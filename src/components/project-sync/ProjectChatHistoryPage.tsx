@@ -1,8 +1,9 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
   CodexThreadDetailsPage,
   CodexThreadSummary,
+  GitBranchSummary,
   LocalProjectSummary,
   ProjectBinding,
   ProjectChatHistory,
@@ -65,6 +66,162 @@ interface ContentProps {
 
 const THREAD_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CHAT_HISTORY_PAGE_SIZE = 10;
+
+interface BranchPickerProps {
+  branches: GitBranchSummary[];
+  selectedBranch: string;
+  disabled: boolean;
+  onChange: (branch: string) => void;
+}
+
+export function BranchPicker({ branches, selectedBranch, disabled, onChange }: BranchPickerProps) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuId = `branch-picker-${useId().replace(/:/g, "")}`;
+  const selected = branches.find((branch) => branch.name === selectedBranch) ?? branches[0];
+
+  const focusOption = (target: "selected" | "first" | "last") => {
+    window.requestAnimationFrame(() => {
+      const options = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>(
+        '[role="menuitemradio"]',
+      ) ?? []);
+      const option = target === "first"
+        ? options[0]
+        : target === "last"
+          ? options[options.length - 1]
+          : options.find((candidate) => candidate.dataset.branch === selectedBranch) ?? options[0];
+      option?.focus();
+    });
+  };
+
+  const openMenu = (focusTarget: "selected" | "first" | "last" = "selected") => {
+    if (disabled) return;
+    setOpen(true);
+    focusOption(focusTarget);
+  };
+
+  const closeMenu = (restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) closeMenu();
+    };
+    const handleFocusIn = (event: FocusEvent) => {
+      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) closeMenu();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeMenu(true);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("focusin", handleFocusIn);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("focusin", handleFocusIn);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  if (!selected) return null;
+
+  return (
+    <div ref={rootRef} className={`v3-history-branch-select${open ? " open" : ""}`}>
+      <Icon name="git-branch" size={15} />
+      <button
+        ref={triggerRef}
+        type="button"
+        className="v3-history-branch-trigger"
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={menuId}
+        aria-label={`Branch: ${selected.name}${selected.is_current ? ", current branch" : ""}${!selected.available ? ", history only" : ""}`}
+        title="Choose a branch"
+        onClick={() => open ? closeMenu() : openMenu()}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+          event.preventDefault();
+          openMenu(event.key === "ArrowDown" ? "first" : "last");
+        }}
+      >
+        <span className="v3-history-branch-name" title={selected.name}>{selected.name}</span>
+        {selected.is_current && <span className="v3-history-branch-state current">Current</span>}
+        {!selected.available && <span className="v3-history-branch-state history-only">History only</span>}
+        <Icon name="chevron-down" size={12} className="v3-history-branch-chevron" />
+      </button>
+      <div
+        ref={menuRef}
+        id={menuId}
+        className="v3-history-branch-menu"
+        role="menu"
+        aria-label="Branches"
+        hidden={!open}
+        onKeyDown={(event) => {
+          const options = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>(
+            '[role="menuitemradio"]',
+          ));
+          const currentIndex = options.indexOf(document.activeElement as HTMLButtonElement);
+          let nextIndex: number | null = null;
+          if (event.key === "ArrowDown") nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % options.length;
+          if (event.key === "ArrowUp") nextIndex = currentIndex < 0
+            ? options.length - 1
+            : (currentIndex - 1 + options.length) % options.length;
+          if (event.key === "Home") nextIndex = 0;
+          if (event.key === "End") nextIndex = options.length - 1;
+          if (nextIndex === null) return;
+          event.preventDefault();
+          options[nextIndex]?.focus();
+        }}
+      >
+        <div className="v3-history-branch-menu-heading">
+          <span>Switch branch</span>
+          <small>{branches.length}</small>
+        </div>
+        <div className="v3-history-branch-options">
+          {branches.map((branch) => (
+            <button
+              key={branch.name}
+              type="button"
+              role="menuitemradio"
+              aria-checked={branch.name === selectedBranch}
+              className="v3-history-branch-option"
+              data-branch={branch.name}
+              title={!branch.available ? "This branch is no longer available locally; recorded session history can still be shown." : branch.name}
+              onClick={() => {
+                closeMenu(true);
+                if (branch.name !== selectedBranch) onChange(branch.name);
+              }}
+            >
+              <span className="v3-history-branch-check" aria-hidden="true">
+                {branch.name === selectedBranch ? "✓" : ""}
+              </span>
+              <span className="v3-history-branch-option-copy">
+                <strong>{branch.name}</strong>
+                <span>
+                  {branch.is_current ? "Checked out locally" : branch.available ? "Local branch" : "Recorded session history only"}
+                </span>
+              </span>
+              {branch.is_current && <span className="v3-history-branch-state current">Current</span>}
+              {!branch.available && <span className="v3-history-branch-state history-only">History only</span>}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function formatDate(value?: number | null): string {
   if (!value) return "Not recorded";
@@ -449,12 +606,12 @@ export function ProjectChatHistoryContent({
               </span>
             )}
             {history?.git && (
-              <label className="v3-history-branch-select" title="Branch"><Icon name="git-branch" size={15} />
-                <span className="v3-visually-hidden">Branch</span>
-                <select aria-label="Branch" value={history.git.selected_branch} onChange={(event) => onBranchChange(event.target.value)} disabled={loading}>
-                  {history.git.branches.map((branch) => <option key={branch.name} value={branch.name}>{branch.name}{branch.is_current ? " (current)" : ""}{!branch.available ? " (unavailable)" : ""}</option>)}
-                </select>
-              </label>
+              <BranchPicker
+                branches={history.git.branches}
+                selectedBranch={history.git.selected_branch}
+                disabled={loading}
+                onChange={onBranchChange}
+              />
             )}
             {(showEmbeddedThreadCount || showComparisonSummary) && (
               <span className="v3-history-toolbar-stats">

@@ -204,7 +204,6 @@ export function StorageEditor({
         <>
           <div className="v3-r2-setup">
             <section className="v3-r2-guide" aria-labelledby={`storage-${storage.id}-r2-guide`}>
-              <span className="v3-r2-guide-icon"><Icon name="cloud" size={18} /></span>
               <div>
                 <div className="v3-r2-guide-heading">
                   <strong id={`storage-${storage.id}-r2-guide`}>Connect a Cloudflare R2 bucket</strong>

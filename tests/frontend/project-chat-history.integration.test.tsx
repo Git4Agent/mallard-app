@@ -4,6 +4,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import Icon from "../../src/components/Icons";
 import ProjectChatHistoryPage, {
+  BranchPicker,
   ProjectChatHistoryContent,
   ThreadMetrics,
   threadSyncPresentation,
@@ -71,6 +72,28 @@ const history = {
     last_push_at: 1_752_800_000,
   }],
 };
+
+test("the branch picker exposes branch state without using the native select menu", () => {
+  const html = renderToStaticMarkup(
+    <BranchPicker
+      branches={[
+        { name: "main", is_current: true, available: true },
+        { name: "release/0.1", is_current: false, available: true },
+        { name: "removed-experiment", is_current: false, available: false },
+      ]}
+      selectedBranch="main"
+      disabled={false}
+      onChange={() => undefined}
+    />,
+  );
+
+  assert.match(html, /aria-haspopup="menu"/);
+  assert.match(html, /aria-label="Branch: main, current branch"/);
+  assert.match(html, />Current</);
+  assert.match(html, /Recorded session history only/);
+  assert.match(html, />History only</);
+  assert.doesNotMatch(html, /<select/);
+});
 
 test("V3 thread indicators use the file-status symbol vocabulary", () => {
   const presentation = (state: Parameters<typeof threadSyncPresentation>[0]["state"]) => (

@@ -4715,20 +4715,9 @@ summary:focus-visible {
 .v3-storage-fields { padding: 12px; grid-template-columns: 1fr 1.5fr; }
 .v3-r2-guide {
   padding: 14px 16px;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
   border-bottom: 1px solid var(--border);
 }
-.v3-r2-guide-icon {
-  width: 24px;
-  height: 24px;
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  color: var(--text-1);
-}
-.v3-r2-guide > div { min-width: 0; flex: 1; }
+.v3-r2-guide > div { min-width: 0; }
 .v3-r2-guide-heading {
   display: flex;
   align-items: baseline;
@@ -8848,6 +8837,7 @@ div.storage-link-main {
 }
 
 .v3-history-branch-select {
+  position: relative;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -8855,21 +8845,200 @@ div.storage-link-main {
   color: var(--text-3);
 }
 
-.v3-history-branch-select select {
-  min-width: 155px;
-  height: 30px;
-  padding: 0 26px 0 8px;
-  border: 0;
-  border-radius: 6px;
-  background-color: transparent;
-  color: var(--text-1);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
+.v3-history-branch-select > svg {
+  flex: 0 0 auto;
 }
 
-.v3-history-branch-select select:hover:not(:disabled) {
-  background-color: var(--bg-hover);
+.v3-history-branch-trigger {
+  min-width: 164px;
+  max-width: 280px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 7px 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.v3-history-branch-trigger:hover:not(:disabled),
+.v3-history-branch-select.open .v3-history-branch-trigger {
+  background: var(--bg-hover);
   color: var(--text-0);
+}
+
+.v3-history-branch-trigger:disabled {
+  opacity: .42;
+  cursor: default;
+}
+
+.v3-history-branch-name {
+  min-width: 38px;
+  overflow: hidden;
+  color: currentColor;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v3-history-branch-state {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 8.5px;
+  font-weight: 680;
+  letter-spacing: .02em;
+  line-height: 1.5;
+  text-transform: uppercase;
+}
+
+.v3-history-branch-state.current {
+  background: var(--surface-muted);
+  color: var(--text-2);
+}
+
+.v3-history-branch-state.history-only {
+  background: var(--warning-soft);
+  color: var(--yellow);
+}
+
+.v3-history-branch-chevron {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--text-3);
+  transition: transform 140ms ease, color 120ms ease;
+}
+
+.v3-history-branch-select.open .v3-history-branch-chevron {
+  color: var(--text-1);
+  transform: rotate(180deg);
+}
+
+.v3-history-branch-menu {
+  position: absolute;
+  z-index: 12;
+  top: calc(100% + 6px);
+  right: 0;
+  width: clamp(240px, 28vw, 320px);
+  max-width: calc(100vw - 32px);
+  max-height: min(360px, calc(100vh - 130px));
+  overflow: hidden;
+  padding: 5px;
+  border: 1px solid var(--border-mid);
+  border-radius: 9px;
+  background: var(--surface-popover);
+  box-shadow: var(--shadow-popover);
+  color: var(--text-1);
+  animation: v3-branch-menu-reveal 120ms ease-out both;
+}
+
+.v3-history-branch-menu[hidden] {
+  display: none;
+}
+
+@keyframes v3-branch-menu-reveal {
+  from { opacity: 0; transform: translateY(-3px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.v3-history-branch-menu-heading {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 8px 4px;
+  color: var(--text-3);
+  font-size: 9.5px;
+  font-weight: 680;
+  letter-spacing: .055em;
+  text-transform: uppercase;
+}
+
+.v3-history-branch-menu-heading small {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-align: center;
+}
+
+.v3-history-branch-options {
+  max-height: min(310px, calc(100vh - 172px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.v3-history-branch-option {
+  width: 100%;
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 17px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.v3-history-branch-option:hover,
+.v3-history-branch-option:focus-visible {
+  outline: none;
+  background: var(--bg-hover);
+  color: var(--text-0);
+}
+
+.v3-history-branch-option[aria-checked="true"] {
+  background: var(--surface-muted);
+}
+
+.v3-history-branch-check {
+  align-self: start;
+  padding-top: 2px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1;
+  text-align: center;
+}
+
+.v3-history-branch-option-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.v3-history-branch-option-copy strong,
+.v3-history-branch-option-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v3-history-branch-option-copy strong {
+  color: currentColor;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 620;
+}
+
+.v3-history-branch-option-copy span {
+  color: var(--text-3);
+  font-size: 9.5px;
 }
 
 .v3-history-icon-action {
@@ -8899,10 +9068,10 @@ div.storage-link-main {
   cursor: default;
 }
 
-.v3-history-branch-select select:focus-visible {
-  outline: 1px solid color-mix(in srgb, var(--accent) 72%, transparent);
-  outline-offset: -1px;
-  background-color: var(--bg-hover);
+.v3-history-branch-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  background: var(--bg-hover);
   color: var(--text-0);
 }
 
@@ -9928,7 +10097,7 @@ button.v3-project-file-expand { cursor: pointer; }
   .v3-history-header { position: static; align-items: stretch; flex-direction: column; }
   .v3-history-toolbar { align-items: flex-end; }
   .v3-history-branch-select { min-width: 0; flex: 1; }
-  .v3-history-branch-select select { width: 100%; min-width: 0; }
+  .v3-history-branch-trigger { min-width: 0; max-width: none; flex: 1; }
   .v3-history-settings { margin-left: 0; }
 }
 

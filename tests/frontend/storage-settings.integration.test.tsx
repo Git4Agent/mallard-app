@@ -75,6 +75,7 @@ test("cloud storage editor exposes the guided R2 form instead of generic S3 fiel
 
   assert.match(html, /Cloudflare R2/);
   assert.match(html, /Connect a Cloudflare R2 bucket/);
+  assert.doesNotMatch(html, /v3-r2-guide-icon/);
   assert.match(html, /Create an R2 bucket/);
   assert.match(html, /Create R2 credentials/);
   assert.match(html, /Find your Account ID/);
