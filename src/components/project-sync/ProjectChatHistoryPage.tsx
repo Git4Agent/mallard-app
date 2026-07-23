@@ -13,6 +13,7 @@ import type {
 import Icon from "../Icons";
 import { projectSyncApi } from "./api";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
+import ThreadVariantReview from "./ThreadVariantReview";
 
 interface PageProps {
   project: LocalProjectSummary;
@@ -501,8 +502,13 @@ export function ProjectChatHistoryContent({
   const threads = useMemo(() => new Map((history?.threads ?? []).map((thread) => [thread.thread_id, thread])), [history?.threads]);
   const syncByThread = useMemo(() => new Map((comparison?.entries ?? []).map((entry) => [entry.thread_id, entry])), [comparison?.entries]);
   const comparisonStorageName = comparison?.storage_name ?? activeStorageName ?? "selected storage";
+  const variantEntries = useMemo(
+    () => (comparison?.entries ?? []).filter((entry) => entry.conflict_group_id && entry.variant_id),
+    [comparison?.entries],
+  );
   const compactSelectionReview = embedded && selectionMode != null;
   const storedOnlyEntries = useMemo(() => (comparison?.entries ?? [])
+    .filter((entry) => !entry.variant_id)
     .filter((entry) => !entry.local_present && entry.storage_present && !threads.has(entry.thread_id))
     .filter((entry) => !history || entry.storage_updated_at == null || entry.storage_updated_at >= history.window_start),
   [comparison?.entries, history, threads]);
@@ -664,6 +670,16 @@ export function ProjectChatHistoryContent({
                   </span>
                 )) : <span className="v3-history-context-item muted" title="No storage linked"><Icon name="cloud" size={14} /><span>No storage</span></span>}
               </section>
+            )}
+
+            {variantEntries.length > 0 && (
+              <ThreadVariantReview
+                entries={variantEntries}
+                selectedResourceIds={selectedResourceIds}
+                disabled={selectionDisabled}
+                onToggleResource={onToggleResource}
+                onOpenProviderThread={onOpenCodex}
+              />
             )}
 
             {history.git ? (

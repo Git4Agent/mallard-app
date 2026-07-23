@@ -226,6 +226,7 @@ test("history content uses the local alias and renders commit/thread actions", (
     <ProjectChatHistoryContent
       project={project}
       binding={{
+        host_id: "00112233445566778899aabbccddeeff",
         replica_id: "replica",
         local_project_id: project.local_project_id,
         bundle_id: project.bundle_id,
@@ -289,6 +290,7 @@ test("commit hashes remain plain text without a GitHub remote", () => {
     <ProjectChatHistoryContent
       project={project}
       binding={{
+        host_id: "00112233445566778899aabbccddeeff",
         replica_id: "replica",
         local_project_id: project.local_project_id,
         bundle_id: project.bundle_id,
@@ -346,6 +348,7 @@ test("chat history remains independently collapsible under the permanent summary
       embedded
       project={project}
       binding={{
+        host_id: "00112233445566778899aabbccddeeff",
         replica_id: "replica",
         local_project_id: project.local_project_id,
         bundle_id: project.bundle_id,
@@ -404,6 +407,7 @@ test("embedded history follows the project workspace without repeating project c
       embedded
       project={project}
       binding={{
+        host_id: "00112233445566778899aabbccddeeff",
         replica_id: "replica",
         local_project_id: project.local_project_id,
         bundle_id: project.bundle_id,
@@ -445,6 +449,7 @@ test("embedded non-Git history uses one Codex threads heading", () => {
       embedded
       project={project}
       binding={{
+        host_id: "00112233445566778899aabbccddeeff",
         replica_id: "replica",
         local_project_id: project.local_project_id,
         bundle_id: project.bundle_id,
@@ -479,6 +484,7 @@ test("selection review removes repeated history and storage labels", () => {
       embedded
       project={project}
       binding={{
+        host_id: "00112233445566778899aabbccddeeff",
         replica_id: "replica",
         local_project_id: project.local_project_id,
         bundle_id: project.bundle_id,
@@ -568,6 +574,7 @@ test("selected storage adds directional indicators and storage-only threads", ()
       embedded
       project={project}
       binding={{
+        host_id: "00112233445566778899aabbccddeeff",
         replica_id: "replica",
         local_project_id: project.local_project_id,
         bundle_id: project.bundle_id,
@@ -638,6 +645,7 @@ test("unavailable sessions explain why they cannot be synced", () => {
       embedded
       project={project}
       binding={{
+        host_id: "00112233445566778899aabbccddeeff",
         replica_id: "replica",
         local_project_id: project.local_project_id,
         bundle_id: project.bundle_id,
@@ -673,6 +681,7 @@ test("non-Git history renders a flat Codex thread list", () => {
     <ProjectChatHistoryContent
       project={{ ...project, local_alias: null }}
       binding={{
+        host_id: "00112233445566778899aabbccddeeff",
         replica_id: "replica",
         local_project_id: project.local_project_id,
         bundle_id: project.bundle_id,
@@ -711,6 +720,7 @@ test("an invalid persisted Codex profile stays in the project workspace", () => 
     <ProjectChatHistoryContent
       project={project}
       binding={{
+        host_id: "00112233445566778899aabbccddeeff",
         replica_id: "replica",
         local_project_id: project.local_project_id,
         bundle_id: project.bundle_id,

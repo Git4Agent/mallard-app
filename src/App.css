@@ -3312,6 +3312,17 @@ summary:focus-visible {
   cursor: pointer;
 }
 .v3-theme-button:hover { color: var(--text-0); background: var(--bg-hover); }
+.v3-host-recovery {
+  min-height: 100vh;
+  min-height: 100svh;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+  color: var(--text-1);
+  background: var(--bg-0);
+}
+.v3-host-recovery .v3-empty-state { width: min(620px, 100%); }
+.v3-host-recovery .v3-callout { margin: 8px 0; }
 
 .v3-main {
   flex: 1;
@@ -10149,4 +10160,78 @@ button.v3-project-file-expand { cursor: pointer; }
     flex-direction: column;
     gap: 9px;
   }
+}
+.v3-thread-variant-review {
+  display: grid;
+  gap: 12px;
+}
+
+.v3-thread-variant-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.v3-thread-variant-group > header,
+.v3-thread-variant-main,
+.v3-thread-variant-title,
+.v3-thread-variant-badges {
+  display: flex;
+  align-items: center;
+}
+
+.v3-thread-variant-group > header {
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  background: var(--bg-2);
+}
+
+.v3-thread-variant-list {
+  display: grid;
+}
+
+.v3-thread-variant-row {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.v3-thread-variant-main,
+.v3-thread-variant-title,
+.v3-thread-variant-badges {
+  gap: 8px;
+}
+
+.v3-thread-variant-main {
+  align-items: flex-start;
+}
+
+.v3-thread-variant-title code,
+.v3-thread-variant-row details code {
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.v3-thread-variant-badges {
+  flex-wrap: wrap;
+  margin-top: 5px;
+}
+
+.v3-thread-variant-badges span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.v3-thread-variant-row p {
+  margin: 5px 0 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.v3-thread-variant-action {
+  color: var(--text-1) !important;
+  font-weight: 600;
 }

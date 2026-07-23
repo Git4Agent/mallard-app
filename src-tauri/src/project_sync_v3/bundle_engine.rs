@@ -1,4 +1,4 @@
-//! Schema-4 bundle storage, publication, fetch, restore planning, and apply.
+//! Schema-4/schema-5 bundle storage, publication, fetch, restore planning, and apply.
 //!
 //! The engine operates on validated logical/store keys and a small object
 //! store trait. Its local implementation is complete; an S3 adapter can reuse
@@ -14,13 +14,19 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
+use super::conversation_codec::{
+    analyze_codex_transcript, CodecLineage, CodecUnknownReason, CODEX_CODEC_VERSION,
+    CODEX_LINEAGE_CODEC_KEY, CODEX_REWRITE_CODEC_KEY, CODEX_SEMANTIC_CODEC_KEY,
+};
 use super::domain::{
     self, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt, BindingState, BundleDirectoryEntry,
     BundleFileEntry, BundleHead, BundleId, BundleIdentity, BundleKind, BundleManifest,
-    BundleRecipe, BundleSnapshot, CapturedWith, DependencyAction, DependencyActionKind,
-    LogicalPath, PlanId, ProjectBinding, Provider, ResourceDescriptor, ResourceId, ResourceKind,
-    RestoreAction, RestoreActionKind, RestorePlan, StorageId, Tombstone, TombstoneTarget,
-    BUNDLE_SCHEMA_V4, RESTORE_PLAN_SCHEMA_V1,
+    BundleRecipe, BundleSnapshot, CapturedWith, ConflictGroupId, ConversationFileRef,
+    ConversationFileRole, ConversationGroup, ConversationLineageStatus, ConversationVariant,
+    DependencyAction, DependencyActionKind, LogicalPath, PlanId, PortableOrigin, ProjectBinding,
+    Provider, RecipeEntry, ResourceDescriptor, ResourceId, ResourceKind, RestoreAction,
+    RestoreActionKind, RestorePlan, StorageId, Tombstone, TombstoneTarget, BUNDLE_SCHEMA_V4,
+    BUNDLE_SCHEMA_V5, RESTORE_PLAN_SCHEMA_V2,
 };
 use super::provider_capture::{self, CapturedResources};
 
@@ -426,10 +432,328 @@ pub struct PublishedBundle {
 }
 
 #[derive(Clone, Debug)]
+pub struct Schema5CapturedFile {
+    pub resource_id: ResourceId,
+    pub bytes: Vec<u8>,
+    pub source_mtime: u64,
+    pub mode: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PublishSchema5Request {
+    pub identity: BundleIdentity,
+    pub recipe: BundleRecipe,
+    pub captured_with: CapturedWith,
+    pub published_by_origin: PortableOrigin,
+    pub conversation_groups: BTreeMap<ConflictGroupId, ConversationGroup>,
+    pub resources: BTreeMap<ResourceId, ResourceDescriptor>,
+    /// Entries copied byte-for-byte from the reviewed previous manifest. The
+    /// engine verifies every referenced immutable object before publishing.
+    pub retained_files: BTreeMap<LogicalPath, BundleFileEntry>,
+    /// New or changed payloads. A path cannot also appear in retained_files.
+    pub captured_files: BTreeMap<LogicalPath, Schema5CapturedFile>,
+    pub directories: BTreeMap<LogicalPath, BundleDirectoryEntry>,
+    pub tombstones: BTreeMap<String, Tombstone>,
+    pub expected_head: PublishExpectation,
+    pub updated_at: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Schema5PublishOutcome {
+    pub published: bool,
+    pub snapshot: BundleSnapshot,
+    pub head_token: HeadToken,
+}
+
+#[derive(Clone, Debug)]
 pub struct FetchedBundle {
     pub snapshot: BundleSnapshot,
     pub files: BTreeMap<LogicalPath, Vec<u8>>,
     pub dependency_actions: Vec<DependencyAction>,
+}
+
+const CLAUDE_UNAVAILABLE_LINEAGE_CODEC_KEY: &str = "claude.lineage.unavailable.v1";
+
+/// Build the one-way schema-4-to-schema-5 publication reviewed by a cutover
+/// caller. Historical provider bytes are copied exactly, while conversation
+/// identities and logical ownership move to the group/variant model. The
+/// migrating host is deliberately not recorded as creator or semantic editor.
+pub fn build_schema5_cutover_request(
+    fetched: &FetchedBundle,
+    published_by_origin: PortableOrigin,
+    expected_head: HeadToken,
+    updated_at: u64,
+) -> Result<PublishSchema5Request, String> {
+    fetched.snapshot.validate()?;
+    published_by_origin.validate()?;
+    if fetched.snapshot.manifest.schema_version != BUNDLE_SCHEMA_V4 {
+        return Err("schema cutover requires a reviewed schema-4 manifest".to_string());
+    }
+    let reviewed_head = &fetched.snapshot.head;
+    if expected_head.generation != reviewed_head.generation
+        || expected_head.commit_id != reviewed_head.commit_id
+        || expected_head.manifest_sha256 != reviewed_head.manifest_sha256
+    {
+        return Err("schema cutover head pin does not match the reviewed snapshot".to_string());
+    }
+    if updated_at == 0 {
+        return Err("schema cutover timestamp must be non-zero".to_string());
+    }
+
+    let manifest = &fetched.snapshot.manifest;
+    let mut recipe = manifest.recipe.clone();
+    let mut captured_with = manifest.captured_with.clone();
+    captured_with
+        .codec_versions
+        .insert(CODEX_LINEAGE_CODEC_KEY.to_string(), CODEX_CODEC_VERSION);
+    captured_with
+        .codec_versions
+        .insert(CODEX_REWRITE_CODEC_KEY.to_string(), CODEX_CODEC_VERSION);
+    captured_with
+        .codec_versions
+        .insert(CODEX_SEMANTIC_CODEC_KEY.to_string(), CODEX_CODEC_VERSION);
+
+    let mut resources = manifest.resources.clone();
+    let mut retained_files = BTreeMap::new();
+    let mut captured_files = BTreeMap::new();
+    let mut conversation_groups = BTreeMap::new();
+    let conversation_resource_ids = manifest
+        .resources
+        .iter()
+        .filter_map(|(resource_id, descriptor)| {
+            matches!(
+                descriptor.kind,
+                ResourceKind::CodexConversation | ResourceKind::ClaudeConversation
+            )
+            .then_some(resource_id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+
+    for (path, entry) in &manifest.files {
+        let bytes = fetched
+            .files
+            .get(path)
+            .ok_or_else(|| format!("reviewed schema-4 file '{}' was not fetched", path))?;
+        if bytes.len() as u64 != entry.size || sha256(bytes) != entry.sha256 {
+            return Err(format!(
+                "reviewed schema-4 file '{}' does not match its manifest digest",
+                path
+            ));
+        }
+        if !conversation_resource_ids.contains(&entry.resource_id) {
+            retained_files.insert(path.clone(), entry.clone());
+        }
+    }
+    if manifest
+        .directories
+        .values()
+        .any(|entry| conversation_resource_ids.contains(&entry.resource_id))
+    {
+        return Err("schema-4 conversation resource unexpectedly owns a directory".to_string());
+    }
+
+    for legacy_resource_id in conversation_resource_ids {
+        let legacy_descriptor = manifest
+            .resources
+            .get(&legacy_resource_id)
+            .expect("conversation resource came from the manifest");
+        let provider = legacy_descriptor.provider.ok_or_else(|| {
+            format!(
+                "legacy conversation '{}' has no provider",
+                legacy_resource_id
+            )
+        })?;
+        let (group_id, variant_id) = domain::deterministic_schema4_conversation_ids(
+            &manifest.bundle.bundle_id,
+            provider,
+            &legacy_resource_id,
+        )?;
+        let resource_id = domain::conversation_resource_id(provider, &group_id, &variant_id)?;
+        let mut owned = manifest
+            .files
+            .iter()
+            .filter(|(_, entry)| entry.resource_id == legacy_resource_id)
+            .collect::<Vec<_>>();
+        owned.sort_by(|left, right| left.0.cmp(right.0));
+        if owned.is_empty() {
+            return Err(format!(
+                "legacy conversation '{}' owns no transcript",
+                legacy_resource_id
+            ));
+        }
+        let transcript_index = owned
+            .iter()
+            .position(|(path, _)| path.as_str().ends_with(".jsonl"))
+            .unwrap_or(0);
+        let transcript_bytes = fetched
+            .files
+            .get(owned[transcript_index].0)
+            .expect("owned legacy file was verified above");
+        let analysis =
+            (provider == Provider::Codex).then(|| analyze_codex_transcript(transcript_bytes));
+        let (
+            lineage_status,
+            lineage_codec,
+            head_message_id,
+            message_count,
+            lineage_digest,
+            semantic_digest,
+            source_thread_id,
+        ) = match analysis {
+            Some(analysis) => match analysis.lineage {
+                CodecLineage::Complete {
+                    chain,
+                    lineage_digest,
+                    semantic_digest,
+                } => (
+                    ConversationLineageStatus::Complete,
+                    CODEX_LINEAGE_CODEC_KEY.to_string(),
+                    chain.last().map(|message| message.message_id.clone()),
+                    Some(chain.len() as u64),
+                    Some(lineage_digest),
+                    Some(semantic_digest),
+                    analysis.source_thread_id,
+                ),
+                CodecLineage::Unknown { reason } => (
+                    ConversationLineageStatus::Unknown {
+                        reason_code: reason.as_str().to_string(),
+                    },
+                    CODEX_LINEAGE_CODEC_KEY.to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    analysis.source_thread_id,
+                ),
+            },
+            None => {
+                captured_with
+                    .codec_versions
+                    .insert(CLAUDE_UNAVAILABLE_LINEAGE_CODEC_KEY.to_string(), 1);
+                (
+                    ConversationLineageStatus::Unknown {
+                        reason_code: CodecUnknownReason::UnsupportedCodec.as_str().to_string(),
+                    },
+                    CLAUDE_UNAVAILABLE_LINEAGE_CODEC_KEY.to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    legacy_resource_id
+                        .as_str()
+                        .rsplit(':')
+                        .next()
+                        .map(str::to_string),
+                )
+            }
+        };
+
+        let mut file_refs = Vec::with_capacity(owned.len());
+        for (index, (old_path, old_entry)) in owned.into_iter().enumerate() {
+            let (filename, role) = if index == transcript_index {
+                (
+                    "transcript.jsonl".to_string(),
+                    ConversationFileRole::Transcript,
+                )
+            } else {
+                (
+                    format!("sidecar-{index}.json"),
+                    ConversationFileRole::Sidecar {
+                        sidecar_kind: format!("legacy-{index}"),
+                    },
+                )
+            };
+            let path = LogicalPath::parse(format!(
+                "state/conversations/{}/{}/{}/{}",
+                provider.as_str(),
+                group_id,
+                variant_id,
+                filename
+            ))?;
+            let bytes = fetched
+                .files
+                .get(old_path)
+                .expect("owned legacy file was verified above")
+                .clone();
+            captured_files.insert(
+                path.clone(),
+                Schema5CapturedFile {
+                    resource_id: resource_id.clone(),
+                    bytes,
+                    source_mtime: old_entry.source_mtime,
+                    mode: old_entry.mode,
+                },
+            );
+            file_refs.push(ConversationFileRef {
+                logical_path: path,
+                role,
+            });
+        }
+
+        resources.remove(&legacy_resource_id);
+        let mut descriptor = legacy_descriptor.clone();
+        descriptor.resource_id = resource_id.clone();
+        resources.insert(resource_id.clone(), descriptor);
+        let legacy_recipe = recipe.entries.remove(&legacy_resource_id).ok_or_else(|| {
+            format!(
+                "legacy conversation '{}' is absent from its recipe",
+                legacy_resource_id
+            )
+        })?;
+        recipe.entries.insert(
+            resource_id.clone(),
+            RecipeEntry {
+                resource_id: resource_id.clone(),
+                apply_policy: legacy_recipe.apply_policy,
+                required: legacy_recipe.required,
+            },
+        );
+        let variant = ConversationVariant {
+            variant_id: variant_id.clone(),
+            resource_id,
+            files: file_refs,
+            lineage_status,
+            lineage_codec,
+            head_message_id,
+            message_count,
+            lineage_digest,
+            semantic_digest,
+            parent_variant_id: None,
+            fork_message_id: None,
+            source_thread_id,
+            created_by_origin: None,
+            last_updated_by_origin: None,
+            created_at: manifest.updated_at,
+            updated_at: manifest.updated_at,
+        };
+        conversation_groups.insert(
+            group_id.clone(),
+            ConversationGroup {
+                conflict_group_id: group_id,
+                provider,
+                display_title: Some(legacy_descriptor.display_name.clone()),
+                primary_variant_id: variant_id.clone(),
+                variants: BTreeMap::from([(variant_id, variant)]),
+                created_at: manifest.updated_at,
+                updated_at: manifest.updated_at,
+            },
+        );
+    }
+
+    Ok(PublishSchema5Request {
+        identity: manifest.bundle.clone(),
+        recipe,
+        captured_with,
+        published_by_origin,
+        conversation_groups,
+        resources,
+        retained_files,
+        captured_files,
+        directories: manifest.directories.clone(),
+        tombstones: manifest.tombstones.clone(),
+        expected_head: PublishExpectation::Match(expected_head),
+        updated_at,
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -446,6 +770,8 @@ struct CommitRecord {
     added_files: u64,
     changed_files: u64,
     removed_files: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published_by_origin: Option<PortableOrigin>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -580,6 +906,14 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         }
 
         let current = self.read_head(&request.identity.bundle_id)?;
+        if current
+            .as_ref()
+            .is_some_and(|(head, _)| head.schema_version == BUNDLE_SCHEMA_V5)
+        {
+            return Err(
+                "schema-5 bundle requires the conversation-variant publication path".to_string(),
+            );
+        }
         let cas_expectation = match (&request.expected_head, &current) {
             (PublishExpectation::Absent, None) => CasExpectation::Absent,
             (PublishExpectation::Absent, Some(_)) => {
@@ -675,6 +1009,8 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             bundle: request.identity.clone(),
             recipe: request.recipe,
             captured_with: request.captured_with,
+            published_by_origin: None,
+            conversation_groups: BTreeMap::new(),
             resources,
             files,
             directories,
@@ -703,6 +1039,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             added_files,
             changed_files,
             removed_files,
+            published_by_origin: None,
         };
         let commit_bytes =
             serde_json::to_vec(&commit).map_err(|e| format!("serialize bundle commit: {}", e))?;
@@ -751,6 +1088,252 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         };
         Ok(PublishedBundle {
             snapshot,
+            head_token: HeadToken {
+                generation: head.generation,
+                commit_id: head.commit_id.clone(),
+                manifest_sha256: head.manifest_sha256.clone(),
+                etag: head_etag,
+            },
+        })
+    }
+
+    /// Publish a complete schema-5 conversation snapshot. The caller supplies
+    /// the reviewed live set; the engine enforces remote-variant retention,
+    /// verifies retained immutable objects, skips true no-ops, and advances
+    /// the head only through compare-and-swap.
+    pub fn publish_schema5(
+        &self,
+        request: PublishSchema5Request,
+    ) -> Result<Schema5PublishOutcome, String> {
+        request.identity.validate()?;
+        request.recipe.validate()?;
+        request.published_by_origin.validate()?;
+        if request.identity.kind != BundleKind::Project {
+            return Err("schema-5 supports only project bundles".to_string());
+        }
+        if request.updated_at == 0 {
+            return Err("publish timestamp must be non-zero".to_string());
+        }
+        for path in request.captured_files.keys() {
+            if request.retained_files.contains_key(path) {
+                return Err(format!(
+                    "schema-5 file '{}' is both retained and captured",
+                    path
+                ));
+            }
+        }
+
+        let current = self.read_head(&request.identity.bundle_id)?;
+        let cas_expectation = match (&request.expected_head, &current) {
+            (PublishExpectation::Absent, None) => CasExpectation::Absent,
+            (PublishExpectation::Absent, Some(_)) => {
+                return Err("bundle head changed: expected an absent head".to_string())
+            }
+            (PublishExpectation::Match(expected), Some((head, token)))
+                if expected == token
+                    && expected.generation == head.generation
+                    && expected.commit_id == head.commit_id
+                    && expected.manifest_sha256 == head.manifest_sha256 =>
+            {
+                CasExpectation::Match(token.etag.clone())
+            }
+            (PublishExpectation::Match(_), _) => {
+                return Err("bundle head changed before publication".to_string())
+            }
+        };
+        let previous_manifest = current
+            .as_ref()
+            .map(|(head, _)| self.read_manifest(head))
+            .transpose()?;
+
+        for (path, entry) in &request.retained_files {
+            entry.validate()?;
+            let previous = previous_manifest.as_ref().ok_or_else(|| {
+                format!("schema-5 retained file '{}' has no previous manifest", path)
+            })?;
+            let was_published = previous.files.values().any(|candidate| {
+                candidate.object_key == entry.object_key
+                    && candidate.sha256 == entry.sha256
+                    && candidate.size == entry.size
+            });
+            if !was_published {
+                return Err(format!(
+                    "schema-5 retained file '{}' was not in the reviewed manifest",
+                    path
+                ));
+            }
+            let key = repository_object_key(&request.identity.bundle_id, &entry.object_key)?;
+            let object = self
+                .store
+                .get(&key)?
+                .ok_or_else(|| format!("retained bundle object '{}' is missing", key))?;
+            if object.bytes.len() as u64 != entry.size || sha256(&object.bytes) != entry.sha256 {
+                return Err(format!(
+                    "retained bundle object '{}' does not match its reviewed digest",
+                    key
+                ));
+            }
+        }
+
+        let generation = current
+            .as_ref()
+            .map(|(head, _)| head.generation.saturating_add(1))
+            .unwrap_or(1);
+        let commit_id = random_named_id("commit")?;
+        let upload_id = random_named_id("upload")?;
+        let mut files = request.retained_files.clone();
+        for (path, captured) in &request.captured_files {
+            if captured.bytes.len() as u64 > domain::MAX_FILE_BYTES {
+                return Err(format!(
+                    "schema-5 file '{}' exceeds the portable limit",
+                    path
+                ));
+            }
+            if captured.mode.is_some_and(|mode| mode & !0o777 != 0) {
+                return Err(format!("schema-5 file '{}' has unsafe mode bits", path));
+            }
+            if !request.resources.contains_key(&captured.resource_id) {
+                return Err(format!(
+                    "schema-5 file '{}' belongs to missing resource '{}'",
+                    path, captured.resource_id
+                ));
+            }
+            files.insert(
+                path.clone(),
+                BundleFileEntry {
+                    resource_id: captured.resource_id.clone(),
+                    sha256: sha256(&captured.bytes),
+                    size: captured.bytes.len() as u64,
+                    source_mtime: captured.source_mtime,
+                    object_key: format!("_uploads/{}/files/{}", upload_id, path),
+                    mode: captured.mode,
+                },
+            );
+        }
+
+        let manifest = BundleManifest {
+            schema_version: BUNDLE_SCHEMA_V5,
+            generation,
+            commit_id: commit_id.clone(),
+            updated_at: request.updated_at,
+            bundle: request.identity.clone(),
+            recipe: request.recipe,
+            captured_with: request.captured_with,
+            published_by_origin: Some(request.published_by_origin.clone()),
+            conversation_groups: request.conversation_groups,
+            resources: request.resources,
+            files,
+            directories: request.directories,
+            tombstones: request.tombstones,
+        };
+        manifest.validate()?;
+        if let Some(previous) = &previous_manifest {
+            validate_schema5_conversation_retention(previous, &manifest)?;
+        }
+
+        if let (Some((head, token)), Some(previous)) = (&current, &previous_manifest) {
+            if previous.schema_version == BUNDLE_SCHEMA_V5
+                && schema5_manifest_is_semantic_noop(previous, &manifest)
+            {
+                return Ok(Schema5PublishOutcome {
+                    published: false,
+                    snapshot: BundleSnapshot {
+                        storage_id: self.storage_id.clone(),
+                        head: head.clone(),
+                        manifest: previous.clone(),
+                        fetched_at: request.updated_at,
+                    },
+                    head_token: token.clone(),
+                });
+            }
+        }
+
+        for (path, captured) in &request.captured_files {
+            let entry = manifest
+                .files
+                .get(path)
+                .expect("captured schema-5 file was inserted");
+            let key = repository_object_key(&request.identity.bundle_id, &entry.object_key)?;
+            self.store.put_immutable(&key, &captured.bytes)?;
+            let stored = self
+                .store
+                .get(&key)?
+                .ok_or_else(|| format!("schema-5 object '{}' disappeared", key))?;
+            if stored.bytes.len() as u64 != entry.size || sha256(&stored.bytes) != entry.sha256 {
+                return Err(format!(
+                    "schema-5 object '{}' failed post-publication verification",
+                    key
+                ));
+            }
+        }
+
+        let manifest_bytes = serde_json::to_vec(&manifest)
+            .map_err(|error| format!("serialize schema-5 manifest: {error}"))?;
+        let manifest_sha256 = sha256(&manifest_bytes);
+        let manifest_relative_key = format!("_manifests/{}-{}.json", generation, commit_id);
+        let manifest_key =
+            repository_object_key(&request.identity.bundle_id, &manifest_relative_key)?;
+        self.store.put_immutable(&manifest_key, &manifest_bytes)?;
+
+        let (added_files, changed_files, removed_files) =
+            file_delta(previous_manifest.as_ref(), &manifest);
+        let commit = CommitRecord {
+            schema_version: BUNDLE_SCHEMA_V5,
+            bundle_id: request.identity.bundle_id.clone(),
+            generation,
+            commit_id: commit_id.clone(),
+            manifest_key: manifest_relative_key.clone(),
+            manifest_sha256: manifest_sha256.clone(),
+            created_at: request.updated_at,
+            previous_commit_id: current.as_ref().map(|(head, _)| head.commit_id.clone()),
+            added_files,
+            changed_files,
+            removed_files,
+            published_by_origin: Some(request.published_by_origin),
+        };
+        let commit_bytes = serde_json::to_vec(&commit)
+            .map_err(|error| format!("serialize schema-5 commit: {error}"))?;
+        let commit_key = repository_object_key(
+            &request.identity.bundle_id,
+            &format!("_commits/{}-{}.json", generation, commit_id),
+        )?;
+        self.store.put_immutable(&commit_key, &commit_bytes)?;
+
+        let head = BundleHead {
+            schema_version: BUNDLE_SCHEMA_V5,
+            bundle_id: request.identity.bundle_id.clone(),
+            kind: request.identity.kind,
+            generation,
+            commit_id,
+            manifest_key: manifest_relative_key,
+            manifest_sha256,
+            updated_at: request.updated_at,
+        };
+        head.validate()?;
+        let head_bytes = serde_json::to_vec(&head)
+            .map_err(|error| format!("serialize schema-5 head: {error}"))?;
+        let head_key = repository_object_key(&request.identity.bundle_id, HEAD_FILE)?;
+        let head_etag =
+            match self
+                .store
+                .compare_and_swap(&head_key, &cas_expectation, &head_bytes)?
+            {
+                CasOutcome::Written { etag } => etag,
+                CasOutcome::Conflict { .. } => {
+                    return Err(
+                        "bundle head CAS conflict; fetch and rebase before retrying".to_string()
+                    )
+                }
+            };
+        let _ = self.publish_tag(&manifest);
+        Ok(Schema5PublishOutcome {
+            published: true,
+            snapshot: BundleSnapshot {
+                storage_id: self.storage_id.clone(),
+                head: head.clone(),
+                manifest,
+                fetched_at: request.updated_at,
+            },
             head_token: HeadToken {
                 generation: head.generation,
                 commit_id: head.commit_id.clone(),
@@ -818,17 +1401,29 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         commit_id: &str,
         manifest_sha256: &str,
     ) -> Result<BundleManifest, String> {
-        let head = BundleHead {
-            schema_version: BUNDLE_SCHEMA_V4,
-            bundle_id: bundle_id.clone(),
-            kind: BundleKind::Project,
-            generation,
-            commit_id: commit_id.to_string(),
-            manifest_key: format!("_manifests/{generation}-{commit_id}.json"),
-            manifest_sha256: manifest_sha256.to_string(),
-            updated_at: 0,
-        };
-        self.read_manifest(&head)
+        domain::validate_sha256("historical manifest", manifest_sha256)?;
+        let relative_key = format!("_manifests/{generation}-{commit_id}.json");
+        validate_bundle_relative_object_key(&relative_key)?;
+        let key = repository_object_key(bundle_id, &relative_key)?;
+        let stored = self
+            .store
+            .get(&key)?
+            .ok_or_else(|| format!("bundle manifest '{}' is missing", key))?;
+        if sha256(&stored.bytes) != manifest_sha256 {
+            return Err(format!(
+                "bundle manifest '{}' failed hash verification",
+                key
+            ));
+        }
+        let manifest: BundleManifest = parse_bounded_json(&stored.bytes, "bundle manifest")?;
+        manifest.validate()?;
+        if &manifest.bundle.bundle_id != bundle_id
+            || manifest.generation != generation
+            || manifest.commit_id != commit_id
+        {
+            return Err("historical manifest coordinates do not match its contents".to_string());
+        }
+        Ok(manifest)
     }
 
     /// Cursor-paginated remote discovery. The cursor is the last returned
@@ -883,7 +1478,9 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 .get(&key)?
                 .ok_or_else(|| format!("listed bundle tag '{}' disappeared", key))?;
             let tag: BundleTag = parse_bounded_json(&stored.bytes, "bundle tag")?;
-            if tag.schema_version != BUNDLE_SCHEMA_V4 || tag.bundle_id != bundle_id {
+            if !matches!(tag.schema_version, BUNDLE_SCHEMA_V4 | BUNDLE_SCHEMA_V5)
+                || tag.bundle_id != bundle_id
+            {
                 return Err(format!("bundle tag '{}' has inconsistent identity", key));
             }
             summaries.push(RemoteBundleSummary {
@@ -911,6 +1508,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         bundle: &FetchedBundle,
         binding: &ProjectBinding,
         created_at: u64,
+        expected_host_identity_revision: u64,
     ) -> Result<RestorePlan, String> {
         validate_bundle_snapshot_bytes(bundle)?;
         self.validate_binding(binding, None)?;
@@ -1224,11 +1822,13 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         }
         actions.sort_by(|a, b| a.action_id.cmp(&b.action_id));
         let plan = RestorePlan {
-            schema_version: RESTORE_PLAN_SCHEMA_V1,
+            schema_version: RESTORE_PLAN_SCHEMA_V2,
             plan_id,
             storage_id: self.storage_id.clone(),
             bundle_id: bundle.snapshot.head.bundle_id.clone(),
+            host_id: binding.host_id.clone(),
             replica_id: binding.replica_id.clone(),
+            expected_host_identity_revision,
             generation: bundle.snapshot.head.generation,
             commit_id: bundle.snapshot.head.commit_id.clone(),
             manifest_sha256: bundle.snapshot.head.manifest_sha256.clone(),
@@ -1236,6 +1836,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             created_at,
             expires_at: created_at.saturating_add(DEFAULT_PLAN_LIFETIME_SECS),
             actions,
+            conversation_actions: Vec::new(),
             project_content_eligibility: None,
         };
         plan.validate()?;
@@ -1263,7 +1864,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
 
     fn publish_tag(&self, manifest: &BundleManifest) -> Result<(), String> {
         let tag = BundleTag {
-            schema_version: BUNDLE_SCHEMA_V4,
+            schema_version: manifest.schema_version,
             bundle_id: manifest.bundle.bundle_id.clone(),
             display_name: manifest.bundle.display_name.clone(),
             kind: manifest.bundle.kind,
@@ -1413,6 +2014,7 @@ mod tests {
         claude_home: Option<&Path>,
     ) -> ProjectBinding {
         ProjectBinding {
+            host_id: super::domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
             replica_id: ReplicaId::parse("replica-test").unwrap(),
             local_project_id: LocalProjectId::parse("project-test").unwrap(),
             bundle_id: id,
@@ -1720,7 +2322,9 @@ mod tests {
             .unwrap();
         let fetched = engine.fetch(&id).unwrap();
         let binding = active_binding(id, &target, None, None);
-        let plan = engine.build_restore_plan(&fetched, &binding, 100).unwrap();
+        let plan = engine
+            .build_restore_plan(&fetched, &binding, 100, 0)
+            .unwrap();
         let write_action = plan
             .actions
             .iter()
@@ -1811,7 +2415,9 @@ mod tests {
             .unwrap();
         let fetched = engine.fetch(&id).unwrap();
         let binding = active_binding(id, &target, None, None);
-        let plan = engine.build_restore_plan(&fetched, &binding, 100).unwrap();
+        let plan = engine
+            .build_restore_plan(&fetched, &binding, 100, 0)
+            .unwrap();
         let settings_action = plan
             .actions
             .iter()
@@ -1921,7 +2527,9 @@ mod tests {
             .unwrap();
         let fetched = engine.fetch(&id).unwrap();
         let binding = active_binding(id, &target, None, None);
-        let plan = engine.build_restore_plan(&fetched, &binding, 100).unwrap();
+        let plan = engine
+            .build_restore_plan(&fetched, &binding, 100, 0)
+            .unwrap();
         let approved: BTreeSet<_> = plan
             .actions
             .iter()
@@ -2048,7 +2656,9 @@ mod tests {
             .unwrap();
         let fetched = engine.fetch(&id).unwrap();
         let binding = active_binding(id, &target, None, Some(&target_claude));
-        let plan = engine.build_restore_plan(&fetched, &binding, 100).unwrap();
+        let plan = engine
+            .build_restore_plan(&fetched, &binding, 100, 0)
+            .unwrap();
         let action = plan
             .actions
             .iter()
@@ -2158,7 +2768,9 @@ mod tests {
         // Simulate a session copied by an older release without path rebinding.
         let target_session = target_codex.join(session_relative);
         write(&target_session, transcript.as_bytes());
-        let plan = engine.build_restore_plan(&fetched, &binding, 100).unwrap();
+        let plan = engine
+            .build_restore_plan(&fetched, &binding, 100, 0)
+            .unwrap();
         assert!(plan
             .actions
             .iter()
@@ -2207,7 +2819,9 @@ mod tests {
             "only structural cwd fields are rebound"
         );
 
-        let repeat = engine.build_restore_plan(&fetched, &binding, 102).unwrap();
+        let repeat = engine
+            .build_restore_plan(&fetched, &binding, 102, 0)
+            .unwrap();
         let repeat_action = repeat
             .actions
             .iter()
@@ -2270,7 +2884,9 @@ mod tests {
             .unwrap();
         let fetched = engine.fetch(&id).unwrap();
         let binding = active_binding(id, &target, None, None);
-        let plan = engine.build_restore_plan(&fetched, &binding, 100).unwrap();
+        let plan = engine
+            .build_restore_plan(&fetched, &binding, 100, 0)
+            .unwrap();
         assert_eq!(plan.actions.len(), 1);
         let install = fetched
             .dependency_actions
@@ -2350,7 +2966,9 @@ mod tests {
             DependencyActionKind::InstallCodexPlugin
         ));
         let binding = active_binding(id, &target, None, None);
-        let restore = engine.build_restore_plan(&fetched, &binding, 100).unwrap();
+        let restore = engine
+            .build_restore_plan(&fetched, &binding, 100, 0)
+            .unwrap();
         assert!(restore.actions.is_empty());
     }
 
@@ -2429,7 +3047,9 @@ mod tests {
         fs::create_dir_all(&target_project).unwrap();
         fs::create_dir_all(&target_home).unwrap();
         let binding = active_binding(id, &target_project, Some(&target_home), None);
-        let plan = engine.build_restore_plan(&fetched, &binding, 100).unwrap();
+        let plan = engine
+            .build_restore_plan(&fetched, &binding, 100, 0)
+            .unwrap();
         let install = plan
             .actions
             .iter()
@@ -2498,7 +3118,9 @@ mod tests {
 
         // Idempotent replan: a matching target is an install no-op pinned to
         // the same digest.
-        let replan = engine.build_restore_plan(&fetched, &binding, 103).unwrap();
+        let replan = engine
+            .build_restore_plan(&fetched, &binding, 103, 0)
+            .unwrap();
         let noop = replan
             .actions
             .iter()
@@ -2527,7 +3149,9 @@ mod tests {
         write(&target_home.join("skills/deploy/local-note.txt"), b"mine");
         let binding = active_binding(id, &target_project, Some(&target_home), None);
 
-        let plan = engine.build_restore_plan(&fetched, &binding, 100).unwrap();
+        let plan = engine
+            .build_restore_plan(&fetched, &binding, 100, 0)
+            .unwrap();
         let overwrite = plan
             .actions
             .iter()
@@ -2579,7 +3203,9 @@ mod tests {
             b"---\nname: deploy\n---\nLocal variant\n",
         );
         let binding = active_binding(id, &target_project, Some(&target_home), None);
-        let plan = engine.build_restore_plan(&fetched, &binding, 100).unwrap();
+        let plan = engine
+            .build_restore_plan(&fetched, &binding, 100, 0)
+            .unwrap();
         let overwrite = plan
             .actions
             .iter()
@@ -2695,7 +3321,9 @@ mod tests {
         fs::create_dir_all(&target_project).unwrap();
         fs::create_dir_all(&target_home).unwrap();
         let binding = active_binding(id, &target_project, Some(&target_home), None);
-        let plan = engine.build_restore_plan(&fetched, &binding, 100).unwrap();
+        let plan = engine
+            .build_restore_plan(&fetched, &binding, 100, 0)
+            .unwrap();
         let install = plan
             .actions
             .iter()
@@ -3782,6 +4410,7 @@ fn validate_plan_pin(
     if &plan.storage_id != storage_id
         || plan.storage_id != bundle.snapshot.storage_id
         || plan.bundle_id != bundle.snapshot.head.bundle_id
+        || plan.host_id != binding.host_id
         || plan.replica_id != binding.replica_id
         || plan.bundle_id != binding.bundle_id
         || plan.generation != bundle.snapshot.head.generation
@@ -3813,6 +4442,7 @@ fn receipt_for(
         status,
         applied_at,
         error,
+        conversation: None,
     }
 }
 
@@ -4334,6 +4964,9 @@ fn reconcile_manifest_content(
             !directories.contains_key(logical_path)
                 && !captured_directory_paths.contains(logical_path)
         }
+        TombstoneTarget::ConversationVariant { .. } | TombstoneTarget::ConversationGroup { .. } => {
+            true
+        }
     });
     Ok((resources, files, directories, tombstones))
 }
@@ -4379,6 +5012,84 @@ fn dependencies_from_manifest(manifest: &BundleManifest) -> Result<Vec<Dependenc
     }
     actions.sort_by(|a, b| a.action_id.cmp(&b.action_id));
     Ok(actions)
+}
+
+fn validate_schema5_conversation_retention(
+    previous: &BundleManifest,
+    next: &BundleManifest,
+) -> Result<(), String> {
+    if previous.schema_version != BUNDLE_SCHEMA_V5 {
+        return Ok(());
+    }
+    for (group_id, previous_group) in &previous.conversation_groups {
+        let Some(next_group) = next.conversation_groups.get(group_id) else {
+            let deleted = next.tombstones.values().any(|tombstone| {
+                matches!(
+                    &tombstone.target,
+                    TombstoneTarget::ConversationGroup { conflict_group_id }
+                        if conflict_group_id == group_id
+                )
+            });
+            if !deleted {
+                return Err(format!(
+                    "schema-5 publication drops conversation group '{}' without a reviewed tombstone",
+                    group_id
+                ));
+            }
+            continue;
+        };
+        for variant_id in previous_group.variants.keys() {
+            if next_group.variants.contains_key(variant_id) {
+                continue;
+            }
+            let deleted = next.tombstones.values().any(|tombstone| {
+                matches!(
+                    &tombstone.target,
+                    TombstoneTarget::ConversationVariant {
+                        conflict_group_id,
+                        variant_id: deleted_variant_id,
+                    } if conflict_group_id == group_id && deleted_variant_id == variant_id
+                )
+            });
+            if !deleted {
+                return Err(format!(
+                    "schema-5 publication drops conversation variant '{}'/ '{}' without a reviewed tombstone",
+                    group_id, variant_id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn schema5_manifest_is_semantic_noop(
+    previous: &BundleManifest,
+    candidate: &BundleManifest,
+) -> bool {
+    previous.bundle == candidate.bundle
+        && previous.recipe == candidate.recipe
+        && previous.captured_with.codec_versions == candidate.captured_with.codec_versions
+        && previous.conversation_groups == candidate.conversation_groups
+        && previous.resources == candidate.resources
+        && schema5_files_are_semantically_equal(&previous.files, &candidate.files)
+        && previous.directories == candidate.directories
+        && previous.tombstones == candidate.tombstones
+}
+
+fn schema5_files_are_semantically_equal(
+    previous: &BTreeMap<LogicalPath, BundleFileEntry>,
+    candidate: &BTreeMap<LogicalPath, BundleFileEntry>,
+) -> bool {
+    previous.len() == candidate.len()
+        && previous.iter().all(|(path, left)| {
+            candidate.get(path).is_some_and(|right| {
+                left.resource_id == right.resource_id
+                    && left.sha256 == right.sha256
+                    && left.size == right.size
+                    && left.source_mtime == right.source_mtime
+                    && left.mode == right.mode
+            })
+        })
 }
 
 fn file_delta(previous: Option<&BundleManifest>, current: &BundleManifest) -> (u64, u64, u64) {

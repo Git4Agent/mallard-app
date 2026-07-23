@@ -87,7 +87,9 @@ export function assertPullPlansAligned(
     const sameSnapshot =
       dependencyPlan.storage_id === restorePlan.storage_id &&
       dependencyPlan.bundle_id === restorePlan.bundle_id &&
+      dependencyPlan.host_id === restorePlan.host_id &&
       dependencyPlan.replica_id === restorePlan.replica_id &&
+      dependencyPlan.expected_host_identity_revision === restorePlan.expected_host_identity_revision &&
       dependencyPlan.generation === restorePlan.generation &&
       dependencyPlan.commit_id === restorePlan.commit_id &&
       dependencyPlan.manifest_sha256 === restorePlan.manifest_sha256 &&

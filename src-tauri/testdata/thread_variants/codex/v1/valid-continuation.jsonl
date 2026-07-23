@@ -1,0 +1,7 @@
+{"timestamp":"2026-07-22T00:00:00Z","type":"session_meta","payload":{"id":"thread-fixture","cwd":"/fixture/project","cli_version":"1.2.3","source":"cli"}}
+{"timestamp":"2026-07-22T00:00:01Z","type":"turn_context","payload":{"cwd":"/fixture/project","approval_policy":"on-request","sandbox_policy":{"type":"workspace-write"}}}
+{"timestamp":"2026-07-22T00:00:02Z","type":"response_item","payload":{"type":"message","id":"msg-001","parent_id":null,"role":"user","content":[{"type":"input_text","text":"Inspect the project."}]}}
+{"timestamp":"2026-07-22T00:00:03Z","type":"response_item","payload":{"type":"message","id":"msg-002","parent_id":"msg-001","role":"assistant","content":[{"type":"output_text","text":"I will inspect it."}]}}
+{"timestamp":"2026-07-22T00:00:04Z","type":"response_item","payload":{"type":"function_call","id":"msg-003","parent_id":"msg-002","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}","call_id":"call-001"}}
+{"timestamp":"2026-07-22T00:00:05Z","type":"response_item","payload":{"type":"function_call_output","id":"msg-004","parent_id":"msg-003","call_id":"call-001","output":"Chunk ID: fixture\nProcess exited with code 0\nFinal output:\n/fixture/project"}}
+{"timestamp":"2026-07-22T00:00:06Z","type":"response_item","payload":{"type":"message","id":"msg-005","parent_id":"msg-004","role":"assistant","content":[{"type":"output_text","text":"The project is ready."}]}}

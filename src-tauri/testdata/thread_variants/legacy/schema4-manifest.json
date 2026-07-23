@@ -1,0 +1,53 @@
+{
+  "schema_version": 4,
+  "generation": 7,
+  "commit_id": "commit-legacy-fixture",
+  "updated_at": 1784678406,
+  "bundle": {
+    "bundle_id": "0123456789abcdef0123456789abcdef",
+    "display_name": "Legacy fixture bundle",
+    "kind": "project"
+  },
+  "recipe": {
+    "schema_version": 1,
+    "revision": 1,
+    "entries": {
+      "codex:session:legacy-thread": {
+        "resource_id": "codex:session:legacy-thread",
+        "apply_policy": "safe_file",
+        "required": false
+      }
+    }
+  },
+  "captured_with": {
+    "app_version": "0.1.2",
+    "codex_version": "fixture-v1",
+    "codec_versions": {}
+  },
+  "resources": {
+    "codex:session:legacy-thread": {
+      "resource_id": "codex:session:legacy-thread",
+      "kind": "codex_conversation",
+      "provider": "codex",
+      "scope": "provider_state",
+      "display_name": "Legacy fixture conversation",
+      "provenance": { "kind": "unknown" },
+      "apply_policy": "safe_file",
+      "relative_cwd": ".",
+      "codec_version": 1,
+      "metadata": {}
+    }
+  },
+  "files": {
+    "state/codex/sessions/legacy-thread.jsonl": {
+      "resource_id": "codex:session:legacy-thread",
+      "sha256": "a3b4dee9fa1aefbcb10ba2273cba207ae8de37055eb48903a6a087ec0e5213a3",
+      "size": 1401,
+      "source_mtime": 1784678406,
+      "object_key": "_uploads/upload-legacy/files/state/codex/sessions/legacy-thread.jsonl",
+      "mode": 384
+    }
+  },
+  "directories": {},
+  "tombstones": {}
+}

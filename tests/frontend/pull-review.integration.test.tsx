@@ -32,6 +32,7 @@ function deferred<T>() {
 }
 
 const binding: ProjectBinding = {
+  host_id: "00112233445566778899aabbccddeeff",
   replica_id: "replica-gam2",
   local_project_id: "project-gam2",
   bundle_id: "df29babc833808e68ad0efa4d01d7d6d",
@@ -44,11 +45,13 @@ const binding: ProjectBinding = {
 };
 
 const restorePlan: RestorePlan = {
-  schema_version: 1,
+  schema_version: 2,
   plan_id: "plan-restore",
   storage_id: "storage-local",
   bundle_id: binding.bundle_id,
+  host_id: binding.host_id,
   replica_id: binding.replica_id,
+  expected_host_identity_revision: 0,
   generation: 1,
   commit_id: "commit-restore",
   manifest_sha256: "a".repeat(64),
@@ -225,11 +228,13 @@ test("the embedded Pull footer omits redundant helper copy", () => {
 
 function dependencyPlan(actions: DependencyPlan["actions"]): DependencyPlan {
   return {
-    schema_version: 1,
+    schema_version: 2,
     plan_id: "plan-dependencies",
     storage_id: restorePlan.storage_id,
     bundle_id: restorePlan.bundle_id,
+    host_id: restorePlan.host_id,
     replica_id: restorePlan.replica_id,
+    expected_host_identity_revision: restorePlan.expected_host_identity_revision,
     generation: restorePlan.generation,
     commit_id: restorePlan.commit_id,
     manifest_sha256: restorePlan.manifest_sha256,
@@ -628,6 +633,49 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
     /different bundle generations/,
   );
   assert.doesNotMatch(calls.join(","), /unexpected-restore/);
+
+  await assert.rejects(
+    applyPullReview(
+      {
+        applyRestore: async () => restoreResult,
+        applyDependencies: async () => dependencyResult,
+        getRestoreReadiness: async () => ready,
+      },
+      restorePlan,
+      { ...dependencies, host_id: "ffeeddccbbaa99887766554433221100" },
+      {
+        resourceIds: ["codex:plugin:computer-use"],
+        restoreActionIds: [],
+        dependencyActionIds: ["install-plugin"],
+      },
+      () => undefined,
+    ),
+    /different bundle generations/,
+    "a dependency plan from another host must not share one approval click",
+  );
+
+  await assert.rejects(
+    applyPullReview(
+      {
+        applyRestore: async () => restoreResult,
+        applyDependencies: async () => dependencyResult,
+        getRestoreReadiness: async () => ready,
+      },
+      restorePlan,
+      {
+        ...dependencies,
+        expected_host_identity_revision: dependencies.expected_host_identity_revision + 1,
+      },
+      {
+        resourceIds: ["codex:plugin:computer-use"],
+        restoreActionIds: [],
+        dependencyActionIds: ["install-plugin"],
+      },
+      () => undefined,
+    ),
+    /different bundle generations/,
+    "a dependency plan from another host-identity revision must not share one approval click",
+  );
 
   await assert.rejects(
     applyPullReview(

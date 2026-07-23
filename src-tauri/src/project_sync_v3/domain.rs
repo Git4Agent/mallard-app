@@ -1,10 +1,11 @@
-//! Schema-3 local project-sync state and schema-4 portable bundle model.
+//! Schema-3 local project-sync state and schema-4/schema-5 portable bundle model.
 //!
 //! This module intentionally contains no Tauri or filesystem code.  All
 //! strings which can become cloud namespace components are validated on
 //! deserialization, so persistence and transport code cannot accidentally
 //! turn untrusted JSON into an unchecked path or identifier.
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -13,12 +14,19 @@ use std::path::{Component, Path};
 
 pub const LOCAL_SCHEMA_V3: u32 = 3;
 pub const MACHINE_PROJECT_SCHEMA_V1: u32 = 1;
+pub const MACHINE_PROJECT_SCHEMA_V2: u32 = 2;
+pub const HOST_IDENTITY_SCHEMA_V1: u32 = 1;
+pub const CONVERSATION_BINDINGS_SCHEMA_V1: u32 = 1;
+pub const CONVERSATION_SYNC_JOURNAL_SCHEMA_V1: u32 = 1;
+pub const PUSH_PLAN_SCHEMA_V1: u32 = 1;
 pub const BUNDLE_SCHEMA_V4: u32 = 4;
+pub const BUNDLE_SCHEMA_V5: u32 = 5;
 pub const RECIPE_SCHEMA_V1: u32 = 1;
-pub const RESTORE_PLAN_SCHEMA_V1: u32 = 1;
-pub const DEPENDENCY_PLAN_SCHEMA_V1: u32 = 1;
+pub const RESTORE_PLAN_SCHEMA_V2: u32 = 2;
+pub const DEPENDENCY_PLAN_SCHEMA_V2: u32 = 2;
 pub const SETUP_DRAFT_SCHEMA_V1: u32 = 1;
 pub const SETUP_TRANSACTION_SCHEMA_V1: u32 = 1;
+pub const SETUP_TRANSACTION_SCHEMA_V2: u32 = 2;
 pub const MAX_SETUP_DRAFTS: usize = 64;
 
 pub const MAX_PROJECTS: usize = 1_024;
@@ -29,6 +37,9 @@ pub const MAX_PROVIDER_PROFILES: usize = 1_024;
 pub const MAX_RESOURCES: usize = 20_000;
 pub const MAX_FILES: usize = 100_000;
 pub const MAX_ACTIONS: usize = 100_000;
+pub const MAX_CONVERSATION_BINDINGS: usize = 100_000;
+pub const MAX_ORIGIN_ALIASES: usize = 20_000;
+pub const MAX_CONVERSATION_JOURNAL_OPERATIONS: usize = 10_000;
 pub const MAX_LOGICAL_PATH_BYTES: usize = 1_024;
 pub const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_PROJECT_CONTENT_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -108,11 +119,197 @@ named_id!(ResourceId, "resource id");
 named_id!(LocalProjectId, "local project id");
 named_id!(StorageId, "storage id");
 named_id!(ReplicaId, "replica id");
+named_id!(ConflictGroupId, "conflict group id");
+named_id!(VariantId, "variant id");
 named_id!(PlanId, "plan id");
 named_id!(ActionId, "action id");
 named_id!(MaterializationId, "materialization id");
+named_id!(ConversationOperationId, "conversation operation id");
 named_id!(LocalProviderProfileId, "local provider profile id");
 named_id!(SetupDraftId, "setup draft id");
+named_id!(OriginKeyRef, "origin key reference");
+
+macro_rules! fixed_hex_id {
+    ($name:ident, $label:literal, $bytes:literal) => {
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(try_from = "String", into = "String")]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+                let value = value.into();
+                if value.len() != $bytes * 2
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(format!(
+                        "{} must be exactly {} lowercase hexadecimal characters: '{}'",
+                        $label,
+                        $bytes * 2,
+                        value.escape_debug()
+                    ));
+                }
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = String;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::parse(value)
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> String {
+                value.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    };
+}
+
+fixed_hex_id!(HostId, "host id", 16);
+fixed_hex_id!(OriginHostToken, "origin host token", 32);
+fixed_hex_id!(OriginReplicaToken, "origin replica token", 32);
+
+/// Provider message identifiers are portable ancestry evidence, but unlike
+/// Mallard-owned IDs their alphabet is provider-defined. Keep them bounded
+/// and free of control characters without imposing `named_id!` syntax.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(try_from = "String", into = "String")]
+pub struct MessageId(String);
+
+impl MessageId {
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+            return Err("message id must be 1-256 non-control characters".to_string());
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for MessageId {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<MessageId> for String {
+    fn from(value: MessageId) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for MessageId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl HostId {
+    pub fn generate() -> Result<Self, String> {
+        let mut bytes = [0_u8; 16];
+        getrandom::fill(&mut bytes).map_err(|error| format!("random host id: {}", error))?;
+        Self::parse(hex_lower(&bytes))
+    }
+}
+
+/// Privacy-sensitive machine-local key used only to derive bundle-scoped
+/// provenance tokens. It deliberately has no serde implementation so it
+/// cannot be embedded in another state document by accident.
+#[derive(Clone)]
+pub struct OriginKey([u8; 32]);
+
+impl OriginKey {
+    pub fn generate() -> Result<Self, String> {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes).map_err(|error| format!("random origin key: {}", error))?;
+        Ok(Self(bytes))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| "origin key must be exactly 32 bytes".to_string())?;
+        Ok(Self(bytes))
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for OriginKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OriginKey([REDACTED])")
+    }
+}
+
+fn derive_origin_token(key: &OriginKey, fields: &[&[u8]]) -> Result<String, String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())
+        .map_err(|_| "initialize origin-token HMAC".to_string())?;
+    for field in fields {
+        let length = u64::try_from(field.len())
+            .map_err(|_| "origin-token field exceeds supported length".to_string())?;
+        mac.update(&length.to_be_bytes());
+        mac.update(field);
+    }
+    Ok(hex_lower(&mac.finalize().into_bytes()))
+}
+
+pub fn derive_origin_host_token(
+    key: &OriginKey,
+    bundle_id: &BundleId,
+) -> Result<OriginHostToken, String> {
+    OriginHostToken::parse(derive_origin_token(
+        key,
+        &[b"mallard-origin-host-v1", bundle_id.as_str().as_bytes()],
+    )?)
+}
+
+pub fn derive_origin_key_verifier(key: &OriginKey, host_id: &HostId) -> Result<String, String> {
+    derive_origin_token(
+        key,
+        &[
+            b"mallard-origin-key-verifier-v1",
+            host_id.as_str().as_bytes(),
+        ],
+    )
+}
+
+pub fn derive_origin_replica_token(
+    key: &OriginKey,
+    bundle_id: &BundleId,
+    replica_id: &ReplicaId,
+) -> Result<OriginReplicaToken, String> {
+    OriginReplicaToken::parse(derive_origin_token(
+        key,
+        &[
+            b"mallard-origin-replica-v1",
+            bundle_id.as_str().as_bytes(),
+            replica_id.as_str().as_bytes(),
+        ],
+    )?)
+}
 
 /// A bundle ID is an opaque, generated 128-bit value.  Requiring its exact
 /// lowercase hexadecimal representation makes it safe as one cloud key
@@ -341,6 +538,15 @@ pub fn validate_absolute_clean_path(label: &str, value: &str) -> Result<(), Stri
 pub enum Provider {
     Codex,
     Claude,
+}
+
+impl Provider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -963,6 +1169,66 @@ pub enum BindingState {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HostIdentity {
+    pub schema: u32,
+    pub revision: u64,
+    pub host_id: HostId,
+    pub origin_key_ref: OriginKeyRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_key_verifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_display_name: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl HostIdentity {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != HOST_IDENTITY_SCHEMA_V1 {
+            return Err(format!(
+                "unsupported host identity schema {} (expected {})",
+                self.schema, HOST_IDENTITY_SCHEMA_V1
+            ));
+        }
+        if let Some(name) = &self.local_display_name {
+            validate_host_label("local host display name", name)?;
+        }
+        if let Some(verifier) = &self.origin_key_verifier {
+            validate_sha256("origin key verifier", verifier)?;
+        }
+        if self.created_at > self.updated_at {
+            return Err("host identity has invalid timestamps".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PortableOrigin {
+    pub origin_host_token: OriginHostToken,
+    pub origin_replica_token: OriginReplicaToken,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_label: Option<String>,
+}
+
+impl PortableOrigin {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(label) = &self.shared_label {
+            validate_host_label("shared origin label", label)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_host_label(label: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        Err(format!("invalid {}", label))
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProviderProfile {
     pub profile_id: LocalProviderProfileId,
     pub provider: Provider,
@@ -993,6 +1259,7 @@ impl ProviderProfile {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProjectBinding {
+    pub host_id: HostId,
     pub replica_id: ReplicaId,
     pub local_project_id: LocalProjectId,
     pub bundle_id: BundleId,
@@ -1040,7 +1307,7 @@ pub struct MachineProjectState {
 impl Default for MachineProjectState {
     fn default() -> Self {
         Self {
-            schema: MACHINE_PROJECT_SCHEMA_V1,
+            schema: MACHINE_PROJECT_SCHEMA_V2,
             revision: 0,
             profiles: Vec::new(),
             bindings: Vec::new(),
@@ -1050,7 +1317,7 @@ impl Default for MachineProjectState {
 
 impl MachineProjectState {
     pub fn validate(&self, config: &SyncConfigV3) -> Result<(), String> {
-        if self.schema != MACHINE_PROJECT_SCHEMA_V1
+        if self.schema != MACHINE_PROJECT_SCHEMA_V2
             || self.bindings.len() > MAX_BINDINGS
             || self.profiles.len() > MAX_PROVIDER_PROFILES
         {
@@ -1081,13 +1348,21 @@ impl MachineProjectState {
             profiles.insert(profile.profile_id.clone(), profile);
         }
         let mut replicas = HashSet::new();
+        let mut host_id: Option<&HostId> = None;
         let mut active_projects = HashSet::new();
         let mut active_root_profiles: BTreeMap<(String, LocalProviderProfileId), &LocalProjectId> =
             BTreeMap::new();
         for binding in &self.bindings {
             binding.validate_structure()?;
+            if let Some(expected) = host_id {
+                if expected != &binding.host_id {
+                    return Err("machine project bindings contain multiple host IDs".to_string());
+                }
+            } else {
+                host_id = Some(&binding.host_id);
+            }
             if !replicas.insert(binding.replica_id.clone()) {
-                return Err(format!("duplicate replica id '{}'", binding.replica_id));
+                return Err("machine project bindings contain a duplicate replica ID".to_string());
             }
             let project = config.project(&binding.local_project_id);
             if binding.state == BindingState::Active && project.is_none() {
@@ -1155,6 +1430,497 @@ impl MachineProjectState {
         self.bindings.iter().find(|binding| {
             &binding.local_project_id == id && binding.state == BindingState::Active
         })
+    }
+
+    pub fn for_project(&self, id: &LocalProjectId) -> Option<&ProjectBinding> {
+        self.active_for(id).or_else(|| {
+            self.bindings
+                .iter()
+                .find(|binding| &binding.local_project_id == id)
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationMaterializationState {
+    Pending,
+    Resumable,
+    StoredOnly,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LocalConversationBinding {
+    pub host_id: HostId,
+    pub replica_id: ReplicaId,
+    pub local_project_id: LocalProjectId,
+    pub provider_profile_id: LocalProviderProfileId,
+    pub conflict_group_id: ConflictGroupId,
+    pub variant_id: VariantId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_thread_id: Option<String>,
+    pub materialization_state: ConversationMaterializationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed_file_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed_head_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed_lineage_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed_semantic_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_manifest_sha256: Option<String>,
+    pub revision: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl LocalConversationBinding {
+    pub fn validate(&self) -> Result<(), String> {
+        let requires_provider_id = matches!(
+            self.materialization_state,
+            ConversationMaterializationState::Pending | ConversationMaterializationState::Resumable
+        );
+        if requires_provider_id != self.provider_thread_id.is_some() {
+            return Err(format!(
+                "conversation variant '{}'/ '{}' has an invalid provider-thread binding",
+                self.conflict_group_id, self.variant_id
+            ));
+        }
+        if self.provider_thread_id.as_ref().is_some_and(|thread_id| {
+            thread_id.is_empty() || thread_id.len() > 128 || thread_id.chars().any(char::is_control)
+        }) {
+            return Err("conversation binding has an invalid provider thread ID".to_string());
+        }
+        if self
+            .last_observed_head_message_id
+            .as_ref()
+            .is_some_and(|message_id| {
+                message_id.is_empty()
+                    || message_id.len() > 256
+                    || message_id.chars().any(char::is_control)
+            })
+        {
+            return Err("conversation binding has an invalid head message ID".to_string());
+        }
+        for (label, digest) in [
+            (
+                "conversation local file",
+                self.last_observed_file_sha256.as_deref(),
+            ),
+            (
+                "conversation lineage",
+                self.last_observed_lineage_digest.as_deref(),
+            ),
+            (
+                "conversation semantic",
+                self.last_observed_semantic_digest.as_deref(),
+            ),
+            (
+                "conversation source manifest",
+                self.source_manifest_sha256.as_deref(),
+            ),
+        ] {
+            if let Some(digest) = digest {
+                validate_sha256(label, digest)?;
+            }
+        }
+        if self.source_generation.is_some() != self.source_manifest_sha256.is_some() {
+            return Err(
+                "conversation binding source generation and manifest must be pinned together"
+                    .to_string(),
+            );
+        }
+        if self.created_at > self.updated_at {
+            return Err("conversation binding has invalid timestamps".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LocalConversationPreference {
+    pub host_id: HostId,
+    pub replica_id: ReplicaId,
+    pub local_project_id: LocalProjectId,
+    pub provider_profile_id: LocalProviderProfileId,
+    pub conflict_group_id: ConflictGroupId,
+    pub preferred_variant_id: VariantId,
+    pub revision: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OriginHostAlias {
+    pub bundle_id: BundleId,
+    pub origin_host_token: OriginHostToken,
+    pub display_name: String,
+    pub revision: u64,
+    pub updated_at: u64,
+}
+
+impl OriginHostAlias {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_host_label("origin host alias", &self.display_name)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationBindings {
+    pub schema: u32,
+    pub revision: u64,
+    pub host_id: HostId,
+    #[serde(default)]
+    pub bindings: Vec<LocalConversationBinding>,
+    #[serde(default)]
+    pub preferences: Vec<LocalConversationPreference>,
+    #[serde(default)]
+    pub origin_aliases: Vec<OriginHostAlias>,
+}
+
+impl ConversationBindings {
+    pub fn empty(host_id: HostId) -> Self {
+        Self {
+            schema: CONVERSATION_BINDINGS_SCHEMA_V1,
+            revision: 0,
+            host_id,
+            bindings: Vec::new(),
+            preferences: Vec::new(),
+            origin_aliases: Vec::new(),
+        }
+    }
+
+    pub fn validate(
+        &self,
+        identity: &HostIdentity,
+        machine: &MachineProjectState,
+        config: &SyncConfigV3,
+    ) -> Result<(), String> {
+        if self.schema != CONVERSATION_BINDINGS_SCHEMA_V1
+            || self.bindings.len() > MAX_CONVERSATION_BINDINGS
+            || self.preferences.len() > MAX_CONVERSATION_BINDINGS
+            || self.origin_aliases.len() > MAX_ORIGIN_ALIASES
+        {
+            return Err("invalid conversation bindings document".to_string());
+        }
+        if self.host_id != identity.host_id {
+            return Err("conversation bindings belong to a different host".to_string());
+        }
+
+        let profiles = machine
+            .profiles
+            .iter()
+            .map(|profile| (profile.profile_id.clone(), profile))
+            .collect::<BTreeMap<_, _>>();
+        let replicas = machine
+            .bindings
+            .iter()
+            .map(|binding| (binding.replica_id.clone(), binding))
+            .collect::<BTreeMap<_, _>>();
+        let mut binding_keys = HashSet::new();
+        let mut provider_owners = HashSet::new();
+        for binding in &self.bindings {
+            binding.validate()?;
+            if binding.host_id != self.host_id {
+                return Err("conversation binding belongs to a different host".to_string());
+            }
+            let project_binding = replicas
+                .get(&binding.replica_id)
+                .ok_or_else(|| "conversation binding references an unknown replica".to_string())?;
+            if project_binding.host_id != self.host_id
+                || project_binding.local_project_id != binding.local_project_id
+                || !project_binding
+                    .profile_ids
+                    .values()
+                    .any(|profile_id| profile_id == &binding.provider_profile_id)
+                || (project_binding.state == BindingState::Active
+                    && config.project(&binding.local_project_id).is_none())
+                || !profiles.contains_key(&binding.provider_profile_id)
+            {
+                return Err("conversation binding project/profile scope is stale".to_string());
+            }
+            let key = (
+                binding.host_id.clone(),
+                binding.replica_id.clone(),
+                binding.local_project_id.clone(),
+                binding.provider_profile_id.clone(),
+                binding.conflict_group_id.clone(),
+                binding.variant_id.clone(),
+            );
+            if !binding_keys.insert(key) {
+                return Err("duplicate local conversation binding".to_string());
+            }
+            if let Some(thread_id) = &binding.provider_thread_id {
+                let owner = (
+                    binding.host_id.clone(),
+                    binding.provider_profile_id.clone(),
+                    thread_id.clone(),
+                );
+                if !provider_owners.insert(owner) {
+                    return Err("provider thread ID is owned by multiple variants".to_string());
+                }
+            }
+        }
+
+        let mut preference_keys = HashSet::new();
+        for preference in &self.preferences {
+            if preference.host_id != self.host_id {
+                return Err("conversation preference belongs to a different host".to_string());
+            }
+            let key = (
+                preference.host_id.clone(),
+                preference.replica_id.clone(),
+                preference.local_project_id.clone(),
+                preference.provider_profile_id.clone(),
+                preference.conflict_group_id.clone(),
+            );
+            if !preference_keys.insert(key) {
+                return Err("duplicate local conversation preference".to_string());
+            }
+            if !self.bindings.iter().any(|binding| {
+                binding.host_id == preference.host_id
+                    && binding.replica_id == preference.replica_id
+                    && binding.local_project_id == preference.local_project_id
+                    && binding.provider_profile_id == preference.provider_profile_id
+                    && binding.conflict_group_id == preference.conflict_group_id
+                    && binding.variant_id == preference.preferred_variant_id
+            }) {
+                return Err("conversation preference points to an unknown variant".to_string());
+            }
+        }
+
+        let mut aliases = HashSet::new();
+        for alias in &self.origin_aliases {
+            alias.validate()?;
+            if !aliases.insert((alias.bundle_id.clone(), alias.origin_host_token.clone())) {
+                return Err("duplicate origin host alias".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn fallback_origin_host_label(token: &OriginHostToken) -> String {
+    format!("Host {}", token.as_str()[..4].to_ascii_uppercase())
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationSyncPhase {
+    Prepared,
+    Staged,
+    ProviderCommitted,
+    CloudPublished,
+    LocalCommitted,
+    RecoveryRequired,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationJournalTarget {
+    pub target_path: String,
+    pub role: ConversationFileRole,
+    pub expected: TargetExpectation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_sha256: Option<String>,
+    #[serde(default)]
+    pub commit_started: bool,
+    #[serde(default)]
+    pub committed: bool,
+}
+
+impl ConversationJournalTarget {
+    fn validate(&self) -> Result<(), String> {
+        validate_absolute_clean_path("conversation journal target", &self.target_path)?;
+        self.expected.validate()?;
+        if let Some(path) = &self.staged_path {
+            validate_absolute_clean_path("conversation journal staging path", path)?;
+        }
+        if let Some(path) = &self.backup_path {
+            validate_absolute_clean_path("conversation journal backup path", path)?;
+        }
+        if let Some(digest) = &self.staged_sha256 {
+            validate_sha256("conversation journal staged target", digest)?;
+        }
+        if self.staged_path.is_some() != self.staged_sha256.is_some() {
+            return Err("conversation journal staging path and digest must be paired".to_string());
+        }
+        if self.committed && !self.commit_started {
+            return Err(
+                "conversation journal target cannot be committed before commit starts".to_string(),
+            );
+        }
+        self.role.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationSyncOperation {
+    pub operation_id: ConversationOperationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<PlanId>,
+    pub direction: ConversationPlanDirection,
+    pub phase: ConversationSyncPhase,
+    pub storage_id: StorageId,
+    pub bundle_id: BundleId,
+    pub generation: u64,
+    pub commit_id: String,
+    pub manifest_sha256: String,
+    pub host_id: HostId,
+    pub replica_id: ReplicaId,
+    pub local_project_id: LocalProjectId,
+    pub provider_profile_id: LocalProviderProfileId,
+    pub provider: Provider,
+    pub conflict_group_id: ConflictGroupId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_variant_id: Option<VariantId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_variant_id: Option<VariantId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rekeyed_local_variant_id: Option<VariantId>,
+    #[serde(default)]
+    pub rekey_committed: bool,
+    pub result_variant_id: VariantId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_thread_id: Option<String>,
+    pub materialization_state: ConversationMaterializationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_digest: Option<String>,
+    pub expected_host_identity_revision: u64,
+    pub expected_bindings_document_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_binding_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_preference_revision: Option<u64>,
+    pub expected_profile_revision: u64,
+    pub expected_project_binding_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_local_digest: Option<String>,
+    #[serde(default)]
+    pub initialize_preference: bool,
+    #[serde(default)]
+    pub targets: Vec<ConversationJournalTarget>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl ConversationSyncOperation {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_named_id("conversation journal commit", &self.commit_id)?;
+        validate_sha256("conversation journal manifest", &self.manifest_sha256)?;
+        if let Some(digest) = &self.expected_local_digest {
+            validate_sha256("conversation journal local target", digest)?;
+        }
+        for (label, digest) in [
+            (
+                "conversation journal lineage",
+                self.lineage_digest.as_deref(),
+            ),
+            (
+                "conversation journal semantic",
+                self.semantic_digest.as_deref(),
+            ),
+        ] {
+            if let Some(digest) = digest {
+                validate_sha256(label, digest)?;
+            }
+        }
+        if self.lineage_digest.is_some() != self.semantic_digest.is_some() {
+            return Err("conversation journal lineage and semantics must be paired".to_string());
+        }
+        if self.old_variant_id.is_some() != self.rekeyed_local_variant_id.is_some() {
+            return Err("conversation journal rekey source and result must be paired".to_string());
+        }
+        if let (Some(old), Some(rekeyed)) = (&self.old_variant_id, &self.rekeyed_local_variant_id) {
+            if old == rekeyed {
+                return Err("conversation journal rekey must change the variant id".to_string());
+            }
+            if self.direction == ConversationPlanDirection::Push
+                && &self.result_variant_id != rekeyed
+            {
+                return Err(
+                    "conversation Push rekey result must be the published local variant"
+                        .to_string(),
+                );
+            }
+        }
+        if self.rekey_committed && self.rekeyed_local_variant_id.is_none() {
+            return Err("conversation journal marks a missing rekey as committed".to_string());
+        }
+        if self.created_at > self.updated_at || self.targets.len() > 64 {
+            return Err("invalid conversation journal timestamps or target count".to_string());
+        }
+        if self.provider_thread_id.as_ref().is_some_and(|thread_id| {
+            thread_id.is_empty() || thread_id.len() > 128 || thread_id.chars().any(char::is_control)
+        }) {
+            return Err("conversation journal has an invalid provider thread id".to_string());
+        }
+        let requires_provider = matches!(
+            self.materialization_state,
+            ConversationMaterializationState::Pending | ConversationMaterializationState::Resumable
+        );
+        if requires_provider != self.provider_thread_id.is_some() {
+            return Err("conversation journal has invalid provider materialization".to_string());
+        }
+        if self.initialize_preference
+            && (self.direction != ConversationPlanDirection::Pull
+                || self.materialization_state != ConversationMaterializationState::Resumable)
+        {
+            return Err("only a resumable Pull result can initialize local preference".to_string());
+        }
+        let mut targets = BTreeSet::new();
+        for target in &self.targets {
+            target.validate()?;
+            if !targets.insert(target.target_path.to_lowercase()) {
+                return Err("conversation journal repeats a target".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationSyncJournal {
+    pub schema: u32,
+    pub revision: u64,
+    #[serde(default)]
+    pub operations: Vec<ConversationSyncOperation>,
+}
+
+impl ConversationSyncJournal {
+    pub fn empty() -> Self {
+        Self {
+            schema: CONVERSATION_SYNC_JOURNAL_SCHEMA_V1,
+            revision: 0,
+            operations: Vec::new(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != CONVERSATION_SYNC_JOURNAL_SCHEMA_V1
+            || self.operations.len() > MAX_CONVERSATION_JOURNAL_OPERATIONS
+        {
+            return Err("invalid conversation sync journal".to_string());
+        }
+        let mut ids = BTreeSet::new();
+        for operation in &self.operations {
+            operation.validate()?;
+            if !ids.insert(operation.operation_id.clone()) {
+                return Err(format!(
+                    "duplicate conversation journal operation '{}'",
+                    operation.operation_id
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1313,6 +2079,8 @@ pub struct SetupTransaction {
     pub draft_id: SetupDraftId,
     pub draft_revision: u64,
     pub created_at: u64,
+    pub host_id: HostId,
+    pub replica_id: ReplicaId,
     #[serde(default)]
     pub profiles: Vec<ProviderProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1325,10 +2093,10 @@ pub struct SetupTransaction {
 
 impl SetupTransaction {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != SETUP_TRANSACTION_SCHEMA_V1 {
+        if self.schema != SETUP_TRANSACTION_SCHEMA_V2 {
             return Err(format!(
                 "unsupported setup transaction schema {} (expected {})",
-                self.schema, SETUP_TRANSACTION_SCHEMA_V1
+                self.schema, SETUP_TRANSACTION_SCHEMA_V2
             ));
         }
         for profile in &self.profiles {
@@ -1346,7 +2114,9 @@ impl SetupTransaction {
             }
         }
         self.binding.validate_structure()?;
-        if self.binding.local_project_id != self.project.local_project_id
+        if self.binding.host_id != self.host_id
+            || self.binding.replica_id != self.replica_id
+            || self.binding.local_project_id != self.project.local_project_id
             || self.binding.bundle_id != self.project.bundle_id
         {
             return Err("setup transaction binding does not match its project".to_string());
@@ -1383,6 +2153,716 @@ pub struct CapturedWith {
     pub claude_version: Option<String>,
     #[serde(default)]
     pub codec_versions: BTreeMap<String, u32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ConversationLineageStatus {
+    Complete,
+    Unknown { reason_code: String },
+}
+
+impl ConversationLineageStatus {
+    fn validate(&self) -> Result<(), String> {
+        if let Self::Unknown { reason_code } = self {
+            validate_display_text("conversation lineage reason", reason_code, false)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConversationFileRole {
+    Transcript,
+    ProviderIndexFragment,
+    Sidecar { sidecar_kind: String },
+}
+
+impl ConversationFileRole {
+    fn validate(&self) -> Result<(), String> {
+        if let Self::Sidecar { sidecar_kind } = self {
+            validate_display_text("conversation sidecar kind", sidecar_kind, false)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationFileRef {
+    pub logical_path: LogicalPath,
+    pub role: ConversationFileRole,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationVariant {
+    pub variant_id: VariantId,
+    pub resource_id: ResourceId,
+    #[serde(default)]
+    pub files: Vec<ConversationFileRef>,
+    pub lineage_status: ConversationLineageStatus,
+    pub lineage_codec: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_message_id: Option<MessageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_variant_id: Option<VariantId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_message_id: Option<MessageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_origin: Option<PortableOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_updated_by_origin: Option<PortableOrigin>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl ConversationVariant {
+    fn validate(&self, provider: Provider, group_id: &ConflictGroupId) -> Result<(), String> {
+        self.lineage_status.validate()?;
+        validate_display_text("conversation lineage codec", &self.lineage_codec, false)?;
+        let expected_resource_id = conversation_resource_id(provider, group_id, &self.variant_id)?;
+        if self.resource_id != expected_resource_id {
+            return Err(format!(
+                "conversation variant '{}' has non-canonical resource id '{}'",
+                self.variant_id, self.resource_id
+            ));
+        }
+        if self.files.is_empty() || self.files.len() > MAX_FILES {
+            return Err(format!(
+                "conversation variant '{}' has an invalid file inventory",
+                self.variant_id
+            ));
+        }
+        let mut paths = BTreeSet::new();
+        let mut transcript_count = 0_usize;
+        for file in &self.files {
+            file.role.validate()?;
+            if !paths.insert(file.logical_path.clone()) {
+                return Err(format!(
+                    "conversation variant '{}' repeats file '{}'",
+                    self.variant_id, file.logical_path
+                ));
+            }
+            if file.role == ConversationFileRole::Transcript {
+                transcript_count += 1;
+            }
+        }
+        if transcript_count != 1 {
+            return Err(format!(
+                "conversation variant '{}' must own exactly one transcript",
+                self.variant_id
+            ));
+        }
+        let complete_fields = self.head_message_id.is_some()
+            && self.message_count.is_some_and(|count| count > 0)
+            && self.lineage_digest.is_some()
+            && self.semantic_digest.is_some();
+        match self.lineage_status {
+            ConversationLineageStatus::Complete if !complete_fields => {
+                return Err(format!(
+                    "conversation variant '{}' has incomplete lineage metadata",
+                    self.variant_id
+                ));
+            }
+            ConversationLineageStatus::Unknown { .. }
+                if self.head_message_id.is_some()
+                    || self.message_count.is_some()
+                    || self.lineage_digest.is_some()
+                    || self.semantic_digest.is_some() =>
+            {
+                return Err(format!(
+                    "conversation variant '{}' has misleading unknown-lineage metadata",
+                    self.variant_id
+                ));
+            }
+            _ => {}
+        }
+        for (label, digest) in [
+            ("conversation lineage", self.lineage_digest.as_deref()),
+            ("conversation semantic", self.semantic_digest.as_deref()),
+        ] {
+            if let Some(digest) = digest {
+                validate_sha256(label, digest)?;
+            }
+        }
+        if self.parent_variant_id.as_ref() == Some(&self.variant_id) {
+            return Err(format!(
+                "conversation variant '{}' cannot parent itself",
+                self.variant_id
+            ));
+        }
+        if let Some(thread_id) = &self.source_thread_id {
+            if thread_id.is_empty()
+                || thread_id.len() > 256
+                || thread_id.chars().any(char::is_control)
+            {
+                return Err("conversation source thread id is invalid".to_string());
+            }
+        }
+        for origin in [
+            self.created_by_origin.as_ref(),
+            self.last_updated_by_origin.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            origin.validate()?;
+        }
+        if self.created_at > self.updated_at {
+            return Err(format!(
+                "conversation variant '{}' has invalid timestamps",
+                self.variant_id
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationGroup {
+    pub conflict_group_id: ConflictGroupId,
+    pub provider: Provider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_title: Option<String>,
+    pub primary_variant_id: VariantId,
+    #[serde(default)]
+    pub variants: BTreeMap<VariantId, ConversationVariant>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl ConversationGroup {
+    fn validate(&self) -> Result<(), String> {
+        if let Some(title) = &self.display_title {
+            validate_display_text("conversation title", title, false)?;
+        }
+        if self.variants.is_empty() || self.variants.len() > MAX_RESOURCES {
+            return Err(format!(
+                "conversation group '{}' has an invalid variant count",
+                self.conflict_group_id
+            ));
+        }
+        if !self.variants.contains_key(&self.primary_variant_id) {
+            return Err(format!(
+                "conversation group '{}' has an invalid primary variant",
+                self.conflict_group_id
+            ));
+        }
+        for (variant_id, variant) in &self.variants {
+            if variant_id != &variant.variant_id {
+                return Err(format!(
+                    "conversation variant key '{}' does not match its embedded id",
+                    variant_id
+                ));
+            }
+            variant.validate(self.provider, &self.conflict_group_id)?;
+        }
+        let mut state = BTreeMap::<VariantId, u8>::new();
+        for variant_id in self.variants.keys() {
+            validate_variant_parent_chain(variant_id, &self.variants, &mut state)?;
+        }
+        if self.created_at > self.updated_at {
+            return Err(format!(
+                "conversation group '{}' has invalid timestamps",
+                self.conflict_group_id
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_variant_parent_chain(
+    variant_id: &VariantId,
+    variants: &BTreeMap<VariantId, ConversationVariant>,
+    state: &mut BTreeMap<VariantId, u8>,
+) -> Result<(), String> {
+    match state.get(variant_id).copied() {
+        Some(1) => return Err("conversation variant parent cycle".to_string()),
+        Some(2) => return Ok(()),
+        _ => {}
+    }
+    state.insert(variant_id.clone(), 1);
+    if let Some(parent) = variants
+        .get(variant_id)
+        .and_then(|variant| variant.parent_variant_id.as_ref())
+    {
+        if variants.contains_key(parent) {
+            validate_variant_parent_chain(parent, variants, state)?;
+        }
+    }
+    state.insert(variant_id.clone(), 2);
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalConversationMessage {
+    pub message_id: MessageId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_message_id: Option<MessageId>,
+    pub semantic_fingerprint: String,
+}
+
+impl CanonicalConversationMessage {
+    fn validate(&self) -> Result<(), String> {
+        validate_sha256(
+            "conversation message semantic fingerprint",
+            &self.semantic_fingerprint,
+        )
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationRelation {
+    Identical,
+    CloudPrefixOfLocal,
+    LocalPrefixOfCloud,
+    Diverged,
+    Unknown,
+    LocalMissing,
+    CloudMissing,
+    BothMissing,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationPlanDirection {
+    Push,
+    Pull,
+}
+
+/// Typed reconciliation outcomes. Push and Pull intentionally share one enum
+/// so every relation can be represented in review DTOs without interpreting a
+/// localized message. `FastForwardCloud` and `RequirePull` make the two Push
+/// prefix outcomes explicit rather than overloading Pull-only actions.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationPlanActionType {
+    NoOp,
+    FastForwardLocal,
+    FastForwardCloud,
+    KeepLocal,
+    RequirePull,
+    AddAlternate,
+    StoreOnly,
+    PromoteLocal,
+    PromoteCloud,
+    ReplaceLocal,
+    TombstoneVariant,
+    TombstoneGroup,
+    Blocked,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationReasonCode {
+    Identical,
+    StructuralRewriteOnly,
+    CloudPrefixOfLocal,
+    LocalPrefixOfCloud,
+    Diverged,
+    UnknownLineage,
+    LocalMissing,
+    CloudMissing,
+    BothMissing,
+    ProviderNotQuiescent,
+    CodecUnsupported,
+    AmbiguousBinding,
+    MissingBinding,
+    TombstoneUnchanged,
+    TombstoneModified,
+    StalePlan,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "state", content = "sha256", rename_all = "snake_case")]
+pub enum TargetExpectation {
+    Absent,
+    Sha256(String),
+}
+
+impl TargetExpectation {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Self::Sha256(digest) = self {
+            validate_sha256("conversation target expectation", digest)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProviderStateExpectation {
+    pub target_path: String,
+    pub expectation: TargetExpectation,
+}
+
+impl ProviderStateExpectation {
+    fn validate(&self) -> Result<(), String> {
+        validate_absolute_clean_path("conversation provider target", &self.target_path)?;
+        self.expectation.validate()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationPlanAction {
+    pub action_id: ActionId,
+    pub direction: ConversationPlanDirection,
+    pub action: ConversationPlanActionType,
+    pub reason_code: ConversationReasonCode,
+    pub relation: ConversationRelation,
+    pub provider: Provider,
+    pub host_id: HostId,
+    pub replica_id: ReplicaId,
+    pub local_project_id: LocalProjectId,
+    pub provider_profile_id: LocalProviderProfileId,
+    pub conflict_group_id: ConflictGroupId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_variant_id: Option<VariantId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_variant_id: Option<VariantId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_local_variant_id: Option<VariantId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_resource_id: Option<ResourceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_provider_thread_id: Option<String>,
+    pub required_codec: String,
+    pub pinned_generation: u64,
+    pub pinned_commit_id: String,
+    pub pinned_manifest_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_lineage_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_semantic_digest: Option<String>,
+    pub expected_local_target: TargetExpectation,
+    #[serde(default)]
+    pub expected_provider_state: Vec<ProviderStateExpectation>,
+    pub expected_profile_revision: u64,
+    pub expected_project_binding_revision: u64,
+    pub expected_host_identity_revision: u64,
+    pub expected_bindings_document_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_binding_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_preference_revision: Option<u64>,
+    pub expires_at: u64,
+}
+
+impl ConversationPlanAction {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_named_id("conversation plan commit", &self.pinned_commit_id)?;
+        validate_sha256("conversation plan manifest", &self.pinned_manifest_sha256)?;
+        validate_display_text("conversation plan codec", &self.required_codec, false)?;
+        for (label, digest) in [
+            (
+                "conversation plan lineage",
+                self.pinned_lineage_digest.as_deref(),
+            ),
+            (
+                "conversation plan semantic",
+                self.pinned_semantic_digest.as_deref(),
+            ),
+        ] {
+            if let Some(digest) = digest {
+                validate_sha256(label, digest)?;
+            }
+        }
+        if self.pinned_lineage_digest.is_some() != self.pinned_semantic_digest.is_some() {
+            return Err("conversation plan must pin lineage and semantics together".to_string());
+        }
+        self.expected_local_target.validate()?;
+        if self.expected_provider_state.len() > 64 {
+            return Err("conversation plan has too many provider targets".to_string());
+        }
+        let mut paths = BTreeSet::new();
+        for target in &self.expected_provider_state {
+            target.validate()?;
+            if !paths.insert(target.target_path.to_lowercase()) {
+                return Err("conversation plan repeats a provider target".to_string());
+            }
+        }
+        if self
+            .proposed_provider_thread_id
+            .as_ref()
+            .is_some_and(|thread_id| {
+                thread_id.is_empty()
+                    || thread_id.len() > 128
+                    || thread_id.chars().any(char::is_control)
+            })
+        {
+            return Err("conversation plan has an invalid provider thread id".to_string());
+        }
+        if (self.direction == ConversationPlanDirection::Pull
+            && matches!(
+                self.action,
+                ConversationPlanActionType::FastForwardLocal
+                    | ConversationPlanActionType::AddAlternate
+                    | ConversationPlanActionType::ReplaceLocal
+            ))
+            && self.proposed_provider_thread_id.is_none()
+        {
+            return Err(
+                "conversation materialization action lacks a provider thread id".to_string(),
+            );
+        }
+        if self.direction == ConversationPlanDirection::Push
+            && matches!(
+                self.action,
+                ConversationPlanActionType::FastForwardLocal
+                    | ConversationPlanActionType::StoreOnly
+                    | ConversationPlanActionType::PromoteLocal
+                    | ConversationPlanActionType::ReplaceLocal
+            )
+        {
+            return Err("conversation Push plan contains a Pull-only action".to_string());
+        }
+        if self.direction == ConversationPlanDirection::Pull
+            && matches!(
+                self.action,
+                ConversationPlanActionType::FastForwardCloud
+                    | ConversationPlanActionType::RequirePull
+                    | ConversationPlanActionType::PromoteCloud
+            )
+        {
+            return Err("conversation Pull plan contains a Push-only action".to_string());
+        }
+        if self.action == ConversationPlanActionType::NoOp
+            && (self.result_local_variant_id.is_some()
+                || self.proposed_provider_thread_id.is_some()
+                || !self.expected_provider_state.is_empty())
+        {
+            return Err("conversation no-op reserves mutation targets".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationPushPlan {
+    pub schema_version: u32,
+    pub plan_id: PlanId,
+    pub storage_id: StorageId,
+    pub bundle_id: BundleId,
+    pub host_id: HostId,
+    pub replica_id: ReplicaId,
+    pub local_project_id: LocalProjectId,
+    pub provider_profile_id: LocalProviderProfileId,
+    pub expected_host_identity_revision: u64,
+    pub expected_project_binding_revision: u64,
+    pub expected_bindings_document_revision: u64,
+    pub expected_profile_revision: u64,
+    pub generation: u64,
+    pub commit_id: String,
+    pub manifest_sha256: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    #[serde(default)]
+    pub actions: Vec<ConversationPlanAction>,
+}
+
+impl ConversationPushPlan {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != PUSH_PLAN_SCHEMA_V1 {
+            return Err(format!(
+                "unsupported conversation push-plan schema {}",
+                self.schema_version
+            ));
+        }
+        validate_named_id("conversation push-plan commit", &self.commit_id)?;
+        validate_sha256("conversation push-plan manifest", &self.manifest_sha256)?;
+        if self.created_at > self.expires_at || self.actions.len() > MAX_ACTIONS {
+            return Err("invalid conversation push-plan lifetime or action count".to_string());
+        }
+        let mut action_ids = BTreeSet::new();
+        for action in &self.actions {
+            action.validate()?;
+            if action.direction != ConversationPlanDirection::Push
+                || action.host_id != self.host_id
+                || action.replica_id != self.replica_id
+                || action.local_project_id != self.local_project_id
+                || action.provider_profile_id != self.provider_profile_id
+                || action.pinned_generation != self.generation
+                || action.pinned_commit_id != self.commit_id
+                || action.pinned_manifest_sha256 != self.manifest_sha256
+                || action.expected_host_identity_revision != self.expected_host_identity_revision
+                || action.expected_bindings_document_revision
+                    != self.expected_bindings_document_revision
+                || action.expected_profile_revision != self.expected_profile_revision
+                || action.expected_project_binding_revision
+                    != self.expected_project_binding_revision
+                || action.expires_at != self.expires_at
+            {
+                return Err("conversation push-plan action pins disagree with the plan".to_string());
+            }
+            if !action_ids.insert(action.action_id.clone()) {
+                return Err(format!(
+                    "duplicate conversation push action '{}'",
+                    action.action_id
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn classify_conversation_relation(
+    local: Option<&[CanonicalConversationMessage]>,
+    cloud: Option<&[CanonicalConversationMessage]>,
+) -> ConversationRelation {
+    match (local, cloud) {
+        (None, None) => return ConversationRelation::BothMissing,
+        (None, Some(_)) => return ConversationRelation::LocalMissing,
+        (Some(_), None) => return ConversationRelation::CloudMissing,
+        (Some(local), Some(cloud)) => {
+            if validate_conversation_chain(local).is_err()
+                || validate_conversation_chain(cloud).is_err()
+            {
+                return ConversationRelation::Unknown;
+            }
+            let common = local.len().min(cloud.len());
+            for index in 0..common {
+                if local[index].message_id != cloud[index].message_id {
+                    return ConversationRelation::Diverged;
+                }
+                if local[index].parent_message_id != cloud[index].parent_message_id
+                    || local[index].semantic_fingerprint != cloud[index].semantic_fingerprint
+                {
+                    return ConversationRelation::Unknown;
+                }
+            }
+            match local.len().cmp(&cloud.len()) {
+                std::cmp::Ordering::Equal => ConversationRelation::Identical,
+                std::cmp::Ordering::Greater => ConversationRelation::CloudPrefixOfLocal,
+                std::cmp::Ordering::Less => ConversationRelation::LocalPrefixOfCloud,
+            }
+        }
+    }
+}
+
+pub fn validate_conversation_chain(chain: &[CanonicalConversationMessage]) -> Result<(), String> {
+    if chain.is_empty() || chain.len() > MAX_FILES {
+        return Err("conversation chain is empty or exceeds its record limit".to_string());
+    }
+    let mut ids = BTreeSet::new();
+    for (index, message) in chain.iter().enumerate() {
+        message.validate()?;
+        if !ids.insert(message.message_id.clone()) {
+            return Err("conversation chain contains a duplicate message id".to_string());
+        }
+        let expected_parent = index
+            .checked_sub(1)
+            .and_then(|previous| chain.get(previous))
+            .map(|previous| &previous.message_id);
+        if message.parent_message_id.as_ref() != expected_parent {
+            return Err("conversation chain is not one linear path".to_string());
+        }
+    }
+    Ok(())
+}
+
+pub fn conversation_chain_digests(
+    chain: &[CanonicalConversationMessage],
+) -> Result<(String, String), String> {
+    validate_conversation_chain(chain)?;
+    let mut lineage = Sha256::new();
+    let mut semantic = Sha256::new();
+    update_length_prefixed(&mut lineage, b"mallard-conversation-lineage-v1");
+    update_length_prefixed(&mut semantic, b"mallard-conversation-semantic-v1");
+    for message in chain {
+        update_length_prefixed(&mut lineage, message.message_id.as_str().as_bytes());
+        update_optional_length_prefixed(
+            &mut lineage,
+            message.parent_message_id.as_ref().map(MessageId::as_str),
+        );
+        update_length_prefixed(&mut semantic, message.message_id.as_str().as_bytes());
+        update_optional_length_prefixed(
+            &mut semantic,
+            message.parent_message_id.as_ref().map(MessageId::as_str),
+        );
+        update_length_prefixed(&mut semantic, message.semantic_fingerprint.as_bytes());
+    }
+    Ok((
+        hex_lower(&lineage.finalize()),
+        hex_lower(&semantic.finalize()),
+    ))
+}
+
+fn update_length_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn update_optional_length_prefixed(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            update_length_prefixed(hasher, value.as_bytes());
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn stable_conversation_id(prefix: &str, domain: &str, fields: &[&[u8]]) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    update_length_prefixed(&mut hasher, domain.as_bytes());
+    for field in fields {
+        update_length_prefixed(&mut hasher, field);
+    }
+    // Conversation IDs use the first 128 digest bits. This matches Mallard's
+    // other opaque identities while leaving enough room for the canonical
+    // `<provider>:conversation:<group>:<variant>` resource ID inside the
+    // existing 128-byte ResourceId bound. The domain and length-prefixed
+    // encoding make group and variant namespaces independent.
+    let digest = hasher.finalize();
+    let value = format!("{}-{}", prefix, hex_lower(&digest[..16]));
+    validate_named_id("stable conversation id", &value)?;
+    Ok(value)
+}
+
+pub fn deterministic_schema4_conversation_ids(
+    bundle_id: &BundleId,
+    provider: Provider,
+    schema4_resource_id: &ResourceId,
+) -> Result<(ConflictGroupId, VariantId), String> {
+    let group = ConflictGroupId::parse(stable_conversation_id(
+        "group",
+        "mallard-conversation-group-v1",
+        &[
+            bundle_id.as_str().as_bytes(),
+            provider.as_str().as_bytes(),
+            schema4_resource_id.as_str().as_bytes(),
+        ],
+    )?)?;
+    let variant = VariantId::parse(stable_conversation_id(
+        "variant",
+        "mallard-conversation-variant-v1",
+        &[
+            group.as_str().as_bytes(),
+            schema4_resource_id.as_str().as_bytes(),
+        ],
+    )?)?;
+    Ok((group, variant))
+}
+
+pub fn conversation_resource_id(
+    provider: Provider,
+    group_id: &ConflictGroupId,
+    variant_id: &VariantId,
+) -> Result<ResourceId, String> {
+    ResourceId::parse(format!(
+        "{}:conversation:{}:{}",
+        provider.as_str(),
+        group_id,
+        variant_id
+    ))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1455,6 +2935,13 @@ pub enum TombstoneTarget {
         resource_id: ResourceId,
         logical_path: LogicalPath,
     },
+    ConversationVariant {
+        conflict_group_id: ConflictGroupId,
+        variant_id: VariantId,
+    },
+    ConversationGroup {
+        conflict_group_id: ConflictGroupId,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1481,6 +2968,13 @@ impl Tombstone {
                 resource_id,
                 logical_path,
             } => format!("project-content-dir:{}:{}", resource_id, logical_path),
+            TombstoneTarget::ConversationVariant {
+                conflict_group_id,
+                variant_id,
+            } => format!("conversation-variant:{}:{}", conflict_group_id, variant_id),
+            TombstoneTarget::ConversationGroup { conflict_group_id } => {
+                format!("conversation-group:{}", conflict_group_id)
+            }
         }
     }
 
@@ -1506,7 +3000,7 @@ pub struct BundleHead {
 
 impl BundleHead {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != BUNDLE_SCHEMA_V4 {
+        if !matches!(self.schema_version, BUNDLE_SCHEMA_V4 | BUNDLE_SCHEMA_V5) {
             return Err(format!(
                 "unsupported bundle head schema {}",
                 self.schema_version
@@ -1534,6 +3028,10 @@ pub struct BundleManifest {
     pub bundle: BundleIdentity,
     pub recipe: BundleRecipe,
     pub captured_with: CapturedWith,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_by_origin: Option<PortableOrigin>,
+    #[serde(default)]
+    pub conversation_groups: BTreeMap<ConflictGroupId, ConversationGroup>,
     #[serde(default)]
     pub resources: BTreeMap<ResourceId, ResourceDescriptor>,
     #[serde(default)]
@@ -1546,11 +3044,27 @@ pub struct BundleManifest {
 
 impl BundleManifest {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != BUNDLE_SCHEMA_V4 {
+        if !matches!(self.schema_version, BUNDLE_SCHEMA_V4 | BUNDLE_SCHEMA_V5) {
             return Err(format!(
                 "unsupported bundle manifest schema {}",
                 self.schema_version
             ));
+        }
+        match self.schema_version {
+            BUNDLE_SCHEMA_V4
+                if self.published_by_origin.is_some() || !self.conversation_groups.is_empty() =>
+            {
+                return Err(
+                    "schema-4 manifest cannot contain schema-5 conversation metadata".to_string(),
+                );
+            }
+            BUNDLE_SCHEMA_V5 if self.published_by_origin.is_none() => {
+                return Err("schema-5 manifest lacks publishing origin".to_string());
+            }
+            _ => {}
+        }
+        if let Some(origin) = &self.published_by_origin {
+            origin.validate()?;
         }
         validate_named_id("commit id", &self.commit_id)?;
         self.bundle.validate()?;
@@ -1568,6 +3082,7 @@ impl BundleManifest {
             }
             descriptor.validate()?;
         }
+        self.validate_conversation_groups()?;
         let recipe_ids = self.recipe.selected_ids();
         let resource_ids: BTreeSet<_> = self.resources.keys().cloned().collect();
         if recipe_ids != resource_ids {
@@ -1786,6 +3301,196 @@ impl BundleManifest {
                         ));
                     }
                 }
+                TombstoneTarget::ConversationVariant {
+                    conflict_group_id,
+                    variant_id,
+                } => {
+                    if self
+                        .conversation_groups
+                        .get(conflict_group_id)
+                        .is_some_and(|group| group.variants.contains_key(variant_id))
+                    {
+                        return Err(format!(
+                            "live conversation variant '{}'/ '{}' also has a tombstone",
+                            conflict_group_id, variant_id
+                        ));
+                    }
+                    if tombstone.last_sha256.is_none() {
+                        return Err(format!(
+                            "conversation variant tombstone '{}'/ '{}' lacks its last digest",
+                            conflict_group_id, variant_id
+                        ));
+                    }
+                }
+                TombstoneTarget::ConversationGroup { conflict_group_id } => {
+                    if self.conversation_groups.contains_key(conflict_group_id) {
+                        return Err(format!(
+                            "live conversation group '{}' also has a tombstone",
+                            conflict_group_id
+                        ));
+                    }
+                    if tombstone.last_sha256.is_none() {
+                        return Err(format!(
+                            "conversation group tombstone '{}' lacks its last digest",
+                            conflict_group_id
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_conversation_groups(&self) -> Result<(), String> {
+        if self.schema_version == BUNDLE_SCHEMA_V4 {
+            return Ok(());
+        }
+        if self.conversation_groups.len() > MAX_RESOURCES {
+            return Err("bundle has too many conversation groups".to_string());
+        }
+        let mut variant_resources = BTreeSet::new();
+        let mut referenced_files = BTreeMap::<LogicalPath, ResourceId>::new();
+        for (group_id, group) in &self.conversation_groups {
+            if group_id != &group.conflict_group_id {
+                return Err(format!(
+                    "conversation group key '{}' does not match its embedded id",
+                    group_id
+                ));
+            }
+            group.validate()?;
+            if self.tombstones.values().any(|tombstone| {
+                matches!(
+                    &tombstone.target,
+                    TombstoneTarget::ConversationGroup { conflict_group_id }
+                        if conflict_group_id == group_id
+                )
+            }) {
+                return Err(format!(
+                    "live conversation group '{}' also has a tombstone",
+                    group_id
+                ));
+            }
+            for (variant_id, variant) in &group.variants {
+                if !variant_resources.insert(variant.resource_id.clone()) {
+                    return Err(format!(
+                        "conversation resource '{}' belongs to multiple variants",
+                        variant.resource_id
+                    ));
+                }
+                let descriptor = self.resources.get(&variant.resource_id).ok_or_else(|| {
+                    format!(
+                        "conversation variant '{}' references missing resource '{}'",
+                        variant_id, variant.resource_id
+                    )
+                })?;
+                let expected_kind = match group.provider {
+                    Provider::Codex => ResourceKind::CodexConversation,
+                    Provider::Claude => ResourceKind::ClaudeConversation,
+                };
+                if descriptor.kind != expected_kind || descriptor.provider != Some(group.provider) {
+                    return Err(format!(
+                        "conversation variant '{}' disagrees with its resource provider",
+                        variant_id
+                    ));
+                }
+                if !self
+                    .captured_with
+                    .codec_versions
+                    .contains_key(&variant.lineage_codec)
+                {
+                    return Err(format!(
+                        "conversation variant '{}' references unknown codec '{}'",
+                        variant_id, variant.lineage_codec
+                    ));
+                }
+                if self.tombstones.values().any(|tombstone| {
+                    matches!(
+                        &tombstone.target,
+                        TombstoneTarget::ConversationVariant {
+                            conflict_group_id,
+                            variant_id: tombstoned_variant_id,
+                        } if conflict_group_id == group_id && tombstoned_variant_id == variant_id
+                    )
+                }) {
+                    return Err(format!(
+                        "live conversation variant '{}'/ '{}' also has a tombstone",
+                        group_id, variant_id
+                    ));
+                }
+                if let Some(parent_id) = &variant.parent_variant_id {
+                    let parent_is_tombstoned = self.tombstones.values().any(|tombstone| {
+                        matches!(
+                            &tombstone.target,
+                            TombstoneTarget::ConversationVariant {
+                                conflict_group_id,
+                                variant_id: tombstoned_variant_id,
+                            } if conflict_group_id == group_id && tombstoned_variant_id == parent_id
+                        )
+                    });
+                    if !group.variants.contains_key(parent_id) && !parent_is_tombstoned {
+                        return Err(format!(
+                            "conversation variant '{}'/ '{}' references an unknown parent '{}'",
+                            group_id, variant_id, parent_id
+                        ));
+                    }
+                }
+                let declared_paths = variant
+                    .files
+                    .iter()
+                    .map(|file| file.logical_path.clone())
+                    .collect::<BTreeSet<_>>();
+                for file in &variant.files {
+                    let entry = self.files.get(&file.logical_path).ok_or_else(|| {
+                        format!(
+                            "conversation variant '{}'/ '{}' references missing file '{}'",
+                            group_id, variant_id, file.logical_path
+                        )
+                    })?;
+                    if entry.resource_id != variant.resource_id {
+                        return Err(format!(
+                            "conversation file '{}' has the wrong resource owner",
+                            file.logical_path
+                        ));
+                    }
+                    if let Some(previous) = referenced_files
+                        .insert(file.logical_path.clone(), variant.resource_id.clone())
+                    {
+                        return Err(format!(
+                            "conversation file '{}' is shared by '{}' and '{}'",
+                            file.logical_path, previous, variant.resource_id
+                        ));
+                    }
+                }
+                for (path, entry) in &self.files {
+                    if entry.resource_id == variant.resource_id && !declared_paths.contains(path) {
+                        return Err(format!(
+                            "conversation resource '{}' owns undeclared file '{}'",
+                            variant.resource_id, path
+                        ));
+                    }
+                }
+                if self
+                    .directories
+                    .values()
+                    .any(|entry| entry.resource_id == variant.resource_id)
+                {
+                    return Err(format!(
+                        "conversation resource '{}' cannot own a directory entry",
+                        variant.resource_id
+                    ));
+                }
+            }
+        }
+        for (resource_id, descriptor) in &self.resources {
+            if matches!(
+                descriptor.kind,
+                ResourceKind::CodexConversation | ResourceKind::ClaudeConversation
+            ) && !variant_resources.contains(resource_id)
+            {
+                return Err(format!(
+                    "conversation resource '{}' belongs to no live variant",
+                    resource_id
+                ));
             }
         }
         Ok(())
@@ -1794,7 +3499,8 @@ impl BundleManifest {
     pub fn validate_against_head(&self, head: &BundleHead) -> Result<(), String> {
         self.validate()?;
         head.validate()?;
-        if self.bundle.bundle_id != head.bundle_id
+        if self.schema_version != head.schema_version
+            || self.bundle.bundle_id != head.bundle_id
             || self.bundle.kind != head.kind
             || self.generation != head.generation
             || self.commit_id != head.commit_id
@@ -2040,7 +3746,9 @@ pub struct RestorePlan {
     pub plan_id: PlanId,
     pub storage_id: StorageId,
     pub bundle_id: BundleId,
+    pub host_id: HostId,
     pub replica_id: ReplicaId,
+    pub expected_host_identity_revision: u64,
     pub generation: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
@@ -2049,6 +3757,8 @@ pub struct RestorePlan {
     pub expires_at: u64,
     #[serde(default)]
     pub actions: Vec<RestoreAction>,
+    #[serde(default)]
+    pub conversation_actions: Vec<ConversationPlanAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_content_eligibility: Option<ProjectFileSyncEligibility>,
 }
@@ -2081,7 +3791,7 @@ impl ProjectFileSyncEligibility {
 
 impl RestorePlan {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != RESTORE_PLAN_SCHEMA_V1 {
+        if self.schema_version != RESTORE_PLAN_SCHEMA_V2 {
             return Err(format!(
                 "unsupported restore-plan schema {}",
                 self.schema_version
@@ -2089,7 +3799,15 @@ impl RestorePlan {
         }
         validate_named_id("commit id", &self.commit_id)?;
         validate_sha256("restore-plan manifest", &self.manifest_sha256)?;
-        if self.created_at > self.expires_at || self.actions.len() > MAX_ACTIONS {
+        if self.created_at > self.expires_at
+            || self.actions.len() > MAX_ACTIONS
+            || self.conversation_actions.len() > MAX_ACTIONS
+            || self
+                .actions
+                .len()
+                .saturating_add(self.conversation_actions.len())
+                > MAX_ACTIONS
+        {
             return Err("invalid restore plan lifetime or action count".to_string());
         }
         let mut action_ids = HashSet::new();
@@ -2098,6 +3816,23 @@ impl RestorePlan {
         }
         for action in &self.actions {
             action.validate()?;
+            if !action_ids.insert(action.action_id.clone()) {
+                return Err(format!("duplicate restore action '{}'", action.action_id));
+            }
+        }
+        for action in &self.conversation_actions {
+            action.validate()?;
+            if action.direction != ConversationPlanDirection::Pull
+                || action.host_id != self.host_id
+                || action.replica_id != self.replica_id
+                || action.pinned_generation != self.generation
+                || action.pinned_commit_id != self.commit_id
+                || action.pinned_manifest_sha256 != self.manifest_sha256
+                || action.expected_host_identity_revision != self.expected_host_identity_revision
+                || action.expires_at != self.expires_at
+            {
+                return Err("conversation Pull action pins disagree with the plan".to_string());
+            }
             if !action_ids.insert(action.action_id.clone()) {
                 return Err(format!("duplicate restore action '{}'", action.action_id));
             }
@@ -2184,7 +3919,9 @@ pub struct DependencyPlan {
     pub plan_id: PlanId,
     pub storage_id: StorageId,
     pub bundle_id: BundleId,
+    pub host_id: HostId,
     pub replica_id: ReplicaId,
+    pub expected_host_identity_revision: u64,
     pub generation: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
@@ -2201,7 +3938,7 @@ pub struct DependencyPlan {
 
 impl DependencyPlan {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != DEPENDENCY_PLAN_SCHEMA_V1 {
+        if self.schema_version != DEPENDENCY_PLAN_SCHEMA_V2 {
             return Err(format!(
                 "unsupported dependency-plan schema {}",
                 self.schema_version
@@ -2261,6 +3998,7 @@ pub struct DependencyApplicationRecord {
     pub local_project_id: LocalProjectId,
     pub storage_id: StorageId,
     pub bundle_id: BundleId,
+    pub host_id: HostId,
     pub replica_id: ReplicaId,
     pub generation: u64,
     pub commit_id: String,
@@ -2344,6 +4082,75 @@ pub enum ActionStatus {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationApplyReceipt {
+    pub host_id: HostId,
+    pub replica_id: ReplicaId,
+    pub conflict_group_id: ConflictGroupId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_variant_id: Option<VariantId>,
+    pub result_variant_id: VariantId,
+    pub provider_profile_id: LocalProviderProfileId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_thread_id: Option<String>,
+    pub materialization_state: ConversationMaterializationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_file_sha256_after: Option<String>,
+    pub cloud_generation: u64,
+    pub cloud_commit_id: String,
+    pub cloud_manifest_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_origin_host_token: Option<OriginHostToken>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_origin_replica_token: Option<OriginReplicaToken>,
+    pub journal_operation_id: ConversationOperationId,
+}
+
+impl ConversationApplyReceipt {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_named_id("conversation receipt commit", &self.cloud_commit_id)?;
+        validate_sha256("conversation receipt manifest", &self.cloud_manifest_sha256)?;
+        for (label, digest) in [
+            (
+                "conversation receipt lineage",
+                self.lineage_digest.as_deref(),
+            ),
+            (
+                "conversation receipt semantic",
+                self.semantic_digest.as_deref(),
+            ),
+            (
+                "conversation receipt local file",
+                self.local_file_sha256_after.as_deref(),
+            ),
+        ] {
+            if let Some(digest) = digest {
+                validate_sha256(label, digest)?;
+            }
+        }
+        if self.lineage_digest.is_some() != self.semantic_digest.is_some() {
+            return Err("conversation receipt lineage and semantics must be paired".to_string());
+        }
+        let requires_provider = matches!(
+            self.materialization_state,
+            ConversationMaterializationState::Pending | ConversationMaterializationState::Resumable
+        );
+        if requires_provider != self.provider_thread_id.is_some() {
+            return Err("conversation receipt has invalid provider materialization".to_string());
+        }
+        if self.provider_thread_id.as_ref().is_some_and(|thread_id| {
+            thread_id.is_empty() || thread_id.len() > 128 || thread_id.chars().any(char::is_control)
+        }) {
+            return Err("conversation receipt has an invalid provider thread id".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ApplyReceipt {
     pub action_id: ActionId,
     pub resource_id: ResourceId,
@@ -2360,6 +4167,8 @@ pub struct ApplyReceipt {
     pub applied_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<ConversationApplyReceipt>,
 }
 
 impl ApplyReceipt {
@@ -2380,6 +4189,9 @@ impl ApplyReceipt {
         }) {
             return Err("invalid receipt error".to_string());
         }
+        if let Some(conversation) = &self.conversation {
+            conversation.validate()?;
+        }
         Ok(())
     }
 }
@@ -2396,6 +4208,7 @@ pub enum MaterializationStatus {
 pub struct MaterializationRecord {
     pub materialization_id: MaterializationId,
     pub plan_id: PlanId,
+    pub host_id: HostId,
     pub replica_id: ReplicaId,
     pub local_project_id: LocalProjectId,
     pub storage_id: StorageId,
@@ -2536,6 +4349,8 @@ mod tests {
             },
             recipe: BundleRecipe::default(),
             captured_with: CapturedWith::default(),
+            published_by_origin: None,
+            conversation_groups: BTreeMap::new(),
             resources: BTreeMap::new(),
             files: BTreeMap::new(),
             directories: BTreeMap::new(),
@@ -2594,6 +4409,60 @@ mod tests {
         assert!(ResourceId::parse("skill:release").is_ok());
         assert!(ResourceId::parse("Skill/Release").is_err());
         assert!(serde_json::from_str::<BundleId>("\"../../etc/passwd\"").is_err());
+    }
+
+    #[test]
+    fn host_identity_and_scoped_origin_tokens_have_fixed_validated_encodings() {
+        assert!(HostId::parse("00112233445566778899aabbccddeeff").is_ok());
+        assert!(HostId::parse("00112233445566778899AABBCCDDEEFF").is_err());
+        assert!(HostId::parse("short").is_err());
+
+        let key = OriginKey::from_bytes(&(0_u8..32).collect::<Vec<_>>()).unwrap();
+        let bundle = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let replica = ReplicaId::parse("replica-a").unwrap();
+        let host_token = derive_origin_host_token(&key, &bundle).unwrap();
+        let replica_token = derive_origin_replica_token(&key, &bundle, &replica).unwrap();
+
+        // Golden vectors freeze the domain-separated u64-length-prefixed
+        // encoding used by every schema-5 writer.
+        assert_eq!(
+            host_token.as_str(),
+            "f8c99890be4775ff291c46711da68cae8a45430d944aa72c560987e358462330"
+        );
+        assert_eq!(
+            replica_token.as_str(),
+            "63ec7403165c8d3884e5043b29de820739338f58fff465231246ef522cbf2ffe"
+        );
+        assert_eq!(derive_origin_host_token(&key, &bundle).unwrap(), host_token);
+        assert_ne!(
+            derive_origin_host_token(
+                &key,
+                &BundleId::parse("11111111111111111111111111111111").unwrap()
+            )
+            .unwrap(),
+            host_token
+        );
+        assert_ne!(
+            derive_origin_replica_token(&key, &bundle, &ReplicaId::parse("replica-b").unwrap())
+                .unwrap(),
+            replica_token
+        );
+        assert_eq!(format!("{:?}", key), "OriginKey([REDACTED])");
+    }
+
+    #[test]
+    fn origin_labels_are_bounded_local_presentation_only() {
+        let token = OriginHostToken::parse("7f3a".repeat(16)).unwrap();
+        assert_eq!(fallback_origin_host_label(&token), "Host 7F3A");
+        let valid = PortableOrigin {
+            origin_host_token: token,
+            origin_replica_token: OriginReplicaToken::parse("ab".repeat(32)).unwrap(),
+            shared_label: Some("Work laptop".to_string()),
+        };
+        valid.validate().unwrap();
+        let mut invalid = valid;
+        invalid.shared_label = Some("x".repeat(129));
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
@@ -2696,6 +4565,7 @@ mod tests {
             updated_at: 1,
         };
         let binding = |replica: &str, project: &str, bundle: &str, profile: &str| ProjectBinding {
+            host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
             replica_id: ReplicaId::parse(replica).unwrap(),
             local_project_id: LocalProjectId::parse(project).unwrap(),
             bundle_id: BundleId::parse(bundle).unwrap(),
@@ -2712,7 +4582,7 @@ mod tests {
             updated_at: 1,
         };
         let mut machine = MachineProjectState {
-            schema: MACHINE_PROJECT_SCHEMA_V1,
+            schema: MACHINE_PROJECT_SCHEMA_V2,
             revision: 0,
             profiles: vec![
                 profile("profile-main", "/home/user/.codex"),
@@ -2816,6 +4686,8 @@ mod tests {
             },
             recipe,
             captured_with: CapturedWith::default(),
+            published_by_origin: None,
+            conversation_groups: BTreeMap::new(),
             resources,
             files,
             directories: BTreeMap::new(),
@@ -2948,5 +4820,288 @@ mod tests {
             requires_explicit_approval: false,
         };
         assert!(action.validate().unwrap_err().contains("explicit approval"));
+    }
+
+    fn canonical_message(
+        id: &str,
+        parent: Option<&str>,
+        semantic_byte: char,
+    ) -> CanonicalConversationMessage {
+        CanonicalConversationMessage {
+            message_id: MessageId::parse(id).unwrap(),
+            parent_message_id: parent.map(|value| MessageId::parse(value).unwrap()),
+            semantic_fingerprint: semantic_byte.to_string().repeat(64),
+        }
+    }
+
+    #[test]
+    fn conversation_relation_matrix_uses_ids_parentage_and_semantics() {
+        let base = vec![
+            canonical_message("m-a", None, 'a'),
+            canonical_message("m-b", Some("m-a"), 'b'),
+        ];
+        let local = vec![
+            canonical_message("m-a", None, 'a'),
+            canonical_message("m-b", Some("m-a"), 'b'),
+            canonical_message("m-local", Some("m-b"), 'c'),
+        ];
+        let cloud = vec![
+            canonical_message("m-a", None, 'a'),
+            canonical_message("m-b", Some("m-a"), 'b'),
+            canonical_message("m-cloud", Some("m-b"), 'd'),
+        ];
+
+        assert_eq!(
+            classify_conversation_relation(Some(&base), Some(&base)),
+            ConversationRelation::Identical
+        );
+        assert_eq!(
+            classify_conversation_relation(Some(&local), Some(&base)),
+            ConversationRelation::CloudPrefixOfLocal
+        );
+        assert_eq!(
+            classify_conversation_relation(Some(&base), Some(&cloud)),
+            ConversationRelation::LocalPrefixOfCloud
+        );
+        assert_eq!(
+            classify_conversation_relation(Some(&local), Some(&cloud)),
+            ConversationRelation::Diverged
+        );
+        assert_eq!(
+            classify_conversation_relation(None, Some(&cloud)),
+            ConversationRelation::LocalMissing
+        );
+        assert_eq!(
+            classify_conversation_relation(Some(&local), None),
+            ConversationRelation::CloudMissing
+        );
+        assert_eq!(
+            classify_conversation_relation(None, None),
+            ConversationRelation::BothMissing
+        );
+
+        let same_text_different_id = vec![canonical_message("other", None, 'a')];
+        assert_eq!(
+            classify_conversation_relation(Some(&base[..1]), Some(&same_text_different_id),),
+            ConversationRelation::Diverged
+        );
+
+        let mut reused_id = base.clone();
+        reused_id[1].semantic_fingerprint = "e".repeat(64);
+        assert_eq!(
+            classify_conversation_relation(Some(&base), Some(&reused_id)),
+            ConversationRelation::Unknown
+        );
+
+        let mut broken_parent = base.clone();
+        broken_parent[1].parent_message_id = None;
+        assert_eq!(
+            classify_conversation_relation(Some(&base), Some(&broken_parent)),
+            ConversationRelation::Unknown
+        );
+    }
+
+    #[test]
+    fn conversation_digests_separate_lineage_from_semantics() {
+        let first = vec![
+            canonical_message("m-a", None, 'a'),
+            canonical_message("m-b", Some("m-a"), 'b'),
+        ];
+        let mut semantic_change = first.clone();
+        semantic_change[1].semantic_fingerprint = "c".repeat(64);
+        let different_lineage = vec![
+            canonical_message("m-a", None, 'a'),
+            canonical_message("m-c", Some("m-a"), 'b'),
+        ];
+
+        let first_digests = conversation_chain_digests(&first).unwrap();
+        let semantic_digests = conversation_chain_digests(&semantic_change).unwrap();
+        let lineage_digests = conversation_chain_digests(&different_lineage).unwrap();
+        assert_eq!(first_digests.0, semantic_digests.0);
+        assert_ne!(first_digests.1, semantic_digests.1);
+        assert_ne!(first_digests.0, lineage_digests.0);
+        assert_ne!(first_digests.1, lineage_digests.1);
+    }
+
+    #[test]
+    fn schema4_conversation_ids_are_deterministic_and_domain_separated() {
+        let bundle = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let resource = ResourceId::parse("codex:session:thread-a").unwrap();
+        let first =
+            deterministic_schema4_conversation_ids(&bundle, Provider::Codex, &resource).unwrap();
+        let repeated =
+            deterministic_schema4_conversation_ids(&bundle, Provider::Codex, &resource).unwrap();
+        let claude =
+            deterministic_schema4_conversation_ids(&bundle, Provider::Claude, &resource).unwrap();
+        assert_eq!(first, repeated);
+        assert_ne!(first.0, claude.0);
+        assert_ne!(first.0.as_str(), first.1.as_str());
+        assert_eq!(first.0.as_str(), "group-ba8916e65f9fd93d9f1c05dce39ef50c");
+        assert_eq!(first.1.as_str(), "variant-a6a4d9115bf7665c22d3f4acd116a137");
+    }
+
+    fn schema5_conversation_manifest() -> BundleManifest {
+        let bundle = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let legacy_resource = ResourceId::parse("codex:session:thread-a").unwrap();
+        let (group_id, variant_id) =
+            deterministic_schema4_conversation_ids(&bundle, Provider::Codex, &legacy_resource)
+                .unwrap();
+        let resource_id =
+            conversation_resource_id(Provider::Codex, &group_id, &variant_id).unwrap();
+        let transcript_path = LogicalPath::parse(format!(
+            "state/conversations/codex/{}/{}/transcript.jsonl",
+            group_id, variant_id
+        ))
+        .unwrap();
+        let chain = vec![
+            canonical_message("m-a", None, 'a'),
+            canonical_message("m-b", Some("m-a"), 'b'),
+        ];
+        let (lineage_digest, semantic_digest) = conversation_chain_digests(&chain).unwrap();
+        let variant = ConversationVariant {
+            variant_id: variant_id.clone(),
+            resource_id: resource_id.clone(),
+            files: vec![ConversationFileRef {
+                logical_path: transcript_path.clone(),
+                role: ConversationFileRole::Transcript,
+            }],
+            lineage_status: ConversationLineageStatus::Complete,
+            lineage_codec: "codex-lineage-v1".to_string(),
+            head_message_id: Some(MessageId::parse("m-b").unwrap()),
+            message_count: Some(2),
+            lineage_digest: Some(lineage_digest),
+            semantic_digest: Some(semantic_digest),
+            parent_variant_id: None,
+            fork_message_id: None,
+            source_thread_id: Some("thread-a".to_string()),
+            created_by_origin: None,
+            last_updated_by_origin: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let descriptor = ResourceDescriptor {
+            resource_id: resource_id.clone(),
+            kind: ResourceKind::CodexConversation,
+            provider: Some(Provider::Codex),
+            scope: ResourceScope::ProviderState,
+            display_name: "Conversation".to_string(),
+            provenance: Provenance::Unknown,
+            apply_policy: ApplyPolicy::SafeFile,
+            relative_cwd: Some(".".to_string()),
+            codec_version: 1,
+            metadata: BTreeMap::new(),
+        };
+        BundleManifest {
+            schema_version: BUNDLE_SCHEMA_V5,
+            generation: 2,
+            commit_id: "commit-schema5".to_string(),
+            updated_at: 2,
+            bundle: BundleIdentity {
+                bundle_id: bundle,
+                display_name: "Project".to_string(),
+                kind: BundleKind::Project,
+                repository_fingerprint: None,
+            },
+            recipe: BundleRecipe {
+                schema_version: RECIPE_SCHEMA_V1,
+                revision: 1,
+                entries: BTreeMap::from([(
+                    resource_id.clone(),
+                    RecipeEntry {
+                        resource_id: resource_id.clone(),
+                        apply_policy: ApplyPolicy::SafeFile,
+                        required: false,
+                    },
+                )]),
+            },
+            captured_with: CapturedWith {
+                app_version: "test".to_string(),
+                codex_version: Some("test".to_string()),
+                claude_version: None,
+                codec_versions: BTreeMap::from([("codex-lineage-v1".to_string(), 1)]),
+            },
+            published_by_origin: Some(PortableOrigin {
+                origin_host_token: OriginHostToken::parse("a".repeat(64)).unwrap(),
+                origin_replica_token: OriginReplicaToken::parse("b".repeat(64)).unwrap(),
+                shared_label: None,
+            }),
+            conversation_groups: BTreeMap::from([(
+                group_id.clone(),
+                ConversationGroup {
+                    conflict_group_id: group_id,
+                    provider: Provider::Codex,
+                    display_title: Some("Conversation".to_string()),
+                    primary_variant_id: variant_id.clone(),
+                    variants: BTreeMap::from([(variant_id, variant)]),
+                    created_at: 1,
+                    updated_at: 1,
+                },
+            )]),
+            resources: BTreeMap::from([(resource_id.clone(), descriptor)]),
+            files: BTreeMap::from([(
+                transcript_path,
+                BundleFileEntry {
+                    resource_id,
+                    sha256: "c".repeat(64),
+                    size: 10,
+                    source_mtime: 1,
+                    object_key: "_uploads/upload-1/files/transcript.jsonl".to_string(),
+                    mode: Some(0o600),
+                },
+            )]),
+            directories: BTreeMap::new(),
+            tombstones: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn schema5_manifest_enforces_conversation_referential_integrity() {
+        let manifest = schema5_conversation_manifest();
+        manifest.validate().unwrap();
+
+        let mut bad_primary = manifest.clone();
+        bad_primary
+            .conversation_groups
+            .values_mut()
+            .next()
+            .unwrap()
+            .primary_variant_id = VariantId::parse("variant-missing").unwrap();
+        assert!(bad_primary
+            .validate()
+            .unwrap_err()
+            .contains("invalid primary"));
+
+        let mut missing_file = manifest.clone();
+        missing_file.files.clear();
+        assert!(missing_file
+            .validate()
+            .unwrap_err()
+            .contains("missing file"));
+
+        let mut wrong_provider = manifest.clone();
+        wrong_provider
+            .conversation_groups
+            .values_mut()
+            .next()
+            .unwrap()
+            .provider = Provider::Claude;
+        assert!(wrong_provider
+            .validate()
+            .unwrap_err()
+            .contains("non-canonical resource id"));
+
+        let mut duplicate_transcript = manifest.clone();
+        let group = duplicate_transcript
+            .conversation_groups
+            .values_mut()
+            .next()
+            .unwrap();
+        let variant = group.variants.values_mut().next().unwrap();
+        let duplicate = variant.files[0].clone();
+        variant.files.push(duplicate);
+        assert!(duplicate_transcript
+            .validate()
+            .unwrap_err()
+            .contains("repeats file"));
     }
 }

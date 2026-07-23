@@ -14,6 +14,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use walkdir::{DirEntry, WalkDir};
 
+use super::conversation_codec::{
+    analyze_codex_transcript, CodecLineage, CodecUnknownReason, CODEX_LINEAGE_CODEC_KEY,
+};
 use super::domain;
 use super::global_inventory;
 
@@ -157,9 +160,33 @@ pub struct CapturedResources {
     pub resources: BTreeMap<String, CapturedResource>,
     pub files: BTreeMap<String, CapturedFile>,
     pub directories: BTreeMap<String, CapturedDirectory>,
+    /// Local typed codec output used by schema-5 planning. It is deliberately
+    /// separate from descriptor metadata so provider IDs and parsed chains do
+    /// not leak into a schema-4 manifest or presentation fields.
+    pub conversations: BTreeMap<String, CapturedConversation>,
     pub dependency_actions: Vec<DependencyAction>,
     pub unavailable_resource_ids: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapturedConversation {
+    pub provider: Provider,
+    pub lineage_codec: String,
+    pub source_thread_id: Option<String>,
+    pub source_cwd: Option<String>,
+    pub transcript_logical_path: String,
+    pub record_count: usize,
+    pub lineage: CodecLineage,
+}
+
+impl CapturedConversation {
+    pub fn unknown_reason(&self) -> Option<CodecUnknownReason> {
+        match &self.lineage {
+            CodecLineage::Unknown { reason } => Some(*reason),
+            CodecLineage::Complete { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -420,6 +447,54 @@ pub fn capture_selected(
         );
         if let Some(action) = &discovered.descriptor.dependency {
             result.dependency_actions.push(action.clone());
+        }
+        if discovered.descriptor.kind == CaptureResourceKind::Conversation {
+            let provider = discovered.descriptor.provider.unwrap_or(Provider::Codex);
+            if let Some(transcript) = resource_files.first() {
+                let (lineage_codec, source_thread_id, source_cwd, record_count, lineage) =
+                    match provider {
+                        Provider::Codex if resource_files.len() == 1 => {
+                            let analysis = analyze_codex_transcript(&transcript.bytes);
+                            (
+                                CODEX_LINEAGE_CODEC_KEY.to_string(),
+                                analysis.source_thread_id,
+                                analysis.source_cwd,
+                                analysis.record_count,
+                                analysis.lineage,
+                            )
+                        }
+                        Provider::Codex => (
+                            CODEX_LINEAGE_CODEC_KEY.to_string(),
+                            None,
+                            None,
+                            0,
+                            CodecLineage::Unknown {
+                                reason: CodecUnknownReason::UnsupportedCodec,
+                            },
+                        ),
+                        Provider::Claude => (
+                            "claude.lineage.unavailable".to_string(),
+                            None,
+                            None,
+                            0,
+                            CodecLineage::Unknown {
+                                reason: CodecUnknownReason::UnsupportedCodec,
+                            },
+                        ),
+                    };
+                result.conversations.insert(
+                    resource_id.clone(),
+                    CapturedConversation {
+                        provider,
+                        lineage_codec,
+                        source_thread_id,
+                        source_cwd,
+                        transcript_logical_path: transcript.logical_path.clone(),
+                        record_count,
+                        lineage,
+                    },
+                );
+            }
         }
         result.resources.insert(
             resource_id.clone(),

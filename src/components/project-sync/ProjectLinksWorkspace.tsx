@@ -68,6 +68,7 @@ interface Props {
   onUnlinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onPush: (projectId: string, storageId: string) => Promise<void> | void;
   onPull: (projectId: string, storageId: string) => Promise<void> | void;
+  onConfigureBinding: (projectId: string) => Promise<void> | void;
   onRepairConversationPaths: (projectId: string) => Promise<void> | void;
   onRenameProject: (projectId: string, alias: string | null) => Promise<boolean> | boolean;
   onRefresh: () => void;
@@ -277,6 +278,7 @@ export default function ProjectLinksWorkspace({
   onUnlinkStorage,
   onPush,
   onPull,
+  onConfigureBinding,
   onRepairConversationPaths,
   onRenameProject,
   onRefresh,
@@ -367,6 +369,8 @@ export default function ProjectLinksWorkspace({
     links.filter((link) => link.local_project_id === project.local_project_id),
   ])), [links, projects]);
   const bindingByProject = useMemo(() => new Map(bindings
+    .map((candidate) => [candidate.local_project_id, candidate])), [bindings]);
+  const activeBindingByProject = useMemo(() => new Map(bindings
     .filter((candidate) => candidate.state === "active")
     .map((candidate) => [candidate.local_project_id, candidate])), [bindings]);
 
@@ -769,6 +773,7 @@ export default function ProjectLinksWorkspace({
                 !projectLinks.some((link) => link.storage_id === storage.id)
               ));
               const projectBinding = bindingByProject.get(project.local_project_id);
+              const bindingActive = projectBinding?.state === "active";
               const configuredProviders = PROJECT_PROVIDERS.filter((provider) => (
                 projectBinding?.profile_ids?.[provider]
               ));
@@ -782,9 +787,9 @@ export default function ProjectLinksWorkspace({
                 && !!projectProfile?.available
                 && projectProfile.readable;
               const profilesWritable = profilesReadable && !!projectProfile?.writable;
-              const canSync = !!projectBinding && profilesReadable;
-              const canRestore = !!projectBinding && profilesWritable;
-              const codexConfigured = projectProvider === "codex" && !hasMultipleProviders;
+              const canSync = bindingActive && profilesReadable;
+              const canRestore = bindingActive && profilesWritable;
+              const codexConfigured = bindingActive && projectProvider === "codex" && !hasMultipleProviders;
               const conversationPathAudit = conversationPathAudits[project.local_project_id];
               const conversationPathAuditError = conversationPathAuditErrors[project.local_project_id];
               const conversationPathNoticeBlocked = !!conversationPathAuditError
@@ -806,7 +811,7 @@ export default function ProjectLinksWorkspace({
                 : null;
               const profileIssue = hasMultipleProviders
                 ? "Choose one project agent before syncing"
-                : !profilesReadable && projectBinding
+                : bindingActive && !profilesReadable
                   ? "The selected agent profile is unavailable"
                   : null;
               const conversationPathNotice = codexConfigured && !conversationPathAuditLoading ? (
@@ -846,6 +851,17 @@ export default function ProjectLinksWorkspace({
                         <small>{projectLinks.length}</small>
                         {!conversationPathNoticeBlocked && conversationPathNotice}
                         <span className="project-profile-storage-actions">
+                          {!bindingActive && !selectedStorage && (
+                            <button
+                              type="button"
+                              className="profile-link-another"
+                              disabled={busy || !!inlineStorageReview}
+                              onClick={() => void onConfigureBinding(project.local_project_id)}
+                            >
+                              <Icon name="folder" size={13} />
+                              {projectBinding ? "Confirm setup" : "Set up project"}
+                            </button>
+                          )}
                           {availableStorages.length > 0 && (
                             <button
                               type="button"
@@ -1007,7 +1023,7 @@ export default function ProjectLinksWorkspace({
                                   disabled={busy
                                     || !!runningAction
                                     || conversationPathBlocked
-                                    || (!!projectBinding && !canRestore)
+                                    || (bindingActive && !canRestore)
                                     || storageActionLockedForReview(activeReviewKind, "pull")}
                                   onClick={() => {
                                     if (pullReviewOpen) {
@@ -1023,12 +1039,16 @@ export default function ProjectLinksWorkspace({
                                   }}
                                   title={conversationPathTitle
                                     ?? profileIssue
-                                    ?? (pullReviewOpen
+                                    ?? (!bindingActive
+                                      ? "Confirm project setup before pulling"
+                                      : pullReviewOpen
                                       ? "Return to the open Pull review"
-                                      : !profilesWritable && projectBinding
+                                      : !profilesWritable
                                         ? "The selected agent profile is read only"
                                         : "Review the Pull actions before applying them")}
-                                  aria-label={pullReviewOpen
+                                  aria-label={!bindingActive
+                                    ? "Set up project before Pull"
+                                    : pullReviewOpen
                                     ? "Return to Pull review"
                                     : `Pull from ${storage.name || "storage"}`}
                                   aria-expanded={pullReviewOpen}
@@ -1038,7 +1058,7 @@ export default function ProjectLinksWorkspace({
                                     ? "Reviewing…"
                                     : pullReviewOpen
                                       ? "View review"
-                                      : project.project_root
+                                      : bindingActive
                                         ? "Pull"
                                         : "Set up"}
                                 </button>
@@ -1200,7 +1220,7 @@ export default function ProjectLinksWorkspace({
             <ProjectChatHistoryPage
               embedded
               project={activeProject}
-              binding={bindingByProject.get(activeProject.local_project_id) ?? null}
+              binding={activeBindingByProject.get(activeProject.local_project_id) ?? null}
               refreshEpoch={historyRefreshEpoch}
               activeStorageId={activeStorageId}
               activeStorageName={storages.find((storage) => storage.id === activeStorageId)?.name ?? null}
@@ -1220,7 +1240,7 @@ export default function ProjectLinksWorkspace({
             <SkillsPluginStatusPage
               view={activeProjectTab}
               project={activeProject}
-              binding={bindingByProject.get(activeProject.local_project_id) ?? null}
+              binding={activeBindingByProject.get(activeProject.local_project_id) ?? null}
               refreshEpoch={historyRefreshEpoch}
               activeStorageId={activeStorageId}
               activeStorageName={storages.find((storage) => storage.id === activeStorageId)?.name ?? null}

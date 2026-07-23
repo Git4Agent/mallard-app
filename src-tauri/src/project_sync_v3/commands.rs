@@ -11,19 +11,27 @@ use super::bundle_engine::{
     StoredObject,
 };
 use super::chat_history::{self, CodexThreadDetailsPage, ProjectChatHistory};
+use super::conversation_codec::analyze_codex_transcript;
+use super::conversation_materialization::recover_conversation_materializations;
+use super::conversation_sync::{
+    default_conversation_decision, BindingResolution, ConversationCapabilities,
+};
 use super::domain::{
     generated_named_id, validate_absolute_clean_path, ActionId, ActionStatus, ApplyPolicy,
     ApplyReceipt, BindingState, BundleId, BundleIdentity, BundleKind, BundleManifest, BundleRecipe,
-    BundleSnapshot, CapturedWith, DependencyAction, DependencyActionKind,
+    BundleSnapshot, CapturedWith, ConflictGroupId, ConversationFileRole,
+    ConversationMaterializationState, ConversationPlanActionType, ConversationPlanDirection,
+    ConversationReasonCode, ConversationRelation, DependencyAction, DependencyActionKind,
     DependencyApplicationRecord, DependencyApplyReceipt, DependencyPlan, DraftProfileSelection,
-    DraftRepositoryChoice, DraftStorageSelection, LocalProjectId, LocalProjectRegistration,
+    DraftRepositoryChoice, DraftStorageSelection, HostId, LocalProjectId, LocalProjectRegistration,
     LocalProviderProfileId, MachineProjectState, MaterializationId, MaterializationRecord,
-    MaterializationStatus, PlanId, ProjectBinding, ProjectFileSyncEligibility,
-    ProjectFileSyncEligibilityState, ProjectSetupDraft, ProjectStorageLink, Provenance, Provider,
-    ProviderProfile, RecipeBase, RecipeEntry, ReplicaId, ResourceDescriptor, ResourceId,
-    ResourceKind, ResourceScope, RestoreAction, RestoreActionKind, RestoreActionType, RestorePlan,
-    SetupDraftId, SetupTransaction, StorageConfigV3, StorageId, StorageKind, SyncConfigV3,
-    DEPENDENCY_PLAN_SCHEMA_V1, SETUP_DRAFT_SCHEMA_V1, SETUP_TRANSACTION_SCHEMA_V1,
+    MaterializationStatus, OriginHostAlias, OriginHostToken, PlanId, ProjectBinding,
+    ProjectFileSyncEligibility, ProjectFileSyncEligibilityState, ProjectSetupDraft,
+    ProjectStorageLink, Provenance, Provider, ProviderProfile, RecipeBase, RecipeEntry, ReplicaId,
+    ResourceDescriptor, ResourceId, ResourceKind, ResourceScope, RestoreAction, RestoreActionKind,
+    RestoreActionType, RestorePlan, SetupDraftId, SetupTransaction, StorageConfigV3, StorageId,
+    StorageKind, SyncConfigV3, VariantId, BUNDLE_SCHEMA_V5, DEPENDENCY_PLAN_SCHEMA_V2,
+    SETUP_DRAFT_SCHEMA_V1, SETUP_TRANSACTION_SCHEMA_V2,
 };
 use super::global_inventory;
 use super::persistence::V3Repository;
@@ -126,6 +134,56 @@ pub struct SaveProjectBindingRequest {
     /// Required when changing an existing binding.  Creation uses `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct HostIdentityStatus {
+    pub host_id: HostId,
+    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_display_name: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub origin_key_available: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UpdateHostDisplayNameRequest {
+    pub expected_host_id: HostId,
+    pub expected_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_display_name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RegisterNewHostRequest {
+    pub expected_host_id: HostId,
+    pub expected_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_display_name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SaveOriginHostAliasRequest {
+    pub bundle_id: BundleId,
+    pub origin_host_token: OriginHostToken,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct OriginHostLabel {
+    pub origin_host_token: OriginHostToken,
+    pub display_name: String,
+    pub is_this_host: bool,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProjectOriginTokens {
+    pub bundle_id: BundleId,
+    pub origin_host_token: OriginHostToken,
+    pub origin_replica_token: super::domain::OriginReplicaToken,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -427,6 +485,32 @@ pub struct ThreadSyncEntry {
     pub local_updated_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_updated_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_group_id: Option<ConflictGroupId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant_id: Option<VariantId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<ConversationRelation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_action: Option<ConversationPlanActionType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<ConversationReasonCode>,
+    #[serde(default)]
+    pub cloud_primary: bool,
+    #[serde(default)]
+    pub local_preferred: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialization_state: Option<ConversationMaterializationState>,
+    #[serde(default)]
+    pub resumable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_label: Option<String>,
+    #[serde(default)]
+    pub available_actions: Vec<ConversationPlanActionType>,
+    #[serde(default)]
+    pub requires_explicit_approval: bool,
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -695,6 +779,173 @@ pub async fn get_project_sync_config(app: tauri::AppHandle) -> Result<SyncConfig
     repository(&app)?.load_config()
 }
 
+fn host_identity_status(
+    identity: super::domain::HostIdentity,
+    origin_key_available: bool,
+) -> HostIdentityStatus {
+    HostIdentityStatus {
+        host_id: identity.host_id,
+        revision: identity.revision,
+        local_display_name: identity.local_display_name,
+        created_at: identity.created_at,
+        updated_at: identity.updated_at,
+        origin_key_available,
+    }
+}
+
+#[tauri::command]
+pub async fn get_host_identity_status(app: tauri::AppHandle) -> Result<HostIdentityStatus, String> {
+    let (identity, key_available) = repository(&app)?.inspect_host_identity()?;
+    Ok(host_identity_status(identity, key_available))
+}
+
+#[tauri::command]
+pub async fn update_host_display_name(
+    app: tauri::AppHandle,
+    request: UpdateHostDisplayNameRequest,
+) -> Result<HostIdentityStatus, String> {
+    let identity = repository(&app)?.update_host_display_name(
+        &request.expected_host_id,
+        request.expected_revision,
+        request.local_display_name,
+    )?;
+    Ok(host_identity_status(identity, true))
+}
+
+fn register_new_host_with_repository(
+    repository: &V3Repository,
+    request: RegisterNewHostRequest,
+) -> Result<HostIdentityStatus, String> {
+    let identity = repository.register_as_new_host(
+        Some((&request.expected_host_id, request.expected_revision)),
+        request.local_display_name,
+    )?;
+    Ok(host_identity_status(identity, true))
+}
+
+#[tauri::command]
+pub async fn register_as_new_host(
+    app: tauri::AppHandle,
+    request: RegisterNewHostRequest,
+) -> Result<HostIdentityStatus, String> {
+    register_new_host_with_repository(&repository(&app)?, request)
+}
+
+#[tauri::command]
+pub async fn rotate_host_identity(
+    app: tauri::AppHandle,
+    request: RegisterNewHostRequest,
+) -> Result<HostIdentityStatus, String> {
+    let identity = repository(&app)?.rotate_host_identity(
+        Some((&request.expected_host_id, request.expected_revision)),
+        request.local_display_name,
+    )?;
+    Ok(host_identity_status(identity, true))
+}
+
+#[tauri::command]
+pub async fn get_project_origin_tokens(
+    app: tauri::AppHandle,
+    local_project_id: LocalProjectId,
+) -> Result<ProjectOriginTokens, String> {
+    let repository = repository(&app)?;
+    let (bundle_id, origin_host_token, origin_replica_token) =
+        repository.derive_project_origin_tokens(&local_project_id)?;
+    Ok(ProjectOriginTokens {
+        bundle_id,
+        origin_host_token,
+        origin_replica_token,
+    })
+}
+
+#[tauri::command]
+pub async fn list_origin_host_aliases(
+    app: tauri::AppHandle,
+    bundle_id: Option<BundleId>,
+) -> Result<Vec<OriginHostAlias>, String> {
+    let mut aliases = repository(&app)?.load_origin_aliases()?;
+    if let Some(bundle_id) = bundle_id {
+        aliases.retain(|alias| alias.bundle_id == bundle_id);
+    }
+    aliases.sort_by(|left, right| {
+        left.bundle_id
+            .cmp(&right.bundle_id)
+            .then_with(|| left.display_name.cmp(&right.display_name))
+            .then_with(|| left.origin_host_token.cmp(&right.origin_host_token))
+    });
+    Ok(aliases)
+}
+
+#[tauri::command]
+pub async fn save_origin_host_alias(
+    app: tauri::AppHandle,
+    request: SaveOriginHostAliasRequest,
+) -> Result<OriginHostAlias, String> {
+    let repository = repository(&app)?;
+    let now = now_secs();
+    repository.mutate_origin_aliases(|aliases| {
+        let position = aliases.iter().position(|alias| {
+            alias.bundle_id == request.bundle_id
+                && alias.origin_host_token == request.origin_host_token
+        });
+        let alias = match position {
+            Some(index) => {
+                let current = &aliases[index];
+                let expected = request.expected_revision.ok_or_else(|| {
+                    "expected_revision is required when changing an origin alias".to_string()
+                })?;
+                if expected != current.revision {
+                    return Err(format!(
+                        "origin alias changed (expected revision {}, current {})",
+                        expected, current.revision
+                    ));
+                }
+                OriginHostAlias {
+                    bundle_id: request.bundle_id.clone(),
+                    origin_host_token: request.origin_host_token.clone(),
+                    display_name: request.display_name.clone(),
+                    revision: current.revision.saturating_add(1),
+                    updated_at: now,
+                }
+            }
+            None => {
+                if request.expected_revision.is_some() {
+                    return Err("new origin alias must not provide expected_revision".to_string());
+                }
+                OriginHostAlias {
+                    bundle_id: request.bundle_id.clone(),
+                    origin_host_token: request.origin_host_token.clone(),
+                    display_name: request.display_name.clone(),
+                    revision: 0,
+                    updated_at: now,
+                }
+            }
+        };
+        alias.validate()?;
+        match position {
+            Some(index) => aliases[index] = alias.clone(),
+            None => aliases.push(alias.clone()),
+        }
+        Ok(alias)
+    })
+}
+
+#[tauri::command]
+pub async fn resolve_origin_host_label(
+    app: tauri::AppHandle,
+    bundle_id: BundleId,
+    origin_host_token: OriginHostToken,
+) -> Result<OriginHostLabel, String> {
+    let repository = repository(&app)?;
+    let (display_name, is_this_host) =
+        repository.resolve_origin_host_label(&bundle_id, &origin_host_token)?;
+    Ok(OriginHostLabel {
+        origin_host_token,
+        display_name,
+        is_this_host,
+    })
+}
+
 #[tauri::command]
 pub async fn save_project_sync_config(
     app: tauri::AppHandle,
@@ -741,6 +992,21 @@ pub async fn list_local_projects(
     // finalization heals here before any project data is rendered.
     for warning in recover_setup_state(&repository) {
         emit_typed_log(&app, ActivityLogType::Configuration, "warning", &warning);
+    }
+    match recover_conversation_materializations(&repository) {
+        Ok(report) if !report.recovery_required.is_empty() => emit_typed_log(
+            &app,
+            ActivityLogType::Repair,
+            "warning",
+            "One or more conversation sync operations need manual recovery.",
+        ),
+        Ok(_) => {}
+        Err(error) => emit_typed_log(
+            &app,
+            ActivityLogType::Repair,
+            "warning",
+            &format!("Conversation recovery is unavailable: {error}"),
+        ),
     }
     Ok(repository.load_config()?.projects)
 }
@@ -1028,6 +1294,7 @@ fn remove_project_link_with_repository(
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
 ) -> Result<bool, String> {
+    let _host_operation = repository.acquire_host_operation()?;
     repository.mutate_config(|config| {
         let before = config.links.len();
         config.links.retain(|link| {
@@ -1119,7 +1386,7 @@ pub async fn get_project_binding(
 ) -> Result<Option<ProjectBinding>, String> {
     Ok(repository(&app)?
         .load_bindings()?
-        .active_for(&local_project_id)
+        .for_project(&local_project_id)
         .cloned())
 }
 
@@ -2153,6 +2420,15 @@ fn inspect_project_files_with_repository(
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
 ) -> Result<ProjectContentInventory, String> {
+    let _host_operation = repository.acquire_host_operation()?;
+    inspect_project_files_guarded(repository, local_project_id, storage_id)
+}
+
+fn inspect_project_files_guarded(
+    repository: &V3Repository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+) -> Result<ProjectContentInventory, String> {
     let config = repository.load_config()?;
     let project = config
         .project(local_project_id)
@@ -2615,6 +2891,7 @@ fn project_content_review_token(
     let mut hasher = Sha256::new();
     hasher.update(b"project-content-review-v1\0");
     hasher.update(binding.local_project_id.as_str().as_bytes());
+    hasher.update(binding.host_id.as_str().as_bytes());
     hasher.update(binding.replica_id.as_str().as_bytes());
     hasher.update(binding.revision.to_be_bytes());
     hasher.update(format!("{:?}", eligibility.state).as_bytes());
@@ -3326,7 +3603,8 @@ fn materialized_thread_bases(
     let materializations = repository.load_materializations()?;
     let mut bases = BTreeMap::<ResourceId, MaterializedThreadBase>::new();
     for record in materializations.records.iter().filter(|record| {
-        record.replica_id == binding.replica_id
+        record.host_id == binding.host_id
+            && record.replica_id == binding.replica_id
             && record.local_project_id == project.local_project_id
             && record.storage_id == *storage_id
             && record.bundle_id == project.bundle_id
@@ -3467,6 +3745,206 @@ fn count_thread_sync_state(counts: &mut ThreadSyncCounts, state: ThreadSyncState
     }
 }
 
+fn relation_sync_state(relation: ConversationRelation) -> ThreadSyncState {
+    match relation {
+        ConversationRelation::Identical | ConversationRelation::BothMissing => {
+            ThreadSyncState::Synced
+        }
+        ConversationRelation::CloudPrefixOfLocal => ThreadSyncState::LocalAhead,
+        ConversationRelation::CloudMissing => ThreadSyncState::LocalOnly,
+        ConversationRelation::LocalPrefixOfCloud => ThreadSyncState::StorageAhead,
+        ConversationRelation::LocalMissing => ThreadSyncState::StorageOnly,
+        ConversationRelation::Diverged => ThreadSyncState::Diverged,
+        ConversationRelation::Unknown => ThreadSyncState::Unknown,
+    }
+}
+
+pub(crate) fn schema5_thread_variant_entries(
+    repository: &V3Repository,
+    fetched: &FetchedBundle,
+    captured: &provider_capture::CapturedResources,
+    binding: &ProjectBinding,
+) -> Result<Vec<ThreadSyncEntry>, String> {
+    if fetched.snapshot.manifest.schema_version != BUNDLE_SCHEMA_V5 {
+        return Ok(Vec::new());
+    }
+    let document = repository.load_conversation_bindings()?;
+    let profile_id = binding.profile_ids.get(&Provider::Codex);
+    let mut entries = Vec::new();
+    for (group_id, group) in &fetched.snapshot.manifest.conversation_groups {
+        if group.provider != Provider::Codex {
+            continue;
+        }
+        let preference = profile_id.and_then(|profile_id| {
+            document.preferences.iter().find(|preference| {
+                preference.host_id == binding.host_id
+                    && preference.replica_id == binding.replica_id
+                    && preference.local_project_id == binding.local_project_id
+                    && preference.provider_profile_id == *profile_id
+                    && preference.conflict_group_id == *group_id
+            })
+        });
+        for (variant_id, variant) in &group.variants {
+            let local_binding = profile_id.and_then(|profile_id| {
+                document.bindings.iter().find(|conversation| {
+                    conversation.host_id == binding.host_id
+                        && conversation.replica_id == binding.replica_id
+                        && conversation.local_project_id == binding.local_project_id
+                        && conversation.provider_profile_id == *profile_id
+                        && conversation.conflict_group_id == *group_id
+                        && conversation.variant_id == *variant_id
+                })
+            });
+            let local_conversation = local_binding
+                .and_then(|conversation| conversation.provider_thread_id.as_deref())
+                .and_then(|provider_thread_id| {
+                    captured.conversations.values().find(|conversation| {
+                        conversation.provider == provider_capture::Provider::Codex
+                            && conversation.source_thread_id.as_deref() == Some(provider_thread_id)
+                    })
+                });
+            let transcript = variant
+                .files
+                .iter()
+                .find(|file| file.role == ConversationFileRole::Transcript)
+                .and_then(|file| fetched.files.get(&file.logical_path));
+            let cloud_analysis = transcript.map(|bytes| analyze_codex_transcript(bytes));
+            let local_chain =
+                local_conversation.and_then(|conversation| conversation.lineage.chain());
+            let cloud_chain = cloud_analysis
+                .as_ref()
+                .and_then(|analysis| analysis.lineage.chain());
+            let relation = match (local_conversation, cloud_analysis.as_ref()) {
+                (Some(_), Some(_)) if local_chain.is_none() || cloud_chain.is_none() => {
+                    ConversationRelation::Unknown
+                }
+                (Some(_), Some(_)) => {
+                    super::domain::classify_conversation_relation(local_chain, cloud_chain)
+                }
+                (None, Some(_)) => ConversationRelation::LocalMissing,
+                (Some(_), None) => ConversationRelation::CloudMissing,
+                (None, None) => ConversationRelation::BothMissing,
+            };
+            let cloud_readable = cloud_analysis
+                .as_ref()
+                .is_some_and(|analysis| analysis.lineage.is_complete());
+            let local_capturable =
+                local_conversation.is_some_and(|conversation| conversation.lineage.is_complete());
+            let capabilities = ConversationCapabilities {
+                binding: if local_binding.is_some() {
+                    BindingResolution::Bound
+                } else {
+                    BindingResolution::Missing
+                },
+                local_safely_capturable: local_capturable,
+                cloud_safely_readable: cloud_readable,
+                destination_codec_resumable: cloud_readable,
+                provider_quiescent: true,
+                structural_rewrite_only: false,
+            };
+            let push = default_conversation_decision(
+                ConversationPlanDirection::Push,
+                relation,
+                capabilities,
+            );
+            let pull = default_conversation_decision(
+                ConversationPlanDirection::Pull,
+                relation,
+                capabilities,
+            );
+            let state = relation_sync_state(relation);
+            let proposed = match state {
+                ThreadSyncState::LocalOnly | ThreadSyncState::LocalAhead => push,
+                ThreadSyncState::Synced => pull,
+                _ => pull,
+            };
+            let mut available_actions = vec![push.action, pull.action];
+            available_actions.sort_by_key(|action| format!("{action:?}"));
+            available_actions.dedup();
+            let descriptor = fetched
+                .snapshot
+                .manifest
+                .resources
+                .get(&variant.resource_id)
+                .ok_or_else(|| {
+                    format!("conversation variant '{}' has no descriptor", variant_id)
+                })?;
+            let origin_label = variant
+                .last_updated_by_origin
+                .as_ref()
+                .or(variant.created_by_origin.as_ref())
+                .map(|origin| {
+                    repository
+                        .resolve_origin_host_label(
+                            &fetched.snapshot.manifest.bundle.bundle_id,
+                            &origin.origin_host_token,
+                        )
+                        .map(|(label, _)| label)
+                })
+                .transpose()?;
+            let provider_thread_id =
+                local_binding.and_then(|conversation| conversation.provider_thread_id.clone());
+            let local_updated_at = provider_thread_id.as_deref().and_then(|thread_id| {
+                captured
+                    .files
+                    .values()
+                    .filter(|file| {
+                        captured
+                            .conversations
+                            .get(&file.resource_id)
+                            .and_then(|conversation| conversation.source_thread_id.as_deref())
+                            == Some(thread_id)
+                    })
+                    .map(|file| file.source_mtime)
+                    .max()
+            });
+            let materialization_state = local_binding
+                .map(|conversation| conversation.materialization_state.clone())
+                .unwrap_or(ConversationMaterializationState::StoredOnly);
+            let resumable = materialization_state == ConversationMaterializationState::Resumable
+                && local_conversation
+                    .is_some_and(|conversation| conversation.lineage.is_complete());
+            entries.push(ThreadSyncEntry {
+                thread_id: provider_thread_id
+                    .clone()
+                    .or_else(|| variant.source_thread_id.clone())
+                    .unwrap_or_else(|| variant_id.to_string()),
+                resource_id: variant.resource_id.clone(),
+                display_name: descriptor.display_name.clone(),
+                state,
+                local_present: local_conversation.is_some(),
+                storage_present: true,
+                status_detail: (relation == ConversationRelation::Unknown)
+                    .then(|| "Conversation ancestry could not be proven safely.".to_string()),
+                local_updated_at,
+                storage_updated_at: Some(variant.updated_at),
+                conflict_group_id: Some(group_id.clone()),
+                variant_id: Some(variant_id.clone()),
+                provider_thread_id,
+                relation: Some(relation),
+                proposed_action: Some(proposed.action),
+                reason_code: Some(proposed.reason_code),
+                cloud_primary: group.primary_variant_id == *variant_id,
+                local_preferred: preference
+                    .is_some_and(|preference| preference.preferred_variant_id == *variant_id),
+                materialization_state: Some(materialization_state),
+                resumable,
+                origin_label,
+                available_actions,
+                requires_explicit_approval: matches!(
+                    proposed.action,
+                    ConversationPlanActionType::PromoteLocal
+                        | ConversationPlanActionType::PromoteCloud
+                        | ConversationPlanActionType::ReplaceLocal
+                        | ConversationPlanActionType::TombstoneVariant
+                        | ConversationPlanActionType::TombstoneGroup
+                ),
+            });
+        }
+    }
+    Ok(entries)
+}
+
 fn get_project_thread_sync_comparison_with_repository(
     repository: &V3Repository,
     local_project_id: &LocalProjectId,
@@ -3558,6 +4036,11 @@ fn get_project_thread_sync_comparison_with_repository(
 
     let (_, engine) = storage_engine(repository, storage_id)?;
     let current = engine.inspect_optional(&project.bundle_id)?;
+    let schema5_fetched = current
+        .as_ref()
+        .filter(|snapshot| snapshot.manifest.schema_version == BUNDLE_SCHEMA_V5)
+        .map(|_| engine.fetch(&project.bundle_id))
+        .transpose()?;
     let generation = current.as_ref().map(|snapshot| snapshot.head.generation);
     let remote_versions = current
         .as_ref()
@@ -3707,6 +4190,7 @@ fn get_project_thread_sync_comparison_with_repository(
             .unwrap_or_else(|| thread_id.clone());
         count_thread_sync_state(&mut counts, state);
         entries.push(ThreadSyncEntry {
+            provider_thread_id: Some(thread_id.clone()),
             thread_id,
             resource_id,
             display_name,
@@ -3716,6 +4200,18 @@ fn get_project_thread_sync_comparison_with_repository(
             status_detail,
             local_updated_at: local.and_then(|version| version.updated_at),
             storage_updated_at: remote.and_then(|version| version.updated_at),
+            conflict_group_id: None,
+            variant_id: None,
+            relation: None,
+            proposed_action: None,
+            reason_code: None,
+            cloud_primary: false,
+            local_preferred: false,
+            materialization_state: None,
+            resumable: local_present && !local_unavailable,
+            origin_label: None,
+            available_actions: Vec::new(),
+            requires_explicit_approval: false,
         });
     }
     entries.sort_by(|left, right| {
@@ -3733,6 +4229,30 @@ fn get_project_thread_sync_comparison_with_repository(
             )
             .then_with(|| left.thread_id.cmp(&right.thread_id))
     });
+    if let Some(fetched) = &schema5_fetched {
+        let variant_entries =
+            schema5_thread_variant_entries(repository, fetched, &captured, &binding)?;
+        let bound_provider_ids = variant_entries
+            .iter()
+            .filter_map(|entry| entry.provider_thread_id.clone())
+            .collect::<BTreeSet<_>>();
+        entries.retain(|entry| {
+            entry.variant_id.is_some() || !bound_provider_ids.contains(&entry.thread_id)
+        });
+        entries.extend(variant_entries);
+        entries.sort_by(|left, right| {
+            left.conflict_group_id
+                .cmp(&right.conflict_group_id)
+                .then_with(|| right.cloud_primary.cmp(&left.cloud_primary))
+                .then_with(|| right.local_preferred.cmp(&left.local_preferred))
+                .then_with(|| left.variant_id.cmp(&right.variant_id))
+                .then_with(|| left.thread_id.cmp(&right.thread_id))
+        });
+        counts = ThreadSyncCounts::default();
+        for entry in &entries {
+            count_thread_sync_state(&mut counts, entry.state);
+        }
+    }
     warnings.sort();
     warnings.dedup();
     Ok(ThreadSyncComparison {
@@ -4299,6 +4819,7 @@ fn push_bundle_reviewed_with_repository(
     requested_recipe: Option<BundleRecipe>,
     project_content_review: ProjectContentPushReview,
 ) -> Result<ProjectOperationResult, String> {
+    let _host_operation = repository.acquire_host_operation()?;
     let config = repository.load_config()?;
     let mut project = config
         .project(local_project_id)
@@ -4389,8 +4910,7 @@ fn push_bundle_reviewed_with_repository(
         || !project_content_review.removal_ids.is_empty();
     let mut reviewed_inventory = None;
     if let Some(review_token) = project_content_review.review_token.as_deref() {
-        let inventory =
-            inspect_project_files_with_repository(repository, local_project_id, storage_id)?;
+        let inventory = inspect_project_files_guarded(repository, local_project_id, storage_id)?;
         if inventory.eligibility.state != ProjectFileSyncEligibilityState::Eligible {
             return Err(inventory.eligibility.reason);
         }
@@ -4675,6 +5195,7 @@ fn plan_bundle_restore_with_repository(
     bundle_id: &BundleId,
     binding: &ProjectBinding,
 ) -> Result<RestorePlan, String> {
+    let _host_operation = repository.acquire_host_operation()?;
     let binding = require_current_binding(repository, binding)?;
     if &binding.bundle_id != bundle_id {
         return Err("binding and requested bundle IDs differ".to_string());
@@ -4710,7 +5231,11 @@ fn plan_bundle_restore_with_repository(
         None => None,
     };
     let materialized_bases = materialized_thread_bases(repository, &project, storage_id, &binding)?;
-    let mut plan = engine.build_restore_plan(&fetched, &binding, now_secs())?;
+    let identity = repository.load_or_create_host_identity()?;
+    if identity.host_id != binding.host_id {
+        return Err("host identity changed while preparing the Pull review".to_string());
+    }
+    let mut plan = engine.build_restore_plan(&fetched, &binding, now_secs(), identity.revision)?;
     plan.actions.retain(|action| {
         if !is_conversation_keep_local_action(action, &fetched.snapshot.manifest) {
             return true;
@@ -4741,6 +5266,7 @@ fn apply_bundle_restore_with_repository(
     plan_id: &PlanId,
     approved_action_ids: Vec<ActionId>,
 ) -> Result<RestoreResult, String> {
+    let _host_operation = repository.acquire_host_operation()?;
     let plan = repository.load_restore_plan(plan_id)?;
     let binding = current_binding_for_restore_plan(repository, &plan)?;
     let approved = unique_approved_actions(&approved_action_ids, &plan.actions)?;
@@ -4824,6 +5350,7 @@ fn apply_bundle_restore_with_repository(
     let record = MaterializationRecord {
         materialization_id: MaterializationId::parse(generated_named_id("materialization")?)?,
         plan_id: plan.plan_id.clone(),
+        host_id: binding.host_id.clone(),
         replica_id: binding.replica_id.clone(),
         local_project_id: binding.local_project_id.clone(),
         storage_id: plan.storage_id.clone(),
@@ -4963,6 +5490,7 @@ fn restore_support_context(
     let head = &fetched.snapshot.head;
     if plan.storage_id != fetched.snapshot.storage_id
         || plan.bundle_id != head.bundle_id
+        || plan.host_id != binding.host_id
         || plan.replica_id != binding.replica_id
         || plan.generation != head.generation
         || plan.commit_id != head.commit_id
@@ -4980,17 +5508,20 @@ fn plan_dependencies_with_repository(
     repository: &V3Repository,
     restore_plan_id: &PlanId,
 ) -> Result<DependencyPlan, String> {
+    let _host_operation = repository.acquire_host_operation()?;
     let (restore_plan, binding, fetched) = restore_support_context(repository, restore_plan_id)?;
     let created_at = now_secs();
     let plan = DependencyPlan {
-        schema_version: DEPENDENCY_PLAN_SCHEMA_V1,
+        schema_version: DEPENDENCY_PLAN_SCHEMA_V2,
         // `generated_named_id` accepts only lowercase alphanumeric prefixes.
         // The plan type and its persistence directory already distinguish
         // dependency plans from restore plans.
         plan_id: PlanId::parse(generated_named_id("plan")?)?,
         storage_id: restore_plan.storage_id,
         bundle_id: restore_plan.bundle_id,
+        host_id: binding.host_id.clone(),
         replica_id: binding.replica_id,
+        expected_host_identity_revision: restore_plan.expected_host_identity_revision,
         generation: restore_plan.generation,
         commit_id: restore_plan.commit_id,
         manifest_sha256: restore_plan.manifest_sha256,
@@ -5027,22 +5558,44 @@ fn prepare_dependency_application(
     if applied_at < plan.created_at || applied_at > plan.expires_at {
         return Err("dependency plan has expired or is not active yet".to_string());
     }
-    let previous = repository
-        .load_dependency_applications()?
-        .records
-        .into_iter()
-        .find(|record| record.plan_id == plan.plan_id);
     let bindings = repository.load_bindings()?;
     let binding = bindings
         .bindings
         .iter()
         .find(|binding| {
-            binding.replica_id == plan.replica_id && binding.state == BindingState::Active
+            binding.host_id == plan.host_id
+                && binding.replica_id == plan.replica_id
+                && binding.state == BindingState::Active
         })
         .cloned()
         .ok_or_else(|| "dependency plan's project binding is no longer active".to_string())?;
     if binding.revision != plan.binding_revision || binding.bundle_id != plan.bundle_id {
         return Err("dependency plan's binding changed after planning".to_string());
+    }
+    let identity = repository.load_or_create_host_identity()?;
+    if identity.host_id != plan.host_id || identity.revision != plan.expected_host_identity_revision
+    {
+        return Err("dependency plan's host identity changed after planning".to_string());
+    }
+    let previous = repository
+        .load_dependency_applications()?
+        .records
+        .into_iter()
+        .find(|record| record.plan_id == plan.plan_id);
+    if previous.as_ref().is_some_and(|record| {
+        record.local_project_id != binding.local_project_id
+            || record.storage_id != plan.storage_id
+            || record.bundle_id != plan.bundle_id
+            || record.host_id != plan.host_id
+            || record.replica_id != plan.replica_id
+            || record.generation != plan.generation
+            || record.commit_id != plan.commit_id
+            || record.manifest_sha256 != plan.manifest_sha256
+            || record.binding_revision != plan.binding_revision
+    }) {
+        return Err(
+            "stored dependency receipt does not match this plan's host and snapshot".to_string(),
+        );
     }
     let binding = resolve_project_binding(repository, &binding)?;
     let (_, fetched) = fetch_from_storage(repository, &plan.storage_id, &plan.bundle_id)?;
@@ -5064,6 +5617,7 @@ async fn apply_dependency_actions_with_repository(
     plan_id: &PlanId,
     action_ids: Vec<ActionId>,
 ) -> Result<DependencyResult, String> {
+    let _host_operation = repository.acquire_host_operation()?;
     let prepare_repository = repository.clone();
     let prepare_plan_id = plan_id.clone();
     let prepared = run_blocking(move || {
@@ -5138,6 +5692,7 @@ fn finalize_dependency_application(
         local_project_id: binding.local_project_id,
         storage_id: plan.storage_id.clone(),
         bundle_id: plan.bundle_id.clone(),
+        host_id: binding.host_id,
         replica_id: binding.replica_id,
         generation: plan.generation,
         commit_id: plan.commit_id.clone(),
@@ -5152,6 +5707,20 @@ fn finalize_dependency_application(
             .iter_mut()
             .find(|current| current.plan_id == record.plan_id)
         {
+            if current.local_project_id != record.local_project_id
+                || current.storage_id != record.storage_id
+                || current.bundle_id != record.bundle_id
+                || current.host_id != record.host_id
+                || current.replica_id != record.replica_id
+                || current.generation != record.generation
+                || current.commit_id != record.commit_id
+                || current.manifest_sha256 != record.manifest_sha256
+                || current.binding_revision != record.binding_revision
+            {
+                return Err(
+                    "dependency receipt scope changed while actions were running".to_string(),
+                );
+            }
             *current = record;
         } else {
             applications.records.push(record);
@@ -5236,7 +5805,8 @@ fn bundle_readiness_for_fetched(
         .into_iter()
         .rev()
         .find(|record| {
-            record.replica_id == binding.replica_id
+            record.host_id == binding.host_id
+                && record.replica_id == binding.replica_id
                 && record.bundle_id == *bundle_id
                 && record.generation == head.generation
                 && record.manifest_sha256 == head.manifest_sha256
@@ -5249,7 +5819,8 @@ fn bundle_readiness_for_fetched(
         .records
         .iter()
         .filter(|application| {
-            application.replica_id == binding.replica_id
+            application.host_id == binding.host_id
+                && application.replica_id == binding.replica_id
                 && application.bundle_id == *bundle_id
                 && application.generation == head.generation
                 && application.manifest_sha256 == head.manifest_sha256
@@ -5479,7 +6050,9 @@ fn require_current_binding(
     let current = bindings
         .bindings
         .into_iter()
-        .find(|binding| binding.replica_id == supplied.replica_id)
+        .find(|binding| {
+            binding.host_id == supplied.host_id && binding.replica_id == supplied.replica_id
+        })
         .ok_or_else(|| "project binding is not registered on this machine".to_string())?;
     if &current != supplied {
         return Err("project binding changed; refresh before continuing".to_string());
@@ -5503,12 +6076,19 @@ fn current_binding_for_restore_plan(
     repository: &V3Repository,
     plan: &RestorePlan,
 ) -> Result<ProjectBinding, String> {
+    let identity = repository.load_or_create_host_identity()?;
+    if identity.host_id != plan.host_id || identity.revision != plan.expected_host_identity_revision
+    {
+        return Err("restore plan's host identity changed after planning".to_string());
+    }
     let binding = repository
         .load_bindings()?
         .bindings
         .into_iter()
         .find(|binding| {
-            binding.replica_id == plan.replica_id && binding.state == BindingState::Active
+            binding.host_id == plan.host_id
+                && binding.replica_id == plan.replica_id
+                && binding.state == BindingState::Active
         })
         .ok_or_else(|| "restore plan's project binding is no longer active".to_string())?;
     if binding.revision != plan.binding_revision || binding.bundle_id != plan.bundle_id {
@@ -5593,6 +6173,7 @@ fn validate_dependency_plan_pin(
     if plan.storage_id != fetched.snapshot.storage_id
         || plan.bundle_id != fetched.snapshot.head.bundle_id
         || plan.bundle_id != binding.bundle_id
+        || plan.host_id != binding.host_id
         || plan.replica_id != binding.replica_id
         || plan.generation != fetched.snapshot.head.generation
         || plan.commit_id != fetched.snapshot.head.commit_id
@@ -5619,7 +6200,8 @@ async fn execute_dependency_action(
                 .records
                 .iter()
                 .any(|record| {
-                    record.replica_id == binding.replica_id
+                    record.host_id == binding.host_id
+                        && record.replica_id == binding.replica_id
                         && record.bundle_id == plan.bundle_id
                         && record.generation == plan.generation
                         && record.manifest_sha256 == plan.manifest_sha256
@@ -6227,7 +6809,7 @@ fn get_project_with_repository(
         .collect();
     let binding = repository
         .load_bindings()?
-        .active_for(local_project_id)
+        .for_project(local_project_id)
         .cloned();
     let materializations = repository
         .load_materializations()?
@@ -6399,6 +6981,14 @@ fn save_project_link_with_repository(
 }
 
 fn connect_project_to_remote_bundle_with_repository(
+    repository: &V3Repository,
+    request: ConnectProjectBundleRequest,
+) -> Result<ProjectDetail, String> {
+    let _host_operation = repository.acquire_host_operation()?;
+    connect_project_to_remote_bundle_guarded(repository, request)
+}
+
+fn connect_project_to_remote_bundle_guarded(
     repository: &V3Repository,
     request: ConnectProjectBundleRequest,
 ) -> Result<ProjectDetail, String> {
@@ -6580,7 +7170,7 @@ fn connect_project_to_remote_bundle_with_repository(
     }
 
     if let Some(binding) = active_binding {
-        save_project_binding_with_repository(
+        save_project_binding_guarded(
             repository,
             SaveProjectBindingRequest {
                 local_project_id: request.local_project_id.clone(),
@@ -6598,7 +7188,16 @@ fn save_project_binding_with_repository(
     repository: &V3Repository,
     request: SaveProjectBindingRequest,
 ) -> Result<ProjectBinding, String> {
+    let _host_operation = repository.acquire_host_operation()?;
+    save_project_binding_guarded(repository, request)
+}
+
+fn save_project_binding_guarded(
+    repository: &V3Repository,
+    request: SaveProjectBindingRequest,
+) -> Result<ProjectBinding, String> {
     let validated = validate_binding_request(repository, &request)?;
+    let host_id = repository.load_or_create_host_identity()?.host_id;
     let binding = repository.mutate_bindings(|config, bindings| {
         let project = config
             .project(&request.local_project_id)
@@ -6640,6 +7239,7 @@ fn save_project_binding_with_repository(
             }
         };
         let next = ProjectBinding {
+            host_id: host_id.clone(),
             replica_id,
             local_project_id: request.local_project_id.clone(),
             bundle_id: project.bundle_id.clone(),
@@ -6664,7 +7264,8 @@ fn save_project_binding_with_repository(
     // older binding revision are detached and cannot satisfy a new plan.
     repository.mutate_materializations(|_, materializations| {
         for record in &mut materializations.records {
-            if record.replica_id == binding.replica_id
+            if record.host_id == binding.host_id
+                && record.replica_id == binding.replica_id
                 && record.binding_revision != binding.revision
                 && record.status != MaterializationStatus::Detached
             {
@@ -6823,7 +7424,15 @@ fn detach_project_binding_with_repository(
     repository: &V3Repository,
     local_project_id: &LocalProjectId,
 ) -> Result<bool, String> {
-    let detached_replica = repository.mutate_bindings(|_, bindings| {
+    let _host_operation = repository.acquire_host_operation()?;
+    detach_project_binding_guarded(repository, local_project_id)
+}
+
+fn detach_project_binding_guarded(
+    repository: &V3Repository,
+    local_project_id: &LocalProjectId,
+) -> Result<bool, String> {
+    let detached_scope = repository.mutate_bindings(|_, bindings| {
         let Some(binding) = bindings.bindings.iter_mut().find(|binding| {
             &binding.local_project_id == local_project_id && binding.state == BindingState::Active
         }) else {
@@ -6832,14 +7441,14 @@ fn detach_project_binding_with_repository(
         binding.state = BindingState::Detached;
         binding.revision = binding.revision.saturating_add(1);
         binding.updated_at = now_secs();
-        Ok(Some(binding.replica_id.clone()))
+        Ok(Some((binding.host_id.clone(), binding.replica_id.clone())))
     })?;
-    let Some(replica_id) = detached_replica else {
+    let Some((host_id, replica_id)) = detached_scope else {
         return Ok(false);
     };
     repository.mutate_materializations(|_, materializations| {
         for record in &mut materializations.records {
-            if record.replica_id == replica_id {
+            if record.host_id == host_id && record.replica_id == replica_id {
                 record.status = MaterializationStatus::Detached;
             }
         }
@@ -6884,6 +7493,14 @@ fn remove_local_project_with_repository(
     repository: &V3Repository,
     local_project_id: &LocalProjectId,
 ) -> Result<bool, String> {
+    let _host_operation = repository.acquire_host_operation()?;
+    remove_local_project_guarded(repository, local_project_id)
+}
+
+fn remove_local_project_guarded(
+    repository: &V3Repository,
+    local_project_id: &LocalProjectId,
+) -> Result<bool, String> {
     if repository
         .load_config()?
         .project(local_project_id)
@@ -6894,7 +7511,7 @@ fn remove_local_project_with_repository(
     // Detach local application state before removing the registration.  A
     // crash between files leaves a valid unbound project, never an active
     // binding to an unknown project.
-    let _ = detach_project_binding_with_repository(repository, local_project_id)?;
+    let _ = detach_project_binding_guarded(repository, local_project_id)?;
     repository.mutate_materializations(|_, materializations| {
         for record in &mut materializations.records {
             if &record.local_project_id == local_project_id {
@@ -7621,6 +8238,7 @@ fn build_setup_transaction(
     draft: &ProjectSetupDraft,
 ) -> Result<(SetupTransaction, Vec<String>), String> {
     let mut warnings = Vec::new();
+    let host_id = repository.load_or_create_host_identity()?.host_id;
     let canonical = fs_canonicalize(Path::new(&draft.project_root))?;
     if canonical.to_string_lossy() != draft.canonical_project_root {
         return Err(
@@ -7763,6 +8381,7 @@ fn build_setup_transaction(
         .collect();
 
     let binding = ProjectBinding {
+        host_id: host_id.clone(),
         replica_id: ReplicaId::parse(generated_named_id("replica")?)?,
         local_project_id: draft.local_project_id.clone(),
         bundle_id,
@@ -7778,10 +8397,12 @@ fn build_setup_transaction(
     binding.validate_structure()?;
 
     let transaction = SetupTransaction {
-        schema: SETUP_TRANSACTION_SCHEMA_V1,
+        schema: SETUP_TRANSACTION_SCHEMA_V2,
         draft_id: draft.draft_id.clone(),
         draft_revision: draft.revision,
         created_at: now,
+        host_id,
+        replica_id: binding.replica_id.clone(),
         profiles: resolved_profiles.pending_records,
         storage: resolved_storage
             .filter(|resolved| resolved.pending)
@@ -7818,6 +8439,15 @@ fn apply_setup_transaction(
     repository: &V3Repository,
     transaction: &SetupTransaction,
 ) -> Result<(), String> {
+    let _host_operation = repository.acquire_host_operation()?;
+    transaction.validate()?;
+    let identity = repository.load_or_create_host_identity()?;
+    if transaction.host_id != identity.host_id {
+        return Err(
+            "setup transaction belongs to a different host; review the draft again".to_string(),
+        );
+    }
+
     // 1. Provider profiles (machine state; no dependency on config).
     let profile_id_map = repository.mutate_bindings(|_, machine| {
         let mut map: BTreeMap<LocalProviderProfileId, LocalProviderProfileId> = BTreeMap::new();
@@ -7894,21 +8524,26 @@ fn apply_setup_transaction(
     })?;
 
     // 3. Machine binding (requires the project to exist in config).
+    let mut expected_binding = transaction.binding.clone();
+    for profile_id in expected_binding.profile_ids.values_mut() {
+        if let Some(mapped) = profile_id_map.get(profile_id) {
+            *profile_id = mapped.clone();
+        }
+    }
     repository.mutate_bindings(|_, machine| {
-        if machine
+        if let Some(existing) = machine
             .bindings
             .iter()
-            .any(|binding| binding.local_project_id == transaction.binding.local_project_id)
+            .find(|binding| binding.local_project_id == expected_binding.local_project_id)
         {
-            return Ok(());
-        }
-        let mut binding = transaction.binding.clone();
-        for profile_id in binding.profile_ids.values_mut() {
-            if let Some(mapped) = profile_id_map.get(profile_id) {
-                *profile_id = mapped.clone();
+            if existing == &expected_binding {
+                return Ok(());
             }
+            return Err(
+                "setup transaction conflicts with a different host or project replica".to_string(),
+            );
         }
-        machine.bindings.push(binding);
+        machine.bindings.push(expected_binding.clone());
         Ok(())
     })?;
 
@@ -7921,11 +8556,12 @@ fn apply_setup_transaction(
     {
         return Err("project registration did not persist".to_string());
     }
-    if repository
+    let persisted_binding = repository
         .load_bindings()?
-        .active_for(&transaction.project.local_project_id)
-        .is_none()
-    {
+        .bindings
+        .into_iter()
+        .find(|binding| binding.local_project_id == transaction.project.local_project_id);
+    if persisted_binding.as_ref() != Some(&expected_binding) {
         return Err("project binding did not persist".to_string());
     }
     Ok(())
@@ -7980,6 +8616,45 @@ pub(crate) fn recover_setup_state(repository: &V3Repository) -> Vec<String> {
         Err(error) => return vec![format!("setup recovery unavailable: {}", error)],
     };
     for transaction in transactions {
+        match repository.load_or_create_host_identity() {
+            Ok(identity) if identity.host_id != transaction.host_id => {
+                let project_exists = repository.load_config().ok().is_some_and(|config| {
+                    config
+                        .project(&transaction.project.local_project_id)
+                        .is_some()
+                });
+                if let Err(error) = repository.delete_setup_transaction(&transaction.draft_id) {
+                    warnings.push(error);
+                    continue;
+                }
+                if project_exists {
+                    if let Err(error) = repository.delete_setup_draft(&transaction.draft_id) {
+                        warnings.push(error);
+                    }
+                    warnings.push(format!(
+                        "setup for draft '{}' was retained as a detached project after host registration; review its local binding",
+                        transaction.draft_id
+                    ));
+                } else {
+                    let message =
+                        "host identity changed during setup; review the draft and finish again";
+                    record_draft_error(repository, &transaction.draft_id, message);
+                    warnings.push(format!(
+                        "setup for draft '{}' must be reviewed again because the host identity changed",
+                        transaction.draft_id
+                    ));
+                }
+                continue;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warnings.push(format!(
+                    "setup for draft '{}' cannot verify host identity: {}",
+                    transaction.draft_id, error
+                ));
+                continue;
+            }
+        }
         match apply_setup_transaction(repository, &transaction) {
             Ok(()) => {
                 if let Err(error) = repository.delete_setup_transaction(&transaction.draft_id) {
@@ -8441,6 +9116,7 @@ fn repair_codex_conversation_paths_with_repository(
     repository: &V3Repository,
     local_project_id: &LocalProjectId,
 ) -> Result<CodexConversationPathRepairResult, String> {
+    let _host_operation = repository.acquire_host_operation()?;
     let audit = audit_codex_conversation_paths_with_repository(repository, local_project_id)?;
     if !audit.blockers.is_empty() {
         return Err(format!(
@@ -8985,6 +9661,54 @@ mod tests {
         RestoreActionKind, StorageConfigV3, StorageKind, TombstoneTarget,
     };
     use crate::sync_tests::stub_s3::StubS3;
+
+    #[test]
+    fn host_sensitive_workflows_share_the_host_operation_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = V3Repository::from_home_dir(temp.path()).unwrap();
+        let guard = repo.acquire_host_operation().unwrap();
+        let request = SaveProjectBindingRequest {
+            local_project_id: LocalProjectId::parse("project-a").unwrap(),
+            project_root: temp.path().join("project").to_string_lossy().into_owned(),
+            profile_ids: BTreeMap::new(),
+            expected_revision: None,
+        };
+        assert!(save_project_binding_with_repository(&repo, request)
+            .unwrap_err()
+            .contains("host-sensitive operation"));
+        assert!(detach_project_binding_with_repository(
+            &repo,
+            &LocalProjectId::parse("project-a").unwrap()
+        )
+        .unwrap_err()
+        .contains("host-sensitive operation"));
+        assert!(
+            plan_dependencies_with_repository(&repo, &PlanId::parse("plan-a").unwrap())
+                .unwrap_err()
+                .contains("host-sensitive operation")
+        );
+        assert!(repair_codex_conversation_paths_with_repository(
+            &repo,
+            &LocalProjectId::parse("project-a").unwrap()
+        )
+        .unwrap_err()
+        .contains("host-sensitive operation"));
+        assert!(inspect_project_files_with_repository(
+            &repo,
+            &LocalProjectId::parse("project-a").unwrap(),
+            &StorageId::parse("storage-a").unwrap(),
+        )
+        .unwrap_err()
+        .contains("host-sensitive operation"));
+        assert!(remove_project_link_with_repository(
+            &repo,
+            &LocalProjectId::parse("project-a").unwrap(),
+            &StorageId::parse("storage-a").unwrap(),
+        )
+        .unwrap_err()
+        .contains("host-sensitive operation"));
+        drop(guard);
+    }
 
     #[test]
     fn routine_history_scan_logs_are_throttled_per_project() {
@@ -9822,6 +10546,7 @@ mod tests {
     #[test]
     fn project_open_commands_pin_the_checkout_and_assigned_profiles() {
         let binding = ProjectBinding {
+            host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
             replica_id: ReplicaId::parse("replica-test").unwrap(),
             local_project_id: LocalProjectId::parse("project-test").unwrap(),
             bundle_id: BundleId::parse("0123456789abcdef0123456789abcdef").unwrap(),
@@ -11242,6 +11967,7 @@ mod tests {
                 status: ActionStatus::Skipped,
                 applied_at: now_secs(),
                 error: Some("conversation was left unchanged".to_string()),
+                conversation: None,
             });
             Ok(())
         })

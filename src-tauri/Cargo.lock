@@ -2719,9 +2719,13 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "getrandom 0.3.4",
+ "hmac 0.12.1",
  "http-body-util",
  "hyper 1.10.1",
  "hyper-util",
+ "libc",
+ "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2733,6 +2737,7 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "walkdir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

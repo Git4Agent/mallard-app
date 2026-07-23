@@ -18,13 +18,17 @@ import type {
   CreateSetupDraftResult,
   DependencyPlan,
   DependencyResult,
+  HostIdentityStatus,
   LocalProjectRegistration,
+  OriginHostAlias,
+  OriginHostLabel,
   ProjectBinding,
   ProjectChatHistory,
   ProjectDiscovery,
   ProjectDetail,
   ProjectContentInventory,
   ProjectOperationResult,
+  ProjectOriginTokens,
   ProjectProvider,
   ProjectSetupDraft,
   ProjectStorageLink,
@@ -32,16 +36,19 @@ import type {
   ProviderProfileProbe,
   ProviderProfileSummary,
   RegisterLocalProjectRequest,
+  RegisterNewHostRequest,
   ResourceInventory,
   ResourceStatusReport,
   RestorePlan,
   RestoreResult,
   SaveProjectBindingRequest,
+  SaveOriginHostAliasRequest,
   SaveProjectLinkRequest,
   SetupDraftInspection,
   SetupDraftList,
   SyncConfigV3,
   ThreadSyncComparison,
+  UpdateHostDisplayNameRequest,
 } from "../../types";
 
 export function createSingleFlight() {
@@ -124,6 +131,30 @@ export const projectSyncApi = {
 
   saveConfig: (config: SyncConfigV3) =>
     invoke<SyncConfigV3>("save_project_sync_config", { config }),
+
+  getHostIdentityStatus: () =>
+    invoke<HostIdentityStatus>("get_host_identity_status"),
+
+  updateHostDisplayName: (request: UpdateHostDisplayNameRequest) =>
+    invoke<HostIdentityStatus>("update_host_display_name", { request }),
+
+  registerAsNewHost: (request: RegisterNewHostRequest) =>
+    invoke<HostIdentityStatus>("register_as_new_host", { request }),
+
+  rotateHostIdentity: (request: RegisterNewHostRequest) =>
+    invoke<HostIdentityStatus>("rotate_host_identity", { request }),
+
+  getProjectOriginTokens: (localProjectId: string) =>
+    invoke<ProjectOriginTokens>("get_project_origin_tokens", { localProjectId }),
+
+  listOriginHostAliases: (bundleId?: string | null) =>
+    invoke<OriginHostAlias[]>("list_origin_host_aliases", { bundleId: bundleId ?? null }),
+
+  saveOriginHostAlias: (request: SaveOriginHostAliasRequest) =>
+    invoke<OriginHostAlias>("save_origin_host_alias", { request }),
+
+  resolveOriginHostLabel: (bundleId: string, originHostToken: string) =>
+    invoke<OriginHostLabel>("resolve_origin_host_label", { bundleId, originHostToken }),
 
   listRemoteBundles: (storageId: string, cursor?: string | null) =>
     invoke<BundlePage>("list_remote_bundles", { storageId, cursor: cursor ?? null }),

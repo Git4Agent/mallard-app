@@ -32,6 +32,8 @@ export type SetupCompletion = "open" | "push" | "pull";
 
 interface Props {
   draftId: string;
+  workflowGeneration: number;
+  isWorkflowCurrent: (workflowGeneration: number) => boolean;
   profiles: ProviderProfileSummary[];
   projects: LocalProjectSummary[];
   storages: StorageConfigV3[];
@@ -39,7 +41,11 @@ interface Props {
   onClose: () => void;
   onDiscard: (draftId: string) => void;
   onAddStorage: () => void;
-  onFinalized: (detail: ProjectDetail, completion: SetupCompletion) => void;
+  onFinalized: (
+    detail: ProjectDetail,
+    completion: SetupCompletion,
+    workflowGeneration: number,
+  ) => void;
 }
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -70,6 +76,8 @@ function sectionBadge(section: SetupSectionStatus | null) {
 
 export default function ProjectSetupWorkspace({
   draftId,
+  workflowGeneration,
+  isWorkflowCurrent,
   profiles,
   projects,
   storages,
@@ -97,27 +105,35 @@ export default function ProjectSetupWorkspace({
   const savingRef = useRef(false);
   const inspectRequest = useRef(0);
   const repoAutoSelected = useRef(false);
+  const mountedRef = useRef(true);
+  const workflowIsActive = () => (
+    mountedRef.current && isWorkflowCurrent(workflowGeneration)
+  );
 
   const refreshInspection = async (id: string) => {
+    if (!workflowIsActive()) return;
     const requestId = ++inspectRequest.current;
     setInspecting(true);
     try {
       const next = await projectSyncApi.inspectSetupDraft(id);
-      if (requestId !== inspectRequest.current) return;
+      if (requestId !== inspectRequest.current || !workflowIsActive()) return;
       setInspection(next);
     } catch (reason) {
-      if (requestId === inspectRequest.current) setError(errorMessage(reason));
+      if (requestId === inspectRequest.current && workflowIsActive()) {
+        setError(errorMessage(reason));
+      }
     } finally {
-      if (requestId === inspectRequest.current) setInspecting(false);
+      if (requestId === inspectRequest.current && workflowIsActive()) setInspecting(false);
     }
   };
 
   useEffect(() => {
+    mountedRef.current = true;
     let cancelled = false;
     void (async () => {
       try {
         const loaded = await projectSyncApi.getSetupDraft(draftId);
-        if (cancelled) return;
+        if (cancelled || !workflowIsActive()) return;
         if (!loaded) {
           setError("This setup draft no longer exists.");
           return;
@@ -132,11 +148,12 @@ export default function ProjectSetupWorkspace({
         setDraft({ ...loaded, profiles: normalizedProfiles });
         void refreshInspection(draftId);
       } catch (reason) {
-        if (!cancelled) setError(errorMessage(reason));
+        if (!cancelled && workflowIsActive()) setError(errorMessage(reason));
       }
     })();
     return () => {
       cancelled = true;
+      mountedRef.current = false;
       inspectRequest.current += 1;
     };
     // The draft page owns one draft for its lifetime.
@@ -144,15 +161,16 @@ export default function ProjectSetupWorkspace({
 
   // Debounced autosave whenever an edit lands.
   useEffect(() => {
-    if (!draft || !dirtyRef.current || savingRef.current) return;
+    if (!draft || !dirtyRef.current || savingRef.current || !workflowIsActive()) return;
     const timer = window.setTimeout(() => {
       void (async () => {
-        if (!dirtyRef.current || savingRef.current) return;
+        if (!dirtyRef.current || savingRef.current || !workflowIsActive()) return;
         savingRef.current = true;
         dirtyRef.current = false;
         setSaveState("saving");
         try {
           const saved = await projectSyncApi.updateSetupDraft(draft);
+          if (!workflowIsActive()) return;
           setSaveState("saved");
           setError(null);
           // Keep local edits that raced the save; only adopt server-owned
@@ -168,8 +186,10 @@ export default function ProjectSetupWorkspace({
             : saved);
           void refreshInspection(draftId);
         } catch (reason) {
-          setSaveState("error");
-          setError(errorMessage(reason));
+          if (workflowIsActive()) {
+            setSaveState("error");
+            setError(errorMessage(reason));
+          }
         } finally {
           savingRef.current = false;
         }
@@ -179,6 +199,7 @@ export default function ProjectSetupWorkspace({
   }, [draft, draftId]);
 
   const edit = (mutate: (current: ProjectSetupDraft) => ProjectSetupDraft) => {
+    if (!workflowIsActive()) return;
     dirtyRef.current = true;
     setSaveState("saving");
     setDraft((current) => (current ? mutate(current) : current));
@@ -200,6 +221,7 @@ export default function ProjectSetupWorkspace({
   const listableStorageId = draft?.storage?.kind === "existing" ? draft.storage.storage_id : null;
   useEffect(() => {
     let cancelled = false;
+    if (!workflowIsActive()) return () => { cancelled = true; };
     if (!listableStorageId) {
       setRemoteBundles([]);
       setBundlesError(null);
@@ -210,16 +232,16 @@ export default function ProjectSetupWorkspace({
     setBundlesError(null);
     void projectSyncApi.listRemoteBundleSnapshots(listableStorageId)
       .then((bundles) => {
-        if (cancelled) return;
+        if (cancelled || !workflowIsActive()) return;
         setRemoteBundles(bundles);
       })
       .catch((reason) => {
-        if (cancelled) return;
+        if (cancelled || !workflowIsActive()) return;
         setRemoteBundles([]);
         setBundlesError(errorMessage(reason));
       })
       .finally(() => {
-        if (!cancelled) setBundlesLoading(false);
+        if (!cancelled && workflowIsActive()) setBundlesLoading(false);
       });
     return () => { cancelled = true; };
   }, [listableStorageId]);
@@ -272,7 +294,7 @@ export default function ProjectSetupWorkspace({
 
   const chooseProfileFolder = async (provider: ProjectProvider) => {
     const picked = await open({ directory: true, multiple: false });
-    if (typeof picked !== "string" || !picked) return;
+    if (!workflowIsActive() || typeof picked !== "string" || !picked) return;
     edit((current) => ({
       ...current,
       profiles: {
@@ -282,6 +304,7 @@ export default function ProjectSetupWorkspace({
   };
 
   const selectSetupProvider = (provider: ProjectProvider) => {
+    if (!workflowIsActive()) return;
     setSetupProvider(provider);
     edit((current) => ({
       ...current,
@@ -291,43 +314,48 @@ export default function ProjectSetupWorkspace({
 
   const changeProjectFolder = async () => {
     const picked = await open({ directory: true, multiple: false });
-    if (typeof picked !== "string" || !picked) return;
+    if (!workflowIsActive() || typeof picked !== "string" || !picked) return;
     edit((current) => ({ ...current, project_root: picked }));
   };
 
   const finalize = async (completion: SetupCompletion) => {
-    if (!draft) return;
+    if (!draft || !workflowIsActive()) return;
+    let expectedRevision = draft.revision;
     // Flush any pending edit before pinning the reviewed revision.
     if (dirtyRef.current && !savingRef.current) {
       savingRef.current = true;
       dirtyRef.current = false;
       try {
         const saved = await projectSyncApi.updateSetupDraft(draft);
+        if (!workflowIsActive()) return;
         setDraft((current) => current ? { ...current, revision: saved.revision } : saved);
-        draft.revision = saved.revision;
+        expectedRevision = saved.revision;
       } catch (reason) {
-        setError(errorMessage(reason));
+        if (workflowIsActive()) setError(errorMessage(reason));
         savingRef.current = false;
         return;
       }
       savingRef.current = false;
     }
+    if (!workflowIsActive()) return;
     setFinalizing(true);
     setError(null);
     try {
-      const detail = await projectSyncApi.finalizeProjectSetup(draftId, draft.revision);
-      onFinalized(detail, completion);
+      const detail = await projectSyncApi.finalizeProjectSetup(draftId, expectedRevision);
+      if (!workflowIsActive()) return;
+      onFinalized(detail, completion, workflowGeneration);
     } catch (reason) {
+      if (!workflowIsActive()) return;
       setError(errorMessage(reason));
       // The draft may carry a recorded error and a bumped revision now.
       try {
         const reloaded = await projectSyncApi.getSetupDraft(draftId);
-        if (reloaded) setDraft(reloaded);
+        if (workflowIsActive() && reloaded) setDraft(reloaded);
       } catch {
         // The original error is already shown.
       }
     } finally {
-      setFinalizing(false);
+      if (workflowIsActive()) setFinalizing(false);
     }
   };
 

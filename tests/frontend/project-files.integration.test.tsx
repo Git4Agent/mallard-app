@@ -231,6 +231,7 @@ test("an empty file review keeps only the action and state", () => {
 });
 
 const binding: ProjectBinding = {
+  host_id: "00112233445566778899aabbccddeeff",
   replica_id: "replica-b",
   local_project_id: "project-b",
   bundle_id: "11111111111111111111111111111111",
@@ -243,11 +244,13 @@ const binding: ProjectBinding = {
 };
 
 const pullPlan: RestorePlan = {
-  schema_version: 1,
+  schema_version: 2,
   plan_id: "plan-project-files",
   storage_id: "storage-a",
   bundle_id: binding.bundle_id,
+  host_id: binding.host_id,
   replica_id: binding.replica_id,
+  expected_host_identity_revision: 0,
   generation: 1,
   commit_id: "commit-a",
   manifest_sha256: "b".repeat(64),

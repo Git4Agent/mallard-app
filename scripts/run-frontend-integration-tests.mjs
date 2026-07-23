@@ -18,6 +18,7 @@ const entries = [
   "tests/frontend/resource-inventory.integration.test.tsx",
   "tests/frontend/single-provider.integration.test.tsx",
   "tests/frontend/storage-settings.integration.test.tsx",
+  "tests/frontend/thread-variants.integration.test.tsx",
 ];
 
 try {

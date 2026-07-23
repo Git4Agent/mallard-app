@@ -204,6 +204,7 @@ export interface ProjectContentPreferences {
 }
 
 export interface ProjectBinding {
+  host_id: string;
   replica_id: string;
   local_project_id: string;
   bundle_id: string;
@@ -277,6 +278,7 @@ export interface ApplyReceipt {
 export interface MaterializationRecord {
   materialization_id: string;
   plan_id: string;
+  host_id: string;
   replica_id: string;
   local_project_id: string;
   storage_id: string;
@@ -441,6 +443,54 @@ export interface SaveProjectBindingRequest {
   project_root: string;
   profile_ids: Partial<Record<ProjectProvider, string>>;
   expected_revision?: number | null;
+}
+
+export interface HostIdentityStatus {
+  host_id: string;
+  revision: number;
+  local_display_name?: string | null;
+  created_at: number;
+  updated_at: number;
+  origin_key_available: boolean;
+}
+
+export interface UpdateHostDisplayNameRequest {
+  expected_host_id: string;
+  expected_revision: number;
+  local_display_name?: string | null;
+}
+
+export interface RegisterNewHostRequest {
+  expected_host_id: string;
+  expected_revision: number;
+  local_display_name?: string | null;
+}
+
+export interface OriginHostAlias {
+  bundle_id: string;
+  origin_host_token: string;
+  display_name: string;
+  revision: number;
+  updated_at: number;
+}
+
+export interface SaveOriginHostAliasRequest {
+  bundle_id: string;
+  origin_host_token: string;
+  display_name: string;
+  expected_revision?: number | null;
+}
+
+export interface OriginHostLabel {
+  origin_host_token: string;
+  display_name: string;
+  is_this_host: boolean;
+}
+
+export interface ProjectOriginTokens {
+  bundle_id: string;
+  origin_host_token: string;
+  origin_replica_token: string;
 }
 
 export interface SyncConfigV3 {
@@ -666,11 +716,13 @@ export interface RestoreAction {
 }
 
 export interface RestorePlan {
-  schema_version: 1;
+  schema_version: 2;
   plan_id: string;
   storage_id: string;
   bundle_id: string;
+  host_id: string;
   replica_id: string;
+  expected_host_identity_revision: number;
   generation: number;
   commit_id: string;
   manifest_sha256: string;
@@ -690,11 +742,13 @@ export interface RestoreResult {
 }
 
 export interface DependencyPlan {
-  schema_version: 1;
+  schema_version: 2;
   plan_id: string;
   storage_id: string;
   bundle_id: string;
+  host_id: string;
   replica_id: string;
+  expected_host_identity_revision: number;
   generation: number;
   commit_id: string;
   manifest_sha256: string;
@@ -794,6 +848,51 @@ export type ThreadSyncState =
   | "unavailable"
   | "unknown";
 
+export type ConversationRelation =
+  | "identical"
+  | "cloud_prefix_of_local"
+  | "local_prefix_of_cloud"
+  | "diverged"
+  | "unknown"
+  | "local_missing"
+  | "cloud_missing"
+  | "both_missing";
+
+export type ConversationPlanActionType =
+  | "no_op"
+  | "fast_forward_local"
+  | "fast_forward_cloud"
+  | "keep_local"
+  | "require_pull"
+  | "add_alternate"
+  | "store_only"
+  | "promote_local"
+  | "promote_cloud"
+  | "replace_local"
+  | "tombstone_variant"
+  | "tombstone_group"
+  | "blocked";
+
+export type ConversationReasonCode =
+  | "identical"
+  | "structural_rewrite_only"
+  | "cloud_prefix_of_local"
+  | "local_prefix_of_cloud"
+  | "diverged"
+  | "unknown_lineage"
+  | "local_missing"
+  | "cloud_missing"
+  | "both_missing"
+  | "provider_not_quiescent"
+  | "codec_unsupported"
+  | "ambiguous_binding"
+  | "missing_binding"
+  | "tombstone_unchanged"
+  | "tombstone_modified"
+  | "stale_plan";
+
+export type ConversationMaterializationState = "pending" | "resumable" | "stored_only";
+
 export interface ThreadSyncEntry {
   thread_id: string;
   resource_id: string;
@@ -804,6 +903,19 @@ export interface ThreadSyncEntry {
   status_detail?: string | null;
   local_updated_at?: number | null;
   storage_updated_at?: number | null;
+  conflict_group_id?: string | null;
+  variant_id?: string | null;
+  provider_thread_id?: string | null;
+  relation?: ConversationRelation | null;
+  proposed_action?: ConversationPlanActionType | null;
+  reason_code?: ConversationReasonCode | null;
+  cloud_primary?: boolean;
+  local_preferred?: boolean;
+  materialization_state?: ConversationMaterializationState | null;
+  resumable?: boolean;
+  origin_label?: string | null;
+  available_actions?: ConversationPlanActionType[];
+  requires_explicit_approval?: boolean;
 }
 
 export interface ThreadSyncCounts {

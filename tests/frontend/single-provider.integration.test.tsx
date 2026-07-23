@@ -109,6 +109,7 @@ test("the configured profile keeps a repair action inline with the storage headi
   const storageId = "storage-one";
   const secondStorageId = "storage-two";
   const binding: ProjectBinding = {
+    host_id: "00112233445566778899aabbccddeeff",
     replica_id: "replica-one",
     local_project_id: projectId,
     bundle_id: "bundle-one",
@@ -205,6 +206,7 @@ test("the configured profile keeps a repair action inline with the storage headi
       onUnlinkStorage={() => undefined}
       onPush={() => undefined}
       onPull={() => undefined}
+      onConfigureBinding={() => undefined}
       onRepairConversationPaths={() => undefined}
       onRenameProject={() => true}
       onRefresh={() => undefined}
@@ -274,4 +276,101 @@ test("the configured profile keeps a repair action inline with the storage headi
   assert.doesNotMatch(html, /Configure project profile/);
   assert.doesNotMatch(html, />CLAUDE</);
   assert.doesNotMatch(html, /Not used/);
+});
+
+test("a detached project can reopen setup without linked storage", () => {
+  const projectId = "project-detached";
+  const detachedBinding: ProjectBinding = {
+    host_id: "00112233445566778899aabbccddeeff",
+    replica_id: "replica-detached",
+    local_project_id: projectId,
+    bundle_id: "bundle-detached",
+    project_root: "/Users/test/project-detached",
+    canonical_project_root: "/Users/test/project-detached",
+    profile_ids: { codex: codexProfile.profile_id },
+    state: "detached",
+    revision: 2,
+    updated_at: 2,
+  };
+  const baseProps = {
+    projects: [{
+      local_project_id: projectId,
+      bundle_id: detachedBinding.bundle_id,
+      display_name: "Detached project",
+      revision: 1,
+      project_root: null,
+    }],
+    activeProjectId: projectId,
+    activeStorageId: null,
+    profiles: [codexProfile],
+    storages: [],
+    links: [],
+    loading: false,
+    busy: false,
+    error: null,
+    conversationPathAudits: {},
+    conversationPathAuditErrors: {},
+    conversationPathAuditLoading: false,
+    onSelectStorage: () => undefined,
+    onLinkStorage: () => undefined,
+    onUnlinkStorage: () => undefined,
+    onPush: () => undefined,
+    onPull: () => undefined,
+    onConfigureBinding: () => undefined,
+    onRepairConversationPaths: () => undefined,
+    onRenameProject: () => true,
+    onRefresh: () => undefined,
+    onAddProject: () => undefined,
+    onOpenStorageSettings: () => undefined,
+    onSaveStorage: () => undefined,
+  };
+
+  const detachedHtml = renderToStaticMarkup(
+    <ProjectLinksWorkspace {...baseProps} bindings={[detachedBinding]} />,
+  );
+  assert.match(detachedHtml, />Confirm setup<\/button>/);
+  assert.match(detachedHtml, /No storage linked yet/);
+
+  const linkedDetachedHtml = renderToStaticMarkup(
+    <ProjectLinksWorkspace
+      {...baseProps}
+      activeStorageId="storage-detached"
+      bindings={[detachedBinding]}
+      storages={[{
+        id: "storage-detached",
+        name: "Detached storage",
+        kind: "local",
+        bucket: "",
+        access_key_id: "",
+        secret_access_key: "",
+        account_id: "",
+        s3_endpoint: "",
+        region: "",
+        local_dir: "/Users/test/storage",
+        included_default_exclusions: [],
+      }]}
+      links={[{
+        local_project_id: projectId,
+        storage_id: "storage-detached",
+        bundle_id: detachedBinding.bundle_id,
+        pinned: true,
+        created_at: 1,
+      }]}
+    />,
+  );
+  const pullButton = linkedDetachedHtml.match(/<button[^>]+aria-label="Set up project before Pull"[^>]*>/)?.[0] ?? "";
+  const pushButton = linkedDetachedHtml.match(/<button[^>]+aria-label="Push to Detached storage"[^>]*>/)?.[0] ?? "";
+  assert.ok(pullButton, "detached projects keep Pull available as a setup entry point");
+  assert.doesNotMatch(pullButton, /disabled=""/);
+  assert.match(pushButton, /disabled=""/);
+  assert.match(linkedDetachedHtml, />Set up<\/button>/);
+  assert.doesNotMatch(linkedDetachedHtml, />Confirm setup<\/button>/);
+
+  const activeHtml = renderToStaticMarkup(
+    <ProjectLinksWorkspace
+      {...baseProps}
+      bindings={[{ ...detachedBinding, state: "active" }]}
+    />,
+  );
+  assert.doesNotMatch(activeHtml, />Confirm setup<\/button>|>Set up project<\/button>/);
 });
