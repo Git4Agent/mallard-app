@@ -107,6 +107,20 @@ test("local storage keeps browse and save actions in the path row", () => {
   assert.doesNotMatch(html, /v3-storage-primary-action/);
 });
 
+test("configured storage can move name editing into its page heading", () => {
+  const html = renderToStaticMarkup(
+    <StorageEditor
+      storage={{ ...r2Storage(), bucket: "agent" }}
+      disabled={false}
+      onChange={() => undefined}
+      showNameField={false}
+    />,
+  );
+
+  assert.doesNotMatch(html, /aria-label="Storage name"/);
+  assert.match(html, /Cloudflare R2/);
+});
+
 test("repository rows keep metadata behind an icon disclosure", () => {
   const bundle: RemoteBundleSummary = {
     bundle_id: "440ed684dbb6034cf32c3bdf04a8f0ea",
@@ -149,14 +163,29 @@ test("storage settings identify the destination with its storage icon", () => {
   assert.match(cloudHtml, /title="Cloudflare R2: R2 storage"/);
 });
 
-test("configured storage opens repository-first with details folded", () => {
+test("the storage sidebar opens the overview folded and the gear opens settings", () => {
+  const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
+  const shell = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
 
-  assert.match(workspace, /setStorageDetailsExpanded\(!storageConfigReady\(storage\)\)/);
-  assert.match(workspace, /storageDetailsExpanded \? "Hide settings" : "Edit settings"/);
+  assert.match(sidebar, /onClick=\{\(\) => onOpenStorage\(storage\.id, false\)\}/);
+  assert.match(sidebar, /onClick=\{\(\) => onOpenStorage\(storage\.id, true\)\}/);
+  assert.match(shell, /onOpenStorage=\{\(storageId, settingsExpanded\) => \{/);
+  assert.match(shell, /mode: "open",\s*storageId,\s*settingsExpanded,/);
+  assert.match(workspace, /setStorageDetailsExpanded\(storageEditorRequest\.settingsExpanded\)/);
+  assert.match(
+    workspace,
+    /const openStorageEditorWithSettings = async[\s\S]*setStorageDetailsExpanded\(true\);/,
+  );
+  assert.match(workspace, /void openStorageEditorWithSettings\(storage\);/);
   assert.match(workspace, /aria-expanded=\{storageDetailsExpanded\}/);
+  assert.match(workspace, /aria-label=\{storageDetailsExpanded \? "Hide storage settings" : "Edit storage settings"\}/);
   assert.match(workspace, /showStorageDetails \? " settings-expanded" : " settings-collapsed"/);
   assert.match(workspace, /hidden=\{!showStorageDetails\}/);
   assert.match(workspace, /\{showStorageDetails && \(/);
   assert.match(workspace, /setStorageDetailsExpanded\(false\);\s*await loadStorageBundles/);
+  assert.match(workspace, /className="v3-project-heading-name"/);
+  assert.match(workspace, />\s*Rename\s*<\/button>/);
+  assert.match(workspace, /`rename-storage:\$\{storageDraft\.id\}`/);
+  assert.match(workspace, /const renamedStorage = \{ \.\.\.editedStorageConfig, name \}/);
 });

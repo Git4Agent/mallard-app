@@ -250,8 +250,7 @@ function githubCommitUrl(repositoryUrl: string | null | undefined, sha: string):
 }
 
 type ThreadSyncPresentation = {
-  glyph?: "+" | "●" | "↓";
-  icon?: "alert-triangle" | "ban" | "help-circle";
+  icon: "badge-check" | "cloud-off" | "download" | "git-compare-arrows" | "octagon-x" | "upload";
   className: string;
   label: string;
 };
@@ -259,25 +258,25 @@ type ThreadSyncPresentation = {
 export function threadSyncPresentation(entry: ThreadSyncEntry, storageName: string): ThreadSyncPresentation {
   switch (entry.state) {
     case "synced":
-      return { glyph: "●", className: "synced", label: `Up to date here and in ${storageName}.` };
+      return { icon: "badge-check", className: "synced", label: `Up to date here and in ${storageName}.` };
     case "local_only":
-      return { glyph: "+", className: "local", label: `Only on this computer. Push to save it in ${storageName}.` };
+      return { icon: "upload", className: "local", label: `Only on this computer. Push to save it in ${storageName}.` };
     case "local_ahead":
-      return { glyph: "●", className: "local", label: `Newer on this computer. Push to update ${storageName}.` };
+      return { icon: "upload", className: "local", label: `Newer on this computer. Push to update ${storageName}.` };
     case "storage_only":
-      return { glyph: "↓", className: "storage", label: `Only in ${storageName}. Pull to download it here.` };
+      return { icon: "download", className: "storage", label: `Only in ${storageName}. Pull to download it here.` };
     case "storage_ahead":
-      return { glyph: "↓", className: "storage", label: `Newer in ${storageName}. Pull to update this computer.` };
+      return { icon: "download", className: "storage", label: `Newer in ${storageName}. Pull to update this computer.` };
     case "diverged":
-      return { icon: "alert-triangle" as const, className: "diverged", label: `Changed here and in ${storageName}. Review before syncing.` };
+      return { icon: "git-compare-arrows", className: "diverged", label: `Changed here and in ${storageName}. Review before syncing.` };
     case "unavailable":
       return {
-        icon: "ban" as const,
+        icon: "octagon-x",
         className: "unavailable",
         label: `Unavailable for sync. ${entry.status_detail ?? "Mallard could not safely read this session."}`,
       };
     default:
-      return { icon: "help-circle" as const, className: "needs-baseline", label: `Comparison baseline needed in ${storageName}. Pull or Push to establish one.` };
+      return { icon: "cloud-off", className: "needs-baseline", label: `Comparison baseline needed in ${storageName}. Pull or Push to establish one.` };
   }
 }
 
@@ -290,11 +289,7 @@ function ThreadSyncIndicator({ entry, storageName }: { entry: ThreadSyncEntry; s
       aria-label={presentation.label}
       tabIndex={0}
     >
-      {presentation.glyph
-        ? <span className="v3-thread-sync-glyph" aria-hidden="true">{presentation.glyph}</span>
-        : presentation.icon
-          ? <Icon name={presentation.icon} size={13} />
-          : null}
+      <Icon name={presentation.icon} size={13} />
     </span>
   );
 }
@@ -634,15 +629,15 @@ export function ProjectChatHistoryContent({
                   <span className="v3-thread-sync-summary" aria-label={`Visible thread comparison with ${comparisonStorageName}`}>
                     {visibleComparisonCounts.local > 0 && <span className="local" title={`${visibleComparisonCounts.local} local thread change${visibleComparisonCounts.local === 1 ? "" : "s"}`}><Icon name="upload" size={12} />{visibleComparisonCounts.local}</span>}
                     {visibleComparisonCounts.storage > 0 && <span className="storage" title={`${visibleComparisonCounts.storage} thread change${visibleComparisonCounts.storage === 1 ? "" : "s"} in ${comparisonStorageName}`}><Icon name="download" size={12} />{visibleComparisonCounts.storage}</span>}
-                    {visibleComparisonCounts.diverged > 0 && <span className="diverged" title={`${visibleComparisonCounts.diverged} diverged thread${visibleComparisonCounts.diverged === 1 ? "" : "s"}`}><Icon name="alert-triangle" size={12} />{visibleComparisonCounts.diverged}</span>}
-                    {visibleComparisonCounts.unavailable > 0 && <span className="unavailable" title={`${visibleComparisonCounts.unavailable} thread${visibleComparisonCounts.unavailable === 1 ? " is" : "s are"} unavailable for sync`}><Icon name="ban" size={12} />{visibleComparisonCounts.unavailable}</span>}
-                    {visibleComparisonCounts.needsBaseline > 0 && <span className="needs-baseline" title={`${visibleComparisonCounts.needsBaseline} thread${visibleComparisonCounts.needsBaseline === 1 ? " needs" : "s need"} a comparison baseline`}><Icon name="help-circle" size={12} />{visibleComparisonCounts.needsBaseline}</span>}
+                    {visibleComparisonCounts.diverged > 0 && <span className="diverged" title={`${visibleComparisonCounts.diverged} diverged thread${visibleComparisonCounts.diverged === 1 ? "" : "s"}`}><Icon name="git-compare-arrows" size={12} />{visibleComparisonCounts.diverged}</span>}
+                    {visibleComparisonCounts.unavailable > 0 && <span className="unavailable" title={`${visibleComparisonCounts.unavailable} thread${visibleComparisonCounts.unavailable === 1 ? " is" : "s are"} unavailable for sync`}><Icon name="octagon-x" size={12} />{visibleComparisonCounts.unavailable}</span>}
+                    {visibleComparisonCounts.needsBaseline > 0 && <span className="needs-baseline" title={`${visibleComparisonCounts.needsBaseline} thread${visibleComparisonCounts.needsBaseline === 1 ? " needs" : "s need"} a comparison baseline`}><Icon name="cloud-off" size={12} />{visibleComparisonCounts.needsBaseline}</span>}
                   </span>
                 )}
               </span>
             )}
-            {comparisonLoading && <span className="v3-thread-sync-loading" role="status" aria-label={`Comparing threads with ${activeStorageName ?? "storage"}`}><span className="status-loader" /></span>}
-            {comparisonError && <span className="v3-thread-sync-error" tabIndex={0} data-tooltip={comparisonError} aria-label={`Storage comparison failed: ${comparisonError}`}><Icon name="alert-triangle" size={13} /></span>}
+            {comparisonLoading && <span className="v3-thread-sync-loading" role="status" aria-label={`Comparing threads with ${activeStorageName ?? "storage"}`}><Icon name="refresh" size={13} className="icon-spin" /></span>}
+            {comparisonError && <span className="v3-thread-sync-error" tabIndex={0} data-tooltip={comparisonError} aria-label={`Storage comparison failed: ${comparisonError}`}><Icon name="octagon-x" size={13} /></span>}
             <button type="button" className="v3-history-icon-action v3-history-refresh" onClick={onRefresh} disabled={loading || comparisonLoading}
               title="Refresh activity" aria-label="Refresh activity"><Icon name="refresh" size={15} className={loading || comparisonLoading ? "icon-spin" : undefined} /></button>
           </div>

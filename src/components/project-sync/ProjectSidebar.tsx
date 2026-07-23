@@ -44,7 +44,7 @@ interface Props {
   onToggleActivity: () => void;
   onAddProject: () => void;
   onRefresh: () => void;
-  onOpenStorage: (storageId: string) => void;
+  onOpenStorage: (storageId: string, settingsExpanded: boolean) => void;
   onRemoveStorage: (storageId: string) => void;
   onAddStorage: () => void;
 }
@@ -166,7 +166,6 @@ export default function ProjectSidebar({
           <div className="sidebar-section-heading">
             <div className="sidebar-section-label">
               <span className="sidebar-section-title">Projects</span>
-              <span className="sidebar-section-count">{projects.length}</span>
             </div>
             <div className="sidebar-heading-actions">
               <button
@@ -308,7 +307,6 @@ export default function ProjectSidebar({
           <div className="sidebar-section-heading">
             <div className="sidebar-section-label">
               <span className="sidebar-section-title">Storage</span>
-              <span className="sidebar-section-count">{storages.length}</span>
             </div>
             <button
               type="button"
@@ -333,9 +331,10 @@ export default function ProjectSidebar({
                   <button
                     type="button"
                     className="sidebar-profile-main"
-                    onClick={() => onOpenStorage(storage.id)}
+                    onClick={() => onOpenStorage(storage.id, false)}
                     disabled={busy}
-                    title={`Configure ${storageName}`}
+                    title={`Open ${storageName}`}
+                    aria-label={`Open ${storageName}`}
                   >
                     <Icon name={storage.kind === "local" ? "drive" : "cloud"} size={16} />
                     <span>{storage.name || "(unnamed)"}</span>
@@ -343,7 +342,7 @@ export default function ProjectSidebar({
                   <div className="sidebar-profile-actions">
                     <button
                       type="button"
-                      onClick={() => onOpenStorage(storage.id)}
+                      onClick={() => onOpenStorage(storage.id, true)}
                       disabled={busy}
                       title={`Storage settings for ${storageName}`}
                       aria-label={`Storage settings for ${storageName}`}

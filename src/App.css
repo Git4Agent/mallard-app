@@ -5103,6 +5103,7 @@ summary:focus-visible {
   min-height: 34px;
   display: flex;
   align-items: center;
+  flex-wrap: nowrap;
   gap: 7px;
   padding: 0 12px;
   border-top: 1px solid var(--border);
@@ -5151,8 +5152,10 @@ summary:focus-visible {
 .project-profile-storage-actions {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 2px;
   margin-left: auto;
+  white-space: nowrap;
 }
 
 .project-profile-storage-heading .profile-link-another {
@@ -5168,6 +5171,12 @@ summary:focus-visible {
 .project-profile-storage-heading .profile-link-another.active {
   background: var(--bg-hover);
   color: var(--text-0);
+}
+
+.project-profile-storage-heading .profile-storage-icon-action {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
 }
 
 .project-profile-group .profile-link-no-storage {
@@ -5249,6 +5258,7 @@ summary:focus-visible {
 }
 
 .v3-project-combined-page .project-profile-storage-list .storage-link-block.selected {
+  border-top: 0;
   background: var(--surface-subtle);
   box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 72%, transparent);
 }
@@ -5280,47 +5290,43 @@ summary:focus-visible {
   font-size: 10.5px;
 }
 
-.v3-project-combined-page .storage-link-configure {
+.v3-project-combined-page .storage-link-copy .storage-link-meta > small {
+  font-size: 9.5px;
+}
+
+.v3-project-combined-page .storage-link-more {
   width: 30px;
   height: 30px;
   border-radius: 6px;
 }
 
-.v3-project-combined-page .storage-link-unlink {
-  width: 30px;
-  height: 30px;
-  min-height: 30px;
-  justify-content: center;
-  padding: 0;
-}
-
-.v3-project-combined-page .storage-link-row-controls {
-  gap: 2px;
-  margin-right: 6px;
-  padding-right: 8px;
-  border-right: 1px solid var(--border);
-}
-
 .v3-project-combined-page .storage-link-actions {
   align-self: center;
-  gap: 0;
+  gap: 8px;
   padding: 0 8px;
   border-left: 0;
 }
 
 .v3-project-combined-page .storage-link-action-group {
-  gap: 4px;
+  overflow: hidden;
+  gap: 0;
+  margin: 0;
   padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-muted) 58%, transparent);
 }
 
 .v3-project-combined-page .storage-link-sync {
-  min-height: 32px;
-  padding: 0 10px;
+  min-height: 30px;
+  padding: 0 11px;
+  border-radius: 0;
   background: transparent;
   font-size: 11px;
+}
+
+.v3-project-combined-page .storage-link-sync + .storage-link-sync {
+  border-left: 1px solid var(--border);
 }
 
 .v3-project-combined-page .storage-link-sync-secondary {
@@ -5333,14 +5339,14 @@ summary:focus-visible {
 }
 
 .v3-project-combined-page .storage-link-sync-commit {
-  border: 1px solid var(--button-primary-border);
-  background: var(--button-primary-bg);
+  border: 0;
+  background: transparent;
   font-weight: 620;
 }
 
 .v3-project-combined-page .storage-link-sync-commit:hover:not(:disabled),
 .v3-project-combined-page .storage-link-sync-commit.active {
-  background: var(--button-primary-hover);
+  background: var(--bg-hover);
 }
 
 .v3-project-heading-identity {
@@ -6690,6 +6696,14 @@ summary:focus-visible {
   background: var(--surface-row-active);
 }
 
+.storage-link-block.storage-actions-open {
+  position: relative;
+  z-index: 10;
+  overflow: visible;
+  border-color: var(--border-strong);
+  background: var(--surface-row-active);
+}
+
 .storage-link-row {
   min-height: 68px;
   display: flex;
@@ -6810,6 +6824,28 @@ summary:focus-visible {
   font-size: 12px;
 }
 
+.storage-link-copy .storage-link-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.storage-link-copy .storage-link-meta > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.storage-link-copy .storage-link-meta > small {
+  flex: 0 0 auto;
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .storage-link-menu {
   width: 100%;
   overflow: hidden;
@@ -6911,7 +6947,14 @@ summary:focus-visible {
   font-size: 10.5px;
 }
 
-.storage-link-configure {
+.storage-link-overflow {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.storage-link-more {
   width: 34px;
   height: 34px;
   display: inline-flex;
@@ -6919,72 +6962,105 @@ summary:focus-visible {
   justify-content: center;
   flex-shrink: 0;
   padding: 0;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text-1);
-  cursor: pointer;
-  transition: background 140ms ease, color 140ms ease;
-}
-
-.storage-link-configure:hover:not(:disabled) {
-  background: var(--button-bg-hover);
-  color: var(--text-0);
-}
-
-.storage-link-configure:disabled {
-  opacity: var(--button-disabled-opacity);
-  cursor: not-allowed;
-}
-
-.storage-link-configure.active {
-  background: var(--button-bg-hover);
-  color: var(--accent);
-}
-
-.storage-link-configure:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
-
-.storage-link-row-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex: 0 0 auto;
-}
-
-.storage-link-unlink {
-  width: 34px;
-  height: 34px;
-  min-height: 34px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
+  border: 1px solid var(--border);
   border-radius: 7px;
   background: transparent;
   color: var(--text-2);
   font: inherit;
-  font-size: 10.5px;
   cursor: pointer;
-  transition: background 140ms ease, color 140ms ease;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
-.storage-link-unlink:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--red) 10%, transparent);
-  color: var(--red);
+.storage-link-more:hover:not(:disabled),
+.storage-link-overflow.open .storage-link-more {
+  border-color: var(--border-strong);
+  background: var(--button-bg-hover);
+  color: var(--text-0);
 }
 
-.storage-link-unlink:focus-visible {
+.storage-link-more:disabled {
+  opacity: var(--button-disabled-opacity);
+  cursor: not-allowed;
+}
+
+.storage-link-more:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 
-.storage-link-unlink:disabled {
+.storage-link-actions-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 190px;
+  overflow: hidden;
+  padding: 4px;
+  border: 1px solid var(--border-mid);
+  border-radius: 9px;
+  background: var(--surface-popover);
+  box-shadow: var(--shadow-popover);
+  color: var(--text-1);
+  animation: storage-actions-menu-reveal 120ms ease-out both;
+}
+
+.storage-link-actions-menu[hidden] {
+  display: none;
+}
+
+@keyframes storage-actions-menu-reveal {
+  from { opacity: 0; transform: translateY(-3px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.storage-link-actions-menu-item {
+  width: 100%;
+  min-height: 32px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.storage-link-actions-menu-item:hover:not(:disabled),
+.storage-link-actions-menu-item:focus-visible {
+  outline: 0;
+  background: var(--bg-hover);
+  color: var(--text-0);
+}
+
+.storage-link-actions-menu-item.danger:hover:not(:disabled),
+.storage-link-actions-menu-item.danger:focus-visible {
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  color: var(--red);
+}
+
+.storage-link-actions-menu-item:disabled {
   opacity: var(--button-disabled-opacity);
   cursor: not-allowed;
+}
+
+.storage-link-actions-menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+.storage-link-actions-divider {
+  width: 1px;
+  height: 24px;
+  flex: 0 0 auto;
+  background: var(--border);
 }
 
 .storage-link-profile-section {
@@ -7064,7 +7140,7 @@ summary:focus-visible {
   flex-shrink: 0;
 }
 
-/* Linked storage actions stay visible; the profile gear opens secondary details. */
+/* Keep sync actions visible; infrequent storage management lives in the overflow menu. */
 div.storage-link-main {
   cursor: default;
 }
@@ -7268,6 +7344,11 @@ div.storage-link-main {
     border-top: 1px solid var(--border);
     border-left: 0;
   }
+
+  .storage-link-actions-menu {
+    right: auto;
+    left: 0;
+  }
 }
 
 @container (max-width: 480px) {
@@ -7391,16 +7472,10 @@ div.storage-link-main {
   flex-shrink: 0;
 }
 
-.v3-storage-details-toggle {
-  gap: 6px;
-}
-
-.v3-storage-details-chevron {
-  transition: transform 150ms ease;
-}
-
-.v3-storage-details-toggle[aria-expanded="true"] .v3-storage-details-chevron {
-  transform: rotate(180deg);
+.v3-storage-settings-icon {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
 }
 
 .v3-storage-details-panel {
@@ -8600,14 +8675,13 @@ div.storage-link-main {
   color: var(--text-3);
 }
 .v3-capability-kind { background: var(--surface-muted); color: var(--text-2); }
-.v3-capability-state.synced,
-.v3-capability-state.installed { color: var(--green); }
-.v3-capability-state.local { color: var(--accent); }
-.v3-capability-state.storage { color: var(--text-1); }
-.v3-capability-state.diverged,
-.v3-capability-state.disabled { color: var(--yellow); }
+.v3-capability-state.synced { color: var(--text-2); }
+.v3-capability-state.local,
+.v3-capability-state.storage { color: var(--blue); }
+.v3-capability-state.diverged { color: var(--yellow); }
 .v3-capability-state.blocked { color: var(--red); }
-.v3-capability-state.unknown { color: var(--text-3); }
+.v3-capability-state.disabled,
+.v3-capability-state.unknown { color: var(--text-2); }
 
 .v3-capability-copy {
   min-width: 0;
@@ -8865,11 +8939,11 @@ div.storage-link-main {
   gap: 3px;
 }
 
-.v3-thread-sync-summary .local { color: var(--accent); }
-.v3-thread-sync-summary .storage { color: var(--text-1); }
+.v3-thread-sync-summary .local,
+.v3-thread-sync-summary .storage { color: var(--blue); }
 .v3-thread-sync-summary .diverged { color: var(--yellow); }
 .v3-thread-sync-summary .unavailable { color: var(--red); }
-.v3-thread-sync-summary .needs-baseline { color: var(--text-3); }
+.v3-thread-sync-summary .needs-baseline { color: var(--text-2); }
 
 .v3-thread-sync-loading {
   width: 24px;
@@ -8877,11 +8951,7 @@ div.storage-link-main {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-}
-
-.v3-thread-sync-loading .status-loader {
-  width: 12px;
-  height: 12px;
+  color: var(--blue);
 }
 
 .v3-history-branch-select {
@@ -9371,23 +9441,13 @@ div.storage-link-main {
   flex: 0 0 auto;
 }
 
-.v3-thread-sync-glyph {
-  display: block;
-  min-width: 13px;
-  color: currentColor;
-  font-family: var(--font);
-  font-size: 14px;
-  font-weight: 750;
-  line-height: 1;
-  text-align: center;
-}
-
 .v3-thread-sync-indicator.synced { color: var(--text-2); }
-.v3-thread-sync-indicator.local { color: var(--green); }
+.v3-thread-sync-indicator.local,
 .v3-thread-sync-indicator.storage { color: var(--blue); }
-.v3-thread-sync-indicator.diverged,
-.v3-thread-sync-error { color: var(--yellow); }
-.v3-thread-sync-indicator.unavailable { color: var(--red); }
+.v3-thread-sync-indicator.diverged { color: var(--yellow); }
+.v3-thread-sync-indicator.unavailable,
+.v3-thread-sync-error { color: var(--red); }
+.v3-thread-sync-indicator.needs-baseline { color: var(--text-2); }
 
 .v3-thread-sync-indicator::after,
 .v3-thread-sync-error::after {

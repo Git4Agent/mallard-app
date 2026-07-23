@@ -44,11 +44,11 @@ interface ContentProps {
 }
 
 type StatusIcon =
-  | "alert-triangle"
-  | "ban"
-  | "check-circle"
+  | "badge-check"
+  | "cloud-off"
   | "download"
-  | "help-circle"
+  | "git-compare-arrows"
+  | "octagon-x"
   | "upload";
 
 interface StatusPresentation {
@@ -74,7 +74,7 @@ export function capabilityStatusPresentation(
 ): StatusPresentation {
   if (item.blocked_reason || item.state === "blocked") {
     return {
-      icon: "ban",
+      icon: "octagon-x",
       className: "blocked",
       label: "Blocked",
       detail: item.blocked_reason || "Mallard cannot safely capture this resource.",
@@ -82,7 +82,7 @@ export function capabilityStatusPresentation(
   }
   if (item.kind === "plugin" && item.enabled === false) {
     return {
-      icon: "alert-triangle",
+      icon: "cloud-off",
       className: "disabled",
       label: "Disabled",
       detail: "Installed locally but disabled in the provider configuration.",
@@ -92,13 +92,13 @@ export function capabilityStatusPresentation(
     case "synced":
       return item.kind === "plugin"
         ? {
-          icon: "check-circle",
+          icon: "badge-check",
           className: "synced",
           label: "Backup intent matches",
           detail: `The local plugin installation intent matches ${storageName}; plugin payload bytes are installer-owned.`,
         }
         : {
-          icon: "check-circle",
+          icon: "badge-check",
           className: "synced",
           label: "Up to date",
           detail: `The local skill content matches ${storageName}.`,
@@ -133,7 +133,7 @@ export function capabilityStatusPresentation(
       };
     case "diverged":
       return {
-        icon: "alert-triangle",
+        icon: "git-compare-arrows",
         className: "diverged",
         label: item.kind === "plugin" ? "Review intent" : "Review changes",
         detail: `The local and ${storageName} versions changed independently.`,
@@ -141,20 +141,20 @@ export function capabilityStatusPresentation(
     case "not_compared":
       return item.local_present
         ? {
-          icon: "check-circle",
-          className: "installed",
+          icon: "cloud-off",
+          className: "unknown",
           label: item.kind === "plugin" ? "Installed" : "Available locally",
           detail: "Select a reachable storage to compare backup status.",
         }
         : {
-          icon: "help-circle",
+          icon: "cloud-off",
           className: "unknown",
           label: "Unavailable",
           detail: "This resource is not available on this machine.",
         };
     default:
       return {
-        icon: "help-circle",
+        icon: "cloud-off",
         className: "unknown",
         label: "Status unknown",
         detail: item.message || "Mallard could not safely compare this resource.",

@@ -104,7 +104,7 @@ test("binding setup renders one profile editor behind an explicit agent choice",
   assert.doesNotMatch(html, /aria-label="Claude profile"/);
 });
 
-test("the configured profile keeps a repair action inline with the storage heading", () => {
+test("the configured profile keeps storage identity first and moves utility actions into an overflow menu", () => {
   const projectId = "project-one";
   const storageId = "storage-one";
   const secondStorageId = "storage-two";
@@ -178,6 +178,19 @@ test("the configured profile keeps a repair action inline with the storage headi
           local_dir: "",
           included_default_exclusions: [],
         },
+        {
+          id: "storage-available",
+          name: "Archive storage",
+          kind: "local",
+          bucket: "",
+          access_key_id: "",
+          secret_access_key: "",
+          account_id: "",
+          s3_endpoint: "",
+          region: "",
+          local_dir: "/Users/test/archive",
+          included_default_exclusions: [],
+        },
       ]}
       links={[
         {
@@ -217,54 +230,85 @@ test("the configured profile keeps a repair action inline with the storage headi
   );
 
   const warningIndex = html.indexOf("conversation-path-repair-notice");
-  const storageHeadingIndex = html.indexOf("project-profile-storage-heading");
-  const storageActionsIndex = html.indexOf("project-profile-storage-actions", storageHeadingIndex);
-  const addStorageIndex = html.indexOf(">Add storage<", storageHeadingIndex);
   const storageIndex = html.indexOf("storage-link-block");
+  const storageRowIndex = html.indexOf("storage-link-row", storageIndex);
+  const storageIdentityIndex = html.indexOf("storage-link-storage-section", storageRowIndex);
+  const storageActionsIndex = html.indexOf("storage-link-actions", storageIdentityIndex);
+  const storageOverflowIndex = html.indexOf("storage-link-overflow", storageActionsIndex);
+  const storageMoreIndex = html.indexOf('aria-label="Storage actions"', storageOverflowIndex);
+  const storageActionsMenuIndex = html.indexOf('role="menu" aria-label="Actions for Local storage"', storageMoreIndex);
+  const linkStorageIndex = html.indexOf(">Link storage<", storageActionsMenuIndex);
+  const addStorageIndex = html.indexOf(">Add storage<", storageActionsMenuIndex);
+  const configureStorageIndex = html.indexOf(">Storage settings<", storageActionsMenuIndex);
+  const unlinkStorageIndex = html.indexOf(">Unlink storage<", storageActionsMenuIndex);
+  const storageActionsDividerIndex = html.indexOf("storage-link-actions-divider", unlinkStorageIndex);
+  const syncActionsIndex = html.indexOf('role="group" aria-label="Sync actions"', storageActionsDividerIndex);
   const activityIndex = html.indexOf(">Activity<");
 
+  assert.ok(storageIndex >= 0);
   assert.ok(warningIndex >= 0);
-  assert.ok(warningIndex > storageHeadingIndex);
-  assert.ok(storageActionsIndex > warningIndex);
-  assert.ok(addStorageIndex > storageActionsIndex);
-  assert.ok(addStorageIndex < storageIndex);
-  assert.ok(storageIndex > warningIndex);
+  assert.ok(warningIndex < storageIndex);
+  assert.ok(storageRowIndex > storageIndex);
+  assert.ok(storageIdentityIndex > storageRowIndex);
+  assert.ok(storageActionsIndex > storageIdentityIndex);
+  assert.ok(storageOverflowIndex > storageActionsIndex);
+  assert.ok(storageMoreIndex > storageOverflowIndex);
+  assert.ok(storageActionsMenuIndex > storageMoreIndex);
+  assert.ok(linkStorageIndex > storageActionsMenuIndex);
+  assert.ok(addStorageIndex > linkStorageIndex);
+  assert.ok(configureStorageIndex > addStorageIndex);
+  assert.ok(unlinkStorageIndex > configureStorageIndex);
+  assert.ok(storageActionsDividerIndex > unlinkStorageIndex);
+  assert.ok(syncActionsIndex > storageActionsDividerIndex);
   assert.ok(activityIndex > storageIndex);
   assert.doesNotMatch(html, /Show project settings|Hide project settings|Close project settings/);
   assert.equal(html.match(/conversation-path-repair-notice/g)?.length, 1);
   assert.equal(html.match(/class="storage-link-block/g)?.length, 1);
-  assert.equal(html.match(/class="storage-link-unlink"/g)?.length, 1);
+  assert.equal(html.match(/class="storage-link-more"/g)?.length, 1);
   assert.doesNotMatch(html, /type="radio"/);
   assert.match(html, /aria-label="Active storage: Local storage\. Choose another storage"/);
   assert.match(html, /class="storage-link-identity storage-link-switcher"/);
   assert.match(html, /role="menu" aria-label="Switch storage" hidden=""/);
   assert.equal(html.match(/class="storage-link-menu-option/g)?.length, 1);
-  assert.equal(html.match(/role="menuitem"/g)?.length, 1);
+  assert.equal(html.match(/class="storage-link-actions-menu-item/g)?.length, 4);
+  assert.equal(html.match(/role="menuitem"/g)?.length, 5);
   assert.doesNotMatch(html, /menuitemradio|aria-checked|storage-link-selector/);
-  assert.match(html, /storage-link-copy"><strong>Local storage<\/strong><span[^>]*>~\/storage<\/span>/);
+  assert.match(
+    html,
+    /storage-link-copy"><strong>Local storage<\/strong><span class="storage-link-meta"><span[^>]*>~\/storage<\/span><small>· 2 linked<\/small>/,
+  );
   assert.match(html, /storage-link-menu-copy"><strong>R2 storage<\/strong><span[^>]*>Bucket · agent<\/span>/);
   assert.match(html, /aria-label="Switch to R2 storage"/);
-  assert.match(html, /aria-label="Unlink Local storage from Project one"/);
-  assert.doesNotMatch(html, /aria-label="Unlink R2 storage from Project one"/);
-  assert.doesNotMatch(html, />Unlink<\/button>/);
-  assert.match(html, /role="group" aria-label="Storage settings"/);
+  assert.match(html, /aria-haspopup="menu" aria-expanded="false" aria-controls="storage-actions-project-one-storage-one"/);
+  assert.match(html, /role="menu" aria-label="Actions for Local storage" hidden=""/);
+  assert.match(html, /storage-link-actions-menu-item danger/);
   assert.match(html, /role="group" aria-label="Sync actions"/);
-  assert.ok(html.indexOf('aria-label="Storage settings"') < html.indexOf('aria-label="Sync actions"'));
+  assert.ok(storageMoreIndex < syncActionsIndex);
   const css = readFileSync("src/App.css", "utf8");
   const selectedStorageRule = css.match(/\.v3-project-combined-page \.project-profile-storage-list \.storage-link-block\.selected\s*\{[^}]+\}/s)?.[0] ?? "";
-  const storageControlsRule = css.match(/\.v3-project-combined-page \.storage-link-row-controls\s*\{[^}]+\}/s)?.[0] ?? "";
+  const storageMoreRule = css.match(/^\.storage-link-more\s*\{[^}]+\}/ms)?.[0] ?? "";
+  const storageActionsMenuRule = css.match(/\.storage-link-actions-menu\s*\{[^}]+\}/s)?.[0] ?? "";
+  const syncActionsRule = css.match(/\.v3-project-combined-page \.storage-link-action-group\s*\{[^}]+\}/s)?.[0] ?? "";
   const pushActionRule = css.match(/\.v3-project-combined-page \.storage-link-sync-commit\s*\{[^}]+\}/s)?.[0] ?? "";
   const storageMenuRule = css.match(/\.storage-link-menu\s*\{[^}]+\}/s)?.[0] ?? "";
   assert.match(selectedStorageRule, /inset 2px 0 0/);
-  assert.match(storageControlsRule, /border-right:\s*1px/);
-  assert.match(pushActionRule, /background:\s*var\(--button-primary-bg\)/);
+  assert.match(storageMoreRule, /border:\s*1px/);
+  assert.match(storageActionsMenuRule, /position:\s*absolute/);
+  assert.match(storageActionsMenuRule, /box-shadow:\s*var\(--shadow-popover\)/);
+  assert.match(syncActionsRule, /border:\s*1px/);
+  assert.match(syncActionsRule, /border-radius:\s*8px/);
+  assert.match(pushActionRule, /background:\s*transparent/);
   assert.match(storageMenuRule, /width:\s*100%/);
   assert.match(storageMenuRule, /border-top:\s*1px/);
   assert.doesNotMatch(storageMenuRule, /position:\s*absolute|box-shadow/);
+  assert.match(css, /\.project-profile-storage-heading\s*\{[^}]*flex-wrap:\s*nowrap;/);
   assert.equal(html.match(/class="storage-link-profile-section/g)?.length ?? 0, 0);
-  assert.match(html, /aria-label="2 linked storage locations"/);
-  assert.match(html, /project-profile-storage-icon/);
-  assert.match(html, /project-profile-storage-actions/);
+  assert.doesNotMatch(html, /project-profile-storage-heading|project-profile-storage-icon|project-profile-storage-actions/);
+  assert.doesNotMatch(html, /storage-link-utility-action|storage-link-configure|storage-link-unlink/);
+  assert.match(html, />Link storage<\/span><\/button>/);
+  assert.match(html, />Add storage<\/span><\/button>/);
+  assert.match(html, />Storage settings<\/span><\/button>/);
+  assert.match(html, />Unlink storage<\/span><\/button>/);
   assert.doesNotMatch(html, /Linked storage/);
   assert.doesNotMatch(html, /project-profile-group-footer/);
   assert.equal(html.match(/Default Codex/g)?.length, 1);

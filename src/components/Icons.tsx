@@ -3,11 +3,13 @@ import type { SVGProps } from "react";
 type IconName =
   | "activity"
   | "alert-triangle"
+  | "badge-check"
   | "ban"
   | "chevron-down"
   | "chevron-left"
   | "chevron-right"
   | "cloud"
+  | "cloud-off"
   | "computer"
   | "check-circle"
   | "download"
@@ -16,6 +18,7 @@ type IconName =
   | "folder"
   | "external-link"
   | "git-branch"
+  | "git-compare-arrows"
   | "git-folder"
   | "help-circle"
   | "info"
@@ -23,6 +26,7 @@ type IconName =
   | "lock"
   | "message"
   | "more"
+  | "octagon-x"
   | "openai"
   | "pause"
   | "play"
@@ -74,6 +78,12 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           <path d="M12 17h.01" />
         </>
       )}
+      {name === "badge-check" && (
+        <>
+          <path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z" />
+          <path d="m9 12 2 2 4-4" />
+        </>
+      )}
       {name === "ban" && (
         <>
           <circle cx="12" cy="12" r="9" />
@@ -83,6 +93,13 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
       {name === "cloud" && (
         <>
           <path d="M2.25 15a4.5 4.5 0 0 0 4.5 4.5H18a3.75 3.75 0 0 0 1.332-7.257 3 3 0 0 0-3.758-3.848 5.25 5.25 0 0 0-10.233 2.33A4.502 4.502 0 0 0 2.25 15Z" />
+        </>
+      )}
+      {name === "cloud-off" && (
+        <>
+          <path d="M10.94 5.274A7 7 0 0 1 15.71 10h1.79a4.5 4.5 0 0 1 4.222 6.057" />
+          <path d="M18.796 18.81A4.5 4.5 0 0 1 17.5 19H9A7 7 0 0 1 5.79 5.78" />
+          <path d="m2 2 20 20" />
         </>
       )}
       {name === "computer" && (
@@ -170,15 +187,29 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           <path d="M8 13h4a6 6 0 0 0 6-5" />
         </>
       )}
+      {name === "git-compare-arrows" && (
+        <>
+          <circle cx="5" cy="6" r="3" />
+          <path d="M12 6h5a2 2 0 0 1 2 2v7" />
+          <path d="m15 9-3-3 3-3" />
+          <circle cx="19" cy="18" r="3" />
+          <path d="M12 18H7a2 2 0 0 1-2-2V9" />
+          <path d="m9 15 3 3-3 3" />
+        </>
+      )}
       {name === "git-folder" && (
         <>
-          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
-          <g className="icon-git-folder-mark" stroke="currentColor" strokeWidth="2.2">
-            <circle cx="9" cy="9" r="1.5" fill="currentColor" stroke="none" />
-            <circle cx="15" cy="9.5" r="1.5" fill="currentColor" stroke="none" />
-            <circle cx="9" cy="16" r="1.5" fill="currentColor" stroke="none" />
-            <path d="M9 10.5v4" />
-            <path d="M9 12h2a4 4 0 0 0 4-4" />
+          <path
+            className="icon-git-folder-shell"
+            d="M3.5 17.5V7.75A2.25 2.25 0 0 1 5.75 5.5h3.72c.67 0 1.3.3 1.73.81L12.62 8h5.63a2.25 2.25 0 0 1 2.25 2.25v7.25a2.25 2.25 0 0 1-2.25 2.25H5.75A2.25 2.25 0 0 1 3.5 17.5Z"
+            strokeWidth="2.1"
+          />
+          <g className="icon-git-folder-mark" stroke="currentColor" strokeWidth="2">
+            <circle cx="10.1" cy="10.6" r="1.3" />
+            <circle cx="15.5" cy="13.2" r="1.3" />
+            <circle cx="8.5" cy="16.4" r="1.3" />
+            <path d="M10.1 11.9v.8c0 .67-.27 1.31-.74 1.78l-.46.46" />
+            <path d="M10.1 13.2h4.1" />
           </g>
         </>
       )}
@@ -194,6 +225,13 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           <path d="M12 12h.01" />
           <path d="M17 12h.01" />
           <path d="M7 12h.01" />
+        </>
+      )}
+      {name === "octagon-x" && (
+        <>
+          <path d="m15 9-6 6" />
+          <path d="M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z" />
+          <path d="m9 9 6 6" />
         </>
       )}
       {name === "openai" && (

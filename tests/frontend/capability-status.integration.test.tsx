@@ -223,6 +223,37 @@ test("capability status uses precise skill and plugin language", () => {
   assert.equal(capabilityStatusPresentation(plugin, "R2 backup").label, "Disabled");
 });
 
+test("capability status uses the quiet desktop sync vocabulary", () => {
+  const presentation = (state: string) => (
+    capabilityStatusPresentation(capability("standalone_skill", "review", state), "R2 backup")
+  );
+
+  assert.deepEqual(
+    ["synced", "local_only", "local_ahead", "storage_only", "storage_ahead", "diverged", "not_compared"].map((state) => {
+      const { icon, className } = presentation(state);
+      return { icon, className };
+    }),
+    [
+      { icon: "badge-check", className: "synced" },
+      { icon: "upload", className: "local" },
+      { icon: "upload", className: "local" },
+      { icon: "download", className: "storage" },
+      { icon: "download", className: "storage" },
+      { icon: "git-compare-arrows", className: "diverged" },
+      { icon: "cloud-off", className: "unknown" },
+    ],
+  );
+
+  const blocked = capability("standalone_skill", "review", "blocked");
+  assert.deepEqual(
+    {
+      icon: capabilityStatusPresentation(blocked, "R2 backup").icon,
+      className: capabilityStatusPresentation(blocked, "R2 backup").className,
+    },
+    { icon: "octagon-x", className: "blocked" },
+  );
+});
+
 test("the Skills status view excludes plugins", () => {
   const skill = {
     ...capability("standalone_skill", "security-review", "local_ahead"),

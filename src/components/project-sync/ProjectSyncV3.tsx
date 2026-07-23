@@ -242,7 +242,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
   const [activeStorageByProject, setActiveStorageByProject] = useState<Record<string, string>>(storedActiveStorages);
   const [activeStorageSettingsId, setActiveStorageSettingsId] = useState<string | null>(null);
   const [storageEditorRequest, setStorageEditorRequest] = useState<
-    | { mode: "toggle"; storageId: string; requestId: number }
+    | { mode: "open"; storageId: string; settingsExpanded: boolean; requestId: number }
     | { mode: "create"; storageKind: "local" | "s3"; requestId: number }
     | { mode: "close"; requestId: number }
     | null
@@ -2425,14 +2425,15 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
         }}
         onAddProject={() => void beginAddProject()}
         onRefresh={() => void refresh()}
-        onOpenStorage={(storageId) => {
+        onOpenStorage={(storageId, settingsExpanded) => {
           setSetupDraftId(null);
           setPendingPush(null);
           setPushError(null);
           if (restorePlan) closePullReview();
           setStorageEditorRequest((current) => ({
-            mode: "toggle",
+            mode: "open",
             storageId,
+            settingsExpanded,
             requestId: (current?.requestId ?? 0) + 1,
           }));
         }}

@@ -104,12 +104,14 @@ export function StorageEditor({
   onChange,
   onRemove,
   primaryAction,
+  showNameField = true,
 }: {
   storage: StorageConfigV3;
   disabled: boolean;
   onChange: (storage: StorageConfigV3) => void;
   onRemove?: () => void;
   primaryAction?: ReactNode;
+  showNameField?: boolean;
 }) {
   const set = (patch: Partial<StorageConfigV3>) => onChange({ ...storage, ...patch });
   const derivedS3ApiUrl = r2S3ApiUrl(storage.account_id ?? "", storage.bucket ?? "");
@@ -148,7 +150,9 @@ export function StorageEditor({
     <article className="v3-storage-card">
       <header>
         <span className="v3-storage-icon"><Icon name={storage.kind === "local" ? "drive" : "cloud"} size={18} /></span>
-        <input value={storage.name} onChange={(event) => set({ name: event.target.value })} disabled={disabled} aria-label="Storage name" />
+        {showNameField && (
+          <input value={storage.name} onChange={(event) => set({ name: event.target.value })} disabled={disabled} aria-label="Storage name" />
+        )}
         <div className="v3-segmented" role="radiogroup" aria-label="Storage type">
           <button
             type="button"

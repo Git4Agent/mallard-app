@@ -95,29 +95,35 @@ test("the branch picker exposes branch state without using the native select men
   assert.doesNotMatch(html, /<select/);
 });
 
-test("V3 thread indicators use the file-status symbol vocabulary", () => {
+test("V3 thread indicators use the quiet desktop sync vocabulary", () => {
   const presentation = (state: Parameters<typeof threadSyncPresentation>[0]["state"]) => (
     threadSyncPresentation({ state } as Parameters<typeof threadSyncPresentation>[0], "Storage")
   );
 
   assert.deepEqual(
-    ["local_only", "local_ahead", "storage_only", "storage_ahead", "synced"].map((state) => {
-      const { glyph, className } = presentation(state as Parameters<typeof presentation>[0]);
-      return { glyph, className };
+    ["synced", "local_only", "local_ahead", "storage_only", "storage_ahead", "diverged", "unavailable", "unknown"].map((state) => {
+      const { icon, className } = presentation(state as Parameters<typeof presentation>[0]);
+      return { icon, className };
     }),
     [
-      { glyph: "+", className: "local" },
-      { glyph: "●", className: "local" },
-      { glyph: "↓", className: "storage" },
-      { glyph: "↓", className: "storage" },
-      { glyph: "●", className: "synced" },
+      { icon: "badge-check", className: "synced" },
+      { icon: "upload", className: "local" },
+      { icon: "upload", className: "local" },
+      { icon: "download", className: "storage" },
+      { icon: "download", className: "storage" },
+      { icon: "git-compare-arrows", className: "diverged" },
+      { icon: "octagon-x", className: "unavailable" },
+      { icon: "cloud-off", className: "needs-baseline" },
     ],
   );
 
   const css = readFileSync("src/App.css", "utf8");
   assert.match(css, /\.v3-thread-sync-indicator\.synced \{ color: var\(--text-2\); \}/);
-  assert.match(css, /\.v3-thread-sync-indicator\.local \{ color: var\(--green\); \}/);
-  assert.match(css, /\.v3-thread-sync-indicator\.storage \{ color: var\(--blue\); \}/);
+  assert.match(css, /\.v3-thread-sync-indicator\.local,\s*\n\.v3-thread-sync-indicator\.storage \{ color: var\(--blue\); \}/);
+  assert.match(css, /\.v3-thread-sync-indicator\.diverged \{ color: var\(--yellow\); \}/);
+  assert.match(css, /\.v3-thread-sync-indicator\.unavailable,\s*\n\.v3-thread-sync-error \{ color: var\(--red\); \}/);
+  assert.match(css, /\.v3-thread-sync-indicator\.needs-baseline \{ color: var\(--text-2\); \}/);
+  assert.match(css, /\.v3-thread-sync-loading\s*\{[^}]*color:\s*var\(--blue\);/s);
 });
 
 test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
@@ -606,8 +612,9 @@ test("selected storage adds directional indicators and storage-only threads", ()
   assert.doesNotMatch(html, /title="2 local thread changes"/);
   assert.match(html, /aria-label="Newer on this computer\. Push to update Local storage 1\."/);
   assert.match(html, /aria-label="Only in Local storage 1\. Pull to download it here\."/);
-  assert.match(html, /v3-thread-sync-indicator local[^>]+aria-label="Newer on this computer\.[^"]+"[^>]*><span class="v3-thread-sync-glyph" aria-hidden="true">●<\/span>/);
-  assert.match(html, /v3-thread-sync-indicator storage[^>]+aria-label="Only in Local storage 1\.[^"]+"[^>]*><span class="v3-thread-sync-glyph" aria-hidden="true">↓<\/span>/);
+  assert.match(html, /v3-thread-sync-indicator local[^>]+aria-label="Newer on this computer\.[^"]+"[^>]*><svg[^>]+>/);
+  assert.match(html, /v3-thread-sync-indicator storage[^>]+aria-label="Only in Local storage 1\.[^"]+"[^>]*><svg[^>]+>/);
+  assert.doesNotMatch(html, /v3-thread-sync-glyph/);
   assert.match(html, /Stored thread 019f7798/);
   assert.match(html, /aria-label="2 threads"/);
   assert.ok(
@@ -747,10 +754,13 @@ test("an invalid persisted Codex profile stays in the project workspace", () => 
   assert.doesNotMatch(html, /Open Project Settings|Project settings/);
 });
 
-test("the Git project icon uses a hollow folder with a centered branch", () => {
+test("the Git project icon uses the bold hollow-folder design with an oversized branch", () => {
   const html = renderToStaticMarkup(<Icon name="git-folder" size={16} />);
+  assert.match(html, /icon-git-folder-shell/);
   assert.match(html, /icon-git-folder-mark/);
-  assert.match(html, /cx="9" cy="9"/);
+  assert.match(html, /cx="10.1" cy="10.6" r="1.3"/);
+  assert.match(html, /cx="8.5" cy="16.4" r="1.3"/);
+  assert.doesNotMatch(html, /fill="currentColor"/);
   assert.doesNotMatch(html, /d="M3 10h18"/);
 });
 
@@ -806,6 +816,7 @@ test("completed projects use their main row for history and only mark Git reposi
   assert.doesNotMatch(html, /Default Codex|myconf3 · Codex/);
   assert.match(html, /role="separator" aria-label="Resize Projects and Storage sections" aria-orientation="horizontal"/);
   assert.match(html, /aria-valuenow="56"/);
+  assert.doesNotMatch(html, /sidebar-section-count/);
   assert.doesNotMatch(html, /Git Based|Non-Git Based/);
   assert.doesNotMatch(html, /Project settings for Mallard local/);
   assert.doesNotMatch(html, /View history for draft repo/);
