@@ -62,6 +62,16 @@ test("the desktop shell supports a persistent sidebar toggle and keyboard shortc
   assert.deepEqual(tauriConfig.app.windows[0].trafficLightPosition, { x: 8, y: 29 });
 });
 
+test("the titlebar marks active Git projects with the Git folder icon", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
+
+  assert.match(
+    workspace,
+    /const workspaceIcon = !activeDraftSummary && activeSummary\?\.is_git_repository === true\s*\? "git-folder"\s*: "folder";/,
+  );
+  assert.match(workspace, /<Icon name=\{workspaceIcon\} size=\{16\} \/>/);
+});
+
 test("the shell blocks copied host state until it is registered locally", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
   const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");

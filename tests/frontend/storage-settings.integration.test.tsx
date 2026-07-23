@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
@@ -146,4 +147,16 @@ test("storage settings identify the destination with its storage icon", () => {
   assert.match(localHtml, /title="Local folder: Local storage 1"/);
   assert.match(localHtml, />Local storage 1</);
   assert.match(cloudHtml, /title="Cloudflare R2: R2 storage"/);
+});
+
+test("configured storage opens repository-first with details folded", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+
+  assert.match(workspace, /setStorageDetailsExpanded\(!storageConfigReady\(storage\)\)/);
+  assert.match(workspace, /storageDetailsExpanded \? "Hide settings" : "Edit settings"/);
+  assert.match(workspace, /aria-expanded=\{storageDetailsExpanded\}/);
+  assert.match(workspace, /showStorageDetails \? " settings-expanded" : " settings-collapsed"/);
+  assert.match(workspace, /hidden=\{!showStorageDetails\}/);
+  assert.match(workspace, /\{showStorageDetails && \(/);
+  assert.match(workspace, /setStorageDetailsExpanded\(false\);\s*await loadStorageBundles/);
 });

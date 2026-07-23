@@ -74,7 +74,7 @@ interface Props {
   onRefresh: () => void;
   onAddProject: () => void;
   onOpenStorageSettings: (storageId?: string) => void;
-  onSaveStorage: (storage: StorageConfigV3) => Promise<void> | void;
+  onSaveStorage: (storage: StorageConfigV3) => Promise<boolean | void> | boolean | void;
   storageEditorRequest?: StorageEditorRequest | null;
   onStorageEditorRequestHandled?: () => void;
   onStorageEditorChange?: (storageId: string | null) => void;
@@ -297,6 +297,7 @@ export default function ProjectLinksWorkspace({
   const [runningAction, setRunningAction] = useState<string | null>(null);
   const [editingStorage, setEditingStorage] = useState<LinkKey | null>(null);
   const [storageDraft, setStorageDraft] = useState<StorageConfigV3 | null>(null);
+  const [storageDetailsExpanded, setStorageDetailsExpanded] = useState(false);
   const [bundlePage, setBundlePage] = useState<BundlePage | null>(null);
   const [bundleLoading, setBundleLoading] = useState(false);
   const [bundleError, setBundleError] = useState<string | null>(null);
@@ -416,6 +417,7 @@ export default function ProjectLinksWorkspace({
       bundleRequestRef.current += 1;
       setEditingStorage(null);
       setStorageDraft(null);
+      setStorageDetailsExpanded(false);
       setBundlePage(null);
       setBundleError(null);
       setBundleLoading(false);
@@ -427,6 +429,7 @@ export default function ProjectLinksWorkspace({
       bundleRequestRef.current += 1;
       setEditingStorage({ projectId: "", storageId: storage.id });
       setStorageDraft(storage);
+      setStorageDetailsExpanded(true);
       setBundlePage(null);
       setBundleError(null);
       setBundleLoading(false);
@@ -439,6 +442,7 @@ export default function ProjectLinksWorkspace({
       bundleRequestRef.current += 1;
       setEditingStorage(null);
       setStorageDraft(null);
+      setStorageDetailsExpanded(false);
       setBundlePage(null);
       setBundleError(null);
       setBundleLoading(false);
@@ -448,6 +452,7 @@ export default function ProjectLinksWorkspace({
 
     setEditingStorage({ projectId: "", storageId: storage.id });
     setStorageDraft({ ...storage });
+    setStorageDetailsExpanded(!storageConfigReady(storage));
     void loadStorageBundles(storage.id);
     onStorageEditorRequestHandled?.();
   }, [storageEditorRequest?.requestId]);
@@ -456,11 +461,13 @@ export default function ProjectLinksWorkspace({
     if (editingStorage?.storageId === storage.id) {
       setEditingStorage(null);
       setStorageDraft(null);
+      setStorageDetailsExpanded(false);
       return;
     }
 
     setEditingStorage({ projectId: "", storageId: storage.id });
     setStorageDraft({ ...storage });
+    setStorageDetailsExpanded(!storageConfigReady(storage));
     await loadStorageBundles(storage.id);
   };
 
@@ -511,6 +518,8 @@ export default function ProjectLinksWorkspace({
 
   if (editingStorage && storageDraft && editedStorageConfig) {
     const storageReady = storageConfigReady(storageDraft);
+    const showStorageDetails = creatingStorage || storageDetailsExpanded;
+    const storageDetailsId = `storage-${storageDraft.id}-settings`;
     return (
       <main className="v3-main v3-project-links-page v3-storage-settings-page">
         <section className="profile-links-section" aria-labelledby="storage-settings-heading">
@@ -521,38 +530,67 @@ export default function ProjectLinksWorkspace({
               </h1>
               <StorageSettingsMeta storage={storageDraft} creating={creatingStorage} />
             </div>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={() => {
-                setEditingStorage(null);
-                setStorageDraft(null);
-              }}
-              aria-label="Close storage settings"
-            >
-              <Icon name="x" size={14} />
-            </button>
-          </div>
-
-          <div ref={storageSettingsRef} className="v3-storage-settings-below v3-storage-settings-dedicated">
-            <StorageEditor
-              storage={storageDraft}
-              disabled={busy}
-              onChange={setStorageDraft}
-              primaryAction={(
+            <div className="v3-storage-settings-actions">
+              {!creatingStorage && (
                 <button
                   type="button"
-                  className="btn"
-                  disabled={busy || !storageReady || (!creatingStorage && JSON.stringify(storageDraft) === JSON.stringify(editedStorageConfig))}
-                  onClick={() => void run(`storage:${editedStorageConfig.id}`, async () => {
-                    await onSaveStorage(storageDraft);
-                    await loadStorageBundles(editedStorageConfig.id);
-                  })}
+                  className="btn btn-ghost v3-storage-details-toggle"
+                  onClick={() => setStorageDetailsExpanded((current) => !current)}
+                  disabled={busy}
+                  aria-controls={storageDetailsId}
+                  aria-expanded={storageDetailsExpanded}
                 >
-                  {runningAction === `storage:${editedStorageConfig.id}` ? "Saving…" : creatingStorage ? "Create storage" : "Save storage"}
+                  {storageDetailsExpanded ? "Hide settings" : "Edit settings"}
+                  <Icon name="chevron-down" size={12} className="v3-storage-details-chevron" />
                 </button>
               )}
-            />
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => {
+                  setEditingStorage(null);
+                  setStorageDraft(null);
+                  setStorageDetailsExpanded(false);
+                }}
+                aria-label="Close storage settings"
+              >
+                <Icon name="x" size={14} />
+              </button>
+            </div>
+          </div>
+
+          <div
+            ref={storageSettingsRef}
+            className={`v3-storage-settings-below v3-storage-settings-dedicated${showStorageDetails ? " settings-expanded" : " settings-collapsed"}`}
+          >
+            <div
+              id={storageDetailsId}
+              className="v3-storage-details-panel"
+              hidden={!showStorageDetails}
+            >
+              {showStorageDetails && (
+                <StorageEditor
+                  storage={storageDraft}
+                  disabled={busy}
+                  onChange={setStorageDraft}
+                  primaryAction={(
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy || !storageReady || (!creatingStorage && JSON.stringify(storageDraft) === JSON.stringify(editedStorageConfig))}
+                      onClick={() => void run(`storage:${editedStorageConfig.id}`, async () => {
+                        const saved = await onSaveStorage(storageDraft);
+                        if (saved === false) return;
+                        setStorageDetailsExpanded(false);
+                        await loadStorageBundles(editedStorageConfig.id);
+                      })}
+                    >
+                      {runningAction === `storage:${editedStorageConfig.id}` ? "Saving…" : creatingStorage ? "Create storage" : "Save storage"}
+                    </button>
+                  )}
+                />
+              )}
+            </div>
 
             {!creatingStorage && (
               <section className="v3-storage-repositories" aria-labelledby="storage-repositories-heading">

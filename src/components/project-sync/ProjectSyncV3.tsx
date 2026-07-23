@@ -554,6 +554,9 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     : null;
   const workspaceTitle = activeDraftSummary?.display_name
     ?? (activeSummary ? projectLabel(activeSummary) : "Projects");
+  const workspaceIcon = !activeDraftSummary && activeSummary?.is_git_repository === true
+    ? "git-folder"
+    : "folder";
   const restoreProfileLabel = restoreBinding
     ? [...new Set(Object.values(restoreBinding.profile_ids)
       .map((profileId) => profiles.find((profile) => profile.profile_id === profileId)?.display_name)
@@ -2092,7 +2095,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
   };
 
   const saveInlineStorage = async (storage: SyncConfigV3["storages"][number]) => {
-    await saveStorageConfig((current) => {
+    return saveStorageConfig((current) => {
       const exists = current.storages.some((candidate) => candidate.id === storage.id);
       return {
         ...current,
@@ -2457,7 +2460,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       <div className={`v3-workspace${resizingLog ? " resizing-log" : ""}`}>
         <header className="v3-titlebar" data-tauri-drag-region>
           <div className="v3-titlebar-context" data-tauri-drag-region title={workspaceTitle}>
-            <Icon name="folder" size={16} />
+            <Icon name={workspaceIcon} size={16} />
             <strong>{workspaceTitle}</strong>
             {activeDraftSummary && <span>Draft setup</span>}
           </div>

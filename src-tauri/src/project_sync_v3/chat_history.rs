@@ -211,7 +211,7 @@ struct MappingResult {
 #[cfg_attr(not(test), allow(dead_code))]
 struct GitDiscovery {
     selected_branch: String,
-    selected_available: bool,
+    selected_ref_available: bool,
     branches: Vec<GitBranchSummary>,
     commits: Vec<GitCommitSummary>,
     next_cursor: Option<String>,
@@ -305,7 +305,7 @@ pub fn get_project_chat_history(
         let github_repository_url = discover_github_repository_url(&resolved.project_root);
         // Mapping must use the complete bounded first-parent rail, rather than
         // just the visible page, so pagination does not change classification.
-        let all_commits = if discovery.selected_available {
+        let all_commits = if discovery.selected_ref_available {
             load_first_parent_commits(
                 &resolved.project_root,
                 &discovery.selected_branch,
@@ -366,7 +366,7 @@ pub fn get_project_chat_history(
         .any(|thread| thread.ended_at < window_start);
     let has_older_commits = git_page.as_ref().is_some_and(|_| {
         git.as_ref()
-            .is_some_and(|discovery| discovery.selected_available)
+            .is_some_and(|discovery| discovery.selected_ref_available)
             && load_first_parent_commits(
                 &resolved.project_root,
                 git.as_ref()
@@ -1875,11 +1875,11 @@ fn discover_git_history_with_recorded_branches(
         })
         .collect::<Vec<_>>();
 
-    let selected_available = branches
-        .iter()
-        .find(|branch| branch.name == selected)
-        .is_some_and(|branch| branch.available);
-    let all = if selected_available {
+    // An unborn current branch has a symbolic HEAD but no refs/heads entry
+    // until its first commit. Keep it visible as the current local branch,
+    // while avoiding a git log call against a revision that does not exist.
+    let selected_ref_available = available_names.contains(&selected);
+    let all = if selected_ref_available {
         load_first_parent_commits(project_root, &selected, MAX_GIT_COMMITS + 1)?
     } else {
         Vec::new()
@@ -1909,7 +1909,7 @@ fn discover_git_history_with_recorded_branches(
     };
     Ok(Some(GitDiscovery {
         selected_branch: selected,
-        selected_available,
+        selected_ref_available,
         branches,
         commits,
         next_cursor,
@@ -3365,6 +3365,35 @@ mod tests {
     }
 
     #[test]
+    fn git_history_allows_an_unborn_current_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        git(root, &["init", "-b", "main"]);
+
+        let discovery = discover_git_history(root, None, None, 50).unwrap().unwrap();
+        assert_eq!(discovery.selected_branch, "main");
+        assert!(!discovery.selected_ref_available);
+        assert!(discovery.commits.is_empty());
+        assert!(discovery.next_cursor.is_none());
+        assert_eq!(
+            discovery
+                .branches
+                .iter()
+                .find(|branch| branch.name == "main"),
+            Some(&GitBranchSummary {
+                name: "main".to_string(),
+                is_current: true,
+                available: true,
+            })
+        );
+
+        let requested = discover_git_history(root, Some("main"), None, 50)
+            .unwrap()
+            .unwrap();
+        assert!(requested.commits.is_empty());
+    }
+
+    #[test]
     fn github_remote_urls_are_canonicalized_without_credentials() {
         for (remote, expected) in [
             (
@@ -3460,7 +3489,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(!discovery.selected_available);
+        assert!(!discovery.selected_ref_available);
         assert!(discovery.commits.is_empty());
         assert_eq!(
             discovery

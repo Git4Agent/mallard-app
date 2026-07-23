@@ -7384,6 +7384,43 @@ div.storage-link-main {
   margin-top: 26px;
 }
 
+.v3-storage-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.v3-storage-details-toggle {
+  gap: 6px;
+}
+
+.v3-storage-details-chevron {
+  transition: transform 150ms ease;
+}
+
+.v3-storage-details-toggle[aria-expanded="true"] .v3-storage-details-chevron {
+  transform: rotate(180deg);
+}
+
+.v3-storage-details-panel {
+  animation: storage-link-reveal 160ms ease-out both;
+}
+
+.v3-storage-details-panel > .v3-storage-card {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.v3-storage-details-panel > .v3-storage-card > header {
+  background: transparent;
+}
+
+.v3-storage-settings-below.settings-collapsed > .v3-storage-repositories {
+  border-top: 0;
+}
+
 .v3-storage-repositories {
   border-top: 1px solid var(--border);
 }
