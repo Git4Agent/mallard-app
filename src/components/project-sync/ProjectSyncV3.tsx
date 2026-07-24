@@ -37,6 +37,7 @@ import type {
   SyncConfigV3,
   ThreadSyncComparison,
 } from "../../types";
+import { PROJECT_SYNC_SCHEMA } from "../../types";
 import Icon from "../Icons";
 import LogPanel, { ACTIVITY_LOG_TYPES } from "../LogPanel";
 import BundleConnectionDialog from "./BundleConnectionDialog";
@@ -77,7 +78,7 @@ interface Props {
 }
 
 const EMPTY_CONFIG: SyncConfigV3 = {
-  schema: 3,
+  schema: PROJECT_SYNC_SCHEMA,
   revision: 0,
   storages: [],
   projects: [],
@@ -711,8 +712,10 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     try {
       nextConfig = await projectSyncApi.getConfig();
       if (shellRequest.current !== requestId) return unavailableResult();
-      if (nextConfig.schema !== 3) {
-        throw new Error(`Expected project sync schema 3, received schema ${nextConfig.schema}`);
+      if (nextConfig.schema !== PROJECT_SYNC_SCHEMA) {
+        throw new Error(
+          `Expected project sync schema ${PROJECT_SYNC_SCHEMA}, received schema ${nextConfig.schema}`,
+        );
       }
       setConfig(nextConfig);
     } catch (reason) {

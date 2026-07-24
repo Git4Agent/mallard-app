@@ -483,8 +483,11 @@ export interface ProjectOriginTokens {
   origin_replica_token: string;
 }
 
+/** Schema of `~/.mallard/config.json`; must match the backend's LOCAL_SCHEMA. */
+export const PROJECT_SYNC_SCHEMA = 1;
+
 export interface SyncConfigV3 {
-  schema: 3;
+  schema: typeof PROJECT_SYNC_SCHEMA;
   revision: number;
   storages: StorageConfigV3[];
   projects: LocalProjectRegistration[];
