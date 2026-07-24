@@ -21,7 +21,7 @@ use super::domain::{
     DependencyActionKind, LogicalPath, PlanId, PortableOrigin, ProjectBinding, ThreadId,
     Provider, ResourceDescriptor, ResourceId, ResourceKind, RestoreAction,
     RestoreActionKind, RestorePlan, StorageId, Tombstone, TombstoneTarget, BUNDLE_SCHEMA_V4,
-    BUNDLE_SCHEMA_V6, RESTORE_PLAN_SCHEMA_V2,
+    BUNDLE_SCHEMA_V6, RESTORE_PLAN_SCHEMA,
 };
 use super::provider_capture::{self, CapturedResources};
 
@@ -1397,23 +1397,9 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             }
 
             let kind = restore_kind_for_file(logical_path, descriptor, entry)?;
-            // A conversation copied by an older Agent Sync release can still
-            // have the exact portable source digest. Treat it as the same
-            // known session so the path-only migration stays a safe default.
-            let approval_target_digest = target_state.digest.as_deref().map(|digest| {
-                if matches!(
-                    descriptor.kind,
-                    ResourceKind::CodexConversation | ResourceKind::ClaudeConversation
-                ) && digest == entry.sha256
-                {
-                    materialized_sha256.as_str()
-                } else {
-                    digest
-                }
-            });
             let requires_explicit_approval = action_needs_explicit_approval(
                 descriptor,
-                approval_target_digest,
+                target_state.digest.as_deref(),
                 &materialized_sha256,
             );
             actions.push(RestoreAction {
@@ -1533,7 +1519,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         }
         actions.sort_by(|a, b| a.action_id.cmp(&b.action_id));
         let plan = RestorePlan {
-            schema_version: RESTORE_PLAN_SCHEMA_V2,
+            schema_version: RESTORE_PLAN_SCHEMA,
             plan_id,
             storage_id: self.storage_id.clone(),
             bundle_id: bundle.snapshot.head.bundle_id.clone(),
@@ -1850,23 +1836,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_bundle_namespace_is_ignored_without_migration() {
+    fn object_keys_outside_the_repository_namespace_are_rejected() {
         assert!(ObjectKey::parse("v3/bundles/0123456789abcdef0123456789abcdef/_tag.json").is_err());
-
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("store");
-        write(
-            &root.join("v3/bundles/0123456789abcdef0123456789abcdef/_tag.json"),
-            b"legacy",
-        );
-        let store = LocalBundleObjectStore::open(&root).unwrap();
-        let engine = BundleEngine::open(store, storage_id()).unwrap();
-        let page = engine.list_remote_bundles(None, 100).unwrap();
-        assert!(page.bundles.is_empty());
-        assert!(root
-            .join("v3/bundles/0123456789abcdef0123456789abcdef/_tag.json")
-            .is_file());
-        assert!(root.join(STORAGE_MARKER_KEY).is_file());
     }
 
     #[test]
@@ -2242,7 +2213,8 @@ mod tests {
         let fetched = engine.fetch(&id).unwrap();
         let binding = active_binding(id, &target, Some(&target_codex), None);
 
-        // Simulate a session copied by an older release without path rebinding.
+        // A pre-existing target file whose bytes are not the materialized form
+        // is unknown content: restoring over it needs explicit approval.
         let target_session = target_codex.join(session_relative);
         write(&target_session, transcript.as_bytes());
         let plan = engine
@@ -2265,7 +2237,7 @@ mod tests {
                 )
             })
             .unwrap();
-        assert!(!action.requires_explicit_approval);
+        assert!(action.requires_explicit_approval);
 
         let approved = BTreeSet::from([action.action_id.clone()]);
         let result = engine
@@ -4403,14 +4375,13 @@ pub struct ApplyBundleResult {
     pub plan_id: PlanId,
     pub receipts: Vec<ApplyReceipt>,
     pub backups: Vec<BackupRecord>,
-    pub deferred_dependencies: Vec<DependencyAction>,
 }
 
 impl<S: BundleObjectStore> BundleEngine<S> {
-    /// Apply approved byte-materialization actions. New RestorePlans omit
-    /// executable dependencies entirely; the legacy installer variants below
-    /// remain only so a stale in-memory plan fails safely. This engine never
-    /// shells out or silently activates executable configuration.
+    /// Apply approved byte-materialization actions. RestorePlans never carry
+    /// executable dependencies — those live in the DependencyPlan and its
+    /// native runner. This engine never shells out or silently activates
+    /// executable configuration.
     pub fn apply_restore_plan(
         &self,
         bundle: &FetchedBundle,
@@ -4502,12 +4473,6 @@ impl<S: BundleObjectStore> BundleEngine<S> {
 
         let mut receipts = Vec::new();
         let mut backups = Vec::new();
-        let mut deferred = Vec::new();
-        let dependencies_by_resource = bundle
-            .dependency_actions
-            .iter()
-            .map(|action| (action.resource_id.clone(), action.clone()))
-            .collect::<BTreeMap<_, _>>();
 
         let mut prepared_directories = Vec::new();
         let mut ensure_actions = plan
@@ -4595,23 +4560,6 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                             Some(error),
                         ),
                     });
-                }
-                RestoreActionKind::InstallPlugin { .. }
-                | RestoreActionKind::InstallStandaloneSkill { .. } => {
-                    if let Some(dependency) = dependencies_by_resource.get(&action.resource_id) {
-                        deferred.push(dependency.clone());
-                    }
-                    receipts.push(receipt_for(
-                        action,
-                        ActionStatus::Blocked,
-                        applied_at,
-                        None,
-                        None,
-                        Some(
-                            "Installer action belongs to Global tools; refresh Pull review"
-                                .to_string(),
-                        ),
-                    ));
                 }
                 RestoreActionKind::Manual { .. } => {
                     receipts.push(receipt_for(
@@ -4705,13 +4653,10 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 )
             }));
         }
-        deferred.sort_by(|a, b| a.action_id.cmp(&b.action_id));
-        deferred.dedup_by(|a, b| a.action_id == b.action_id);
         Ok(ApplyBundleResult {
             plan_id: plan.plan_id.clone(),
             receipts,
             backups,
-            deferred_dependencies: deferred,
         })
     }
 

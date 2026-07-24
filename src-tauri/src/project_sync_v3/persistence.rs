@@ -1,9 +1,8 @@
-//! Bounded, atomic, schema-3 local persistence.
+//! Bounded, atomic local persistence.
 //!
-//! Every file lives below `~/.mallard`; schema-2 configuration, baselines,
-//! backups, and machine records are neither read nor overwritten. All
-//! read-modify-write operations share a process lock and revision check so
-//! concurrent Tauri commands cannot silently lose changes.
+//! Every file lives below `~/.mallard`. All read-modify-write operations
+//! share a process lock and revision check so concurrent Tauri commands
+//! cannot silently lose changes.
 
 use super::domain::{
     derive_origin_host_token, derive_origin_key_verifier, derive_origin_replica_token,
@@ -11,8 +10,8 @@ use super::domain::{
     ConversationPushPlan, ConversationSyncJournal, DependencyApplications, DependencyPlan, HostId,
     HostIdentity, LocalProjectId, MachineProjectState, Materializations, OriginHostToken,
     OriginKey, OriginKeyRef, OriginReplicaToken, PlanId, ProjectSetupDraft, ReplicaId, RestorePlan,
-    SetupDraftId, SetupTransaction, SyncConfigV3, CONVERSATION_BINDINGS_SCHEMA_V2,
-    HOST_IDENTITY_SCHEMA_V1, MACHINE_PROJECT_SCHEMA_V2, MAX_SETUP_DRAFTS,
+    SetupDraftId, SetupTransaction, SyncConfigV3, CONVERSATION_BINDINGS_SCHEMA,
+    HOST_IDENTITY_SCHEMA, MACHINE_PROJECT_SCHEMA, MAX_SETUP_DRAFTS,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -35,7 +34,7 @@ const MAX_SETUP_TRANSACTION_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_HOST_IDENTITY_BYTES: u64 = 16 * 1024;
 // Rotation journals embed every bounded host-scoped document. They are stored
 // as compact JSON to avoid nested pretty-print expansion; the additional
-// headroom covers wrapper fields and bounded migration/default growth.
+// headroom covers wrapper fields and bounded default growth.
 const MAX_HOST_ROTATION_BYTES: u64 = 192 * 1024 * 1024;
 const MAX_CONVERSATION_BINDINGS_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CONVERSATION_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -599,7 +598,7 @@ impl V3Repository {
             };
             quarantine.conversation_bindings =
                 conversations_degraded && self.conversation_bindings_path().exists();
-            let materializations = match self.load_materializations_unlocked(&config, &current) {
+            let materializations = match self.load_materializations_unlocked(&config) {
                 Ok(materializations) => materializations,
                 Err(_) if allow_damaged_recovery => {
                     quarantine.materializations = true;
@@ -616,9 +615,9 @@ impl V3Repository {
         if pending_rotation.is_some() && salvage.is_none() && allow_damaged_recovery {
             self.quarantine_file_unlocked(&self.host_rotation_path(), "host-rotation")?;
         }
-        // Migrate legacy receipts before changing the current host so they
-        // remain truthfully pinned to the installation that produced them.
-        match self.load_dependency_applications_unlocked(&config, &current) {
+        // Validate dependency receipts before changing the current host so a
+        // damaged document is quarantined instead of silently carried over.
+        match self.load_dependency_applications_unlocked(&config) {
             Ok(_) => {}
             Err(_) if allow_damaged_recovery => quarantine.dependency_applications = true,
             Err(error) => return Err(error),
@@ -639,7 +638,7 @@ impl V3Repository {
             binding.updated_at = binding.updated_at.max(timestamp);
             replica_map.insert(previous_replica, next_replica);
         }
-        machine.schema = MACHINE_PROJECT_SCHEMA_V2;
+        machine.schema = MACHINE_PROJECT_SCHEMA;
         machine.revision = machine.revision.saturating_add(1);
         machine.validate(&config)?;
 
@@ -810,7 +809,7 @@ impl V3Repository {
         let mut bindings =
             self.load_conversation_bindings_document_unlocked(&config, &machine, &identity)?;
         let result = mutate(&mut bindings)?;
-        bindings.schema = CONVERSATION_BINDINGS_SCHEMA_V2;
+        bindings.schema = CONVERSATION_BINDINGS_SCHEMA;
         bindings.revision = bindings.revision.saturating_add(1);
         bindings.host_id = identity.host_id.clone();
         bindings.validate(&identity, &machine, &config)?;
@@ -907,7 +906,7 @@ impl V3Repository {
                 config.revision, current.revision
             ));
         }
-        config.schema = super::domain::LOCAL_SCHEMA_V3;
+        config.schema = super::domain::LOCAL_SCHEMA;
         config.revision = current.revision.saturating_add(1);
         config.validate()?;
         write_json_atomic(&self.root, &self.config_path(), &config, MAX_CONFIG_BYTES)?;
@@ -923,7 +922,7 @@ impl V3Repository {
         let _guard = persistence_guard(&self.root)?;
         let mut config = self.load_config_unlocked()?;
         let result = mutate(&mut config)?;
-        config.schema = super::domain::LOCAL_SCHEMA_V3;
+        config.schema = super::domain::LOCAL_SCHEMA;
         config.revision = config.revision.saturating_add(1);
         config.validate()?;
         write_json_atomic(&self.root, &self.config_path(), &config, MAX_CONFIG_BYTES)?;
@@ -946,7 +945,7 @@ impl V3Repository {
         let config = self.load_config_unlocked()?;
         let mut bindings = self.load_bindings_unlocked(&config, &identity)?;
         let result = mutate(&config, &mut bindings)?;
-        bindings.schema = MACHINE_PROJECT_SCHEMA_V2;
+        bindings.schema = MACHINE_PROJECT_SCHEMA;
         bindings.revision = bindings.revision.saturating_add(1);
         if bindings
             .bindings
@@ -973,9 +972,9 @@ impl V3Repository {
 
     pub fn load_materializations(&self) -> Result<Materializations, String> {
         let _guard = persistence_guard(&self.root)?;
-        let identity = self.load_or_create_host_identity_unlocked()?;
+        self.load_or_create_host_identity_unlocked()?;
         let config = self.load_config_unlocked()?;
-        self.load_materializations_unlocked(&config, &identity)
+        self.load_materializations_unlocked(&config)
     }
 
     pub fn mutate_materializations<T>(
@@ -983,11 +982,11 @@ impl V3Repository {
         mutate: impl FnOnce(&SyncConfigV3, &mut Materializations) -> Result<T, String>,
     ) -> Result<T, String> {
         let _guard = persistence_guard(&self.root)?;
-        let identity = self.load_or_create_host_identity_unlocked()?;
+        self.load_or_create_host_identity_unlocked()?;
         let config = self.load_config_unlocked()?;
-        let mut materializations = self.load_materializations_unlocked(&config, &identity)?;
+        let mut materializations = self.load_materializations_unlocked(&config)?;
         let result = mutate(&config, &mut materializations)?;
-        materializations.schema = super::domain::LOCAL_SCHEMA_V3;
+        materializations.schema = super::domain::LOCAL_SCHEMA;
         materializations.revision = materializations.revision.saturating_add(1);
         materializations.validate(&config)?;
         write_json_atomic(
@@ -1001,9 +1000,9 @@ impl V3Repository {
 
     pub fn load_dependency_applications(&self) -> Result<DependencyApplications, String> {
         let _guard = persistence_guard(&self.root)?;
-        let identity = self.load_or_create_host_identity_unlocked()?;
+        self.load_or_create_host_identity_unlocked()?;
         let config = self.load_config_unlocked()?;
-        self.load_dependency_applications_unlocked(&config, &identity)
+        self.load_dependency_applications_unlocked(&config)
     }
 
     pub fn mutate_dependency_applications<T>(
@@ -1011,11 +1010,11 @@ impl V3Repository {
         mutate: impl FnOnce(&SyncConfigV3, &mut DependencyApplications) -> Result<T, String>,
     ) -> Result<T, String> {
         let _guard = persistence_guard(&self.root)?;
-        let identity = self.load_or_create_host_identity_unlocked()?;
+        self.load_or_create_host_identity_unlocked()?;
         let config = self.load_config_unlocked()?;
-        let mut applications = self.load_dependency_applications_unlocked(&config, &identity)?;
+        let mut applications = self.load_dependency_applications_unlocked(&config)?;
         let result = mutate(&config, &mut applications)?;
-        applications.schema = super::domain::LOCAL_SCHEMA_V3;
+        applications.schema = super::domain::LOCAL_SCHEMA;
         applications.revision = applications.revision.saturating_add(1);
         applications.validate(&config)?;
         write_json_atomic(
@@ -1399,10 +1398,9 @@ impl V3Repository {
     }
 
     fn load_config_unlocked(&self) -> Result<SyncConfigV3, String> {
-        let mut config: SyncConfigV3 =
+        let config: SyncConfigV3 =
             read_json_bounded(&self.root, &self.config_path(), MAX_CONFIG_BYTES)?
                 .unwrap_or_default();
-        purge_removed_resource_recipe_entries(&mut config);
         config.validate()?;
         Ok(config)
     }
@@ -1501,7 +1499,7 @@ impl V3Repository {
         let key = OriginKey::generate()?;
         let timestamp = now_secs()?;
         let identity = HostIdentity {
-            schema: HOST_IDENTITY_SCHEMA_V1,
+            schema: HOST_IDENTITY_SCHEMA,
             revision: 0,
             origin_key_verifier: Some(derive_origin_key_verifier(&key, &host_id)?),
             host_id,
@@ -2044,7 +2042,7 @@ impl V3Repository {
         transaction: &HostRotationTransaction,
     ) -> Result<HostIdentity, String> {
         let identity = HostIdentity {
-            schema: HOST_IDENTITY_SCHEMA_V1,
+            schema: HOST_IDENTITY_SCHEMA,
             revision: transaction.previous_identity_revision,
             host_id: transaction.previous_host_id.clone(),
             origin_key_ref: transaction.previous_origin_key_ref.clone(),
@@ -2059,7 +2057,7 @@ impl V3Repository {
 
     fn synthetic_missing_identity(&self, host_id: HostId) -> Result<HostIdentity, String> {
         let identity = HostIdentity {
-            schema: HOST_IDENTITY_SCHEMA_V1,
+            schema: HOST_IDENTITY_SCHEMA,
             revision: 0,
             host_id,
             origin_key_ref: OriginKeyRef::parse(MISSING_ORIGIN_KEY_REF)?,
@@ -2080,7 +2078,7 @@ impl V3Repository {
     fn create_unknown_identity_marker_unlocked(&self) -> Result<HostIdentity, String> {
         let timestamp = now_secs()?;
         let identity = HostIdentity {
-            schema: HOST_IDENTITY_SCHEMA_V1,
+            schema: HOST_IDENTITY_SCHEMA,
             revision: 0,
             host_id: HostId::generate()?,
             origin_key_ref: OriginKeyRef::parse(UNKNOWN_ORIGIN_KEY_REF)?,
@@ -2187,27 +2185,13 @@ impl V3Repository {
             }
         }
 
-        // A current-format primary document cannot be assigned to a freshly
-        // generated host merely because corruption removed every parseable
-        // host_id. Only hostless record documents that inject cleanly are
-        // compatible with a true first run.
+        // A true first run has no host-scoped documents at all; any present
+        // primary document keeps this installation out of first-run setup.
         if self.path_exists_unlocked(&self.host_rotation_path())?
             || self.path_exists_unlocked(&self.conversation_bindings_path())?
-        {
-            return Ok(false);
-        }
-        let config = match self.load_config_unlocked() {
-            Ok(config) => config,
-            Err(_) => return Ok(false),
-        };
-        let legacy_identity =
-            self.synthetic_missing_identity(HostId::parse("00000000000000000000000000000000")?)?;
-        if self.path_exists_unlocked(&self.machine_projects_path())?
-            || !self.materializations_absent_or_valid_legacy_unlocked(&config, &legacy_identity)?
-            || !self.dependency_applications_absent_or_valid_legacy_unlocked(
-                &config,
-                &legacy_identity,
-            )?
+            || self.path_exists_unlocked(&self.machine_projects_path())?
+            || self.path_exists_unlocked(&self.materializations_path())?
+            || self.path_exists_unlocked(&self.dependency_applications_path())?
         {
             return Ok(false);
         }
@@ -2229,55 +2213,6 @@ impl V3Repository {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(format!("inspect host-scoped local state: {}", error)),
         }
-    }
-
-    fn materializations_absent_or_valid_legacy_unlocked(
-        &self,
-        config: &SyncConfigV3,
-        identity: &HostIdentity,
-    ) -> Result<bool, String> {
-        let path = self.materializations_path();
-        if !self.path_exists_unlocked(&path)? {
-            return Ok(true);
-        }
-        let mut value =
-            match read_json_bounded::<Value>(&self.root, &path, MAX_MATERIALIZATIONS_BYTES) {
-                Ok(Some(value)) => value,
-                Ok(None) | Err(_) => return Ok(false),
-            };
-        if inject_host_id_into_records(&mut value, &identity.host_id).is_err() {
-            return Ok(false);
-        }
-        let Ok(document) = serde_json::from_value::<Materializations>(value) else {
-            return Ok(false);
-        };
-        Ok(document.validate(config).is_ok())
-    }
-
-    fn dependency_applications_absent_or_valid_legacy_unlocked(
-        &self,
-        config: &SyncConfigV3,
-        identity: &HostIdentity,
-    ) -> Result<bool, String> {
-        let path = self.dependency_applications_path();
-        if !self.path_exists_unlocked(&path)? {
-            return Ok(true);
-        }
-        let mut value = match read_json_bounded::<Value>(
-            &self.root,
-            &path,
-            MAX_DEPENDENCY_APPLICATIONS_BYTES,
-        ) {
-            Ok(Some(value)) => value,
-            Ok(None) | Err(_) => return Ok(false),
-        };
-        if inject_host_id_into_records(&mut value, &identity.host_id).is_err() {
-            return Ok(false);
-        }
-        let Ok(document) = serde_json::from_value::<DependencyApplications>(value) else {
-            return Ok(false);
-        };
-        Ok(document.validate(config).is_ok())
     }
 
     fn directory_has_json_documents_unlocked(&self, directory: &Path) -> Result<bool, String> {
@@ -3024,52 +2959,32 @@ impl V3Repository {
     fn load_materializations_unlocked(
         &self,
         config: &SyncConfigV3,
-        identity: &HostIdentity,
     ) -> Result<Materializations, String> {
         let path = self.materializations_path();
-        let Some(mut value) =
+        let Some(value) =
             read_json_bounded::<Value>(&self.root, &path, MAX_MATERIALIZATIONS_BYTES)?
         else {
             return Ok(Materializations::default());
         };
-        let migrated = inject_host_id_into_records(&mut value, &identity.host_id)?;
         let materializations: Materializations = serde_json::from_value(value)
             .map_err(|error| format!("parse '{}': {}", path.display(), error))?;
         materializations.validate(config)?;
-        if migrated {
-            write_json_atomic(
-                &self.root,
-                &path,
-                &materializations,
-                MAX_MATERIALIZATIONS_BYTES,
-            )?;
-        }
         Ok(materializations)
     }
 
     fn load_dependency_applications_unlocked(
         &self,
         config: &SyncConfigV3,
-        identity: &HostIdentity,
     ) -> Result<DependencyApplications, String> {
         let path = self.dependency_applications_path();
-        let Some(mut value) =
+        let Some(value) =
             read_json_bounded::<Value>(&self.root, &path, MAX_DEPENDENCY_APPLICATIONS_BYTES)?
         else {
             return Ok(DependencyApplications::default());
         };
-        let migrated = inject_host_id_into_records(&mut value, &identity.host_id)?;
         let applications: DependencyApplications = serde_json::from_value(value)
             .map_err(|error| format!("parse '{}': {}", path.display(), error))?;
         applications.validate(config)?;
-        if migrated {
-            write_json_atomic(
-                &self.root,
-                &path,
-                &applications,
-                MAX_DEPENDENCY_APPLICATIONS_BYTES,
-            )?;
-        }
         Ok(applications)
     }
 
@@ -3114,7 +3029,7 @@ impl V3Repository {
         &self,
         document: &ConversationBindings,
     ) -> Result<(), String> {
-        if document.schema != CONVERSATION_BINDINGS_SCHEMA_V2
+        if document.schema != CONVERSATION_BINDINGS_SCHEMA
             || document.bindings.len() > super::domain::MAX_CONVERSATION_BINDINGS
             || document.origin_aliases.len() > super::domain::MAX_ORIGIN_ALIASES
         {
@@ -3175,7 +3090,7 @@ impl V3Repository {
         // A stale association must not erase unrelated conversation identity.
         // Rebuild the document one independently valid, uniquely scoped row
         // at a time.
-        let may_salvage_bindings = bindings.schema == CONVERSATION_BINDINGS_SCHEMA_V2
+        let may_salvage_bindings = bindings.schema == CONVERSATION_BINDINGS_SCHEMA
             && bindings.bindings.len() <= super::domain::MAX_CONVERSATION_BINDINGS;
         if may_salvage_bindings {
             let profiles = machine
@@ -3548,63 +3463,11 @@ fn collect_host_ids(value: &Value, host_ids: &mut BTreeSet<HostId>) -> Result<()
     Ok(())
 }
 
-fn inject_host_id_into_records(value: &mut Value, host_id: &HostId) -> Result<bool, String> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| "invalid local state document".to_string())?;
-    if !object.contains_key("records") {
-        object.insert("records".to_string(), Value::Array(Vec::new()));
-    }
-    let records = object
-        .get_mut("records")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| "local state document has no records array".to_string())?;
-    let mut migrated = false;
-    for record in records {
-        let record = record
-            .as_object_mut()
-            .ok_or_else(|| "local state document contains an invalid record".to_string())?;
-        if !record.contains_key("host_id") {
-            record.insert(
-                "host_id".to_string(),
-                Value::String(host_id.as_str().to_string()),
-            );
-            migrated = true;
-        }
-    }
-    Ok(migrated)
-}
-
 fn decode_setup_transaction(value: Value) -> Result<SetupTransaction, String> {
     let transaction: SetupTransaction = serde_json::from_value(value)
         .map_err(|error| format!("parse setup transaction: {}", error))?;
     transaction.validate()?;
     Ok(transaction)
-}
-
-/// Resource-id prefixes of the removed typed project-config kinds. Stale
-/// recipe entries with these ids would otherwise surface as bogus
-/// "Requirement" placeholder rows.
-const REMOVED_RESOURCE_ID_PREFIXES: &[&str] = &[
-    "project:file:",
-    "codex:skill:",
-    "claude:skill:",
-    "codex:agent:",
-    "claude:agent:",
-    "codex:command:",
-    "claude:command:",
-    "codex:rule:",
-    "claude:rule:",
-];
-
-fn purge_removed_resource_recipe_entries(config: &mut SyncConfigV3) {
-    for project in &mut config.projects {
-        project.recipe.entries.retain(|id, _| {
-            !REMOVED_RESOURCE_ID_PREFIXES
-                .iter()
-                .any(|prefix| id.as_str().starts_with(prefix))
-        });
-    }
 }
 
 fn now_secs() -> Result<u64, String> {
@@ -3857,7 +3720,7 @@ mod tests {
         generated_named_id, BindingState, BundleId, BundleRecipe, ThreadId,
         ConversationMaterializationState, LocalConversationBinding,
         LocalProjectRegistration, LocalProviderProfileId, MaterializationRecord, OriginHostAlias,
-        ProjectBinding, Provider, ProviderProfile, LOCAL_SCHEMA_V3,
+        ProjectBinding, Provider, ProviderProfile, LOCAL_SCHEMA,
     };
     use std::collections::BTreeMap;
 
@@ -3937,7 +3800,7 @@ mod tests {
         let repo = repository(&temp);
         let saved = repo.save_config(SyncConfigV3::default()).unwrap();
 
-        assert_eq!(saved.schema, LOCAL_SCHEMA_V3);
+        assert_eq!(saved.schema, LOCAL_SCHEMA);
         assert_eq!(saved.revision, 1);
         assert_eq!(fs::read(&old).unwrap(), b"{\"schema\":2,\"keep\":true}\n");
         assert!(repo.config_path().starts_with(temp.path().join(".mallard")));

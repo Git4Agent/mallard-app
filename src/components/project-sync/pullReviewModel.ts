@@ -24,7 +24,7 @@ export interface PullReviewItem {
   projectContentOperation: "add" | "replace" | "create_directory" | "delete_file" | "delete_directory" | null;
 }
 
-const NON_DIRECT_RESTORE_KINDS = new Set(["install_plugin", "install_standalone_skill", "manual"]);
+const NON_DIRECT_RESTORE_KINDS = new Set(["manual"]);
 
 function humanize(value: string): string {
   return value
@@ -50,30 +50,12 @@ function restoreActionCopy(action: RestoreAction): {
 } {
   const kind = action.kind.kind;
   const provider = "provider" in action.kind ? action.kind.provider : null;
-  if (kind === "install_plugin") {
-    return {
-      title: action.kind.plugin_id,
-      detail: "Installed through the provider's native plugin manager.",
-      provider,
-      category: "global_tool",
-      toolKind: "plugin",
-    };
-  }
   if (kind === "install_custom_skill" || kind === "overwrite_custom_skill") {
     return {
       title: action.kind.skill_name,
       detail: kind === "overwrite_custom_skill"
         ? "Replaces the existing custom skill after creating a local backup."
         : "Restores this custom skill into the assigned provider profile.",
-      provider,
-      category: "global_tool",
-      toolKind: "custom_skill",
-    };
-  }
-  if (kind === "install_standalone_skill") {
-    return {
-      title: finalPathPart(action.kind.target_relative_path),
-      detail: "Restores the payload, then completes its approved native setup.",
       provider,
       category: "global_tool",
       toolKind: "custom_skill",

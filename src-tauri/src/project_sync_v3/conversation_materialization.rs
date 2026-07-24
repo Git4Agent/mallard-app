@@ -18,7 +18,7 @@ use super::domain::{
     ConversationFileRole, ConversationJournalTarget, ConversationMaterializationState,
     ConversationOperationId, ConversationPlanDirection, ConversationSyncOperation,
     ConversationSyncPhase, LocalConversationBinding, MaterializationId, MaterializationRecord,
-    MaterializationStatus, RestoreActionType, TargetExpectation, LOCAL_SCHEMA_V3,
+    MaterializationStatus, RestoreActionType, TargetExpectation, LOCAL_SCHEMA,
 };
 use super::persistence::V3Repository;
 
@@ -1239,7 +1239,7 @@ fn commit_receipt(
                 receipts: vec![apply_receipt],
             });
         }
-        materializations.schema = LOCAL_SCHEMA_V3;
+        materializations.schema = LOCAL_SCHEMA;
         Ok(())
     })?;
     Ok(receipt)

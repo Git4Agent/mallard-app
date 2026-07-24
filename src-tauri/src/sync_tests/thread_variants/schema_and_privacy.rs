@@ -3,7 +3,7 @@ use crate::project_sync_v3::bundle_engine::{
     BundleObjectStore, PublishBundleRequest, PublishExpectation,
 };
 use crate::project_sync_v3::domain::{
-    deterministic_schema4_thread_id, BundleId, BundleIdentity, BundleKind, CapturedWith,
+    BundleId, BundleIdentity, BundleKind, CapturedWith,
     ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
     ConversationMaterializationState, ConversationPlanActionType, ConversationPlanDirection,
     ConversationRelation, LocalConversationBinding, LogicalPath, OriginHostAlias, Provider,
@@ -394,18 +394,8 @@ fn portable_objects_do_not_leak_machine_local_identity_or_paths() {
 }
 
 #[test]
-fn schema4_cutover_ids_match_on_independent_replicas_and_old_writer_stops() {
+fn schema4_writer_is_rejected_on_a_schema6_head() {
     let world = VariantWorld::new();
-    let legacy_resource =
-        crate::project_sync_v3::domain::ResourceId::parse("codex:session:legacy-thread").unwrap();
-    let a =
-        deterministic_schema4_thread_id(&world.bundle_id, Provider::Codex, &legacy_resource)
-            .unwrap();
-    let b =
-        deterministic_schema4_thread_id(&world.bundle_id, Provider::Codex, &legacy_resource)
-            .unwrap();
-    assert_eq!(a, b);
-
     let origin = world.origin(&world.repo_a, "replica-a");
     let published = world.publish(
         &[ThreadSpec::new(
@@ -418,7 +408,7 @@ fn schema4_cutover_ids_match_on_independent_replicas_and_old_writer_stops() {
         origin,
         10,
     );
-    let legacy_attempt = world.engine().publish(PublishBundleRequest {
+    let schema4_attempt = world.engine().publish(PublishBundleRequest {
         identity: BundleIdentity {
             bundle_id: world.bundle_id.clone(),
             display_name: "Thread test bundle".to_string(),
@@ -436,7 +426,7 @@ fn schema4_cutover_ids_match_on_independent_replicas_and_old_writer_stops() {
         expected_head: PublishExpectation::Match(published.head_token),
         updated_at: 20,
     });
-    assert!(legacy_attempt
+    assert!(schema4_attempt
         .unwrap_err()
         .contains("conversation-thread publication path"));
 }

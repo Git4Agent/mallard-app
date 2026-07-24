@@ -2057,11 +2057,8 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
         ...selection.restoreActionIds,
         ...selection.dependencyActionIds,
       ]);
-      const deferredRestoreKinds = new Set(["install_plugin", "install_standalone_skill"]);
       const hasSkippedActions = [
-        ...currentRestorePlan.actions
-          .filter((action) => !deferredRestoreKinds.has(action.kind.kind))
-          .map((action) => action.action_id),
+        ...currentRestorePlan.actions.map((action) => action.action_id),
         ...(currentDependencyPlan?.actions ?? []).map((action) => action.action_id),
       ].some((actionId) => (
         !completedPullActionIds.has(actionId) && !approvedThisPass.has(actionId)

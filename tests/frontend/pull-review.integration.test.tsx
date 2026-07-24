@@ -45,7 +45,7 @@ const binding: ProjectBinding = {
 };
 
 const restorePlan: RestorePlan = {
-  schema_version: 2,
+  schema_version: 1,
   plan_id: "plan-restore",
   storage_id: "storage-local",
   bundle_id: binding.bundle_id,
@@ -228,7 +228,7 @@ test("the embedded Pull footer omits redundant helper copy", () => {
 
 function dependencyPlan(actions: DependencyPlan["actions"]): DependencyPlan {
   return {
-    schema_version: 2,
+    schema_version: 1,
     plan_id: "plan-dependencies",
     storage_id: restorePlan.storage_id,
     bundle_id: restorePlan.bundle_id,
@@ -258,30 +258,37 @@ test("restore and native dependency actions merge into one global-tool row per r
         target_path: "/Users/test/.codex/skills/frontend-skill",
         requires_explicit_approval: true,
       },
-      {
-        action_id: "dependency:codex:plugin:computer-use",
-        resource_id: "codex:plugin:computer-use",
-        kind: { kind: "install_plugin", provider: "codex", plugin_id: "computer-use@openai-bundled" },
-        requires_explicit_approval: true,
-      },
     ],
   };
-  const dependencies = dependencyPlan([{
-    action_id: "dependency:codex:plugin:computer-use",
-    resource_id: "codex:plugin:computer-use",
-    kind: "install_codex_plugin",
-    display_name: "computer-use@openai-bundled",
-    provider: "codex",
-    argv: ["plugin", "add", "computer-use@openai-bundled"],
-    requires_explicit_approval: true,
-  }]);
+  const dependencies = dependencyPlan([
+    {
+      action_id: "dependency:codex:skill:frontend-skill",
+      resource_id: "codex:standalone-skill:frontend-skill",
+      kind: "install_standalone_skill",
+      display_name: "frontend-skill",
+      provider: "codex",
+      argv: ["skill", "add", "frontend-skill"],
+      requires_explicit_approval: true,
+    },
+    {
+      action_id: "dependency:codex:plugin:computer-use",
+      resource_id: "codex:plugin:computer-use",
+      kind: "install_codex_plugin",
+      display_name: "computer-use@openai-bundled",
+      provider: "codex",
+      argv: ["plugin", "add", "computer-use@openai-bundled"],
+      requires_explicit_approval: true,
+    },
+  ]);
 
   const items = buildPullReviewItems(mergedRestore, dependencies);
   assert.equal(items.length, 2);
-  assert.equal(items.filter((item) => item.resourceId === "codex:plugin:computer-use").length, 1);
   assert.ok(items.every((item) => item.category === "global_tool"));
+  const skill = items.find((item) => item.resourceId === "codex:standalone-skill:frontend-skill");
+  assert.equal(skill?.restoreActions.length, 1);
+  assert.equal(skill?.dependencyActions.length, 1);
   const plugin = items.find((item) => item.resourceId === "codex:plugin:computer-use");
-  assert.equal(plugin?.restoreActions.length, 1);
+  assert.equal(plugin?.restoreActions.length, 0);
   assert.equal(plugin?.dependencyActions.length, 1);
   const selection = buildPullReviewSelection(
     items,
@@ -290,7 +297,10 @@ test("restore and native dependency actions merge into one global-tool row per r
     new Set(),
   );
   assert.deepEqual(selection.restoreActionIds, ["restore-custom-skill"]);
-  assert.deepEqual(selection.dependencyActionIds, ["dependency:codex:plugin:computer-use"]);
+  assert.deepEqual(
+    [...selection.dependencyActionIds].sort(),
+    ["dependency:codex:plugin:computer-use", "dependency:codex:skill:frontend-skill"],
+  );
 
   const html = renderToStaticMarkup(
     <RestorePlanView

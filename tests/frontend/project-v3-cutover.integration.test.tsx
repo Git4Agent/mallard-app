@@ -30,9 +30,6 @@ test("the production Tauri handler exposes only V3 sync and shared log commands"
     backend,
     /list_config_dirs|read_file_content|write_file_content|get_sync_config,|save_sync_config,|sync_upload|sync_download|get_setup_readiness|setup_link/,
   );
-
-  const persistence = readFileSync("src-tauri/src/project_sync_v3/persistence.rs", "utf8");
-  assert.match(persistence, /schema-2 configuration, baselines,[\s\S]*are neither read nor overwritten/);
 });
 
 test("the desktop shell supports a persistent sidebar toggle and keyboard shortcut", () => {

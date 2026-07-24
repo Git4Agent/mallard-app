@@ -72,7 +72,7 @@ export interface ActivityLogCleanupResult {
 }
 
 // ---------------------------------------------------------------------------
-// Project-scoped sync (schema-3 local state, schema-4 portable bundles)
+// Project-scoped sync (local state and portable bundles)
 // ---------------------------------------------------------------------------
 
 export type ProjectProvider = "codex" | "claude";
@@ -667,10 +667,8 @@ export type RestoreActionKind =
   | { kind: "delete_project_directory"; logical_path: string }
   | { kind: "merge_file"; logical_path: string }
   | { kind: "materialize_conversation"; provider: ProjectProvider; logical_path: string }
-  | { kind: "install_standalone_skill"; provider: ProjectProvider; target_relative_path: string }
   | { kind: "install_custom_skill"; provider: ProjectProvider; skill_name: string }
   | { kind: "overwrite_custom_skill"; provider: ProjectProvider; skill_name: string }
-  | { kind: "install_plugin"; provider: ProjectProvider; plugin_id: string }
   | { kind: "manual"; message: string };
 
 export interface RestoreAction {
@@ -685,7 +683,7 @@ export interface RestoreAction {
 }
 
 export interface RestorePlan {
-  schema_version: 2;
+  schema_version: 1;
   plan_id: string;
   storage_id: string;
   bundle_id: string;
@@ -711,7 +709,7 @@ export interface RestoreResult {
 }
 
 export interface DependencyPlan {
-  schema_version: 2;
+  schema_version: 1;
   plan_id: string;
   storage_id: string;
   bundle_id: string;

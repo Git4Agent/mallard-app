@@ -2630,14 +2630,14 @@ mod tests {
     fn mapping_never_attaches_a_named_thread_to_another_branch() {
         let mut other = thread("feature-thread", 1, 300);
         other.branch = Some("feature/a".to_string());
-        let mut unknown = thread("legacy-thread", 1, 300);
+        let mut unknown = thread("unknown-thread", 1, 300);
         unknown.branch = None;
         let mut commits = vec![commit("a", 200)];
 
         let result = map_threads_to_commits(&[other, unknown], &mut commits, "main");
 
         assert_eq!(commits[0].thread_refs.len(), 1);
-        assert_eq!(commits[0].thread_refs[0].thread_id, "legacy-thread");
+        assert_eq!(commits[0].thread_refs[0].thread_id, "unknown-thread");
         assert_eq!(result.unique_thread_count, 1);
         assert!(result.unmapped.is_empty());
     }

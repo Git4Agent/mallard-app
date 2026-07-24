@@ -1,4 +1,4 @@
-//! Schema-3 local project-sync state and schema-4/schema-5 portable bundle model.
+//! Local project-sync state and portable bundle model.
 //!
 //! This module intentionally contains no Tauri or filesystem code.  All
 //! strings which can become cloud namespace components are validated on
@@ -12,19 +12,21 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::path::{Component, Path};
 
-pub const LOCAL_SCHEMA_V3: u32 = 3;
-pub const MACHINE_PROJECT_SCHEMA_V2: u32 = 2;
-pub const HOST_IDENTITY_SCHEMA_V1: u32 = 1;
-pub const CONVERSATION_BINDINGS_SCHEMA_V2: u32 = 2;
-pub const CONVERSATION_SYNC_JOURNAL_SCHEMA_V2: u32 = 2;
-pub const PUSH_PLAN_SCHEMA_V1: u32 = 1;
+pub const LOCAL_SCHEMA: u32 = 1;
+pub const MACHINE_PROJECT_SCHEMA: u32 = 1;
+pub const HOST_IDENTITY_SCHEMA: u32 = 1;
+pub const CONVERSATION_BINDINGS_SCHEMA: u32 = 1;
+pub const CONVERSATION_SYNC_JOURNAL_SCHEMA: u32 = 1;
+pub const PUSH_PLAN_SCHEMA: u32 = 1;
+// The bundle pair stays distinct until the schema-4 writer is retired
+// (Tier 2 of PLAN_REMOVE_BACKWARD_COMPAT.md); it then collapses to 1.
 pub const BUNDLE_SCHEMA_V4: u32 = 4;
 pub const BUNDLE_SCHEMA_V6: u32 = 6;
-pub const RECIPE_SCHEMA_V1: u32 = 1;
-pub const RESTORE_PLAN_SCHEMA_V2: u32 = 2;
-pub const DEPENDENCY_PLAN_SCHEMA_V2: u32 = 2;
-pub const SETUP_DRAFT_SCHEMA_V1: u32 = 1;
-pub const SETUP_TRANSACTION_SCHEMA_V2: u32 = 2;
+pub const RECIPE_SCHEMA: u32 = 1;
+pub const RESTORE_PLAN_SCHEMA: u32 = 1;
+pub const DEPENDENCY_PLAN_SCHEMA: u32 = 1;
+pub const SETUP_DRAFT_SCHEMA: u32 = 1;
+pub const SETUP_TRANSACTION_SCHEMA: u32 = 1;
 pub const MAX_SETUP_DRAFTS: usize = 64;
 
 pub const MAX_PROJECTS: usize = 1_024;
@@ -786,7 +788,7 @@ pub struct BundleRecipe {
 impl Default for BundleRecipe {
     fn default() -> Self {
         Self {
-            schema_version: RECIPE_SCHEMA_V1,
+            schema_version: RECIPE_SCHEMA,
             revision: 0,
             entries: BTreeMap::new(),
         }
@@ -795,10 +797,10 @@ impl Default for BundleRecipe {
 
 impl BundleRecipe {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != RECIPE_SCHEMA_V1 {
+        if self.schema_version != RECIPE_SCHEMA {
             return Err(format!(
                 "unsupported recipe schema {} (expected {})",
-                self.schema_version, RECIPE_SCHEMA_V1
+                self.schema_version, RECIPE_SCHEMA
             ));
         }
         if self.entries.len() > MAX_RESOURCES {
@@ -903,8 +905,8 @@ pub struct ProjectStorageLink {
     /// Must equal the registration's bundle ID.  Keeping it explicit makes
     /// remote requests self-contained while validation prevents split identity.
     pub bundle_id: BundleId,
-    /// Destination-specific selection from the last explicit Push. Older
-    /// schema-3 links fall back to the project's default recipe.
+    /// Destination-specific selection from the last explicit Push. Links that
+    /// have never pushed fall back to the project's default recipe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<BundleRecipe>,
     /// Machine-local, destination-specific decisions for generic project
@@ -916,7 +918,7 @@ pub struct ProjectStorageLink {
     pub created_at: u64,
 }
 
-pub const PROJECT_CONTENT_PREFERENCES_SCHEMA_V1: u32 = 1;
+pub const PROJECT_CONTENT_PREFERENCES_SCHEMA: u32 = 1;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProjectContentPreferences {
@@ -929,7 +931,7 @@ pub struct ProjectContentPreferences {
 impl Default for ProjectContentPreferences {
     fn default() -> Self {
         Self {
-            schema_version: PROJECT_CONTENT_PREFERENCES_SCHEMA_V1,
+            schema_version: PROJECT_CONTENT_PREFERENCES_SCHEMA,
             revision: 0,
             excluded_resource_ids: BTreeSet::new(),
         }
@@ -938,7 +940,7 @@ impl Default for ProjectContentPreferences {
 
 impl ProjectContentPreferences {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != PROJECT_CONTENT_PREFERENCES_SCHEMA_V1 {
+        if self.schema_version != PROJECT_CONTENT_PREFERENCES_SCHEMA {
             return Err(format!(
                 "unsupported project-content preferences schema {}",
                 self.schema_version
@@ -1057,7 +1059,7 @@ pub struct SyncConfigV3 {
 impl Default for SyncConfigV3 {
     fn default() -> Self {
         Self {
-            schema: LOCAL_SCHEMA_V3,
+            schema: LOCAL_SCHEMA,
             revision: 0,
             storages: Vec::new(),
             projects: Vec::new(),
@@ -1068,10 +1070,10 @@ impl Default for SyncConfigV3 {
 
 impl SyncConfigV3 {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != LOCAL_SCHEMA_V3 {
+        if self.schema != LOCAL_SCHEMA {
             return Err(format!(
                 "unsupported project-sync schema {} (expected {})",
-                self.schema, LOCAL_SCHEMA_V3
+                self.schema, LOCAL_SCHEMA
             ));
         }
         if self.storages.len() > MAX_STORAGES
@@ -1173,10 +1175,10 @@ pub struct HostIdentity {
 
 impl HostIdentity {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != HOST_IDENTITY_SCHEMA_V1 {
+        if self.schema != HOST_IDENTITY_SCHEMA {
             return Err(format!(
                 "unsupported host identity schema {} (expected {})",
-                self.schema, HOST_IDENTITY_SCHEMA_V1
+                self.schema, HOST_IDENTITY_SCHEMA
             ));
         }
         if let Some(name) = &self.local_display_name {
@@ -1296,7 +1298,7 @@ pub struct MachineProjectState {
 impl Default for MachineProjectState {
     fn default() -> Self {
         Self {
-            schema: MACHINE_PROJECT_SCHEMA_V2,
+            schema: MACHINE_PROJECT_SCHEMA,
             revision: 0,
             profiles: Vec::new(),
             bindings: Vec::new(),
@@ -1306,7 +1308,7 @@ impl Default for MachineProjectState {
 
 impl MachineProjectState {
     pub fn validate(&self, config: &SyncConfigV3) -> Result<(), String> {
-        if self.schema != MACHINE_PROJECT_SCHEMA_V2
+        if self.schema != MACHINE_PROJECT_SCHEMA
             || self.bindings.len() > MAX_BINDINGS
             || self.profiles.len() > MAX_PROVIDER_PROFILES
         {
@@ -1557,7 +1559,7 @@ pub struct ConversationBindings {
 impl ConversationBindings {
     pub fn empty(host_id: HostId) -> Self {
         Self {
-            schema: CONVERSATION_BINDINGS_SCHEMA_V2,
+            schema: CONVERSATION_BINDINGS_SCHEMA,
             revision: 0,
             host_id,
             bindings: Vec::new(),
@@ -1571,7 +1573,7 @@ impl ConversationBindings {
         machine: &MachineProjectState,
         config: &SyncConfigV3,
     ) -> Result<(), String> {
-        if self.schema != CONVERSATION_BINDINGS_SCHEMA_V2
+        if self.schema != CONVERSATION_BINDINGS_SCHEMA
             || self.bindings.len() > MAX_CONVERSATION_BINDINGS
             || self.origin_aliases.len() > MAX_ORIGIN_ALIASES
         {
@@ -1878,14 +1880,14 @@ pub struct ConversationSyncJournal {
 impl ConversationSyncJournal {
     pub fn empty() -> Self {
         Self {
-            schema: CONVERSATION_SYNC_JOURNAL_SCHEMA_V2,
+            schema: CONVERSATION_SYNC_JOURNAL_SCHEMA,
             revision: 0,
             operations: Vec::new(),
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != CONVERSATION_SYNC_JOURNAL_SCHEMA_V2
+        if self.schema != CONVERSATION_SYNC_JOURNAL_SCHEMA
             || self.operations.len() > MAX_CONVERSATION_JOURNAL_OPERATIONS
         {
             return Err("invalid conversation sync journal".to_string());
@@ -1987,10 +1989,10 @@ pub struct ProjectSetupDraft {
 
 impl ProjectSetupDraft {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != SETUP_DRAFT_SCHEMA_V1 {
+        if self.schema != SETUP_DRAFT_SCHEMA {
             return Err(format!(
                 "unsupported setup draft schema {} (expected {})",
-                self.schema, SETUP_DRAFT_SCHEMA_V1
+                self.schema, SETUP_DRAFT_SCHEMA
             ));
         }
         validate_display_text("draft display name", &self.display_name, false)?;
@@ -2073,10 +2075,10 @@ pub struct SetupTransaction {
 
 impl SetupTransaction {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != SETUP_TRANSACTION_SCHEMA_V2 {
+        if self.schema != SETUP_TRANSACTION_SCHEMA {
             return Err(format!(
                 "unsupported setup transaction schema {} (expected {})",
-                self.schema, SETUP_TRANSACTION_SCHEMA_V2
+                self.schema, SETUP_TRANSACTION_SCHEMA
             ));
         }
         for profile in &self.profiles {
@@ -2593,7 +2595,7 @@ pub struct ConversationPushPlan {
 
 impl ConversationPushPlan {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != PUSH_PLAN_SCHEMA_V1 {
+        if self.schema_version != PUSH_PLAN_SCHEMA {
             return Err(format!(
                 "unsupported conversation push-plan schema {}",
                 self.schema_version
@@ -2742,32 +2744,12 @@ fn stable_conversation_id(prefix: &str, domain: &str, fields: &[&[u8]]) -> Resul
     // Conversation IDs use the first 128 digest bits. This matches Mallard's
     // other opaque identities while leaving enough room for the canonical
     // `<provider>:conversation:<thread>` resource ID inside the existing
-    // 128-byte ResourceId bound. The domain and length-prefixed encoding make
-    // the legacy group and variant namespaces independent.
+    // 128-byte ResourceId bound. The domain and length-prefixed encoding keep
+    // distinct identity namespaces independent.
     let digest = hasher.finalize();
     let value = format!("{}-{}", prefix, hex_lower(&digest[..16]));
     validate_named_id("stable conversation id", &value)?;
     Ok(value)
-}
-
-/// Derive the schema-6 thread for a schema-4 conversation resource: a pure
-/// function of the bundle, provider, and legacy resource identity, so every
-/// host derives the same thread ID during the cutover without coordination.
-pub fn deterministic_schema4_thread_id(
-    bundle_id: &BundleId,
-    provider: Provider,
-    schema4_resource_id: &ResourceId,
-) -> Result<ThreadId, String> {
-    let thread = stable_conversation_id(
-        "thread",
-        "mallard-conversation-thread-v1",
-        &[
-            bundle_id.as_str().as_bytes(),
-            provider.as_str().as_bytes(),
-            schema4_resource_id.as_str().as_bytes(),
-        ],
-    )?;
-    ThreadId::parse(thread)
 }
 
 pub fn conversation_resource_id(
@@ -3377,10 +3359,8 @@ pub enum RestoreActionType {
     DeleteProjectDirectory,
     MergeFile,
     MaterializeConversation,
-    InstallStandaloneSkill,
     InstallCustomSkill,
     OverwriteCustomSkill,
-    InstallPlugin,
     Manual,
 }
 
@@ -3414,10 +3394,6 @@ pub enum RestoreActionKind {
         provider: Provider,
         logical_path: LogicalPath,
     },
-    InstallStandaloneSkill {
-        provider: Provider,
-        target_relative_path: String,
-    },
     /// Materialize a complete custom-skill directory into the mapped provider
     /// home's `skills/<name>`. The whole directory is one unit: staging,
     /// verification, and rename happen inside a single approved action, never
@@ -3432,10 +3408,6 @@ pub enum RestoreActionKind {
     OverwriteCustomSkill {
         provider: Provider,
         skill_name: String,
-    },
-    InstallPlugin {
-        provider: Provider,
-        plugin_id: String,
     },
     Manual {
         message: String,
@@ -3452,10 +3424,8 @@ impl RestoreActionKind {
             Self::DeleteProjectDirectory { .. } => RestoreActionType::DeleteProjectDirectory,
             Self::MergeFile { .. } => RestoreActionType::MergeFile,
             Self::MaterializeConversation { .. } => RestoreActionType::MaterializeConversation,
-            Self::InstallStandaloneSkill { .. } => RestoreActionType::InstallStandaloneSkill,
             Self::InstallCustomSkill { .. } => RestoreActionType::InstallCustomSkill,
             Self::OverwriteCustomSkill { .. } => RestoreActionType::OverwriteCustomSkill,
-            Self::InstallPlugin { .. } => RestoreActionType::InstallPlugin,
             Self::Manual { .. } => RestoreActionType::Manual,
         }
     }
@@ -3472,29 +3442,9 @@ impl RestoreActionKind {
             Self::DeleteProjectFile { last_sha256, .. } => {
                 validate_sha256("project-content deletion", last_sha256)
             }
-            Self::InstallStandaloneSkill {
-                target_relative_path,
-                ..
-            } => {
-                if target_relative_path.is_empty()
-                    || Path::new(target_relative_path).is_absolute()
-                    || Path::new(target_relative_path)
-                        .components()
-                        .any(|component| {
-                            matches!(component, Component::CurDir | Component::ParentDir)
-                        })
-                {
-                    Err("invalid standalone-skill target".to_string())
-                } else {
-                    Ok(())
-                }
-            }
             Self::InstallCustomSkill { skill_name, .. }
             | Self::OverwriteCustomSkill { skill_name, .. } => {
                 validate_skill_name("custom skill name", skill_name)
-            }
-            Self::InstallPlugin { plugin_id, .. } => {
-                validate_display_text("plugin id", plugin_id, false)
             }
             Self::Manual { message } => validate_display_text("manual action", message, false),
             _ => Ok(()),
@@ -3538,9 +3488,7 @@ impl RestoreAction {
         }
         if matches!(
             self.kind.action_type(),
-            RestoreActionType::InstallPlugin
-                | RestoreActionType::InstallStandaloneSkill
-                | RestoreActionType::InstallCustomSkill
+            RestoreActionType::InstallCustomSkill
                 | RestoreActionType::OverwriteCustomSkill
                 | RestoreActionType::WriteProjectFile
                 | RestoreActionType::EnsureProjectDirectory
@@ -3608,7 +3556,7 @@ impl ProjectFileSyncEligibility {
 
 impl RestorePlan {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != RESTORE_PLAN_SCHEMA_V2 {
+        if self.schema_version != RESTORE_PLAN_SCHEMA {
             return Err(format!(
                 "unsupported restore-plan schema {}",
                 self.schema_version
@@ -3755,7 +3703,7 @@ pub struct DependencyPlan {
 
 impl DependencyPlan {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != DEPENDENCY_PLAN_SCHEMA_V2 {
+        if self.schema_version != DEPENDENCY_PLAN_SCHEMA {
             return Err(format!(
                 "unsupported dependency-plan schema {}",
                 self.schema_version
@@ -3858,7 +3806,7 @@ pub struct DependencyApplications {
 impl Default for DependencyApplications {
     fn default() -> Self {
         Self {
-            schema: LOCAL_SCHEMA_V3,
+            schema: LOCAL_SCHEMA,
             revision: 0,
             records: Vec::new(),
         }
@@ -3867,7 +3815,7 @@ impl Default for DependencyApplications {
 
 impl DependencyApplications {
     pub fn validate(&self, config: &SyncConfigV3) -> Result<(), String> {
-        if self.schema != LOCAL_SCHEMA_V3 || self.records.len() > 100_000 {
+        if self.schema != LOCAL_SCHEMA || self.records.len() > 100_000 {
             return Err("invalid dependency applications document".to_string());
         }
         let mut plans = HashSet::new();
@@ -4068,7 +4016,7 @@ pub struct Materializations {
 impl Default for Materializations {
     fn default() -> Self {
         Self {
-            schema: LOCAL_SCHEMA_V3,
+            schema: LOCAL_SCHEMA,
             revision: 0,
             records: Vec::new(),
         }
@@ -4077,7 +4025,7 @@ impl Default for Materializations {
 
 impl Materializations {
     pub fn validate(&self, config: &SyncConfigV3) -> Result<(), String> {
-        if self.schema != LOCAL_SCHEMA_V3 || self.records.len() > 100_000 {
+        if self.schema != LOCAL_SCHEMA || self.records.len() > 100_000 {
             return Err("invalid materializations document".to_string());
         }
         let mut ids = HashSet::new();
@@ -4111,7 +4059,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_recipe_base_defaults_sync_activity_timestamps() {
+    fn recipe_base_defaults_sync_activity_timestamps() {
         let base: RecipeBase = serde_json::from_str(
             r#"{"generation":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","recipe_revision":2}"#,
         )
@@ -4326,7 +4274,7 @@ mod tests {
             updated_at: 1,
         };
         let mut config = SyncConfigV3 {
-            schema: LOCAL_SCHEMA_V3,
+            schema: LOCAL_SCHEMA,
             revision: 0,
             storages: vec![storage],
             projects: vec![project.clone()],
@@ -4361,7 +4309,7 @@ mod tests {
             updated_at: 1,
         };
         let config = SyncConfigV3 {
-            schema: LOCAL_SCHEMA_V3,
+            schema: LOCAL_SCHEMA,
             revision: 0,
             storages: Vec::new(),
             projects: vec![
@@ -4398,7 +4346,7 @@ mod tests {
             updated_at: 1,
         };
         let mut machine = MachineProjectState {
-            schema: MACHINE_PROJECT_SCHEMA_V2,
+            schema: MACHINE_PROJECT_SCHEMA,
             revision: 0,
             profiles: vec![
                 profile("profile-main", "/home/user/.codex"),
@@ -4518,9 +4466,9 @@ mod tests {
         let manifest = project_content_manifest();
         manifest.validate().unwrap();
 
-        let mut legacy = manifest.clone();
-        legacy.schema_version = 3;
-        assert!(legacy.validate().unwrap_err().contains("unsupported"));
+        let mut unsupported = manifest.clone();
+        unsupported.schema_version = 3;
+        assert!(unsupported.validate().unwrap_err().contains("unsupported"));
 
         let mut missing_ancestor = manifest.clone();
         let docs = LogicalPath::parse("project/docs").unwrap();
@@ -4622,10 +4570,10 @@ mod tests {
     fn executable_restore_actions_cannot_be_implicitly_approved() {
         let action = RestoreAction {
             action_id: ActionId::parse("action-1").unwrap(),
-            resource_id: resource_id("plugin:github"),
-            kind: RestoreActionKind::InstallPlugin {
+            resource_id: resource_id("codex:standalone-skill:frontend-skill"),
+            kind: RestoreActionKind::InstallCustomSkill {
                 provider: Provider::Codex,
-                plugin_id: "github@managed".to_string(),
+                skill_name: "frontend-skill".to_string(),
             },
             target_path: None,
             source_sha256: None,
@@ -4737,29 +4685,9 @@ mod tests {
         assert_ne!(first_digests.1, lineage_digests.1);
     }
 
-    #[test]
-    fn schema4_thread_ids_are_deterministic_and_domain_separated() {
-        let bundle = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
-        let other_bundle = BundleId::parse("fedcba9876543210fedcba9876543210").unwrap();
-        let resource = ResourceId::parse("codex:session:thread-a").unwrap();
-        let first = deterministic_schema4_thread_id(&bundle, Provider::Codex, &resource).unwrap();
-        let repeated =
-            deterministic_schema4_thread_id(&bundle, Provider::Codex, &resource).unwrap();
-        let claude = deterministic_schema4_thread_id(&bundle, Provider::Claude, &resource).unwrap();
-        let elsewhere =
-            deterministic_schema4_thread_id(&other_bundle, Provider::Codex, &resource).unwrap();
-        assert_eq!(first, repeated);
-        assert_ne!(first, claude);
-        assert_ne!(first, elsewhere);
-        assert!(first.as_str().starts_with("thread-"));
-        conversation_resource_id(Provider::Codex, &first).unwrap();
-    }
-
     fn schema6_conversation_manifest() -> BundleManifest {
         let bundle = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
-        let legacy_resource = ResourceId::parse("codex:session:thread-a").unwrap();
-        let thread_id =
-            deterministic_schema4_thread_id(&bundle, Provider::Codex, &legacy_resource).unwrap();
+        let thread_id = ThreadId::parse("thread-0123456789abcdef0123456789abcdef").unwrap();
         let resource_id = conversation_resource_id(Provider::Codex, &thread_id).unwrap();
         let transcript_path = LogicalPath::parse(format!(
             "state/conversations/codex/{}/transcript.jsonl",
@@ -4817,7 +4745,7 @@ mod tests {
                 repository_fingerprint: None,
             },
             recipe: BundleRecipe {
-                schema_version: RECIPE_SCHEMA_V1,
+                schema_version: RECIPE_SCHEMA,
                 revision: 1,
                 entries: BTreeMap::from([(
                     resource_id.clone(),

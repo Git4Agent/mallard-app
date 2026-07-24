@@ -18,7 +18,7 @@ use crate::project_sync_v3::domain::{
     ConversationPlanDirection, ConversationPushPlan, ConversationReasonCode, ConversationRelation,
     ConversationSyncOperation, ConversationSyncPhase, LocalConversationBinding, LocalProjectId,
     LocalProjectRegistration, LocalProviderProfileId, PlanId, ProjectBinding, Provider,
-    ProviderProfile, ReplicaId, StorageId, TargetExpectation, ThreadId, PUSH_PLAN_SCHEMA_V1,
+    ProviderProfile, ReplicaId, StorageId, TargetExpectation, ThreadId, PUSH_PLAN_SCHEMA,
 };
 use crate::project_sync_v3::persistence::V3Repository;
 use crate::project_sync_v3::provider_capture::{
@@ -236,7 +236,7 @@ fn reviewed_push_plan_is_immutable_restart_readable_and_scope_pinned() {
         ConversationRelation::CloudPrefixOfLocal,
     );
     let plan = ConversationPushPlan {
-        schema_version: PUSH_PLAN_SCHEMA_V1,
+        schema_version: PUSH_PLAN_SCHEMA,
         plan_id: PlanId::parse("plan-reviewed-push").unwrap(),
         storage_id: StorageId::parse("storage-reviewed-push").unwrap(),
         bundle_id: BundleId::parse("0123456789abcdef0123456789abcdef").unwrap(),

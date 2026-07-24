@@ -244,7 +244,7 @@ const binding: ProjectBinding = {
 };
 
 const pullPlan: RestorePlan = {
-  schema_version: 2,
+  schema_version: 1,
   plan_id: "plan-project-files",
   storage_id: "storage-a",
   bundle_id: binding.bundle_id,

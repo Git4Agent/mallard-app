@@ -30,8 +30,8 @@ use super::domain::{
     ProjectStorageLink, Provenance, Provider, ProviderProfile, RecipeBase, RecipeEntry, ReplicaId,
     ResourceDescriptor, ResourceId, ResourceKind, ResourceScope, RestoreAction, RestoreActionKind,
     RestoreActionType, RestorePlan, SetupDraftId, SetupTransaction, StorageConfigV3, StorageId,
-    StorageKind, SyncConfigV3, BUNDLE_SCHEMA_V6, DEPENDENCY_PLAN_SCHEMA_V2,
-    MAX_CONVERSATION_FILE_BYTES, SETUP_DRAFT_SCHEMA_V1, SETUP_TRANSACTION_SCHEMA_V2,
+    StorageKind, SyncConfigV3, BUNDLE_SCHEMA_V6, DEPENDENCY_PLAN_SCHEMA,
+    MAX_CONVERSATION_FILE_BYTES, SETUP_DRAFT_SCHEMA, SETUP_TRANSACTION_SCHEMA,
 };
 use super::global_inventory;
 use super::persistence::V3Repository;
@@ -5288,7 +5288,6 @@ fn apply_bundle_restore_with_repository(
                     || (receipt.status == ActionStatus::Skipped
                         && kept_local_conversation_actions.contains(&receipt.action_id))
             }
-            _ => true,
         });
     let status = if files_complete {
         MaterializationStatus::Complete
@@ -5460,7 +5459,7 @@ fn plan_dependencies_with_repository(
     let (restore_plan, binding, fetched) = restore_support_context(repository, restore_plan_id)?;
     let created_at = now_secs();
     let plan = DependencyPlan {
-        schema_version: DEPENDENCY_PLAN_SCHEMA_V2,
+        schema_version: DEPENDENCY_PLAN_SCHEMA,
         // `generated_named_id` accepts only lowercase alphanumeric prefixes.
         // The plan type and its persistence directory already distinguish
         // dependency plans from restore plans.
@@ -5942,10 +5941,8 @@ fn add_partial_materialization_issues(
                 | RestoreActionType::DeleteProjectDirectory => {
                     matches!(receipt.status, ActionStatus::Failed | ActionStatus::Blocked)
                 }
-                RestoreActionType::InstallStandaloneSkill
-                | RestoreActionType::InstallCustomSkill
+                RestoreActionType::InstallCustomSkill
                 | RestoreActionType::OverwriteCustomSkill
-                | RestoreActionType::InstallPlugin
                 | RestoreActionType::Manual => false,
             }
         })
@@ -7745,7 +7742,7 @@ fn create_setup_draft_with_repository(
         .to_string();
     let now = now_secs();
     let draft = ProjectSetupDraft {
-        schema: SETUP_DRAFT_SCHEMA_V1,
+        schema: SETUP_DRAFT_SCHEMA,
         draft_id: SetupDraftId::parse(generated_named_id("draft")?)?,
         local_project_id: LocalProjectId::parse(generated_named_id("project")?)?,
         new_bundle_id: BundleId::generate()?,
@@ -7788,7 +7785,7 @@ fn update_setup_draft_with_repository(
     // Editable fields come from the client; identity, timestamps, and derived
     // path facts stay server-owned.
     let draft = ProjectSetupDraft {
-        schema: SETUP_DRAFT_SCHEMA_V1,
+        schema: SETUP_DRAFT_SCHEMA,
         draft_id: stored.draft_id,
         local_project_id: stored.local_project_id,
         new_bundle_id: stored.new_bundle_id,
@@ -8344,7 +8341,7 @@ fn build_setup_transaction(
     binding.validate_structure()?;
 
     let transaction = SetupTransaction {
-        schema: SETUP_TRANSACTION_SCHEMA_V2,
+        schema: SETUP_TRANSACTION_SCHEMA,
         draft_id: draft.draft_id.clone(),
         draft_revision: draft.revision,
         created_at: now,
