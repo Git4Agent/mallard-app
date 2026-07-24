@@ -1,11 +1,9 @@
 import type {
   BundleRecipe,
-  BundleResourceStatus,
   ProjectProvider,
   ProjectResourceCategory,
   ProjectResourceDescriptor,
   ResourceInventory,
-  ResourceStatusReport,
 } from "../../types";
 import { userFacingRepoTerms } from "../../terminology";
 
@@ -20,11 +18,10 @@ export const RESOURCE_GROUPS: Array<{
   description: string;
 }> = [
   { id: "conversations", label: "Conversations", description: "Tasks, sessions, memory, and their filtered indexes" },
-  { id: "project_setup", label: "Project setup", description: "Instructions and provider-supported project configuration" },
-  { id: "skills", label: "Skills", description: "Project skills and selected standalone skills" },
+  { id: "skills", label: "Skills", description: "Selected standalone skills from the provider home" },
   { id: "plugins", label: "Plugins", description: "Portable install intent; payloads and caches never sync" },
   { id: "project_files", label: "Project files", description: "Exact files and folders selected from a non-Git project" },
-  { id: "tools", label: "Tools & hooks", description: "MCP servers, hooks, commands, and environment requirements" },
+  { id: "tools", label: "Requirements", description: "Environment requirements this backup expects on each machine" },
 ];
 
 const CATEGORY_BY_KIND: Record<string, ProjectResourceCategory> = {
@@ -37,37 +34,22 @@ const CATEGORY_BY_KIND: Record<string, ProjectResourceCategory> = {
   session: "conversations",
   memory: "conversations",
   project_memory: "conversations",
-  instruction: "project_setup",
-  instructions: "project_setup",
-  project_file: "project_setup",
   project_content_file: "project_files",
   project_content_directory: "project_files",
-  project_config: "project_setup",
-  project_settings: "project_setup",
-  setting: "project_setup",
-  settings_patch: "project_setup",
-  agent: "project_setup",
-  command: "project_setup",
-  rule: "project_setup",
-  prompt: "project_setup",
   skill: "skills",
-  project_skill: "skills",
   standalone_skill: "skills",
   plugin_skill: "skills",
   plugin: "plugins",
-  mcp: "tools",
-  mcp_server: "tools",
-  hook: "tools",
   tool: "tools",
   requirement: "tools",
 };
 
 export function categoryFor(resource: ProjectResourceDescriptor): ProjectResourceCategory {
   const explicit = resource.category;
-  if (explicit === "conversations" || explicit === "project_setup" || explicit === "skills" || explicit === "plugins" || explicit === "project_files" || explicit === "tools") {
+  if (explicit === "conversations" || explicit === "skills" || explicit === "plugins" || explicit === "project_files" || explicit === "tools") {
     return explicit;
   }
-  return CATEGORY_BY_KIND[resource.kind.toLowerCase()] ?? "project_setup";
+  return CATEGORY_BY_KIND[resource.kind.toLowerCase()] ?? "tools";
 }
 
 export function inventoryResources(inventory: ResourceInventory | null): ProjectResourceDescriptor[] {
@@ -97,14 +79,6 @@ export function recipeWithSelection(
         required: false,
       }])),
   };
-}
-
-export function statusMap(report: ResourceStatusReport | null): Map<string, string> {
-  if (!report) return new Map();
-  if (Array.isArray(report.statuses)) {
-    return new Map(report.statuses.map((status: BundleResourceStatus) => [status.resource_id, status.state]));
-  }
-  return new Map(Object.entries(report.statuses));
 }
 
 export function compactProjectPath(path?: string | null): string {

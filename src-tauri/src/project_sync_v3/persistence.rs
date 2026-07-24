@@ -12,8 +12,7 @@ use super::domain::{
     HostIdentity, LocalProjectId, MachineProjectState, Materializations, OriginHostToken,
     OriginKey, OriginKeyRef, OriginReplicaToken, PlanId, ProjectSetupDraft, ReplicaId, RestorePlan,
     SetupDraftId, SetupTransaction, SyncConfigV3, CONVERSATION_BINDINGS_SCHEMA_V2,
-    HOST_IDENTITY_SCHEMA_V1, MACHINE_PROJECT_SCHEMA_V1, MACHINE_PROJECT_SCHEMA_V2,
-    MAX_SETUP_DRAFTS, SETUP_TRANSACTION_SCHEMA_V1, SETUP_TRANSACTION_SCHEMA_V2,
+    HOST_IDENTITY_SCHEMA_V1, MACHINE_PROJECT_SCHEMA_V2, MAX_SETUP_DRAFTS,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -566,15 +565,7 @@ impl V3Repository {
                 })
             })
             .flatten();
-        let setup_identity = matching_pending
-            .map(|transaction| self.synthetic_previous_identity(transaction))
-            .transpose()?
-            .unwrap_or_else(|| current.clone());
-        // Schema-1 setup journals predate host pins. Attribute them to the
-        // identity that existed before rotation so they become stale drafts
-        // after registration instead of silently activating old paths under
-        // the new host.
-        self.migrate_legacy_setup_transactions_unlocked(&setup_identity, allow_damaged_recovery)?;
+        self.validate_setup_transactions_unlocked(allow_damaged_recovery)?;
 
         let (mut machine, current_conversations, mut materializations) = if let Some(transaction) =
             salvage
@@ -586,7 +577,7 @@ impl V3Repository {
             )
         } else {
             let machine_result = if allow_damaged_recovery {
-                self.load_bindings_document_unlocked(&config, &current)
+                self.load_bindings_document_unlocked(&config)
             } else {
                 self.load_bindings_unlocked(&config, &current)
             };
@@ -1150,7 +1141,7 @@ impl V3Repository {
 
     pub fn list_setup_transactions(&self) -> Result<(Vec<SetupTransaction>, Vec<String>), String> {
         let _guard = persistence_guard(&self.root)?;
-        let identity = self.load_or_create_host_identity_unlocked()?;
+        self.load_or_create_host_identity_unlocked()?;
         let directory = self.root.join("setup_transactions");
         match fs::symlink_metadata(&directory) {
             Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
@@ -1176,7 +1167,7 @@ impl V3Repository {
                 .and_then(|name| name.to_str())
                 .unwrap_or("unknown setup transaction")
                 .to_string();
-            match self.read_setup_transaction_unlocked(&path, &identity) {
+            match self.read_setup_transaction_unlocked(&path) {
                 Ok(Some(transaction)) => loaded.push(transaction),
                 Ok(None) => {}
                 Err(error) => warnings.push(format!(
@@ -1206,9 +1197,9 @@ impl V3Repository {
         draft_id: &SetupDraftId,
     ) -> Result<Option<SetupTransaction>, String> {
         let _guard = persistence_guard(&self.root)?;
-        let identity = self.load_or_create_host_identity_unlocked()?;
-        let transaction = self
-            .read_setup_transaction_unlocked(&self.setup_transaction_path(draft_id), &identity)?;
+        self.load_or_create_host_identity_unlocked()?;
+        let transaction =
+            self.read_setup_transaction_unlocked(&self.setup_transaction_path(draft_id))?;
         if let Some(transaction) = &transaction {
             transaction.validate()?;
             if &transaction.draft_id != draft_id {
@@ -1224,18 +1215,13 @@ impl V3Repository {
     fn read_setup_transaction_unlocked(
         &self,
         path: &Path,
-        identity: &HostIdentity,
     ) -> Result<Option<SetupTransaction>, String> {
         let Some(value) =
             read_json_bounded::<Value>(&self.root, path, MAX_SETUP_TRANSACTION_BYTES)?
         else {
             return Ok(None);
         };
-        let (transaction, migrated) = decode_setup_transaction(value, identity)?;
-        if migrated {
-            write_json_atomic(&self.root, path, &transaction, MAX_SETUP_TRANSACTION_BYTES)?;
-        }
-        Ok(Some(transaction))
+        Ok(Some(decode_setup_transaction(value)?))
     }
 
     /// A transaction is one finalize attempt's committed intent; replacing an
@@ -1413,9 +1399,10 @@ impl V3Repository {
     }
 
     fn load_config_unlocked(&self) -> Result<SyncConfigV3, String> {
-        let config: SyncConfigV3 =
+        let mut config: SyncConfigV3 =
             read_json_bounded(&self.root, &self.config_path(), MAX_CONFIG_BYTES)?
                 .unwrap_or_default();
+        purge_removed_resource_recipe_entries(&mut config);
         config.validate()?;
         Ok(config)
     }
@@ -2202,8 +2189,8 @@ impl V3Repository {
 
         // A current-format primary document cannot be assigned to a freshly
         // generated host merely because corruption removed every parseable
-        // host_id. Only the explicitly supported hostless migration formats
-        // are compatible with a true first run.
+        // host_id. Only hostless record documents that inject cleanly are
+        // compatible with a true first run.
         if self.path_exists_unlocked(&self.host_rotation_path())?
             || self.path_exists_unlocked(&self.conversation_bindings_path())?
         {
@@ -2215,17 +2202,17 @@ impl V3Repository {
         };
         let legacy_identity =
             self.synthetic_missing_identity(HostId::parse("00000000000000000000000000000000")?)?;
-        if !self.machine_projects_absent_or_valid_legacy_unlocked(&config, &legacy_identity)?
+        if self.path_exists_unlocked(&self.machine_projects_path())?
             || !self.materializations_absent_or_valid_legacy_unlocked(&config, &legacy_identity)?
             || !self.dependency_applications_absent_or_valid_legacy_unlocked(
                 &config,
                 &legacy_identity,
             )?
-            || !self.setup_transactions_absent_or_valid_legacy_unlocked(&legacy_identity)?
         {
             return Ok(false);
         }
         for directory in [
+            self.root.join("setup_transactions"),
             self.root.join("restore_plans"),
             self.root.join("dependency_plans"),
         ] {
@@ -2242,26 +2229,6 @@ impl V3Repository {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(format!("inspect host-scoped local state: {}", error)),
         }
-    }
-
-    fn machine_projects_absent_or_valid_legacy_unlocked(
-        &self,
-        config: &SyncConfigV3,
-        identity: &HostIdentity,
-    ) -> Result<bool, String> {
-        let path = self.machine_projects_path();
-        if !self.path_exists_unlocked(&path)? {
-            return Ok(true);
-        }
-        let value = match read_json_bounded::<Value>(&self.root, &path, MAX_BINDINGS_BYTES) {
-            Ok(Some(value)) => value,
-            Ok(None) | Err(_) => return Ok(false),
-        };
-        if value.get("schema").and_then(Value::as_u64) != Some(MACHINE_PROJECT_SCHEMA_V1 as u64) {
-            return Ok(false);
-        }
-        Ok(decode_machine_project_state(value, identity, config)
-            .is_ok_and(|(_, migrated)| migrated))
     }
 
     fn materializations_absent_or_valid_legacy_unlocked(
@@ -2311,47 +2278,6 @@ impl V3Repository {
             return Ok(false);
         };
         Ok(document.validate(config).is_ok())
-    }
-
-    fn setup_transactions_absent_or_valid_legacy_unlocked(
-        &self,
-        identity: &HostIdentity,
-    ) -> Result<bool, String> {
-        let directory = self.root.join("setup_transactions");
-        match fs::symlink_metadata(&directory) {
-            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
-            }
-            Ok(_) => return Ok(false),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-            Err(error) => return Err(format!("inspect setup transaction storage: {}", error)),
-        }
-        let mut count = 0_usize;
-        for entry in fs::read_dir(&directory)
-            .map_err(|error| format!("list setup transaction storage: {}", error))?
-        {
-            let path = entry
-                .map_err(|error| format!("list setup transaction: {}", error))?
-                .path();
-            if path.extension().is_none_or(|extension| extension != "json") {
-                continue;
-            }
-            count = count.saturating_add(1);
-            if count > MAX_SETUP_DRAFTS {
-                return Ok(false);
-            }
-            let value =
-                match read_json_bounded::<Value>(&self.root, &path, MAX_SETUP_TRANSACTION_BYTES) {
-                    Ok(Some(value)) => value,
-                    Ok(None) | Err(_) => return Ok(false),
-                };
-            if value.get("schema").and_then(Value::as_u64)
-                != Some(SETUP_TRANSACTION_SCHEMA_V1 as u64)
-                || decode_setup_transaction(value, identity).is_err()
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 
     fn directory_has_json_documents_unlocked(&self, directory: &Path) -> Result<bool, String> {
@@ -2422,9 +2348,8 @@ impl V3Repository {
         Ok(())
     }
 
-    fn migrate_legacy_setup_transactions_unlocked(
+    fn validate_setup_transactions_unlocked(
         &self,
-        identity: &HostIdentity,
         allow_damaged_recovery: bool,
     ) -> Result<(), String> {
         let directory = self.root.join("setup_transactions");
@@ -2436,7 +2361,6 @@ impl V3Repository {
             Err(error) => return Err(format!("inspect setup transaction storage: {}", error)),
         }
         let mut count = 0_usize;
-        let mut migrations = Vec::new();
         let mut quarantines = Vec::new();
         for entry in fs::read_dir(&directory)
             .map_err(|error| format!("list setup transaction storage: {}", error))?
@@ -2458,10 +2382,9 @@ impl V3Repository {
                             "setup transaction disappeared during rotation".to_string()
                         })
                     })
-                    .and_then(|value| decode_setup_transaction(value, identity));
+                    .and_then(decode_setup_transaction);
             match decoded {
-                Ok((transaction, true)) => migrations.push((path, transaction)),
-                Ok((_, false)) => {}
+                Ok(_) => {}
                 Err(_) if allow_damaged_recovery => quarantines.push(path),
                 Err(error) => {
                     return Err(format!(
@@ -2472,11 +2395,8 @@ impl V3Repository {
             }
         }
         // Verified rotation validates the complete directory before changing
-        // any setup journal. Imported recovery may then salvage valid legacy
-        // entries and quarantine only the entries it could not validate.
-        for (path, transaction) in migrations {
-            write_json_atomic(&self.root, &path, &transaction, MAX_SETUP_TRANSACTION_BYTES)?;
-        }
+        // any setup journal. Imported recovery quarantines only the entries
+        // it could not validate.
         for path in quarantines {
             self.quarantine_file_unlocked(&path, "setup-transaction")?;
         }
@@ -3072,7 +2992,7 @@ impl V3Repository {
         config: &SyncConfigV3,
         identity: &HostIdentity,
     ) -> Result<MachineProjectState, String> {
-        let bindings = self.load_bindings_document_unlocked(config, identity)?;
+        let bindings = self.load_bindings_document_unlocked(config)?;
         if bindings
             .bindings
             .iter()
@@ -3088,17 +3008,16 @@ impl V3Repository {
     fn load_bindings_document_unlocked(
         &self,
         config: &SyncConfigV3,
-        identity: &HostIdentity,
     ) -> Result<MachineProjectState, String> {
         let path = self.machine_projects_path();
         let Some(value) = read_json_bounded::<Value>(&self.root, &path, MAX_BINDINGS_BYTES)? else {
             return Ok(MachineProjectState::default());
         };
-        let (bindings, migrated) = decode_machine_project_state(value, identity, config)
+        let bindings: MachineProjectState = serde_json::from_value(value)
             .map_err(|error| format!("parse '{}': {}", path.display(), error))?;
-        if migrated {
-            write_json_atomic(&self.root, &path, &bindings, MAX_BINDINGS_BYTES)?;
-        }
+        bindings
+            .validate(config)
+            .map_err(|error| format!("parse '{}': {}", path.display(), error))?;
         Ok(bindings)
     }
 
@@ -3656,75 +3575,36 @@ fn inject_host_id_into_records(value: &mut Value, host_id: &HostId) -> Result<bo
     Ok(migrated)
 }
 
-fn decode_machine_project_state(
-    mut value: Value,
-    identity: &HostIdentity,
-    config: &SyncConfigV3,
-) -> Result<(MachineProjectState, bool), String> {
-    let mut migrated = false;
-    if value.get("schema").and_then(Value::as_u64) == Some(MACHINE_PROJECT_SCHEMA_V1 as u64) {
-        let object = value
-            .as_object_mut()
-            .ok_or_else(|| "invalid legacy machine project state".to_string())?;
-        object.insert("schema".to_string(), Value::from(MACHINE_PROJECT_SCHEMA_V2));
-        if let Some(bindings) = object.get_mut("bindings").and_then(Value::as_array_mut) {
-            for binding in bindings {
-                let binding = binding
-                    .as_object_mut()
-                    .ok_or_else(|| "invalid legacy project binding".to_string())?;
-                binding.insert(
-                    "host_id".to_string(),
-                    Value::String(identity.host_id.as_str().to_string()),
-                );
-            }
-        }
-        migrated = true;
-    }
-    let bindings: MachineProjectState =
-        serde_json::from_value(value).map_err(|error| error.to_string())?;
-    bindings.validate(config)?;
-    Ok((bindings, migrated))
-}
-
-fn decode_setup_transaction(
-    mut value: Value,
-    identity: &HostIdentity,
-) -> Result<(SetupTransaction, bool), String> {
-    let mut migrated = false;
-    if value.get("schema").and_then(Value::as_u64) == Some(SETUP_TRANSACTION_SCHEMA_V1 as u64) {
-        let object = value
-            .as_object_mut()
-            .ok_or_else(|| "invalid legacy setup transaction".to_string())?;
-        let replica_id = object
-            .get("binding")
-            .and_then(Value::as_object)
-            .and_then(|binding| binding.get("replica_id"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| "legacy setup transaction has no replica pin".to_string())?
-            .to_string();
-        object.insert(
-            "schema".to_string(),
-            Value::from(SETUP_TRANSACTION_SCHEMA_V2),
-        );
-        object.insert(
-            "host_id".to_string(),
-            Value::String(identity.host_id.as_str().to_string()),
-        );
-        object.insert("replica_id".to_string(), Value::String(replica_id));
-        let binding = object
-            .get_mut("binding")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| "legacy setup transaction has no binding".to_string())?;
-        binding.insert(
-            "host_id".to_string(),
-            Value::String(identity.host_id.as_str().to_string()),
-        );
-        migrated = true;
-    }
+fn decode_setup_transaction(value: Value) -> Result<SetupTransaction, String> {
     let transaction: SetupTransaction = serde_json::from_value(value)
         .map_err(|error| format!("parse setup transaction: {}", error))?;
     transaction.validate()?;
-    Ok((transaction, migrated))
+    Ok(transaction)
+}
+
+/// Resource-id prefixes of the removed typed project-config kinds. Stale
+/// recipe entries with these ids would otherwise surface as bogus
+/// "Requirement" placeholder rows.
+const REMOVED_RESOURCE_ID_PREFIXES: &[&str] = &[
+    "project:file:",
+    "codex:skill:",
+    "claude:skill:",
+    "codex:agent:",
+    "claude:agent:",
+    "codex:command:",
+    "claude:command:",
+    "codex:rule:",
+    "claude:rule:",
+];
+
+fn purge_removed_resource_recipe_entries(config: &mut SyncConfigV3) {
+    for project in &mut config.projects {
+        project.recipe.entries.retain(|id, _| {
+            !REMOVED_RESOURCE_ID_PREFIXES
+                .iter()
+                .any(|prefix| id.as_str().starts_with(prefix))
+        });
+    }
 }
 
 fn now_secs() -> Result<u64, String> {
@@ -3978,7 +3858,6 @@ mod tests {
         ConversationMaterializationState, LocalConversationBinding,
         LocalProjectRegistration, LocalProviderProfileId, MaterializationRecord, OriginHostAlias,
         ProjectBinding, Provider, ProviderProfile, LOCAL_SCHEMA_V3,
-        MACHINE_PROJECT_SCHEMA_V2,
     };
     use std::collections::BTreeMap;
 
@@ -4494,33 +4373,6 @@ mod tests {
             .contains("register as a new host"));
     }
 
-    #[test]
-    fn valid_hostless_machine_schema_one_remains_a_first_run_migration() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = repository(&temp);
-        let legacy = serde_json::json!({
-            "schema": MACHINE_PROJECT_SCHEMA_V1,
-            "revision": 0,
-            "profiles": [],
-            "bindings": []
-        });
-        write_json_atomic(
-            repo.root(),
-            &repo.machine_projects_path(),
-            &legacy,
-            MAX_BINDINGS_BYTES,
-        )
-        .unwrap();
-
-        let (identity, available) = repo.inspect_host_identity().unwrap();
-        assert!(available);
-        assert!(!repo.is_unknown_identity_marker(&identity));
-        assert_eq!(
-            repo.load_bindings().unwrap().schema,
-            MACHINE_PROJECT_SCHEMA_V2
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn origin_key_with_broader_permissions_is_treated_as_unavailable() {
@@ -4556,125 +4408,6 @@ mod tests {
             .load_or_create_host_identity()
             .unwrap_err()
             .contains("does not match this host identity"));
-    }
-
-    #[test]
-    fn schema_one_setup_transaction_migrates_with_current_host_and_replica_pins() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = repository(&temp);
-        let identity = repo.load_or_create_host_identity().unwrap();
-        let project_root = temp.path().join("project");
-        fs::create_dir_all(&project_root).unwrap();
-        let draft_id = SetupDraftId::parse("draft-a").unwrap();
-        let path = repo.setup_transaction_path(&draft_id);
-        repo.ensure_directory(path.parent().unwrap()).unwrap();
-        let legacy = serde_json::json!({
-            "schema": 1,
-            "draft_id": "draft-a",
-            "draft_revision": 3,
-            "created_at": 1,
-            "profiles": [],
-            "project": {
-                "local_project_id": "project-a",
-                "bundle_id": "0123456789abcdef0123456789abcdef",
-                "display_name": "Project A",
-                "recipe": { "schema_version": 1, "revision": 0, "entries": {} },
-                "recipe_bases": {},
-                "revision": 0,
-                "created_at": 1,
-                "updated_at": 1
-            },
-            "links": [],
-            "binding": {
-                "replica_id": "replica-legacy",
-                "local_project_id": "project-a",
-                "bundle_id": "0123456789abcdef0123456789abcdef",
-                "project_root": project_root.to_string_lossy(),
-                "canonical_project_root": project_root.to_string_lossy(),
-                "profile_ids": {},
-                "state": "active",
-                "revision": 0,
-                "updated_at": 1
-            }
-        });
-        write_json_atomic(repo.root(), &path, &legacy, MAX_SETUP_TRANSACTION_BYTES).unwrap();
-
-        let (transactions, warnings) = repo.list_setup_transactions().unwrap();
-        assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(transactions.len(), 1);
-        assert_eq!(transactions[0].schema, SETUP_TRANSACTION_SCHEMA_V2);
-        assert_eq!(transactions[0].host_id, identity.host_id);
-        assert_eq!(transactions[0].binding.host_id, identity.host_id);
-        assert_eq!(transactions[0].replica_id.as_str(), "replica-legacy");
-        assert_eq!(
-            transactions[0].binding.replica_id.as_str(),
-            "replica-legacy"
-        );
-
-        let migrated: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-        assert_eq!(
-            migrated.get("schema").and_then(Value::as_u64),
-            Some(SETUP_TRANSACTION_SCHEMA_V2 as u64)
-        );
-    }
-
-    #[test]
-    fn rotation_pins_legacy_setup_transactions_to_the_previous_host() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = repository(&temp);
-        let previous = repo.load_or_create_host_identity().unwrap();
-        let project_root = temp.path().join("project");
-        fs::create_dir_all(&project_root).unwrap();
-        let draft_id = SetupDraftId::parse("draft-a").unwrap();
-        let path = repo.setup_transaction_path(&draft_id);
-        repo.ensure_directory(path.parent().unwrap()).unwrap();
-        let legacy = serde_json::json!({
-            "schema": 1,
-            "draft_id": "draft-a",
-            "draft_revision": 3,
-            "created_at": 1,
-            "profiles": [],
-            "project": {
-                "local_project_id": "project-a",
-                "bundle_id": "0123456789abcdef0123456789abcdef",
-                "display_name": "Project A",
-                "recipe": { "schema_version": 1, "revision": 0, "entries": {} },
-                "recipe_bases": {},
-                "revision": 0,
-                "created_at": 1,
-                "updated_at": 1
-            },
-            "links": [],
-            "binding": {
-                "replica_id": "replica-legacy",
-                "local_project_id": "project-a",
-                "bundle_id": "0123456789abcdef0123456789abcdef",
-                "project_root": project_root.to_string_lossy(),
-                "canonical_project_root": project_root.to_string_lossy(),
-                "profile_ids": {},
-                "state": "active",
-                "revision": 0,
-                "updated_at": 1
-            }
-        });
-        write_json_atomic(repo.root(), &path, &legacy, MAX_SETUP_TRANSACTION_BYTES).unwrap();
-
-        let rotated = repo
-            .rotate_host_identity(Some((&previous.host_id, previous.revision)), None)
-            .unwrap();
-        let migrated: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-        assert_eq!(
-            migrated.get("schema").and_then(Value::as_u64),
-            Some(SETUP_TRANSACTION_SCHEMA_V2 as u64)
-        );
-        assert_eq!(
-            migrated.get("host_id").and_then(Value::as_str),
-            Some(previous.host_id.as_str())
-        );
-        assert_ne!(
-            migrated.get("host_id").and_then(Value::as_str),
-            Some(rotated.host_id.as_str())
-        );
     }
 
     #[test]
@@ -5788,149 +5521,5 @@ mod tests {
             Some(identity)
         );
         assert!(!repo.root().join("host_recovery_quarantine").exists());
-    }
-
-    #[test]
-    fn machine_schema_one_migrates_once_and_rotation_detaches_fresh_replicas() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = repository(&temp);
-        let identity = repo.load_or_create_host_identity().unwrap();
-        let project_root = temp.path().join("project");
-        let profile_root = temp.path().join("codex");
-        fs::create_dir_all(&project_root).unwrap();
-        fs::create_dir_all(&profile_root).unwrap();
-
-        let mut config = repo.load_config().unwrap();
-        config.projects.push(LocalProjectRegistration {
-            local_project_id: LocalProjectId::parse("project-a").unwrap(),
-            bundle_id: BundleId::parse("0123456789abcdef0123456789abcdef").unwrap(),
-            display_name: "Project A".to_string(),
-            local_alias: None,
-            repository_fingerprint: None,
-            recipe: BundleRecipe::default(),
-            recipe_bases: BTreeMap::new(),
-            revision: 0,
-            created_at: 1,
-            updated_at: 1,
-        });
-        repo.save_config(config).unwrap();
-
-        let legacy = serde_json::json!({
-            "schema": 1,
-            "revision": 4,
-            "profiles": [{
-                "profile_id": "profile-a",
-                "provider": "codex",
-                "display_name": "Codex",
-                "path": profile_root.to_string_lossy(),
-                "canonical_path": profile_root.to_string_lossy(),
-                "revision": 0,
-                "created_at": 1,
-                "updated_at": 1
-            }],
-            "bindings": [{
-                "replica_id": "replica-old",
-                "local_project_id": "project-a",
-                "bundle_id": "0123456789abcdef0123456789abcdef",
-                "project_root": project_root.to_string_lossy(),
-                "canonical_project_root": project_root.to_string_lossy(),
-                "profile_ids": { "codex": "profile-a" },
-                "state": "active",
-                "revision": 2,
-                "updated_at": 1
-            }]
-        });
-        write_json_atomic(
-            repo.root(),
-            &repo.machine_projects_path(),
-            &legacy,
-            MAX_BINDINGS_BYTES,
-        )
-        .unwrap();
-
-        let migrated = repo.load_bindings().unwrap();
-        assert_eq!(migrated.schema, MACHINE_PROJECT_SCHEMA_V2);
-        assert_eq!(migrated.revision, 4);
-        assert_eq!(migrated.bindings[0].host_id, identity.host_id);
-        let old_replica = migrated.bindings[0].replica_id.clone();
-        repo.mutate_conversation_bindings(|conversations| {
-            conversations.bindings.push(LocalConversationBinding {
-                host_id: identity.host_id.clone(),
-                replica_id: old_replica.clone(),
-                local_project_id: LocalProjectId::parse("project-a").unwrap(),
-                provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
-                thread_id: ThreadId::parse("group-a.variant-a").unwrap(),
-                provider_thread_id: Some("thread-a".to_string()),
-                materialization_state: ConversationMaterializationState::Resumable,
-                last_observed_file_sha256: None,
-                last_observed_head_message_id: None,
-                last_observed_lineage_digest: None,
-                last_observed_semantic_digest: None,
-                source_generation: None,
-                source_manifest_sha256: None,
-                revision: 0,
-                created_at: 1,
-                updated_at: 1,
-            });
-            Ok(())
-        })
-        .unwrap();
-        repo.mutate_materializations(|_, materializations| {
-            materializations.records.push(MaterializationRecord {
-                materialization_id: super::super::domain::MaterializationId::parse(
-                    "materialization-a",
-                )
-                .unwrap(),
-                plan_id: PlanId::parse("plan-a").unwrap(),
-                host_id: identity.host_id.clone(),
-                replica_id: old_replica.clone(),
-                local_project_id: LocalProjectId::parse("project-a").unwrap(),
-                storage_id: super::super::domain::StorageId::parse("storage-a").unwrap(),
-                bundle_id: BundleId::parse("0123456789abcdef0123456789abcdef").unwrap(),
-                generation: 1,
-                commit_id: "commit-a".to_string(),
-                manifest_sha256: "ab".repeat(32),
-                binding_revision: 2,
-                status: super::super::domain::MaterializationStatus::Complete,
-                applied_at: 1,
-                receipts: Vec::new(),
-            });
-            Ok(())
-        })
-        .unwrap();
-        let rotated = repo
-            .rotate_host_identity(Some((&identity.host_id, identity.revision)), None)
-            .unwrap();
-        let after = repo.load_bindings().unwrap();
-        assert_eq!(after.bindings[0].host_id, rotated.host_id);
-        assert_ne!(after.bindings[0].replica_id, old_replica);
-        assert_eq!(after.bindings[0].state, BindingState::Detached);
-        let conversations = repo.load_conversation_bindings().unwrap();
-        assert_eq!(conversations.bindings.len(), 1);
-        assert_eq!(conversations.bindings[0].host_id, rotated.host_id);
-        assert_eq!(
-            conversations.bindings[0].replica_id,
-            after.bindings[0].replica_id
-        );
-        assert_eq!(
-            conversations.bindings[0].materialization_state,
-            ConversationMaterializationState::Pending
-        );
-        assert_eq!(
-            conversations.bindings[0].thread_id.as_str(),
-            "group-a.variant-a"
-        );
-        assert_eq!(
-            conversations.bindings[0].provider_thread_id.as_deref(),
-            Some("thread-a")
-        );
-        let materializations = repo.load_materializations().unwrap();
-        assert_eq!(materializations.records.len(), 1);
-        assert_eq!(materializations.records[0].host_id, identity.host_id);
-        assert_eq!(materializations.records[0].replica_id, old_replica);
-        assert_eq!(
-            materializations.records[0].status,
-            super::super::domain::MaterializationStatus::Detached
-        );
     }
 }

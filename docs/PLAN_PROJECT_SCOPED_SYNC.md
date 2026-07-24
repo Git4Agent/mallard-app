@@ -1,5 +1,9 @@
 # Plan: Project-scoped Agent Sync
 
+> **Partially superseded** by
+> [`PLAN_REMOVE_PROJECT_CONFIG_CAPTURE.md`](./PLAN_REMOVE_PROJECT_CONFIG_CAPTURE.md)
+> (typed project-artifact sync removed).
+
 **Status:** proposed clean-break redesign  
 **Date:** 2026-07-17  
 **Scope of this document:** architecture and implementation plan only

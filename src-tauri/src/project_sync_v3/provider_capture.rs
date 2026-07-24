@@ -45,20 +45,12 @@ pub enum Provider {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureResourceKind {
-    ProjectFile,
     ProjectContentFile,
     ProjectContentDirectory,
-    ProjectSettings,
     Conversation,
     Memory,
-    Agent,
-    Command,
-    Rule,
-    Skill,
     StandaloneSkill,
     Plugin,
-    Hook,
-    McpServer,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -81,7 +73,6 @@ pub enum DependencyKind {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyScope {
-    Project,
     ProviderHome,
 }
 
@@ -570,15 +561,8 @@ pub fn domain_resources(
                     .unwrap_or_else(|| candidate.display_name.clone()),
                 source_digest: resource.content_sha256.clone(),
             },
-            CaptureResourceKind::ProjectFile
-            | CaptureResourceKind::ProjectContentFile
-            | CaptureResourceKind::ProjectContentDirectory
-            | CaptureResourceKind::ProjectSettings
-            | CaptureResourceKind::Agent
-            | CaptureResourceKind::Command
-            | CaptureResourceKind::Rule
-            | CaptureResourceKind::Hook
-            | CaptureResourceKind::McpServer => {
+            CaptureResourceKind::ProjectContentFile
+            | CaptureResourceKind::ProjectContentDirectory => {
                 let relative_path = candidate
                     .logical_paths
                     .first()
@@ -667,25 +651,17 @@ fn domain_provider(provider: Provider) -> domain::Provider {
 
 fn domain_kind(kind: &CaptureResourceKind, provider: Option<Provider>) -> domain::ResourceKind {
     match kind {
-        CaptureResourceKind::ProjectFile => domain::ResourceKind::ProjectFile,
         CaptureResourceKind::ProjectContentFile => domain::ResourceKind::ProjectContentFile,
         CaptureResourceKind::ProjectContentDirectory => {
             domain::ResourceKind::ProjectContentDirectory
         }
-        CaptureResourceKind::ProjectSettings => domain::ResourceKind::Setting,
         CaptureResourceKind::Conversation => match provider {
             Some(Provider::Claude) => domain::ResourceKind::ClaudeConversation,
             _ => domain::ResourceKind::CodexConversation,
         },
         CaptureResourceKind::Memory => domain::ResourceKind::ProjectMemory,
-        CaptureResourceKind::Agent => domain::ResourceKind::Agent,
-        CaptureResourceKind::Command => domain::ResourceKind::Command,
-        CaptureResourceKind::Rule => domain::ResourceKind::Rule,
-        CaptureResourceKind::Skill => domain::ResourceKind::ProjectSkill,
         CaptureResourceKind::StandaloneSkill => domain::ResourceKind::StandaloneSkill,
         CaptureResourceKind::Plugin => domain::ResourceKind::Plugin,
-        CaptureResourceKind::Hook => domain::ResourceKind::Hook,
-        CaptureResourceKind::McpServer => domain::ResourceKind::McpServer,
     }
 }
 
@@ -708,7 +684,6 @@ fn dependency_kind_name(kind: &DependencyKind) -> &'static str {
 
 fn dependency_scope_name(scope: &DependencyScope) -> &'static str {
     match scope {
-        DependencyScope::Project => "project",
         DependencyScope::ProviderHome => "provider_home",
     }
 }
@@ -737,7 +712,6 @@ fn discover(request: &CaptureRequest) -> Result<Discovery, String> {
         ignored_count: 0,
         blocked_count: 0,
     };
-    discover_project_files(&canonical_project, &mut discovery)?;
     if request.include_project_content {
         discover_generic_project_content(
             request,
@@ -768,97 +742,6 @@ fn discover(request: &CaptureRequest) -> Result<Discovery, String> {
         ));
     }
     Ok(discovery)
-}
-
-fn discover_project_files(root: &Path, discovery: &mut Discovery) -> Result<(), String> {
-    // AGENTS.md files belong to the repository and travel with it through Git.
-    // Do not inventory them here, including nested files or symlink aliases.
-    for (relative, kind, provider, policy, default) in [
-        (
-            "CLAUDE.md",
-            CaptureResourceKind::ProjectFile,
-            Some(Provider::Claude),
-            CaptureApplyPolicy::Merge,
-            true,
-        ),
-        (
-            ".claude/CLAUDE.md",
-            CaptureResourceKind::ProjectFile,
-            Some(Provider::Claude),
-            CaptureApplyPolicy::Merge,
-            true,
-        ),
-        (
-            ".codex/config.toml",
-            CaptureResourceKind::ProjectSettings,
-            Some(Provider::Codex),
-            CaptureApplyPolicy::Review,
-            true,
-        ),
-        (
-            ".codex/hooks.json",
-            CaptureResourceKind::Hook,
-            Some(Provider::Codex),
-            CaptureApplyPolicy::Review,
-            false,
-        ),
-        (
-            ".claude/settings.json",
-            CaptureResourceKind::ProjectSettings,
-            Some(Provider::Claude),
-            CaptureApplyPolicy::Review,
-            true,
-        ),
-        (
-            ".mcp.json",
-            CaptureResourceKind::McpServer,
-            Some(Provider::Claude),
-            CaptureApplyPolicy::Review,
-            false,
-        ),
-        (
-            ".agents/plugins/marketplace.json",
-            CaptureResourceKind::ProjectSettings,
-            Some(Provider::Codex),
-            CaptureApplyPolicy::Review,
-            false,
-        ),
-    ] {
-        let path = root.join(relative);
-        if path_exists_no_follow(&path)? {
-            add_single_project_file(discovery, root, relative, kind, provider, policy, default)?;
-        }
-    }
-
-    for (directory, kind, provider) in [
-        (
-            ".agents/skills",
-            CaptureResourceKind::Skill,
-            Provider::Codex,
-        ),
-        (
-            ".claude/skills",
-            CaptureResourceKind::Skill,
-            Provider::Claude,
-        ),
-        (
-            ".claude/agents",
-            CaptureResourceKind::Agent,
-            Provider::Claude,
-        ),
-        (
-            ".claude/commands",
-            CaptureResourceKind::Command,
-            Provider::Claude,
-        ),
-        (".claude/rules", CaptureResourceKind::Rule, Provider::Claude),
-        (".codex/rules", CaptureResourceKind::Rule, Provider::Codex),
-    ] {
-        discover_grouped_directory(root, directory, kind, provider, discovery)?;
-    }
-
-    discover_plugin_intents(root, discovery)?;
-    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -1365,603 +1248,6 @@ fn glob_path_matches(pattern: &str, value: &str) -> bool {
     )
 }
 
-fn add_single_project_file(
-    discovery: &mut Discovery,
-    root: &Path,
-    relative: &str,
-    kind: CaptureResourceKind,
-    provider: Option<Provider>,
-    apply_policy: CaptureApplyPolicy,
-    selected_by_default: bool,
-) -> Result<(), String> {
-    validate_logical_project_relative(relative)?;
-    let path = root.join(relative);
-    let mut blocked_reason = inspect_candidate_files(root, &[path.clone()]).err();
-    let mut derived_bytes = None;
-    if blocked_reason.is_none()
-        && matches!(
-            kind,
-            CaptureResourceKind::ProjectSettings
-                | CaptureResourceKind::Hook
-                | CaptureResourceKind::McpServer
-        )
-    {
-        match portable_project_projection(relative, &path) {
-            Ok((bytes, warnings)) => {
-                derived_bytes = Some(bytes);
-                discovery.warnings.extend(warnings);
-            }
-            Err(error) => blocked_reason = Some(error),
-        }
-    }
-    let resource_id = format!("project:file:{}", resource_id_component(relative));
-    let source = SourceFile {
-        physical_path: path,
-        logical_path: format!("project/{}", relative),
-        opaque_content: matches!(kind, CaptureResourceKind::ProjectFile),
-        derived_bytes,
-    };
-    insert_resource(
-        discovery,
-        DiscoveredResource {
-            descriptor: ResourceCandidate {
-                metadata: BTreeMap::new(),
-                resource_id,
-                kind,
-                provider,
-                display_name: relative.to_string(),
-                relative_cwd: None,
-                apply_policy,
-                selected_by_default,
-                blocked_reason,
-                logical_paths: vec![source.logical_path.clone()],
-                dependency: None,
-            },
-            files: vec![source],
-        },
-    )
-}
-
-/// Project settings cross a stricter boundary than instructions or session
-/// text.  Only a small provider-supported projection enters a bundle; known
-/// auth, trust, approval, permission, and literal environment values are
-/// removed structurally before the generic secret scan runs.
-fn portable_project_projection(
-    relative: &str,
-    path: &Path,
-) -> Result<(Vec<u8>, Vec<String>), String> {
-    let bytes = read_bounded(path)?;
-    match relative {
-        ".codex/config.toml" => project_codex_config_projection(&bytes),
-        ".claude/settings.json" => project_claude_settings_projection(&bytes),
-        ".mcp.json" => project_mcp_projection(&bytes),
-        ".codex/hooks.json" | ".agents/plugins/marketplace.json" => {
-            reviewed_json_projection(relative, &bytes)
-        }
-        _ => Err(format!(
-            "'{}' has no schema-3 portable settings codec",
-            relative
-        )),
-    }
-}
-
-fn project_codex_config_projection(bytes: &[u8]) -> Result<(Vec<u8>, Vec<String>), String> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|error| format!("Codex project config is not UTF-8: {}", error))?;
-    let source: toml::Value =
-        toml::from_str(text).map_err(|error| format!("parse Codex project config: {}", error))?;
-    let table = source
-        .as_table()
-        .ok_or_else(|| "Codex project config must be a TOML table".to_string())?;
-    // Deliberately excludes approval/sandbox/trust, MCP, hooks, marketplaces,
-    // provider endpoints, environment values, and absolute skill paths.
-    const ALLOWED: &[&str] = &[
-        "model",
-        "model_reasoning_effort",
-        "model_reasoning_summary",
-        "personality",
-        "web_search",
-        "hide_agent_reasoning",
-        "show_raw_agent_reasoning",
-        "project_doc_max_bytes",
-        "project_doc_fallback_filenames",
-    ];
-    let mut projected = toml::map::Map::new();
-    for key in ALLOWED {
-        if let Some(value) = table.get(*key) {
-            validate_portable_toml_value(value, key)?;
-            projected.insert((*key).to_string(), value.clone());
-        }
-    }
-    let removed = table.len().saturating_sub(projected.len());
-    let mut warnings = Vec::new();
-    if removed > 0 {
-        warnings.push(format!(
-            ".codex/config.toml: omitted {} machine, trust, executable, or unsupported setting entries",
-            removed
-        ));
-    }
-    let mut output = toml::to_string_pretty(&toml::Value::Table(projected))
-        .map_err(|error| format!("serialize portable Codex config: {}", error))?
-        .into_bytes();
-    if !output.ends_with(b"\n") {
-        output.push(b'\n');
-    }
-    Ok((output, warnings))
-}
-
-fn project_claude_settings_projection(bytes: &[u8]) -> Result<(Vec<u8>, Vec<String>), String> {
-    let source: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|error| format!("parse Claude project settings: {}", error))?;
-    let object = source
-        .as_object()
-        .ok_or_else(|| "Claude project settings must be a JSON object".to_string())?;
-    // Plugin IDs are captured as typed dependency intent.  Hooks, permissions,
-    // env, auth, and trust never hitch a ride in this settings projection.
-    const ALLOWED: &[&str] = &[
-        "model",
-        "language",
-        "outputStyle",
-        "includeCoAuthoredBy",
-        "cleanupPeriodDays",
-        "autoUpdatesChannel",
-        "spinnerTipsEnabled",
-    ];
-    let mut projected = serde_json::Map::new();
-    for key in ALLOWED {
-        if let Some(value) = object.get(*key) {
-            validate_portable_json_value(value, key)?;
-            projected.insert((*key).to_string(), value.clone());
-        }
-    }
-    let removed = object.len().saturating_sub(projected.len());
-    let warnings = (removed > 0)
-        .then(|| {
-            format!(
-                ".claude/settings.json: omitted {} permission, hook, plugin-enable, environment, or unsupported setting entries",
-                removed
-            )
-        })
-        .into_iter()
-        .collect();
-    Ok((
-        canonical_json(serde_json::Value::Object(projected))?,
-        warnings,
-    ))
-}
-
-fn project_mcp_projection(bytes: &[u8]) -> Result<(Vec<u8>, Vec<String>), String> {
-    let source: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|error| format!("parse .mcp.json: {}", error))?;
-    let servers = source
-        .get("mcpServers")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| ".mcp.json must contain an mcpServers object".to_string())?;
-    let mut projected_servers = serde_json::Map::new();
-    let mut warnings = Vec::new();
-    for (name, server) in servers {
-        if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
-            return Err(".mcp.json contains an invalid server name".to_string());
-        }
-        let server = server
-            .as_object()
-            .ok_or_else(|| format!("MCP server '{}' must be an object", name))?;
-        let mut projected = serde_json::Map::new();
-        for key in ["type", "command", "args", "url", "cwd"] {
-            if let Some(value) = server.get(key) {
-                validate_portable_json_value(value, &format!("mcpServers.{}.{}", name, key))?;
-                projected.insert(key.to_string(), value.clone());
-            }
-        }
-        for key in ["env", "headers"] {
-            if let Some(values) = server.get(key) {
-                let values = values
-                    .as_object()
-                    .ok_or_else(|| format!("MCP server '{}.{}' must be an object", name, key))?;
-                let mut placeholders = serde_json::Map::new();
-                for (field, value) in values {
-                    let env_name = portable_environment_name(field);
-                    let placeholder = value
-                        .as_str()
-                        .filter(|value| exact_environment_reference(value))
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("${{{}}}", env_name));
-                    if value.as_str() != Some(placeholder.as_str()) {
-                        warnings.push(format!(
-                            ".mcp.json: replaced literal {} value for {}.{} with an environment reference",
-                            key, name, field
-                        ));
-                    }
-                    placeholders.insert(field.clone(), serde_json::Value::String(placeholder));
-                }
-                projected.insert(key.to_string(), serde_json::Value::Object(placeholders));
-            }
-        }
-        let removed = server.len().saturating_sub(projected.len());
-        if removed > 0 {
-            warnings.push(format!(
-                ".mcp.json: omitted {} auth or unsupported fields from server '{}'",
-                removed, name
-            ));
-        }
-        projected_servers.insert(name.clone(), serde_json::Value::Object(projected));
-    }
-    let projected = serde_json::json!({ "mcpServers": projected_servers });
-    Ok((canonical_json(projected)?, warnings))
-}
-
-fn reviewed_json_projection(
-    relative: &str,
-    bytes: &[u8],
-) -> Result<(Vec<u8>, Vec<String>), String> {
-    let value: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|error| format!("parse {}: {}", relative, error))?;
-    let mut warnings = Vec::new();
-    let projected = sanitize_reviewed_json(value, relative, &mut warnings)?;
-    Ok((canonical_json(projected)?, warnings))
-}
-
-fn sanitize_reviewed_json(
-    value: serde_json::Value,
-    context: &str,
-    warnings: &mut Vec<String>,
-) -> Result<serde_json::Value, String> {
-    match value {
-        serde_json::Value::Object(object) => {
-            let mut projected = serde_json::Map::new();
-            for (key, value) in object {
-                if forbidden_portable_field(&key) {
-                    warnings.push(format!(
-                        "{}: omitted credential/trust field '{}'",
-                        context, key
-                    ));
-                    continue;
-                }
-                if key.eq_ignore_ascii_case("env") || key.eq_ignore_ascii_case("headers") {
-                    let values = value
-                        .as_object()
-                        .ok_or_else(|| format!("{}.{} must be an object", context, key))?;
-                    let mut placeholders = serde_json::Map::new();
-                    for (field, value) in values {
-                        let env_name = portable_environment_name(field);
-                        let placeholder = value
-                            .as_str()
-                            .filter(|value| exact_environment_reference(value))
-                            .map(str::to_string)
-                            .unwrap_or_else(|| format!("${{{}}}", env_name));
-                        placeholders.insert(field.clone(), serde_json::Value::String(placeholder));
-                    }
-                    warnings.push(format!(
-                        "{}: converted {} values to environment references",
-                        context, key
-                    ));
-                    projected.insert(key, serde_json::Value::Object(placeholders));
-                    continue;
-                }
-                projected.insert(
-                    key.clone(),
-                    sanitize_reviewed_json(value, &format!("{}.{}", context, key), warnings)?,
-                );
-            }
-            Ok(serde_json::Value::Object(projected))
-        }
-        serde_json::Value::Array(values) => values
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| {
-                sanitize_reviewed_json(value, &format!("{}[{}]", context, index), warnings)
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(serde_json::Value::Array),
-        serde_json::Value::String(value) => {
-            validate_portable_string(&value, context)?;
-            Ok(serde_json::Value::String(value))
-        }
-        other => Ok(other),
-    }
-}
-
-fn validate_portable_toml_value(value: &toml::Value, context: &str) -> Result<(), String> {
-    match value {
-        toml::Value::String(value) => validate_portable_string(value, context),
-        toml::Value::Array(values) => values.iter().enumerate().try_for_each(|(index, value)| {
-            validate_portable_toml_value(value, &format!("{}[{}]", context, index))
-        }),
-        toml::Value::Table(table) => table.iter().try_for_each(|(key, value)| {
-            if forbidden_portable_field(key) {
-                Err(format!("{} contains forbidden field '{}'", context, key))
-            } else {
-                validate_portable_toml_value(value, &format!("{}.{}", context, key))
-            }
-        }),
-        _ => Ok(()),
-    }
-}
-
-fn validate_portable_json_value(value: &serde_json::Value, context: &str) -> Result<(), String> {
-    match value {
-        serde_json::Value::String(value) => validate_portable_string(value, context),
-        serde_json::Value::Array(values) => {
-            values.iter().enumerate().try_for_each(|(index, value)| {
-                validate_portable_json_value(value, &format!("{}[{}]", context, index))
-            })
-        }
-        serde_json::Value::Object(object) => object.iter().try_for_each(|(key, value)| {
-            if forbidden_portable_field(key) {
-                Err(format!("{} contains forbidden field '{}'", context, key))
-            } else {
-                validate_portable_json_value(value, &format!("{}.{}", context, key))
-            }
-        }),
-        _ => Ok(()),
-    }
-}
-
-fn validate_portable_string(value: &str, context: &str) -> Result<(), String> {
-    if value.len() > 16 * 1024 || value.chars().any(char::is_control) {
-        return Err(format!("{} contains invalid text", context));
-    }
-    if looks_like_local_path(value) || contains_url_credentials(value) {
-        return Err(format!(
-            "{} contains a machine-local or credentialed path",
-            context
-        ));
-    }
-    if detect_secret_material(value.as_bytes()).is_some() {
-        return Err(format!("{} contains credential-shaped material", context));
-    }
-    Ok(())
-}
-
-fn forbidden_portable_field(key: &str) -> bool {
-    let normalized = key
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    [
-        "token",
-        "secret",
-        "password",
-        "credential",
-        "authorization",
-        "authentication",
-        "oauth",
-        "cookie",
-        "trust",
-        "approval",
-        "permission",
-        "apikey",
-        "accesskey",
-        "privatekey",
-    ]
-    .iter()
-    .any(|marker| normalized.contains(marker))
-}
-
-fn exact_environment_reference(value: &str) -> bool {
-    value
-        .strip_prefix("${")
-        .and_then(|value| value.strip_suffix('}'))
-        .is_some_and(|name| {
-            !name.is_empty()
-                && name.len() <= 128
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-        })
-}
-
-fn portable_environment_name(value: &str) -> String {
-    let mut name = value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .take(128)
-        .collect::<String>();
-    if name.is_empty() || name.as_bytes()[0].is_ascii_digit() {
-        name.insert_str(0, "AGENT_SYNC_");
-    }
-    name
-}
-
-fn canonical_json(value: serde_json::Value) -> Result<Vec<u8>, String> {
-    let mut output = serde_json::to_vec_pretty(&value)
-        .map_err(|error| format!("serialize portable JSON: {}", error))?;
-    output.push(b'\n');
-    Ok(output)
-}
-
-fn discover_grouped_directory(
-    project_root: &Path,
-    relative_root: &str,
-    kind: CaptureResourceKind,
-    provider: Provider,
-    discovery: &mut Discovery,
-) -> Result<(), String> {
-    let root = project_root.join(relative_root);
-    let meta = match fs::symlink_metadata(&root) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(format!("inspect '{}': {}", root.display(), e)),
-    };
-    if meta.file_type().is_symlink() || !meta.is_dir() {
-        discovery.warnings.push(format!(
-            "{} is not a regular project directory and was not discovered",
-            relative_root
-        ));
-        return Ok(());
-    }
-    let mut children = fs::read_dir(&root)
-        .map_err(|e| format!("read '{}': {}", root.display(), e))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("read '{}': {}", root.display(), e))?;
-    children.sort_by_key(|entry| entry.file_name());
-    for child in children {
-        let name = child
-            .file_name()
-            .to_str()
-            .ok_or_else(|| format!("non-UTF-8 resource name in '{}'", root.display()))?
-            .to_string();
-        if denied_file_name(&name) || name == ".git" {
-            discovery.warnings.push(format!(
-                "{}/{} is credential/cache/VCS material and was excluded",
-                relative_root, name
-            ));
-            continue;
-        }
-        let files = collect_regular_tree_files(project_root, child.path())?;
-        let logical_paths = files
-            .iter()
-            .map(|path| {
-                normalized_relative(project_root, path).map(|rel| format!("project/{}", rel))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let relative = normalized_relative(project_root, &child.path())?;
-        let resource_id = format!(
-            "{}:{}:{}",
-            provider_name(provider),
-            resource_kind_name(&kind),
-            resource_id_component(&relative)
-        );
-        let executable =
-            kind == CaptureResourceKind::Skill && files.iter().any(|path| is_executable_path(path));
-        let dependency = executable.then(|| DependencyAction {
-            action_id: format!("dependency:{}", resource_id),
-            resource_id: resource_id.clone(),
-            provider,
-            kind: DependencyKind::StandaloneSkill,
-            scope: DependencyScope::Project,
-            display_name: name.clone(),
-            program: None,
-            argv: Vec::new(),
-            requires_review: true,
-            payload_logical_prefix: Some(format!("project/{}/{}", relative_root, name)),
-        });
-        let blocked_reason = inspect_candidate_files(project_root, &files).err();
-        insert_resource(
-            discovery,
-            DiscoveredResource {
-                descriptor: ResourceCandidate {
-                    metadata: BTreeMap::new(),
-                    resource_id,
-                    kind: kind.clone(),
-                    provider: Some(provider),
-                    display_name: name,
-                    relative_cwd: None,
-                    apply_policy: if executable {
-                        CaptureApplyPolicy::Dependency
-                    } else {
-                        CaptureApplyPolicy::SafeFile
-                    },
-                    selected_by_default: true,
-                    blocked_reason,
-                    logical_paths: logical_paths.clone(),
-                    dependency,
-                },
-                files: files
-                    .into_iter()
-                    .zip(logical_paths)
-                    .map(|(physical_path, logical_path)| SourceFile {
-                        physical_path,
-                        logical_path,
-                        opaque_content: true,
-                        derived_bytes: None,
-                    })
-                    .collect(),
-            },
-        )?;
-    }
-    Ok(())
-}
-
-fn discover_plugin_intents(root: &Path, discovery: &mut Discovery) -> Result<(), String> {
-    let claude_settings = root.join(".claude/settings.json");
-    if claude_settings.is_file() {
-        match read_bounded_json(&claude_settings) {
-            Ok(value) => {
-                for plugin_id in extract_claude_plugin_ids(&value) {
-                    let resource_id =
-                        format!("claude:plugin:{}", resource_id_component(&plugin_id));
-                    let action = DependencyAction {
-                        action_id: format!("dependency:{}", resource_id),
-                        resource_id: resource_id.clone(),
-                        provider: Provider::Claude,
-                        kind: DependencyKind::ClaudePlugin,
-                        scope: DependencyScope::Project,
-                        display_name: plugin_id.clone(),
-                        program: Some("claude".to_string()),
-                        argv: vec![
-                            "plugin".to_string(),
-                            "install".to_string(),
-                            plugin_id.clone(),
-                            "--scope".to_string(),
-                            "project".to_string(),
-                        ],
-                        requires_review: true,
-                        payload_logical_prefix: None,
-                    };
-                    insert_resource(
-                        discovery,
-                        dependency_resource(
-                            resource_id,
-                            plugin_id,
-                            Provider::Claude,
-                            CaptureResourceKind::Plugin,
-                            action,
-                        ),
-                    )?;
-                }
-            }
-            Err(error) => discovery
-                .warnings
-                .push(format!("could not inspect Claude plugin intent: {}", error)),
-        }
-    }
-
-    let codex_config = root.join(".codex/config.toml");
-    if codex_config.is_file() {
-        match read_bounded_toml(&codex_config) {
-            Ok(value) => {
-                for plugin_id in extract_codex_plugin_ids(&value) {
-                    let resource_id = format!("codex:plugin:{}", resource_id_component(&plugin_id));
-                    let action = DependencyAction {
-                        action_id: format!("dependency:{}", resource_id),
-                        resource_id: resource_id.clone(),
-                        provider: Provider::Codex,
-                        kind: DependencyKind::CodexPlugin,
-                        scope: DependencyScope::ProviderHome,
-                        display_name: plugin_id.clone(),
-                        program: Some("codex".to_string()),
-                        argv: vec!["plugin".to_string(), "add".to_string(), plugin_id.clone()],
-                        requires_review: true,
-                        payload_logical_prefix: None,
-                    };
-                    insert_resource(
-                        discovery,
-                        dependency_resource(
-                            resource_id,
-                            plugin_id,
-                            Provider::Codex,
-                            CaptureResourceKind::Plugin,
-                            action,
-                        ),
-                    )?;
-                }
-            }
-            Err(error) => discovery
-                .warnings
-                .push(format!("could not inspect Codex plugin intent: {}", error)),
-        }
-    }
-    Ok(())
-}
-
 fn dependency_resource(
     resource_id: String,
     display_name: String,
@@ -2446,10 +1732,7 @@ fn discover_standalone_skill(
     )
 }
 
-/// Register one inventoried global plugin as portable install intent. If the
-/// project configuration already declared the same plugin, the two
-/// observations coalesce into the existing resource instead of creating a
-/// second install action.
+/// Register one inventoried global plugin as portable install intent.
 fn discover_global_plugin(
     plugin: &global_inventory::GlobalPluginSource,
     discovery: &mut Discovery,
@@ -2481,17 +1764,6 @@ fn discover_global_plugin(
             "plugin_provided_skills_json".to_string(),
             serde_json::to_string(&plugin.provided_skills).map_err(|e| e.to_string())?,
         );
-    }
-    if let Some(existing) = discovery.resources.get_mut(&resource_id) {
-        // One plugin with two discovery origins, not two install actions.
-        existing
-            .descriptor
-            .metadata
-            .insert("plugin_origin".to_string(), "project+global".to_string());
-        for (key, value) in metadata {
-            existing.descriptor.metadata.entry(key).or_insert(value);
-        }
-        return Ok(());
     }
     let (kind, program, argv) = match plugin.provider {
         Provider::Codex => (
@@ -2769,98 +2041,6 @@ fn filter_jsonl_by_ids(path: &Path, ids: &BTreeSet<String>) -> Result<Vec<u8>, S
     Ok(output)
 }
 
-fn extract_claude_plugin_ids(value: &serde_json::Value) -> BTreeSet<String> {
-    let mut result = BTreeSet::new();
-    let Some(enabled) = value.get("enabledPlugins") else {
-        return result;
-    };
-    match enabled {
-        serde_json::Value::Object(map) => {
-            for (id, enabled) in map {
-                if enabled.as_bool().unwrap_or(false) && portable_dependency_id(id) {
-                    result.insert(id.clone());
-                }
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for id in values.iter().filter_map(serde_json::Value::as_str) {
-                if portable_dependency_id(id) {
-                    result.insert(id.to_string());
-                }
-            }
-        }
-        _ => {}
-    }
-    result
-}
-
-fn extract_codex_plugin_ids(value: &toml::Value) -> BTreeSet<String> {
-    let mut result = BTreeSet::new();
-    let Some(plugins) = value.get("plugins").and_then(toml::Value::as_table) else {
-        return result;
-    };
-    for (id, definition) in plugins {
-        let enabled = definition
-            .get("enabled")
-            .and_then(toml::Value::as_bool)
-            .unwrap_or(true);
-        if enabled && portable_dependency_id(id) {
-            result.insert(id.clone());
-        }
-    }
-    result
-}
-
-fn portable_dependency_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 512
-        && !value.chars().any(char::is_control)
-        && !value.contains("..")
-        && !looks_like_local_path(value)
-        && !contains_url_credentials(value)
-}
-
-fn looks_like_local_path(value: &str) -> bool {
-    value.starts_with('/')
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || value.starts_with('~')
-        || (value.len() >= 3
-            && value.as_bytes()[1] == b':'
-            && matches!(value.as_bytes()[2], b'/' | b'\\'))
-}
-
-fn contains_url_credentials(value: &str) -> bool {
-    value
-        .split_once("://")
-        .and_then(|(_, tail)| tail.split('/').next())
-        .is_some_and(|authority| authority.contains('@'))
-}
-
-fn read_bounded_json(path: &Path) -> Result<serde_json::Value, String> {
-    let bytes = read_bounded(path)?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("parse '{}': {}", path.display(), e))
-}
-
-fn read_bounded_toml(path: &Path) -> Result<toml::Value, String> {
-    let bytes = read_bounded(path)?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|e| format!("'{}' is not UTF-8: {}", path.display(), e))?;
-    toml::from_str(text).map_err(|e| format!("parse '{}': {}", path.display(), e))
-}
-
-fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
-    let meta =
-        fs::symlink_metadata(path).map_err(|e| format!("inspect '{}': {}", path.display(), e))?;
-    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_FILE_BYTES {
-        return Err(format!(
-            "'{}' is not a bounded regular file",
-            path.display()
-        ));
-    }
-    fs::read(path).map_err(|e| format!("read '{}': {}", path.display(), e))
-}
-
 fn insert_resource(discovery: &mut Discovery, resource: DiscoveredResource) -> Result<(), String> {
     let id = resource.descriptor.resource_id.clone();
     if id.is_empty() || id.len() > 1024 || id.chars().any(char::is_control) {
@@ -2946,7 +2126,10 @@ fn validate_source_file(
 ) -> Result<(), String> {
     let canonical_path = fs::canonicalize(path)
         .map_err(|e| format!("resolve source '{}': {}", path.display(), e))?;
-    let mut approved_roots = vec![canonical_project.to_path_buf()];
+    let mut approved_roots = Vec::new();
+    if request.include_project_content {
+        approved_roots.push(canonical_project.to_path_buf());
+    }
     if let Some(home) = &request.codex_home {
         approved_roots.push(canonical_existing_dir(home, "Codex home")?);
     }
@@ -3149,22 +2332,6 @@ fn canonical_existing_dir(path: &Path, label: &str) -> Result<PathBuf, String> {
         ));
     }
     fs::canonicalize(path).map_err(|e| format!("resolve {} '{}': {}", label, path.display(), e))
-}
-
-fn path_exists_no_follow(path: &Path) -> Result<bool, String> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(format!(
-            "allowlisted path '{}' is a symlink and cannot be captured",
-            path.display()
-        )),
-        Ok(meta) if meta.is_file() => Ok(true),
-        Ok(_) => Err(format!(
-            "allowlisted path '{}' is not a file",
-            path.display()
-        )),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(format!("inspect '{}': {}", path.display(), e)),
-    }
 }
 
 fn normalized_relative(root: &Path, path: &Path) -> Result<String, String> {
@@ -3380,25 +2547,6 @@ fn provider_name(provider: Provider) -> &'static str {
     }
 }
 
-fn resource_kind_name(kind: &CaptureResourceKind) -> &'static str {
-    match kind {
-        CaptureResourceKind::ProjectFile => "project-file",
-        CaptureResourceKind::ProjectContentFile => "project-content-file",
-        CaptureResourceKind::ProjectContentDirectory => "project-content-directory",
-        CaptureResourceKind::ProjectSettings => "settings",
-        CaptureResourceKind::Conversation => "session",
-        CaptureResourceKind::Memory => "memory",
-        CaptureResourceKind::Agent => "agent",
-        CaptureResourceKind::Command => "command",
-        CaptureResourceKind::Rule => "rule",
-        CaptureResourceKind::Skill => "skill",
-        CaptureResourceKind::StandaloneSkill => "custom-skill",
-        CaptureResourceKind::Plugin => "plugin",
-        CaptureResourceKind::Hook => "hook",
-        CaptureResourceKind::McpServer => "mcp",
-    }
-}
-
 fn sha256_bytes(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     hex_digest(digest.as_slice())
@@ -3457,71 +2605,6 @@ mod tests {
     fn write(path: &Path, bytes: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
-    }
-
-    #[test]
-    fn git_owned_agents_files_are_not_discovered() {
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        write(&project.join("AGENTS.md"), b"project guidance");
-        write(&project.join("apps/web/AGENTS.md"), b"nested guidance");
-        write(&project.join("CLAUDE.md"), b"claude guidance");
-        write(&project.join("src/main.rs"), b"ordinary source");
-        write(
-            &project.join(".claude/skills/review/SKILL.md"),
-            b"review instructions",
-        );
-
-        let request = CaptureRequest::for_project(&project);
-        let inventory = discover_project(&request).unwrap();
-        assert!(!inventory
-            .resources
-            .iter()
-            .any(|resource| resource.display_name.ends_with("AGENTS.md")));
-        assert!(!inventory
-            .resources
-            .iter()
-            .flat_map(|resource| &resource.logical_paths)
-            .any(|path| path.contains("src/main.rs")));
-
-        let claude_id = inventory
-            .resources
-            .iter()
-            .find(|resource| resource.display_name == "CLAUDE.md")
-            .unwrap()
-            .resource_id
-            .clone();
-        let selected = BTreeSet::from([claude_id]);
-        let captured = capture_selected(&request, &selected).unwrap();
-        assert_eq!(captured.resources.len(), 1);
-        assert_eq!(captured.files.len(), 1);
-        assert_eq!(
-            captured.files["project/CLAUDE.md"].bytes,
-            b"claude guidance"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn git_owned_agents_symlink_does_not_block_discovery() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        write(&project.join("CLAUDE.md"), b"shared guidance");
-        symlink("CLAUDE.md", project.join("AGENTS.md")).unwrap();
-
-        let inventory = discover_project(&CaptureRequest::for_project(&project)).unwrap();
-        assert!(!inventory
-            .resources
-            .iter()
-            .any(|resource| resource.display_name == "AGENTS.md"));
-        assert!(inventory
-            .resources
-            .iter()
-            .any(|resource| resource.display_name == "CLAUDE.md"));
     }
 
     #[test]
@@ -3747,152 +2830,6 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("ignored duplicate Codex session 'duplicate-thread'")));
-    }
-
-    #[test]
-    fn plugin_intent_is_a_typed_dependency_and_cache_is_never_copied() {
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        write(
-            &project.join(".claude/settings.json"),
-            br#"{"enabledPlugins":{"reviewer@team":true}}"#,
-        );
-        write(
-            &project.join(".claude/plugins/cache/reviewer/payload.js"),
-            b"installed payload",
-        );
-        let request = CaptureRequest::for_project(&project);
-        let inventory = discover_project(&request).unwrap();
-        let plugin = inventory
-            .resources
-            .iter()
-            .find(|resource| resource.kind == CaptureResourceKind::Plugin)
-            .unwrap();
-        let action = plugin.dependency.as_ref().unwrap();
-        assert_eq!(action.program.as_deref(), Some("claude"));
-        assert_eq!(action.scope, DependencyScope::Project);
-        assert!(!inventory
-            .resources
-            .iter()
-            .flat_map(|resource| &resource.logical_paths)
-            .any(|path| path.contains("plugins/cache")));
-    }
-
-    #[test]
-    fn settings_capture_is_a_structural_portable_projection() {
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        write(
-            &project.join(".claude/settings.json"),
-            br#"{
-              "model":"sonnet",
-              "language":"en",
-              "permissions":{"allow":["Bash(*)"]},
-              "env":{"API_TOKEN":"literal-secret"},
-              "enabledPlugins":{"reviewer@team":true},
-              "apiKey":"must-not-sync"
-            }"#,
-        );
-        let request = CaptureRequest::for_project(&project);
-        let inventory = discover_project(&request).unwrap();
-        let settings = inventory
-            .resources
-            .iter()
-            .find(|resource| resource.display_name == ".claude/settings.json")
-            .unwrap();
-        assert!(settings.blocked_reason.is_none());
-        assert!(inventory
-            .resources
-            .iter()
-            .any(|resource| resource.kind == CaptureResourceKind::Plugin));
-
-        let captured =
-            capture_selected(&request, &BTreeSet::from([settings.resource_id.clone()])).unwrap();
-        let projected = String::from_utf8(
-            captured.files["project/.claude/settings.json"]
-                .bytes
-                .clone(),
-        )
-        .unwrap();
-        assert!(projected.contains("\"model\": \"sonnet\""));
-        assert!(projected.contains("\"language\": \"en\""));
-        for denied in [
-            "permissions",
-            "API_TOKEN",
-            "literal-secret",
-            "enabledPlugins",
-            "apiKey",
-        ] {
-            assert!(
-                !projected.contains(denied),
-                "projected settings leaked {denied}"
-            );
-        }
-    }
-
-    #[test]
-    fn mcp_projection_replaces_literal_secrets_with_environment_references() {
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        write(
-            &project.join(".mcp.json"),
-            br#"{
-              "mcpServers": {
-                "docs": {
-                  "command": "npx",
-                  "args": ["-y", "docs-server"],
-                  "env": {"DOCS_TOKEN": "literal-value"},
-                  "headers": {"Authorization": "Bearer literal"},
-                  "oauthToken": "never"
-                }
-              }
-            }"#,
-        );
-        let request = CaptureRequest::for_project(&project);
-        let inventory = discover_project(&request).unwrap();
-        let mcp = inventory
-            .resources
-            .iter()
-            .find(|resource| resource.display_name == ".mcp.json")
-            .unwrap();
-        assert!(mcp.blocked_reason.is_none());
-        let captured =
-            capture_selected(&request, &BTreeSet::from([mcp.resource_id.clone()])).unwrap();
-        let projected =
-            String::from_utf8(captured.files["project/.mcp.json"].bytes.clone()).unwrap();
-        assert!(projected.contains("${DOCS_TOKEN}"));
-        assert!(projected.contains("${AUTHORIZATION}"));
-        assert!(!projected.contains("literal-value"));
-        assert!(!projected.contains("Bearer literal"));
-        assert!(!projected.contains("oauthToken"));
-    }
-
-    #[test]
-    fn credential_file_and_symlink_block_skill_capture() {
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        fs::create_dir_all(project.join(".agents/skills/bad")).unwrap();
-        write(&project.join(".agents/skills/bad/.env"), b"TOKEN=secret");
-        let request = CaptureRequest::for_project(&project);
-        let error = discover_project(&request).unwrap_err();
-        assert!(error.contains("no regular files") || error.contains("credential"));
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-            let clean = temp.path().join("clean");
-            fs::create_dir_all(clean.join(".claude/skills/link")).unwrap();
-            write(&clean.join("outside"), b"outside");
-            symlink(
-                clean.join("outside"),
-                clean.join(".claude/skills/link/SKILL.md"),
-            )
-            .unwrap();
-            assert!(discover_project(&CaptureRequest::for_project(clean)).is_err());
-        }
     }
 
     #[test]

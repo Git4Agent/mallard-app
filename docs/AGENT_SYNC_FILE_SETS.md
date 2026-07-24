@@ -24,7 +24,11 @@ Replace whole-profile synchronization of `~/.codex` and `~/.claude` with an
 explicit project bundle. A bundle owns one logical project and its useful
 portable resources: project conversations and memory, reviewed settings, MCP
 and hook declarations, project skills, plugin/skill installation intent, and
-other project-local files selected by the user. On another machine, the user
+other project-local files selected by the user. [Superseded 2026-07-24 by
+`PLAN_REMOVE_PROJECT_CONFIG_CAPTURE.md`: typed project-directory capture —
+reviewed settings, MCP/hook declarations, project skills, and project plugin
+intents — was removed; bundles carry provider-home resources plus generic
+reviewed project files for non-Git projects.] On another machine, the user
 binds the logical project to a different local path, reviews a restore plan,
 then explicitly approves file writes and dependency installation.
 
@@ -47,13 +51,16 @@ code only.
   project skills, and applies an allowlist/secret filter. Portable projections
   exist for Codex `config.toml`, Claude `settings.json`, `.mcp.json`, hooks, and
   marketplace declarations. Literal MCP environment/header secrets are replaced
-  with environment-variable references.
+  with environment-variable references. [Superseded 2026-07-24: the project-
+  skill capture and the settings/MCP/hook/marketplace projections were removed
+  by `PLAN_REMOVE_PROJECT_CONFIG_CAPTURE.md`.]
 - `bundle_engine.rs` implements local object storage, immutable objects,
   manifests/commits/tags, compare-and-swap heads, pagination, verified fetch,
   restore planning, backups, path remapping, and Claude project-bucket mapping.
   Executable standalone-skill payloads now require both explicit file approval
   and dependency approval. Approved settings/MCP/hook resources have an initial
-  semantic JSON/TOML composition implementation.
+  semantic JSON/TOML composition implementation. [Superseded 2026-07-24: the
+  settings/MCP/hook semantic composition was removed.]
 - `s3_store.rs` adapts S3/R2 to the bundle object-store interface, including
   immutable put, conditional head updates, get, and paginated listing.
 - `commands.rs` contains schema-3 CRUD, discovery/inventory, remote browsing,

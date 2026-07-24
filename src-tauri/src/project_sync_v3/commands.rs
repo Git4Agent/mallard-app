@@ -3252,23 +3252,15 @@ fn capture_resource_kind(
     provider: Option<CaptureProvider>,
 ) -> ResourceKind {
     match kind {
-        CaptureResourceKind::ProjectFile => ResourceKind::ProjectFile,
         CaptureResourceKind::ProjectContentFile => ResourceKind::ProjectContentFile,
         CaptureResourceKind::ProjectContentDirectory => ResourceKind::ProjectContentDirectory,
-        CaptureResourceKind::ProjectSettings => ResourceKind::Setting,
         CaptureResourceKind::Conversation => match provider {
             Some(CaptureProvider::Claude) => ResourceKind::ClaudeConversation,
             _ => ResourceKind::CodexConversation,
         },
         CaptureResourceKind::Memory => ResourceKind::ProjectMemory,
-        CaptureResourceKind::Agent => ResourceKind::Agent,
-        CaptureResourceKind::Command => ResourceKind::Command,
-        CaptureResourceKind::Rule => ResourceKind::Rule,
-        CaptureResourceKind::Skill => ResourceKind::ProjectSkill,
         CaptureResourceKind::StandaloneSkill => ResourceKind::StandaloneSkill,
         CaptureResourceKind::Plugin => ResourceKind::Plugin,
-        CaptureResourceKind::Hook => ResourceKind::Hook,
-        CaptureResourceKind::McpServer => ResourceKind::McpServer,
     }
 }
 
@@ -3286,11 +3278,10 @@ fn resource_category(kind: ResourceKind) -> &'static str {
         ResourceKind::CodexConversation
         | ResourceKind::ClaudeConversation
         | ResourceKind::ProjectMemory => "conversations",
-        ResourceKind::ProjectSkill | ResourceKind::StandaloneSkill => "skills",
+        ResourceKind::StandaloneSkill => "skills",
         ResourceKind::Plugin => "plugins",
         ResourceKind::ProjectContentFile | ResourceKind::ProjectContentDirectory => "project_files",
-        ResourceKind::McpServer | ResourceKind::Hook | ResourceKind::Requirement => "tools",
-        _ => "project_setup",
+        ResourceKind::Requirement => "tools",
     }
 }
 
@@ -4331,10 +4322,7 @@ fn get_bundle_status_with_repository(
 }
 
 fn is_capability_kind(kind: ResourceKind) -> bool {
-    matches!(
-        kind,
-        ResourceKind::ProjectSkill | ResourceKind::StandaloneSkill | ResourceKind::Plugin
-    )
+    matches!(kind, ResourceKind::StandaloneSkill | ResourceKind::Plugin)
 }
 
 fn capability_state_name(state: ThreadSyncState) -> &'static str {
@@ -4479,9 +4467,7 @@ fn get_project_capability_status_with_repository(
         .filter(|candidate| {
             matches!(
                 candidate.kind,
-                CaptureResourceKind::Skill
-                    | CaptureResourceKind::StandaloneSkill
-                    | CaptureResourceKind::Plugin
+                CaptureResourceKind::StandaloneSkill | CaptureResourceKind::Plugin
             )
         })
         .map(|candidate| candidate.resource_id.clone())
@@ -5296,10 +5282,7 @@ fn apply_bundle_restore_with_repository(
             | RestoreActionType::MergeFile
             | RestoreActionType::MaterializeConversation
             | RestoreActionType::InstallCustomSkill
-            | RestoreActionType::OverwriteCustomSkill
-            | RestoreActionType::ReviewHook
-            | RestoreActionType::ReviewMcp
-            | RestoreActionType::ApplySetting => receipt.status == ActionStatus::Applied,
+            | RestoreActionType::OverwriteCustomSkill => receipt.status == ActionStatus::Applied,
             RestoreActionType::Manual => {
                 receipt.status == ActionStatus::Applied
                     || (receipt.status == ActionStatus::Skipped
@@ -5829,7 +5812,7 @@ fn bundle_readiness_for_fetched(
         match materialization.as_ref() {
             None => issues.push(BundleReadinessIssue {
                 issue_id: "restore-files".to_string(),
-                category: "project_setup".to_string(),
+                category: "project_files".to_string(),
                 title: "Pull has not been applied yet".to_string(),
                 detail: Some(
                     "Open the Pull review and apply the changes you want on this machine."
@@ -5952,10 +5935,7 @@ fn add_partial_materialization_issues(
             match receipt.action_type {
                 RestoreActionType::WriteFile
                 | RestoreActionType::MergeFile
-                | RestoreActionType::MaterializeConversation
-                | RestoreActionType::ReviewHook
-                | RestoreActionType::ReviewMcp
-                | RestoreActionType::ApplySetting => true,
+                | RestoreActionType::MaterializeConversation => true,
                 RestoreActionType::WriteProjectFile
                 | RestoreActionType::EnsureProjectDirectory
                 | RestoreActionType::DeleteProjectFile
@@ -5982,7 +5962,7 @@ fn add_partial_materialization_issues(
             .any(|receipt| matches!(receipt.status, ActionStatus::Failed | ActionStatus::Blocked));
         issues.push(BundleReadinessIssue {
             issue_id: "restore-project-data".to_string(),
-            category: "project_setup".to_string(),
+            category: "project_files".to_string(),
             title: if count == 1 {
                 "1 project data change was left unchanged".to_string()
             } else {
@@ -6200,29 +6180,19 @@ fn validate_plugin_install_intent(action: &DependencyAction) -> Result<(), Strin
     if !portable_plugin_id(&action.display_name) {
         return Err("plugin identifier is not safe for native installation".to_string());
     }
-    // Global plugins install without a scope flag; project-declared Claude
-    // plugins keep their project scope. Anything else is rejected before a
-    // process is launched.
+    // Global plugins install without a scope flag. Anything else is rejected
+    // before a process is launched.
     let supported_argument_sets: Vec<Vec<String>> = match action.kind {
         DependencyActionKind::InstallCodexPlugin => vec![vec![
             "plugin".to_string(),
             "add".to_string(),
             action.display_name.clone(),
         ]],
-        DependencyActionKind::InstallClaudePlugin => vec![
-            vec![
-                "plugin".to_string(),
-                "install".to_string(),
-                action.display_name.clone(),
-                "--scope".to_string(),
-                "project".to_string(),
-            ],
-            vec![
-                "plugin".to_string(),
-                "install".to_string(),
-                action.display_name.clone(),
-            ],
-        ],
+        DependencyActionKind::InstallClaudePlugin => vec![vec![
+            "plugin".to_string(),
+            "install".to_string(),
+            action.display_name.clone(),
+        ]],
         _ => return Err("dependency is not a plugin installation".to_string()),
     };
     if !supported_argument_sets.contains(&action.argv) {
@@ -6398,10 +6368,22 @@ async fn run_plugin_install(
     binding: &ProjectBinding,
 ) -> Result<(), String> {
     validate_plugin_install_intent(action)?;
+    let current_dir = match program {
+        "claude" => binding.claude_home.as_deref(),
+        _ => binding.codex_home.as_deref(),
+    }
+    .map(PathBuf::from)
+    .or_else(dirs::home_dir)
+    .ok_or_else(|| {
+        format!(
+            "could not resolve a working directory for the {} plugin installer",
+            program
+        )
+    })?;
     let mut command = Command::new(program);
     command
         .args(&action.argv)
-        .current_dir(&binding.project_root)
+        .current_dir(&current_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

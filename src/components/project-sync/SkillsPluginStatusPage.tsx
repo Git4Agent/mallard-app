@@ -63,9 +63,7 @@ function shortDigest(value?: string | null): string {
 }
 
 function capabilityScope(item: CapabilityStatusItem): string {
-  if (item.kind === "plugin") return "global plugin";
-  if (item.kind === "standalone_skill") return "global custom skill";
-  return "project skill";
+  return item.kind === "plugin" ? "global plugin" : "global custom skill";
 }
 
 export function capabilityStatusPresentation(

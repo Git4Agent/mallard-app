@@ -7,5 +7,4 @@ mod provider_fork;
 mod recovery;
 mod relation_matrix;
 mod schema_and_privacy;
-mod schema_cutover;
 mod storage_parity;

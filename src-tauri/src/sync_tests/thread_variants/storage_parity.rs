@@ -1,12 +1,10 @@
 use super::harness::{chain, schema6_request, ThreadSpec, VariantWorld};
 use crate::project_sync_v3::bundle_engine::{
-    build_schema6_cutover_request, BundleEngine, BundleObjectStore, CasExpectation, CasOutcome,
-    ImmutablePutOutcome, ObjectKey, ObjectPrefix, PublishExpectation, PublishSchema6Request,
-    StoreListPage, StoredObject,
+    BundleEngine, BundleObjectStore, CasExpectation, CasOutcome, ImmutablePutOutcome, ObjectKey,
+    ObjectPrefix, PublishExpectation, PublishSchema6Request, StoreListPage, StoredObject,
 };
 use crate::project_sync_v3::domain::{
-    BundleHead, BundleManifest, BundleRecipe, StorageConfigV3, StorageKind, ThreadId, Tombstone,
-    TombstoneTarget, BUNDLE_SCHEMA_V4, BUNDLE_SCHEMA_V6,
+    BundleRecipe, StorageConfigV3, StorageKind, ThreadId, Tombstone, TombstoneTarget,
 };
 use crate::project_sync_v3::s3_store::S3BundleObjectStore;
 use crate::sync_tests::stub_s3::StubS3;
@@ -690,114 +688,6 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         .iter()
         .filter(|request| request.method == "PUT" && request.key.ends_with("/_head.json"))
         .all(|request| request.conditional));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stub_s3_schema4_golden_cutover_preserves_bytes_and_cas_history() {
-    let temp = tempfile::tempdir().unwrap();
-    let cloud = temp.path().join("cloud");
-    fs::create_dir_all(cloud.join("variant-bucket")).unwrap();
-    let server = StubS3::start(cloud).await;
-    let world = VariantWorld::new();
-    let storage_id = crate::project_sync_v3::domain::StorageId::parse("s3-cutover-store").unwrap();
-    let config = StorageConfigV3 {
-        id: storage_id.clone(),
-        name: "Thread cutover stub S3".to_string(),
-        kind: StorageKind::S3,
-        bucket: "variant-bucket".to_string(),
-        access_key_id: "test-access-key".to_string(),
-        secret_access_key: "test-secret".to_string(),
-        account_id: String::new(),
-        s3_endpoint: server.endpoint.clone(),
-        region: "auto".to_string(),
-        local_dir: String::new(),
-        included_default_exclusions: Vec::new(),
-        supports_conditional_writes: None,
-    };
-    let store =
-        S3BundleObjectStore::from_config(&config, tokio::runtime::Handle::current()).unwrap();
-    let publisher = world.origin(&world.repo_a, "replica-cutover");
-    let bundle_id = world.bundle_id.clone();
-    let task_store = store.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let engine = BundleEngine::open(task_store.clone(), storage_id).unwrap();
-        let manifest: BundleManifest = serde_json::from_str(
-            super::schema_cutover::LEGACY_MANIFEST,
-        )
-        .unwrap();
-        manifest.validate().unwrap();
-        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-        let manifest_sha256 = super::harness::sha256(&manifest_bytes);
-        let manifest_key = ObjectKey::parse(format!(
-            ".mallard/v1/repositories/{bundle_id}/_manifests/7-commit-legacy-fixture.json"
-        ))
-        .unwrap();
-        let transcript_key = ObjectKey::parse(format!(
-            ".mallard/v1/repositories/{bundle_id}/_uploads/upload-legacy/files/state/codex/sessions/legacy-thread.jsonl"
-        ))
-        .unwrap();
-        task_store
-            .put_immutable(&manifest_key, &manifest_bytes)
-            .unwrap();
-        task_store
-            .put_immutable(
-                &transcript_key,
-                super::schema_cutover::LEGACY_TRANSCRIPT,
-            )
-            .unwrap();
-        let head = BundleHead {
-            schema_version: BUNDLE_SCHEMA_V4,
-            bundle_id: bundle_id.clone(),
-            kind: manifest.bundle.kind,
-            generation: manifest.generation,
-            commit_id: manifest.commit_id.clone(),
-            manifest_key: "_manifests/7-commit-legacy-fixture.json".to_string(),
-            manifest_sha256,
-            updated_at: manifest.updated_at,
-        };
-        let head_key = ObjectKey::parse(format!(
-            ".mallard/v1/repositories/{bundle_id}/_head.json"
-        ))
-        .unwrap();
-        assert!(matches!(
-            task_store
-                .compare_and_swap(
-                    &head_key,
-                    &CasExpectation::Absent,
-                    &serde_json::to_vec(&head).unwrap(),
-                )
-                .unwrap(),
-            CasOutcome::Written { .. }
-        ));
-        let legacy = engine.fetch(&bundle_id).unwrap();
-        assert_eq!(legacy.snapshot.head.schema_version, BUNDLE_SCHEMA_V4);
-        assert!(legacy
-            .files
-            .values()
-            .any(|bytes| bytes == super::schema_cutover::LEGACY_TRANSCRIPT));
-        let (_, token) = engine.read_head(&bundle_id).unwrap().unwrap();
-        let request = build_schema6_cutover_request(&legacy, publisher, token, 1784678410)
-            .unwrap();
-        let cutover = engine.publish_schema6(request).unwrap();
-        assert_eq!(cutover.snapshot.head.schema_version, BUNDLE_SCHEMA_V6);
-        let fetched = engine.fetch(&bundle_id).unwrap();
-        fetched.snapshot.validate().unwrap();
-        assert!(fetched
-            .files
-            .values()
-            .any(|bytes| bytes == super::schema_cutover::LEGACY_TRANSCRIPT));
-        fetched.snapshot.head.generation
-    })
-    .await
-    .unwrap();
-    assert_eq!(result, 8);
-    let head_puts = server
-        .requests()
-        .into_iter()
-        .filter(|request| request.method == "PUT" && request.key.ends_with("/_head.json"))
-        .collect::<Vec<_>>();
-    assert_eq!(head_puts.len(), 2);
-    assert!(head_puts.iter().all(|request| request.conditional));
 }
 
 fn thread_v2(origin: &crate::project_sync_v3::domain::PortableOrigin) -> ThreadSpec {

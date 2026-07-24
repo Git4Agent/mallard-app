@@ -137,15 +137,6 @@ function restoreActionCopy(action: RestoreAction): {
       toolKind: null,
     };
   }
-  if (kind === "apply_setting") {
-    return {
-      title: humanize(action.kind.semantic_key),
-      detail: action.target_path ?? action.kind.semantic_key,
-      provider,
-      category: "project_data",
-      toolKind: null,
-    };
-  }
   if (kind === "manual") {
     const conversationProvider = action.resource_id.startsWith("codex:session:")
       ? "codex"

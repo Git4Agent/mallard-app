@@ -80,8 +80,8 @@ change storage B.
 Every portable resource has a `ResourceDescriptor` with a stable ID, kind,
 scope, display name, portable provenance, apply policy, codec version, and
 bounded metadata. Current resource kinds include provider conversations,
-project setup files, memory, agents, commands, rules, skills, plugins, hooks,
-MCP definitions, settings, and ordinary project-content files/directories.
+memory, standalone skills, plugins, requirement placeholders, and ordinary
+project-content files/directories.
 
 ## 4. Machine-local metadata
 
@@ -194,9 +194,9 @@ registration, links, and binding, making retries idempotent.
 
 Normal discovery inventories the provider-owned resources for the selected
 checkout and profiles. It does not scan arbitrary project content. Provider
-adapters map source files to portable namespaces such as `project/...` and
-`state/codex/...`, assign apply policies, filter credentials, and convert
-machine-specific state into portable definitions where supported.
+adapters map source files to portable namespaces such as `state/codex/...`,
+assign apply policies, filter credentials, and convert machine-specific state
+into portable definitions where supported.
 
 Remote matching uses the portable bundle ID and, when available, a SHA-256
 repository fingerprint derived from Git origin data. The checkout binding
@@ -388,7 +388,7 @@ Project content uses four explicit action kinds:
 Every project-content action requires approval and starts unchecked in the
 UI. Selecting a nested file also selects its planned ancestor directories.
 Unchecked actions mean **Keep local / skip this Pull** and do not block
-approved conversations, skills, plugins, or setup work.
+approved conversations, skills, or plugins.
 
 The plan pins the storage, bundle, replica, generation, commit, manifest hash,
 binding revision, targets, expected target digests/modes, and expiry. Native
@@ -517,6 +517,9 @@ Verification on 2026-07-20 completed successfully: the production frontend
 build and Rust check passed, all 56 frontend integration tests passed, and all
 415 Rust library tests passed. Vite reported only its advisory large-chunk
 warning for the current frontend bundle.
+
+These counts predate the removal of typed project-config capture; suite sizes
+change with that refactor and will be re-verified after the test runs.
 
 Project-content end-to-end command coverage currently uses local-folder
 storage. The S3 adapter and bundle protocol have automated transport coverage,

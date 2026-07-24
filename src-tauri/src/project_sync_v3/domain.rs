@@ -13,7 +13,6 @@ use std::fmt;
 use std::path::{Component, Path};
 
 pub const LOCAL_SCHEMA_V3: u32 = 3;
-pub const MACHINE_PROJECT_SCHEMA_V1: u32 = 1;
 pub const MACHINE_PROJECT_SCHEMA_V2: u32 = 2;
 pub const HOST_IDENTITY_SCHEMA_V1: u32 = 1;
 pub const CONVERSATION_BINDINGS_SCHEMA_V2: u32 = 2;
@@ -25,7 +24,6 @@ pub const RECIPE_SCHEMA_V1: u32 = 1;
 pub const RESTORE_PLAN_SCHEMA_V2: u32 = 2;
 pub const DEPENDENCY_PLAN_SCHEMA_V2: u32 = 2;
 pub const SETUP_DRAFT_SCHEMA_V1: u32 = 1;
-pub const SETUP_TRANSACTION_SCHEMA_V1: u32 = 1;
 pub const SETUP_TRANSACTION_SCHEMA_V2: u32 = 2;
 pub const MAX_SETUP_DRAFTS: usize = 64;
 
@@ -635,20 +633,11 @@ impl StorageConfigV3 {
 pub enum ResourceKind {
     CodexConversation,
     ClaudeConversation,
-    ProjectFile,
     ProjectContentFile,
     ProjectContentDirectory,
     ProjectMemory,
-    Agent,
-    Command,
-    Rule,
-    Prompt,
-    ProjectSkill,
     StandaloneSkill,
     Plugin,
-    McpServer,
-    Hook,
-    Setting,
     Requirement,
 }
 
@@ -682,11 +671,6 @@ pub enum Provenance {
         stable_key: String,
         source_digest: String,
     },
-    Git {
-        repository_fingerprint: String,
-        rev: String,
-        subdir: String,
-    },
     Plugin {
         provider: Provider,
         plugin_id: String,
@@ -713,21 +697,6 @@ impl Provenance {
             } => {
                 validate_display_text("standalone skill stable key", stable_key, false)?;
                 validate_sha256("standalone skill source digest", source_digest)?;
-            }
-            Self::Git {
-                repository_fingerprint,
-                rev,
-                subdir,
-            } => {
-                validate_sha256("repository fingerprint", repository_fingerprint)?;
-                validate_display_text("Git revision", rev, false)?;
-                if Path::new(subdir).is_absolute()
-                    || Path::new(subdir).components().any(|component| {
-                        matches!(component, Component::CurDir | Component::ParentDir)
-                    })
-                {
-                    return Err("invalid Git provenance subdirectory".to_string());
-                }
             }
             Self::Plugin { plugin_id, .. } => {
                 validate_display_text("plugin id", plugin_id, false)?;
@@ -3412,9 +3381,6 @@ pub enum RestoreActionType {
     InstallCustomSkill,
     OverwriteCustomSkill,
     InstallPlugin,
-    ReviewHook,
-    ReviewMcp,
-    ApplySetting,
     Manual,
 }
 
@@ -3471,16 +3437,6 @@ pub enum RestoreActionKind {
         provider: Provider,
         plugin_id: String,
     },
-    ReviewHook {
-        definition_sha256: String,
-    },
-    ReviewMcp {
-        definition_sha256: String,
-    },
-    ApplySetting {
-        provider: Provider,
-        semantic_key: String,
-    },
     Manual {
         message: String,
     },
@@ -3500,9 +3456,6 @@ impl RestoreActionKind {
             Self::InstallCustomSkill { .. } => RestoreActionType::InstallCustomSkill,
             Self::OverwriteCustomSkill { .. } => RestoreActionType::OverwriteCustomSkill,
             Self::InstallPlugin { .. } => RestoreActionType::InstallPlugin,
-            Self::ReviewHook { .. } => RestoreActionType::ReviewHook,
-            Self::ReviewMcp { .. } => RestoreActionType::ReviewMcp,
-            Self::ApplySetting { .. } => RestoreActionType::ApplySetting,
             Self::Manual { .. } => RestoreActionType::Manual,
         }
     }
@@ -3518,9 +3471,6 @@ impl RestoreActionKind {
             }
             Self::DeleteProjectFile { last_sha256, .. } => {
                 validate_sha256("project-content deletion", last_sha256)
-            }
-            Self::ReviewHook { definition_sha256 } | Self::ReviewMcp { definition_sha256 } => {
-                validate_sha256("definition", definition_sha256)
             }
             Self::InstallStandaloneSkill {
                 target_relative_path,
@@ -3545,9 +3495,6 @@ impl RestoreActionKind {
             }
             Self::InstallPlugin { plugin_id, .. } => {
                 validate_display_text("plugin id", plugin_id, false)
-            }
-            Self::ApplySetting { semantic_key, .. } => {
-                validate_display_text("semantic setting key", semantic_key, false)
             }
             Self::Manual { message } => validate_display_text("manual action", message, false),
             _ => Ok(()),
@@ -3595,9 +3542,6 @@ impl RestoreAction {
                 | RestoreActionType::InstallStandaloneSkill
                 | RestoreActionType::InstallCustomSkill
                 | RestoreActionType::OverwriteCustomSkill
-                | RestoreActionType::ReviewHook
-                | RestoreActionType::ReviewMcp
-                | RestoreActionType::ApplySetting
                 | RestoreActionType::WriteProjectFile
                 | RestoreActionType::EnsureProjectDirectory
                 | RestoreActionType::DeleteProjectFile
@@ -4504,8 +4448,8 @@ mod tests {
 
     #[test]
     fn manifest_requires_recipe_resource_and_file_referential_integrity() {
-        let id = resource_id("project:agents");
-        let path = LogicalPath::parse("project/AGENTS.md").unwrap();
+        let id = resource_id("memory:claude");
+        let path = LogicalPath::parse("state/claude/memory/MEMORY.md").unwrap();
         let mut recipe = BundleRecipe::default();
         recipe.entries.insert(
             id.clone(),
@@ -4520,13 +4464,11 @@ mod tests {
             id.clone(),
             ResourceDescriptor {
                 resource_id: id.clone(),
-                kind: ResourceKind::ProjectFile,
-                provider: None,
-                scope: ResourceScope::Project,
-                display_name: "AGENTS.md".to_string(),
-                provenance: Provenance::ProjectLocal {
-                    relative_path: "AGENTS.md".to_string(),
-                },
+                kind: ResourceKind::ProjectMemory,
+                provider: Some(Provider::Claude),
+                scope: ResourceScope::ProviderState,
+                display_name: "Claude memory".to_string(),
+                provenance: Provenance::Unknown,
                 apply_policy: ApplyPolicy::Merge,
                 relative_cwd: None,
                 codec_version: 1,
@@ -4541,7 +4483,7 @@ mod tests {
                 sha256: "a".repeat(64),
                 size: 1,
                 source_mtime: 1,
-                object_key: "_uploads/upload-1/files/project/AGENTS.md".to_string(),
+                object_key: "_uploads/upload-1/files/state/claude/memory/MEMORY.md".to_string(),
                 mode: Some(0o644),
             },
         );

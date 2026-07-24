@@ -14,7 +14,7 @@ import PushResourceWorkspace, {
 import type { CapabilityStatusItem, CapabilityStatusReport } from "../../src/types";
 
 function capability(
-  kind: "standalone_skill" | "project_skill" | "plugin",
+  kind: "standalone_skill" | "plugin",
   name: string,
   state: string,
 ): CapabilityStatusItem {
@@ -22,7 +22,7 @@ function capability(
     resource_id: `codex:${kind}:${name}`,
     kind,
     provider: "codex",
-    scope: kind === "plugin" ? "dependency" : kind === "standalone_skill" ? "provider_state" : "project",
+    scope: kind === "plugin" ? "dependency" : "provider_state",
     display_name: name,
     provenance: {},
     apply_policy: kind === "plugin" ? "explicit_install" : "safe_file",

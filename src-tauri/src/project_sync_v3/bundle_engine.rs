@@ -14,17 +14,12 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-use super::conversation_codec::{
-    analyze_codex_transcript, CodecLineage, CodecUnknownReason, CODEX_CODEC_VERSION,
-    CODEX_LINEAGE_CODEC_KEY, CODEX_REWRITE_CODEC_KEY, CODEX_SEMANTIC_CODEC_KEY,
-};
 use super::domain::{
     self, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt, BindingState, BundleDirectoryEntry,
     BundleFileEntry, BundleHead, BundleId, BundleIdentity, BundleKind, BundleManifest,
-    BundleRecipe, BundleSnapshot, CapturedWith, ConversationFileRef, ConversationFileRole,
-    ConversationLineageStatus, ConversationThread, DependencyAction, DependencyActionKind,
-    LogicalPath, PlanId, PortableOrigin, ProjectBinding, ThreadId,
-    Provider, RecipeEntry, ResourceDescriptor, ResourceId, ResourceKind, RestoreAction,
+    BundleRecipe, BundleSnapshot, CapturedWith, ConversationThread, DependencyAction,
+    DependencyActionKind, LogicalPath, PlanId, PortableOrigin, ProjectBinding, ThreadId,
+    Provider, ResourceDescriptor, ResourceId, ResourceKind, RestoreAction,
     RestoreActionKind, RestorePlan, StorageId, Tombstone, TombstoneTarget, BUNDLE_SCHEMA_V4,
     BUNDLE_SCHEMA_V6, RESTORE_PLAN_SCHEMA_V2,
 };
@@ -470,279 +465,6 @@ pub struct FetchedBundle {
     pub snapshot: BundleSnapshot,
     pub files: BTreeMap<LogicalPath, Vec<u8>>,
     pub dependency_actions: Vec<DependencyAction>,
-}
-
-const CLAUDE_UNAVAILABLE_LINEAGE_CODEC_KEY: &str = "claude.lineage.unavailable.v1";
-
-/// Build the one-way schema-4-to-schema-6 publication reviewed by a cutover
-/// caller. Historical provider bytes are copied exactly, while conversation
-/// identities and logical ownership move to the flat-thread model. The
-/// migrating host is deliberately not recorded as creator or semantic editor.
-pub fn build_schema6_cutover_request(
-    fetched: &FetchedBundle,
-    published_by_origin: PortableOrigin,
-    expected_head: HeadToken,
-    updated_at: u64,
-) -> Result<PublishSchema6Request, String> {
-    fetched.snapshot.validate()?;
-    published_by_origin.validate()?;
-    if fetched.snapshot.manifest.schema_version != BUNDLE_SCHEMA_V4 {
-        return Err("schema cutover requires a reviewed schema-4 manifest".to_string());
-    }
-    let reviewed_head = &fetched.snapshot.head;
-    if expected_head.generation != reviewed_head.generation
-        || expected_head.commit_id != reviewed_head.commit_id
-        || expected_head.manifest_sha256 != reviewed_head.manifest_sha256
-    {
-        return Err("schema cutover head pin does not match the reviewed snapshot".to_string());
-    }
-    if updated_at == 0 {
-        return Err("schema cutover timestamp must be non-zero".to_string());
-    }
-
-    let manifest = &fetched.snapshot.manifest;
-    let mut recipe = manifest.recipe.clone();
-    let mut captured_with = manifest.captured_with.clone();
-    captured_with
-        .codec_versions
-        .insert(CODEX_LINEAGE_CODEC_KEY.to_string(), CODEX_CODEC_VERSION);
-    captured_with
-        .codec_versions
-        .insert(CODEX_REWRITE_CODEC_KEY.to_string(), CODEX_CODEC_VERSION);
-    captured_with
-        .codec_versions
-        .insert(CODEX_SEMANTIC_CODEC_KEY.to_string(), CODEX_CODEC_VERSION);
-
-    let mut resources = manifest.resources.clone();
-    let mut retained_files = BTreeMap::new();
-    let mut captured_files = BTreeMap::new();
-    let mut conversations = BTreeMap::new();
-    let conversation_resource_ids = manifest
-        .resources
-        .iter()
-        .filter_map(|(resource_id, descriptor)| {
-            matches!(
-                descriptor.kind,
-                ResourceKind::CodexConversation | ResourceKind::ClaudeConversation
-            )
-            .then_some(resource_id.clone())
-        })
-        .collect::<BTreeSet<_>>();
-
-    for (path, entry) in &manifest.files {
-        let bytes = fetched
-            .files
-            .get(path)
-            .ok_or_else(|| format!("reviewed schema-4 file '{}' was not fetched", path))?;
-        if bytes.len() as u64 != entry.size || sha256(bytes) != entry.sha256 {
-            return Err(format!(
-                "reviewed schema-4 file '{}' does not match its manifest digest",
-                path
-            ));
-        }
-        if !conversation_resource_ids.contains(&entry.resource_id) {
-            retained_files.insert(path.clone(), entry.clone());
-        }
-    }
-    if manifest
-        .directories
-        .values()
-        .any(|entry| conversation_resource_ids.contains(&entry.resource_id))
-    {
-        return Err("schema-4 conversation resource unexpectedly owns a directory".to_string());
-    }
-
-    for legacy_resource_id in conversation_resource_ids {
-        let legacy_descriptor = manifest
-            .resources
-            .get(&legacy_resource_id)
-            .expect("conversation resource came from the manifest");
-        let provider = legacy_descriptor.provider.ok_or_else(|| {
-            format!(
-                "legacy conversation '{}' has no provider",
-                legacy_resource_id
-            )
-        })?;
-        let thread_id = domain::deterministic_schema4_thread_id(
-            &manifest.bundle.bundle_id,
-            provider,
-            &legacy_resource_id,
-        )?;
-        let resource_id = domain::conversation_resource_id(provider, &thread_id)?;
-        let mut owned = manifest
-            .files
-            .iter()
-            .filter(|(_, entry)| entry.resource_id == legacy_resource_id)
-            .collect::<Vec<_>>();
-        owned.sort_by(|left, right| left.0.cmp(right.0));
-        if owned.is_empty() {
-            return Err(format!(
-                "legacy conversation '{}' owns no transcript",
-                legacy_resource_id
-            ));
-        }
-        let transcript_index = owned
-            .iter()
-            .position(|(path, _)| path.as_str().ends_with(".jsonl"))
-            .unwrap_or(0);
-        let transcript_bytes = fetched
-            .files
-            .get(owned[transcript_index].0)
-            .expect("owned legacy file was verified above");
-        let analysis =
-            (provider == Provider::Codex).then(|| analyze_codex_transcript(transcript_bytes));
-        let (
-            lineage_status,
-            lineage_codec,
-            head_message_id,
-            message_count,
-            lineage_digest,
-            semantic_digest,
-            source_thread_id,
-        ) = match analysis {
-            Some(analysis) => match analysis.lineage {
-                CodecLineage::Complete {
-                    chain,
-                    lineage_digest,
-                    semantic_digest,
-                } => (
-                    ConversationLineageStatus::Complete,
-                    CODEX_LINEAGE_CODEC_KEY.to_string(),
-                    chain.last().map(|message| message.message_id.clone()),
-                    Some(chain.len() as u64),
-                    Some(lineage_digest),
-                    Some(semantic_digest),
-                    analysis.source_thread_id,
-                ),
-                CodecLineage::Unknown { reason } => (
-                    ConversationLineageStatus::Unknown {
-                        reason_code: reason.as_str().to_string(),
-                    },
-                    CODEX_LINEAGE_CODEC_KEY.to_string(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    analysis.source_thread_id,
-                ),
-            },
-            None => {
-                captured_with
-                    .codec_versions
-                    .insert(CLAUDE_UNAVAILABLE_LINEAGE_CODEC_KEY.to_string(), 1);
-                (
-                    ConversationLineageStatus::Unknown {
-                        reason_code: CodecUnknownReason::UnsupportedCodec.as_str().to_string(),
-                    },
-                    CLAUDE_UNAVAILABLE_LINEAGE_CODEC_KEY.to_string(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    legacy_resource_id
-                        .as_str()
-                        .rsplit(':')
-                        .next()
-                        .map(str::to_string),
-                )
-            }
-        };
-
-        let mut file_refs = Vec::with_capacity(owned.len());
-        for (index, (old_path, old_entry)) in owned.into_iter().enumerate() {
-            let (filename, role) = if index == transcript_index {
-                (
-                    "transcript.jsonl".to_string(),
-                    ConversationFileRole::Transcript,
-                )
-            } else {
-                (
-                    format!("sidecar-{index}.json"),
-                    ConversationFileRole::Sidecar {
-                        sidecar_kind: format!("legacy-{index}"),
-                    },
-                )
-            };
-            let path = LogicalPath::parse(format!(
-                "state/conversations/{}/{}/{}",
-                provider.as_str(),
-                thread_id,
-                filename
-            ))?;
-            let bytes = fetched
-                .files
-                .get(old_path)
-                .expect("owned legacy file was verified above")
-                .clone();
-            captured_files.insert(
-                path.clone(),
-                Schema6CapturedFile {
-                    resource_id: resource_id.clone(),
-                    bytes,
-                    source_mtime: old_entry.source_mtime,
-                    mode: old_entry.mode,
-                },
-            );
-            file_refs.push(ConversationFileRef {
-                logical_path: path,
-                role,
-            });
-        }
-
-        resources.remove(&legacy_resource_id);
-        let mut descriptor = legacy_descriptor.clone();
-        descriptor.resource_id = resource_id.clone();
-        resources.insert(resource_id.clone(), descriptor);
-        let legacy_recipe = recipe.entries.remove(&legacy_resource_id).ok_or_else(|| {
-            format!(
-                "legacy conversation '{}' is absent from its recipe",
-                legacy_resource_id
-            )
-        })?;
-        recipe.entries.insert(
-            resource_id.clone(),
-            RecipeEntry {
-                resource_id: resource_id.clone(),
-                apply_policy: legacy_recipe.apply_policy,
-                required: legacy_recipe.required,
-            },
-        );
-        let thread = ConversationThread {
-            thread_id: thread_id.clone(),
-            provider,
-            display_title: Some(legacy_descriptor.display_name.clone()),
-            resource_id,
-            files: file_refs,
-            lineage_status,
-            lineage_codec,
-            head_message_id,
-            message_count,
-            lineage_digest,
-            semantic_digest,
-            forked_from: None,
-            source_thread_id,
-            created_by_origin: None,
-            last_updated_by_origin: None,
-            created_at: manifest.updated_at,
-            updated_at: manifest.updated_at,
-        };
-        conversations.insert(thread_id, thread);
-    }
-
-    Ok(PublishSchema6Request {
-        identity: manifest.bundle.clone(),
-        recipe,
-        captured_with,
-        published_by_origin,
-        conversations,
-        resources,
-        retained_files,
-        captured_files,
-        directories: manifest.directories.clone(),
-        tombstones: manifest.tombstones.clone(),
-        expected_head: PublishExpectation::Match(expected_head),
-        updated_at,
-    })
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -2043,8 +1765,8 @@ mod tests {
         ));
 
         let mut ordinary_merge = index;
-        ordinary_merge.resource_id = ResourceId::parse("project:file:guidance").unwrap();
-        ordinary_merge.kind = ResourceKind::ProjectFile;
+        ordinary_merge.resource_id = ResourceId::parse("memory:claude").unwrap();
+        ordinary_merge.kind = ResourceKind::ProjectMemory;
         assert!(action_needs_explicit_approval(
             &ordinary_merge,
             Some("target-differs"),
@@ -2153,7 +1875,8 @@ mod tests {
         let project = temp.path().join("project");
         fs::create_dir_all(&project).unwrap();
         write(&project.join("CLAUDE.md"), b"version one");
-        let request = CaptureRequest::for_project(&project);
+        let mut request = CaptureRequest::for_project(&project);
+        request.include_project_content = true;
         let inventory = discover_project(&request).unwrap();
         let resource_id = inventory
             .resources
@@ -2283,7 +2006,8 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         write(&source.join("CLAUDE.md"), b"portable guidance");
         write(&target.join("CLAUDE.md"), b"target edits");
-        let request = CaptureRequest::for_project(&source);
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
         let inventory = discover_project(&request).unwrap();
         let resource_id = inventory
             .resources
@@ -2349,242 +2073,6 @@ mod tests {
             .receipts
             .iter()
             .any(|receipt| receipt.status == ActionStatus::Applied));
-    }
-
-    #[test]
-    fn settings_and_mcp_apply_preserve_target_only_fields_and_secrets() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("source-project");
-        let target = temp.path().join("target-project");
-        fs::create_dir_all(&source).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        write(
-            &source.join(".claude/settings.json"),
-            br#"{"model": "opus", "outputStyle": "concise", "permissions": {"allow": ["Bash(rm:*)"]}}"#,
-        );
-        write(
-            &source.join(".mcp.json"),
-            br#"{"mcpServers": {"tracker": {"command": "tracker-mcp", "env": {"TRACKER_TOKEN": "portable-secret"}}}}"#,
-        );
-        write(
-            &target.join(".claude/settings.json"),
-            br#"{"model": "haiku", "permissions": {"allow": ["Bash(ls:*)"]}}"#,
-        );
-        write(
-            &target.join(".mcp.json"),
-            br#"{"mcpServers": {"local-db": {"command": "db-mcp"}, "tracker": {"command": "old-tracker", "env": {"TRACKER_TOKEN": "target-secret"}}}}"#,
-        );
-        let request = CaptureRequest::for_project(&source);
-        let inventory = discover_project(&request).unwrap();
-        let resource_ids = [".claude/settings.json", ".mcp.json"].map(|name| {
-            inventory
-                .resources
-                .iter()
-                .find(|resource| resource.display_name == name)
-                .unwrap()
-                .resource_id
-                .clone()
-        });
-        let recipe = recipe_for(resource_ids);
-        let id = bundle_id(6);
-        let engine = BundleEngine::open(
-            LocalBundleObjectStore::open(temp.path().join("store")).unwrap(),
-            storage_id(),
-        )
-        .unwrap();
-        engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Composed project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                expected_head: PublishExpectation::Absent,
-                updated_at: 10,
-            })
-            .unwrap();
-        let fetched = engine.fetch(&id).unwrap();
-        let binding = active_binding(id, &target, None, None);
-        let plan = engine
-            .build_restore_plan(&fetched, &binding, 100, 0)
-            .unwrap();
-        let settings_action = plan
-            .actions
-            .iter()
-            .find(|action| matches!(action.kind, RestoreActionKind::ApplySetting { .. }))
-            .unwrap();
-        let mcp_action = plan
-            .actions
-            .iter()
-            .find(|action| matches!(action.kind, RestoreActionKind::ReviewMcp { .. }))
-            .unwrap();
-        let approved = BTreeSet::from([
-            settings_action.action_id.clone(),
-            mcp_action.action_id.clone(),
-        ]);
-        let result = engine
-            .apply_restore_plan(
-                &fetched,
-                &binding,
-                &plan,
-                &approved,
-                &temp.path().join("backups"),
-                101,
-            )
-            .unwrap();
-        assert!(result
-            .receipts
-            .iter()
-            .all(|receipt| receipt.status == ActionStatus::Applied));
-        assert_eq!(result.backups.len(), 2, "both existing targets backed up");
-
-        let settings: serde_json::Value =
-            serde_json::from_slice(&fs::read(target.join(".claude/settings.json")).unwrap())
-                .unwrap();
-        assert_eq!(settings["model"], "opus", "portable field wins");
-        assert_eq!(settings["outputStyle"], "concise", "portable field added");
-        assert_eq!(
-            settings["permissions"]["allow"][0], "Bash(ls:*)",
-            "target-only permissions survive and never inherit portable ones"
-        );
-
-        let mcp: serde_json::Value =
-            serde_json::from_slice(&fs::read(target.join(".mcp.json")).unwrap()).unwrap();
-        assert_eq!(
-            mcp["mcpServers"]["tracker"]["command"], "tracker-mcp",
-            "portable non-secret field wins"
-        );
-        assert_eq!(
-            mcp["mcpServers"]["tracker"]["env"]["TRACKER_TOKEN"], "target-secret",
-            "target literal secret survives the portable ${{NAME}} placeholder"
-        );
-        assert_eq!(
-            mcp["mcpServers"]["local-db"]["command"], "db-mcp",
-            "target-only server survives"
-        );
-    }
-
-    #[test]
-    fn hook_and_toml_settings_apply_merge_by_identity_and_preserve_target_keys() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("source-project");
-        let target = temp.path().join("target-project");
-        fs::create_dir_all(&source).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        write(
-            &source.join(".codex/config.toml"),
-            b"model = \"gpt-5\"\nweb_search = true\n",
-        );
-        write(
-            &source.join(".codex/hooks.json"),
-            br#"{"hooks": [{"name": "fmt", "command": "cargo fmt --check"}, {"name": "lint", "command": "cargo clippy"}]}"#,
-        );
-        write(
-            &target.join(".codex/config.toml"),
-            b"model = \"o3\"\nsandbox_mode = \"workspace-write\"\n",
-        );
-        write(
-            &target.join(".codex/hooks.json"),
-            br#"{"hooks": [{"name": "fmt", "command": "prettier --check ."}, {"name": "local-scan", "command": "scan.sh"}]}"#,
-        );
-        let request = CaptureRequest::for_project(&source);
-        let inventory = discover_project(&request).unwrap();
-        let resource_ids = [".codex/config.toml", ".codex/hooks.json"].map(|name| {
-            inventory
-                .resources
-                .iter()
-                .find(|resource| resource.display_name == name)
-                .unwrap()
-                .resource_id
-                .clone()
-        });
-        let recipe = recipe_for(resource_ids);
-        let id = bundle_id(7);
-        let engine = BundleEngine::open(
-            LocalBundleObjectStore::open(temp.path().join("store")).unwrap(),
-            storage_id(),
-        )
-        .unwrap();
-        engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Codex project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                expected_head: PublishExpectation::Absent,
-                updated_at: 10,
-            })
-            .unwrap();
-        let fetched = engine.fetch(&id).unwrap();
-        let binding = active_binding(id, &target, None, None);
-        let plan = engine
-            .build_restore_plan(&fetched, &binding, 100, 0)
-            .unwrap();
-        let approved: BTreeSet<_> = plan
-            .actions
-            .iter()
-            .filter(|action| {
-                matches!(
-                    action.kind,
-                    RestoreActionKind::ApplySetting { .. } | RestoreActionKind::ReviewHook { .. }
-                )
-            })
-            .map(|action| action.action_id.clone())
-            .collect();
-        assert_eq!(approved.len(), 2);
-        let result = engine
-            .apply_restore_plan(
-                &fetched,
-                &binding,
-                &plan,
-                &approved,
-                &temp.path().join("backups"),
-                101,
-            )
-            .unwrap();
-        assert!(result
-            .receipts
-            .iter()
-            .all(|receipt| receipt.status == ActionStatus::Applied));
-
-        let config: toml::Value =
-            toml::from_str(&fs::read_to_string(target.join(".codex/config.toml")).unwrap())
-                .unwrap();
-        assert_eq!(config["model"].as_str(), Some("gpt-5"), "portable key wins");
-        assert_eq!(
-            config["web_search"].as_bool(),
-            Some(true),
-            "portable key added"
-        );
-        assert_eq!(
-            config["sandbox_mode"].as_str(),
-            Some("workspace-write"),
-            "target-only TOML key survives"
-        );
-
-        let hooks: serde_json::Value =
-            serde_json::from_slice(&fs::read(target.join(".codex/hooks.json")).unwrap()).unwrap();
-        let list = hooks["hooks"].as_array().unwrap();
-        let by_name = |name: &str| {
-            list.iter()
-                .find(|hook| hook["name"] == name)
-                .unwrap_or_else(|| panic!("hook '{}' missing", name))
-        };
-        assert_eq!(
-            by_name("fmt")["command"],
-            "cargo fmt --check",
-            "same-name hook merges by identity with portable winning"
-        );
-        assert_eq!(
-            by_name("local-scan")["command"],
-            "scan.sh",
-            "target-only hook survives"
-        );
-        assert_eq!(
-            by_name("lint")["command"],
-            "cargo clippy",
-            "portable-only hook is appended"
-        );
-        assert_eq!(list.len(), 3, "no duplicate hook entries");
     }
 
     #[test]
@@ -2830,81 +2318,6 @@ mod tests {
             Some(restored_sha.as_str())
         );
         assert!(!repeat_action.requires_explicit_approval);
-    }
-
-    #[test]
-    fn executable_skill_payload_requires_explicit_file_and_dependency_approval() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("source");
-        let target = temp.path().join("target");
-        fs::create_dir_all(&source).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        let script = source.join(".agents/skills/release/run.sh");
-        write(&script, b"#!/bin/sh\necho release\n");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let request = CaptureRequest::for_project(&source);
-        let inventory = discover_project(&request).unwrap();
-        let skill = inventory
-            .resources
-            .iter()
-            .find(|resource| resource.kind == CaptureResourceKind::Skill)
-            .unwrap();
-        assert!(skill.dependency.is_some());
-        let recipe = recipe_for([skill.resource_id.clone()]);
-        let id = bundle_id(5);
-        let engine = BundleEngine::open(
-            LocalBundleObjectStore::open(temp.path().join("store")).unwrap(),
-            storage_id(),
-        )
-        .unwrap();
-        engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Executable skill"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                expected_head: PublishExpectation::Absent,
-                updated_at: 10,
-            })
-            .unwrap();
-        let fetched = engine.fetch(&id).unwrap();
-        let binding = active_binding(id, &target, None, None);
-        let plan = engine
-            .build_restore_plan(&fetched, &binding, 100, 0)
-            .unwrap();
-        assert_eq!(plan.actions.len(), 1);
-        let install = fetched
-            .dependency_actions
-            .iter()
-            .find(|action| matches!(action.kind, DependencyActionKind::InstallStandaloneSkill))
-            .unwrap();
-        assert!(install.requires_explicit_approval);
-        let payload = plan
-            .actions
-            .iter()
-            .find(|action| matches!(action.kind, RestoreActionKind::WriteFile { .. }))
-            .unwrap();
-        assert!(payload.requires_explicit_approval);
-        let approved = BTreeSet::from([payload.action_id.clone()]);
-        let applied = engine
-            .apply_restore_plan(
-                &fetched,
-                &binding,
-                &plan,
-                &approved,
-                &temp.path().join("backups"),
-                101,
-            )
-            .unwrap();
-        assert!(applied.deferred_dependencies.is_empty());
-        assert_eq!(
-            fs::read(target.join(".agents/skills/release/run.sh")).unwrap(),
-            b"#!/bin/sh\necho release\n"
-        );
     }
 
     #[test]
@@ -3863,18 +3276,6 @@ fn restore_kind_for_file(
             mode: entry.mode.unwrap_or(0o600) & 0o777,
             source_mtime: entry.source_mtime,
         },
-        ResourceKind::Hook => RestoreActionKind::ReviewHook {
-            definition_sha256: entry.sha256.clone(),
-        },
-        ResourceKind::McpServer => RestoreActionKind::ReviewMcp {
-            definition_sha256: entry.sha256.clone(),
-        },
-        ResourceKind::Setting => RestoreActionKind::ApplySetting {
-            provider: descriptor
-                .provider
-                .ok_or_else(|| "setting resource lacks provider".to_string())?,
-            semantic_key: logical_path.as_str().to_string(),
-        },
         _ if descriptor.apply_policy == ApplyPolicy::Merge => RestoreActionKind::MergeFile {
             logical_path: logical_path.clone(),
         },
@@ -3904,11 +3305,7 @@ fn action_needs_explicit_approval(
     ) || target_digest.is_some_and(|target| target != source_digest)
         || matches!(
             descriptor.kind,
-            ResourceKind::Hook
-                | ResourceKind::McpServer
-                | ResourceKind::Setting
-                | ResourceKind::StandaloneSkill
-                | ResourceKind::Plugin
+            ResourceKind::StandaloneSkill | ResourceKind::Plugin
         )
 }
 
@@ -4484,124 +3881,6 @@ fn json_identity(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Array(values) => values.iter().find_map(json_identity),
         _ => None,
     }
-}
-
-/// Compose the already-sanitized portable projection into the target's
-/// project-scoped definition. Target-only fields (including local secrets,
-/// permissions, trust, and unrelated MCP servers) survive. Literal target
-/// env/header values also win over portable `${NAME}` requirements.
-fn merge_portable_project_definition(
-    existing: Option<&[u8]>,
-    incoming: &[u8],
-    logical_path: &str,
-) -> Result<Vec<u8>, String> {
-    let Some(existing) = existing else {
-        return Ok(incoming.to_vec());
-    };
-    if logical_path.ends_with(".toml") {
-        let target_text = std::str::from_utf8(existing)
-            .map_err(|error| format!("target TOML is not UTF-8: {}", error))?;
-        let incoming_text = std::str::from_utf8(incoming)
-            .map_err(|error| format!("portable TOML is not UTF-8: {}", error))?;
-        let mut target: toml::Value =
-            toml::from_str(target_text).map_err(|error| format!("parse target TOML: {}", error))?;
-        let incoming: toml::Value = toml::from_str(incoming_text)
-            .map_err(|error| format!("parse portable TOML: {}", error))?;
-        deep_merge_toml(&mut target, incoming);
-        let mut output = toml::to_string_pretty(&target)
-            .map_err(|error| format!("serialize composed TOML: {}", error))?
-            .into_bytes();
-        if !output.ends_with(b"\n") {
-            output.push(b'\n');
-        }
-        return Ok(output);
-    }
-    if logical_path.ends_with(".json") {
-        let mut target: serde_json::Value = serde_json::from_slice(existing)
-            .map_err(|error| format!("parse target JSON: {}", error))?;
-        let incoming: serde_json::Value = serde_json::from_slice(incoming)
-            .map_err(|error| format!("parse portable JSON: {}", error))?;
-        deep_merge_json(&mut target, incoming, false);
-        let mut output = serde_json::to_vec_pretty(&target)
-            .map_err(|error| format!("serialize composed JSON: {}", error))?;
-        output.push(b'\n');
-        return Ok(output);
-    }
-    Err(format!(
-        "portable definition '{}' has no semantic composer",
-        logical_path
-    ))
-}
-
-fn deep_merge_toml(target: &mut toml::Value, incoming: toml::Value) {
-    match (target, incoming) {
-        (toml::Value::Table(target), toml::Value::Table(incoming)) => {
-            for (key, value) in incoming {
-                match target.get_mut(&key) {
-                    Some(current) => deep_merge_toml(current, value),
-                    None => {
-                        target.insert(key, value);
-                    }
-                }
-            }
-        }
-        (target, incoming) => *target = incoming,
-    }
-}
-
-fn deep_merge_json(
-    target: &mut serde_json::Value,
-    incoming: serde_json::Value,
-    preserve_existing_leaf: bool,
-) {
-    match (target, incoming) {
-        (serde_json::Value::Object(target), serde_json::Value::Object(incoming)) => {
-            for (key, value) in incoming {
-                let preserve = preserve_existing_leaf
-                    || key.eq_ignore_ascii_case("env")
-                    || key.eq_ignore_ascii_case("headers");
-                match target.get_mut(&key) {
-                    Some(current) => deep_merge_json(current, value, preserve),
-                    None => {
-                        target.insert(key, value);
-                    }
-                }
-            }
-        }
-        (serde_json::Value::Array(target), serde_json::Value::Array(incoming))
-            if !preserve_existing_leaf =>
-        {
-            merge_json_array(target, incoming);
-        }
-        (target, incoming) if !preserve_existing_leaf => *target = incoming,
-        _ => {}
-    }
-}
-
-fn merge_json_array(target: &mut Vec<serde_json::Value>, incoming: Vec<serde_json::Value>) {
-    for incoming_value in incoming {
-        let identity = json_merge_identity(&incoming_value);
-        if let Some((index, _)) = identity.as_ref().and_then(|identity| {
-            target
-                .iter()
-                .enumerate()
-                .find(|(_, value)| json_merge_identity(value).as_ref() == Some(identity))
-        }) {
-            deep_merge_json(&mut target[index], incoming_value, false);
-        } else if !target.contains(&incoming_value) {
-            target.push(incoming_value);
-        }
-    }
-}
-
-fn json_merge_identity(value: &serde_json::Value) -> Option<(String, String)> {
-    let object = value.as_object()?;
-    for key in ["name", "id", "pluginId", "plugin_id"] {
-        if let Some(value) = object.get(key).and_then(serde_json::Value::as_str) {
-            return Some((key.to_string(), value.to_string()));
-        }
-    }
-    None
 }
 
 fn canonical_real_dir(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -5346,34 +4625,6 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                         ),
                     ));
                 }
-                RestoreActionKind::ReviewHook { .. }
-                | RestoreActionKind::ReviewMcp { .. }
-                | RestoreActionKind::ApplySetting { .. } => {
-                    let receipt = self
-                        .logical_path_for_review_action(bundle, action)
-                        .and_then(|logical_path| {
-                            self.apply_file_action(
-                                bundle,
-                                binding,
-                                action,
-                                &logical_path,
-                                &plan_backup,
-                                applied_at,
-                                &mut backups,
-                            )
-                        });
-                    receipts.push(match receipt {
-                        Ok(receipt) => receipt,
-                        Err(error) => receipt_for(
-                            action,
-                            ActionStatus::Failed,
-                            applied_at,
-                            None,
-                            None,
-                            Some(error),
-                        ),
-                    });
-                }
                 RestoreActionKind::WriteFile { logical_path }
                 | RestoreActionKind::WriteProjectFile { logical_path, .. }
                 | RestoreActionKind::MergeFile { logical_path }
@@ -5667,30 +4918,6 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         ))
     }
 
-    fn logical_path_for_review_action(
-        &self,
-        bundle: &FetchedBundle,
-        action: &RestoreAction,
-    ) -> Result<LogicalPath, String> {
-        let mut matches = bundle
-            .snapshot
-            .manifest
-            .files
-            .iter()
-            .filter(|(_, entry)| entry.resource_id == action.resource_id)
-            .map(|(logical_path, _)| logical_path.clone());
-        let logical_path = matches
-            .next()
-            .ok_or_else(|| "review action has no portable definition bytes".to_string())?;
-        if matches.next().is_some() {
-            return Err(
-                "review action spans multiple files and needs a provider-specific composer"
-                    .to_string(),
-            );
-        }
-        Ok(logical_path)
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn apply_file_action(
         &self,
@@ -5783,15 +5010,6 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         }
         let write_bytes = if logical_path.as_str() == "state/codex/session_index.jsonl" {
             merge_jsonl_index(before.bytes.as_deref(), bytes)?
-        } else if matches!(
-            descriptor.kind,
-            ResourceKind::Setting | ResourceKind::McpServer | ResourceKind::Hook
-        ) {
-            merge_portable_project_definition(
-                before.bytes.as_deref(),
-                bytes,
-                logical_path.as_str(),
-            )?
         } else {
             materialized_bytes
         };

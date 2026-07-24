@@ -518,7 +518,7 @@ function ConceptFive({
         <div className="pp-activity-heading">
           <div>
             <span className="pp-overline">PROJECT ACTIVITY</span>
-            <h1>{activeTab === "history" ? "What changed" : activeTab === "skills" ? "Project skills" : "Project plugins"}</h1>
+            <h1>{activeTab === "history" ? "What changed" : activeTab === "skills" ? "Skills" : "Plugins"}</h1>
             <p>{activeTab === "history" ? "Review local work and synced Codex sessions in one timeline." : "Resources attached to mallard_test_demo."}</p>
           </div>
           <div className="pp-activity-branch">

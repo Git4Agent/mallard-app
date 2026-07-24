@@ -38,7 +38,6 @@ import type {
   RegisterLocalProjectRequest,
   RegisterNewHostRequest,
   ResourceInventory,
-  ResourceStatusReport,
   RestorePlan,
   RestoreResult,
   SaveProjectBindingRequest,
@@ -179,12 +178,6 @@ export const projectSyncApi = {
 
   getInventory: (localProjectId: string) =>
     invoke<ResourceInventory>("get_bundle_inventory", { localProjectId }),
-
-  saveRecipe: (localProjectId: string, recipe: BundleRecipe) =>
-    invoke<LocalProjectRegistration>("save_bundle_recipe", { localProjectId, recipe }),
-
-  getStatus: (localProjectId: string, storageId: string) =>
-    invoke<ResourceStatusReport>("get_bundle_status", { localProjectId, storageId }),
 
   getCapabilityStatus: (localProjectId: string, storageId?: string | null) =>
     invoke<CapabilityStatusReport>("get_project_capability_status", {

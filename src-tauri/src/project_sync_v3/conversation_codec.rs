@@ -16,8 +16,6 @@ use super::domain::{
 };
 
 pub const CODEX_LINEAGE_CODEC_KEY: &str = "codex.lineage.v1";
-pub const CODEX_REWRITE_CODEC_KEY: &str = "codex.rewrite.v1";
-pub const CODEX_SEMANTIC_CODEC_KEY: &str = "codex.semantic.v1";
 pub const CODEX_CODEC_VERSION: u32 = 1;
 
 const MAX_TRANSCRIPT_BYTES: usize = MAX_CONVERSATION_FILE_BYTES as usize;

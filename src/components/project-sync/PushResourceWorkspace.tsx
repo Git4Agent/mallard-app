@@ -367,10 +367,10 @@ export default function PushResourceWorkspace({
     () => resources.filter((resource) => categoryFor(resource) === "project_files"),
     [resources],
   );
-  const other = useMemo(() => resources.filter((resource) => {
-    const category = categoryFor(resource);
-    return category === "project_setup" || category === "tools";
-  }), [resources]);
+  const other = useMemo(
+    () => resources.filter((resource) => categoryFor(resource) === "tools"),
+    [resources],
+  );
   const selectableIds = useMemo(
     () => pushSelectableResourceIds(resources, threadComparison, capabilityReport, projectContentInventory),
     [capabilityReport, projectContentInventory, resources, threadComparison],

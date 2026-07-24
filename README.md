@@ -25,8 +25,8 @@ resources portable across teammates and machines.
   team can explore the reasoning behind a diff.
 - Parses session summaries and conversation previews locally, with metrics for
   start and end times, user turns, tokens, agent messages, and tool calls.
-- Syncs selected project conversations, setup, skills, plugins, and approved
-  configuration through a local folder or Cloudflare R2.
+- Syncs selected project conversations and provider-home resources — skills,
+  plugins, memory, and session state — through a local folder or Cloudflare R2.
 - Compares local and stored resources before Push or Pull, including
   local-only, storage-only, ahead, synchronized, and conflict states.
 - Publishes immutable, SHA-256-verified bundle generations and presents an
@@ -141,6 +141,9 @@ visible as unmapped rather than being assigned to a commit without evidence.
 
 - Every Push and Pull is reviewed by resource before it changes shared or
   local state.
+- Mallard captures only provider-home state; it never captures configuration
+  or instruction files from inside a Git-managed project directory. That
+  content travels with Git.
 - Non-Git project-file scans are explicit and read-only. `.gitignore`,
   `.ignore`, and `.mallardignore` are honored.
 - VCS data, build output, Codex and Mallard metadata, credential filenames,

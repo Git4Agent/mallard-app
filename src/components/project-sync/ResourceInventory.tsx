@@ -13,7 +13,6 @@ interface Props {
 
 const CATEGORY_ICON: Record<ProjectResourceCategory, "activity" | "settings" | "folder" | "link"> = {
   conversations: "activity",
-  project_setup: "settings",
   skills: "folder",
   plugins: "link",
   project_files: "folder",
@@ -37,9 +36,9 @@ function providedSkills(resource: ProjectResourceDescriptor): string[] {
 }
 
 function resourceIcon(resource: ProjectResourceDescriptor): "activity" | "file" | "folder" | "link" | "settings" {
-  if (resource.kind === "project_skill" || resource.kind === "standalone_skill") return "folder";
+  if (resource.kind === "standalone_skill") return "folder";
   if (resource.kind === "plugin") return "link";
-  if (resource.kind === "setting" || resource.kind === "requirement") return "settings";
+  if (resource.kind === "requirement") return "settings";
   if (resource.kind.includes("conversation")) return "activity";
   return "file";
 }

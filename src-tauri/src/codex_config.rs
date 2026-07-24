@@ -1,14 +1,11 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use toml::{Table, Value};
 use walkdir::WalkDir;
-
-pub const CONFIG_REL: &str = ".codex/config.toml";
 
 const MANAGED_MARKETPLACES: &[&str] =
     &["openai-curated", "openai-bundled", "openai-primary-runtime"];
@@ -23,52 +20,8 @@ pub struct ConfigIssue {
     pub message: String,
 }
 
-#[derive(Default)]
-struct LocalOverlay {
-    marketplaces: BTreeMap<String, Value>,
-    managed_mcp_servers: BTreeMap<String, Value>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ComposePhysicalError {
-    MarketplaceCollision(String),
-    Invalid(String),
-}
-
-impl fmt::Display for ComposePhysicalError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MarketplaceCollision(name) => write!(
-                formatter,
-                "portable marketplace '{}' conflicts with a target-local registration",
-                name
-            ),
-            Self::Invalid(message) => formatter.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for ComposePhysicalError {}
-
 pub fn managed_marketplace_name(name: &str) -> bool {
     MANAGED_MARKETPLACES.contains(&name)
-}
-
-/// The active Codex config and deterministic conflict siblings are both
-/// portable-config artifacts. Only the active file is composed with local
-/// state on pull; siblings are projected so a reviewed/re-uploaded copy can
-/// never introduce machine-local paths into the cloud profile.
-pub fn is_config_artifact(rel: &str) -> bool {
-    if rel == CONFIG_REL {
-        return true;
-    }
-    let Some(tag_and_ext) = rel.strip_prefix(".codex/config.sync-conflict-") else {
-        return false;
-    };
-    let Some(tag) = tag_and_ext.strip_suffix(".toml") else {
-        return false;
-    };
-    tag.len() == 8 && tag.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn parse_table(bytes: &[u8], description: &str) -> Result<Table, String> {
@@ -154,54 +107,6 @@ fn managed_mcp_fingerprint(name: &str, value: &Value) -> bool {
     }
 }
 
-fn split_local_overlay(mut table: Table) -> (Table, LocalOverlay) {
-    let mut overlay = LocalOverlay::default();
-
-    let mut remove_marketplaces = false;
-    if let Some(marketplaces) = table.get_mut("marketplaces").and_then(Value::as_table_mut) {
-        let local_names: Vec<String> = marketplaces
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .as_table()
-                    .and_then(|entry| entry.get("source_type"))
-                    .and_then(Value::as_str)
-                    .filter(|kind| *kind == "local")
-                    .map(|_| name.clone())
-            })
-            .collect();
-        for name in local_names {
-            if let Some(value) = marketplaces.remove(&name) {
-                overlay.marketplaces.insert(name, value);
-            }
-        }
-        remove_marketplaces = marketplaces.is_empty();
-    }
-    if remove_marketplaces {
-        table.remove("marketplaces");
-    }
-
-    let mut remove_mcp_servers = false;
-    if let Some(servers) = table.get_mut("mcp_servers").and_then(Value::as_table_mut) {
-        for name in [NODE_REPL, COMPUTER_USE] {
-            let managed = servers
-                .get(name)
-                .is_some_and(|value| managed_mcp_fingerprint(name, value));
-            if managed {
-                if let Some(value) = servers.remove(name) {
-                    overlay.managed_mcp_servers.insert(name.to_string(), value);
-                }
-            }
-        }
-        remove_mcp_servers = servers.is_empty();
-    }
-    if remove_mcp_servers {
-        table.remove("mcp_servers");
-    }
-
-    (table, overlay)
-}
-
 fn child_table_mut<'a>(root: &'a mut Table, key: &str) -> Result<&'a mut Table, String> {
     if !root.contains_key(key) {
         root.insert(key.to_string(), Value::Table(Table::new()));
@@ -209,81 +114,6 @@ fn child_table_mut<'a>(root: &'a mut Table, key: &str) -> Result<&'a mut Table, 
     root.get_mut(key)
         .and_then(Value::as_table_mut)
         .ok_or_else(|| format!("Codex config key '{}' is not a table", key))
-}
-
-fn apply_local_overlay(
-    table: &mut Table,
-    overlay: LocalOverlay,
-) -> Result<(), ComposePhysicalError> {
-    if !overlay.marketplaces.is_empty() {
-        let marketplaces =
-            child_table_mut(table, "marketplaces").map_err(ComposePhysicalError::Invalid)?;
-        for (name, value) in overlay.marketplaces {
-            if marketplaces.contains_key(&name) {
-                return Err(ComposePhysicalError::MarketplaceCollision(name));
-            }
-            marketplaces.insert(name, value);
-        }
-    }
-    if !overlay.managed_mcp_servers.is_empty() {
-        let servers =
-            child_table_mut(table, "mcp_servers").map_err(ComposePhysicalError::Invalid)?;
-        for (name, value) in overlay.managed_mcp_servers {
-            // A portable same-name entry did not match the managed
-            // fingerprint, so it is user-authored and must be preserved.
-            servers.entry(name).or_insert(value);
-        }
-    }
-    Ok(())
-}
-
-pub fn project_portable_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let table = parse_table(bytes, "Codex config.toml")?;
-    let (portable, _) = split_local_overlay(table);
-    serialize_table(&portable)
-}
-
-pub fn compose_physical_bytes(
-    portable: &[u8],
-    current_physical: Option<&[u8]>,
-) -> Result<Vec<u8>, ComposePhysicalError> {
-    // Project incoming bytes too. This is a safety boundary for profiles made
-    // by older builds that uploaded raw machine-local sections.
-    let incoming = parse_table(portable, "portable Codex config.toml")
-        .map_err(ComposePhysicalError::Invalid)?;
-    let (mut composed, _) = split_local_overlay(incoming);
-
-    if let Some(current) = current_physical {
-        let current = parse_table(current, "current target Codex config.toml")
-            .map_err(ComposePhysicalError::Invalid)?;
-        let (_, overlay) = split_local_overlay(current);
-        apply_local_overlay(&mut composed, overlay)?;
-    }
-    serialize_table(&composed).map_err(ComposePhysicalError::Invalid)
-}
-
-pub fn enabled_managed_plugin_ids_from_bytes(bytes: &[u8]) -> Result<Vec<String>, String> {
-    let table = parse_table(bytes, "Codex config.toml")?;
-    let mut ids: Vec<String> = table
-        .get("plugins")
-        .and_then(Value::as_table)
-        .into_iter()
-        .flat_map(|plugins| plugins.iter())
-        .filter_map(|(id, value)| {
-            let enabled = value
-                .as_table()
-                .and_then(|plugin| plugin.get("enabled"))
-                .and_then(Value::as_bool)
-                == Some(true);
-            let managed = id.rsplit_once('@').is_some_and(|(plugin, marketplace)| {
-                !plugin.is_empty() && managed_marketplace_name(marketplace)
-            });
-            (enabled && managed).then(|| id.clone())
-        })
-        .collect();
-    ids.sort();
-    ids.dedup();
-    Ok(ids)
 }
 
 pub fn explicitly_disabled_plugin_ids_from_bytes(bytes: &[u8]) -> Result<Vec<String>, String> {
@@ -790,11 +620,6 @@ fn inspect_runtime_path(issues: &mut Vec<ConfigIssue>, id: String, raw: &str, ta
     }
 }
 
-pub fn inspect_managed_config(config_path: &Path, target_home: &Path) -> Vec<ConfigIssue> {
-    let default_home = dirs::home_dir().map(|home| home.join(".codex"));
-    inspect_managed_config_inner(config_path, target_home, default_home.as_deref())
-}
-
 pub fn inspect_managed_config_with_default(
     config_path: &Path,
     target_home: &Path,
@@ -987,10 +812,6 @@ fn inspect_managed_config_inner(
 mod tests {
     use super::*;
 
-    fn text(bytes: Vec<u8>) -> String {
-        String::from_utf8(bytes).unwrap()
-    }
-
     fn backup_files(config: &Path) -> Vec<PathBuf> {
         let parent = config.parent().unwrap();
         let prefix = format!(
@@ -1010,209 +831,23 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_active_config_and_well_formed_conflict_siblings() {
-        assert!(is_config_artifact(CONFIG_REL));
-        assert!(is_config_artifact(
-            ".codex/config.sync-conflict-a1b2c3d4.toml"
-        ));
-        assert!(is_config_artifact(
-            ".codex/config.sync-conflict-A1B2C3D4.toml"
-        ));
-        assert!(!is_config_artifact(
-            ".codex/config.sync-conflict-short.toml"
-        ));
-        assert!(!is_config_artifact(".codex/other.toml"));
-    }
-
-    #[test]
-    fn projection_removes_only_local_and_fingerprint_matched_sections() {
-        let physical = br#"
-model = "gpt"
-
-[marketplaces.openai-bundled]
-source_type = "local"
-source = "/machine-a/.codex/.tmp/bundled-marketplaces/openai-bundled"
-
-[marketplaces.team]
-source_type = "git"
-repository = "owner/repo"
-
-[plugins."browser@openai-bundled"]
-enabled = true
-
-[mcp_servers.node_repl]
-command = "/runtime/node_repl"
-args = []
-
-[mcp_servers.node_repl.env]
-CODEX_HOME = "/machine-a/.codex"
-NODE_REPL_TRUSTED_CODE_PATHS = "/machine-a/.codex"
-NODE_REPL_NODE_PATH = "/runtime/node"
-
-[mcp_servers.computer-use]
-command = "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"
-args = ["mcp"]
-cwd = "."
-
-[mcp_servers.user_server]
-command = "/user/tool"
-
-[projects."/work/project"]
-trust_level = "trusted"
-
-[unknown]
-keep = true
-"#;
-        let projected = text(project_portable_bytes(physical).unwrap());
-        assert!(!projected.contains("[marketplaces.openai-bundled]"));
-        assert!(!projected.contains("/machine-a/.codex/.tmp"));
-        assert!(!projected.contains("mcp_servers.node_repl"));
-        assert!(!projected.contains("mcp_servers.computer-use"));
-        for needle in [
-            "[marketplaces.team]",
-            "[plugins.\"browser@openai-bundled\"]",
-            "[mcp_servers.user_server]",
-            "[projects.\"/work/project\"]",
-            "[unknown]",
-        ] {
-            assert!(projected.contains(needle), "missing {needle}: {projected}");
-        }
-        assert_eq!(
-            project_portable_bytes(projected.as_bytes()).unwrap(),
-            projected.as_bytes(),
-            "canonical projection is idempotent"
-        );
-    }
-
-    #[test]
-    fn similarly_named_user_mcp_is_portable_without_the_managed_fingerprint() {
-        let raw = br#"
-[mcp_servers.node_repl]
-command = "/my/custom/node_repl"
-args = ["--custom"]
-
-[mcp_servers.node_repl.env]
-USER_SETTING = "keep"
-"#;
-        let projected = text(project_portable_bytes(raw).unwrap());
-        assert!(projected.contains("USER_SETTING = \"keep\""));
-    }
-
-    #[test]
-    fn compose_keeps_target_overlay_and_applies_portable_values() {
-        let portable = br#"
-model = "cloud-model"
-
-[marketplaces.team]
-source_type = "git"
-repository = "owner/repo"
-
-[plugins."browser@openai-bundled"]
-enabled = true
-"#;
-        let current = br#"
-model = "old-local-model"
-
-[marketplaces.openai-bundled]
-source_type = "local"
-source = "/machine-b/.codex/.tmp/bundled-marketplaces/openai-bundled"
-
-[mcp_servers.node_repl]
-command = "/runtime/node_repl"
-
-[mcp_servers.node_repl.env]
-CODEX_HOME = "/machine-b/.codex"
-NODE_REPL_TRUSTED_CODE_PATHS = "/machine-b/.codex"
-NODE_REPL_NODE_PATH = "/runtime/node"
-"#;
-        let composed = text(compose_physical_bytes(portable, Some(current)).unwrap());
-        assert!(composed.contains("model = \"cloud-model\""));
-        assert!(composed.contains("repository = \"owner/repo\""));
-        assert!(composed.contains("/machine-b/.codex"));
-        let projected = project_portable_bytes(composed.as_bytes()).unwrap();
-        assert_eq!(projected, project_portable_bytes(portable).unwrap());
-    }
-
-    #[test]
-    fn compose_preserves_portable_same_name_custom_mcp() {
-        let portable = br#"
-[mcp_servers.node_repl]
-command = "/custom/node_repl"
-args = ["--custom"]
-
-[mcp_servers.node_repl.env]
-USER_SETTING = "keep"
-"#;
-        let current = br#"
-[mcp_servers.node_repl]
-command = "/managed/node_repl"
-
-[mcp_servers.node_repl.env]
-CODEX_HOME = "/target/.codex"
-NODE_REPL_TRUSTED_CODE_PATHS = "/target/.codex"
-NODE_REPL_NODE_PATH = "/managed/node"
-"#;
-
-        let composed = text(compose_physical_bytes(portable, Some(current)).unwrap());
-
-        assert!(composed.contains("USER_SETTING = \"keep\""));
-        assert!(!composed.contains("/managed/node"));
-        assert_eq!(
-            project_portable_bytes(composed.as_bytes()).unwrap(),
-            project_portable_bytes(portable).unwrap()
-        );
-    }
-
-    #[test]
-    fn compose_blocks_portable_and_target_local_marketplace_collisions() {
-        let portable = br#"
-[marketplaces.team]
-source_type = "git"
-source = "owner/team"
-"#;
-        let current = br#"
-[marketplaces.team]
-source_type = "local"
-source = "/target/local-team"
-"#;
-
-        let error = compose_physical_bytes(portable, Some(current)).unwrap_err();
-
-        assert_eq!(
-            error,
-            ComposePhysicalError::MarketplaceCollision("team".to_string())
-        );
-    }
-
-    #[test]
-    fn malformed_toml_fails_closed() {
-        assert!(project_portable_bytes(b"[broken").is_err());
-        assert!(compose_physical_bytes(b"[broken", None).is_err());
-        assert!(compose_physical_bytes(b"model = 'ok'", Some(b"[broken")).is_err());
-    }
-
-    #[test]
-    fn enabled_managed_plugin_fallback_is_narrow_and_sorted() {
+    fn explicitly_disabled_plugin_ids_are_narrow_and_sorted() {
         let raw = br#"
 [plugins."slack@openai-curated"]
 enabled = true
-[plugins."browser@openai-bundled"]
-enabled = true
 [plugins."documents@openai-primary-runtime"]
+enabled = false
+[plugins."other@team"]
 enabled = false
 [plugins."tool@team"]
 enabled = true
 "#;
         assert_eq!(
-            enabled_managed_plugin_ids_from_bytes(raw).unwrap(),
-            vec![
-                "browser@openai-bundled".to_string(),
-                "slack@openai-curated".to_string()
-            ]
-        );
-        assert_eq!(
             explicitly_disabled_plugin_ids_from_bytes(raw).unwrap(),
-            vec!["documents@openai-primary-runtime".to_string()]
+            vec![
+                "documents@openai-primary-runtime".to_string(),
+                "other@team".to_string()
+            ]
         );
     }
 
@@ -1354,7 +989,7 @@ enabled = false
         assert!(repaired.contains(&format!("CODEX_HOME = \"{}\"", target_home.display())));
         assert!(repaired.contains(app.to_string_lossy().as_ref()));
         assert!(repaired.contains("[mcp_servers.user]"));
-        assert!(inspect_managed_config(&target_config, &target_home).is_empty());
+        assert!(inspect_managed_config_inner(&target_config, &target_home, None).is_empty());
         assert_eq!(backup_files(&target_config).len(), 1);
 
         assert!(
@@ -1502,7 +1137,7 @@ NODE_REPL_NODE_PATH = "{missing}/node"
         )
         .unwrap();
 
-        let issues = inspect_managed_config(&config, &target_home);
+        let issues = inspect_managed_config_inner(&config, &target_home, None);
         let codes: Vec<&str> = issues.iter().map(|issue| issue.code.as_str()).collect();
         for expected in [
             "managed_marketplace_wrong_home",
@@ -1520,7 +1155,7 @@ NODE_REPL_NODE_PATH = "{missing}/node"
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.toml");
         fs::write(&config, "[broken").unwrap();
-        let issues = inspect_managed_config(&config, dir.path());
+        let issues = inspect_managed_config_inner(&config, dir.path(), None);
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].id, "config.toml");
         assert_eq!(issues[0].code, "config_invalid");
@@ -1542,7 +1177,7 @@ NODE_REPL_NODE_PATH = "{missing}/node"
         )
         .unwrap();
 
-        let issues = inspect_managed_config(&config, &target_home);
+        let issues = inspect_managed_config_inner(&config, &target_home, None);
 
         assert!(issues
             .iter()

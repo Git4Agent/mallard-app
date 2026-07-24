@@ -3,9 +3,13 @@
 ## Product and architecture
 
 Mallard is a review-first Tauri 2 desktop application that makes project-scoped
-Codex and Claude sessions, setup, skills, plugins, and selected resources
-portable between machines. The active stack is Rust 2021 in the Tauri backend
-and React 19, strict TypeScript, and Vite 7 in the frontend.
+Codex and Claude sessions and provider-home setup — skills, plugins, memory,
+and state under any bound `CODEX_HOME`/`CLAUDE_CONFIG_DIR` — portable between
+machines. It never captures agent configuration from inside the project
+directory; for non-Git projects, selected ordinary files can additionally
+travel as explicitly reviewed project content. The active stack is Rust 2021
+in the Tauri backend and React 19, strict TypeScript, and Vite 7 in the
+frontend.
 
 The current implementation has one supported product path:
 

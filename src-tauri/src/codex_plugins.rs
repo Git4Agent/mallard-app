@@ -1,31 +1,25 @@
-//! Portable Codex plugin lock: capture → plan → apply → verify.
+//! Managed plugin repair for provider homes.
 //!
-//! Implements PLAN_ENVIRONMENT_RECONCILER.md. The lock (logical path
-//! `.codex/agent-sync/codex-plugins.lock.json`, physically stored under the
-//! app-owned `~/.agent-sync/` — PLAN_GLOBAL_AGENT_SYNC_DIR.md) is an
-//! ordinary synced file
-//! recording declarative plugin intent — never cache payloads, absolute
-//! source-machine paths, or credentials. Replay goes through Codex's own CLI
-//! (`codex plugin marketplace add` / `codex plugin add`); the companion
-//! config codec rebuilds only fingerprint-matched Codex-managed paths and
-//! never rewrites arbitrary plugin files or user-authored config.
+//! Applies approved plugin install intents (`CodexPluginLock` shape: plugin
+//! ids, marketplace repository+ref — never cache payloads, absolute
+//! source-machine paths, or credentials) against a bound Codex home. Replay
+//! goes through Codex's own CLI (`codex plugin marketplace add` /
+//! `codex plugin add`); the companion config codec rebuilds only
+//! fingerprint-matched Codex-managed paths and never rewrites arbitrary
+//! plugin files or user-authored config. `claude_inventory` reads Claude's
+//! manager files into the same `Inventory` shape for the global inventory.
 //!
 //! Everything here is Tauri-free and driven through the `CodexRunner` trait
 //! so tests can feed recorded CLI JSON without a real Codex installation.
 
 use crate::codex_config;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
-
-/// Logical (root-relative) path of the lock. Also referenced by the
-/// allowlist and the Tier 2 merge-driver dispatch in `lib.rs`.
-pub const LOCK_REL: &str = ".codex/agent-sync/codex-plugins.lock.json";
 
 const LOCK_SCHEMA: u32 = 1;
 const MAX_LOCK_BYTES: u64 = 1024 * 1024;
@@ -121,15 +115,6 @@ impl Default for CodexRepairState {
     fn default() -> Self {
         // A report becomes Ready only after explicit final verification.
         CodexRepairState::Failed
-    }
-}
-
-impl CodexPluginPlan {
-    pub fn blocked(message: String) -> CodexPluginPlan {
-        CodexPluginPlan {
-            blocked: Some(message),
-            ..CodexPluginPlan::default()
-        }
     }
 }
 
@@ -347,23 +332,6 @@ pub struct PluginInfo {
 pub struct Inventory {
     pub marketplaces: Vec<MarketplaceInfo>,
     pub plugins: Vec<PluginInfo>,
-}
-
-pub fn codex_version(runner: &dyn CodexRunner) -> Result<String, String> {
-    let out = runner.run(&["--version"])?;
-    if !out.success {
-        return Err(format!(
-            "codex --version failed: {}",
-            redact(out.stderr.trim())
-        ));
-    }
-    // "codex-cli 0.144.1" → "0.144.1"
-    Ok(out
-        .stdout
-        .split_whitespace()
-        .last()
-        .unwrap_or("unknown")
-        .to_string())
 }
 
 pub fn fetch_marketplaces(runner: &dyn CodexRunner) -> Result<Vec<MarketplaceInfo>, String> {
@@ -776,93 +744,6 @@ pub fn validate_lock(lock: &CodexPluginLock) -> Result<(), String> {
     Ok(())
 }
 
-/// Claude has no Codex-managed source namespace. Every executable plugin ID
-/// in its lock must therefore be backed by an explicit portable marketplace
-/// source. Codex-reserved marketplace names remain unavailable to Claude in
-/// the shared schema and are demoted to manual during capture.
-pub fn validate_claude_lock(lock: &CodexPluginLock) -> Result<(), String> {
-    validate_lock(lock)?;
-    let marketplaces: HashSet<&str> = lock
-        .marketplaces
-        .iter()
-        .map(|marketplace| marketplace.name.as_str())
-        .collect();
-    for plugin in &lock.plugins {
-        let marketplace = plugin
-            .id
-            .split_once('@')
-            .map(|(_, marketplace)| marketplace)
-            .unwrap_or_default();
-        if !marketplaces.contains(marketplace) {
-            return Err(format!(
-                "Claude plugin '{}' references marketplace '{}' without a portable source",
-                plugin.id, marketplace
-            ));
-        }
-    }
-    Ok(())
-}
-
-// ── Canonical serialization / lock IO ────────────────────────────────────────
-
-fn canonicalize(lock: &mut CodexPluginLock) {
-    lock.marketplaces.sort();
-    lock.marketplaces.dedup();
-    lock.plugins.sort();
-    lock.plugins.dedup();
-    lock.manual.sort();
-    lock.manual.dedup();
-}
-
-/// Byte-deterministic regardless of which machine serializes: sorted entries,
-/// fixed field order, pretty JSON, trailing newline. Required so independent
-/// Tier 2 merges on two machines converge (see AGENT_SYNC_FILE_SETS.md).
-pub fn canonical_lock_json(lock: &CodexPluginLock) -> String {
-    let mut lock = lock.clone();
-    canonicalize(&mut lock);
-    let mut out = serde_json::to_string_pretty(&lock).unwrap_or_else(|_| "{}".to_string());
-    out.push('\n');
-    out
-}
-
-pub fn read_lock(path: &Path) -> Result<CodexPluginLock, String> {
-    let meta = fs::metadata(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
-    if meta.len() > MAX_LOCK_BYTES {
-        return Err(format!("plugin lock exceeds {} bytes", MAX_LOCK_BYTES));
-    }
-    let raw = fs::read(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
-    parse_lock_bytes(&raw)
-}
-
-pub fn read_claude_lock(path: &Path) -> Result<CodexPluginLock, String> {
-    let lock = read_lock(path)?;
-    validate_claude_lock(&lock)?;
-    Ok(lock)
-}
-
-/// Validate lock bytes at the cloud-to-active-file boundary. Conflict
-/// siblings may deliberately hold a future or malformed side for review, but
-/// the canonical lock must always remain readable by this client.
-pub fn parse_lock_bytes(raw: &[u8]) -> Result<CodexPluginLock, String> {
-    if raw.len() as u64 > MAX_LOCK_BYTES {
-        return Err(format!("plugin lock exceeds {} bytes", MAX_LOCK_BYTES));
-    }
-    let lock: CodexPluginLock =
-        serde_json::from_slice(raw).map_err(|e| format!("parse plugin lock: {}", e))?;
-    validate_lock(&lock)?;
-    Ok(lock)
-}
-
-pub fn parse_claude_lock_bytes(raw: &[u8]) -> Result<CodexPluginLock, String> {
-    let lock = parse_lock_bytes(raw)?;
-    validate_claude_lock(&lock)?;
-    Ok(lock)
-}
-
-fn lock_is_empty(lock: &CodexPluginLock) -> bool {
-    lock.marketplaces.is_empty() && lock.plugins.is_empty() && lock.manual.is_empty()
-}
-
 pub fn empty_lock() -> CodexPluginLock {
     CodexPluginLock {
         schema: LOCK_SCHEMA,
@@ -870,181 +751,7 @@ pub fn empty_lock() -> CodexPluginLock {
     }
 }
 
-/// Atomic write (temp + rename) that never writes an empty capture (an
-/// empty lock means the same as no lock, and must not clobber a good one)
-/// and skips the write entirely when nothing changed, so a no-op capture
-/// does not dirty push state. Returns whether the file changed.
-pub fn save_lock(path: &Path, lock: &CodexPluginLock) -> Result<bool, String> {
-    validate_lock(lock)?;
-    if lock_is_empty(lock) {
-        return Ok(false);
-    }
-    // A present lock is part of the trust boundary. Never treat an unreadable,
-    // malformed, oversized, or future-schema file as if it were absent: an
-    // older client must preserve it rather than overwrite unknown intent.
-    let existing = if path.is_file() {
-        Some(read_lock(path)?)
-    } else {
-        None
-    };
-    let bytes = canonical_lock_json(lock);
-    if bytes.len() as u64 > MAX_LOCK_BYTES {
-        return Err(format!("plugin lock exceeds {} bytes", MAX_LOCK_BYTES));
-    }
-    if existing.is_some_and(|e| canonical_lock_json(&e) == bytes) {
-        return Ok(false);
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("no parent directory for {}", path.display()))?;
-    fs::create_dir_all(parent).map_err(|e| format!("create {}: {}", parent.display(), e))?;
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|e| format!("temp file in {}: {}", parent.display(), e))?;
-    tmp.as_file_mut()
-        .write_all(bytes.as_bytes())
-        .map_err(|e| format!("write plugin lock: {}", e))?;
-    tmp.persist(path)
-        .map_err(|e| format!("replace {}: {}", path.display(), e))?;
-    Ok(true)
-}
-
-fn captured_conflict_path(path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("no parent directory for {}", path.display()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("non-UTF-8 plugin lock path {}", path.display()))?;
-    let (stem, extension) = file_name
-        .rsplit_once('.')
-        .map_or((file_name, None), |(stem, extension)| {
-            (stem, Some(extension))
-        });
-    let digest = Sha256::digest(bytes);
-    let tag: String = digest[..4]
-        .iter()
-        .map(|byte| format!("{:02x}", byte))
-        .collect();
-    let name = extension.map_or_else(
-        || format!("{}.sync-conflict-{}", stem, tag),
-        |extension| format!("{}.sync-conflict-{}.{}", stem, tag, extension),
-    );
-    Ok(parent.join(name))
-}
-
-fn preserve_captured_conflict(path: &Path, lock: &CodexPluginLock) -> Result<PathBuf, String> {
-    let bytes = canonical_lock_json(lock).into_bytes();
-    let conflict = captured_conflict_path(path, &bytes)?;
-    match fs::symlink_metadata(&conflict) {
-        Ok(metadata) if metadata.file_type().is_file() => {
-            if fs::read(&conflict).map_err(|error| error.to_string())? == bytes {
-                return Ok(conflict);
-            }
-            return Err(format!(
-                "existing capture conflict '{}' differs; resolve it first",
-                conflict.display()
-            ));
-        }
-        Ok(_) => {
-            return Err(format!(
-                "capture conflict '{}' is not a regular file",
-                conflict.display()
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("inspect '{}': {}", conflict.display(), error)),
-    }
-    let parent = conflict
-        .parent()
-        .ok_or_else(|| format!("no parent directory for {}", conflict.display()))?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
-    temp.as_file_mut()
-        .write_all(&bytes)
-        .map_err(|error| error.to_string())?;
-    temp.persist_noclobber(&conflict)
-        .map_err(|error| format!("preserve '{}': {}", conflict.display(), error.error))?;
-    Ok(conflict)
-}
-
-/// Persist a fresh inventory capture monotonically over the existing desired
-/// intent. A machine may push before it has repaired plugins learned from
-/// another machine; replacing the lock with only its current inventory would
-/// erase that remote intent. Unsafe source collisions, invalid existing data,
-/// and bounded-union overflow fail without changing the last lock.
-pub fn save_captured_lock(path: &Path, captured: &CodexPluginLock) -> Result<bool, String> {
-    validate_lock(captured)?;
-    if lock_is_empty(captured) {
-        return Ok(false);
-    }
-    if !path.is_file() {
-        return save_lock(path, captured);
-    }
-    let existing = match read_lock(path) {
-        Ok(existing) => existing,
-        Err(error) => {
-            let conflict = preserve_captured_conflict(path, captured)?;
-            return Err(format!(
-                "existing plugin lock is unreadable ({}); fresh capture preserved at '{}'",
-                error,
-                conflict.display()
-            ));
-        }
-    };
-    let existing_json = canonical_lock_json(&existing);
-    let captured_json = canonical_lock_json(captured);
-    let merged = match merge_codex_plugin_lock(&existing_json, &captured_json) {
-        Some(merged) => merged,
-        None => {
-            let conflict = preserve_captured_conflict(path, captured)?;
-            return Err(format!(
-                "captured plugin intent conflicts with the existing lock; fresh capture preserved at '{}'",
-                conflict.display()
-            ));
-        }
-    };
-    let merged = parse_lock_bytes(merged.as_bytes())?;
-    save_lock(path, &merged)
-}
-
-#[cfg_attr(test, allow(dead_code))]
-pub fn save_captured_claude_lock(path: &Path, captured: &CodexPluginLock) -> Result<bool, String> {
-    validate_claude_lock(captured)?;
-    if lock_is_empty(captured) {
-        return Ok(false);
-    }
-    if !path.is_file() {
-        return save_lock(path, captured);
-    }
-    let existing = match read_claude_lock(path) {
-        Ok(existing) => existing,
-        Err(error) => {
-            let conflict = preserve_captured_conflict(path, captured)?;
-            return Err(format!(
-                "existing Claude plugin lock is unreadable ({}); fresh capture preserved at '{}'",
-                error,
-                conflict.display()
-            ));
-        }
-    };
-    let existing_json = canonical_lock_json(&existing);
-    let captured_json = canonical_lock_json(captured);
-    let merged = match merge_claude_plugin_lock(&existing_json, &captured_json) {
-        Some(merged) => merged,
-        None => {
-            let conflict = preserve_captured_conflict(path, captured)?;
-            return Err(format!(
-                "captured Claude plugin intent conflicts with the existing lock; fresh capture preserved at '{}'",
-                conflict.display()
-            ));
-        }
-    };
-    let merged = parse_claude_lock_bytes(merged.as_bytes())?;
-    save_lock(path, &merged)
-}
-
-// ── Capture ──────────────────────────────────────────────────────────────────
+// ── Managed marketplaces ─────────────────────────────────────────────────────
 
 const CURATED_MARKETPLACE: &str = "openai-curated";
 const BUNDLED_MARKETPLACE: &str = "openai-bundled";
@@ -1077,106 +784,6 @@ fn managed_marketplace(name: &str) -> Option<ManagedMarketplace> {
     }
 }
 
-/// Pure capture: installed+enabled plugins only, managed plugins recorded by
-/// id alone, Git marketplaces recorded
-/// as repository+ref, everything else (local paths, unknown sources, ids the
-/// lock charset cannot carry) demoted to a `manual` entry — never an
-/// absolute path.
-pub fn capture_lock(inventory: &Inventory, codex_version: &str) -> CodexPluginLock {
-    let marketplace_info: BTreeMap<&str, &MarketplaceInfo> = inventory
-        .marketplaces
-        .iter()
-        .map(|m| (m.name.as_str(), m))
-        .collect();
-    let mut lock = CodexPluginLock {
-        schema: LOCK_SCHEMA,
-        captured_with: CapturedWith {
-            agent_version: codex_version.to_string(),
-        },
-        ..CodexPluginLock::default()
-    };
-    let mut needed: BTreeSet<&str> = BTreeSet::new();
-    for plugin in &inventory.plugins {
-        if !plugin.installed || !plugin.enabled {
-            continue;
-        }
-        let mut manual = |reason: &str| {
-            if ok_text(&plugin.id) && !plugin.id.is_empty() {
-                lock.manual.push(CodexManualEntry {
-                    id: plugin.id.clone(),
-                    reason: reason.to_string(),
-                });
-            }
-        };
-        if !ok_plugin_id(&plugin.id) {
-            manual("plugin id has unsupported characters");
-            continue;
-        }
-        let observed_version = (!plugin.version.is_empty()
-            && plugin.version.len() <= MAX_STRING
-            && plugin
-                .version
-                .chars()
-                .all(|c| !c.is_control() && !c.is_whitespace()))
-        .then(|| plugin.version.clone());
-        if managed_marketplace(&plugin.marketplace).is_some() {
-            lock.plugins.push(CodexPluginIntent {
-                id: plugin.id.clone(),
-                observed_version,
-            });
-            continue;
-        }
-        match marketplace_info.get(plugin.marketplace.as_str()) {
-            Some(info)
-                if info.source_type == "git"
-                    && ok_component(&info.name)
-                    && ok_repository(&info.source)
-                    && info.git_ref.as_deref().is_none_or(ok_git_ref) =>
-            {
-                lock.plugins.push(CodexPluginIntent {
-                    id: plugin.id.clone(),
-                    observed_version,
-                });
-                needed.insert(info.name.as_str());
-            }
-            _ => manual("local or unknown marketplace source is not portable"),
-        }
-    }
-    for name in needed {
-        let info = marketplace_info[name];
-        lock.marketplaces.push(CodexMarketplaceIntent {
-            name: info.name.clone(),
-            repository: info.source.clone(),
-            git_ref: info.git_ref.clone(),
-        });
-    }
-    canonicalize(&mut lock);
-    lock
-}
-
-/// End-to-end capture against a runner; used by tests and the pre-push hook.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn capture_with(runner: &dyn CodexRunner, lock_path: &Path) -> Result<bool, String> {
-    let version = codex_version(runner)?;
-    let inventory = fetch_inventory(runner)?;
-    let lock = capture_lock(&inventory, &version);
-    save_captured_lock(lock_path, &lock)
-}
-
-fn enabled_managed_plugin_ids(config_path: Option<&Path>) -> Result<Vec<String>, String> {
-    let Some(path) = config_path.filter(|path| path.is_file()) else {
-        return Ok(Vec::new());
-    };
-    let metadata = fs::metadata(path)
-        .map_err(|error| format!("read {} for plugin intent: {}", path.display(), error))?;
-    if metadata.len() > MAX_LOCK_BYTES * 4 {
-        return Err("Codex config is too large to inspect safely".to_string());
-    }
-    let bytes = fs::read(path)
-        .map_err(|error| format!("read {} for plugin intent: {}", path.display(), error))?;
-    codex_config::enabled_managed_plugin_ids_from_bytes(&bytes)
-}
-
 fn explicitly_disabled_plugin_ids(config_path: Option<&Path>) -> Result<BTreeSet<String>, String> {
     let Some(path) = config_path.filter(|path| path.is_file()) else {
         return Ok(BTreeSet::new());
@@ -1194,38 +801,6 @@ fn explicitly_disabled_plugin_ids(config_path: Option<&Path>) -> Result<BTreeSet
             .filter(|id| ok_plugin_id(id))
             .collect(),
     )
-}
-
-fn effective_plugin_intents(
-    lock: &CodexPluginLock,
-    config_path: Option<&Path>,
-) -> Result<Vec<CodexPluginIntent>, String> {
-    let mut by_id: BTreeMap<String, CodexPluginIntent> = lock
-        .plugins
-        .iter()
-        .cloned()
-        .map(|intent| (intent.id.clone(), intent))
-        .collect();
-    for id in enabled_managed_plugin_ids(config_path)? {
-        if ok_plugin_id(&id)
-            && id
-                .split_once('@')
-                .and_then(|(_, name)| managed_marketplace(name))
-                .is_some()
-        {
-            by_id.entry(id.clone()).or_insert(CodexPluginIntent {
-                id,
-                observed_version: None,
-            });
-        }
-    }
-    if by_id.len() > MAX_ENTRIES {
-        return Err(format!(
-            "combined plugin intent exceeds {} entries",
-            MAX_ENTRIES
-        ));
-    }
-    Ok(by_id.into_values().collect())
 }
 
 // ── Plan ─────────────────────────────────────────────────────────────────────
@@ -1342,91 +917,6 @@ fn build_plan_for_intents(
         .map(|m| format!("{} — {}", m.id, m.reason))
         .collect();
     plan
-}
-
-pub fn build_plan(lock: &CodexPluginLock, inventory: &Inventory) -> CodexPluginPlan {
-    build_plan_for_intents(lock, &lock.plugins, inventory, &BTreeSet::new())
-}
-
-/// Plan for the lock at `lock_path`. Missing lock → empty plan (nothing to
-/// do); unreadable lock or unusable codex CLI → a `blocked` plan, not an
-/// error, so the UI can show why.
-fn plan_with_runner(lock: &CodexPluginLock, runner: &dyn CodexRunner) -> CodexPluginPlan {
-    let config_path = runner.config_path();
-    let intents = match effective_plugin_intents(lock, config_path.as_deref()) {
-        Ok(intents) => intents,
-        Err(error) => return CodexPluginPlan::blocked(error),
-    };
-    let explicitly_disabled = match explicitly_disabled_plugin_ids(config_path.as_deref()) {
-        Ok(disabled) => disabled,
-        Err(error) => return CodexPluginPlan::blocked(error),
-    };
-    if lock.marketplaces.is_empty() && intents.is_empty() && lock.manual.is_empty() {
-        return CodexPluginPlan::default();
-    }
-    match fetch_inventory(runner) {
-        Ok(inventory) => {
-            let mut plan = build_plan_for_intents(lock, &intents, &inventory, &explicitly_disabled);
-            if let Some(config_path) = runner.config_path() {
-                if let Some(target_home) = config_path.parent() {
-                    plan.config_repairs =
-                        codex_config::inspect_managed_config(&config_path, target_home)
-                            .into_iter()
-                            .map(|entry| issue(entry.id, &entry.code, entry.message))
-                            .collect();
-                }
-            }
-            plan
-        }
-        Err(inventory_error) => {
-            match marketplace_recovery_candidates(runner, lock, &inventory_error) {
-                Ok(candidates) if !candidates.is_empty() => CodexPluginPlan {
-                    warnings: vec![format!(
-                        "{} registered marketplace clone(s) are missing or invalid — Repair will re-clone them",
-                        candidates.len()
-                    )],
-                    ..CodexPluginPlan::default()
-                },
-                Ok(_) => CodexPluginPlan::blocked(inventory_error),
-                Err(recovery_error) => CodexPluginPlan::blocked(format!(
-                    "{}; automatic recovery blocked: {}",
-                    inventory_error, recovery_error
-                )),
-            }
-        }
-    }
-}
-
-pub fn plan_for_lock(
-    lock_path: &Path,
-    codex_home: Option<PathBuf>,
-) -> Result<CodexPluginPlan, String> {
-    let lock = if lock_path.is_file() {
-        match read_lock(lock_path) {
-            Ok(lock) => lock,
-            Err(e) => return Ok(CodexPluginPlan::blocked(e)),
-        }
-    } else {
-        empty_lock()
-    };
-    let target_home = codex_home
-        .clone()
-        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
-        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")));
-    let config_path = target_home.as_deref().map(|home| home.join("config.toml"));
-    let config_intents = match enabled_managed_plugin_ids(config_path.as_deref()) {
-        Ok(intents) => intents,
-        Err(error) => return Ok(CodexPluginPlan::blocked(error)),
-    };
-    if lock_is_empty(&lock) && config_intents.is_empty() {
-        return Ok(CodexPluginPlan::default());
-    }
-    let codex = match find_binary("codex") {
-        Ok(codex) => codex,
-        Err(e) => return Ok(CodexPluginPlan::blocked(e)),
-    };
-    let runner = ProcessRunner::for_binary(codex).with_codex_home(codex_home);
-    Ok(plan_with_runner(&lock, &runner))
 }
 
 // ── Target-owned managed marketplaces ──────────────────────────────────────
@@ -1952,23 +1442,6 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
 
 // ── Apply ────────────────────────────────────────────────────────────────────
 
-/// Replay the lock through Codex's own CLI: missing marketplaces first (each
-/// verified to appear), then missing plugins, then one final re-inventory to
-/// verify. Individual failures are collected, never fatal; a second run over
-/// the same lock is a no-op.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn apply_plan(
-    runner: &dyn CodexRunner,
-    lock: &CodexPluginLock,
-    log: &mut dyn FnMut(&str, &str),
-) -> Result<CodexPluginRepairReport, String> {
-    validate_lock(lock)?;
-    let config_path = runner.config_path();
-    let intents = effective_plugin_intents(lock, config_path.as_deref())?;
-    let explicitly_disabled = explicitly_disabled_plugin_ids(config_path.as_deref())?;
-    apply_plan_for_intents(runner, lock, &intents, &explicitly_disabled, log)
-}
-
 fn apply_plan_for_intents(
     runner: &dyn CodexRunner,
     lock: &CodexPluginLock,
@@ -2306,38 +1779,10 @@ fn block_managed_dependents(
     }
 }
 
-/// Full production repair: resolve managed catalogs from this machine's
-/// default Codex home, provision/rebind the selected target home, then replay
-/// portable plugin intent through the stable Codex CLI.
-pub fn apply_managed_plan(
-    target_runner: &dyn CodexRunner,
-    default_runner: &dyn CodexRunner,
-    lock: &CodexPluginLock,
-    target_home: &Path,
-    default_home: &Path,
-    log: &mut dyn FnMut(&str, &str),
-) -> Result<CodexPluginRepairReport, String> {
-    validate_lock(lock)?;
-    let target_config = target_home.join("config.toml");
-    let intents = effective_plugin_intents(lock, Some(&target_config))?;
-    let explicitly_disabled = explicitly_disabled_plugin_ids(Some(&target_config))?;
-    apply_managed_plan_for_intents(
-        target_runner,
-        default_runner,
-        lock,
-        &intents,
-        &explicitly_disabled,
-        target_home,
-        default_home,
-        log,
-    )
-}
-
-/// Apply only the plugin intents explicitly approved by the caller. Unlike
-/// [`apply_managed_plan`], this does not pull additional enabled plugin intent
-/// from the target config, so one project-sync approval cannot install an
-/// unrelated plugin. Managed marketplace provisioning and final verification
-/// are otherwise identical to the full repair path.
+/// Apply only the plugin intents explicitly approved by the caller. This
+/// never pulls additional enabled plugin intent from the target config, so
+/// one project-sync approval cannot install an unrelated plugin. Managed
+/// marketplace provisioning and final verification run on every repair.
 pub fn apply_approved_managed_plan(
     target_runner: &dyn CodexRunner,
     default_runner: &dyn CodexRunner,
@@ -2708,121 +2153,13 @@ fn apply_managed_plan_for_intents(
     Ok(report)
 }
 
-// ── Tier 2 merge driver ──────────────────────────────────────────────────────
-
-fn union(a: CodexPluginLock, b: CodexPluginLock) -> CodexPluginLock {
-    fn keyed<T: Clone + Ord, K: Ord, F: Fn(&T) -> K>(a: Vec<T>, b: Vec<T>, key: F) -> Vec<T> {
-        let mut map: BTreeMap<K, T> = BTreeMap::new();
-        for item in a.into_iter().chain(b) {
-            match map.get(&key(&item)) {
-                // Symmetric max on collisions keeps the merge deterministic
-                // no matter which machine runs it.
-                Some(existing) if *existing >= item => {}
-                _ => {
-                    map.insert(key(&item), item);
-                }
-            }
-        }
-        map.into_values().collect()
-    }
-    let plugins = keyed(a.plugins, b.plugins, |p| p.id.clone());
-    let plugin_ids: BTreeSet<&str> = plugins.iter().map(|plugin| plugin.id.as_str()).collect();
-    let mut manual = keyed(a.manual, b.manual, |m| m.id.clone());
-    // A portable plugin declaration is stronger than a machine-local capture
-    // that temporarily could not resolve the marketplace. Keeping both would
-    // make the manual item block Ready forever after a cross-machine pull.
-    manual.retain(|entry| !plugin_ids.contains(entry.id.as_str()));
-    CodexPluginLock {
-        schema: a.schema.max(b.schema),
-        captured_with: a.captured_with.max(b.captured_with),
-        marketplaces: keyed(a.marketplaces, b.marketplaces, |m| m.name.clone()),
-        plugins,
-        manual,
-    }
-}
-
-fn bounded_canonical_lock(lock: &CodexPluginLock) -> Option<String> {
-    validate_lock(lock).ok()?;
-    let canonical = canonical_lock_json(lock);
-    (canonical.len() as u64 <= MAX_LOCK_BYTES).then_some(canonical)
-}
-
-fn marketplace_sources_conflict(a: &CodexPluginLock, b: &CodexPluginLock) -> bool {
-    let sources: BTreeMap<&str, (&str, Option<&str>)> = a
-        .marketplaces
-        .iter()
-        .map(|marketplace| {
-            (
-                marketplace.name.as_str(),
-                (
-                    marketplace.repository.as_str(),
-                    marketplace.git_ref.as_deref(),
-                ),
-            )
-        })
-        .collect();
-    b.marketplaces.iter().any(|marketplace| {
-        sources
-            .get(marketplace.name.as_str())
-            .is_some_and(|(repository, git_ref)| {
-                *repository != marketplace.repository || *git_ref != marketplace.git_ref.as_deref()
-            })
-    })
-}
-
-/// Tier 2 driver (see AGENT_SYNC_FILE_SETS.md): keyed union of the two lock
-/// sides so both machines' plugin intent survives a concurrent push — without
-/// this the regenerated-per-push lock would conflict-copy forever and each
-/// machine would only ever see its own plugins. Byte-deterministic and
-/// symmetric. Any parse/validation failure, source/ref collision, or union
-/// that crosses a safety cap returns `None` so the generic sync path preserves
-/// both complete sides as a conflict pair. In particular, an older client must
-/// never overwrite a future-schema lock merely because it cannot parse it.
-pub fn merge_codex_plugin_lock(local: &str, cloud: &str) -> Option<String> {
-    let parse = |raw: &str| -> Option<CodexPluginLock> {
-        if raw.len() as u64 > MAX_LOCK_BYTES {
-            return None;
-        }
-        let lock: CodexPluginLock = serde_json::from_str(raw).ok()?;
-        validate_lock(&lock).ok()?;
-        Some(lock)
-    };
-    match (parse(local), parse(cloud)) {
-        (Some(a), Some(b)) => {
-            if marketplace_sources_conflict(&a, &b) {
-                // Never combine plugin IDs across two meanings of the same
-                // marketplace name. A fresh target would otherwise install
-                // one side's plugin through the other side's repository/ref.
-                return None;
-            }
-            bounded_canonical_lock(&union(a, b))
-        }
-        _ => None,
-    }
-}
-
-pub fn merge_claude_plugin_lock(local: &str, cloud: &str) -> Option<String> {
-    let local_lock = parse_claude_lock_bytes(local.as_bytes()).ok()?;
-    let cloud_lock = parse_claude_lock_bytes(cloud.as_bytes()).ok()?;
-    if marketplace_sources_conflict(&local_lock, &cloud_lock) {
-        return None;
-    }
-    let merged = union(local_lock, cloud_lock);
-    validate_claude_lock(&merged).ok()?;
-    bounded_canonical_lock(&merged)
-}
-
-// ── Claude lock (same format; capture is plain file reads, no CLI) ──────────
+// ── Claude inventory (plain file reads, no CLI) ─────────────────────────────
 //
-// PLAN_CLAUDE_PLUGIN_LOCK.md. Claude's plugin inventory lives in files:
-// settings.json carries the intent (`enabledPlugins`, `extraKnownMarketplaces`),
-// the manager's known_marketplaces.json / installed_plugins.json carry sources
-// and versions. Those manager files never sync (machine-local absolute paths);
-// they are capture *inputs* only.
-
-/// Logical path of the Claude lock; allowlisted and Tier 2-merged exactly
-/// like the Codex one.
-pub const CLAUDE_LOCK_REL: &str = ".claude/agent-sync/claude-plugins.lock.json";
+// Claude's plugin inventory lives in files: settings.json carries the intent
+// (`enabledPlugins`, `extraKnownMarketplaces`), the manager's
+// known_marketplaces.json / installed_plugins.json carry sources and
+// versions. Those manager files never sync (machine-local absolute paths);
+// they are read-only inputs here.
 
 fn read_optional_capture_json(path: &Path) -> Result<Option<serde_json::Value>, String> {
     let metadata = match fs::metadata(path) {
@@ -2843,31 +2180,6 @@ fn read_optional_capture_json(path: &Path) -> Result<Option<serde_json::Value>, 
         .map_err(|error| format!("parse '{}': {}", path.display(), error))
 }
 
-/// Marketplace name → source object. Settings declarations win over the
-/// manager's records (same data, but settings is the declarative side).
-fn claude_marketplace_sources(
-    settings: &serde_json::Value,
-    known: &serde_json::Value,
-) -> BTreeMap<String, serde_json::Value> {
-    let mut sources = BTreeMap::new();
-    for map in [
-        known.as_object(),
-        settings
-            .get("extraKnownMarketplaces")
-            .and_then(|v| v.as_object()),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        for (name, entry) in map {
-            if let Some(source) = entry.get("source") {
-                sources.insert(name.clone(), source.clone());
-            }
-        }
-    }
-    sources
-}
-
 /// A portable location for a marketplace source object: GitHub `repo`
 /// shorthand or a Git `url`. Local `path` sources return None.
 fn claude_source_location(source: &serde_json::Value) -> Option<String> {
@@ -2878,101 +2190,10 @@ fn claude_source_location(source: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Capture Claude plugin intent into the shared lock format. Enabled plugins
-/// only; marketplaces recorded as repo/url; a path-sourced or unknown
-/// marketplace demotes its plugins to `manual`. No absolute path and no
-/// manager state ever enters the lock. A present but malformed/oversized
-/// input is an error rather than a partial snapshot that could replace the
-/// last complete lock.
-pub fn try_capture_claude_lock(claude_dir: &Path) -> Result<CodexPluginLock, String> {
-    let settings =
-        read_optional_capture_json(&claude_dir.join("settings.json"))?.unwrap_or_default();
-    let known = read_optional_capture_json(&claude_dir.join("plugins/known_marketplaces.json"))?
-        .unwrap_or_default();
-    let installed = read_optional_capture_json(&claude_dir.join("plugins/installed_plugins.json"))?
-        .unwrap_or_default();
-    let sources = claude_marketplace_sources(&settings, &known);
-
-    let mut lock = CodexPluginLock {
-        schema: LOCK_SCHEMA,
-        ..CodexPluginLock::default()
-    };
-    let Some(enabled) = settings.get("enabledPlugins").and_then(|v| v.as_object()) else {
-        return Ok(lock);
-    };
-    let mut needed: BTreeSet<String> = BTreeSet::new();
-    for (id, on) in enabled {
-        if on.as_bool() != Some(true) {
-            continue;
-        }
-        let mut manual = |reason: &str| {
-            if !id.is_empty() && ok_text(id) {
-                lock.manual.push(CodexManualEntry {
-                    id: id.clone(),
-                    reason: reason.to_string(),
-                });
-            }
-        };
-        if !ok_plugin_id(id) {
-            manual("plugin id has unsupported characters");
-            continue;
-        }
-        let marketplace = id.split_once('@').map(|(_, m)| m).unwrap_or("");
-        if managed_marketplace(marketplace).is_some() {
-            manual("marketplace name is reserved by the shared Codex lock schema");
-            continue;
-        }
-        let observed_version = installed
-            .get("plugins")
-            .and_then(|p| p.get(id))
-            .and_then(|v| v.as_array())
-            .and_then(|entries| {
-                entries
-                    .iter()
-                    .find_map(|e| e.get("version").and_then(|v| v.as_str()))
-            })
-            .filter(|v| {
-                v.len() <= MAX_STRING && v.chars().all(|c| !c.is_control() && !c.is_whitespace())
-            })
-            .map(str::to_string);
-        match sources.get(marketplace).and_then(claude_source_location) {
-            Some(location) if ok_repository(&location) && ok_component(marketplace) => {
-                lock.plugins.push(CodexPluginIntent {
-                    id: id.clone(),
-                    observed_version,
-                });
-                needed.insert(marketplace.to_string());
-            }
-            Some(_) => manual("marketplace source is not portable"),
-            None => match sources.get(marketplace) {
-                Some(_) => manual("local marketplace source is not portable"),
-                None => manual("marketplace not found on this machine"),
-            },
-        }
-    }
-    for name in needed {
-        let repository = claude_source_location(&sources[&name]).unwrap_or_default();
-        lock.marketplaces.push(CodexMarketplaceIntent {
-            name,
-            repository,
-            git_ref: None,
-        });
-    }
-    canonicalize(&mut lock);
-    Ok(lock)
-}
-
-/// Compatibility wrapper for read-only callers. Capture failures collapse to
-/// an empty sentinel; `save_lock` refuses to replace a good lock with it.
-#[cfg(test)]
-pub fn capture_claude_lock(claude_dir: &Path) -> CodexPluginLock {
-    try_capture_claude_lock(claude_dir).unwrap_or_else(|_| empty_lock())
-}
-
-/// Claude's local plugin state in the shared `Inventory` shape, so
-/// `build_plan` diffs both agents identically. Presence = the manager's
-/// record points at an existing install path (same rule the repair
-/// presence-checks use); enabled = not explicitly disabled in settings.
+/// Claude's local plugin state in the shared `Inventory` shape, so both
+/// agents diff identically. Presence = the manager's record points at an
+/// existing install path (same rule the repair presence-checks use);
+/// enabled = not explicitly disabled in settings.
 pub fn claude_inventory(claude_dir: &Path) -> Result<Inventory, String> {
     let settings =
         read_optional_capture_json(&claude_dir.join("settings.json"))?.unwrap_or_default();
@@ -3039,75 +2260,6 @@ pub fn claude_inventory(claude_dir: &Path) -> Result<Inventory, String> {
         marketplaces,
         plugins,
     })
-}
-
-/// Target-local negative policy wins over portable restore intent. Plugins
-/// execute code, so an explicit `false` in this machine's settings must keep
-/// the ID out of both readiness planning and mutation.
-pub fn explicitly_disabled_claude_plugin_ids(
-    claude_dir: &Path,
-) -> Result<BTreeSet<String>, String> {
-    let Some(settings) = read_optional_capture_json(&claude_dir.join("settings.json"))? else {
-        return Ok(BTreeSet::new());
-    };
-    let Some(value) = settings.get("enabledPlugins") else {
-        return Ok(BTreeSet::new());
-    };
-    let plugins = value
-        .as_object()
-        .ok_or_else(|| "Claude settings enabledPlugins must be an object".to_string())?;
-    let mut disabled = BTreeSet::new();
-    for (id, enabled) in plugins {
-        let enabled = enabled
-            .as_bool()
-            .ok_or_else(|| format!("Claude settings enabledPlugins['{}'] must be boolean", id))?;
-        if !enabled {
-            disabled.insert(id.clone());
-        }
-    }
-    Ok(disabled)
-}
-
-/// Plan for the Claude lock at `lock_path` against the installation in
-/// `claude_dir` — all file reads, no CLI, so this is cheap enough to drive
-/// the footer badge.
-pub fn plan_for_claude_lock(
-    lock_path: &Path,
-    claude_dir: &Path,
-) -> Result<CodexPluginPlan, String> {
-    if !lock_path.is_file() {
-        return Ok(CodexPluginPlan::default());
-    }
-    let mut lock = match read_claude_lock(lock_path) {
-        Ok(lock) => lock,
-        Err(e) => return Ok(CodexPluginPlan::blocked(e)),
-    };
-    let disabled = match explicitly_disabled_claude_plugin_ids(claude_dir) {
-        Ok(disabled) => disabled,
-        Err(error) => return Ok(CodexPluginPlan::blocked(error)),
-    };
-    lock.plugins.retain(|plugin| !disabled.contains(&plugin.id));
-    lock.manual.retain(|entry| !disabled.contains(&entry.id));
-    let needed_marketplaces: BTreeSet<&str> = lock
-        .plugins
-        .iter()
-        .filter_map(|plugin| {
-            plugin
-                .id
-                .split_once('@')
-                .map(|(_, marketplace)| marketplace)
-        })
-        .collect();
-    lock.marketplaces
-        .retain(|marketplace| needed_marketplaces.contains(marketplace.name.as_str()));
-    if lock_is_empty(&lock) {
-        return Ok(CodexPluginPlan::default());
-    }
-    let inventory = match claude_inventory(claude_dir) {
-        Ok(inventory) => inventory,
-        Err(error) => return Ok(CodexPluginPlan::blocked(error)),
-    };
-    Ok(build_plan(&lock, &inventory))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -3180,8 +2332,6 @@ mod tests {
             self.config_path.borrow().clone()
         }
     }
-
-    const VERSION_OUT: &str = "codex-cli 0.144.1\n";
 
     fn marketplaces_json(entries: &[(&str, &str, &str, Option<&str>)]) -> String {
         let list: Vec<serde_json::Value> = entries
@@ -3290,308 +2440,6 @@ mod tests {
     }
 
     #[test]
-    fn capture_filters_to_the_portable_set() {
-        let lock = capture_lock(&sample_inventory(), "0.144.1");
-        assert_eq!(
-            lock.plugins
-                .iter()
-                .map(|p| p.id.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "chrome@openai-bundled",
-                "linter@openai-curated",
-                "my-plugin@team-tools",
-                "pdf@openai-primary-runtime",
-            ]
-        );
-        assert_eq!(lock.marketplaces.len(), 1);
-        assert_eq!(lock.marketplaces[0].name, "team-tools");
-        assert_eq!(lock.marketplaces[0].repository, "owner/repo");
-        assert_eq!(lock.marketplaces[0].git_ref.as_deref(), Some("4f2c0d9"));
-        assert_eq!(
-            lock.manual
-                .iter()
-                .map(|m| m.id.as_str())
-                .collect::<Vec<_>>(),
-            ["local-helper@personal-local"]
-        );
-        assert_eq!(lock.plugins[2].observed_version.as_deref(), Some("1.4.2"));
-        // No absolute source-machine path may leak into the lock.
-        assert!(!canonical_lock_json(&lock).contains("/Users/"));
-        validate_lock(&lock).unwrap();
-    }
-
-    #[test]
-    fn capture_is_canonical_regardless_of_cli_ordering() {
-        let mut reversed = sample_inventory();
-        reversed.marketplaces.reverse();
-        reversed.plugins.reverse();
-        assert_eq!(
-            canonical_lock_json(&capture_lock(&sample_inventory(), "0.144.1")),
-            canonical_lock_json(&capture_lock(&reversed, "0.144.1"))
-        );
-    }
-
-    #[test]
-    fn save_lock_keeps_last_good_lock_and_skips_identical_writes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agent-sync/codex-plugins.lock.json");
-        let lock = capture_lock(&sample_inventory(), "0.144.1");
-        assert!(save_lock(&path, &lock).unwrap());
-        assert!(
-            !save_lock(&path, &lock).unwrap(),
-            "identical write must be skipped"
-        );
-        let empty = CodexPluginLock {
-            schema: LOCK_SCHEMA,
-            ..CodexPluginLock::default()
-        };
-        assert!(
-            !save_lock(&path, &empty).unwrap(),
-            "empty capture must not win"
-        );
-        assert_eq!(read_lock(&path).unwrap(), lock);
-        // An invalid lock is rejected before any write.
-        let mut bad = lock.clone();
-        bad.marketplaces[0].repository = "--upload-pack=/bin/sh".to_string();
-        assert!(save_lock(&path, &bad).is_err());
-        assert_eq!(read_lock(&path).unwrap(), lock);
-    }
-
-    #[test]
-    fn capture_save_is_monotonic_and_refuses_unknown_existing_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agent-sync/codex-plugins.lock.json");
-        let make = |id: &str| CodexPluginLock {
-            schema: LOCK_SCHEMA,
-            plugins: vec![CodexPluginIntent {
-                id: id.to_string(),
-                observed_version: None,
-            }],
-            ..CodexPluginLock::default()
-        };
-        let remote = make("slack@openai-curated");
-        let local_capture = make("calendar@openai-curated");
-        assert!(save_lock(&path, &remote).unwrap());
-        assert!(save_captured_lock(&path, &local_capture).unwrap());
-        let merged = read_lock(&path).unwrap();
-        assert_eq!(
-            merged
-                .plugins
-                .iter()
-                .map(|plugin| plugin.id.as_str())
-                .collect::<Vec<_>>(),
-            ["calendar@openai-curated", "slack@openai-curated"]
-        );
-
-        let future = b"{\"schema\":2,\"plugins\":[{\"id\":\"future@openai-curated\"}]}\n";
-        fs::write(&path, future).unwrap();
-        let error = save_captured_lock(&path, &local_capture).unwrap_err();
-        assert!(error.contains("unsupported plugin lock schema"), "{error}");
-        assert_eq!(fs::read(&path).unwrap(), future);
-        let error = save_lock(&path, &local_capture).unwrap_err();
-        assert!(error.contains("unsupported plugin lock schema"), "{error}");
-        assert_eq!(fs::read(&path).unwrap(), future);
-    }
-
-    #[test]
-    fn capture_source_collision_preserves_fresh_side_as_conflict_sibling() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agent-sync/codex-plugins.lock.json");
-        let lock = |repository: &str| CodexPluginLock {
-            schema: LOCK_SCHEMA,
-            marketplaces: vec![CodexMarketplaceIntent {
-                name: "team-tools".to_string(),
-                repository: repository.to_string(),
-                git_ref: None,
-            }],
-            plugins: vec![CodexPluginIntent {
-                id: "alpha@team-tools".to_string(),
-                observed_version: None,
-            }],
-            ..CodexPluginLock::default()
-        };
-        let existing = lock("owner/repo-a");
-        let captured = lock("owner/repo-b");
-        save_lock(&path, &existing).unwrap();
-
-        let error = save_captured_lock(&path, &captured).unwrap_err();
-        assert!(error.contains("fresh capture preserved"), "{error}");
-        assert_eq!(read_lock(&path).unwrap(), existing);
-        let conflict =
-            captured_conflict_path(&path, canonical_lock_json(&captured).as_bytes()).unwrap();
-        assert_eq!(read_lock(&conflict).unwrap(), captured);
-    }
-
-    #[test]
-    fn capture_overflow_preserves_the_last_good_lock() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agent-sync/codex-plugins.lock.json");
-        let good = capture_lock(&sample_inventory(), "0.144.1");
-        assert!(save_lock(&path, &good).unwrap());
-        let inventory = Inventory {
-            plugins: (0..=MAX_ENTRIES)
-                .map(|index| PluginInfo {
-                    id: format!("plugin-{index:03}@openai-curated"),
-                    marketplace: CURATED_MARKETPLACE.to_string(),
-                    version: "1.0.0".to_string(),
-                    installed: true,
-                    enabled: true,
-                })
-                .collect(),
-            ..Inventory::default()
-        };
-
-        let overflow = capture_lock(&inventory, "0.144.1");
-        assert_eq!(overflow.plugins.len(), MAX_ENTRIES + 1);
-        let error = save_lock(&path, &overflow).unwrap_err();
-
-        assert!(error.contains("exceeds"), "{error}");
-        assert_eq!(read_lock(&path).unwrap(), good);
-    }
-
-    #[test]
-    fn oversized_serialization_preserves_the_last_good_lock() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agent-sync/codex-plugins.lock.json");
-        let good = capture_lock(&sample_inventory(), "0.144.1");
-        assert!(save_lock(&path, &good).unwrap());
-        let oversized = CodexPluginLock {
-            schema: LOCK_SCHEMA,
-            manual: (0..MAX_ENTRIES)
-                .map(|index| {
-                    let prefix = format!("manual-{index:03}-");
-                    CodexManualEntry {
-                        id: format!("{}{}", prefix, "x".repeat(MAX_STRING - prefix.len())),
-                        reason: "r".repeat(MAX_STRING),
-                    }
-                })
-                .collect(),
-            ..CodexPluginLock::default()
-        };
-        assert!(canonical_lock_json(&oversized).len() as u64 > MAX_LOCK_BYTES);
-
-        let error = save_lock(&path, &oversized).unwrap_err();
-
-        assert!(error.contains("bytes"), "{error}");
-        assert_eq!(read_lock(&path).unwrap(), good);
-    }
-
-    #[test]
-    fn read_lock_rejects_oversized_schema_and_injection() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lock.json");
-        fs::write(&path, "{not json").unwrap();
-        assert!(read_lock(&path).is_err());
-        fs::write(
-            &path,
-            serde_json::json!({"schema": 2, "marketplaces": [], "plugins": [], "manual": []})
-                .to_string(),
-        )
-        .unwrap();
-        assert!(read_lock(&path).unwrap_err().contains("schema"));
-        for (field, value) in [
-            ("repository", "-flag"),
-            ("repository", "/Users/a/marketplace"),
-            ("repository", "file:///tmp/marketplace"),
-            (
-                "repository",
-                "https://user:secret@example.com/marketplace.git",
-            ),
-            ("repository", "ext::sh -c exploit"),
-            ("repository", "a b"),
-            ("repository", "owner/.."),
-            ("repository", "owner/NUL"),
-            ("repository", "git@example.com:owner/../repo"),
-            ("git_ref", "--upload-pack=x"),
-            ("name", "team tools"),
-            ("name", ".."),
-            ("name", "Team"),
-            ("name", "CON"),
-            ("name", "team."),
-        ] {
-            let mut m = serde_json::json!({"name": "team-tools", "repository": "owner/repo"});
-            m[field] = serde_json::json!(value);
-            let raw = serde_json::json!({
-                "schema": 1,
-                "marketplaces": [m],
-                "plugins": [],
-                "manual": []
-            });
-            fs::write(&path, raw.to_string()).unwrap();
-            assert!(
-                read_lock(&path).is_err(),
-                "{}='{}' must be rejected",
-                field,
-                value
-            );
-        }
-        fs::write(
-            &path,
-            serde_json::json!({
-                "schema": 1,
-                "plugins": [{"id": "no-marketplace-part"}]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        assert!(read_lock(&path).is_err());
-        for id in [
-            ".@openai-curated",
-            "..@openai-curated",
-            "tool@..",
-            "tool@Team",
-        ] {
-            fs::write(
-                &path,
-                serde_json::json!({
-                    "schema": 1,
-                    "plugins": [{"id": id}]
-                })
-                .to_string(),
-            )
-            .unwrap();
-            assert!(
-                read_lock(&path).is_err(),
-                "plugin id '{id}' must be rejected"
-            );
-        }
-
-        fs::write(
-            &path,
-            serde_json::json!({
-                "schema": 1,
-                "marketplaces": [],
-                "plugins": [{"id": "tool@target-local"}]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let error = read_lock(&path).unwrap_err();
-        assert!(error.contains("without a portable source"), "{error}");
-
-        fs::write(
-            &path,
-            serde_json::json!({
-                "schema": 1,
-                "marketplaces": [{"name": "openai-curated", "repository": "owner/repo"}]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        assert!(read_lock(&path).is_err());
-
-        for repository in [
-            "owner/repo",
-            "https://github.com/owner/repo.git",
-            "ssh://git@example.com/owner/repo.git",
-            "git@example.com:owner/repo.git",
-        ] {
-            assert!(ok_repository(repository), "{repository}");
-        }
-    }
-
-    #[test]
     fn plan_classifies_missing_present_drift_disabled_and_mismatch() {
         let lock = CodexPluginLock {
             schema: 1,
@@ -3652,7 +2500,7 @@ mod tests {
             source: "/Users/b/evil".into(),
             git_ref: None,
         });
-        let plan = build_plan(&lock, &inventory);
+        let plan = build_plan_for_intents(&lock, &lock.plugins, &inventory, &BTreeSet::new());
         assert_eq!(plan.missing_marketplaces, ["new-market"]);
         assert_eq!(
             plan.missing_plugins,
@@ -3703,7 +2551,7 @@ mod tests {
             plugins: Vec::new(),
         };
 
-        let plan = build_plan(&lock, &inventory);
+        let plan = build_plan_for_intents(&lock, &lock.plugins, &inventory, &BTreeSet::new());
 
         assert!(plan.missing_plugins.is_empty());
         assert!(plan.blocked_plugins.iter().any(|entry| {
@@ -3721,59 +2569,14 @@ mod tests {
             }],
             ..CodexPluginLock::default()
         };
-        let plan = build_plan(&lock, &Inventory::default());
+        let plan =
+            build_plan_for_intents(&lock, &lock.plugins, &Inventory::default(), &BTreeSet::new());
         assert!(plan.missing_plugins.is_empty());
         assert_eq!(plan.missing_managed_marketplaces.len(), 1);
         assert_eq!(plan.missing_managed_marketplaces[0].id, "openai-bundled");
         assert_eq!(plan.blocked_plugins.len(), 1);
         assert_eq!(plan.blocked_plugins[0].id, "sites@openai-bundled");
         assert_eq!(plan.blocked_plugins[0].code, "managed_catalog_missing");
-    }
-
-    #[test]
-    fn effective_intent_recovers_enabled_managed_plugins_from_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("config.toml");
-        fs::write(
-            &config,
-            "[plugins.\"sites@openai-bundled\"]\nenabled = true\n\
-             [plugins.\"off@openai-bundled\"]\nenabled = false\n\
-             [plugins.\"custom@team\"]\nenabled = true\n",
-        )
-        .unwrap();
-        let intents = effective_plugin_intents(&empty_lock(), Some(&config)).unwrap();
-        assert_eq!(
-            intents
-                .iter()
-                .map(|intent| intent.id.as_str())
-                .collect::<Vec<_>>(),
-            ["sites@openai-bundled"]
-        );
-    }
-
-    #[test]
-    fn effective_intent_overflow_is_blocked_instead_of_truncated() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("config.toml");
-        fs::write(
-            &config,
-            "[plugins.\"extra@openai-curated\"]\nenabled = true\n",
-        )
-        .unwrap();
-        let lock = CodexPluginLock {
-            schema: LOCK_SCHEMA,
-            plugins: (0..MAX_ENTRIES)
-                .map(|index| CodexPluginIntent {
-                    id: format!("plugin-{index}@team"),
-                    observed_version: None,
-                })
-                .collect(),
-            ..CodexPluginLock::default()
-        };
-
-        let error = effective_plugin_intents(&lock, Some(&config)).unwrap_err();
-
-        assert!(error.contains("exceeds"), "{error}");
     }
 
     #[test]
@@ -4078,7 +2881,7 @@ mod tests {
         target_runner.on("plugin add slack@openai-curated", Ok((true, String::new())));
 
         let mut log = |_: &str, _: &str| {};
-        let first = apply_managed_plan(
+        let first = apply_approved_managed_plan(
             &target_runner,
             &default_runner,
             &lock,
@@ -4101,7 +2904,7 @@ mod tests {
             .contains("marketplaces.openai-curated"));
 
         let calls_before = target_runner.calls().len();
-        let second = apply_managed_plan(
+        let second = apply_approved_managed_plan(
             &target_runner,
             &default_runner,
             &lock,
@@ -4334,7 +3137,7 @@ mod tests {
         target_runner.on("plugin list --json", Ok((true, plugins_json(&[]))));
 
         let mut log = |_: &str, _: &str| {};
-        let report = apply_managed_plan(
+        let report = apply_approved_managed_plan(
             &target_runner,
             &default_runner,
             &empty_lock(),
@@ -4348,7 +3151,12 @@ mod tests {
         assert!(report
             .config_paths_repaired
             .contains(&"mcp_servers.node_repl".to_string()));
-        assert!(codex_config::inspect_managed_config(&target_config, &target_home).is_empty());
+        assert!(codex_config::inspect_managed_config_with_default(
+            &target_config,
+            &target_home,
+            &default_home
+        )
+        .is_empty());
     }
 
     #[test]
@@ -4395,7 +3203,7 @@ mod tests {
         target_runner.on("plugin list --json", Ok((true, plugins_json(&[]))));
 
         let mut log = |_: &str, _: &str| {};
-        let report = apply_managed_plan(
+        let report = apply_approved_managed_plan(
             &target_runner,
             &default_runner,
             &lock,
@@ -4458,7 +3266,7 @@ mod tests {
         );
 
         let mut log = |_: &str, _: &str| {};
-        let report = apply_managed_plan(
+        let report = apply_approved_managed_plan(
             &target_runner,
             &default_runner,
             &lock,
@@ -4519,6 +3327,16 @@ mod tests {
             Ok((true, marketplaces_json(&[("openai-curated", "", "", None)]))),
         );
         fake.on("plugin list --json", Ok((true, plugins_json(&[]))));
+    }
+
+    fn apply_plan(
+        runner: &dyn CodexRunner,
+        lock: &CodexPluginLock,
+        log: &mut dyn FnMut(&str, &str),
+    ) -> Result<CodexPluginRepairReport, String> {
+        validate_lock(lock)?;
+        let explicitly_disabled = explicitly_disabled_plugin_ids(runner.config_path().as_deref())?;
+        apply_plan_for_intents(runner, lock, &lock.plugins, &explicitly_disabled, log)
     }
 
     #[test]
@@ -4729,29 +3547,6 @@ mod tests {
     }
 
     #[test]
-    fn broken_clone_plan_stays_actionable_without_mutating() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake = FakeRunner::new();
-        fake.use_config(write_codex_config(
-            dir.path(),
-            "owner/repo",
-            Some("4f2c0d9"),
-        ));
-        fake.on(
-            "plugin marketplace list --json",
-            Ok((false, BROKEN_TEAM_TOOLS.into())),
-        );
-
-        let plan = plan_with_runner(&repair_lock(), &fake);
-        assert!(plan.blocked.is_none());
-        assert!(plan
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("Repair will re-clone")));
-        assert!(!fake.calls().iter().any(|call| call.contains(" add ")));
-    }
-
-    #[test]
     fn broken_clone_with_different_registered_source_is_not_overwritten() {
         let dir = tempfile::tempdir().unwrap();
         let fake = FakeRunner::new();
@@ -4934,154 +3729,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_is_a_symmetric_idempotent_keyed_union() {
-        let a = canonical_lock_json(&CodexPluginLock {
-            schema: 1,
-            captured_with: CapturedWith {
-                agent_version: "0.144.1".into(),
-            },
-            marketplaces: vec![CodexMarketplaceIntent {
-                name: "team-tools".into(),
-                repository: "owner/repo".into(),
-                git_ref: Some("aaa".into()),
-            }],
-            plugins: vec![CodexPluginIntent {
-                id: "a@team-tools".into(),
-                observed_version: None,
-            }],
-            manual: vec![],
-        });
-        let b = canonical_lock_json(&CodexPluginLock {
-            schema: 1,
-            captured_with: CapturedWith {
-                agent_version: "0.145.0".into(),
-            },
-            marketplaces: vec![CodexMarketplaceIntent {
-                name: "team-tools".into(),
-                repository: "owner/repo".into(),
-                git_ref: Some("aaa".into()),
-            }],
-            plugins: vec![CodexPluginIntent {
-                id: "b@team-tools".into(),
-                observed_version: Some("1.0".into()),
-            }],
-            manual: vec![
-                CodexManualEntry {
-                    id: "a@team-tools".into(),
-                    reason: "marketplace not found on this machine".into(),
-                },
-                CodexManualEntry {
-                    id: "x@local".into(),
-                    reason: "local".into(),
-                },
-            ],
-        });
-        let ab = merge_codex_plugin_lock(&a, &b).unwrap();
-        assert_eq!(
-            Some(ab.clone()),
-            merge_codex_plugin_lock(&b, &a),
-            "must be symmetric"
-        );
-        assert_eq!(
-            merge_codex_plugin_lock(&ab, &a),
-            Some(ab.clone()),
-            "must be idempotent"
-        );
-        assert_eq!(merge_codex_plugin_lock(&ab, &b), Some(ab.clone()));
-        let merged: CodexPluginLock = serde_json::from_str(&ab).unwrap();
-        assert_eq!(
-            merged.plugins.len(),
-            2,
-            "union keeps both machines' plugins"
-        );
-        assert_eq!(merged.marketplaces.len(), 1, "keyed by name, no duplicate");
-        assert_eq!(merged.captured_with.agent_version, "0.145.0");
-        assert_eq!(merged.manual.len(), 1);
-        assert_eq!(merged.manual[0].id, "x@local");
-    }
-
-    #[test]
-    fn merge_ref_conflict_declines_union() {
-        let make_lock = |plugin: &str, repository: &str, git_ref: &str| {
-            canonical_lock_json(&CodexPluginLock {
-                schema: LOCK_SCHEMA,
-                marketplaces: vec![CodexMarketplaceIntent {
-                    name: "team-tools".to_string(),
-                    repository: repository.to_string(),
-                    git_ref: Some(git_ref.to_string()),
-                }],
-                plugins: vec![CodexPluginIntent {
-                    id: format!("{plugin}@team-tools"),
-                    observed_version: None,
-                }],
-                ..CodexPluginLock::default()
-            })
-        };
-        let a = make_lock("one", "owner/repo", "aaa");
-        let b = make_lock("two", "owner/repo", "bbb");
-
-        assert_eq!(merge_codex_plugin_lock(&a, &b), None);
-        assert_eq!(merge_codex_plugin_lock(&b, &a), None);
-    }
-
-    #[test]
-    fn merge_repository_conflict_declines_union() {
-        let make_lock = |plugin: &str, repository: &str| {
-            canonical_lock_json(&CodexPluginLock {
-                schema: LOCK_SCHEMA,
-                marketplaces: vec![CodexMarketplaceIntent {
-                    name: "team-tools".to_string(),
-                    repository: repository.to_string(),
-                    git_ref: Some("aaa".to_string()),
-                }],
-                plugins: vec![CodexPluginIntent {
-                    id: format!("{plugin}@team-tools"),
-                    observed_version: None,
-                }],
-                ..CodexPluginLock::default()
-            })
-        };
-        let a = make_lock("one", "owner/repo");
-        let b = make_lock("two", "other/repo");
-
-        assert_eq!(merge_codex_plugin_lock(&a, &b), None);
-        assert_eq!(merge_codex_plugin_lock(&b, &a), None);
-    }
-
-    #[test]
-    fn merge_overflow_declines_union() {
-        let make_lock = |prefix: &str| CodexPluginLock {
-            schema: LOCK_SCHEMA,
-            plugins: (0..300)
-                .map(|index| CodexPluginIntent {
-                    id: format!("{prefix}-{index:03}@openai-curated"),
-                    observed_version: None,
-                })
-                .collect(),
-            ..CodexPluginLock::default()
-        };
-        let a = canonical_lock_json(&make_lock("a"));
-        let b = canonical_lock_json(&make_lock("b"));
-
-        assert_eq!(merge_codex_plugin_lock(&a, &b), None);
-        assert_eq!(merge_codex_plugin_lock(&b, &a), None);
-    }
-
-    #[test]
-    fn merge_declines_if_either_side_is_invalid_or_future_schema() {
-        let good = canonical_lock_json(&repair_lock());
-        assert_eq!(merge_codex_plugin_lock(&good, "{broken"), None);
-        assert_eq!(merge_codex_plugin_lock("{broken", &good), None);
-        assert_eq!(merge_codex_plugin_lock("{broken", "also broken"), None);
-        assert_eq!(merge_codex_plugin_lock("also broken", "{broken"), None);
-
-        let future = good.replacen("\"schema\": 1", "\"schema\": 2", 1);
-        assert_ne!(future, good, "fixture must change the schema");
-        assert_eq!(merge_codex_plugin_lock(&good, &future), None);
-        assert_eq!(merge_codex_plugin_lock(&future, &good), None);
-    }
-
-    #[test]
     fn redact_masks_secretish_lines_and_timeout_kills_children() {
         assert_eq!(redact("Authorization: Bearer abc123"), "[redacted]");
         assert_eq!(redact("export API_KEY=xyz"), "[redacted]");
@@ -5098,310 +3745,4 @@ mod tests {
         assert!(err.contains("timed out"), "{}", err);
     }
 
-    #[test]
-    fn capture_with_writes_lock_from_cli_json() {
-        let fake = FakeRunner::new();
-        fake.on("--version", Ok((true, VERSION_OUT.into())));
-        fake.on(
-            "plugin marketplace list --json",
-            Ok((
-                true,
-                marketplaces_json(&[
-                    ("openai-curated", "", "", None),
-                    ("team-tools", "git", "owner/repo", Some("4f2c0d9")),
-                ]),
-            )),
-        );
-        fake.on(
-            "plugin list --json",
-            Ok((
-                true,
-                plugins_json(&[("my-plugin@team-tools", "team-tools", "1.4.2", true, true)]),
-            )),
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agent-sync/codex-plugins.lock.json");
-        assert!(capture_with(&fake, &path).unwrap());
-        let lock = read_lock(&path).unwrap();
-        assert_eq!(lock.captured_with.agent_version, "0.144.1");
-        assert_eq!(lock.plugins.len(), 1);
-        // CLI failure must not touch the saved lock.
-        let broken = FakeRunner::new();
-        broken.on("--version", Ok((true, VERSION_OUT.into())));
-        broken.on("plugin marketplace list --json", Ok((false, String::new())));
-        assert!(capture_with(&broken, &path).is_err());
-        assert_eq!(read_lock(&path).unwrap(), lock);
-    }
-
-    /// Shapes mirror a real ~/.claude tree: settings.json intent, manager
-    /// records with machine-local absolute paths, one path-sourced
-    /// marketplace, one disabled plugin.
-    fn seed_claude_dir(dir: &Path) {
-        fs::create_dir_all(dir.join("plugins")).unwrap();
-        fs::write(
-            dir.join("settings.json"),
-            serde_json::json!({
-                "enabledPlugins": {
-                    "ponytail@ponytail": true,
-                    "helper@local-mkt": true,
-                    "off@ponytail": false,
-                    "ghost@nowhere": true
-                },
-                "extraKnownMarketplaces": {
-                    "ponytail": { "source": { "source": "github", "repo": "DietrichGebert/ponytail" } }
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        fs::write(
-            dir.join("plugins/known_marketplaces.json"),
-            serde_json::json!({
-                "ponytail": {
-                    "source": { "source": "github", "repo": "DietrichGebert/ponytail" },
-                    "installLocation": "/Users/a/.claude/plugins/marketplaces/ponytail"
-                },
-                "local-mkt": {
-                    "source": { "source": "local", "path": "/Users/a/my-marketplace" },
-                    "installLocation": "/Users/a/.claude/plugins/marketplaces/local-mkt"
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        fs::write(
-            dir.join("plugins/installed_plugins.json"),
-            serde_json::json!({
-                "version": 2,
-                "plugins": {
-                    "ponytail@ponytail": [
-                        { "scope": "user", "installPath": "/nonexistent/cache/ponytail/4.8.4",
-                          "version": "4.8.4", "gitCommitSha": "14a0d79" }
-                    ]
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn claude_capture_filters_to_the_portable_set() {
-        let dir = tempfile::tempdir().unwrap();
-        seed_claude_dir(dir.path());
-        let lock = capture_claude_lock(dir.path());
-        assert_eq!(
-            lock.plugins
-                .iter()
-                .map(|p| p.id.as_str())
-                .collect::<Vec<_>>(),
-            ["ponytail@ponytail"],
-            "enabled + portable only"
-        );
-        assert_eq!(lock.plugins[0].observed_version.as_deref(), Some("4.8.4"));
-        assert_eq!(lock.marketplaces.len(), 1);
-        assert_eq!(lock.marketplaces[0].repository, "DietrichGebert/ponytail");
-        let manual_ids: Vec<&str> = lock.manual.iter().map(|m| m.id.as_str()).collect();
-        assert!(
-            manual_ids.contains(&"helper@local-mkt"),
-            "path source → manual"
-        );
-        assert!(
-            manual_ids.contains(&"ghost@nowhere"),
-            "unknown marketplace → manual"
-        );
-        assert!(
-            !canonical_lock_json(&lock).contains("/Users/"),
-            "no path leaks"
-        );
-        validate_lock(&lock).unwrap();
-        // Unreadable settings → empty capture, which save_lock refuses to
-        // write over a good lock.
-        fs::write(dir.path().join("settings.json"), "{broken").unwrap();
-        assert!(lock_is_empty(&capture_claude_lock(dir.path())));
-    }
-
-    #[test]
-    fn claude_capture_overflow_preserves_the_last_good_lock() {
-        let dir = tempfile::tempdir().unwrap();
-        seed_claude_dir(dir.path());
-        let path = dir.path().join("agent-sync/claude-plugins.lock.json");
-        let good = capture_claude_lock(dir.path());
-        assert!(save_lock(&path, &good).unwrap());
-
-        let enabled_plugins: serde_json::Map<String, serde_json::Value> = (0..=MAX_ENTRIES)
-            .map(|index| {
-                (
-                    format!("plugin-{index:03}@overflow"),
-                    serde_json::Value::Bool(true),
-                )
-            })
-            .collect();
-        fs::write(
-            dir.path().join("settings.json"),
-            serde_json::json!({
-                "enabledPlugins": enabled_plugins,
-                "extraKnownMarketplaces": {
-                    "overflow": {
-                        "source": { "source": "github", "repo": "owner/repo" }
-                    }
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let overflow = capture_claude_lock(dir.path());
-        assert_eq!(overflow.plugins.len(), MAX_ENTRIES + 1);
-        let error = save_lock(&path, &overflow).unwrap_err();
-
-        assert!(error.contains("exceeds"), "{error}");
-        assert_eq!(read_lock(&path).unwrap(), good);
-    }
-
-    #[test]
-    fn claude_malformed_manager_input_preserves_the_last_good_lock() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("plugins")).unwrap();
-        fs::write(
-            dir.path().join("settings.json"),
-            serde_json::json!({
-                "enabledPlugins": { "only-in-manager@team-tools": true }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let known_path = dir.path().join("plugins/known_marketplaces.json");
-        fs::write(
-            &known_path,
-            serde_json::json!({
-                "team-tools": {
-                    "source": { "source": "github", "repo": "owner/repo" },
-                    "installLocation": "/machine-local/team-tools"
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        fs::write(dir.path().join("plugins/installed_plugins.json"), "{}").unwrap();
-
-        let path = dir.path().join("agent-sync/claude-plugins.lock.json");
-        let good = try_capture_claude_lock(dir.path()).unwrap();
-        assert_eq!(good.marketplaces[0].repository, "owner/repo");
-        assert!(save_lock(&path, &good).unwrap());
-
-        fs::write(&known_path, "{broken").unwrap();
-        let error = try_capture_claude_lock(dir.path()).unwrap_err();
-        assert!(error.contains("known_marketplaces.json"), "{error}");
-        let failed_capture = capture_claude_lock(dir.path());
-        assert!(lock_is_empty(&failed_capture));
-        assert!(!save_lock(&path, &failed_capture).unwrap());
-        assert_eq!(read_lock(&path).unwrap(), good);
-    }
-
-    #[test]
-    fn claude_plan_diffs_lock_against_local_manager_state() {
-        let dir = tempfile::tempdir().unwrap();
-        seed_claude_dir(dir.path());
-        // Lock from "person A": one plugin B lacks, one marketplace B lacks,
-        // plus the plugin B already has (recorded as installed but its
-        // installPath does not exist on this machine → still missing here).
-        let lock = CodexPluginLock {
-            schema: 1,
-            marketplaces: vec![
-                CodexMarketplaceIntent {
-                    name: "ponytail".into(),
-                    repository: "DietrichGebert/ponytail".into(),
-                    git_ref: None,
-                },
-                CodexMarketplaceIntent {
-                    name: "team-tools".into(),
-                    repository: "owner/repo".into(),
-                    git_ref: None,
-                },
-            ],
-            plugins: vec![
-                CodexPluginIntent {
-                    id: "ponytail@ponytail".into(),
-                    observed_version: None,
-                },
-                CodexPluginIntent {
-                    id: "new-thing@team-tools".into(),
-                    observed_version: None,
-                },
-                CodexPluginIntent {
-                    id: "off@ponytail".into(),
-                    observed_version: None,
-                },
-            ],
-            ..CodexPluginLock::default()
-        };
-        let lock_path = dir.path().join("claude-plugins.lock.json");
-        fs::write(&lock_path, canonical_lock_json(&lock)).unwrap();
-        let plan = plan_for_claude_lock(&lock_path, dir.path()).unwrap();
-        assert!(plan.blocked.is_none());
-        assert_eq!(plan.missing_marketplaces, ["team-tools"]);
-        // ponytail's installPath doesn't exist on this machine → not present.
-        assert!(plan
-            .missing_plugins
-            .contains(&"new-thing@team-tools".to_string()));
-        assert!(plan
-            .missing_plugins
-            .contains(&"ponytail@ponytail".to_string()));
-        assert!(
-            !plan.missing_plugins.contains(&"off@ponytail".to_string()),
-            "target-local explicit false overrides portable restore intent"
-        );
-        fs::write(dir.path().join("settings.json"), "{broken").unwrap();
-        assert!(
-            plan_for_claude_lock(&lock_path, dir.path())
-                .unwrap()
-                .blocked
-                .is_some(),
-            "present unreadable target policy must fail closed"
-        );
-        // No lock → empty plan; unreadable lock → blocked.
-        let empty = tempfile::tempdir().unwrap();
-        let empty_lock = empty.path().join("claude-plugins.lock.json");
-        assert!(plan_for_claude_lock(&empty_lock, empty.path())
-            .unwrap()
-            .blocked
-            .is_none());
-        fs::write(&empty_lock, "{broken").unwrap();
-        assert!(plan_for_claude_lock(&empty_lock, empty.path())
-            .unwrap()
-            .blocked
-            .is_some());
-    }
-
-    #[test]
-    fn plan_for_lock_handles_missing_and_invalid_lock() {
-        let dir = tempfile::tempdir().unwrap();
-        // Explicit codex_home: None falls back to $CODEX_HOME/$HOME, which the
-        // sync_tests harness swaps process-globally during parallel runs.
-        let home = Some(dir.path().to_path_buf());
-        let missing = dir.path().join("nope.json");
-        let plan = plan_for_lock(&missing, home.clone()).unwrap();
-        assert!(plan.blocked.is_none());
-        assert!(plan.missing_plugins.is_empty() && plan.manual.is_empty());
-        let bad = dir.path().join("bad.json");
-        fs::write(&bad, "{broken").unwrap();
-        assert!(plan_for_lock(&bad, home).unwrap().blocked.is_some());
-    }
-
-    #[test]
-    fn claude_lock_requires_sources_even_for_codex_reserved_marketplace_names() {
-        let lock = CodexPluginLock {
-            schema: LOCK_SCHEMA,
-            plugins: vec![CodexPluginIntent {
-                id: "evil@openai-curated".to_string(),
-                observed_version: None,
-            }],
-            ..CodexPluginLock::default()
-        };
-        assert!(validate_lock(&lock).is_ok(), "valid Codex managed intent");
-        assert!(validate_claude_lock(&lock).is_err());
-        let raw = canonical_lock_json(&lock);
-        assert!(merge_claude_plugin_lock(&raw, &raw).is_none());
-    }
 }

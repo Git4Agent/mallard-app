@@ -79,7 +79,6 @@ export type ProjectProvider = "codex" | "claude";
 
 export type ProjectResourceCategory =
   | "conversations"
-  | "project_setup"
   | "skills"
   | "plugins"
   | "project_files"
@@ -100,20 +99,11 @@ export type ProjectResourceState =
 export type ProjectResourceKind =
   | "codex_conversation"
   | "claude_conversation"
-  | "project_file"
   | "project_content_file"
   | "project_content_directory"
   | "project_memory"
-  | "agent"
-  | "command"
-  | "rule"
-  | "prompt"
-  | "project_skill"
   | "standalone_skill"
   | "plugin"
-  | "mcp_server"
-  | "hook"
-  | "setting"
   | "requirement";
 
 export type ProjectResourceScope = "project" | "provider_state" | "dependency" | "requirement";
@@ -669,24 +659,6 @@ export interface BundleSnapshotSummary extends RemoteBundleSummary {
   warnings?: string[];
 }
 
-export type PlanActionRisk = "safe" | "review" | "executable" | "blocked" | string;
-
-export interface PlannedAction {
-  action_id: string;
-  kind: string;
-  title: string;
-  detail?: string | null;
-  category?: ProjectResourceCategory | string;
-  provider?: ProjectProvider | null;
-  resource_id?: string | null;
-  target_path?: string | null;
-  risk?: PlanActionRisk;
-  default_approved?: boolean;
-  requires_explicit_approval?: boolean;
-  blocked_reason?: string | null;
-  state?: string;
-}
-
 export type RestoreActionKind =
   | { kind: "write_file"; logical_path: string }
   | { kind: "write_project_file"; logical_path: string; mode: number; source_mtime: number }
@@ -699,9 +671,6 @@ export type RestoreActionKind =
   | { kind: "install_custom_skill"; provider: ProjectProvider; skill_name: string }
   | { kind: "overwrite_custom_skill"; provider: ProjectProvider; skill_name: string }
   | { kind: "install_plugin"; provider: ProjectProvider; plugin_id: string }
-  | { kind: "review_hook"; definition_sha256: string }
-  | { kind: "review_mcp"; definition_sha256: string }
-  | { kind: "apply_setting"; provider: ProjectProvider; semantic_key: string }
   | { kind: "manual"; message: string };
 
 export interface RestoreAction {

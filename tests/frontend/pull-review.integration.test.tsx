@@ -372,7 +372,7 @@ test("conversation conflicts become one-time keep-local decisions without blocki
         state: "needs_setup",
         issues: [{
           issue_id: "restore-files",
-          category: "project_setup",
+          category: "project_files",
           title: "Project files are not fully materialized",
           detail: "Build a restore plan and approve the intended file actions.",
           severity: "warning",
