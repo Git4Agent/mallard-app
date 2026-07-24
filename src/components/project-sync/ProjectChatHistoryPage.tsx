@@ -497,13 +497,13 @@ export function ProjectChatHistoryContent({
   const threads = useMemo(() => new Map((history?.threads ?? []).map((thread) => [thread.thread_id, thread])), [history?.threads]);
   const syncByThread = useMemo(() => new Map((comparison?.entries ?? []).map((entry) => [entry.thread_id, entry])), [comparison?.entries]);
   const comparisonStorageName = comparison?.storage_name ?? activeStorageName ?? "selected storage";
-  const variantEntries = useMemo(
-    () => (comparison?.entries ?? []).filter((entry) => entry.conflict_group_id && entry.variant_id),
+  const threadEntries = useMemo(
+    () => (comparison?.entries ?? []).filter((entry) => entry.cloud_thread_id),
     [comparison?.entries],
   );
   const compactSelectionReview = embedded && selectionMode != null;
   const storedOnlyEntries = useMemo(() => (comparison?.entries ?? [])
-    .filter((entry) => !entry.variant_id)
+    .filter((entry) => !entry.cloud_thread_id)
     .filter((entry) => !entry.local_present && entry.storage_present && !threads.has(entry.thread_id))
     .filter((entry) => !history || entry.storage_updated_at == null || entry.storage_updated_at >= history.window_start),
   [comparison?.entries, history, threads]);
@@ -667,9 +667,9 @@ export function ProjectChatHistoryContent({
               </section>
             )}
 
-            {variantEntries.length > 0 && (
+            {threadEntries.length > 0 && (
               <ThreadVariantReview
-                entries={variantEntries}
+                entries={threadEntries}
                 selectedResourceIds={selectedResourceIds}
                 disabled={selectionDisabled}
                 onToggleResource={onToggleResource}

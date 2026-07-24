@@ -3,6 +3,7 @@ mod conflicts;
 mod continuation;
 mod harness;
 mod provider_codec;
+mod provider_fork;
 mod recovery;
 mod relation_matrix;
 mod schema_and_privacy;

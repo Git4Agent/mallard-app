@@ -1,13 +1,13 @@
-use super::harness::{chain, VariantSpec, VariantWorld};
+use super::harness::{chain, ThreadSpec, VariantWorld};
 use crate::project_sync_v3::bundle_engine::{
     BundleObjectStore, PublishBundleRequest, PublishExpectation,
 };
 use crate::project_sync_v3::domain::{
-    deterministic_schema4_conversation_ids, BundleId, BundleIdentity, BundleKind, CapturedWith,
-    ConflictGroupId, ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
+    deterministic_schema4_thread_id, BundleId, BundleIdentity, BundleKind, CapturedWith,
+    ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
     ConversationMaterializationState, ConversationPlanActionType, ConversationPlanDirection,
     ConversationRelation, LocalConversationBinding, LogicalPath, OriginHostAlias, Provider,
-    ReplicaId, Tombstone, TombstoneTarget, VariantId, MAX_FILE_BYTES,
+    ReplicaId, ThreadId, Tombstone, TombstoneTarget, MAX_FILE_BYTES,
 };
 use crate::project_sync_v3::provider_capture::CapturedResources;
 use std::collections::BTreeMap;
@@ -125,18 +125,15 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
         Err(crate::project_sync_v3::conversation_sync::ConversationStalePin::Host)
     );
 
-    let variant_id = VariantId::parse("variant-alias-scan").unwrap();
     let origin = world.origin(&world.repo_b, "replica-b");
     world.publish(
-        &[VariantSpec::new(
-            "group-alias-scan",
-            variant_id.as_str(),
+        &[ThreadSpec::new(
+            "thread-alias-scan",
             "source-thread",
             chain("source-thread", &[("m-a", "safe")]),
             origin.clone(),
             10,
         )],
-        &variant_id,
         origin,
         10,
     );
@@ -150,50 +147,26 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
 }
 
 #[test]
-fn schema5_manifest_rejects_each_conversation_reference_corruption() {
+fn schema6_manifest_rejects_each_conversation_reference_corruption() {
     let world = VariantWorld::new();
     let origin = world.origin(&world.repo_a, "replica-a");
-    let initial_variant_id = VariantId::parse("variant-v1").unwrap();
-    let second_variant_id = VariantId::parse("variant-v2").unwrap();
     let published = world.publish(
         &[
-            VariantSpec::new(
-                "group-main",
-                initial_variant_id.as_str(),
+            ThreadSpec::new(
+                thread_id().as_str(),
                 "source-thread",
                 chain("source-thread", &[("m-a", "one")]),
                 origin.clone(),
                 10,
             ),
-            VariantSpec::new(
-                "group-main",
-                second_variant_id.as_str(),
-                "source-thread",
-                chain("source-thread", &[("m-a", "one"), ("m-b", "two")]),
+            ThreadSpec::new(
+                "thread-v2",
+                "source-thread-v2",
+                chain("source-thread-v2", &[("m-a", "one"), ("m-b", "two")]),
                 origin.clone(),
-                10,
-            ),
-            VariantSpec::new(
-                "group-other",
-                initial_variant_id.as_str(),
-                "source-thread-other-primary",
-                chain("source-thread-other-primary", &[("m-other-a", "one")]),
-                origin.clone(),
-                10,
-            ),
-            VariantSpec::new(
-                "group-other",
-                "variant-cross-parent",
-                "source-thread-other-parent",
-                chain(
-                    "source-thread-other-parent",
-                    &[("m-other-a", "one"), ("m-other-b", "two")],
-                ),
-                origin,
                 10,
             ),
         ],
-        &initial_variant_id,
         world.origin(&world.repo_a, "replica-a"),
         10,
     );
@@ -202,187 +175,93 @@ fn schema5_manifest_rejects_each_conversation_reference_corruption() {
     let mut mutations: Vec<Box<dyn Fn(&mut crate::project_sync_v3::domain::BundleManifest)>> =
         Vec::new();
     mutations.push(Box::new(|manifest| {
-        let group = manifest.conversation_groups.remove(&group_id()).unwrap();
+        let thread = manifest.conversations.remove(&thread_id()).unwrap();
         manifest
-            .conversation_groups
-            .insert(ConflictGroupId::parse("group-wrong").unwrap(), group);
-    }));
-    mutations.push(Box::new(|manifest| {
-        let group = manifest.conversation_groups.get_mut(&group_id()).unwrap();
-        let variant = group.variants.remove(&variant_id()).unwrap();
-        group
-            .variants
-            .insert(VariantId::parse("variant-wrong").unwrap(), variant);
+            .conversations
+            .insert(ThreadId::parse("thread-wrong").unwrap(), thread);
     }));
     mutations.push(Box::new(|manifest| {
         manifest
-            .conversation_groups
-            .get_mut(&group_id())
-            .unwrap()
-            .primary_variant_id = VariantId::parse("variant-missing").unwrap();
-    }));
-    mutations.push(Box::new(|manifest| {
-        manifest
-            .conversation_groups
-            .get_mut(&group_id())
-            .unwrap()
-            .variants
-            .get_mut(&variant_id())
+            .conversations
+            .get_mut(&thread_id())
             .unwrap()
             .files
             .clear();
     }));
     mutations.push(Box::new(|manifest| {
-        let variant = manifest
-            .conversation_groups
-            .get_mut(&group_id())
-            .unwrap()
-            .variants
-            .get_mut(&variant_id())
-            .unwrap();
-        let path = variant.files[0].logical_path.clone();
-        variant.files.push(ConversationFileRef {
+        let thread = manifest.conversations.get_mut(&thread_id()).unwrap();
+        let path = thread.files[0].logical_path.clone();
+        thread.files.push(ConversationFileRef {
             logical_path: path,
             role: ConversationFileRole::Transcript,
         });
     }));
     mutations.push(Box::new(|manifest| {
-        let variant = manifest
-            .conversation_groups
-            .get_mut(&group_id())
-            .unwrap()
-            .variants
-            .get_mut(&variant_id())
-            .unwrap();
-        variant.lineage_status = ConversationLineageStatus::Unknown {
+        let thread = manifest.conversations.get_mut(&thread_id()).unwrap();
+        thread.lineage_status = ConversationLineageStatus::Unknown {
             reason_code: "parser_gap".to_string(),
         };
     }));
     mutations.push(Box::new(|manifest| {
         manifest
-            .conversation_groups
-            .get_mut(&group_id())
-            .unwrap()
-            .variants
-            .get_mut(&variant_id())
+            .conversations
+            .get_mut(&thread_id())
             .unwrap()
             .lineage_codec = "codex.lineage.missing".to_string();
     }));
     mutations.push(Box::new(|manifest| {
-        manifest
-            .conversation_groups
-            .get_mut(&group_id())
-            .unwrap()
-            .provider = Provider::Claude;
+        manifest.conversations.get_mut(&thread_id()).unwrap().provider = Provider::Claude;
     }));
     mutations.push(Box::new(|manifest| {
-        let variant = &manifest.conversation_groups[&group_id()].variants[&variant_id()];
-        let path = variant.files[0].logical_path.clone();
+        let thread = &manifest.conversations[&thread_id()];
+        let path = thread.files[0].logical_path.clone();
         manifest.files.remove(&path);
     }));
     mutations.push(Box::new(|manifest| {
-        let resource_id = manifest.conversation_groups[&group_id()].variants[&variant_id()]
-            .resource_id
-            .clone();
+        let resource_id = manifest.conversations[&thread_id()].resource_id.clone();
         manifest.resources.remove(&resource_id);
     }));
     mutations.push(Box::new(|manifest| {
         manifest
-            .conversation_groups
-            .get_mut(&group_id())
-            .unwrap()
-            .variants
-            .get_mut(&variant_id())
+            .conversations
+            .get_mut(&thread_id())
             .unwrap()
             .head_message_id = None;
     }));
     mutations.push(Box::new(|manifest| {
-        manifest
-            .conversation_groups
-            .get_mut(&group_id())
-            .unwrap()
-            .variants
-            .get_mut(&variant_id())
-            .unwrap()
-            .parent_variant_id = Some(variant_id());
+        let thread = manifest.conversations.get_mut(&thread_id()).unwrap();
+        thread.forked_from = Some(thread.thread_id.clone());
     }));
     mutations.push(Box::new(|manifest| {
-        manifest
-            .conversation_groups
-            .get_mut(&group_id())
-            .unwrap()
-            .variants
-            .get_mut(&VariantId::parse("variant-v2").unwrap())
-            .unwrap()
-            .parent_variant_id = Some(VariantId::parse("variant-cross-parent").unwrap());
+        let v2 = ThreadId::parse("thread-v2").unwrap();
+        let v1_resource = manifest.conversations[&thread_id()].resource_id.clone();
+        manifest.conversations.get_mut(&v2).unwrap().resource_id = v1_resource;
     }));
     mutations.push(Box::new(|manifest| {
-        let v2 = VariantId::parse("variant-v2").unwrap();
-        let group = manifest.conversation_groups.get_mut(&group_id()).unwrap();
-        group
-            .variants
-            .get_mut(&variant_id())
-            .unwrap()
-            .parent_variant_id = Some(v2.clone());
-        group.variants.get_mut(&v2).unwrap().parent_variant_id = Some(variant_id());
-    }));
-    mutations.push(Box::new(|manifest| {
-        let v2 = VariantId::parse("variant-v2").unwrap();
-        let v1_resource = manifest.conversation_groups[&group_id()].variants[&variant_id()]
-            .resource_id
-            .clone();
-        manifest
-            .conversation_groups
-            .get_mut(&group_id())
-            .unwrap()
-            .variants
-            .get_mut(&v2)
-            .unwrap()
-            .resource_id = v1_resource;
-    }));
-    mutations.push(Box::new(|manifest| {
-        let v2 = VariantId::parse("variant-v2").unwrap();
-        let v1_path = manifest.conversation_groups[&group_id()].variants[&variant_id()].files[0]
+        let v2 = ThreadId::parse("thread-v2").unwrap();
+        let v1_path = manifest.conversations[&thread_id()].files[0]
             .logical_path
             .clone();
-        manifest
-            .conversation_groups
-            .get_mut(&group_id())
-            .unwrap()
-            .variants
-            .get_mut(&v2)
-            .unwrap()
-            .files[0]
-            .logical_path = v1_path;
+        manifest.conversations.get_mut(&v2).unwrap().files[0].logical_path = v1_path;
     }));
     mutations.push(Box::new(|manifest| {
-        let v1 = &manifest.conversation_groups[&group_id()].variants[&variant_id()];
+        let v1 = &manifest.conversations[&thread_id()];
         let entry = manifest.files[&v1.files[0].logical_path].clone();
         manifest.files.insert(
-            LogicalPath::parse("state/conversations/codex/group-main/variant-v1/undeclared.json")
-                .unwrap(),
+            LogicalPath::parse("state/conversations/codex/thread-v1/undeclared.json").unwrap(),
             entry,
         );
     }));
     mutations.push(Box::new(|manifest| {
-        let v2 = VariantId::parse("variant-v2").unwrap();
-        manifest
-            .conversation_groups
-            .get_mut(&group_id())
-            .unwrap()
-            .variants
-            .remove(&v2);
+        let v2 = ThreadId::parse("thread-v2").unwrap();
+        manifest.conversations.remove(&v2);
     }));
     mutations.push(Box::new(|manifest| {
-        let resource = manifest.conversation_groups[&group_id()].variants[&variant_id()]
-            .resource_id
-            .clone();
+        let resource = manifest.conversations[&thread_id()].resource_id.clone();
         manifest.recipe.entries.remove(&resource);
     }));
     mutations.push(Box::new(|manifest| {
-        let resource = manifest.conversation_groups[&group_id()].variants[&variant_id()]
-            .resource_id
-            .clone();
+        let resource = manifest.conversations[&thread_id()].resource_id.clone();
         manifest
             .resources
             .get_mut(&resource)
@@ -391,28 +270,15 @@ fn schema5_manifest_rejects_each_conversation_reference_corruption() {
             .insert("oversized".to_string(), "x".repeat(4_097));
     }));
     mutations.push(Box::new(|manifest| {
-        let path = manifest.conversation_groups[&group_id()].variants[&variant_id()].files[0]
+        let path = manifest.conversations[&thread_id()].files[0]
             .logical_path
             .clone();
         manifest.files.get_mut(&path).unwrap().size = MAX_FILE_BYTES + 1;
     }));
     mutations.push(Box::new(|manifest| {
         let tombstone = Tombstone {
-            target: TombstoneTarget::ConversationVariant {
-                conflict_group_id: group_id(),
-                variant_id: variant_id(),
-            },
-            last_sha256: Some("a".repeat(64)),
-            deleted_at: 20,
-        };
-        manifest
-            .tombstones
-            .insert(tombstone.canonical_key(), tombstone);
-    }));
-    mutations.push(Box::new(|manifest| {
-        let tombstone = Tombstone {
-            target: TombstoneTarget::ConversationGroup {
-                conflict_group_id: group_id(),
+            target: TombstoneTarget::ConversationThread {
+                thread_id: thread_id(),
             },
             last_sha256: Some("a".repeat(64)),
             deleted_at: 20,
@@ -432,8 +298,8 @@ fn schema5_manifest_rejects_each_conversation_reference_corruption() {
     }
 
     let mut serialized = serde_json::to_value(&baseline).unwrap();
-    serialized["conversation_groups"][group_id().as_str()]["variants"][variant_id().as_str()]
-        ["files"][0]["role"] = serde_json::json!({"kind": "unrecognized_provider_role"});
+    serialized["conversations"][thread_id().as_str()]["files"][0]["role"] =
+        serde_json::json!({"kind": "unrecognized_provider_role"});
     assert!(
         serde_json::from_value::<crate::project_sync_v3::domain::BundleManifest>(serialized)
             .is_err()
@@ -449,13 +315,12 @@ fn local_bindings_reject_duplicate_provider_thread_ownership_profile_wide() {
         "duplicate-provider-owner",
         "replica-duplicate-owner",
     );
-    let binding = |variant: &str| LocalConversationBinding {
+    let binding = |thread: &str| LocalConversationBinding {
         host_id: scope.host_id.clone(),
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
-        conflict_group_id: ConflictGroupId::parse("group-main").unwrap(),
-        variant_id: VariantId::parse(variant).unwrap(),
+        thread_id: ThreadId::parse(thread).unwrap(),
         provider_thread_id: Some("same-provider-thread".to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
         last_observed_file_sha256: None,
@@ -471,12 +336,12 @@ fn local_bindings_reject_duplicate_provider_thread_ownership_profile_wide() {
     let error = world
         .repo_fresh
         .mutate_conversation_bindings(|document| {
-            document.bindings.push(binding("variant-v1"));
-            document.bindings.push(binding("variant-v2"));
+            document.bindings.push(binding("thread-v1"));
+            document.bindings.push(binding("thread-v2"));
             Ok(())
         })
         .unwrap_err();
-    assert!(error.contains("owned by multiple variants"));
+    assert!(error.contains("owned by multiple conversations"));
     assert!(world
         .repo_fresh
         .load_conversation_bindings()
@@ -490,17 +355,14 @@ fn portable_objects_do_not_leak_machine_local_identity_or_paths() {
     let world = VariantWorld::new();
     let identity = world.repo_a.load_or_create_host_identity().unwrap();
     let origin = world.origin(&world.repo_a, "replica-private-sentinel");
-    let variant_id = VariantId::parse("variant-v1").unwrap();
     world.publish(
-        &[VariantSpec::new(
-            "group-main",
-            variant_id.as_str(),
+        &[ThreadSpec::new(
+            "thread-v1",
             "bounded-source-provenance",
             chain("bounded-source-provenance", &[("m-a", "safe content")]),
             origin.clone(),
             10,
         )],
-        &variant_id,
         origin,
         10,
     );
@@ -509,7 +371,6 @@ fn portable_objects_do_not_leak_machine_local_identity_or_paths() {
         identity.host_id.to_string(),
         "replica-private-sentinel".to_string(),
         "profile-private-sentinel".to_string(),
-        "preference-private-sentinel".to_string(),
         "journal-private-sentinel".to_string(),
         world.repo_a.root().to_string_lossy().to_string(),
         std::env::var("USER").unwrap_or_default(),
@@ -538,32 +399,29 @@ fn schema4_cutover_ids_match_on_independent_replicas_and_old_writer_stops() {
     let legacy_resource =
         crate::project_sync_v3::domain::ResourceId::parse("codex:session:legacy-thread").unwrap();
     let a =
-        deterministic_schema4_conversation_ids(&world.bundle_id, Provider::Codex, &legacy_resource)
+        deterministic_schema4_thread_id(&world.bundle_id, Provider::Codex, &legacy_resource)
             .unwrap();
     let b =
-        deterministic_schema4_conversation_ids(&world.bundle_id, Provider::Codex, &legacy_resource)
+        deterministic_schema4_thread_id(&world.bundle_id, Provider::Codex, &legacy_resource)
             .unwrap();
     assert_eq!(a, b);
 
     let origin = world.origin(&world.repo_a, "replica-a");
-    let variant_id = VariantId::parse("variant-v1").unwrap();
     let published = world.publish(
-        &[VariantSpec::new(
-            "group-main",
-            variant_id.as_str(),
+        &[ThreadSpec::new(
+            "thread-v1",
             "source-thread",
             chain("source-thread", &[("m-a", "one")]),
             origin.clone(),
             10,
         )],
-        &variant_id,
         origin,
         10,
     );
     let legacy_attempt = world.engine().publish(PublishBundleRequest {
         identity: BundleIdentity {
             bundle_id: world.bundle_id.clone(),
-            display_name: "Variant test bundle".to_string(),
+            display_name: "Thread test bundle".to_string(),
             kind: BundleKind::Project,
             repository_fingerprint: None,
         },
@@ -580,13 +438,9 @@ fn schema4_cutover_ids_match_on_independent_replicas_and_old_writer_stops() {
     });
     assert!(legacy_attempt
         .unwrap_err()
-        .contains("conversation-variant publication path"));
+        .contains("conversation-thread publication path"));
 }
 
-fn group_id() -> ConflictGroupId {
-    ConflictGroupId::parse("group-main").unwrap()
-}
-
-fn variant_id() -> VariantId {
-    VariantId::parse("variant-v1").unwrap()
+fn thread_id() -> ThreadId {
+    ThreadId::parse("thread-v1").unwrap()
 }

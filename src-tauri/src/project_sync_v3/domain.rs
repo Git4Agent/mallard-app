@@ -16,11 +16,11 @@ pub const LOCAL_SCHEMA_V3: u32 = 3;
 pub const MACHINE_PROJECT_SCHEMA_V1: u32 = 1;
 pub const MACHINE_PROJECT_SCHEMA_V2: u32 = 2;
 pub const HOST_IDENTITY_SCHEMA_V1: u32 = 1;
-pub const CONVERSATION_BINDINGS_SCHEMA_V1: u32 = 1;
-pub const CONVERSATION_SYNC_JOURNAL_SCHEMA_V1: u32 = 1;
+pub const CONVERSATION_BINDINGS_SCHEMA_V2: u32 = 2;
+pub const CONVERSATION_SYNC_JOURNAL_SCHEMA_V2: u32 = 2;
 pub const PUSH_PLAN_SCHEMA_V1: u32 = 1;
 pub const BUNDLE_SCHEMA_V4: u32 = 4;
-pub const BUNDLE_SCHEMA_V5: u32 = 5;
+pub const BUNDLE_SCHEMA_V6: u32 = 6;
 pub const RECIPE_SCHEMA_V1: u32 = 1;
 pub const RESTORE_PLAN_SCHEMA_V2: u32 = 2;
 pub const DEPENDENCY_PLAN_SCHEMA_V2: u32 = 2;
@@ -119,8 +119,7 @@ named_id!(ResourceId, "resource id");
 named_id!(LocalProjectId, "local project id");
 named_id!(StorageId, "storage id");
 named_id!(ReplicaId, "replica id");
-named_id!(ConflictGroupId, "conflict group id");
-named_id!(VariantId, "variant id");
+named_id!(ThreadId, "thread id");
 named_id!(PlanId, "plan id");
 named_id!(ActionId, "action id");
 named_id!(MaterializationId, "materialization id");
@@ -363,6 +362,26 @@ impl fmt::Display for BundleId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
+}
+
+/// A random RFC 4122 version-4 UUID in lowercase hyphenated form. Provider
+/// CLIs treat session identifiers as UUIDs (Claude Code's `--session-id`
+/// requires one), so forked provider sessions must mint IDs in the
+/// provider-native format rather than Mallard's internal named-ID format.
+pub fn generated_uuid_v4() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|error| format!("random uuid: {}", error))?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = hex_lower(&bytes);
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    ))
 }
 
 pub fn generated_named_id(prefix: &str) -> Result<String, String> {
@@ -1455,8 +1474,7 @@ pub struct LocalConversationBinding {
     pub replica_id: ReplicaId,
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
-    pub conflict_group_id: ConflictGroupId,
-    pub variant_id: VariantId,
+    pub thread_id: ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
     pub materialization_state: ConversationMaterializationState,
@@ -1485,8 +1503,8 @@ impl LocalConversationBinding {
         );
         if requires_provider_id != self.provider_thread_id.is_some() {
             return Err(format!(
-                "conversation variant '{}'/ '{}' has an invalid provider-thread binding",
-                self.conflict_group_id, self.variant_id
+                "conversation thread '{}' has an invalid provider-thread binding",
+                self.thread_id
             ));
         }
         if self.provider_thread_id.as_ref().is_some_and(|thread_id| {
@@ -1541,18 +1559,6 @@ impl LocalConversationBinding {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct LocalConversationPreference {
-    pub host_id: HostId,
-    pub replica_id: ReplicaId,
-    pub local_project_id: LocalProjectId,
-    pub provider_profile_id: LocalProviderProfileId,
-    pub conflict_group_id: ConflictGroupId,
-    pub preferred_variant_id: VariantId,
-    pub revision: u64,
-    pub updated_at: u64,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct OriginHostAlias {
     pub bundle_id: BundleId,
     pub origin_host_token: OriginHostToken,
@@ -1575,19 +1581,16 @@ pub struct ConversationBindings {
     #[serde(default)]
     pub bindings: Vec<LocalConversationBinding>,
     #[serde(default)]
-    pub preferences: Vec<LocalConversationPreference>,
-    #[serde(default)]
     pub origin_aliases: Vec<OriginHostAlias>,
 }
 
 impl ConversationBindings {
     pub fn empty(host_id: HostId) -> Self {
         Self {
-            schema: CONVERSATION_BINDINGS_SCHEMA_V1,
+            schema: CONVERSATION_BINDINGS_SCHEMA_V2,
             revision: 0,
             host_id,
             bindings: Vec::new(),
-            preferences: Vec::new(),
             origin_aliases: Vec::new(),
         }
     }
@@ -1598,9 +1601,8 @@ impl ConversationBindings {
         machine: &MachineProjectState,
         config: &SyncConfigV3,
     ) -> Result<(), String> {
-        if self.schema != CONVERSATION_BINDINGS_SCHEMA_V1
+        if self.schema != CONVERSATION_BINDINGS_SCHEMA_V2
             || self.bindings.len() > MAX_CONVERSATION_BINDINGS
-            || self.preferences.len() > MAX_CONVERSATION_BINDINGS
             || self.origin_aliases.len() > MAX_ORIGIN_ALIASES
         {
             return Err("invalid conversation bindings document".to_string());
@@ -1646,8 +1648,7 @@ impl ConversationBindings {
                 binding.replica_id.clone(),
                 binding.local_project_id.clone(),
                 binding.provider_profile_id.clone(),
-                binding.conflict_group_id.clone(),
-                binding.variant_id.clone(),
+                binding.thread_id.clone(),
             );
             if !binding_keys.insert(key) {
                 return Err("duplicate local conversation binding".to_string());
@@ -1659,35 +1660,10 @@ impl ConversationBindings {
                     thread_id.clone(),
                 );
                 if !provider_owners.insert(owner) {
-                    return Err("provider thread ID is owned by multiple variants".to_string());
+                    return Err(
+                        "provider thread ID is owned by multiple conversations".to_string()
+                    );
                 }
-            }
-        }
-
-        let mut preference_keys = HashSet::new();
-        for preference in &self.preferences {
-            if preference.host_id != self.host_id {
-                return Err("conversation preference belongs to a different host".to_string());
-            }
-            let key = (
-                preference.host_id.clone(),
-                preference.replica_id.clone(),
-                preference.local_project_id.clone(),
-                preference.provider_profile_id.clone(),
-                preference.conflict_group_id.clone(),
-            );
-            if !preference_keys.insert(key) {
-                return Err("duplicate local conversation preference".to_string());
-            }
-            if !self.bindings.iter().any(|binding| {
-                binding.host_id == preference.host_id
-                    && binding.replica_id == preference.replica_id
-                    && binding.local_project_id == preference.local_project_id
-                    && binding.provider_profile_id == preference.provider_profile_id
-                    && binding.conflict_group_id == preference.conflict_group_id
-                    && binding.variant_id == preference.preferred_variant_id
-            }) {
-                return Err("conversation preference points to an unknown variant".to_string());
             }
         }
 
@@ -1777,18 +1753,21 @@ pub struct ConversationSyncOperation {
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
     pub provider: Provider,
-    pub conflict_group_id: ConflictGroupId,
+    /// The cloud thread this operation was planned against: the rekey source
+    /// for a fork, otherwise the thread the result binds to.
+    pub thread_id: ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_variant_id: Option<VariantId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub old_variant_id: Option<VariantId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rekeyed_local_variant_id: Option<VariantId>,
+    pub old_thread_id: Option<ThreadId>,
     #[serde(default)]
     pub rekey_committed: bool,
-    pub result_variant_id: VariantId,
+    pub result_thread_id: ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
+    /// When the provider session behind this operation was created by a
+    /// provider-native fork (CLI or codec fallback), the session it was
+    /// forked from. Provenance for receipts and recovery only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_provider_thread_id: Option<String>,
     pub materialization_state: ConversationMaterializationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_digest: Option<String>,
@@ -1798,18 +1777,23 @@ pub struct ConversationSyncOperation {
     pub expected_bindings_document_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_binding_revision: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_preference_revision: Option<u64>,
     pub expected_profile_revision: u64,
     pub expected_project_binding_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_local_digest: Option<String>,
     #[serde(default)]
-    pub initialize_preference: bool,
-    #[serde(default)]
     pub targets: Vec<ConversationJournalTarget>,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+impl ConversationSyncOperation {
+    /// A deferred-publication fork: the binding moves to a freshly minted
+    /// thread while transcripts, provider files, and the cloud stay untouched.
+    /// Push forks rekey too, but publish the result in the same operation.
+    pub fn is_pure_rekey(&self) -> bool {
+        self.direction == ConversationPlanDirection::Pull && self.old_thread_id.is_some()
+    }
 }
 
 impl ConversationSyncOperation {
@@ -1836,23 +1820,31 @@ impl ConversationSyncOperation {
         if self.lineage_digest.is_some() != self.semantic_digest.is_some() {
             return Err("conversation journal lineage and semantics must be paired".to_string());
         }
-        if self.old_variant_id.is_some() != self.rekeyed_local_variant_id.is_some() {
-            return Err("conversation journal rekey source and result must be paired".to_string());
-        }
-        if let (Some(old), Some(rekeyed)) = (&self.old_variant_id, &self.rekeyed_local_variant_id) {
-            if old == rekeyed {
-                return Err("conversation journal rekey must change the variant id".to_string());
+        match &self.old_thread_id {
+            Some(old) => {
+                if old != &self.thread_id {
+                    return Err(
+                        "conversation journal rekey source must be the planned thread".to_string(),
+                    );
+                }
+                if old == &self.result_thread_id {
+                    return Err("conversation journal rekey must change the thread id".to_string());
+                }
+                if self.is_pure_rekey() && !self.targets.is_empty() {
+                    return Err(
+                        "conversation fork rekey must not touch provider targets".to_string()
+                    );
+                }
             }
-            if self.direction == ConversationPlanDirection::Push
-                && &self.result_variant_id != rekeyed
-            {
-                return Err(
-                    "conversation Push rekey result must be the published local variant"
-                        .to_string(),
-                );
+            None => {
+                if self.thread_id != self.result_thread_id {
+                    return Err(
+                        "conversation journal without a rekey must keep one thread id".to_string(),
+                    );
+                }
             }
         }
-        if self.rekey_committed && self.rekeyed_local_variant_id.is_none() {
+        if self.rekey_committed && self.old_thread_id.is_none() {
             return Err("conversation journal marks a missing rekey as committed".to_string());
         }
         if self.created_at > self.updated_at || self.targets.len() > 64 {
@@ -1863,18 +1855,36 @@ impl ConversationSyncOperation {
         }) {
             return Err("conversation journal has an invalid provider thread id".to_string());
         }
+        if let Some(forked_from) = &self.forked_from_provider_thread_id {
+            if forked_from.is_empty()
+                || forked_from.len() > 128
+                || forked_from.chars().any(char::is_control)
+            {
+                return Err(
+                    "conversation journal has an invalid forked-from provider id".to_string()
+                );
+            }
+            match &self.provider_thread_id {
+                None => {
+                    return Err(
+                        "conversation journal fork provenance requires a provider thread id"
+                            .to_string(),
+                    );
+                }
+                Some(provider_thread_id) if provider_thread_id == forked_from => {
+                    return Err(
+                        "conversation journal fork must change the provider thread id".to_string(),
+                    );
+                }
+                Some(_) => {}
+            }
+        }
         let requires_provider = matches!(
             self.materialization_state,
             ConversationMaterializationState::Pending | ConversationMaterializationState::Resumable
         );
         if requires_provider != self.provider_thread_id.is_some() {
             return Err("conversation journal has invalid provider materialization".to_string());
-        }
-        if self.initialize_preference
-            && (self.direction != ConversationPlanDirection::Pull
-                || self.materialization_state != ConversationMaterializationState::Resumable)
-        {
-            return Err("only a resumable Pull result can initialize local preference".to_string());
         }
         let mut targets = BTreeSet::new();
         for target in &self.targets {
@@ -1898,14 +1908,14 @@ pub struct ConversationSyncJournal {
 impl ConversationSyncJournal {
     pub fn empty() -> Self {
         Self {
-            schema: CONVERSATION_SYNC_JOURNAL_SCHEMA_V1,
+            schema: CONVERSATION_SYNC_JOURNAL_SCHEMA_V2,
             revision: 0,
             operations: Vec::new(),
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != CONVERSATION_SYNC_JOURNAL_SCHEMA_V1
+        if self.schema != CONVERSATION_SYNC_JOURNAL_SCHEMA_V2
             || self.operations.len() > MAX_CONVERSATION_JOURNAL_OPERATIONS
         {
             return Err("invalid conversation sync journal".to_string());
@@ -2195,8 +2205,11 @@ pub struct ConversationFileRef {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ConversationVariant {
-    pub variant_id: VariantId,
+pub struct ConversationThread {
+    pub thread_id: ThreadId,
+    pub provider: Provider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_title: Option<String>,
     pub resource_id: ResourceId,
     #[serde(default)]
     pub files: Vec<ConversationFileRef>,
@@ -2210,10 +2223,10 @@ pub struct ConversationVariant {
     pub lineage_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_digest: Option<String>,
+    /// Provenance of a fork only. Never consulted by the resolver, and the
+    /// referenced thread may have been tombstoned or pruned since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_variant_id: Option<VariantId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_message_id: Option<MessageId>,
+    pub forked_from: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2224,21 +2237,24 @@ pub struct ConversationVariant {
     pub updated_at: u64,
 }
 
-impl ConversationVariant {
-    fn validate(&self, provider: Provider, group_id: &ConflictGroupId) -> Result<(), String> {
+impl ConversationThread {
+    fn validate(&self) -> Result<(), String> {
         self.lineage_status.validate()?;
+        if let Some(title) = &self.display_title {
+            validate_display_text("conversation title", title, false)?;
+        }
         validate_display_text("conversation lineage codec", &self.lineage_codec, false)?;
-        let expected_resource_id = conversation_resource_id(provider, group_id, &self.variant_id)?;
+        let expected_resource_id = conversation_resource_id(self.provider, &self.thread_id)?;
         if self.resource_id != expected_resource_id {
             return Err(format!(
-                "conversation variant '{}' has non-canonical resource id '{}'",
-                self.variant_id, self.resource_id
+                "conversation thread '{}' has non-canonical resource id '{}'",
+                self.thread_id, self.resource_id
             ));
         }
         if self.files.is_empty() || self.files.len() > MAX_FILES {
             return Err(format!(
-                "conversation variant '{}' has an invalid file inventory",
-                self.variant_id
+                "conversation thread '{}' has an invalid file inventory",
+                self.thread_id
             ));
         }
         let mut paths = BTreeSet::new();
@@ -2247,8 +2263,8 @@ impl ConversationVariant {
             file.role.validate()?;
             if !paths.insert(file.logical_path.clone()) {
                 return Err(format!(
-                    "conversation variant '{}' repeats file '{}'",
-                    self.variant_id, file.logical_path
+                    "conversation thread '{}' repeats file '{}'",
+                    self.thread_id, file.logical_path
                 ));
             }
             if file.role == ConversationFileRole::Transcript {
@@ -2257,8 +2273,8 @@ impl ConversationVariant {
         }
         if transcript_count != 1 {
             return Err(format!(
-                "conversation variant '{}' must own exactly one transcript",
-                self.variant_id
+                "conversation thread '{}' must own exactly one transcript",
+                self.thread_id
             ));
         }
         let complete_fields = self.head_message_id.is_some()
@@ -2268,8 +2284,8 @@ impl ConversationVariant {
         match self.lineage_status {
             ConversationLineageStatus::Complete if !complete_fields => {
                 return Err(format!(
-                    "conversation variant '{}' has incomplete lineage metadata",
-                    self.variant_id
+                    "conversation thread '{}' has incomplete lineage metadata",
+                    self.thread_id
                 ));
             }
             ConversationLineageStatus::Unknown { .. }
@@ -2279,8 +2295,8 @@ impl ConversationVariant {
                     || self.semantic_digest.is_some() =>
             {
                 return Err(format!(
-                    "conversation variant '{}' has misleading unknown-lineage metadata",
-                    self.variant_id
+                    "conversation thread '{}' has misleading unknown-lineage metadata",
+                    self.thread_id
                 ));
             }
             _ => {}
@@ -2293,10 +2309,10 @@ impl ConversationVariant {
                 validate_sha256(label, digest)?;
             }
         }
-        if self.parent_variant_id.as_ref() == Some(&self.variant_id) {
+        if self.forked_from.as_ref() == Some(&self.thread_id) {
             return Err(format!(
-                "conversation variant '{}' cannot parent itself",
-                self.variant_id
+                "conversation thread '{}' cannot fork from itself",
+                self.thread_id
             ));
         }
         if let Some(thread_id) = &self.source_thread_id {
@@ -2318,88 +2334,12 @@ impl ConversationVariant {
         }
         if self.created_at > self.updated_at {
             return Err(format!(
-                "conversation variant '{}' has invalid timestamps",
-                self.variant_id
+                "conversation thread '{}' has invalid timestamps",
+                self.thread_id
             ));
         }
         Ok(())
     }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ConversationGroup {
-    pub conflict_group_id: ConflictGroupId,
-    pub provider: Provider,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_title: Option<String>,
-    pub primary_variant_id: VariantId,
-    #[serde(default)]
-    pub variants: BTreeMap<VariantId, ConversationVariant>,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
-impl ConversationGroup {
-    fn validate(&self) -> Result<(), String> {
-        if let Some(title) = &self.display_title {
-            validate_display_text("conversation title", title, false)?;
-        }
-        if self.variants.is_empty() || self.variants.len() > MAX_RESOURCES {
-            return Err(format!(
-                "conversation group '{}' has an invalid variant count",
-                self.conflict_group_id
-            ));
-        }
-        if !self.variants.contains_key(&self.primary_variant_id) {
-            return Err(format!(
-                "conversation group '{}' has an invalid primary variant",
-                self.conflict_group_id
-            ));
-        }
-        for (variant_id, variant) in &self.variants {
-            if variant_id != &variant.variant_id {
-                return Err(format!(
-                    "conversation variant key '{}' does not match its embedded id",
-                    variant_id
-                ));
-            }
-            variant.validate(self.provider, &self.conflict_group_id)?;
-        }
-        let mut state = BTreeMap::<VariantId, u8>::new();
-        for variant_id in self.variants.keys() {
-            validate_variant_parent_chain(variant_id, &self.variants, &mut state)?;
-        }
-        if self.created_at > self.updated_at {
-            return Err(format!(
-                "conversation group '{}' has invalid timestamps",
-                self.conflict_group_id
-            ));
-        }
-        Ok(())
-    }
-}
-
-fn validate_variant_parent_chain(
-    variant_id: &VariantId,
-    variants: &BTreeMap<VariantId, ConversationVariant>,
-    state: &mut BTreeMap<VariantId, u8>,
-) -> Result<(), String> {
-    match state.get(variant_id).copied() {
-        Some(1) => return Err("conversation variant parent cycle".to_string()),
-        Some(2) => return Ok(()),
-        _ => {}
-    }
-    state.insert(variant_id.clone(), 1);
-    if let Some(parent) = variants
-        .get(variant_id)
-        .and_then(|variant| variant.parent_variant_id.as_ref())
-    {
-        if variants.contains_key(parent) {
-            validate_variant_parent_chain(parent, variants, state)?;
-        }
-    }
-    state.insert(variant_id.clone(), 2);
-    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -2443,6 +2383,8 @@ pub enum ConversationPlanDirection {
 /// so every relation can be represented in review DTOs without interpreting a
 /// localized message. `FastForwardCloud` and `RequirePull` make the two Push
 /// prefix outcomes explicit rather than overloading Pull-only actions.
+/// `Fork` is the divergence default in both directions; `ReplaceCloud`,
+/// `ReplaceLocal`, and `TombstoneThread` exist only behind explicit approval.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationPlanActionType {
@@ -2451,13 +2393,13 @@ pub enum ConversationPlanActionType {
     FastForwardCloud,
     KeepLocal,
     RequirePull,
-    AddAlternate,
+    Fork,
+    CreateCloud,
+    CreateLocal,
     StoreOnly,
-    PromoteLocal,
-    PromoteCloud,
     ReplaceLocal,
-    TombstoneVariant,
-    TombstoneGroup,
+    ReplaceCloud,
+    TombstoneThread,
     Blocked,
 }
 
@@ -2523,13 +2465,11 @@ pub struct ConversationPlanAction {
     pub replica_id: ReplicaId,
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
-    pub conflict_group_id: ConflictGroupId,
+    pub thread_id: ThreadId,
+    /// The freshly minted thread a fork rekeys or creates. Minted at plan
+    /// time and carried in the reviewed action so retries never re-mint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cloud_variant_id: Option<VariantId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local_variant_id: Option<VariantId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_local_variant_id: Option<VariantId>,
+    pub result_thread_id: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_resource_id: Option<ResourceId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2551,8 +2491,6 @@ pub struct ConversationPlanAction {
     pub expected_bindings_document_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_binding_revision: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_preference_revision: Option<u64>,
     pub expires_at: u64,
 }
 
@@ -2604,7 +2542,8 @@ impl ConversationPlanAction {
             && matches!(
                 self.action,
                 ConversationPlanActionType::FastForwardLocal
-                    | ConversationPlanActionType::AddAlternate
+                    | ConversationPlanActionType::Fork
+                    | ConversationPlanActionType::CreateLocal
                     | ConversationPlanActionType::ReplaceLocal
             ))
             && self.proposed_provider_thread_id.is_none()
@@ -2618,7 +2557,8 @@ impl ConversationPlanAction {
                 self.action,
                 ConversationPlanActionType::FastForwardLocal
                     | ConversationPlanActionType::StoreOnly
-                    | ConversationPlanActionType::PromoteLocal
+                    | ConversationPlanActionType::CreateLocal
+                    | ConversationPlanActionType::KeepLocal
                     | ConversationPlanActionType::ReplaceLocal
             )
         {
@@ -2629,13 +2569,26 @@ impl ConversationPlanAction {
                 self.action,
                 ConversationPlanActionType::FastForwardCloud
                     | ConversationPlanActionType::RequirePull
-                    | ConversationPlanActionType::PromoteCloud
+                    | ConversationPlanActionType::CreateCloud
+                    | ConversationPlanActionType::ReplaceCloud
+                    | ConversationPlanActionType::TombstoneThread
             )
         {
             return Err("conversation Pull plan contains a Push-only action".to_string());
         }
+        if self.action == ConversationPlanActionType::Fork {
+            match &self.result_thread_id {
+                None => {
+                    return Err("conversation fork lacks a minted result thread".to_string());
+                }
+                Some(result) if result == &self.thread_id => {
+                    return Err("conversation fork must mint a distinct thread id".to_string());
+                }
+                Some(_) => {}
+            }
+        }
         if self.action == ConversationPlanActionType::NoOp
-            && (self.result_local_variant_id.is_some()
+            && (self.result_thread_id.is_some()
                 || self.proposed_provider_thread_id.is_some()
                 || !self.expected_provider_state.is_empty())
         {
@@ -2818,50 +2771,43 @@ fn stable_conversation_id(prefix: &str, domain: &str, fields: &[&[u8]]) -> Resul
     }
     // Conversation IDs use the first 128 digest bits. This matches Mallard's
     // other opaque identities while leaving enough room for the canonical
-    // `<provider>:conversation:<group>:<variant>` resource ID inside the
-    // existing 128-byte ResourceId bound. The domain and length-prefixed
-    // encoding make group and variant namespaces independent.
+    // `<provider>:conversation:<thread>` resource ID inside the existing
+    // 128-byte ResourceId bound. The domain and length-prefixed encoding make
+    // the legacy group and variant namespaces independent.
     let digest = hasher.finalize();
     let value = format!("{}-{}", prefix, hex_lower(&digest[..16]));
     validate_named_id("stable conversation id", &value)?;
     Ok(value)
 }
 
-pub fn deterministic_schema4_conversation_ids(
+/// Derive the schema-6 thread for a schema-4 conversation resource: a pure
+/// function of the bundle, provider, and legacy resource identity, so every
+/// host derives the same thread ID during the cutover without coordination.
+pub fn deterministic_schema4_thread_id(
     bundle_id: &BundleId,
     provider: Provider,
     schema4_resource_id: &ResourceId,
-) -> Result<(ConflictGroupId, VariantId), String> {
-    let group = ConflictGroupId::parse(stable_conversation_id(
-        "group",
-        "mallard-conversation-group-v1",
+) -> Result<ThreadId, String> {
+    let thread = stable_conversation_id(
+        "thread",
+        "mallard-conversation-thread-v1",
         &[
             bundle_id.as_str().as_bytes(),
             provider.as_str().as_bytes(),
             schema4_resource_id.as_str().as_bytes(),
         ],
-    )?)?;
-    let variant = VariantId::parse(stable_conversation_id(
-        "variant",
-        "mallard-conversation-variant-v1",
-        &[
-            group.as_str().as_bytes(),
-            schema4_resource_id.as_str().as_bytes(),
-        ],
-    )?)?;
-    Ok((group, variant))
+    )?;
+    ThreadId::parse(thread)
 }
 
 pub fn conversation_resource_id(
     provider: Provider,
-    group_id: &ConflictGroupId,
-    variant_id: &VariantId,
+    thread_id: &ThreadId,
 ) -> Result<ResourceId, String> {
     ResourceId::parse(format!(
-        "{}:conversation:{}:{}",
+        "{}:conversation:{}",
         provider.as_str(),
-        group_id,
-        variant_id
+        thread_id
     ))
 }
 
@@ -2935,12 +2881,8 @@ pub enum TombstoneTarget {
         resource_id: ResourceId,
         logical_path: LogicalPath,
     },
-    ConversationVariant {
-        conflict_group_id: ConflictGroupId,
-        variant_id: VariantId,
-    },
-    ConversationGroup {
-        conflict_group_id: ConflictGroupId,
+    ConversationThread {
+        thread_id: ThreadId,
     },
 }
 
@@ -2968,12 +2910,8 @@ impl Tombstone {
                 resource_id,
                 logical_path,
             } => format!("project-content-dir:{}:{}", resource_id, logical_path),
-            TombstoneTarget::ConversationVariant {
-                conflict_group_id,
-                variant_id,
-            } => format!("conversation-variant:{}:{}", conflict_group_id, variant_id),
-            TombstoneTarget::ConversationGroup { conflict_group_id } => {
-                format!("conversation-group:{}", conflict_group_id)
+            TombstoneTarget::ConversationThread { thread_id } => {
+                format!("conversation-thread:{}", thread_id)
             }
         }
     }
@@ -3000,7 +2938,7 @@ pub struct BundleHead {
 
 impl BundleHead {
     pub fn validate(&self) -> Result<(), String> {
-        if !matches!(self.schema_version, BUNDLE_SCHEMA_V4 | BUNDLE_SCHEMA_V5) {
+        if !matches!(self.schema_version, BUNDLE_SCHEMA_V4 | BUNDLE_SCHEMA_V6) {
             return Err(format!(
                 "unsupported bundle head schema {}",
                 self.schema_version
@@ -3031,7 +2969,7 @@ pub struct BundleManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_by_origin: Option<PortableOrigin>,
     #[serde(default)]
-    pub conversation_groups: BTreeMap<ConflictGroupId, ConversationGroup>,
+    pub conversations: BTreeMap<ThreadId, ConversationThread>,
     #[serde(default)]
     pub resources: BTreeMap<ResourceId, ResourceDescriptor>,
     #[serde(default)]
@@ -3044,7 +2982,7 @@ pub struct BundleManifest {
 
 impl BundleManifest {
     pub fn validate(&self) -> Result<(), String> {
-        if !matches!(self.schema_version, BUNDLE_SCHEMA_V4 | BUNDLE_SCHEMA_V5) {
+        if !matches!(self.schema_version, BUNDLE_SCHEMA_V4 | BUNDLE_SCHEMA_V6) {
             return Err(format!(
                 "unsupported bundle manifest schema {}",
                 self.schema_version
@@ -3052,14 +2990,14 @@ impl BundleManifest {
         }
         match self.schema_version {
             BUNDLE_SCHEMA_V4
-                if self.published_by_origin.is_some() || !self.conversation_groups.is_empty() =>
+                if self.published_by_origin.is_some() || !self.conversations.is_empty() =>
             {
                 return Err(
-                    "schema-4 manifest cannot contain schema-5 conversation metadata".to_string(),
+                    "schema-4 manifest cannot contain schema-6 conversation metadata".to_string(),
                 );
             }
-            BUNDLE_SCHEMA_V5 if self.published_by_origin.is_none() => {
-                return Err("schema-5 manifest lacks publishing origin".to_string());
+            BUNDLE_SCHEMA_V6 if self.published_by_origin.is_none() => {
+                return Err("schema-6 manifest lacks publishing origin".to_string());
             }
             _ => {}
         }
@@ -3082,7 +3020,7 @@ impl BundleManifest {
             }
             descriptor.validate()?;
         }
-        self.validate_conversation_groups()?;
+        self.validate_conversations()?;
         let recipe_ids = self.recipe.selected_ids();
         let resource_ids: BTreeSet<_> = self.resources.keys().cloned().collect();
         if recipe_ids != resource_ids {
@@ -3301,38 +3239,17 @@ impl BundleManifest {
                         ));
                     }
                 }
-                TombstoneTarget::ConversationVariant {
-                    conflict_group_id,
-                    variant_id,
-                } => {
-                    if self
-                        .conversation_groups
-                        .get(conflict_group_id)
-                        .is_some_and(|group| group.variants.contains_key(variant_id))
-                    {
+                TombstoneTarget::ConversationThread { thread_id } => {
+                    if self.conversations.contains_key(thread_id) {
                         return Err(format!(
-                            "live conversation variant '{}'/ '{}' also has a tombstone",
-                            conflict_group_id, variant_id
+                            "live conversation thread '{}' also has a tombstone",
+                            thread_id
                         ));
                     }
                     if tombstone.last_sha256.is_none() {
                         return Err(format!(
-                            "conversation variant tombstone '{}'/ '{}' lacks its last digest",
-                            conflict_group_id, variant_id
-                        ));
-                    }
-                }
-                TombstoneTarget::ConversationGroup { conflict_group_id } => {
-                    if self.conversation_groups.contains_key(conflict_group_id) {
-                        return Err(format!(
-                            "live conversation group '{}' also has a tombstone",
-                            conflict_group_id
-                        ));
-                    }
-                    if tombstone.last_sha256.is_none() {
-                        return Err(format!(
-                            "conversation group tombstone '{}' lacks its last digest",
-                            conflict_group_id
+                            "conversation thread tombstone '{}' lacks its last digest",
+                            thread_id
                         ));
                     }
                 }
@@ -3341,154 +3258,109 @@ impl BundleManifest {
         Ok(())
     }
 
-    fn validate_conversation_groups(&self) -> Result<(), String> {
-        if self.schema_version == BUNDLE_SCHEMA_V4 {
+    fn validate_conversations(&self) -> Result<(), String> {
+        if self.schema_version != BUNDLE_SCHEMA_V6 {
             return Ok(());
         }
-        if self.conversation_groups.len() > MAX_RESOURCES {
-            return Err("bundle has too many conversation groups".to_string());
+        if self.conversations.len() > MAX_RESOURCES {
+            return Err("bundle has too many conversation threads".to_string());
         }
-        let mut variant_resources = BTreeSet::new();
+        let mut thread_resources = BTreeSet::new();
         let mut referenced_files = BTreeMap::<LogicalPath, ResourceId>::new();
-        for (group_id, group) in &self.conversation_groups {
-            if group_id != &group.conflict_group_id {
+        for (thread_id, thread) in &self.conversations {
+            if thread_id != &thread.thread_id {
                 return Err(format!(
-                    "conversation group key '{}' does not match its embedded id",
-                    group_id
+                    "conversation thread key '{}' does not match its embedded id",
+                    thread_id
                 ));
             }
-            group.validate()?;
-            if self.tombstones.values().any(|tombstone| {
-                matches!(
-                    &tombstone.target,
-                    TombstoneTarget::ConversationGroup { conflict_group_id }
-                        if conflict_group_id == group_id
+            thread.validate()?;
+            if !thread_resources.insert(thread.resource_id.clone()) {
+                return Err(format!(
+                    "conversation resource '{}' belongs to multiple threads",
+                    thread.resource_id
+                ));
+            }
+            let descriptor = self.resources.get(&thread.resource_id).ok_or_else(|| {
+                format!(
+                    "conversation thread '{}' references missing resource '{}'",
+                    thread_id, thread.resource_id
                 )
-            }) {
+            })?;
+            let expected_kind = match thread.provider {
+                Provider::Codex => ResourceKind::CodexConversation,
+                Provider::Claude => ResourceKind::ClaudeConversation,
+            };
+            if descriptor.kind != expected_kind || descriptor.provider != Some(thread.provider) {
                 return Err(format!(
-                    "live conversation group '{}' also has a tombstone",
-                    group_id
+                    "conversation thread '{}' disagrees with its resource provider",
+                    thread_id
                 ));
             }
-            for (variant_id, variant) in &group.variants {
-                if !variant_resources.insert(variant.resource_id.clone()) {
-                    return Err(format!(
-                        "conversation resource '{}' belongs to multiple variants",
-                        variant.resource_id
-                    ));
-                }
-                let descriptor = self.resources.get(&variant.resource_id).ok_or_else(|| {
+            if !self
+                .captured_with
+                .codec_versions
+                .contains_key(&thread.lineage_codec)
+            {
+                return Err(format!(
+                    "conversation thread '{}' references unknown codec '{}'",
+                    thread_id, thread.lineage_codec
+                ));
+            }
+            let declared_paths = thread
+                .files
+                .iter()
+                .map(|file| file.logical_path.clone())
+                .collect::<BTreeSet<_>>();
+            for file in &thread.files {
+                let entry = self.files.get(&file.logical_path).ok_or_else(|| {
                     format!(
-                        "conversation variant '{}' references missing resource '{}'",
-                        variant_id, variant.resource_id
+                        "conversation thread '{}' references missing file '{}'",
+                        thread_id, file.logical_path
                     )
                 })?;
-                let expected_kind = match group.provider {
-                    Provider::Codex => ResourceKind::CodexConversation,
-                    Provider::Claude => ResourceKind::ClaudeConversation,
-                };
-                if descriptor.kind != expected_kind || descriptor.provider != Some(group.provider) {
+                if entry.resource_id != thread.resource_id {
                     return Err(format!(
-                        "conversation variant '{}' disagrees with its resource provider",
-                        variant_id
+                        "conversation file '{}' has the wrong resource owner",
+                        file.logical_path
                     ));
                 }
-                if !self
-                    .captured_with
-                    .codec_versions
-                    .contains_key(&variant.lineage_codec)
+                if let Some(previous) =
+                    referenced_files.insert(file.logical_path.clone(), thread.resource_id.clone())
                 {
                     return Err(format!(
-                        "conversation variant '{}' references unknown codec '{}'",
-                        variant_id, variant.lineage_codec
+                        "conversation file '{}' is shared by '{}' and '{}'",
+                        file.logical_path, previous, thread.resource_id
                     ));
                 }
-                if self.tombstones.values().any(|tombstone| {
-                    matches!(
-                        &tombstone.target,
-                        TombstoneTarget::ConversationVariant {
-                            conflict_group_id,
-                            variant_id: tombstoned_variant_id,
-                        } if conflict_group_id == group_id && tombstoned_variant_id == variant_id
-                    )
-                }) {
+            }
+            for (path, entry) in &self.files {
+                if entry.resource_id == thread.resource_id && !declared_paths.contains(path) {
                     return Err(format!(
-                        "live conversation variant '{}'/ '{}' also has a tombstone",
-                        group_id, variant_id
+                        "conversation resource '{}' owns undeclared file '{}'",
+                        thread.resource_id, path
                     ));
                 }
-                if let Some(parent_id) = &variant.parent_variant_id {
-                    let parent_is_tombstoned = self.tombstones.values().any(|tombstone| {
-                        matches!(
-                            &tombstone.target,
-                            TombstoneTarget::ConversationVariant {
-                                conflict_group_id,
-                                variant_id: tombstoned_variant_id,
-                            } if conflict_group_id == group_id && tombstoned_variant_id == parent_id
-                        )
-                    });
-                    if !group.variants.contains_key(parent_id) && !parent_is_tombstoned {
-                        return Err(format!(
-                            "conversation variant '{}'/ '{}' references an unknown parent '{}'",
-                            group_id, variant_id, parent_id
-                        ));
-                    }
-                }
-                let declared_paths = variant
-                    .files
-                    .iter()
-                    .map(|file| file.logical_path.clone())
-                    .collect::<BTreeSet<_>>();
-                for file in &variant.files {
-                    let entry = self.files.get(&file.logical_path).ok_or_else(|| {
-                        format!(
-                            "conversation variant '{}'/ '{}' references missing file '{}'",
-                            group_id, variant_id, file.logical_path
-                        )
-                    })?;
-                    if entry.resource_id != variant.resource_id {
-                        return Err(format!(
-                            "conversation file '{}' has the wrong resource owner",
-                            file.logical_path
-                        ));
-                    }
-                    if let Some(previous) = referenced_files
-                        .insert(file.logical_path.clone(), variant.resource_id.clone())
-                    {
-                        return Err(format!(
-                            "conversation file '{}' is shared by '{}' and '{}'",
-                            file.logical_path, previous, variant.resource_id
-                        ));
-                    }
-                }
-                for (path, entry) in &self.files {
-                    if entry.resource_id == variant.resource_id && !declared_paths.contains(path) {
-                        return Err(format!(
-                            "conversation resource '{}' owns undeclared file '{}'",
-                            variant.resource_id, path
-                        ));
-                    }
-                }
-                if self
-                    .directories
-                    .values()
-                    .any(|entry| entry.resource_id == variant.resource_id)
-                {
-                    return Err(format!(
-                        "conversation resource '{}' cannot own a directory entry",
-                        variant.resource_id
-                    ));
-                }
+            }
+            if self
+                .directories
+                .values()
+                .any(|entry| entry.resource_id == thread.resource_id)
+            {
+                return Err(format!(
+                    "conversation resource '{}' cannot own a directory entry",
+                    thread.resource_id
+                ));
             }
         }
         for (resource_id, descriptor) in &self.resources {
             if matches!(
                 descriptor.kind,
                 ResourceKind::CodexConversation | ResourceKind::ClaudeConversation
-            ) && !variant_resources.contains(resource_id)
+            ) && !thread_resources.contains(resource_id)
             {
                 return Err(format!(
-                    "conversation resource '{}' belongs to no live variant",
+                    "conversation resource '{}' belongs to no live thread",
                     resource_id
                 ));
             }
@@ -4085,10 +3957,9 @@ pub enum ActionStatus {
 pub struct ConversationApplyReceipt {
     pub host_id: HostId,
     pub replica_id: ReplicaId,
-    pub conflict_group_id: ConflictGroupId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_variant_id: Option<VariantId>,
-    pub result_variant_id: VariantId,
+    pub old_thread_id: Option<ThreadId>,
+    pub result_thread_id: ThreadId,
     pub provider_profile_id: LocalProviderProfileId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
@@ -4350,7 +4221,7 @@ mod tests {
             recipe: BundleRecipe::default(),
             captured_with: CapturedWith::default(),
             published_by_origin: None,
-            conversation_groups: BTreeMap::new(),
+            conversations: BTreeMap::new(),
             resources: BTreeMap::new(),
             files: BTreeMap::new(),
             directories: BTreeMap::new(),
@@ -4687,7 +4558,7 @@ mod tests {
             recipe,
             captured_with: CapturedWith::default(),
             published_by_origin: None,
-            conversation_groups: BTreeMap::new(),
+            conversations: BTreeMap::new(),
             resources,
             files,
             directories: BTreeMap::new(),
@@ -4924,33 +4795,32 @@ mod tests {
     }
 
     #[test]
-    fn schema4_conversation_ids_are_deterministic_and_domain_separated() {
+    fn schema4_thread_ids_are_deterministic_and_domain_separated() {
         let bundle = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let other_bundle = BundleId::parse("fedcba9876543210fedcba9876543210").unwrap();
         let resource = ResourceId::parse("codex:session:thread-a").unwrap();
-        let first =
-            deterministic_schema4_conversation_ids(&bundle, Provider::Codex, &resource).unwrap();
+        let first = deterministic_schema4_thread_id(&bundle, Provider::Codex, &resource).unwrap();
         let repeated =
-            deterministic_schema4_conversation_ids(&bundle, Provider::Codex, &resource).unwrap();
-        let claude =
-            deterministic_schema4_conversation_ids(&bundle, Provider::Claude, &resource).unwrap();
+            deterministic_schema4_thread_id(&bundle, Provider::Codex, &resource).unwrap();
+        let claude = deterministic_schema4_thread_id(&bundle, Provider::Claude, &resource).unwrap();
+        let elsewhere =
+            deterministic_schema4_thread_id(&other_bundle, Provider::Codex, &resource).unwrap();
         assert_eq!(first, repeated);
-        assert_ne!(first.0, claude.0);
-        assert_ne!(first.0.as_str(), first.1.as_str());
-        assert_eq!(first.0.as_str(), "group-ba8916e65f9fd93d9f1c05dce39ef50c");
-        assert_eq!(first.1.as_str(), "variant-a6a4d9115bf7665c22d3f4acd116a137");
+        assert_ne!(first, claude);
+        assert_ne!(first, elsewhere);
+        assert!(first.as_str().starts_with("thread-"));
+        conversation_resource_id(Provider::Codex, &first).unwrap();
     }
 
-    fn schema5_conversation_manifest() -> BundleManifest {
+    fn schema6_conversation_manifest() -> BundleManifest {
         let bundle = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
         let legacy_resource = ResourceId::parse("codex:session:thread-a").unwrap();
-        let (group_id, variant_id) =
-            deterministic_schema4_conversation_ids(&bundle, Provider::Codex, &legacy_resource)
-                .unwrap();
-        let resource_id =
-            conversation_resource_id(Provider::Codex, &group_id, &variant_id).unwrap();
+        let thread_id =
+            deterministic_schema4_thread_id(&bundle, Provider::Codex, &legacy_resource).unwrap();
+        let resource_id = conversation_resource_id(Provider::Codex, &thread_id).unwrap();
         let transcript_path = LogicalPath::parse(format!(
-            "state/conversations/codex/{}/{}/transcript.jsonl",
-            group_id, variant_id
+            "state/conversations/codex/{}/transcript.jsonl",
+            thread_id
         ))
         .unwrap();
         let chain = vec![
@@ -4958,8 +4828,10 @@ mod tests {
             canonical_message("m-b", Some("m-a"), 'b'),
         ];
         let (lineage_digest, semantic_digest) = conversation_chain_digests(&chain).unwrap();
-        let variant = ConversationVariant {
-            variant_id: variant_id.clone(),
+        let thread = ConversationThread {
+            thread_id: thread_id.clone(),
+            provider: Provider::Codex,
+            display_title: Some("Conversation".to_string()),
             resource_id: resource_id.clone(),
             files: vec![ConversationFileRef {
                 logical_path: transcript_path.clone(),
@@ -4971,8 +4843,7 @@ mod tests {
             message_count: Some(2),
             lineage_digest: Some(lineage_digest),
             semantic_digest: Some(semantic_digest),
-            parent_variant_id: None,
-            fork_message_id: None,
+            forked_from: None,
             source_thread_id: Some("thread-a".to_string()),
             created_by_origin: None,
             last_updated_by_origin: None,
@@ -4992,9 +4863,9 @@ mod tests {
             metadata: BTreeMap::new(),
         };
         BundleManifest {
-            schema_version: BUNDLE_SCHEMA_V5,
+            schema_version: BUNDLE_SCHEMA_V6,
             generation: 2,
-            commit_id: "commit-schema5".to_string(),
+            commit_id: "commit-schema6".to_string(),
             updated_at: 2,
             bundle: BundleIdentity {
                 bundle_id: bundle,
@@ -5025,18 +4896,7 @@ mod tests {
                 origin_replica_token: OriginReplicaToken::parse("b".repeat(64)).unwrap(),
                 shared_label: None,
             }),
-            conversation_groups: BTreeMap::from([(
-                group_id.clone(),
-                ConversationGroup {
-                    conflict_group_id: group_id,
-                    provider: Provider::Codex,
-                    display_title: Some("Conversation".to_string()),
-                    primary_variant_id: variant_id.clone(),
-                    variants: BTreeMap::from([(variant_id, variant)]),
-                    created_at: 1,
-                    updated_at: 1,
-                },
-            )]),
+            conversations: BTreeMap::from([(thread_id.clone(), thread)]),
             resources: BTreeMap::from([(resource_id.clone(), descriptor)]),
             files: BTreeMap::from([(
                 transcript_path,
@@ -5055,21 +4915,9 @@ mod tests {
     }
 
     #[test]
-    fn schema5_manifest_enforces_conversation_referential_integrity() {
-        let manifest = schema5_conversation_manifest();
+    fn schema6_manifest_enforces_conversation_referential_integrity() {
+        let manifest = schema6_conversation_manifest();
         manifest.validate().unwrap();
-
-        let mut bad_primary = manifest.clone();
-        bad_primary
-            .conversation_groups
-            .values_mut()
-            .next()
-            .unwrap()
-            .primary_variant_id = VariantId::parse("variant-missing").unwrap();
-        assert!(bad_primary
-            .validate()
-            .unwrap_err()
-            .contains("invalid primary"));
 
         let mut missing_file = manifest.clone();
         missing_file.files.clear();
@@ -5080,7 +4928,7 @@ mod tests {
 
         let mut wrong_provider = manifest.clone();
         wrong_provider
-            .conversation_groups
+            .conversations
             .values_mut()
             .next()
             .unwrap()
@@ -5091,17 +4939,33 @@ mod tests {
             .contains("non-canonical resource id"));
 
         let mut duplicate_transcript = manifest.clone();
-        let group = duplicate_transcript
-            .conversation_groups
+        let thread = duplicate_transcript
+            .conversations
             .values_mut()
             .next()
             .unwrap();
-        let variant = group.variants.values_mut().next().unwrap();
-        let duplicate = variant.files[0].clone();
-        variant.files.push(duplicate);
+        let duplicate = thread.files[0].clone();
+        thread.files.push(duplicate);
         assert!(duplicate_transcript
             .validate()
             .unwrap_err()
             .contains("repeats file"));
+
+        let mut self_fork = manifest.clone();
+        {
+            let thread = self_fork.conversations.values_mut().next().unwrap();
+            thread.forked_from = Some(thread.thread_id.clone());
+        }
+        assert!(self_fork
+            .validate()
+            .unwrap_err()
+            .contains("cannot fork from itself"));
+
+        let mut downgraded = manifest;
+        downgraded.schema_version = BUNDLE_SCHEMA_V4;
+        assert!(downgraded
+            .validate()
+            .unwrap_err()
+            .contains("schema-4 manifest cannot contain"));
     }
 }

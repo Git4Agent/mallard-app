@@ -16,10 +16,9 @@ use crate::project_sync_v3::domain::{
     BindingState, BundleId, BundleRecipe, ConversationFileRole, ConversationJournalTarget,
     ConversationMaterializationState, ConversationOperationId, ConversationPlanActionType,
     ConversationPlanDirection, ConversationPushPlan, ConversationReasonCode, ConversationRelation,
-    ConversationSyncOperation, ConversationSyncPhase, LocalConversationBinding,
-    LocalConversationPreference, LocalProjectId, LocalProjectRegistration, LocalProviderProfileId,
-    PlanId, ProjectBinding, Provider, ProviderProfile, ReplicaId, StorageId, TargetExpectation,
-    VariantId, PUSH_PLAN_SCHEMA_V1,
+    ConversationSyncOperation, ConversationSyncPhase, LocalConversationBinding, LocalProjectId,
+    LocalProjectRegistration, LocalProviderProfileId, PlanId, ProjectBinding, Provider,
+    ProviderProfile, ReplicaId, StorageId, TargetExpectation, ThreadId, PUSH_PLAN_SCHEMA_V1,
 };
 use crate::project_sync_v3::persistence::V3Repository;
 use crate::project_sync_v3::provider_capture::{
@@ -128,10 +127,6 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
             Box::new(|value| value.binding_revision = Some(99)),
         ),
         (
-            ConversationStalePin::PreferenceRevision,
-            Box::new(|value| value.preference_revision = Some(99)),
-        ),
-        (
             ConversationStalePin::Codec,
             Box::new(|value| value.codec = "codex.lineage.v2".to_string()),
         ),
@@ -177,7 +172,11 @@ fn every_typed_action_rejects_a_stale_plan_before_apply() {
         ),
         (
             ConversationPlanDirection::Pull,
-            ConversationPlanActionType::AddAlternate,
+            ConversationPlanActionType::Fork,
+        ),
+        (
+            ConversationPlanDirection::Push,
+            ConversationPlanActionType::Fork,
         ),
         (
             ConversationPlanDirection::Pull,
@@ -185,11 +184,11 @@ fn every_typed_action_rejects_a_stale_plan_before_apply() {
         ),
         (
             ConversationPlanDirection::Pull,
-            ConversationPlanActionType::PromoteLocal,
+            ConversationPlanActionType::CreateLocal,
         ),
         (
             ConversationPlanDirection::Push,
-            ConversationPlanActionType::PromoteCloud,
+            ConversationPlanActionType::CreateCloud,
         ),
         (
             ConversationPlanDirection::Pull,
@@ -197,11 +196,11 @@ fn every_typed_action_rejects_a_stale_plan_before_apply() {
         ),
         (
             ConversationPlanDirection::Push,
-            ConversationPlanActionType::TombstoneVariant,
+            ConversationPlanActionType::ReplaceCloud,
         ),
         (
             ConversationPlanDirection::Push,
-            ConversationPlanActionType::TombstoneGroup,
+            ConversationPlanActionType::TombstoneThread,
         ),
         (
             ConversationPlanDirection::Pull,
@@ -301,15 +300,11 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
         )
         .unwrap(),
         provider: Provider::Codex,
-        conflict_group_id: crate::project_sync_v3::domain::ConflictGroupId::parse("group-a")
-            .unwrap(),
-        source_variant_id: Some(
-            crate::project_sync_v3::domain::VariantId::parse("variant-a").unwrap(),
-        ),
-        old_variant_id: None,
-        rekeyed_local_variant_id: None,
+        thread_id: ThreadId::parse("thread-journal").unwrap(),
+        old_thread_id: None,
         rekey_committed: false,
-        result_variant_id: crate::project_sync_v3::domain::VariantId::parse("variant-a").unwrap(),
+        result_thread_id: ThreadId::parse("thread-journal").unwrap(),
+        forked_from_provider_thread_id: None,
         provider_thread_id: Some("thread-a".to_string()),
         materialization_state: ConversationMaterializationState::Pending,
         lineage_digest: Some("b".repeat(64)),
@@ -317,11 +312,9 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
         expected_host_identity_revision: 0,
         expected_bindings_document_revision: 0,
         expected_binding_revision: None,
-        expected_preference_revision: None,
         expected_profile_revision: 0,
         expected_project_binding_revision: 0,
         expected_local_digest: None,
-        initialize_preference: false,
         targets: vec![ConversationJournalTarget {
             target_path: "/tmp/provider/thread-a.jsonl".to_string(),
             role: crate::project_sync_v3::domain::ConversationFileRole::Transcript,
@@ -378,13 +371,11 @@ fn journal_rejects_duplicate_operation_ids() {
         )
         .unwrap(),
         provider: Provider::Codex,
-        conflict_group_id: crate::project_sync_v3::domain::ConflictGroupId::parse("group-a")
-            .unwrap(),
-        source_variant_id: None,
-        old_variant_id: None,
-        rekeyed_local_variant_id: None,
+        thread_id: ThreadId::parse("thread-journal").unwrap(),
+        old_thread_id: None,
         rekey_committed: false,
-        result_variant_id: crate::project_sync_v3::domain::VariantId::parse("variant-a").unwrap(),
+        result_thread_id: ThreadId::parse("thread-journal").unwrap(),
+        forked_from_provider_thread_id: None,
         provider_thread_id: None,
         materialization_state: ConversationMaterializationState::StoredOnly,
         lineage_digest: None,
@@ -392,11 +383,9 @@ fn journal_rejects_duplicate_operation_ids() {
         expected_host_identity_revision: 0,
         expected_bindings_document_revision: 0,
         expected_binding_revision: None,
-        expected_preference_revision: None,
         expected_profile_revision: 0,
         expected_project_binding_revision: 0,
         expected_local_digest: None,
-        initialize_preference: false,
         targets: vec![],
         created_at: 1,
         updated_at: 1,
@@ -605,17 +594,16 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
     for (checkpoint, publication_committed) in checkpoints {
         let world = VariantWorld::new();
         let origin = world.origin(&world.repo_a, "replica-cloud-checkpoint");
-        let variant_id = VariantId::parse("variant-cloud-checkpoint").unwrap();
+        let thread_id = ThreadId::parse("thread-cloud-checkpoint").unwrap();
         let initial_transcript = super::harness::chain("source-thread", &[("m-a", "base")]);
-        let initial_variant = super::harness::VariantSpec::new(
-            "group-push",
-            variant_id.as_str(),
+        let initial_thread = super::harness::ThreadSpec::new(
+            thread_id.as_str(),
             "source-thread",
             initial_transcript,
             origin.clone(),
             10,
         );
-        let initial = world.publish(&[initial_variant.clone()], &variant_id, origin.clone(), 10);
+        let initial = world.publish(&[initial_thread.clone()], origin.clone(), 10);
         let scope = install_scope(
             &world.repo_a,
             &world.bundle_id,
@@ -647,11 +635,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                     replica_id: scope.replica_id.clone(),
                     local_project_id: scope.project_id.clone(),
                     provider_profile_id: scope.profile_id.clone(),
-                    conflict_group_id: crate::project_sync_v3::domain::ConflictGroupId::parse(
-                        "group-push",
-                    )
-                    .unwrap(),
-                    variant_id: variant_id.clone(),
+                    thread_id: thread_id.clone(),
                     provider_thread_id: Some("source-thread".to_string()),
                     materialization_state: ConversationMaterializationState::Resumable,
                     last_observed_file_sha256: Some(sha256(&advanced_transcript)),
@@ -664,31 +648,17 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                     created_at: 10,
                     updated_at: 10,
                 });
-                document.preferences.push(LocalConversationPreference {
-                    host_id: scope.host_id.clone(),
-                    replica_id: scope.replica_id.clone(),
-                    local_project_id: scope.project_id.clone(),
-                    provider_profile_id: scope.profile_id.clone(),
-                    conflict_group_id: crate::project_sync_v3::domain::ConflictGroupId::parse(
-                        "group-push",
-                    )
-                    .unwrap(),
-                    preferred_variant_id: variant_id.clone(),
-                    revision: 0,
-                    updated_at: 10,
-                });
                 Ok(())
             })
             .unwrap();
         let bindings = world.repo_a.load_conversation_bindings().unwrap();
-        let mut advanced_variant = initial_variant;
-        advanced_variant.transcript = advanced_transcript.clone();
-        advanced_variant.updated_at = 20;
-        advanced_variant.last_updated_by = Some(origin.clone());
-        let request = super::harness::schema5_request(
+        let mut advanced_thread = initial_thread;
+        advanced_thread.transcript = advanced_transcript.clone();
+        advanced_thread.updated_at = 20;
+        advanced_thread.last_updated_by = Some(origin.clone());
+        let request = super::harness::schema6_request(
             world.bundle_id.clone(),
-            &[advanced_variant],
-            &variant_id,
+            &[advanced_thread],
             origin,
             20,
             Some(&initial.snapshot.manifest),
@@ -702,12 +672,10 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
             initial.snapshot.head.generation,
             initial.snapshot.head.commit_id,
             initial.snapshot.head.manifest_sha256,
-            &variant_id,
-            &variant_id,
-            None,
+            &thread_id,
+            &thread_id,
             bindings.revision,
             Some(bindings.bindings[0].revision),
-            Some(bindings.preferences[0].revision),
             &advanced_transcript,
             &lineage,
             &semantic,
@@ -717,7 +685,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
         let result = apply_conversation_cloud_publication(
             &world.repo_a,
             operation,
-            || engine.publish_schema5(request).map(cloud_publication),
+            || engine.publish_schema6(request).map(cloud_publication),
             || Ok(None),
             &mut fail_once,
         );
@@ -929,8 +897,8 @@ fn committed_codex_provider_files_materialize_resume_and_rebind_one_variant() {
     let bindings = fixture.repository.load_conversation_bindings().unwrap();
     assert_eq!(bindings.bindings.len(), 1);
     assert_eq!(
-        bindings.bindings[0].variant_id,
-        VariantId::parse("variant-cloud").unwrap()
+        bindings.bindings[0].thread_id,
+        ThreadId::parse("thread-materialize").unwrap()
     );
     assert_eq!(
         bindings.bindings[0].provider_thread_id.as_deref(),
@@ -969,14 +937,13 @@ fn replacement_is_digest_pinned_backed_up_and_restart_idempotent() {
 }
 
 #[test]
-fn same_id_divergent_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
+fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
     let world = VariantWorld::new();
     let origin_a = world.origin(&world.repo_a, "replica-push");
     let origin_b = world.origin(&world.repo_b, "replica-b");
-    let cloud_id = VariantId::parse("variant-shared").unwrap();
-    let local_id = VariantId::parse("variant-local-stable").unwrap();
-    let cloud_initial = super::harness::VariantSpec::new(
-        "group-push",
+    let cloud_id = ThreadId::parse("thread-shared").unwrap();
+    let forked_id = ThreadId::parse("thread-forked-local").unwrap();
+    let cloud_initial = super::harness::ThreadSpec::new(
         cloud_id.as_str(),
         "source-thread",
         super::harness::chain(
@@ -990,7 +957,7 @@ fn same_id_divergent_push_reuses_rekey_after_cas_failure_and_post_cas_restart() 
         origin_b.clone(),
         10,
     );
-    let initial = world.publish(&[cloud_initial.clone()], &cloud_id, origin_b.clone(), 10);
+    let initial = world.publish(&[cloud_initial.clone()], origin_b.clone(), 10);
     let local_transcript = super::harness::chain(
         "source-thread",
         &[
@@ -1019,11 +986,7 @@ fn same_id_divergent_push_reuses_rekey_after_cas_failure_and_post_cas_restart() 
                 replica_id: scope.replica_id.clone(),
                 local_project_id: scope.project_id.clone(),
                 provider_profile_id: scope.profile_id.clone(),
-                conflict_group_id: crate::project_sync_v3::domain::ConflictGroupId::parse(
-                    "group-push",
-                )
-                .unwrap(),
-                variant_id: cloud_id.clone(),
+                thread_id: cloud_id.clone(),
                 provider_thread_id: Some("source-thread".to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
                 last_observed_file_sha256: Some(sha256(&local_transcript)),
@@ -1036,38 +999,22 @@ fn same_id_divergent_push_reuses_rekey_after_cas_failure_and_post_cas_restart() 
                 created_at: 10,
                 updated_at: 10,
             });
-            document.preferences.push(LocalConversationPreference {
-                host_id: scope.host_id.clone(),
-                replica_id: scope.replica_id.clone(),
-                local_project_id: scope.project_id.clone(),
-                provider_profile_id: scope.profile_id.clone(),
-                conflict_group_id: crate::project_sync_v3::domain::ConflictGroupId::parse(
-                    "group-push",
-                )
-                .unwrap(),
-                preferred_variant_id: cloud_id.clone(),
-                revision: 0,
-                updated_at: 10,
-            });
             Ok(())
         })
         .unwrap();
 
+    let mut forked_spec = super::harness::ThreadSpec::new(
+        forked_id.as_str(),
+        "source-thread",
+        local_transcript.clone(),
+        origin_a.clone(),
+        20,
+    );
+    forked_spec.forked_from = Some(cloud_id.clone());
     let old_token = world.current_head().unwrap();
-    let stale_request = super::harness::schema5_request(
+    let stale_request = super::harness::schema6_request(
         world.bundle_id.clone(),
-        &[
-            cloud_initial.clone(),
-            super::harness::VariantSpec::new(
-                "group-push",
-                local_id.as_str(),
-                "source-thread",
-                local_transcript.clone(),
-                origin_a.clone(),
-                20,
-            ),
-        ],
-        &cloud_id,
+        &[cloud_initial.clone(), forked_spec.clone()],
         origin_a.clone(),
         20,
         Some(&initial.snapshot.manifest),
@@ -1085,7 +1032,7 @@ fn same_id_divergent_push_reuses_rekey_after_cas_failure_and_post_cas_restart() 
     );
     cloud_advanced.updated_at = 21;
     cloud_advanced.last_updated_by = Some(origin_b.clone());
-    world.publish(&[cloud_advanced.clone()], &cloud_id, origin_b, 21);
+    world.publish(&[cloud_advanced.clone()], origin_b, 21);
 
     let first_operation = push_operation(
         &world,
@@ -1096,10 +1043,8 @@ fn same_id_divergent_push_reuses_rekey_after_cas_failure_and_post_cas_restart() 
         initial.snapshot.head.commit_id.clone(),
         initial.snapshot.head.manifest_sha256.clone(),
         &cloud_id,
-        &local_id,
-        Some((&cloud_id, &local_id)),
+        &forked_id,
         1,
-        Some(0),
         Some(0),
         &local_transcript,
         &lineage,
@@ -1110,20 +1055,23 @@ fn same_id_divergent_push_reuses_rekey_after_cas_failure_and_post_cas_restart() 
     let error = apply_conversation_cloud_publication(
         &world.repo_a,
         first_operation,
-        || engine.publish_schema5(stale_request).map(cloud_publication),
+        || engine.publish_schema6(stale_request).map(cloud_publication),
         || Ok(None),
         &mut no_failpoints,
     )
     .unwrap_err();
     assert!(error.contains("changed") || error.contains("conflict"));
+    // The reviewed rekey survives the failed publication: the conversation is
+    // now bound to the minted fork thread and simply classifies CloudMissing
+    // until the next push publishes it under the already-minted ID.
     let after_failure = world.repo_a.load_conversation_bindings().unwrap();
     assert_eq!(after_failure.bindings.len(), 1);
-    assert_eq!(after_failure.bindings[0].variant_id, local_id);
+    assert_eq!(after_failure.bindings[0].thread_id, forked_id);
     assert_eq!(
         after_failure.bindings[0].provider_thread_id.as_deref(),
         Some("source-thread")
     );
-    assert_eq!(after_failure.preferences[0].preferred_variant_id, local_id);
+    assert_eq!(after_failure.bindings[0].source_generation, None);
     assert!(world
         .repo_a
         .load_conversation_sync_journal()
@@ -1133,18 +1081,11 @@ fn same_id_divergent_push_reuses_rekey_after_cas_failure_and_post_cas_restart() 
 
     let current = world.engine().inspect(&world.bundle_id).unwrap();
     let current_token = world.current_head().unwrap();
-    let local_variant = super::harness::VariantSpec::new(
-        "group-push",
-        local_id.as_str(),
-        "source-thread",
-        local_transcript.clone(),
-        origin_a.clone(),
-        30,
-    );
-    let retry_request = super::harness::schema5_request(
+    let mut retry_forked = forked_spec.clone();
+    retry_forked.updated_at = 30;
+    let retry_request = super::harness::schema6_request(
         world.bundle_id.clone(),
-        &[cloud_advanced, local_variant],
-        &cloud_id,
+        &[cloud_advanced, retry_forked],
         origin_a,
         30,
         Some(&current.manifest),
@@ -1159,12 +1100,10 @@ fn same_id_divergent_push_reuses_rekey_after_cas_failure_and_post_cas_restart() 
         current.head.generation,
         current.head.commit_id,
         current.head.manifest_sha256,
-        &local_id,
-        &local_id,
-        None,
+        &forked_id,
+        &forked_id,
         retry_state.revision,
         Some(retry_state.bindings[0].revision),
-        Some(retry_state.preferences[0].revision),
         &local_transcript,
         &lineage,
         &semantic,
@@ -1174,17 +1113,17 @@ fn same_id_divergent_push_reuses_rekey_after_cas_failure_and_post_cas_restart() 
     assert!(apply_conversation_cloud_publication(
         &world.repo_a,
         retry_operation,
-        || engine.publish_schema5(retry_request).map(cloud_publication),
+        || engine.publish_schema6(retry_request).map(cloud_publication),
         || Ok(None),
         &mut fail_after_cas,
     )
     .is_err());
     let published_head = world.current_head().unwrap();
     let published_snapshot = world.engine().inspect(&world.bundle_id).unwrap();
-    assert!(published_snapshot.manifest.conversation_groups
-        [&crate::project_sync_v3::domain::ConflictGroupId::parse("group-push").unwrap()]
-        .variants
-        .contains_key(&local_id));
+    assert!(published_snapshot
+        .manifest
+        .conversations
+        .contains_key(&forked_id));
     let discovered_publication = ConversationCloudPublication {
         generation: published_snapshot.head.generation,
         commit_id: published_snapshot.head.commit_id,
@@ -1203,15 +1142,21 @@ fn same_id_divergent_push_reuses_rekey_after_cas_failure_and_post_cas_restart() 
     );
     assert_eq!(world.current_head().unwrap(), published_head);
     let final_manifest = world.engine().inspect(&world.bundle_id).unwrap().manifest;
-    let group = &final_manifest.conversation_groups
-        [&crate::project_sync_v3::domain::ConflictGroupId::parse("group-push").unwrap()];
-    assert_eq!(group.variants.len(), 2);
-    assert!(group.variants.contains_key(&cloud_id));
-    assert!(group.variants.contains_key(&local_id));
+    assert_eq!(final_manifest.conversations.len(), 2);
+    assert!(final_manifest.conversations.contains_key(&cloud_id));
+    assert!(final_manifest.conversations.contains_key(&forked_id));
+    assert_eq!(
+        final_manifest.conversations[&forked_id].forked_from,
+        Some(cloud_id.clone()),
+        "fork provenance survives publication",
+    );
     let final_bindings = world.repo_a.load_conversation_bindings().unwrap();
     assert_eq!(final_bindings.bindings.len(), 1);
-    assert_eq!(final_bindings.bindings[0].variant_id, local_id);
-    assert_eq!(final_bindings.preferences[0].preferred_variant_id, local_id);
+    assert_eq!(final_bindings.bindings[0].thread_id, forked_id);
+    assert_eq!(
+        final_bindings.bindings[0].source_generation,
+        Some(published_snapshot.head.generation)
+    );
 }
 
 #[derive(Clone)]
@@ -1264,6 +1209,16 @@ pub(super) fn install_scope(
     suffix: &str,
     replica: &str,
 ) -> InstalledScope {
+    install_scope_for_provider(repository, bundle_id, suffix, replica, Provider::Codex)
+}
+
+pub(super) fn install_scope_for_provider(
+    repository: &V3Repository,
+    bundle_id: &BundleId,
+    suffix: &str,
+    replica: &str,
+    provider: Provider,
+) -> InstalledScope {
     let identity = repository.load_or_create_host_identity().unwrap();
     let home = repository.root().parent().unwrap();
     let project_root = home.join(format!("project-{suffix}"));
@@ -1296,8 +1251,8 @@ pub(super) fn install_scope(
         .mutate_bindings(|_, machine| {
             machine.profiles.push(ProviderProfile {
                 profile_id: profile_id.clone(),
-                provider: Provider::Codex,
-                display_name: format!("Codex {suffix}"),
+                provider,
+                display_name: format!("{} {suffix}", provider.as_str()),
                 path: provider_root.to_string_lossy().into_owned(),
                 canonical_path: provider_root.to_string_lossy().into_owned(),
                 revision: 0,
@@ -1311,7 +1266,7 @@ pub(super) fn install_scope(
                 bundle_id: bundle_id.clone(),
                 project_root: project_root.to_string_lossy().into_owned(),
                 canonical_project_root: project_root.to_string_lossy().into_owned(),
-                profile_ids: BTreeMap::from([(Provider::Codex, profile_id.clone())]),
+                profile_ids: BTreeMap::from([(provider, profile_id.clone())]),
                 codex_home: None,
                 claude_home: None,
                 state: BindingState::Active,
@@ -1341,16 +1296,17 @@ fn push_operation(
     generation: u64,
     commit_id: String,
     manifest_sha256: String,
-    source_variant_id: &VariantId,
-    result_variant_id: &VariantId,
-    rekey: Option<(&VariantId, &VariantId)>,
+    thread_id: &ThreadId,
+    result_thread_id: &ThreadId,
     bindings_revision: u64,
     binding_revision: Option<u64>,
-    preference_revision: Option<u64>,
     transcript: &[u8],
     lineage_digest: &str,
     semantic_digest: &str,
 ) -> ConversationSyncOperation {
+    // A distinct result thread means this push is a fork: the operation
+    // rekeys the binding from the planned thread to the minted one.
+    let old_thread_id = (thread_id != result_thread_id).then(|| thread_id.clone());
     ConversationSyncOperation {
         operation_id: ConversationOperationId::parse(operation_id).unwrap(),
         plan_id: Some(PlanId::parse(plan_id).unwrap()),
@@ -1366,13 +1322,11 @@ fn push_operation(
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
         provider: Provider::Codex,
-        conflict_group_id: crate::project_sync_v3::domain::ConflictGroupId::parse("group-push")
-            .unwrap(),
-        source_variant_id: Some(source_variant_id.clone()),
-        old_variant_id: rekey.map(|(old, _)| old.clone()),
-        rekeyed_local_variant_id: rekey.map(|(_, result)| result.clone()),
+        thread_id: thread_id.clone(),
+        old_thread_id,
         rekey_committed: false,
-        result_variant_id: result_variant_id.clone(),
+        result_thread_id: result_thread_id.clone(),
+        forked_from_provider_thread_id: None,
         provider_thread_id: Some("source-thread".to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
         lineage_digest: Some(lineage_digest.to_string()),
@@ -1380,11 +1334,9 @@ fn push_operation(
         expected_host_identity_revision: scope.host_identity_revision,
         expected_bindings_document_revision: bindings_revision,
         expected_binding_revision: binding_revision,
-        expected_preference_revision: preference_revision,
         expected_profile_revision: 0,
         expected_project_binding_revision: 0,
         expected_local_digest: Some(sha256(transcript)),
-        initialize_preference: false,
         targets: vec![],
         created_at: 30,
         updated_at: 30,
@@ -1392,7 +1344,7 @@ fn push_operation(
 }
 
 fn cloud_publication(
-    outcome: crate::project_sync_v3::bundle_engine::Schema5PublishOutcome,
+    outcome: crate::project_sync_v3::bundle_engine::Schema6PublishOutcome,
 ) -> ConversationCloudPublication {
     ConversationCloudPublication {
         generation: outcome.snapshot.head.generation,
@@ -1521,15 +1473,11 @@ impl MaterializationFixture {
             local_project_id,
             provider_profile_id: profile_id,
             provider: Provider::Codex,
-            conflict_group_id: crate::project_sync_v3::domain::ConflictGroupId::parse(
-                "group-materialize",
-            )
-            .unwrap(),
-            source_variant_id: Some(VariantId::parse("variant-cloud").unwrap()),
-            old_variant_id: None,
-            rekeyed_local_variant_id: None,
+            thread_id: ThreadId::parse("thread-materialize").unwrap(),
+            old_thread_id: None,
             rekey_committed: false,
-            result_variant_id: VariantId::parse("variant-cloud").unwrap(),
+            result_thread_id: ThreadId::parse("thread-materialize").unwrap(),
+            forked_from_provider_thread_id: None,
             provider_thread_id: Some(thread_id.to_string()),
             materialization_state: ConversationMaterializationState::Resumable,
             lineage_digest: Some(lineage_digest),
@@ -1537,11 +1485,9 @@ impl MaterializationFixture {
             expected_host_identity_revision: identity.revision,
             expected_bindings_document_revision: 0,
             expected_binding_revision: None,
-            expected_preference_revision: None,
             expected_profile_revision: 0,
             expected_project_binding_revision: 0,
             expected_local_digest: None,
-            initialize_preference: true,
             targets: vec![],
             created_at: 10,
             updated_at: 10,
@@ -1587,7 +1533,6 @@ fn assert_materialization_fixed_point(
     let receipts = repository.load_materializations().unwrap();
     if complete {
         assert_eq!(bindings.bindings.len(), 1);
-        assert_eq!(bindings.preferences.len(), 1);
         assert_eq!(
             bindings.bindings[0].provider_thread_id.as_deref(),
             Some("destination-thread")
@@ -1609,7 +1554,6 @@ fn assert_materialization_fixed_point(
         );
     } else {
         assert!(bindings.bindings.is_empty());
-        assert!(bindings.preferences.is_empty());
         assert!(receipts.records.is_empty());
     }
     assert!(!repository

@@ -12,14 +12,13 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::conversation_codec::{analyze_codex_transcript, CodecLineage};
-use super::conversation_sync::{rekey_same_id_divergence, ConversationBindingScope};
+use super::conversation_sync::{rekey_thread_binding, ConversationBindingScope};
 use super::domain::{
     conversation_resource_id, ActionId, ActionStatus, ApplyReceipt, ConversationApplyReceipt,
     ConversationFileRole, ConversationJournalTarget, ConversationMaterializationState,
     ConversationOperationId, ConversationPlanDirection, ConversationSyncOperation,
-    ConversationSyncPhase, LocalConversationBinding, LocalConversationPreference,
-    MaterializationId, MaterializationRecord, MaterializationStatus, RestoreActionType,
-    TargetExpectation, LOCAL_SCHEMA_V3,
+    ConversationSyncPhase, LocalConversationBinding, MaterializationId, MaterializationRecord,
+    MaterializationStatus, RestoreActionType, TargetExpectation, LOCAL_SCHEMA_V3,
 };
 use super::persistence::V3Repository;
 
@@ -412,6 +411,7 @@ fn prepare_operation(
     }
     if operation.materialization_state == ConversationMaterializationState::Resumable
         && request.targets.is_empty()
+        && !operation.is_pure_rekey()
     {
         return Err("resumable conversation materialization has no provider files".to_string());
     }
@@ -674,6 +674,12 @@ fn verify_target_role_set(
     operation: &ConversationSyncOperation,
     targets: &[ConversationTargetPayload],
 ) -> Result<(), String> {
+    if operation.is_pure_rekey() {
+        if !targets.is_empty() {
+            return Err("conversation fork rekey must not touch provider targets".to_string());
+        }
+        return Ok(());
+    }
     if operation.materialization_state == ConversationMaterializationState::StoredOnly {
         if !targets.is_empty() || operation.provider_thread_id.is_some() {
             return Err("stored-only conversation cannot publish provider files".to_string());
@@ -699,8 +705,10 @@ fn verify_target_role_set(
     if operation.provider == super::domain::Provider::Codex && indexes != 1 {
         return Err("resumable Codex conversation requires one index fragment".to_string());
     }
-    if operation.provider == super::domain::Provider::Claude {
-        return Err("Claude conversation continuation is not supported by this codec".to_string());
+    // Claude has no provider index: the projects directory listing is the
+    // index, so a resumable Claude materialization is exactly one transcript.
+    if operation.provider == super::domain::Provider::Claude && indexes != 0 {
+        return Err("Claude conversations have no provider index fragment".to_string());
     }
     Ok(())
 }
@@ -719,6 +727,45 @@ fn verify_provider_payload(
         )
     })?;
     match &target.role {
+        ConversationFileRole::Transcript if operation.provider == super::domain::Provider::Claude => {
+            // Claude transcripts have no lineage codec. Verify what can be
+            // proven without one: bounded JSONL structure, and that the
+            // staged file's authoritative session metadata names exactly the
+            // reviewed destination session in the reviewed project.
+            if operation.lineage_digest.is_some() || operation.semantic_digest.is_some() {
+                return Err(
+                    "Claude conversations cannot pin lineage digests without a codec".to_string(),
+                );
+            }
+            for line in bytes.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
+                if line.len() > 1024 * 1024 {
+                    return Err("Claude transcript row exceeds one MiB".to_string());
+                }
+                serde_json::from_slice::<serde_json::Value>(line)
+                    .map_err(|_| "Claude transcript contains malformed JSON".to_string())?;
+            }
+            let meta = super::provider_capture::scan_jsonl_metadata(
+                path,
+                super::provider_capture::Provider::Claude,
+            )
+            .map_err(|error| format!("staged Claude transcript metadata: {error}"))?;
+            if Some(meta.session_id.as_str()) != operation.provider_thread_id.as_deref() {
+                return Err("staged Claude transcript has the wrong session id".to_string());
+            }
+            let machine = repository.load_bindings()?;
+            let project = machine
+                .bindings
+                .iter()
+                .find(|binding| {
+                    binding.host_id == operation.host_id
+                        && binding.replica_id == operation.replica_id
+                        && binding.local_project_id == operation.local_project_id
+                })
+                .ok_or_else(|| "staged transcript project replica disappeared".to_string())?;
+            if meta.cwd != project.project_root && meta.cwd != project.canonical_project_root {
+                return Err("staged Claude transcript has the wrong project cwd".to_string());
+            }
+        }
         ConversationFileRole::Transcript => {
             if operation.provider != super::domain::Provider::Codex {
                 return Err("unsupported resumable conversation provider".to_string());
@@ -939,35 +986,32 @@ fn commit_binding(
     if binding_commit_is_complete(&current, operation) {
         return Ok(());
     }
-    let scope = ConversationBindingScope {
-        host_id: operation.host_id.clone(),
-        replica_id: operation.replica_id.clone(),
-        local_project_id: operation.local_project_id.clone(),
-        provider_profile_id: operation.provider_profile_id.clone(),
-        conflict_group_id: operation.conflict_group_id.clone(),
-    };
+    let scope = operation_scope(operation);
     repository.mutate_conversation_bindings(|document| {
         if document.revision != operation.expected_bindings_document_revision {
             return Err("conversation bindings changed after review".to_string());
         }
         if !operation.rekey_committed {
-            if let (Some(old), Some(rekeyed)) = (
-                operation.old_variant_id.as_ref(),
-                operation.rekeyed_local_variant_id.as_ref(),
-            ) {
-                rekey_same_id_divergence(
+            if let Some(old) = operation.old_thread_id.as_ref() {
+                rekey_thread_binding(
                     document,
                     &scope,
                     old,
-                    rekeyed,
+                    &operation.result_thread_id,
                     operation.expected_bindings_document_revision,
                     operation
                         .expected_binding_revision
                         .ok_or_else(|| "conversation rekey lacks a binding revision".to_string())?,
-                    operation.expected_preference_revision,
                     operation.updated_at,
                 )?;
             }
+        }
+        if operation.is_pure_rekey() {
+            // A deferred-publication fork moves the binding and nothing else:
+            // the transcript, provider files, and observed digests are
+            // already true for the minted thread, and there is no cloud
+            // publication to pin.
+            return Ok(());
         }
 
         if let Some(binding) = document.bindings.iter_mut().find(|binding| {
@@ -975,10 +1019,9 @@ fn commit_binding(
                 && binding.replica_id == operation.replica_id
                 && binding.local_project_id == operation.local_project_id
                 && binding.provider_profile_id == operation.provider_profile_id
-                && binding.conflict_group_id == operation.conflict_group_id
-                && binding.variant_id == operation.result_variant_id
+                && binding.thread_id == operation.result_thread_id
         }) {
-            if operation.old_variant_id.as_ref() != Some(&operation.result_variant_id)
+            if operation.old_thread_id.is_none()
                 && operation.expected_binding_revision.is_some()
                 && binding.revision != operation.expected_binding_revision.unwrap()
             {
@@ -999,8 +1042,7 @@ fn commit_binding(
                 replica_id: operation.replica_id.clone(),
                 local_project_id: operation.local_project_id.clone(),
                 provider_profile_id: operation.provider_profile_id.clone(),
-                conflict_group_id: operation.conflict_group_id.clone(),
-                variant_id: operation.result_variant_id.clone(),
+                thread_id: operation.result_thread_id.clone(),
                 provider_thread_id: operation.provider_thread_id.clone(),
                 materialization_state: operation.materialization_state,
                 last_observed_file_sha256: transcript_target_digest(operation),
@@ -1014,28 +1056,17 @@ fn commit_binding(
                 updated_at: operation.updated_at,
             });
         }
-        if operation.initialize_preference
-            && !document.preferences.iter().any(|preference| {
-                preference.host_id == operation.host_id
-                    && preference.replica_id == operation.replica_id
-                    && preference.local_project_id == operation.local_project_id
-                    && preference.provider_profile_id == operation.provider_profile_id
-                    && preference.conflict_group_id == operation.conflict_group_id
-            })
-        {
-            document.preferences.push(LocalConversationPreference {
-                host_id: operation.host_id.clone(),
-                replica_id: operation.replica_id.clone(),
-                local_project_id: operation.local_project_id.clone(),
-                provider_profile_id: operation.provider_profile_id.clone(),
-                conflict_group_id: operation.conflict_group_id.clone(),
-                preferred_variant_id: operation.result_variant_id.clone(),
-                revision: 0,
-                updated_at: operation.updated_at,
-            });
-        }
         Ok(())
     })
+}
+
+fn operation_scope(operation: &ConversationSyncOperation) -> ConversationBindingScope {
+    ConversationBindingScope {
+        host_id: operation.host_id.clone(),
+        replica_id: operation.replica_id.clone(),
+        local_project_id: operation.local_project_id.clone(),
+        provider_profile_id: operation.provider_profile_id.clone(),
+    }
 }
 
 fn binding_commit_is_complete(
@@ -1043,13 +1074,19 @@ fn binding_commit_is_complete(
     operation: &ConversationSyncOperation,
 ) -> bool {
     let result_exists = document.bindings.iter().any(|binding| {
-        binding.host_id == operation.host_id
+        let in_scope = binding.host_id == operation.host_id
             && binding.replica_id == operation.replica_id
             && binding.local_project_id == operation.local_project_id
             && binding.provider_profile_id == operation.provider_profile_id
-            && binding.conflict_group_id == operation.conflict_group_id
-            && binding.variant_id == operation.result_variant_id
-            && binding.provider_thread_id == operation.provider_thread_id
+            && binding.thread_id == operation.result_thread_id;
+        if !in_scope {
+            return false;
+        }
+        if operation.is_pure_rekey() {
+            // The rekey clears the cloud pins; everything else is untouched.
+            return binding.source_generation.is_none();
+        }
+        binding.provider_thread_id == operation.provider_thread_id
             && binding.materialization_state == operation.materialization_state
             && binding.last_observed_file_sha256 == transcript_target_digest(operation)
             && binding.last_observed_lineage_digest == operation.lineage_digest
@@ -1057,29 +1094,16 @@ fn binding_commit_is_complete(
             && binding.source_generation == Some(operation.generation)
             && binding.source_manifest_sha256.as_deref() == Some(&operation.manifest_sha256)
     });
-    let rekey_complete = operation
-        .rekeyed_local_variant_id
-        .as_ref()
-        .is_none_or(|rekeyed| {
-            document.bindings.iter().any(|binding| {
-                binding.host_id == operation.host_id
-                    && binding.replica_id == operation.replica_id
-                    && binding.local_project_id == operation.local_project_id
-                    && binding.provider_profile_id == operation.provider_profile_id
-                    && binding.conflict_group_id == operation.conflict_group_id
-                    && binding.variant_id == *rekeyed
-            })
-        });
-    let preference_complete = !operation.initialize_preference
-        || document.preferences.iter().any(|preference| {
-            preference.host_id == operation.host_id
-                && preference.replica_id == operation.replica_id
-                && preference.local_project_id == operation.local_project_id
-                && preference.provider_profile_id == operation.provider_profile_id
-                && preference.conflict_group_id == operation.conflict_group_id
-                && preference.preferred_variant_id == operation.result_variant_id
-        });
-    result_exists && rekey_complete && preference_complete
+    let rekey_complete = operation.old_thread_id.as_ref().is_none_or(|old| {
+        !document.bindings.iter().any(|binding| {
+            binding.host_id == operation.host_id
+                && binding.replica_id == operation.replica_id
+                && binding.local_project_id == operation.local_project_id
+                && binding.provider_profile_id == operation.provider_profile_id
+                && binding.thread_id == *old
+        })
+    });
+    result_exists && rekey_complete
 }
 
 fn transcript_target_digest(operation: &ConversationSyncOperation) -> Option<String> {
@@ -1095,33 +1119,23 @@ fn commit_push_rekey(
     repository: &V3Repository,
     operation: &ConversationSyncOperation,
 ) -> Result<ConversationSyncOperation, String> {
-    let (Some(old), Some(rekeyed)) = (
-        operation.old_variant_id.as_ref(),
-        operation.rekeyed_local_variant_id.as_ref(),
-    ) else {
+    let Some(old) = operation.old_thread_id.as_ref() else {
         return Ok(operation.clone());
     };
     if operation.rekey_committed {
         return Ok(operation.clone());
     }
-    let scope = ConversationBindingScope {
-        host_id: operation.host_id.clone(),
-        replica_id: operation.replica_id.clone(),
-        local_project_id: operation.local_project_id.clone(),
-        provider_profile_id: operation.provider_profile_id.clone(),
-        conflict_group_id: operation.conflict_group_id.clone(),
-    };
+    let scope = operation_scope(operation);
     repository.mutate_conversation_bindings(|document| {
-        rekey_same_id_divergence(
+        rekey_thread_binding(
             document,
             &scope,
             old,
-            rekeyed,
+            &operation.result_thread_id,
             operation.expected_bindings_document_revision,
             operation
                 .expected_binding_revision
                 .ok_or_else(|| "conversation rekey lacks a binding revision".to_string())?,
-            operation.expected_preference_revision,
             operation.updated_at,
         )?;
         Ok(())
@@ -1135,26 +1149,13 @@ fn commit_push_rekey(
                 && binding.replica_id == operation.replica_id
                 && binding.local_project_id == operation.local_project_id
                 && binding.provider_profile_id == operation.provider_profile_id
-                && binding.conflict_group_id == operation.conflict_group_id
-                && binding.variant_id == *rekeyed
+                && binding.thread_id == operation.result_thread_id
         })
         .ok_or_else(|| "conversation Push rekey was not persisted".to_string())?;
-    let preference_revision = bindings
-        .preferences
-        .iter()
-        .find(|preference| {
-            preference.host_id == operation.host_id
-                && preference.replica_id == operation.replica_id
-                && preference.local_project_id == operation.local_project_id
-                && preference.provider_profile_id == operation.provider_profile_id
-                && preference.conflict_group_id == operation.conflict_group_id
-        })
-        .map(|preference| preference.revision);
     let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
         journaled.rekey_committed = true;
         journaled.expected_bindings_document_revision = bindings.revision;
         journaled.expected_binding_revision = Some(rekeyed_binding.revision);
-        journaled.expected_preference_revision = preference_revision;
         Ok(())
     })?;
     Ok(updated)
@@ -1181,11 +1182,8 @@ fn commit_receipt(
             return Ok(());
         }
         let action_id = stable_action_id(&operation.operation_id)?;
-        let resource_id = conversation_resource_id(
-            operation.provider,
-            &operation.conflict_group_id,
-            &operation.result_variant_id,
-        )?;
+        let resource_id =
+            conversation_resource_id(operation.provider, &operation.result_thread_id)?;
         let apply_receipt = ApplyReceipt {
             action_id,
             resource_id,
@@ -1251,9 +1249,8 @@ fn conversation_receipt(operation: &ConversationSyncOperation) -> ConversationAp
     ConversationApplyReceipt {
         host_id: operation.host_id.clone(),
         replica_id: operation.replica_id.clone(),
-        conflict_group_id: operation.conflict_group_id.clone(),
-        source_variant_id: operation.source_variant_id.clone(),
-        result_variant_id: operation.result_variant_id.clone(),
+        old_thread_id: operation.old_thread_id.clone(),
+        result_thread_id: operation.result_thread_id.clone(),
         provider_profile_id: operation.provider_profile_id.clone(),
         provider_thread_id: operation.provider_thread_id.clone(),
         materialization_state: operation.materialization_state,

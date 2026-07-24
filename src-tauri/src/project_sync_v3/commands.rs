@@ -19,7 +19,7 @@ use super::conversation_sync::{
 use super::domain::{
     generated_named_id, validate_absolute_clean_path, ActionId, ActionStatus, ApplyPolicy,
     ApplyReceipt, BindingState, BundleId, BundleIdentity, BundleKind, BundleManifest, BundleRecipe,
-    BundleSnapshot, CapturedWith, ConflictGroupId, ConversationFileRole,
+    BundleSnapshot, CapturedWith, ThreadId, ConversationFileRole,
     ConversationMaterializationState, ConversationPlanActionType, ConversationPlanDirection,
     ConversationReasonCode, ConversationRelation, DependencyAction, DependencyActionKind,
     DependencyApplicationRecord, DependencyApplyReceipt, DependencyPlan, DraftProfileSelection,
@@ -30,7 +30,7 @@ use super::domain::{
     ProjectStorageLink, Provenance, Provider, ProviderProfile, RecipeBase, RecipeEntry, ReplicaId,
     ResourceDescriptor, ResourceId, ResourceKind, ResourceScope, RestoreAction, RestoreActionKind,
     RestoreActionType, RestorePlan, SetupDraftId, SetupTransaction, StorageConfigV3, StorageId,
-    StorageKind, SyncConfigV3, VariantId, BUNDLE_SCHEMA_V5, DEPENDENCY_PLAN_SCHEMA_V2,
+    StorageKind, SyncConfigV3, BUNDLE_SCHEMA_V6, DEPENDENCY_PLAN_SCHEMA_V2,
     SETUP_DRAFT_SCHEMA_V1, SETUP_TRANSACTION_SCHEMA_V2,
 };
 use super::global_inventory;
@@ -486,9 +486,9 @@ pub struct ThreadSyncEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_updated_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conflict_group_id: Option<ConflictGroupId>,
+    pub cloud_thread_id: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub variant_id: Option<VariantId>,
+    pub forked_from: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -497,10 +497,6 @@ pub struct ThreadSyncEntry {
     pub proposed_action: Option<ConversationPlanActionType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<ConversationReasonCode>,
-    #[serde(default)]
-    pub cloud_primary: bool,
-    #[serde(default)]
-    pub local_preferred: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materialization_state: Option<ConversationMaterializationState>,
     #[serde(default)]
@@ -3759,188 +3755,163 @@ fn relation_sync_state(relation: ConversationRelation) -> ThreadSyncState {
     }
 }
 
-pub(crate) fn schema5_thread_variant_entries(
+pub(crate) fn schema6_thread_entries(
     repository: &V3Repository,
     fetched: &FetchedBundle,
     captured: &provider_capture::CapturedResources,
     binding: &ProjectBinding,
 ) -> Result<Vec<ThreadSyncEntry>, String> {
-    if fetched.snapshot.manifest.schema_version != BUNDLE_SCHEMA_V5 {
+    if fetched.snapshot.manifest.schema_version != BUNDLE_SCHEMA_V6 {
         return Ok(Vec::new());
     }
     let document = repository.load_conversation_bindings()?;
     let profile_id = binding.profile_ids.get(&Provider::Codex);
     let mut entries = Vec::new();
-    for (group_id, group) in &fetched.snapshot.manifest.conversation_groups {
-        if group.provider != Provider::Codex {
+    for (thread_id, thread) in &fetched.snapshot.manifest.conversations {
+        if thread.provider != Provider::Codex {
             continue;
         }
-        let preference = profile_id.and_then(|profile_id| {
-            document.preferences.iter().find(|preference| {
-                preference.host_id == binding.host_id
-                    && preference.replica_id == binding.replica_id
-                    && preference.local_project_id == binding.local_project_id
-                    && preference.provider_profile_id == *profile_id
-                    && preference.conflict_group_id == *group_id
+        let local_binding = profile_id.and_then(|profile_id| {
+            document.bindings.iter().find(|conversation| {
+                conversation.host_id == binding.host_id
+                    && conversation.replica_id == binding.replica_id
+                    && conversation.local_project_id == binding.local_project_id
+                    && conversation.provider_profile_id == *profile_id
+                    && conversation.thread_id == *thread_id
             })
         });
-        for (variant_id, variant) in &group.variants {
-            let local_binding = profile_id.and_then(|profile_id| {
-                document.bindings.iter().find(|conversation| {
-                    conversation.host_id == binding.host_id
-                        && conversation.replica_id == binding.replica_id
-                        && conversation.local_project_id == binding.local_project_id
-                        && conversation.provider_profile_id == *profile_id
-                        && conversation.conflict_group_id == *group_id
-                        && conversation.variant_id == *variant_id
+        let local_conversation = local_binding
+            .and_then(|conversation| conversation.provider_thread_id.as_deref())
+            .and_then(|provider_thread_id| {
+                captured.conversations.values().find(|conversation| {
+                    conversation.provider == provider_capture::Provider::Codex
+                        && conversation.source_thread_id.as_deref() == Some(provider_thread_id)
                 })
             });
-            let local_conversation = local_binding
-                .and_then(|conversation| conversation.provider_thread_id.as_deref())
-                .and_then(|provider_thread_id| {
-                    captured.conversations.values().find(|conversation| {
-                        conversation.provider == provider_capture::Provider::Codex
-                            && conversation.source_thread_id.as_deref() == Some(provider_thread_id)
-                    })
-                });
-            let transcript = variant
+        let transcript = thread
+            .files
+            .iter()
+            .find(|file| file.role == ConversationFileRole::Transcript)
+            .and_then(|file| fetched.files.get(&file.logical_path));
+        let cloud_analysis = transcript.map(|bytes| analyze_codex_transcript(bytes));
+        let local_chain = local_conversation.and_then(|conversation| conversation.lineage.chain());
+        let cloud_chain = cloud_analysis
+            .as_ref()
+            .and_then(|analysis| analysis.lineage.chain());
+        let relation = match (local_conversation, cloud_analysis.as_ref()) {
+            (Some(_), Some(_)) if local_chain.is_none() || cloud_chain.is_none() => {
+                ConversationRelation::Unknown
+            }
+            (Some(_), Some(_)) => {
+                super::domain::classify_conversation_relation(local_chain, cloud_chain)
+            }
+            (None, Some(_)) => ConversationRelation::LocalMissing,
+            (Some(_), None) => ConversationRelation::CloudMissing,
+            (None, None) => ConversationRelation::BothMissing,
+        };
+        let cloud_readable = cloud_analysis
+            .as_ref()
+            .is_some_and(|analysis| analysis.lineage.is_complete());
+        let local_capturable =
+            local_conversation.is_some_and(|conversation| conversation.lineage.is_complete());
+        let capabilities = ConversationCapabilities {
+            binding: if local_binding.is_some() {
+                BindingResolution::Bound
+            } else {
+                BindingResolution::Missing
+            },
+            local_safely_capturable: local_capturable,
+            cloud_safely_readable: cloud_readable,
+            destination_codec_resumable: cloud_readable,
+            provider_quiescent: true,
+            structural_rewrite_only: false,
+        };
+        let push =
+            default_conversation_decision(ConversationPlanDirection::Push, relation, capabilities);
+        let pull =
+            default_conversation_decision(ConversationPlanDirection::Pull, relation, capabilities);
+        let state = relation_sync_state(relation);
+        let proposed = match state {
+            ThreadSyncState::LocalOnly | ThreadSyncState::LocalAhead => push,
+            _ => pull,
+        };
+        let mut available_actions = vec![push.action, pull.action];
+        available_actions.sort_by_key(|action| format!("{action:?}"));
+        available_actions.dedup();
+        let descriptor = fetched
+            .snapshot
+            .manifest
+            .resources
+            .get(&thread.resource_id)
+            .ok_or_else(|| format!("conversation thread '{}' has no descriptor", thread_id))?;
+        let origin_label = thread
+            .last_updated_by_origin
+            .as_ref()
+            .or(thread.created_by_origin.as_ref())
+            .map(|origin| {
+                repository
+                    .resolve_origin_host_label(
+                        &fetched.snapshot.manifest.bundle.bundle_id,
+                        &origin.origin_host_token,
+                    )
+                    .map(|(label, _)| label)
+            })
+            .transpose()?;
+        let provider_thread_id =
+            local_binding.and_then(|conversation| conversation.provider_thread_id.clone());
+        let local_updated_at = provider_thread_id.as_deref().and_then(|thread_id| {
+            captured
                 .files
-                .iter()
-                .find(|file| file.role == ConversationFileRole::Transcript)
-                .and_then(|file| fetched.files.get(&file.logical_path));
-            let cloud_analysis = transcript.map(|bytes| analyze_codex_transcript(bytes));
-            let local_chain =
-                local_conversation.and_then(|conversation| conversation.lineage.chain());
-            let cloud_chain = cloud_analysis
-                .as_ref()
-                .and_then(|analysis| analysis.lineage.chain());
-            let relation = match (local_conversation, cloud_analysis.as_ref()) {
-                (Some(_), Some(_)) if local_chain.is_none() || cloud_chain.is_none() => {
-                    ConversationRelation::Unknown
-                }
-                (Some(_), Some(_)) => {
-                    super::domain::classify_conversation_relation(local_chain, cloud_chain)
-                }
-                (None, Some(_)) => ConversationRelation::LocalMissing,
-                (Some(_), None) => ConversationRelation::CloudMissing,
-                (None, None) => ConversationRelation::BothMissing,
-            };
-            let cloud_readable = cloud_analysis
-                .as_ref()
-                .is_some_and(|analysis| analysis.lineage.is_complete());
-            let local_capturable =
-                local_conversation.is_some_and(|conversation| conversation.lineage.is_complete());
-            let capabilities = ConversationCapabilities {
-                binding: if local_binding.is_some() {
-                    BindingResolution::Bound
-                } else {
-                    BindingResolution::Missing
-                },
-                local_safely_capturable: local_capturable,
-                cloud_safely_readable: cloud_readable,
-                destination_codec_resumable: cloud_readable,
-                provider_quiescent: true,
-                structural_rewrite_only: false,
-            };
-            let push = default_conversation_decision(
-                ConversationPlanDirection::Push,
-                relation,
-                capabilities,
-            );
-            let pull = default_conversation_decision(
-                ConversationPlanDirection::Pull,
-                relation,
-                capabilities,
-            );
-            let state = relation_sync_state(relation);
-            let proposed = match state {
-                ThreadSyncState::LocalOnly | ThreadSyncState::LocalAhead => push,
-                ThreadSyncState::Synced => pull,
-                _ => pull,
-            };
-            let mut available_actions = vec![push.action, pull.action];
-            available_actions.sort_by_key(|action| format!("{action:?}"));
-            available_actions.dedup();
-            let descriptor = fetched
-                .snapshot
-                .manifest
-                .resources
-                .get(&variant.resource_id)
-                .ok_or_else(|| {
-                    format!("conversation variant '{}' has no descriptor", variant_id)
-                })?;
-            let origin_label = variant
-                .last_updated_by_origin
-                .as_ref()
-                .or(variant.created_by_origin.as_ref())
-                .map(|origin| {
-                    repository
-                        .resolve_origin_host_label(
-                            &fetched.snapshot.manifest.bundle.bundle_id,
-                            &origin.origin_host_token,
-                        )
-                        .map(|(label, _)| label)
+                .values()
+                .filter(|file| {
+                    captured
+                        .conversations
+                        .get(&file.resource_id)
+                        .and_then(|conversation| conversation.source_thread_id.as_deref())
+                        == Some(thread_id)
                 })
-                .transpose()?;
-            let provider_thread_id =
-                local_binding.and_then(|conversation| conversation.provider_thread_id.clone());
-            let local_updated_at = provider_thread_id.as_deref().and_then(|thread_id| {
-                captured
-                    .files
-                    .values()
-                    .filter(|file| {
-                        captured
-                            .conversations
-                            .get(&file.resource_id)
-                            .and_then(|conversation| conversation.source_thread_id.as_deref())
-                            == Some(thread_id)
-                    })
-                    .map(|file| file.source_mtime)
-                    .max()
-            });
-            let materialization_state = local_binding
-                .map(|conversation| conversation.materialization_state.clone())
-                .unwrap_or(ConversationMaterializationState::StoredOnly);
-            let resumable = materialization_state == ConversationMaterializationState::Resumable
-                && local_conversation
-                    .is_some_and(|conversation| conversation.lineage.is_complete());
-            entries.push(ThreadSyncEntry {
-                thread_id: provider_thread_id
-                    .clone()
-                    .or_else(|| variant.source_thread_id.clone())
-                    .unwrap_or_else(|| variant_id.to_string()),
-                resource_id: variant.resource_id.clone(),
-                display_name: descriptor.display_name.clone(),
-                state,
-                local_present: local_conversation.is_some(),
-                storage_present: true,
-                status_detail: (relation == ConversationRelation::Unknown)
-                    .then(|| "Conversation ancestry could not be proven safely.".to_string()),
-                local_updated_at,
-                storage_updated_at: Some(variant.updated_at),
-                conflict_group_id: Some(group_id.clone()),
-                variant_id: Some(variant_id.clone()),
-                provider_thread_id,
-                relation: Some(relation),
-                proposed_action: Some(proposed.action),
-                reason_code: Some(proposed.reason_code),
-                cloud_primary: group.primary_variant_id == *variant_id,
-                local_preferred: preference
-                    .is_some_and(|preference| preference.preferred_variant_id == *variant_id),
-                materialization_state: Some(materialization_state),
-                resumable,
-                origin_label,
-                available_actions,
-                requires_explicit_approval: matches!(
-                    proposed.action,
-                    ConversationPlanActionType::PromoteLocal
-                        | ConversationPlanActionType::PromoteCloud
-                        | ConversationPlanActionType::ReplaceLocal
-                        | ConversationPlanActionType::TombstoneVariant
-                        | ConversationPlanActionType::TombstoneGroup
-                ),
-            });
-        }
+                .map(|file| file.source_mtime)
+                .max()
+        });
+        let materialization_state = local_binding
+            .map(|conversation| conversation.materialization_state.clone())
+            .unwrap_or(ConversationMaterializationState::StoredOnly);
+        let resumable = materialization_state == ConversationMaterializationState::Resumable
+            && local_conversation.is_some_and(|conversation| conversation.lineage.is_complete());
+        entries.push(ThreadSyncEntry {
+            thread_id: provider_thread_id
+                .clone()
+                .or_else(|| thread.source_thread_id.clone())
+                .unwrap_or_else(|| thread_id.to_string()),
+            resource_id: thread.resource_id.clone(),
+            display_name: thread
+                .display_title
+                .clone()
+                .unwrap_or_else(|| descriptor.display_name.clone()),
+            state,
+            local_present: local_conversation.is_some(),
+            storage_present: true,
+            status_detail: (relation == ConversationRelation::Unknown)
+                .then(|| "Conversation ancestry could not be proven safely.".to_string()),
+            local_updated_at,
+            storage_updated_at: Some(thread.updated_at),
+            cloud_thread_id: Some(thread_id.clone()),
+            forked_from: thread.forked_from.clone(),
+            provider_thread_id,
+            relation: Some(relation),
+            proposed_action: Some(proposed.action),
+            reason_code: Some(proposed.reason_code),
+            materialization_state: Some(materialization_state),
+            resumable,
+            origin_label,
+            available_actions,
+            requires_explicit_approval: matches!(
+                proposed.action,
+                ConversationPlanActionType::ReplaceLocal
+                    | ConversationPlanActionType::ReplaceCloud
+                    | ConversationPlanActionType::TombstoneThread
+            ),
+        });
     }
     Ok(entries)
 }
@@ -4036,9 +4007,9 @@ fn get_project_thread_sync_comparison_with_repository(
 
     let (_, engine) = storage_engine(repository, storage_id)?;
     let current = engine.inspect_optional(&project.bundle_id)?;
-    let schema5_fetched = current
+    let schema6_fetched = current
         .as_ref()
-        .filter(|snapshot| snapshot.manifest.schema_version == BUNDLE_SCHEMA_V5)
+        .filter(|snapshot| snapshot.manifest.schema_version == BUNDLE_SCHEMA_V6)
         .map(|_| engine.fetch(&project.bundle_id))
         .transpose()?;
     let generation = current.as_ref().map(|snapshot| snapshot.head.generation);
@@ -4200,13 +4171,11 @@ fn get_project_thread_sync_comparison_with_repository(
             status_detail,
             local_updated_at: local.and_then(|version| version.updated_at),
             storage_updated_at: remote.and_then(|version| version.updated_at),
-            conflict_group_id: None,
-            variant_id: None,
+            cloud_thread_id: None,
+            forked_from: None,
             relation: None,
             proposed_action: None,
             reason_code: None,
-            cloud_primary: false,
-            local_preferred: false,
             materialization_state: None,
             resumable: local_present && !local_unavailable,
             origin_label: None,
@@ -4229,23 +4198,19 @@ fn get_project_thread_sync_comparison_with_repository(
             )
             .then_with(|| left.thread_id.cmp(&right.thread_id))
     });
-    if let Some(fetched) = &schema5_fetched {
-        let variant_entries =
-            schema5_thread_variant_entries(repository, fetched, &captured, &binding)?;
-        let bound_provider_ids = variant_entries
+    if let Some(fetched) = &schema6_fetched {
+        let thread_entries = schema6_thread_entries(repository, fetched, &captured, &binding)?;
+        let bound_provider_ids = thread_entries
             .iter()
             .filter_map(|entry| entry.provider_thread_id.clone())
             .collect::<BTreeSet<_>>();
         entries.retain(|entry| {
-            entry.variant_id.is_some() || !bound_provider_ids.contains(&entry.thread_id)
+            entry.cloud_thread_id.is_some() || !bound_provider_ids.contains(&entry.thread_id)
         });
-        entries.extend(variant_entries);
+        entries.extend(thread_entries);
         entries.sort_by(|left, right| {
-            left.conflict_group_id
-                .cmp(&right.conflict_group_id)
-                .then_with(|| right.cloud_primary.cmp(&left.cloud_primary))
-                .then_with(|| right.local_preferred.cmp(&left.local_preferred))
-                .then_with(|| left.variant_id.cmp(&right.variant_id))
+            left.cloud_thread_id
+                .cmp(&right.cloud_thread_id)
                 .then_with(|| left.thread_id.cmp(&right.thread_id))
         });
         counts = ThreadSyncCounts::default();

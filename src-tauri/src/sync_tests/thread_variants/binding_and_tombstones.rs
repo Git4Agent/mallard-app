@@ -1,12 +1,10 @@
-use super::harness::{analyzed_chain, chain, schema5_request, sha256, VariantSpec, VariantWorld};
-use crate::project_sync_v3::bundle_engine::{PublishExpectation, PublishSchema5Request};
+use super::harness::{analyzed_chain, chain, schema6_request, sha256, ThreadSpec, VariantWorld};
+use crate::project_sync_v3::bundle_engine::{PublishExpectation, PublishSchema6Request};
 use crate::project_sync_v3::conversation_sync::{
     recover_unique_compatible_binding, review_conversation_tombstone, BindingRecoveryCandidate,
     BindingRecoveryResult, TombstoneDecision,
 };
-use crate::project_sync_v3::domain::{
-    BundleRecipe, ConflictGroupId, Tombstone, TombstoneTarget, VariantId,
-};
+use crate::project_sync_v3::domain::{BundleRecipe, ThreadId, Tombstone, TombstoneTarget};
 use std::collections::BTreeMap;
 
 #[test]
@@ -18,24 +16,24 @@ fn missing_binding_recovers_only_one_unique_longest_compatible_ancestor() {
     let short = analyzed_chain(&chain("cloud-short", &[("m-a", "one")]));
     let longest = analyzed_chain(&chain("cloud-long", &[("m-a", "one"), ("m-b", "two")]));
     let unrelated = analyzed_chain(&chain("cloud-other", &[("m-x", "same title")]));
-    let short_id = VariantId::parse("variant-short").unwrap();
-    let longest_id = VariantId::parse("variant-long").unwrap();
-    let unrelated_id = VariantId::parse("variant-unrelated").unwrap();
+    let short_id = ThreadId::parse("thread-short").unwrap();
+    let longest_id = ThreadId::parse("thread-long").unwrap();
+    let unrelated_id = ThreadId::parse("thread-unrelated").unwrap();
 
     assert_eq!(
         recover_unique_compatible_binding(
             Some(&local),
             &[
                 BindingRecoveryCandidate {
-                    variant_id: short_id.clone(),
+                    thread_id: short_id.clone(),
                     chain: Some(&short),
                 },
                 BindingRecoveryCandidate {
-                    variant_id: longest_id.clone(),
+                    thread_id: longest_id.clone(),
                     chain: Some(&longest),
                 },
                 BindingRecoveryCandidate {
-                    variant_id: unrelated_id,
+                    thread_id: unrelated_id,
                     chain: Some(&unrelated),
                 },
             ],
@@ -48,11 +46,11 @@ fn missing_binding_recovers_only_one_unique_longest_compatible_ancestor() {
             Some(&local),
             &[
                 BindingRecoveryCandidate {
-                    variant_id: longest_id,
+                    thread_id: longest_id,
                     chain: Some(&longest),
                 },
                 BindingRecoveryCandidate {
-                    variant_id: VariantId::parse("variant-equal").unwrap(),
+                    thread_id: ThreadId::parse("thread-equal").unwrap(),
                     chain: Some(&longest),
                 },
             ],
@@ -63,7 +61,7 @@ fn missing_binding_recovers_only_one_unique_longest_compatible_ancestor() {
         recover_unique_compatible_binding(
             Some(&local),
             &[BindingRecoveryCandidate {
-                variant_id: VariantId::parse("variant-title-only").unwrap(),
+                thread_id: ThreadId::parse("thread-title-only").unwrap(),
                 chain: Some(&unrelated),
             }],
         ),
@@ -74,7 +72,7 @@ fn missing_binding_recovers_only_one_unique_longest_compatible_ancestor() {
         recover_unique_compatible_binding(
             Some(&local),
             &[BindingRecoveryCandidate {
-                variant_id: short_id,
+                thread_id: short_id,
                 chain: None,
             }],
         ),
@@ -87,121 +85,80 @@ fn missing_binding_recovers_only_one_unique_longest_compatible_ancestor() {
 }
 
 #[test]
-fn tombstone_review_covers_unapproved_primary_final_stale_and_modified_cases() {
-    let world = VariantWorld::new();
-    let origin = world.origin(&world.repo_a, "replica-a");
-    let v1_id = VariantId::parse("variant-v1").unwrap();
-    let v2_id = VariantId::parse("variant-v2").unwrap();
-    let v1 = VariantSpec::new(
-        "group-main",
-        v1_id.as_str(),
-        "thread-v1",
-        chain("thread-v1", &[("m-a", "base"), ("m-b1", "one")]),
-        origin.clone(),
-        10,
-    );
-    let v2 = VariantSpec::new(
-        "group-main",
-        v2_id.as_str(),
-        "thread-v2",
-        chain("thread-v2", &[("m-a", "base"), ("m-b2", "two")]),
-        origin.clone(),
-        10,
-    );
-    let published = world.publish(&[v1, v2], &v1_id, origin, 10);
-    let group = &published.snapshot.manifest.conversation_groups
-        [&ConflictGroupId::parse("group-main").unwrap()];
-
+fn tombstone_review_covers_unapproved_stale_and_modified_cases() {
     assert_eq!(
-        review_conversation_tombstone(group, &v2_id, "reviewed", "reviewed", false, None),
+        review_conversation_tombstone(true, "reviewed", "reviewed", false),
         TombstoneDecision::RejectUnapproved
     );
     assert_eq!(
-        review_conversation_tombstone(group, &v1_id, "reviewed", "reviewed", true, None),
-        TombstoneDecision::RejectPrimaryWithoutReplacement
+        review_conversation_tombstone(true, "reviewed", "modified", true),
+        TombstoneDecision::PreserveModified,
+        "a modified copy always survives a tombstone race",
     );
     assert_eq!(
-        review_conversation_tombstone(group, &v1_id, "reviewed", "reviewed", true, Some(&v2_id),),
-        TombstoneDecision::TombstoneVariant
-    );
-    assert_eq!(
-        review_conversation_tombstone(group, &v2_id, "reviewed", "modified", true, None),
-        TombstoneDecision::PreserveModifiedInSameGroup
-    );
-    assert_eq!(
-        review_conversation_tombstone(
-            group,
-            &VariantId::parse("variant-missing").unwrap(),
-            "reviewed",
-            "reviewed",
-            true,
-            None,
-        ),
+        review_conversation_tombstone(false, "reviewed", "reviewed", true),
         TombstoneDecision::RejectStaleDigest
     );
-
-    let mut final_group = group.clone();
-    final_group.variants.remove(&v2_id);
     assert_eq!(
-        review_conversation_tombstone(&final_group, &v1_id, "reviewed", "reviewed", true, None,),
-        TombstoneDecision::TombstoneGroup
+        review_conversation_tombstone(true, "reviewed", "reviewed", true),
+        TombstoneDecision::TombstoneThread
     );
 }
 
 #[test]
-fn reviewed_variant_and_group_tombstones_publish_once_and_retain_survivors() {
+fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
     let world = VariantWorld::new();
     let origin = world.origin(&world.repo_a, "replica-a");
-    let group_id = ConflictGroupId::parse("group-main").unwrap();
-    let v1_id = VariantId::parse("variant-v1").unwrap();
-    let v2_id = VariantId::parse("variant-v2").unwrap();
-    let v1 = VariantSpec::new(
-        group_id.as_str(),
-        v1_id.as_str(),
+    let t1_id = ThreadId::parse("thread-t1").unwrap();
+    let t2_id = ThreadId::parse("thread-t2").unwrap();
+    let t1 = ThreadSpec::new(
+        t1_id.as_str(),
         "thread-v1",
         chain("thread-v1", &[("m-a", "base"), ("m-b1", "one")]),
         origin.clone(),
         10,
     );
-    let v2 = VariantSpec::new(
-        group_id.as_str(),
-        v2_id.as_str(),
+    let t2 = ThreadSpec::new(
+        t2_id.as_str(),
         "thread-v2",
         chain("thread-v2", &[("m-a", "base"), ("m-b2", "two")]),
         origin.clone(),
         10,
     );
-    let initial = world.publish(&[v1.clone(), v2.clone()], &v1_id, origin.clone(), 10);
+    let initial = world.publish(&[t1.clone(), t2.clone()], origin.clone(), 10);
     let tombstone = Tombstone {
-        target: TombstoneTarget::ConversationVariant {
-            conflict_group_id: group_id.clone(),
-            variant_id: v2_id.clone(),
+        target: TombstoneTarget::ConversationThread {
+            thread_id: t2_id.clone(),
         },
-        last_sha256: Some(sha256(&v2.transcript)),
+        last_sha256: Some(sha256(&t2.transcript)),
         deleted_at: 20,
     };
-    let mut delete_variant = schema5_request(
+    let mut delete_thread = schema6_request(
         world.bundle_id.clone(),
-        &[v1.clone()],
-        &v1_id,
+        &[t1.clone()],
         origin.clone(),
         20,
         Some(&initial.snapshot.manifest),
         PublishExpectation::Match(initial.head_token),
     );
-    delete_variant
+    delete_thread
         .tombstones
         .insert(tombstone.canonical_key(), tombstone.clone());
-    let deleted = world.engine().publish_schema5(delete_variant).unwrap();
+    let deleted = world.engine().publish_schema6(delete_thread).unwrap();
     assert!(deleted.published);
-    let group = &deleted.snapshot.manifest.conversation_groups[&group_id];
-    assert_eq!(group.variants.keys().collect::<Vec<_>>(), vec![&v1_id]);
-    assert_eq!(group.primary_variant_id, v1_id);
+    assert_eq!(
+        deleted
+            .snapshot
+            .manifest
+            .conversations
+            .keys()
+            .collect::<Vec<_>>(),
+        vec![&t1_id]
+    );
 
-    let mut repeated = schema5_request(
+    let mut repeated = schema6_request(
         world.bundle_id.clone(),
-        &[v1],
-        &v1_id,
+        &[t1.clone()],
         origin.clone(),
         30,
         Some(&deleted.snapshot.manifest),
@@ -209,27 +166,26 @@ fn reviewed_variant_and_group_tombstones_publish_once_and_retain_survivors() {
     );
     repeated
         .tombstones
-        .insert(tombstone.canonical_key(), tombstone);
-    let repeated = world.engine().publish_schema5(repeated).unwrap();
+        .insert(tombstone.canonical_key(), tombstone.clone());
+    let repeated = world.engine().publish_schema6(repeated).unwrap();
     assert!(!repeated.published);
     assert_eq!(repeated.snapshot.head.generation, 2);
 
-    let group_tombstone = Tombstone {
-        target: TombstoneTarget::ConversationGroup {
-            conflict_group_id: group_id.clone(),
+    let final_tombstone = Tombstone {
+        target: TombstoneTarget::ConversationThread {
+            thread_id: t1_id.clone(),
         },
-        last_sha256: Some("f".repeat(64)),
+        last_sha256: Some(sha256(&t1.transcript)),
         deleted_at: 40,
     };
     let mut tombstones = repeated.snapshot.manifest.tombstones.clone();
-    tombstones.remove(&format!("conversation-variant:{group_id}:{v2_id}"));
-    tombstones.insert(group_tombstone.canonical_key(), group_tombstone);
-    let delete_group = PublishSchema5Request {
+    tombstones.insert(final_tombstone.canonical_key(), final_tombstone);
+    let delete_all = PublishSchema6Request {
         identity: repeated.snapshot.manifest.bundle.clone(),
         recipe: BundleRecipe::default(),
         captured_with: repeated.snapshot.manifest.captured_with.clone(),
         published_by_origin: origin,
-        conversation_groups: BTreeMap::new(),
+        conversations: BTreeMap::new(),
         resources: BTreeMap::new(),
         retained_files: BTreeMap::new(),
         captured_files: BTreeMap::new(),
@@ -238,18 +194,13 @@ fn reviewed_variant_and_group_tombstones_publish_once_and_retain_survivors() {
         expected_head: PublishExpectation::Match(repeated.head_token),
         updated_at: 40,
     };
-    let deleted_group = world.engine().publish_schema5(delete_group).unwrap();
-    assert!(deleted_group.published);
-    assert!(deleted_group
-        .snapshot
-        .manifest
-        .conversation_groups
-        .is_empty());
-    assert!(deleted_group.snapshot.manifest.resources.is_empty());
+    let deleted_all = world.engine().publish_schema6(delete_all).unwrap();
+    assert!(deleted_all.published);
+    assert!(deleted_all.snapshot.manifest.conversations.is_empty());
+    assert!(deleted_all.snapshot.manifest.resources.is_empty());
 
-    let mut modified_after_delete = VariantSpec::new(
-        group_id.as_str(),
-        v1_id.as_str(),
+    let mut modified_after_delete = ThreadSpec::new(
+        t1_id.as_str(),
         "thread-v1",
         chain(
             "thread-v1",
@@ -263,23 +214,22 @@ fn reviewed_variant_and_group_tombstones_publish_once_and_retain_survivors() {
         50,
     );
     modified_after_delete.created_at = 1;
-    let resurrect = schema5_request(
+    let resurrect = schema6_request(
         world.bundle_id.clone(),
         &[modified_after_delete.clone()],
-        &v1_id,
         world.origin(&world.repo_b, "replica-b"),
         50,
-        Some(&deleted_group.snapshot.manifest),
-        PublishExpectation::Match(deleted_group.head_token),
+        Some(&deleted_all.snapshot.manifest),
+        PublishExpectation::Match(deleted_all.head_token),
     );
-    let resurrected = world.engine().publish_schema5(resurrect).unwrap();
+    let resurrected = world.engine().publish_schema6(resurrect).unwrap();
     assert!(resurrected.published);
     assert_eq!(resurrected.snapshot.head.generation, 4);
     assert!(resurrected
         .snapshot
         .manifest
-        .conversation_groups
-        .contains_key(&group_id));
+        .conversations
+        .contains_key(&t1_id));
     assert!(!resurrected
         .snapshot
         .manifest
@@ -288,14 +238,13 @@ fn reviewed_variant_and_group_tombstones_publish_once_and_retain_survivors() {
         .any(|tombstone| {
             matches!(
                 &tombstone.target,
-                TombstoneTarget::ConversationGroup { conflict_group_id }
-                    if conflict_group_id == &group_id
+                TombstoneTarget::ConversationThread { thread_id }
+                    if thread_id == &t1_id
             )
         }));
-    let fixed_point = schema5_request(
+    let fixed_point = schema6_request(
         world.bundle_id.clone(),
         &[modified_after_delete],
-        &v1_id,
         world.origin(&world.repo_b, "replica-b"),
         60,
         Some(&resurrected.snapshot.manifest),
@@ -304,7 +253,7 @@ fn reviewed_variant_and_group_tombstones_publish_once_and_retain_survivors() {
     assert!(
         !world
             .engine()
-            .publish_schema5(fixed_point)
+            .publish_schema6(fixed_point)
             .unwrap()
             .published
     );

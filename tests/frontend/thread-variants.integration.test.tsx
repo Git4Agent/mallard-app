@@ -7,7 +7,7 @@ import ThreadVariantReview, {
   conversationActionSelectedByDefault,
   conversationReasonLabel,
   conversationRelationLabel,
-  groupThreadVariants,
+  sortedThreadEntries,
 } from "../../src/components/project-sync/ThreadVariantReview";
 import type {
   ConversationPlanActionType,
@@ -16,72 +16,74 @@ import type {
   ThreadSyncEntry,
 } from "../../src/types";
 
-function variant(overrides: Partial<ThreadSyncEntry>): ThreadSyncEntry {
+function thread(overrides: Partial<ThreadSyncEntry>): ThreadSyncEntry {
   return {
     thread_id: "provider-thread",
     provider_thread_id: "provider-thread",
-    resource_id: "codex:conversation:group-main:variant-v1",
+    resource_id: "codex:conversation:thread-v1",
     display_name: "Same conversation title",
     state: "diverged",
     local_present: true,
     storage_present: true,
-    conflict_group_id: "group-main",
-    variant_id: "variant-v1",
+    cloud_thread_id: "thread-v1",
+    forked_from: null,
     relation: "diverged",
-    proposed_action: "add_alternate",
+    proposed_action: "fork",
     reason_code: "diverged",
-    cloud_primary: false,
-    local_preferred: false,
     materialization_state: "resumable",
     resumable: true,
     origin_label: "This host",
-    available_actions: ["add_alternate", "promote_cloud", "tombstone_variant"],
+    available_actions: ["fork", "replace_cloud", "tombstone_thread"],
     requires_explicit_approval: false,
     ...overrides,
   };
 }
 
-test("thread variants stay grouped while cloud primary and local preference remain independent", () => {
+test("thread rows stay flat with fork provenance shown only as a hint", () => {
   let openCalls = 0;
   const entries = [
-    variant({
-      variant_id: "variant-cloud",
-      resource_id: "codex:conversation:group-main:variant-cloud",
+    thread({
+      cloud_thread_id: "thread-origin",
+      resource_id: "codex:conversation:thread-origin",
       thread_id: "cloud-source-shared",
       provider_thread_id: "provider-cloud-local",
-      cloud_primary: true,
-      local_preferred: false,
       materialization_state: "stored_only",
       resumable: false,
       origin_label: "Host 7F3A",
       proposed_action: "store_only",
       reason_code: "unknown_lineage",
       relation: "unknown",
+      storage_updated_at: 30,
     }),
-    variant({
-      variant_id: "variant-local",
-      resource_id: "codex:conversation:group-main:variant-local",
+    thread({
+      cloud_thread_id: "thread-forked-local",
+      forked_from: "thread-origin",
+      resource_id: "codex:conversation:thread-forked-local",
       thread_id: "cloud-source-shared",
       provider_thread_id: "provider-local-active",
-      cloud_primary: false,
-      local_preferred: true,
       materialization_state: "resumable",
       origin_label: "Work laptop",
+      storage_updated_at: 20,
     }),
-    variant({
-      conflict_group_id: "group-pending",
-      variant_id: "variant-pending",
-      resource_id: "codex:conversation:group-pending:variant-pending",
+    thread({
+      cloud_thread_id: "thread-pending",
+      resource_id: "codex:conversation:thread-pending",
       display_name: "Pending conversation",
       materialization_state: "pending",
       provider_thread_id: "provider-pending",
+      storage_updated_at: 10,
+    }),
+    thread({
+      cloud_thread_id: null,
+      resource_id: "codex:session:not-a-cloud-thread",
+      display_name: "Provider-only row",
     }),
   ];
-  const groups = groupThreadVariants(entries);
-  assert.equal(groups.length, 2);
+  const sorted = sortedThreadEntries(entries);
+  assert.equal(sorted.length, 3, "rows without a cloud thread are excluded");
   assert.deepEqual(
-    groups[0].entries.map((entry) => entry.variant_id),
-    ["variant-cloud", "variant-local"],
+    sorted.map((entry) => entry.cloud_thread_id),
+    ["thread-origin", "thread-forked-local", "thread-pending"],
   );
 
   const html = renderToStaticMarkup(
@@ -92,12 +94,17 @@ test("thread variants stay grouped while cloud primary and local preference rema
     />,
   );
   assert.equal(openCalls, 0, "rendering a Pull review must not open or resume a provider");
-  assert.ok((html.match(/Same conversation title/g) ?? []).length >= 3);
-  assert.match(html, /data-conflict-group="group-main"/);
-  assert.match(html, /data-variant-id="variant-cloud"/);
-  assert.match(html, /data-variant-id="variant-local"/);
-  assert.match(html, /Cloud primary/);
-  assert.match(html, /Preferred here/);
+  assert.ok((html.match(/Same conversation title/g) ?? []).length >= 2);
+  assert.match(html, /data-thread-id="thread-origin"/);
+  assert.match(html, /data-thread-id="thread-forked-local"/);
+  assert.doesNotMatch(html, /data-conflict-group/);
+  assert.equal(
+    (html.match(/Forked from another thread/g) ?? []).length,
+    1,
+    "only the forked thread carries the provenance hint",
+  );
+  assert.doesNotMatch(html, /Cloud primary/);
+  assert.doesNotMatch(html, /Preferred here/);
   assert.match(html, /Stored only/);
   assert.match(html, /Resumable/);
   assert.match(html, /Pending/);
@@ -108,30 +115,37 @@ test("thread variants stay grouped while cloud primary and local preference rema
   assert.doesNotMatch(html.split("<details>")[0], /provider-local-active/);
 });
 
-test("safe defaults exclude promotion replacement deletion and blocked actions", () => {
+test("fork is selected by default while forces and deletion require explicit approval", () => {
   assert.equal(
-    conversationActionSelectedByDefault(variant({ proposed_action: "fast_forward_local" })),
+    conversationActionSelectedByDefault(thread({ proposed_action: "fast_forward_local" })),
     true,
   );
   assert.equal(
-    conversationActionSelectedByDefault(variant({ proposed_action: "add_alternate" })),
+    conversationActionSelectedByDefault(thread({ proposed_action: "fork" })),
+    true,
+    "fork is always the pre-selected divergence default",
+  );
+  assert.equal(
+    conversationActionSelectedByDefault(thread({ proposed_action: "create_cloud" })),
+    true,
+  );
+  assert.equal(
+    conversationActionSelectedByDefault(thread({ proposed_action: "create_local" })),
     true,
   );
   for (const action of [
-    "promote_local",
-    "promote_cloud",
     "replace_local",
-    "tombstone_variant",
-    "tombstone_group",
+    "replace_cloud",
+    "tombstone_thread",
   ] as const) {
     assert.equal(conversationActionRequiresExplicitApproval(action), true);
-    assert.equal(conversationActionSelectedByDefault(variant({ proposed_action: action })), false);
+    assert.equal(conversationActionSelectedByDefault(thread({ proposed_action: action })), false);
   }
   for (const action of ["no_op", "keep_local", "require_pull", "blocked"] as const) {
-    assert.equal(conversationActionSelectedByDefault(variant({ proposed_action: action })), false);
+    assert.equal(conversationActionSelectedByDefault(thread({ proposed_action: action })), false);
   }
   assert.equal(
-    conversationActionSelectedByDefault(variant({
+    conversationActionSelectedByDefault(thread({
       proposed_action: "fast_forward_cloud",
       requires_explicit_approval: true,
     })),
@@ -156,13 +170,13 @@ test("every backend relation action and reason code has typed frontend copy", ()
     "fast_forward_cloud",
     "keep_local",
     "require_pull",
-    "add_alternate",
+    "fork",
+    "create_cloud",
+    "create_local",
     "store_only",
-    "promote_local",
-    "promote_cloud",
     "replace_local",
-    "tombstone_variant",
-    "tombstone_group",
+    "replace_cloud",
+    "tombstone_thread",
     "blocked",
   ];
   const reasons: ConversationReasonCode[] = [
@@ -189,20 +203,18 @@ test("every backend relation action and reason code has typed frontend copy", ()
   const rendered = renderToStaticMarkup(
     <ThreadVariantReview
       entries={[
-        ...actions.map((action, index) => variant({
-          conflict_group_id: `group-action-${index}`,
-          variant_id: `variant-action-${index}`,
-          resource_id: `codex:conversation:group-action-${index}:variant-action-${index}`,
+        ...actions.map((action, index) => thread({
+          cloud_thread_id: `thread-action-${index}`,
+          resource_id: `codex:conversation:thread-action-${index}`,
           relation: relations[index % relations.length],
           proposed_action: action,
           reason_code: reasons[index % reasons.length],
           materialization_state: (["resumable", "pending", "stored_only"] as const)[index % 3],
           requires_explicit_approval: conversationActionRequiresExplicitApproval(action),
         })),
-        ...reasons.map((reason, index) => variant({
-          conflict_group_id: `group-reason-${index}`,
-          variant_id: `variant-reason-${index}`,
-          resource_id: `codex:conversation:group-reason-${index}:variant-reason-${index}`,
+        ...reasons.map((reason, index) => thread({
+          cloud_thread_id: `thread-reason-${index}`,
+          resource_id: `codex:conversation:thread-reason-${index}`,
           relation: relations[index % relations.length],
           proposed_action: "store_only",
           reason_code: reason,
@@ -215,7 +227,7 @@ test("every backend relation action and reason code has typed frontend copy", ()
   reasons.forEach((reason) => {
     assert.match(rendered, new RegExp(conversationReasonLabel(reason).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   });
-  assert.equal((rendered.match(/Review required/g) ?? []).length, 5);
+  assert.equal((rendered.match(/Review required/g) ?? []).length, 3);
   assert.match(conversationReasonLabel("stale_plan"), /Refresh/);
   assert.match(conversationReasonLabel("provider_not_quiescent"), /still be writing/);
   assert.match(conversationReasonLabel("ambiguous_binding"), /More than one/);

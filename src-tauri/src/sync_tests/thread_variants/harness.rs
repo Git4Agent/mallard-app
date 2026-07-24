@@ -1,16 +1,15 @@
 use crate::project_sync_v3::bundle_engine::{
     BundleEngine, BundleObjectStore, HeadToken, LocalBundleObjectStore, PublishExpectation,
-    PublishSchema5Request, Schema5CapturedFile, Schema5PublishOutcome,
+    PublishSchema6Request, Schema6CapturedFile, Schema6PublishOutcome,
 };
 use crate::project_sync_v3::conversation_codec::{
     analyze_codex_transcript, CodecLineage, CODEX_LINEAGE_CODEC_KEY,
 };
 use crate::project_sync_v3::domain::{
     conversation_resource_id, ApplyPolicy, BundleId, BundleIdentity, BundleKind, BundleRecipe,
-    CapturedWith, ConflictGroupId, ConversationFileRef, ConversationFileRole, ConversationGroup,
-    ConversationLineageStatus, ConversationVariant, LogicalPath, PortableOrigin, Provenance,
-    Provider, RecipeEntry, ReplicaId, ResourceDescriptor, ResourceId, ResourceKind, ResourceScope,
-    StorageId, VariantId,
+    CapturedWith, ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
+    ConversationThread, LogicalPath, PortableOrigin, Provenance, Provider, RecipeEntry, ReplicaId,
+    ResourceDescriptor, ResourceKind, ResourceScope, StorageId, ThreadId,
 };
 use crate::project_sync_v3::persistence::V3Repository;
 use serde_json::{json, Value};
@@ -80,20 +79,18 @@ impl VariantWorld {
 
     pub fn publish(
         &self,
-        variants: &[VariantSpec],
-        primary: &VariantId,
+        threads: &[ThreadSpec],
         publisher: PortableOrigin,
         updated_at: u64,
-    ) -> Schema5PublishOutcome {
+    ) -> Schema6PublishOutcome {
         let engine = self.engine();
         let current = engine.read_head(&self.bundle_id).unwrap();
         let previous = current
             .as_ref()
             .map(|_| engine.inspect(&self.bundle_id).unwrap().manifest);
-        let request = schema5_request(
+        let request = schema6_request(
             self.bundle_id.clone(),
-            variants,
-            primary,
+            threads,
             publisher,
             updated_at,
             previous.as_ref(),
@@ -101,189 +98,159 @@ impl VariantWorld {
                 .map(|(_, token)| PublishExpectation::Match(token))
                 .unwrap_or(PublishExpectation::Absent),
         );
-        engine.publish_schema5(request).unwrap()
+        engine.publish_schema6(request).unwrap()
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct VariantSpec {
-    pub group_id: ConflictGroupId,
-    pub variant_id: VariantId,
+pub struct ThreadSpec {
+    pub thread_id: ThreadId,
     pub title: String,
     pub source_thread_id: String,
     pub transcript: Vec<u8>,
     pub created_by: Option<PortableOrigin>,
     pub last_updated_by: Option<PortableOrigin>,
-    pub parent_variant_id: Option<VariantId>,
+    pub forked_from: Option<ThreadId>,
     pub created_at: u64,
     pub updated_at: u64,
 }
 
-impl VariantSpec {
+impl ThreadSpec {
     pub fn new(
-        group: &str,
-        variant: &str,
+        thread: &str,
         source_thread_id: &str,
         transcript: Vec<u8>,
         origin: PortableOrigin,
         updated_at: u64,
     ) -> Self {
         Self {
-            group_id: ConflictGroupId::parse(group).unwrap(),
-            variant_id: VariantId::parse(variant).unwrap(),
-            title: "Variant test conversation".to_string(),
+            thread_id: ThreadId::parse(thread).unwrap(),
+            title: "Thread test conversation".to_string(),
             source_thread_id: source_thread_id.to_string(),
             transcript,
             created_by: Some(origin.clone()),
             last_updated_by: Some(origin),
-            parent_variant_id: None,
+            forked_from: None,
             created_at: 1,
             updated_at,
         }
     }
 }
 
-pub fn schema5_request(
+pub fn schema6_request(
     bundle_id: BundleId,
-    variants: &[VariantSpec],
-    primary: &VariantId,
+    threads: &[ThreadSpec],
     publisher: PortableOrigin,
     updated_at: u64,
     previous: Option<&crate::project_sync_v3::domain::BundleManifest>,
     expected_head: PublishExpectation,
-) -> PublishSchema5Request {
+) -> PublishSchema6Request {
     let mut recipe = BundleRecipe::default();
     let mut resources = BTreeMap::new();
     let mut retained_files = BTreeMap::new();
     let mut captured_files = BTreeMap::new();
-    let mut grouped = BTreeMap::<ConflictGroupId, Vec<&VariantSpec>>::new();
-    for variant in variants {
-        grouped
-            .entry(variant.group_id.clone())
-            .or_default()
-            .push(variant);
-    }
-    let mut conversation_groups = BTreeMap::new();
-    for (group_id, specs) in grouped {
-        let mut group_variants = BTreeMap::new();
-        let mut group_created = u64::MAX;
-        let mut group_updated = 0;
-        for spec in specs {
-            let analysis = analyze_codex_transcript(&spec.transcript);
-            let resource_id =
-                conversation_resource_id(Provider::Codex, &group_id, &spec.variant_id).unwrap();
-            let logical_path = LogicalPath::parse(format!(
-                "state/conversations/codex/{}/{}/transcript.jsonl",
-                group_id, spec.variant_id
-            ))
-            .unwrap();
-            let (lineage_status, head_message_id, message_count, lineage_digest, semantic_digest) =
-                match analysis.lineage {
-                    CodecLineage::Complete {
-                        chain,
-                        lineage_digest,
-                        semantic_digest,
-                    } => (
-                        ConversationLineageStatus::Complete,
-                        chain.last().map(|message| message.message_id.clone()),
-                        Some(chain.len() as u64),
-                        Some(lineage_digest),
-                        Some(semantic_digest),
-                    ),
-                    CodecLineage::Unknown { reason } => (
-                        ConversationLineageStatus::Unknown {
-                            reason_code: reason.as_str().to_string(),
-                        },
-                        None,
-                        None,
-                        None,
-                        None,
-                    ),
-                };
-            let portable_variant = ConversationVariant {
-                variant_id: spec.variant_id.clone(),
-                resource_id: resource_id.clone(),
-                files: vec![ConversationFileRef {
-                    logical_path: logical_path.clone(),
-                    role: ConversationFileRole::Transcript,
-                }],
-                lineage_status,
-                lineage_codec: CODEX_LINEAGE_CODEC_KEY.to_string(),
-                head_message_id,
-                message_count,
-                lineage_digest,
-                semantic_digest,
-                parent_variant_id: spec.parent_variant_id.clone(),
-                fork_message_id: None,
-                source_thread_id: Some(spec.source_thread_id.clone()),
-                created_by_origin: spec.created_by.clone(),
-                last_updated_by_origin: spec.last_updated_by.clone(),
-                created_at: spec.created_at,
-                updated_at: spec.updated_at,
+    let mut conversations = BTreeMap::new();
+    for spec in threads {
+        let analysis = analyze_codex_transcript(&spec.transcript);
+        let resource_id = conversation_resource_id(Provider::Codex, &spec.thread_id).unwrap();
+        let logical_path = LogicalPath::parse(format!(
+            "state/conversations/codex/{}/transcript.jsonl",
+            spec.thread_id
+        ))
+        .unwrap();
+        let (lineage_status, head_message_id, message_count, lineage_digest, semantic_digest) =
+            match analysis.lineage {
+                CodecLineage::Complete {
+                    chain,
+                    lineage_digest,
+                    semantic_digest,
+                } => (
+                    ConversationLineageStatus::Complete,
+                    chain.last().map(|message| message.message_id.clone()),
+                    Some(chain.len() as u64),
+                    Some(lineage_digest),
+                    Some(semantic_digest),
+                ),
+                CodecLineage::Unknown { reason } => (
+                    ConversationLineageStatus::Unknown {
+                        reason_code: reason.as_str().to_string(),
+                    },
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
             };
-            resources.insert(
-                resource_id.clone(),
-                ResourceDescriptor {
-                    resource_id: resource_id.clone(),
-                    kind: ResourceKind::CodexConversation,
-                    provider: Some(Provider::Codex),
-                    scope: ResourceScope::ProviderState,
-                    display_name: spec.title.clone(),
-                    provenance: Provenance::Unknown,
-                    apply_policy: ApplyPolicy::SafeFile,
-                    relative_cwd: Some(".".to_string()),
-                    codec_version: 1,
-                    metadata: BTreeMap::new(),
-                },
-            );
-            recipe.entries.insert(
-                resource_id.clone(),
-                RecipeEntry {
-                    resource_id: resource_id.clone(),
-                    apply_policy: ApplyPolicy::SafeFile,
-                    required: false,
-                },
-            );
-            let captured = Schema5CapturedFile {
+        let thread = ConversationThread {
+            thread_id: spec.thread_id.clone(),
+            provider: Provider::Codex,
+            display_title: Some(spec.title.clone()),
+            resource_id: resource_id.clone(),
+            files: vec![ConversationFileRef {
+                logical_path: logical_path.clone(),
+                role: ConversationFileRole::Transcript,
+            }],
+            lineage_status,
+            lineage_codec: CODEX_LINEAGE_CODEC_KEY.to_string(),
+            head_message_id,
+            message_count,
+            lineage_digest,
+            semantic_digest,
+            forked_from: spec.forked_from.clone(),
+            source_thread_id: Some(spec.source_thread_id.clone()),
+            created_by_origin: spec.created_by.clone(),
+            last_updated_by_origin: spec.last_updated_by.clone(),
+            created_at: spec.created_at,
+            updated_at: spec.updated_at,
+        };
+        resources.insert(
+            resource_id.clone(),
+            ResourceDescriptor {
                 resource_id: resource_id.clone(),
-                bytes: spec.transcript.clone(),
-                source_mtime: spec.updated_at,
-                mode: Some(0o600),
-            };
-            let digest = sha256(&captured.bytes);
-            let retained = previous.and_then(|manifest| manifest.files.get(&logical_path));
-            if let Some(entry) = retained.filter(|entry| {
-                entry.resource_id == resource_id
-                    && entry.sha256 == digest
-                    && entry.size == captured.bytes.len() as u64
-                    && entry.source_mtime == captured.source_mtime
-                    && entry.mode == captured.mode
-            }) {
-                retained_files.insert(logical_path, entry.clone());
-            } else {
-                captured_files.insert(logical_path, captured);
-            }
-            group_created = group_created.min(spec.created_at);
-            group_updated = group_updated.max(spec.updated_at);
-            group_variants.insert(spec.variant_id.clone(), portable_variant);
-        }
-        conversation_groups.insert(
-            group_id.clone(),
-            ConversationGroup {
-                conflict_group_id: group_id,
-                provider: Provider::Codex,
-                display_title: Some("Variant test conversation".to_string()),
-                primary_variant_id: primary.clone(),
-                variants: group_variants,
-                created_at: group_created,
-                updated_at: group_updated,
+                kind: ResourceKind::CodexConversation,
+                provider: Some(Provider::Codex),
+                scope: ResourceScope::ProviderState,
+                display_name: spec.title.clone(),
+                provenance: Provenance::Unknown,
+                apply_policy: ApplyPolicy::SafeFile,
+                relative_cwd: Some(".".to_string()),
+                codec_version: 1,
+                metadata: BTreeMap::new(),
             },
         );
+        recipe.entries.insert(
+            resource_id.clone(),
+            RecipeEntry {
+                resource_id: resource_id.clone(),
+                apply_policy: ApplyPolicy::SafeFile,
+                required: false,
+            },
+        );
+        let captured = Schema6CapturedFile {
+            resource_id: resource_id.clone(),
+            bytes: spec.transcript.clone(),
+            source_mtime: spec.updated_at,
+            mode: Some(0o600),
+        };
+        let digest = sha256(&captured.bytes);
+        let retained = previous.and_then(|manifest| manifest.files.get(&logical_path));
+        if let Some(entry) = retained.filter(|entry| {
+            entry.resource_id == resource_id
+                && entry.sha256 == digest
+                && entry.size == captured.bytes.len() as u64
+                && entry.source_mtime == captured.source_mtime
+                && entry.mode == captured.mode
+        }) {
+            retained_files.insert(logical_path, entry.clone());
+        } else {
+            captured_files.insert(logical_path, captured);
+        }
+        conversations.insert(spec.thread_id.clone(), thread);
     }
-    PublishSchema5Request {
+    PublishSchema6Request {
         identity: BundleIdentity {
             bundle_id,
-            display_name: "Variant test bundle".to_string(),
+            display_name: "Thread test bundle".to_string(),
             kind: BundleKind::Project,
             repository_fingerprint: None,
         },
@@ -295,7 +262,7 @@ pub fn schema5_request(
             codec_versions: BTreeMap::from([(CODEX_LINEAGE_CODEC_KEY.to_string(), 1)]),
         },
         published_by_origin: publisher,
-        conversation_groups,
+        conversations,
         resources,
         retained_files,
         captured_files,
@@ -364,12 +331,6 @@ impl TranscriptBuilder {
             }
         }));
         self.last_message_id = Some(id.to_string());
-        self
-    }
-
-    pub fn malformed(mut self) -> Self {
-        self.records
-            .push(Value::String("__MALFORMED__".to_string()));
         self
     }
 
@@ -445,12 +406,3 @@ pub fn assert_manifest_consistent(world: &VariantWorld) {
     }
 }
 
-pub fn variant_resource(
-    manifest: &crate::project_sync_v3::domain::BundleManifest,
-    group: &ConflictGroupId,
-    variant: &VariantId,
-) -> ResourceId {
-    manifest.conversation_groups[group].variants[variant]
-        .resource_id
-        .clone()
-}

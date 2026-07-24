@@ -1,14 +1,14 @@
 use super::harness::{analyzed_chain, sha256, VariantWorld};
 use crate::project_sync_v3::bundle_engine::{
-    build_schema5_cutover_request, BundleObjectStore, CasExpectation, CasOutcome, ObjectKey,
+    build_schema6_cutover_request, BundleObjectStore, CasExpectation, CasOutcome, ObjectKey,
     PublishBundleRequest, PublishExpectation,
 };
 use crate::project_sync_v3::conversation_sync::{
     recover_unique_compatible_binding, BindingRecoveryCandidate, BindingRecoveryResult,
 };
 use crate::project_sync_v3::domain::{
-    deterministic_schema4_conversation_ids, BundleHead, BundleManifest, CapturedWith, Provider,
-    ResourceId, BUNDLE_SCHEMA_V4, BUNDLE_SCHEMA_V5,
+    deterministic_schema4_thread_id, BundleHead, BundleManifest, CapturedWith, Provider,
+    ResourceId, BUNDLE_SCHEMA_V4, BUNDLE_SCHEMA_V6,
 };
 use crate::project_sync_v3::provider_capture::CapturedResources;
 
@@ -82,21 +82,22 @@ fn committed_schema4_fixture_cutover_is_deterministic_readable_and_one_way() {
     let (_, token) = engine.read_head(&world.bundle_id).unwrap().unwrap();
     let publisher = world.origin(&world.repo_a, "replica-a");
     let request_a =
-        build_schema5_cutover_request(&legacy, publisher.clone(), token.clone(), 1784678410)
+        build_schema6_cutover_request(&legacy, publisher.clone(), token.clone(), 1784678410)
             .unwrap();
-    let request_b = build_schema5_cutover_request(&legacy, publisher, token, 1784678410).unwrap();
+    let request_b = build_schema6_cutover_request(&legacy, publisher, token, 1784678410).unwrap();
     assert_eq!(
-        request_a.conversation_groups.keys().collect::<Vec<_>>(),
-        request_b.conversation_groups.keys().collect::<Vec<_>>()
+        request_a.conversations.keys().collect::<Vec<_>>(),
+        request_b.conversations.keys().collect::<Vec<_>>()
     );
 
     let legacy_resource = ResourceId::parse("codex:session:legacy-thread").unwrap();
-    let (expected_group, expected_variant) =
-        deterministic_schema4_conversation_ids(&world.bundle_id, Provider::Codex, &legacy_resource)
+    let expected_thread =
+        deterministic_schema4_thread_id(&world.bundle_id, Provider::Codex, &legacy_resource)
             .unwrap();
-    let migrated = &request_a.conversation_groups[&expected_group].variants[&expected_variant];
+    let migrated = &request_a.conversations[&expected_thread];
     assert!(migrated.created_by_origin.is_none());
     assert!(migrated.last_updated_by_origin.is_none());
+    assert!(migrated.forked_from.is_none());
     assert_eq!(migrated.source_thread_id.as_deref(), Some("thread-fixture"));
     assert_eq!(
         request_a.captured_files.values().next().unwrap().bytes,
@@ -107,17 +108,17 @@ fn committed_schema4_fixture_cutover_is_deterministic_readable_and_one_way() {
         recover_unique_compatible_binding(
             Some(&local_chain),
             &[BindingRecoveryCandidate {
-                variant_id: expected_variant.clone(),
+                thread_id: expected_thread.clone(),
                 chain: Some(&local_chain),
             }],
         ),
-        BindingRecoveryResult::Unique(expected_variant.clone())
+        BindingRecoveryResult::Unique(expected_thread.clone())
     );
 
-    let cutover = engine.publish_schema5(request_a).unwrap();
+    let cutover = engine.publish_schema6(request_a).unwrap();
     assert!(cutover.published);
-    assert_eq!(cutover.snapshot.head.schema_version, BUNDLE_SCHEMA_V5);
-    assert_eq!(cutover.snapshot.manifest.schema_version, BUNDLE_SCHEMA_V5);
+    assert_eq!(cutover.snapshot.head.schema_version, BUNDLE_SCHEMA_V6);
+    assert_eq!(cutover.snapshot.manifest.schema_version, BUNDLE_SCHEMA_V6);
     assert!(cutover
         .snapshot
         .manifest
@@ -127,8 +128,8 @@ fn committed_schema4_fixture_cutover_is_deterministic_readable_and_one_way() {
     assert!(cutover
         .snapshot
         .manifest
-        .conversation_groups
-        .contains_key(&expected_group));
+        .conversations
+        .contains_key(&expected_thread));
     let fetched = engine.fetch(&world.bundle_id).unwrap();
     fetched.snapshot.validate().unwrap();
     assert!(fetched
@@ -151,5 +152,5 @@ fn committed_schema4_fixture_cutover_is_deterministic_readable_and_one_way() {
     });
     assert!(old_writer
         .unwrap_err()
-        .contains("conversation-variant publication path"));
+        .contains("conversation-thread publication path"));
 }

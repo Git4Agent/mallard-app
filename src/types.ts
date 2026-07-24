@@ -864,13 +864,13 @@ export type ConversationPlanActionType =
   | "fast_forward_cloud"
   | "keep_local"
   | "require_pull"
-  | "add_alternate"
+  | "fork"
+  | "create_cloud"
+  | "create_local"
   | "store_only"
-  | "promote_local"
-  | "promote_cloud"
   | "replace_local"
-  | "tombstone_variant"
-  | "tombstone_group"
+  | "replace_cloud"
+  | "tombstone_thread"
   | "blocked";
 
 export type ConversationReasonCode =
@@ -903,14 +903,12 @@ export interface ThreadSyncEntry {
   status_detail?: string | null;
   local_updated_at?: number | null;
   storage_updated_at?: number | null;
-  conflict_group_id?: string | null;
-  variant_id?: string | null;
+  cloud_thread_id?: string | null;
+  forked_from?: string | null;
   provider_thread_id?: string | null;
   relation?: ConversationRelation | null;
   proposed_action?: ConversationPlanActionType | null;
   reason_code?: ConversationReasonCode | null;
-  cloud_primary?: boolean;
-  local_preferred?: boolean;
   materialization_state?: ConversationMaterializationState | null;
   resumable?: boolean;
   origin_label?: string | null;

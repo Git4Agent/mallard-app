@@ -90,6 +90,7 @@ const ACTIVE_STORAGE_BY_PROJECT_KEY = "mallard.active-storage-by-project";
 const DEFAULT_PROJECT_SIDEBAR_WIDTH = 318;
 const MIN_PROJECT_SIDEBAR_WIDTH = 220;
 const MAX_PROJECT_SIDEBAR_WIDTH = 560;
+const FOCUS_RECONCILE_MIN_AWAY_MS = 5000;
 
 function clampSidebarWidth(width: number, maxWidth = MAX_PROJECT_SIDEBAR_WIDTH): number {
   return Math.min(maxWidth, Math.max(MIN_PROJECT_SIDEBAR_WIDTH, width));
@@ -282,6 +283,8 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
   const [sidebarVisible, setSidebarVisible] = useState(storedSidebarVisibility);
   const [resizingSidebar, setResizingSidebar] = useState(false);
   const [unreadLogs, setUnreadLogs] = useState(0);
+  const [appMenuOpen, setAppMenuOpen] = useState(false);
+  const appMenuRef = useRef<HTMLDivElement>(null);
   const activityOpenRef = useRef(false);
   const logFiltersRef = useRef({ types: logTypeFilters, level: logLevelFilter, search: logSearch });
   const logRequestRef = useRef(0);
@@ -900,6 +903,82 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     if (hostWorkflowGeneration.current !== continuationGeneration) return;
     setHistoryRefreshEpoch((epoch) => epoch + 1);
   };
+
+  // Quietly reconciles state commonly changed outside Mallard (git init, external
+  // renames) after the window regains focus. Deliberately narrower than refresh():
+  // no audits, profiles, readiness probes, history reset, or loading indicator.
+  const reconcileExternalChanges = async () => {
+    if (loading || busy || !hostIdentityShellReady) return;
+    const shellRequestId = shellRequest.current;
+    const workflowGeneration = hostWorkflowGeneration.current;
+    const stale = () => (
+      shellRequest.current !== shellRequestId
+      || hostWorkflowGeneration.current !== workflowGeneration
+    );
+    try {
+      const [nextProjects, nextRepositoryKinds] = await Promise.all([
+        projectSyncApi.listProjects(),
+        projectSyncApi.listProjectRepositoryKinds(),
+      ]);
+      if (stale()) return;
+      setRegistrations(nextProjects);
+      setRepositoryKinds(nextRepositoryKinds);
+      if (!activeProjectId) return;
+      if (!nextProjects.some((candidate) => candidate.local_project_id === activeProjectId)) {
+        // The active project vanished externally; the full refresh reselects safely.
+        await refresh(workflowGeneration);
+        return;
+      }
+      const nextDetail = await projectSyncApi.getProject(activeProjectId);
+      if (stale() || !nextDetail) return;
+      setDetail(nextDetail);
+      if (nextDetail.binding) {
+        setBindings((current) => upsertBinding(current, nextDetail.binding as ProjectBinding));
+      }
+    } catch {
+      // Background reconcile stays silent; explicit actions still surface their errors.
+    }
+  };
+  const reconcileExternalChangesRef = useRef(reconcileExternalChanges);
+  reconcileExternalChangesRef.current = reconcileExternalChanges;
+  const windowBlurredAt = useRef<number | null>(null);
+  useEffect(() => {
+    const handleBlur = () => { windowBlurredAt.current = Date.now(); };
+    const handleFocus = () => {
+      const blurredAt = windowBlurredAt.current;
+      windowBlurredAt.current = null;
+      if (blurredAt !== null && Date.now() - blurredAt >= FOCUS_RECONCILE_MIN_AWAY_MS) {
+        void reconcileExternalChangesRef.current();
+      }
+    };
+    window.addEventListener("blur", handleBlur);
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      window.removeEventListener("blur", handleBlur);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!appMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !appMenuRef.current?.contains(event.target)) setAppMenuOpen(false);
+    };
+    const handleFocusIn = (event: FocusEvent) => {
+      if (event.target instanceof Node && !appMenuRef.current?.contains(event.target)) setAppMenuOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAppMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("focusin", handleFocusIn);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("focusin", handleFocusIn);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [appMenuOpen]);
 
   const registerNewHost = async () => {
     if (!hostIdentityStatus) return;
@@ -2424,7 +2503,6 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
           setActivityOpen(next);
         }}
         onAddProject={() => void beginAddProject()}
-        onRefresh={() => void refresh()}
         onOpenStorage={(storageId, settingsExpanded) => {
           setSetupDraftId(null);
           setPendingPush(null);
@@ -2465,13 +2543,51 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
             <strong>{workspaceTitle}</strong>
             {activeDraftSummary && <span>Draft setup</span>}
           </div>
-          <button
-            type="button"
-            className="v3-theme-button"
-            onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
-          >
-            {theme === "dark" ? "Light" : "Dark"} theme
-          </button>
+          <div className="v3-titlebar-actions">
+            <button
+              type="button"
+              className="v3-theme-button"
+              onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
+            >
+              {theme === "dark" ? "Light" : "Dark"} theme
+            </button>
+            <div ref={appMenuRef} className={`storage-link-overflow${appMenuOpen ? " open" : ""}`}>
+              <button
+                type="button"
+                className="storage-link-more"
+                aria-haspopup="menu"
+                aria-expanded={appMenuOpen}
+                aria-controls="v3-app-actions-menu"
+                title="App actions"
+                aria-label="App actions"
+                onClick={() => setAppMenuOpen((current) => !current)}
+              >
+                <Icon name="more" size={16} />
+              </button>
+              <div
+                id="v3-app-actions-menu"
+                className="storage-link-actions-menu"
+                role="menu"
+                aria-label="App actions"
+                hidden={!appMenuOpen}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="storage-link-actions-menu-item"
+                  disabled={loading || busy}
+                  title="Reload all Mallard data from disk and storage; project files are not modified"
+                  onClick={() => {
+                    setAppMenuOpen(false);
+                    void refresh();
+                  }}
+                >
+                  <Icon name="refresh" size={14} className={loading ? "icon-spin" : undefined} />
+                  <span>Reload app data</span>
+                </button>
+              </div>
+            </div>
+          </div>
         </header>
 
         {backendError && (

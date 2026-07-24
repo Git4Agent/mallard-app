@@ -1,4 +1,4 @@
-//! Pure conversation-variant reconciliation and reviewed-plan pinning.
+//! Pure conversation-thread reconciliation and reviewed-plan pinning.
 //!
 //! Filesystem, Tauri, and object-store code call these functions rather than
 //! reimplementing relation-to-action policy. This keeps Push, Pull, recovery,
@@ -7,11 +7,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::domain::{
-    classify_conversation_relation, ActionId, CanonicalConversationMessage, ConflictGroupId,
-    ConversationBindings, ConversationGroup, ConversationPlanAction, ConversationPlanActionType,
+    classify_conversation_relation, ActionId, CanonicalConversationMessage,
+    ConversationBindings, ConversationPlanAction, ConversationPlanActionType,
     ConversationPlanDirection, ConversationReasonCode, ConversationRelation, HostId,
-    LocalConversationBinding, LocalConversationPreference, LocalProjectId, LocalProviderProfileId,
-    Provider, ProviderStateExpectation, ReplicaId, ResourceId, TargetExpectation, VariantId,
+    LocalConversationBinding, LocalProjectId, LocalProviderProfileId, Provider,
+    ProviderStateExpectation, ReplicaId, ResourceId, TargetExpectation, ThreadId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,9 +53,10 @@ pub struct ConversationDecision {
     pub reason_code: ConversationReasonCode,
 }
 
-/// Map a proven relation to one typed default action. Explicit promotions,
-/// replacement, and tombstones are never synthesized here; callers add those
-/// only from reviewed user intent.
+/// Map a proven relation to one typed default action. Fork is always the
+/// divergence default; the explicit forces (`ReplaceCloud`, `ReplaceLocal`)
+/// and `TombstoneThread` are never synthesized here; callers add those only
+/// from reviewed user intent.
 pub fn default_conversation_decision(
     direction: ConversationPlanDirection,
     relation: ConversationRelation,
@@ -104,7 +105,7 @@ pub fn default_conversation_decision(
                     capabilities.binding,
                     BindingResolution::Bound | BindingResolution::UniqueCompatibleAncestor
                 ) {
-                    decision(Action::AddAlternate, Reason::Diverged)
+                    decision(Action::Fork, Reason::Diverged)
                 } else {
                     decision(
                         Action::Blocked,
@@ -120,7 +121,9 @@ pub fn default_conversation_decision(
                 if capabilities.local_safely_capturable
                     && capabilities.binding == BindingResolution::Bound
                 {
-                    decision(Action::AddAlternate, Reason::UnknownLineage)
+                    // Content is preserved on both sides, so forking under
+                    // unproven ancestry is safe by construction.
+                    decision(Action::Fork, Reason::UnknownLineage)
                 } else {
                     decision(
                         Action::Blocked,
@@ -137,7 +140,7 @@ pub fn default_conversation_decision(
             Relation::LocalMissing => decision(Action::NoOp, Reason::LocalMissing),
             Relation::CloudMissing => {
                 if capabilities.local_safely_capturable {
-                    decision(Action::AddAlternate, Reason::CloudMissing)
+                    decision(Action::CreateCloud, Reason::CloudMissing)
                 } else {
                     decision(Action::Blocked, Reason::CodecUnsupported)
                 }
@@ -159,7 +162,7 @@ pub fn default_conversation_decision(
             }
             Relation::Diverged => {
                 if capabilities.cloud_safely_readable && capabilities.destination_codec_resumable {
-                    decision(Action::AddAlternate, Reason::Diverged)
+                    decision(Action::Fork, Reason::Diverged)
                 } else {
                     decision(Action::StoreOnly, Reason::CodecUnsupported)
                 }
@@ -167,7 +170,7 @@ pub fn default_conversation_decision(
             Relation::Unknown => decision(Action::StoreOnly, Reason::UnknownLineage),
             Relation::LocalMissing => {
                 if capabilities.cloud_safely_readable && capabilities.destination_codec_resumable {
-                    decision(Action::AddAlternate, Reason::LocalMissing)
+                    decision(Action::CreateLocal, Reason::LocalMissing)
                 } else {
                     decision(Action::StoreOnly, Reason::CodecUnsupported)
                 }
@@ -203,10 +206,8 @@ pub struct ConversationPlanActionRequest<'a> {
     pub replica_id: ReplicaId,
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
-    pub conflict_group_id: ConflictGroupId,
-    pub cloud_variant_id: Option<VariantId>,
-    pub local_variant_id: Option<VariantId>,
-    pub result_local_variant_id: Option<VariantId>,
+    pub thread_id: ThreadId,
+    pub result_thread_id: Option<ThreadId>,
     pub source_resource_id: Option<ResourceId>,
     pub proposed_provider_thread_id: Option<String>,
     pub required_codec: String,
@@ -222,7 +223,6 @@ pub struct ConversationPlanActionRequest<'a> {
     pub expected_host_identity_revision: u64,
     pub expected_bindings_document_revision: u64,
     pub expected_binding_revision: Option<u64>,
-    pub expected_preference_revision: Option<u64>,
     pub expires_at: u64,
 }
 
@@ -245,10 +245,8 @@ pub fn build_conversation_plan_action(
         replica_id: request.replica_id,
         local_project_id: request.local_project_id,
         provider_profile_id: request.provider_profile_id,
-        conflict_group_id: request.conflict_group_id,
-        cloud_variant_id: request.cloud_variant_id,
-        local_variant_id: request.local_variant_id,
-        result_local_variant_id: request.result_local_variant_id,
+        thread_id: request.thread_id,
+        result_thread_id: request.result_thread_id,
         source_resource_id: request.source_resource_id,
         proposed_provider_thread_id: request.proposed_provider_thread_id,
         required_codec: request.required_codec,
@@ -264,7 +262,6 @@ pub fn build_conversation_plan_action(
         expected_host_identity_revision: request.expected_host_identity_revision,
         expected_bindings_document_revision: request.expected_bindings_document_revision,
         expected_binding_revision: request.expected_binding_revision,
-        expected_preference_revision: request.expected_preference_revision,
         expires_at: request.expires_at,
     };
     action.validate()?;
@@ -273,21 +270,24 @@ pub fn build_conversation_plan_action(
 
 #[derive(Clone, Debug)]
 pub struct BindingRecoveryCandidate<'a> {
-    pub variant_id: VariantId,
+    pub thread_id: ThreadId,
     pub chain: Option<&'a [CanonicalConversationMessage]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindingRecoveryResult {
-    Unique(VariantId),
+    Unique(ThreadId),
     Missing,
     Ambiguous,
     Unknown,
 }
 
 /// Recover a missing binding only from one unique longest compatible cloud
-/// ancestor. Names, titles, and provider IDs are intentionally absent from
-/// this API and therefore cannot influence the result.
+/// ancestor among all threads. Names, titles, and provider IDs are
+/// intentionally absent from this API and therefore cannot influence the
+/// result. Callers must skip conversations that are already bound: a
+/// deliberately forked conversation is always bound to its minted thread and
+/// must never be silently re-attached to a compatible ancestor.
 pub fn recover_unique_compatible_binding(
     local_chain: Option<&[CanonicalConversationMessage]>,
     candidates: &[BindingRecoveryCandidate<'_>],
@@ -306,7 +306,7 @@ pub fn recover_unique_compatible_binding(
                 classify_conversation_relation(Some(local_chain), Some(chain)),
                 ConversationRelation::Identical | ConversationRelation::CloudPrefixOfLocal
             )
-            .then_some((chain.len(), candidate.variant_id.clone()))
+            .then_some((chain.len(), candidate.thread_id.clone()))
         })
         .collect::<Vec<_>>();
     let Some(longest) = compatible.iter().map(|(length, _)| *length).max() else {
@@ -315,7 +315,7 @@ pub fn recover_unique_compatible_binding(
     let mut longest_matches = compatible
         .into_iter()
         .filter(|(length, _)| *length == longest)
-        .map(|(_, variant_id)| variant_id);
+        .map(|(_, thread_id)| thread_id);
     let Some(result) = longest_matches.next() else {
         return BindingRecoveryResult::Missing;
     };
@@ -329,46 +329,30 @@ pub fn recover_unique_compatible_binding(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TombstoneDecision {
     RejectUnapproved,
-    RejectPrimaryWithoutReplacement,
     RejectStaleDigest,
-    PreserveModifiedInSameGroup,
-    TombstoneVariant,
-    TombstoneGroup,
+    PreserveModified,
+    TombstoneThread,
 }
 
 /// Decide a reviewed deletion without treating absence as intent. A modified
-/// local copy always survives; deleting the last branch uses a group
-/// tombstone, and deleting the primary requires a replacement in the same
-/// reviewed publication. A modified branch wins a group-tombstone race and
-/// resurrects the same conflict-group identity so bindings remain stable.
+/// copy always survives a tombstone race, and a tombstone that no longer
+/// matches a live thread is stale rather than silently re-applied.
 pub fn review_conversation_tombstone(
-    group: &ConversationGroup,
-    variant_id: &VariantId,
+    thread_is_live: bool,
     reviewed_tree_digest: &str,
     current_tree_digest: &str,
     approved: bool,
-    replacement_primary: Option<&VariantId>,
 ) -> TombstoneDecision {
     if !approved {
         return TombstoneDecision::RejectUnapproved;
     }
     if reviewed_tree_digest != current_tree_digest {
-        return TombstoneDecision::PreserveModifiedInSameGroup;
+        return TombstoneDecision::PreserveModified;
     }
-    if !group.variants.contains_key(variant_id) {
+    if !thread_is_live {
         return TombstoneDecision::RejectStaleDigest;
     }
-    if group.variants.len() == 1 {
-        return TombstoneDecision::TombstoneGroup;
-    }
-    if group.primary_variant_id == *variant_id
-        && replacement_primary.is_none_or(|replacement| {
-            replacement == variant_id || !group.variants.contains_key(replacement)
-        })
-    {
-        return TombstoneDecision::RejectPrimaryWithoutReplacement;
-    }
-    TombstoneDecision::TombstoneVariant
+    TombstoneDecision::TombstoneThread
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -390,7 +374,6 @@ pub enum ConversationStalePin {
     ProjectBindingRevision,
     BindingsDocumentRevision,
     BindingRevision,
-    PreferenceRevision,
     Codec,
     ProviderQuiescence,
 }
@@ -414,7 +397,6 @@ pub struct ConversationApplyContext {
     pub project_binding_revision: u64,
     pub bindings_document_revision: u64,
     pub binding_revision: Option<u64>,
-    pub preference_revision: Option<u64>,
     pub codec: String,
     pub provider_quiescent: bool,
 }
@@ -482,9 +464,6 @@ pub fn validate_conversation_action_pins(
     if current.binding_revision != action.expected_binding_revision {
         return Err(ConversationStalePin::BindingRevision);
     }
-    if current.preference_revision != action.expected_preference_revision {
-        return Err(ConversationStalePin::PreferenceRevision);
-    }
     if current.codec != action.required_codec {
         return Err(ConversationStalePin::Codec);
     }
@@ -504,141 +483,78 @@ pub struct ConversationBindingScope {
     pub replica_id: ReplicaId,
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
-    pub conflict_group_id: super::domain::ConflictGroupId,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConversationRekeyResult {
-    pub binding: LocalConversationBinding,
-    pub preference: Option<LocalConversationPreference>,
-}
-
-/// Perform the machine-local half of a same-ID divergence. Callers invoke
-/// this inside `V3Repository::mutate_conversation_bindings`, making the binding
-/// rekey and preference-pointer move one atomic document replacement. The
-/// provider thread ID and transcript are deliberately untouched.
-pub fn rekey_same_id_divergence(
+/// Move one local conversation binding to a freshly minted thread. This is
+/// the core fork primitive: identity converges while content never does.
+/// Callers invoke it inside `V3Repository::mutate_conversation_bindings`, so
+/// the rekey is one atomic document replacement. The provider thread ID and
+/// transcript are deliberately untouched, and the cloud source pins are
+/// cleared because the minted thread has no published counterpart yet — the
+/// journal's binding commit re-pins them when a publication completes.
+pub fn rekey_thread_binding(
     document: &mut ConversationBindings,
     scope: &ConversationBindingScope,
-    old_variant_id: &VariantId,
-    result_variant_id: &VariantId,
+    old_thread_id: &ThreadId,
+    result_thread_id: &ThreadId,
     expected_document_revision: u64,
     expected_binding_revision: u64,
-    expected_preference_revision: Option<u64>,
     updated_at: u64,
-) -> Result<ConversationRekeyResult, String> {
+) -> Result<LocalConversationBinding, String> {
     if document.revision != expected_document_revision {
         return Err("conversation bindings changed after review".to_string());
     }
-    if old_variant_id == result_variant_id {
-        return Err("same-id divergence must allocate a distinct variant id".to_string());
+    if old_thread_id == result_thread_id {
+        return Err("thread fork must mint a distinct thread id".to_string());
     }
     if document.bindings.iter().any(|binding| {
-        binding.host_id == scope.host_id
-            && binding.replica_id == scope.replica_id
-            && binding.local_project_id == scope.local_project_id
-            && binding.provider_profile_id == scope.provider_profile_id
-            && binding.conflict_group_id == scope.conflict_group_id
-            && binding.variant_id == *result_variant_id
+        binding_in_scope(binding, scope) && binding.thread_id == *result_thread_id
     }) {
-        return Err("same-id divergence result variant is already bound".to_string());
+        return Err("fork result thread is already bound".to_string());
     }
 
     let binding_index = document
         .bindings
         .iter()
-        .position(|binding| binding_matches_scope(binding, scope, old_variant_id))
-        .ok_or_else(|| "same-id divergence binding disappeared".to_string())?;
+        .position(|binding| binding_in_scope(binding, scope) && binding.thread_id == *old_thread_id)
+        .ok_or_else(|| "fork source binding disappeared".to_string())?;
     if document.bindings[binding_index].revision != expected_binding_revision {
         return Err("conversation binding changed after review".to_string());
     }
-    let preference_index = document
-        .preferences
-        .iter()
-        .position(|preference| preference_matches_scope(preference, scope));
-    match (preference_index, expected_preference_revision) {
-        (Some(index), Some(expected_revision))
-            if document.preferences[index].revision != expected_revision =>
-        {
-            return Err("conversation preference changed after review".to_string());
-        }
-        (Some(_), None) => {
-            return Err("conversation preference appeared after review".to_string());
-        }
-        (None, Some(_)) => {
-            return Err("conversation preference disappeared after review".to_string());
-        }
-        _ => {}
-    }
 
     let binding = &mut document.bindings[binding_index];
-    binding.variant_id = result_variant_id.clone();
+    binding.thread_id = result_thread_id.clone();
+    binding.source_generation = None;
+    binding.source_manifest_sha256 = None;
     binding.revision = binding.revision.saturating_add(1);
     binding.updated_at = updated_at;
-    let binding_after = binding.clone();
-
-    let preference_after = preference_index.map(|index| {
-        let preference = &mut document.preferences[index];
-        if preference.preferred_variant_id == *old_variant_id {
-            preference.preferred_variant_id = result_variant_id.clone();
-            preference.revision = preference.revision.saturating_add(1);
-            preference.updated_at = updated_at;
-        }
-        preference.clone()
-    });
-    Ok(ConversationRekeyResult {
-        binding: binding_after,
-        preference: preference_after,
-    })
+    Ok(binding.clone())
 }
 
-fn binding_matches_scope(
-    binding: &LocalConversationBinding,
-    scope: &ConversationBindingScope,
-    variant_id: &VariantId,
-) -> bool {
+fn binding_in_scope(binding: &LocalConversationBinding, scope: &ConversationBindingScope) -> bool {
     binding.host_id == scope.host_id
         && binding.replica_id == scope.replica_id
         && binding.local_project_id == scope.local_project_id
         && binding.provider_profile_id == scope.provider_profile_id
-        && binding.conflict_group_id == scope.conflict_group_id
-        && binding.variant_id == *variant_id
-}
-
-fn preference_matches_scope(
-    preference: &LocalConversationPreference,
-    scope: &ConversationBindingScope,
-) -> bool {
-    preference.host_id == scope.host_id
-        && preference.replica_id == scope.replica_id
-        && preference.local_project_id == scope.local_project_id
-        && preference.provider_profile_id == scope.provider_profile_id
-        && preference.conflict_group_id == scope.conflict_group_id
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderIdRequest {
-    pub variant_id: VariantId,
+    pub thread_id: ThreadId,
     pub source_hint: Option<String>,
-    pub primary: bool,
 }
 
-/// Reserve provider IDs in deterministic plan order: primary first, then
-/// sorted variant ID. Existing IDs always win collisions. Generated values
-/// come from an injected allocator so plans persist one chosen value and do
-/// not depend on recalculation during retries.
+/// Reserve provider IDs in deterministic plan order: sorted thread ID.
+/// Existing IDs always win collisions. Generated values come from an
+/// injected allocator so plans persist one chosen value and do not depend on
+/// recalculation during retries.
 pub fn reserve_provider_thread_ids(
     requests: impl IntoIterator<Item = ProviderIdRequest>,
     occupied: &BTreeSet<String>,
     mut allocate: impl FnMut() -> Result<String, String>,
-) -> Result<BTreeMap<VariantId, String>, String> {
+) -> Result<BTreeMap<ThreadId, String>, String> {
     let mut requests = requests.into_iter().collect::<Vec<_>>();
-    requests.sort_by(|left, right| {
-        right
-            .primary
-            .cmp(&left.primary)
-            .then_with(|| left.variant_id.cmp(&right.variant_id))
-    });
+    requests.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
     let mut reserved = occupied.clone();
     let mut result = BTreeMap::new();
     for request in requests {
@@ -655,7 +571,7 @@ pub fn reserve_provider_thread_ids(
             },
         };
         reserved.insert(chosen.clone());
-        result.insert(request.variant_id, chosen);
+        result.insert(request.thread_id, chosen);
     }
     Ok(result)
 }
@@ -698,7 +614,7 @@ mod tests {
             ConversationRelation::Unknown,
             ConversationCapabilities::default(),
         );
-        assert_eq!(bound.action, ConversationPlanActionType::AddAlternate);
+        assert_eq!(bound.action, ConversationPlanActionType::Fork);
 
         let missing = default_conversation_decision(
             ConversationPlanDirection::Push,
@@ -720,17 +636,43 @@ mod tests {
     }
 
     #[test]
-    fn provider_id_reservation_is_primary_first_and_injective() {
+    fn fork_is_the_divergence_default_in_both_directions() {
+        let push = default_conversation_decision(
+            ConversationPlanDirection::Push,
+            ConversationRelation::Diverged,
+            ConversationCapabilities::default(),
+        );
+        assert_eq!(push.action, ConversationPlanActionType::Fork);
+        let pull = default_conversation_decision(
+            ConversationPlanDirection::Pull,
+            ConversationRelation::Diverged,
+            ConversationCapabilities::default(),
+        );
+        assert_eq!(pull.action, ConversationPlanActionType::Fork);
+        let create = default_conversation_decision(
+            ConversationPlanDirection::Push,
+            ConversationRelation::CloudMissing,
+            ConversationCapabilities::default(),
+        );
+        assert_eq!(create.action, ConversationPlanActionType::CreateCloud);
+        let materialize = default_conversation_decision(
+            ConversationPlanDirection::Pull,
+            ConversationRelation::LocalMissing,
+            ConversationCapabilities::default(),
+        );
+        assert_eq!(materialize.action, ConversationPlanActionType::CreateLocal);
+    }
+
+    #[test]
+    fn provider_id_reservation_is_ordered_and_injective() {
         let requests = vec![
             ProviderIdRequest {
-                variant_id: VariantId::parse("variant-z").unwrap(),
+                thread_id: ThreadId::parse("thread-z").unwrap(),
                 source_hint: Some("shared-source".to_string()),
-                primary: false,
             },
             ProviderIdRequest {
-                variant_id: VariantId::parse("variant-a").unwrap(),
+                thread_id: ThreadId::parse("thread-a").unwrap(),
                 source_hint: Some("shared-source".to_string()),
-                primary: true,
             },
         ];
         let mut sequence = ["generated-1", "generated-2"].into_iter();
@@ -739,11 +681,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            reserved[&VariantId::parse("variant-a").unwrap()],
+            reserved[&ThreadId::parse("thread-a").unwrap()],
             "shared-source"
         );
         assert_eq!(
-            reserved[&VariantId::parse("variant-z").unwrap()],
+            reserved[&ThreadId::parse("thread-z").unwrap()],
             "generated-1"
         );
     }

@@ -32,6 +32,7 @@ libc = "0.2"
 tempfile = "3"
 getrandom = "0.3"
 chrono = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem"] }

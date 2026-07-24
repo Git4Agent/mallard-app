@@ -11,7 +11,7 @@ use super::domain::{
     ConversationPushPlan, ConversationSyncJournal, DependencyApplications, DependencyPlan, HostId,
     HostIdentity, LocalProjectId, MachineProjectState, Materializations, OriginHostToken,
     OriginKey, OriginKeyRef, OriginReplicaToken, PlanId, ProjectSetupDraft, ReplicaId, RestorePlan,
-    SetupDraftId, SetupTransaction, SyncConfigV3, CONVERSATION_BINDINGS_SCHEMA_V1,
+    SetupDraftId, SetupTransaction, SyncConfigV3, CONVERSATION_BINDINGS_SCHEMA_V2,
     HOST_IDENTITY_SCHEMA_V1, MACHINE_PROJECT_SCHEMA_V1, MACHINE_PROJECT_SCHEMA_V2,
     MAX_SETUP_DRAFTS, SETUP_TRANSACTION_SCHEMA_V1, SETUP_TRANSACTION_SCHEMA_V2,
 };
@@ -655,7 +655,6 @@ impl V3Repository {
         let mut conversations = current_conversations;
         conversations.host_id = next.host_id.clone();
         conversations.revision = conversations.revision.saturating_add(1);
-        conversations.preferences.clear();
         conversations.bindings.retain_mut(|binding| {
             let Some(next_replica) = replica_map.get(&binding.replica_id) else {
                 return false;
@@ -820,7 +819,7 @@ impl V3Repository {
         let mut bindings =
             self.load_conversation_bindings_document_unlocked(&config, &machine, &identity)?;
         let result = mutate(&mut bindings)?;
-        bindings.schema = CONVERSATION_BINDINGS_SCHEMA_V1;
+        bindings.schema = CONVERSATION_BINDINGS_SCHEMA_V2;
         bindings.revision = bindings.revision.saturating_add(1);
         bindings.host_id = identity.host_id.clone();
         bindings.validate(&identity, &machine, &config)?;
@@ -2898,7 +2897,6 @@ impl V3Repository {
                 binding.materialization_state
                     == super::domain::ConversationMaterializationState::Resumable
             })
-            || !transaction.conversation_bindings.preferences.is_empty()
         {
             return Err(
                 "host rotation must not pre-authorize resumable conversation bindings".to_string(),
@@ -3156,18 +3154,25 @@ impl V3Repository {
         Ok(applications)
     }
 
+    fn read_conversation_bindings_unlocked(
+        &self,
+    ) -> Result<Option<ConversationBindings>, String> {
+        read_json_bounded(
+            &self.root,
+            &self.conversation_bindings_path(),
+            MAX_CONVERSATION_BINDINGS_BYTES,
+        )
+    }
+
     fn load_conversation_bindings_document_unlocked(
         &self,
         config: &SyncConfigV3,
         machine: &MachineProjectState,
         identity: &HostIdentity,
     ) -> Result<ConversationBindings, String> {
-        let bindings: ConversationBindings = read_json_bounded(
-            &self.root,
-            &self.conversation_bindings_path(),
-            MAX_CONVERSATION_BINDINGS_BYTES,
-        )?
-        .unwrap_or_else(|| ConversationBindings::empty(identity.host_id.clone()));
+        let bindings = self
+            .read_conversation_bindings_unlocked()?
+            .unwrap_or_else(|| ConversationBindings::empty(identity.host_id.clone()));
         bindings.validate(identity, machine, config)?;
         Ok(bindings)
     }
@@ -3176,12 +3181,9 @@ impl V3Repository {
         &self,
         identity: &HostIdentity,
     ) -> Result<ConversationBindings, String> {
-        let document: ConversationBindings = read_json_bounded(
-            &self.root,
-            &self.conversation_bindings_path(),
-            MAX_CONVERSATION_BINDINGS_BYTES,
-        )?
-        .unwrap_or_else(|| ConversationBindings::empty(identity.host_id.clone()));
+        let document = self
+            .read_conversation_bindings_unlocked()?
+            .unwrap_or_else(|| ConversationBindings::empty(identity.host_id.clone()));
         self.validate_origin_aliases_unlocked(&document)?;
         if document.host_id != identity.host_id {
             return Err("origin aliases belong to a different host document".to_string());
@@ -3193,9 +3195,8 @@ impl V3Repository {
         &self,
         document: &ConversationBindings,
     ) -> Result<(), String> {
-        if document.schema != CONVERSATION_BINDINGS_SCHEMA_V1
+        if document.schema != CONVERSATION_BINDINGS_SCHEMA_V2
             || document.bindings.len() > super::domain::MAX_CONVERSATION_BINDINGS
-            || document.preferences.len() > super::domain::MAX_CONVERSATION_BINDINGS
             || document.origin_aliases.len() > super::domain::MAX_ORIGIN_ALIASES
         {
             return Err("invalid conversation bindings document".to_string());
@@ -3253,11 +3254,10 @@ impl V3Repository {
         salvaged.revision = bindings.revision;
 
         // A stale association must not erase unrelated conversation identity.
-        // Rebuild the document one independently valid, uniquely scoped row at
-        // a time, then retain only preferences whose selected variant survived.
-        let may_salvage_bindings = bindings.schema == CONVERSATION_BINDINGS_SCHEMA_V1
-            && bindings.bindings.len() <= super::domain::MAX_CONVERSATION_BINDINGS
-            && bindings.preferences.len() <= super::domain::MAX_CONVERSATION_BINDINGS;
+        // Rebuild the document one independently valid, uniquely scoped row
+        // at a time.
+        let may_salvage_bindings = bindings.schema == CONVERSATION_BINDINGS_SCHEMA_V2
+            && bindings.bindings.len() <= super::domain::MAX_CONVERSATION_BINDINGS;
         if may_salvage_bindings {
             let profiles = machine
                 .profiles
@@ -3302,8 +3302,7 @@ impl V3Repository {
                     binding.replica_id.clone(),
                     binding.local_project_id.clone(),
                     binding.provider_profile_id.clone(),
-                    binding.conflict_group_id.clone(),
-                    binding.variant_id.clone(),
+                    binding.thread_id.clone(),
                 );
                 let provider_owner = binding.provider_thread_id.as_ref().map(|thread_id| {
                     (
@@ -3325,36 +3324,6 @@ impl V3Repository {
                     provider_owners.insert(owner);
                 }
                 salvaged.bindings.push(binding);
-            }
-
-            let mut preference_keys = HashSet::new();
-            for mut preference in bindings.preferences {
-                let targets = salvaged
-                    .bindings
-                    .iter()
-                    .filter(|binding| {
-                        binding.local_project_id == preference.local_project_id
-                            && binding.provider_profile_id == preference.provider_profile_id
-                            && binding.conflict_group_id == preference.conflict_group_id
-                            && binding.variant_id == preference.preferred_variant_id
-                    })
-                    .collect::<Vec<_>>();
-                if targets.len() != 1 {
-                    continue;
-                }
-                preference.host_id = salvage_host_id.clone();
-                preference.replica_id = targets[0].replica_id.clone();
-                let key = (
-                    preference.host_id.clone(),
-                    preference.replica_id.clone(),
-                    preference.local_project_id.clone(),
-                    preference.provider_profile_id.clone(),
-                    preference.conflict_group_id.clone(),
-                );
-                if !preference_keys.contains(&key) {
-                    preference_keys.insert(key);
-                    salvaged.preferences.push(preference);
-                }
             }
         }
 
@@ -4005,10 +3974,10 @@ fn write_bytes_atomic(
 mod tests {
     use super::*;
     use crate::project_sync_v3::domain::{
-        generated_named_id, BindingState, BundleId, BundleRecipe, ConflictGroupId,
-        ConversationMaterializationState, LocalConversationBinding, LocalConversationPreference,
+        generated_named_id, BindingState, BundleId, BundleRecipe, ThreadId,
+        ConversationMaterializationState, LocalConversationBinding,
         LocalProjectRegistration, LocalProviderProfileId, MaterializationRecord, OriginHostAlias,
-        ProjectBinding, Provider, ProviderProfile, VariantId, LOCAL_SCHEMA_V3,
+        ProjectBinding, Provider, ProviderProfile, LOCAL_SCHEMA_V3,
         MACHINE_PROJECT_SCHEMA_V2,
     };
     use std::collections::BTreeMap;
@@ -4154,8 +4123,7 @@ mod tests {
                 replica_id: replica_id.clone(),
                 local_project_id: LocalProjectId::parse("project-a").unwrap(),
                 provider_profile_id: first_profile_id.clone(),
-                conflict_group_id: ConflictGroupId::parse("group-a").unwrap(),
-                variant_id: VariantId::parse("variant-a").unwrap(),
+                thread_id: ThreadId::parse("group-a.variant-a").unwrap(),
                 provider_thread_id: None,
                 materialization_state: ConversationMaterializationState::StoredOnly,
                 last_observed_file_sha256: None,
@@ -4890,8 +4858,7 @@ mod tests {
                 replica_id: previous_replica.clone(),
                 local_project_id: LocalProjectId::parse("project-a").unwrap(),
                 provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
-                conflict_group_id: ConflictGroupId::parse("group-a").unwrap(),
-                variant_id: VariantId::parse("variant-a").unwrap(),
+                thread_id: ThreadId::parse("group-a.variant-a").unwrap(),
                 provider_thread_id: Some("thread-a".to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
                 last_observed_file_sha256: None,
@@ -4921,7 +4888,6 @@ mod tests {
         machine.validate(&config).unwrap();
         conversations.host_id = next.host_id.clone();
         conversations.revision = conversations.revision.saturating_add(1);
-        conversations.preferences.clear();
         conversations.bindings[0].host_id = next.host_id.clone();
         conversations.bindings[0].replica_id = next_replica;
         conversations.bindings[0].materialization_state = ConversationMaterializationState::Pending;
@@ -4971,12 +4937,8 @@ mod tests {
             after_machine.bindings[0].replica_id
         );
         assert_eq!(
-            after_conversations.bindings[0].conflict_group_id.as_str(),
-            "group-a"
-        );
-        assert_eq!(
-            after_conversations.bindings[0].variant_id.as_str(),
-            "variant-a"
+            after_conversations.bindings[0].thread_id.as_str(),
+            "group-a.variant-a"
         );
         assert_eq!(
             after_conversations.bindings[0]
@@ -4999,8 +4961,7 @@ mod tests {
                 replica_id: replica.clone(),
                 local_project_id: LocalProjectId::parse("project-a").unwrap(),
                 provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
-                conflict_group_id: ConflictGroupId::parse("group-valid").unwrap(),
-                variant_id: VariantId::parse("variant-valid").unwrap(),
+                thread_id: ThreadId::parse("thread-valid").unwrap(),
                 provider_thread_id: Some("thread-valid".to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
                 last_observed_file_sha256: None,
@@ -5019,8 +4980,7 @@ mod tests {
         let mut damaged = repo.load_conversation_bindings().unwrap();
         let mut stale = damaged.bindings[0].clone();
         stale.provider_profile_id = LocalProviderProfileId::parse("profile-missing").unwrap();
-        stale.conflict_group_id = ConflictGroupId::parse("group-stale").unwrap();
-        stale.variant_id = VariantId::parse("variant-stale").unwrap();
+        stale.thread_id = ThreadId::parse("thread-stale").unwrap();
         stale.provider_thread_id = Some("thread-stale".to_string());
         damaged.bindings.push(stale);
         write_json_atomic(
@@ -5037,8 +4997,7 @@ mod tests {
         let after = repo.load_conversation_bindings().unwrap();
         assert_eq!(after.bindings.len(), 1);
         assert_eq!(after.bindings[0].host_id, next.host_id);
-        assert_eq!(after.bindings[0].conflict_group_id.as_str(), "group-valid");
-        assert_eq!(after.bindings[0].variant_id.as_str(), "variant-valid");
+        assert_eq!(after.bindings[0].thread_id.as_str(), "thread-valid");
         assert_eq!(
             after.bindings[0].provider_thread_id.as_deref(),
             Some("thread-valid")
@@ -5683,8 +5642,7 @@ mod tests {
                 replica_id: previous_replica.clone(),
                 local_project_id: LocalProjectId::parse("project-a").unwrap(),
                 provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
-                conflict_group_id: ConflictGroupId::parse("group-a").unwrap(),
-                variant_id: VariantId::parse("variant-a").unwrap(),
+                thread_id: ThreadId::parse("group-a.variant-a").unwrap(),
                 provider_thread_id: Some("thread-a".to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
                 last_observed_file_sha256: Some("ab".repeat(32)),
@@ -5695,16 +5653,6 @@ mod tests {
                 source_manifest_sha256: Some("12".repeat(32)),
                 revision: 3,
                 created_at: 1,
-                updated_at: 2,
-            });
-            conversations.preferences.push(LocalConversationPreference {
-                host_id: previous.host_id.clone(),
-                replica_id: previous_replica.clone(),
-                local_project_id: LocalProjectId::parse("project-a").unwrap(),
-                provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
-                conflict_group_id: ConflictGroupId::parse("group-a").unwrap(),
-                preferred_variant_id: VariantId::parse("variant-a").unwrap(),
-                revision: 1,
                 updated_at: 2,
             });
             Ok(())
@@ -5740,12 +5688,10 @@ mod tests {
         let machine = repo.load_bindings().unwrap();
         let conversations = repo.load_conversation_bindings().unwrap();
         assert_eq!(conversations.bindings.len(), 1);
-        assert!(conversations.preferences.is_empty());
         let binding = &conversations.bindings[0];
         assert_eq!(binding.host_id, registered.host_id);
         assert_eq!(binding.replica_id, machine.bindings[0].replica_id);
-        assert_eq!(binding.conflict_group_id.as_str(), "group-a");
-        assert_eq!(binding.variant_id.as_str(), "variant-a");
+        assert_eq!(binding.thread_id.as_str(), "group-a.variant-a");
         assert_eq!(binding.provider_thread_id.as_deref(), Some("thread-a"));
         assert_eq!(
             binding.materialization_state,
@@ -5913,8 +5859,7 @@ mod tests {
                 replica_id: old_replica.clone(),
                 local_project_id: LocalProjectId::parse("project-a").unwrap(),
                 provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
-                conflict_group_id: ConflictGroupId::parse("group-a").unwrap(),
-                variant_id: VariantId::parse("variant-a").unwrap(),
+                thread_id: ThreadId::parse("group-a.variant-a").unwrap(),
                 provider_thread_id: Some("thread-a".to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
                 last_observed_file_sha256: None,
@@ -5925,16 +5870,6 @@ mod tests {
                 source_manifest_sha256: None,
                 revision: 0,
                 created_at: 1,
-                updated_at: 1,
-            });
-            conversations.preferences.push(LocalConversationPreference {
-                host_id: identity.host_id.clone(),
-                replica_id: old_replica.clone(),
-                local_project_id: LocalProjectId::parse("project-a").unwrap(),
-                provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
-                conflict_group_id: ConflictGroupId::parse("group-a").unwrap(),
-                preferred_variant_id: VariantId::parse("variant-a").unwrap(),
-                revision: 0,
                 updated_at: 1,
             });
             Ok(())
@@ -5971,7 +5906,6 @@ mod tests {
         assert_ne!(after.bindings[0].replica_id, old_replica);
         assert_eq!(after.bindings[0].state, BindingState::Detached);
         let conversations = repo.load_conversation_bindings().unwrap();
-        assert!(conversations.preferences.is_empty());
         assert_eq!(conversations.bindings.len(), 1);
         assert_eq!(conversations.bindings[0].host_id, rotated.host_id);
         assert_eq!(
@@ -5983,10 +5917,9 @@ mod tests {
             ConversationMaterializationState::Pending
         );
         assert_eq!(
-            conversations.bindings[0].conflict_group_id.as_str(),
-            "group-a"
+            conversations.bindings[0].thread_id.as_str(),
+            "group-a.variant-a"
         );
-        assert_eq!(conversations.bindings[0].variant_id.as_str(), "variant-a");
         assert_eq!(
             conversations.bindings[0].provider_thread_id.as_deref(),
             Some("thread-a")

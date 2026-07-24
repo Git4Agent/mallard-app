@@ -14,4 +14,5 @@ pub mod domain;
 pub mod global_inventory;
 pub mod persistence;
 pub mod provider_capture;
+pub mod provider_fork;
 pub mod s3_store;

@@ -202,3 +202,31 @@ test("host-scoped workflows keep their originating generation across async conti
   assert.match(finalize, /const detail = await projectSyncApi\.finalizeProjectSetup\(draftId, expectedRevision\);\s*if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, completion, workflowGeneration\)/);
   assert.match(setupWorkspace, /mountedRef\.current = false;\s*inspectRequest\.current \+= 1;/);
 });
+
+test("refocus reconciles external changes narrowly and the full reload lives in the titlebar menu", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
+  const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
+
+  // The sidebar no longer carries an always-visible refresh icon; full reload is a
+  // labeled recovery action in the titlebar overflow menu.
+  assert.doesNotMatch(sidebar, /onRefresh|Refresh projects/);
+  assert.match(workspace, /Reload app data/);
+  assert.match(workspace, /className="v3-titlebar-actions"/);
+
+  // Refocus reconcile only fires after the window was away, and stays narrower than
+  // refresh(): project list, repository kinds, and active detail — no audits, profiles,
+  // readiness probes, inventory, or loading indicator.
+  const start = workspace.indexOf("const reconcileExternalChanges = async");
+  const end = workspace.indexOf("\n  const registerNewHost =", start);
+  assert.ok(start >= 0 && end > start, "missing reconcileExternalChanges");
+  const reconcile = workspace.slice(start, end);
+  assert.match(reconcile, /if \(loading \|\| busy \|\| !hostIdentityShellReady\) return;/);
+  assert.match(reconcile, /listProjects\(\)/);
+  assert.match(reconcile, /listProjectRepositoryKinds\(\)/);
+  assert.match(reconcile, /getProject\(activeProjectId\)/);
+  assert.doesNotMatch(reconcile, /auditCodexConversationPaths|listProviderProfiles|listBindings|getReadiness|getInventory|setLoading/);
+  assert.match(reconcile, /shellRequest\.current !== shellRequestId/);
+  assert.match(reconcile, /hostWorkflowGeneration\.current !== workflowGeneration/);
+  assert.match(reconcile, /await refresh\(workflowGeneration\)/);
+  assert.match(workspace, /Date\.now\(\) - blurredAt >= FOCUS_RECONCILE_MIN_AWAY_MS/);
+});

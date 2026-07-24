@@ -3312,6 +3312,19 @@ summary:focus-visible {
   cursor: pointer;
 }
 .v3-theme-button:hover { color: var(--text-0); background: var(--bg-hover); }
+
+.v3-titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.v3-titlebar-actions .storage-link-more {
+  width: 28px;
+  height: 28px;
+  border: 0;
+}
 .v3-host-recovery {
   min-height: 100vh;
   min-height: 100svh;

@@ -1,4 +1,4 @@
-//! Schema-4/schema-5 bundle storage, publication, fetch, restore planning, and apply.
+//! Schema-4/schema-6 bundle storage, publication, fetch, restore planning, and apply.
 //!
 //! The engine operates on validated logical/store keys and a small object
 //! store trait. Its local implementation is complete; an S3 adapter can reuse
@@ -21,12 +21,12 @@ use super::conversation_codec::{
 use super::domain::{
     self, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt, BindingState, BundleDirectoryEntry,
     BundleFileEntry, BundleHead, BundleId, BundleIdentity, BundleKind, BundleManifest,
-    BundleRecipe, BundleSnapshot, CapturedWith, ConflictGroupId, ConversationFileRef,
-    ConversationFileRole, ConversationGroup, ConversationLineageStatus, ConversationVariant,
-    DependencyAction, DependencyActionKind, LogicalPath, PlanId, PortableOrigin, ProjectBinding,
+    BundleRecipe, BundleSnapshot, CapturedWith, ConversationFileRef, ConversationFileRole,
+    ConversationLineageStatus, ConversationThread, DependencyAction, DependencyActionKind,
+    LogicalPath, PlanId, PortableOrigin, ProjectBinding, ThreadId,
     Provider, RecipeEntry, ResourceDescriptor, ResourceId, ResourceKind, RestoreAction,
     RestoreActionKind, RestorePlan, StorageId, Tombstone, TombstoneTarget, BUNDLE_SCHEMA_V4,
-    BUNDLE_SCHEMA_V5, RESTORE_PLAN_SCHEMA_V2,
+    BUNDLE_SCHEMA_V6, RESTORE_PLAN_SCHEMA_V2,
 };
 use super::provider_capture::{self, CapturedResources};
 
@@ -432,7 +432,7 @@ pub struct PublishedBundle {
 }
 
 #[derive(Clone, Debug)]
-pub struct Schema5CapturedFile {
+pub struct Schema6CapturedFile {
     pub resource_id: ResourceId,
     pub bytes: Vec<u8>,
     pub source_mtime: u64,
@@ -440,18 +440,18 @@ pub struct Schema5CapturedFile {
 }
 
 #[derive(Clone, Debug)]
-pub struct PublishSchema5Request {
+pub struct PublishSchema6Request {
     pub identity: BundleIdentity,
     pub recipe: BundleRecipe,
     pub captured_with: CapturedWith,
     pub published_by_origin: PortableOrigin,
-    pub conversation_groups: BTreeMap<ConflictGroupId, ConversationGroup>,
+    pub conversations: BTreeMap<ThreadId, ConversationThread>,
     pub resources: BTreeMap<ResourceId, ResourceDescriptor>,
     /// Entries copied byte-for-byte from the reviewed previous manifest. The
     /// engine verifies every referenced immutable object before publishing.
     pub retained_files: BTreeMap<LogicalPath, BundleFileEntry>,
     /// New or changed payloads. A path cannot also appear in retained_files.
-    pub captured_files: BTreeMap<LogicalPath, Schema5CapturedFile>,
+    pub captured_files: BTreeMap<LogicalPath, Schema6CapturedFile>,
     pub directories: BTreeMap<LogicalPath, BundleDirectoryEntry>,
     pub tombstones: BTreeMap<String, Tombstone>,
     pub expected_head: PublishExpectation,
@@ -459,7 +459,7 @@ pub struct PublishSchema5Request {
 }
 
 #[derive(Clone, Debug)]
-pub struct Schema5PublishOutcome {
+pub struct Schema6PublishOutcome {
     pub published: bool,
     pub snapshot: BundleSnapshot,
     pub head_token: HeadToken,
@@ -474,16 +474,16 @@ pub struct FetchedBundle {
 
 const CLAUDE_UNAVAILABLE_LINEAGE_CODEC_KEY: &str = "claude.lineage.unavailable.v1";
 
-/// Build the one-way schema-4-to-schema-5 publication reviewed by a cutover
+/// Build the one-way schema-4-to-schema-6 publication reviewed by a cutover
 /// caller. Historical provider bytes are copied exactly, while conversation
-/// identities and logical ownership move to the group/variant model. The
+/// identities and logical ownership move to the flat-thread model. The
 /// migrating host is deliberately not recorded as creator or semantic editor.
-pub fn build_schema5_cutover_request(
+pub fn build_schema6_cutover_request(
     fetched: &FetchedBundle,
     published_by_origin: PortableOrigin,
     expected_head: HeadToken,
     updated_at: u64,
-) -> Result<PublishSchema5Request, String> {
+) -> Result<PublishSchema6Request, String> {
     fetched.snapshot.validate()?;
     published_by_origin.validate()?;
     if fetched.snapshot.manifest.schema_version != BUNDLE_SCHEMA_V4 {
@@ -516,7 +516,7 @@ pub fn build_schema5_cutover_request(
     let mut resources = manifest.resources.clone();
     let mut retained_files = BTreeMap::new();
     let mut captured_files = BTreeMap::new();
-    let mut conversation_groups = BTreeMap::new();
+    let mut conversations = BTreeMap::new();
     let conversation_resource_ids = manifest
         .resources
         .iter()
@@ -563,12 +563,12 @@ pub fn build_schema5_cutover_request(
                 legacy_resource_id
             )
         })?;
-        let (group_id, variant_id) = domain::deterministic_schema4_conversation_ids(
+        let thread_id = domain::deterministic_schema4_thread_id(
             &manifest.bundle.bundle_id,
             provider,
             &legacy_resource_id,
         )?;
-        let resource_id = domain::conversation_resource_id(provider, &group_id, &variant_id)?;
+        let resource_id = domain::conversation_resource_id(provider, &thread_id)?;
         let mut owned = manifest
             .files
             .iter()
@@ -664,10 +664,9 @@ pub fn build_schema5_cutover_request(
                 )
             };
             let path = LogicalPath::parse(format!(
-                "state/conversations/{}/{}/{}/{}",
+                "state/conversations/{}/{}/{}",
                 provider.as_str(),
-                group_id,
-                variant_id,
+                thread_id,
                 filename
             ))?;
             let bytes = fetched
@@ -677,7 +676,7 @@ pub fn build_schema5_cutover_request(
                 .clone();
             captured_files.insert(
                 path.clone(),
-                Schema5CapturedFile {
+                Schema6CapturedFile {
                     resource_id: resource_id.clone(),
                     bytes,
                     source_mtime: old_entry.source_mtime,
@@ -708,8 +707,10 @@ pub fn build_schema5_cutover_request(
                 required: legacy_recipe.required,
             },
         );
-        let variant = ConversationVariant {
-            variant_id: variant_id.clone(),
+        let thread = ConversationThread {
+            thread_id: thread_id.clone(),
+            provider,
+            display_title: Some(legacy_descriptor.display_name.clone()),
             resource_id,
             files: file_refs,
             lineage_status,
@@ -718,34 +719,22 @@ pub fn build_schema5_cutover_request(
             message_count,
             lineage_digest,
             semantic_digest,
-            parent_variant_id: None,
-            fork_message_id: None,
+            forked_from: None,
             source_thread_id,
             created_by_origin: None,
             last_updated_by_origin: None,
             created_at: manifest.updated_at,
             updated_at: manifest.updated_at,
         };
-        conversation_groups.insert(
-            group_id.clone(),
-            ConversationGroup {
-                conflict_group_id: group_id,
-                provider,
-                display_title: Some(legacy_descriptor.display_name.clone()),
-                primary_variant_id: variant_id.clone(),
-                variants: BTreeMap::from([(variant_id, variant)]),
-                created_at: manifest.updated_at,
-                updated_at: manifest.updated_at,
-            },
-        );
+        conversations.insert(thread_id, thread);
     }
 
-    Ok(PublishSchema5Request {
+    Ok(PublishSchema6Request {
         identity: manifest.bundle.clone(),
         recipe,
         captured_with,
         published_by_origin,
-        conversation_groups,
+        conversations,
         resources,
         retained_files,
         captured_files,
@@ -908,10 +897,10 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         let current = self.read_head(&request.identity.bundle_id)?;
         if current
             .as_ref()
-            .is_some_and(|(head, _)| head.schema_version == BUNDLE_SCHEMA_V5)
+            .is_some_and(|(head, _)| head.schema_version == BUNDLE_SCHEMA_V6)
         {
             return Err(
-                "schema-5 bundle requires the conversation-variant publication path".to_string(),
+                "schema-6 bundle requires the conversation-thread publication path".to_string(),
             );
         }
         let cas_expectation = match (&request.expected_head, &current) {
@@ -1010,7 +999,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             recipe: request.recipe,
             captured_with: request.captured_with,
             published_by_origin: None,
-            conversation_groups: BTreeMap::new(),
+            conversations: BTreeMap::new(),
             resources,
             files,
             directories,
@@ -1097,19 +1086,19 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         })
     }
 
-    /// Publish a complete schema-5 conversation snapshot. The caller supplies
+    /// Publish a complete schema-6 conversation snapshot. The caller supplies
     /// the reviewed live set; the engine enforces remote-variant retention,
     /// verifies retained immutable objects, skips true no-ops, and advances
     /// the head only through compare-and-swap.
-    pub fn publish_schema5(
+    pub fn publish_schema6(
         &self,
-        request: PublishSchema5Request,
-    ) -> Result<Schema5PublishOutcome, String> {
+        request: PublishSchema6Request,
+    ) -> Result<Schema6PublishOutcome, String> {
         request.identity.validate()?;
         request.recipe.validate()?;
         request.published_by_origin.validate()?;
         if request.identity.kind != BundleKind::Project {
-            return Err("schema-5 supports only project bundles".to_string());
+            return Err("schema-6 supports only project bundles".to_string());
         }
         if request.updated_at == 0 {
             return Err("publish timestamp must be non-zero".to_string());
@@ -1117,7 +1106,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         for path in request.captured_files.keys() {
             if request.retained_files.contains_key(path) {
                 return Err(format!(
-                    "schema-5 file '{}' is both retained and captured",
+                    "schema-6 file '{}' is both retained and captured",
                     path
                 ));
             }
@@ -1149,7 +1138,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         for (path, entry) in &request.retained_files {
             entry.validate()?;
             let previous = previous_manifest.as_ref().ok_or_else(|| {
-                format!("schema-5 retained file '{}' has no previous manifest", path)
+                format!("schema-6 retained file '{}' has no previous manifest", path)
             })?;
             let was_published = previous.files.values().any(|candidate| {
                 candidate.object_key == entry.object_key
@@ -1158,7 +1147,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             });
             if !was_published {
                 return Err(format!(
-                    "schema-5 retained file '{}' was not in the reviewed manifest",
+                    "schema-6 retained file '{}' was not in the reviewed manifest",
                     path
                 ));
             }
@@ -1185,16 +1174,16 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         for (path, captured) in &request.captured_files {
             if captured.bytes.len() as u64 > domain::MAX_FILE_BYTES {
                 return Err(format!(
-                    "schema-5 file '{}' exceeds the portable limit",
+                    "schema-6 file '{}' exceeds the portable limit",
                     path
                 ));
             }
             if captured.mode.is_some_and(|mode| mode & !0o777 != 0) {
-                return Err(format!("schema-5 file '{}' has unsafe mode bits", path));
+                return Err(format!("schema-6 file '{}' has unsafe mode bits", path));
             }
             if !request.resources.contains_key(&captured.resource_id) {
                 return Err(format!(
-                    "schema-5 file '{}' belongs to missing resource '{}'",
+                    "schema-6 file '{}' belongs to missing resource '{}'",
                     path, captured.resource_id
                 ));
             }
@@ -1212,7 +1201,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         }
 
         let manifest = BundleManifest {
-            schema_version: BUNDLE_SCHEMA_V5,
+            schema_version: BUNDLE_SCHEMA_V6,
             generation,
             commit_id: commit_id.clone(),
             updated_at: request.updated_at,
@@ -1220,7 +1209,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             recipe: request.recipe,
             captured_with: request.captured_with,
             published_by_origin: Some(request.published_by_origin.clone()),
-            conversation_groups: request.conversation_groups,
+            conversations: request.conversations,
             resources: request.resources,
             files,
             directories: request.directories,
@@ -1228,14 +1217,14 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         };
         manifest.validate()?;
         if let Some(previous) = &previous_manifest {
-            validate_schema5_conversation_retention(previous, &manifest)?;
+            validate_schema6_conversation_retention(previous, &manifest)?;
         }
 
         if let (Some((head, token)), Some(previous)) = (&current, &previous_manifest) {
-            if previous.schema_version == BUNDLE_SCHEMA_V5
-                && schema5_manifest_is_semantic_noop(previous, &manifest)
+            if previous.schema_version == BUNDLE_SCHEMA_V6
+                && schema6_manifest_is_semantic_noop(previous, &manifest)
             {
-                return Ok(Schema5PublishOutcome {
+                return Ok(Schema6PublishOutcome {
                     published: false,
                     snapshot: BundleSnapshot {
                         storage_id: self.storage_id.clone(),
@@ -1252,23 +1241,23 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             let entry = manifest
                 .files
                 .get(path)
-                .expect("captured schema-5 file was inserted");
+                .expect("captured schema-6 file was inserted");
             let key = repository_object_key(&request.identity.bundle_id, &entry.object_key)?;
             self.store.put_immutable(&key, &captured.bytes)?;
             let stored = self
                 .store
                 .get(&key)?
-                .ok_or_else(|| format!("schema-5 object '{}' disappeared", key))?;
+                .ok_or_else(|| format!("schema-6 object '{}' disappeared", key))?;
             if stored.bytes.len() as u64 != entry.size || sha256(&stored.bytes) != entry.sha256 {
                 return Err(format!(
-                    "schema-5 object '{}' failed post-publication verification",
+                    "schema-6 object '{}' failed post-publication verification",
                     key
                 ));
             }
         }
 
         let manifest_bytes = serde_json::to_vec(&manifest)
-            .map_err(|error| format!("serialize schema-5 manifest: {error}"))?;
+            .map_err(|error| format!("serialize schema-6 manifest: {error}"))?;
         let manifest_sha256 = sha256(&manifest_bytes);
         let manifest_relative_key = format!("_manifests/{}-{}.json", generation, commit_id);
         let manifest_key =
@@ -1278,7 +1267,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         let (added_files, changed_files, removed_files) =
             file_delta(previous_manifest.as_ref(), &manifest);
         let commit = CommitRecord {
-            schema_version: BUNDLE_SCHEMA_V5,
+            schema_version: BUNDLE_SCHEMA_V6,
             bundle_id: request.identity.bundle_id.clone(),
             generation,
             commit_id: commit_id.clone(),
@@ -1292,7 +1281,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             published_by_origin: Some(request.published_by_origin),
         };
         let commit_bytes = serde_json::to_vec(&commit)
-            .map_err(|error| format!("serialize schema-5 commit: {error}"))?;
+            .map_err(|error| format!("serialize schema-6 commit: {error}"))?;
         let commit_key = repository_object_key(
             &request.identity.bundle_id,
             &format!("_commits/{}-{}.json", generation, commit_id),
@@ -1300,7 +1289,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         self.store.put_immutable(&commit_key, &commit_bytes)?;
 
         let head = BundleHead {
-            schema_version: BUNDLE_SCHEMA_V5,
+            schema_version: BUNDLE_SCHEMA_V6,
             bundle_id: request.identity.bundle_id.clone(),
             kind: request.identity.kind,
             generation,
@@ -1311,7 +1300,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         };
         head.validate()?;
         let head_bytes = serde_json::to_vec(&head)
-            .map_err(|error| format!("serialize schema-5 head: {error}"))?;
+            .map_err(|error| format!("serialize schema-6 head: {error}"))?;
         let head_key = repository_object_key(&request.identity.bundle_id, HEAD_FILE)?;
         let head_etag =
             match self
@@ -1326,7 +1315,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 }
             };
         let _ = self.publish_tag(&manifest);
-        Ok(Schema5PublishOutcome {
+        Ok(Schema6PublishOutcome {
             published: true,
             snapshot: BundleSnapshot {
                 storage_id: self.storage_id.clone(),
@@ -1478,7 +1467,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 .get(&key)?
                 .ok_or_else(|| format!("listed bundle tag '{}' disappeared", key))?;
             let tag: BundleTag = parse_bounded_json(&stored.bytes, "bundle tag")?;
-            if !matches!(tag.schema_version, BUNDLE_SCHEMA_V4 | BUNDLE_SCHEMA_V5)
+            if !matches!(tag.schema_version, BUNDLE_SCHEMA_V4 | BUNDLE_SCHEMA_V6)
                 || tag.bundle_id != bundle_id
             {
                 return Err(format!("bundle tag '{}' has inconsistent identity", key));
@@ -4964,9 +4953,7 @@ fn reconcile_manifest_content(
             !directories.contains_key(logical_path)
                 && !captured_directory_paths.contains(logical_path)
         }
-        TombstoneTarget::ConversationVariant { .. } | TombstoneTarget::ConversationGroup { .. } => {
-            true
-        }
+        TombstoneTarget::ConversationThread { .. } => true,
     });
     Ok((resources, files, directories, tombstones))
 }
@@ -5014,69 +5001,49 @@ fn dependencies_from_manifest(manifest: &BundleManifest) -> Result<Vec<Dependenc
     Ok(actions)
 }
 
-fn validate_schema5_conversation_retention(
+fn validate_schema6_conversation_retention(
     previous: &BundleManifest,
     next: &BundleManifest,
 ) -> Result<(), String> {
-    if previous.schema_version != BUNDLE_SCHEMA_V5 {
+    if previous.schema_version != BUNDLE_SCHEMA_V6 {
         return Ok(());
     }
-    for (group_id, previous_group) in &previous.conversation_groups {
-        let Some(next_group) = next.conversation_groups.get(group_id) else {
-            let deleted = next.tombstones.values().any(|tombstone| {
-                matches!(
-                    &tombstone.target,
-                    TombstoneTarget::ConversationGroup { conflict_group_id }
-                        if conflict_group_id == group_id
-                )
-            });
-            if !deleted {
-                return Err(format!(
-                    "schema-5 publication drops conversation group '{}' without a reviewed tombstone",
-                    group_id
-                ));
-            }
+    for thread_id in previous.conversations.keys() {
+        if next.conversations.contains_key(thread_id) {
             continue;
-        };
-        for variant_id in previous_group.variants.keys() {
-            if next_group.variants.contains_key(variant_id) {
-                continue;
-            }
-            let deleted = next.tombstones.values().any(|tombstone| {
-                matches!(
-                    &tombstone.target,
-                    TombstoneTarget::ConversationVariant {
-                        conflict_group_id,
-                        variant_id: deleted_variant_id,
-                    } if conflict_group_id == group_id && deleted_variant_id == variant_id
-                )
-            });
-            if !deleted {
-                return Err(format!(
-                    "schema-5 publication drops conversation variant '{}'/ '{}' without a reviewed tombstone",
-                    group_id, variant_id
-                ));
-            }
+        }
+        let deleted = next.tombstones.values().any(|tombstone| {
+            matches!(
+                &tombstone.target,
+                TombstoneTarget::ConversationThread { thread_id: deleted_thread_id }
+                    if deleted_thread_id == thread_id
+            )
+        });
+        if !deleted {
+            return Err(format!(
+                "schema-6 publication drops conversation thread '{}' without a reviewed tombstone",
+                thread_id
+            ));
         }
     }
     Ok(())
 }
 
-fn schema5_manifest_is_semantic_noop(
+fn schema6_manifest_is_semantic_noop(
     previous: &BundleManifest,
     candidate: &BundleManifest,
 ) -> bool {
     previous.bundle == candidate.bundle
         && previous.recipe == candidate.recipe
         && previous.captured_with.codec_versions == candidate.captured_with.codec_versions
-        && previous.conversation_groups == candidate.conversation_groups
+        && previous.conversations == candidate.conversations
         && previous.resources == candidate.resources
-        && schema5_files_are_semantically_equal(&previous.files, &candidate.files)
+        && schema6_files_are_semantically_equal(&previous.files, &candidate.files)
         && previous.directories == candidate.directories
         && previous.tombstones == candidate.tombstones
 }
 
-fn schema5_files_are_semantically_equal(
+fn schema6_files_are_semantically_equal(
     previous: &BTreeMap<LogicalPath, BundleFileEntry>,
     candidate: &BTreeMap<LogicalPath, BundleFileEntry>,
 ) -> bool {

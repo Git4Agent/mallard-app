@@ -43,7 +43,6 @@ interface Props {
   onDiscardDraft: (draftId: string) => void;
   onToggleActivity: () => void;
   onAddProject: () => void;
-  onRefresh: () => void;
   onOpenStorage: (storageId: string, settingsExpanded: boolean) => void;
   onRemoveStorage: (storageId: string) => void;
   onAddStorage: () => void;
@@ -67,7 +66,6 @@ export default function ProjectSidebar({
   onDiscardDraft,
   onToggleActivity,
   onAddProject,
-  onRefresh,
   onOpenStorage,
   onRemoveStorage,
   onAddStorage,
@@ -168,16 +166,6 @@ export default function ProjectSidebar({
               <span className="sidebar-section-title">Projects</span>
             </div>
             <div className="sidebar-heading-actions">
-              <button
-                type="button"
-                className="sidebar-section-action"
-                onClick={onRefresh}
-                disabled={loading || busy}
-                title="Refresh projects"
-                aria-label="Refresh projects"
-              >
-                <Icon name="refresh" size={15} className={loading ? "icon-spin" : undefined} />
-              </button>
               <button
                 type="button"
                 className="sidebar-section-action sidebar-add-action"
