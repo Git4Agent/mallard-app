@@ -7,6 +7,7 @@ use crate::project_sync_v3::conversation_sync::{
 };
 use crate::project_sync_v3::domain::{
     ConversationPlanActionType, ConversationPlanDirection, ConversationRelation,
+    MAX_CONVERSATION_FILE_BYTES,
 };
 use serde_json::{json, Value};
 
@@ -117,7 +118,7 @@ fn every_codex_unknown_reason_is_bounded_and_never_resumable() {
         ("empty", Vec::new(), CodecUnknownReason::Empty),
         (
             "oversized_file",
-            vec![b'x'; 16 * 1024 * 1024 + 1],
+            vec![b'x'; MAX_CONVERSATION_FILE_BYTES as usize + 1],
             CodecUnknownReason::OversizedFile,
         ),
         (

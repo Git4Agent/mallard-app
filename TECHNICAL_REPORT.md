@@ -475,7 +475,8 @@ multi-machine Push.
 | --- | ---: |
 | Discovered resources | 20,000 |
 | Generic project-content depth | 32 components |
-| Captured file size | 16 MiB |
+| Conversation file size | 100 MiB |
+| Other captured file size | 16 MiB |
 | Aggregate selected capture | 512 MiB |
 | Manifest resources | 20,000 |
 | Manifest files/directories/tombstones | 100,000 each |

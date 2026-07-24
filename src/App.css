@@ -822,6 +822,7 @@ summary:focus-visible {
 
 .icon-local  { color: var(--text-1); }
 .icon-cloud  { color: var(--blue); }
+.icon-git-branch-mark,
 .icon-git-folder-mark { color: var(--blue); }
 
 .file-tree-section-label {

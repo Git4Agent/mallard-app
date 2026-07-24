@@ -31,7 +31,7 @@ use super::domain::{
     ResourceDescriptor, ResourceId, ResourceKind, ResourceScope, RestoreAction, RestoreActionKind,
     RestoreActionType, RestorePlan, SetupDraftId, SetupTransaction, StorageConfigV3, StorageId,
     StorageKind, SyncConfigV3, BUNDLE_SCHEMA_V6, DEPENDENCY_PLAN_SCHEMA_V2,
-    SETUP_DRAFT_SCHEMA_V1, SETUP_TRANSACTION_SCHEMA_V2,
+    MAX_CONVERSATION_FILE_BYTES, SETUP_DRAFT_SCHEMA_V1, SETUP_TRANSACTION_SCHEMA_V2,
 };
 use super::global_inventory;
 use super::persistence::V3Repository;
@@ -3714,11 +3714,11 @@ fn thread_capture_unavailable_detail(blocked_reason: Option<&str>) -> String {
     };
     if reason.contains(&format!(
         "exceeds {} bytes",
-        provider_capture::MAX_FILE_BYTES
+        MAX_CONVERSATION_FILE_BYTES
     )) {
         return format!(
             "Session file exceeds the {} MiB per-file sync limit.",
-            provider_capture::MAX_FILE_BYTES / (1024 * 1024)
+            MAX_CONVERSATION_FILE_BYTES / (1024 * 1024)
         );
     }
     if reason.contains("hard-linked") {
@@ -9768,11 +9768,11 @@ mod tests {
     fn unavailable_thread_state_reports_the_capture_limit() {
         let reason = format!(
             "'/tmp/session.jsonl' exceeds {} bytes",
-            provider_capture::MAX_FILE_BYTES
+            MAX_CONVERSATION_FILE_BYTES
         );
         assert_eq!(
             thread_capture_unavailable_detail(Some(&reason)),
-            "Session file exceeds the 16 MiB per-file sync limit."
+            "Session file exceeds the 100 MiB per-file sync limit."
         );
 
         let mut counts = ThreadSyncCounts::default();

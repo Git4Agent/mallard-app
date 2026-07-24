@@ -643,7 +643,7 @@ test("unavailable sessions explain why they cannot be synced", () => {
       state: "unavailable" as const,
       local_present: true,
       storage_present: false,
-      status_detail: "Session file exceeds the 16 MiB per-file sync limit.",
+      status_detail: "Session file exceeds the 100 MiB per-file sync limit.",
       local_updated_at: thread.ended_at,
     }],
   };
@@ -678,7 +678,7 @@ test("unavailable sessions explain why they cannot be synced", () => {
     />,
   );
 
-  assert.match(html, /aria-label="Unavailable for sync\. Session file exceeds the 16 MiB per-file sync limit\."/);
+  assert.match(html, /aria-label="Unavailable for sync\. Session file exceeds the 100 MiB per-file sync limit\."/);
   assert.match(html, /title="1 thread is unavailable for sync"/);
   assert.doesNotMatch(html, /can.t tell which copy is newer/);
 });
@@ -762,6 +762,18 @@ test("the Git project icon uses the bold hollow-folder design with an oversized 
   assert.match(html, /cx="8.5" cy="16.4" r="1.3"/);
   assert.doesNotMatch(html, /fill="currentColor"/);
   assert.doesNotMatch(html, /d="M3 10h18"/);
+});
+
+test("standalone Git branch icons keep the shared blue mark", () => {
+  const html = renderToStaticMarkup(<Icon name="git-branch" size={16} />);
+  const css = readFileSync("src/App.css", "utf8");
+
+  assert.match(html, /icon-git-branch-mark/);
+  assert.match(html, /class="icon-git-branch-mark" stroke="currentColor"/);
+  assert.match(
+    css,
+    /\.icon-git-branch-mark,\s*\.icon-git-folder-mark\s*\{\s*color:\s*var\(--blue\);\s*\}/,
+  );
 });
 
 test("completed projects use their main row for history and only mark Git repositories", () => {

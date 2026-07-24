@@ -27,6 +27,14 @@ const MAX_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_METADATA_LINES: usize = 128;
 const MAX_TREE_DEPTH: usize = 32;
 
+fn capture_file_limit(kind: &CaptureResourceKind) -> u64 {
+    if matches!(kind, CaptureResourceKind::Conversation) {
+        domain::MAX_CONVERSATION_FILE_BYTES
+    } else {
+        MAX_FILE_BYTES
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
@@ -319,6 +327,7 @@ pub fn capture_selected(
             continue;
         }
 
+        let file_limit = capture_file_limit(&discovered.descriptor.kind);
         let mut resource_files = Vec::new();
         for source in &discovered.files {
             validate_logical_path(&source.logical_path)?;
@@ -336,6 +345,7 @@ pub fn capture_selected(
                 &canonical_project,
                 request,
                 resource_id,
+                file_limit,
             )?;
             let meta = fs::metadata(&source.physical_path)
                 .map_err(|e| format!("inspect '{}': {}", source.physical_path.display(), e))?;
@@ -344,12 +354,12 @@ pub fn capture_selected(
                 .as_ref()
                 .map(|bytes| bytes.len() as u64)
                 .unwrap_or(meta.len());
-            if content_len > MAX_FILE_BYTES {
+            if content_len > file_limit {
                 return Err(format!(
                     "resource '{}' file '{}' exceeds {} bytes",
                     resource_id,
                     source.physical_path.display(),
-                    MAX_FILE_BYTES
+                    file_limit
                 ));
             }
             total_bytes = total_bytes
@@ -2057,9 +2067,10 @@ fn discover_codex(
                         relative_cwd: Some(relative_cwd),
                         apply_policy: CaptureApplyPolicy::SafeFile,
                         selected_by_default: true,
-                        blocked_reason: inspect_candidate_files(
+                        blocked_reason: inspect_candidate_files_with_limit(
                             &canonical_home,
                             &[entry.path().to_path_buf()],
+                            domain::MAX_CONVERSATION_FILE_BYTES,
                         )
                         .err(),
                         logical_paths: vec![logical_path.clone()],
@@ -2173,9 +2184,10 @@ fn discover_claude(
                     relative_cwd: Some(relative_cwd),
                     apply_policy: CaptureApplyPolicy::SafeFile,
                     selected_by_default: true,
-                    blocked_reason: inspect_candidate_files(
+                    blocked_reason: inspect_candidate_files_with_limit(
                         &canonical_home,
                         &[entry.path().to_path_buf()],
+                        domain::MAX_CONVERSATION_FILE_BYTES,
                     )
                     .err(),
                     logical_paths: vec![logical_path.clone()],
@@ -2236,9 +2248,10 @@ fn discover_claude(
                         relative_cwd: None,
                         apply_policy: CaptureApplyPolicy::SafeFile,
                         selected_by_default: true,
-                        blocked_reason: inspect_candidate_files(
+                        blocked_reason: inspect_candidate_files_with_limit(
                             &canonical_home,
                             &[entry.path().to_path_buf()],
+                            domain::MAX_CONVERSATION_FILE_BYTES,
                         )
                         .err(),
                         logical_paths: vec![logical_path.clone()],
@@ -2860,6 +2873,14 @@ fn insert_resource(discovery: &mut Discovery, resource: DiscoveredResource) -> R
 }
 
 fn inspect_candidate_files(approved_root: &Path, files: &[PathBuf]) -> Result<(), String> {
+    inspect_candidate_files_with_limit(approved_root, files, MAX_FILE_BYTES)
+}
+
+fn inspect_candidate_files_with_limit(
+    approved_root: &Path,
+    files: &[PathBuf],
+    max_file_bytes: u64,
+) -> Result<(), String> {
     if files.is_empty() {
         return Err("resource has no regular files".to_string());
     }
@@ -2878,11 +2899,11 @@ fn inspect_candidate_files(approved_root: &Path, files: &[PathBuf]) -> Result<()
                 file.display()
             ));
         }
-        if meta.len() > MAX_FILE_BYTES {
+        if meta.len() > max_file_bytes {
             return Err(format!(
                 "'{}' exceeds {} bytes",
                 file.display(),
-                MAX_FILE_BYTES
+                max_file_bytes
             ));
         }
         #[cfg(unix)]
@@ -2921,6 +2942,7 @@ fn validate_source_file(
     canonical_project: &Path,
     request: &CaptureRequest,
     resource_id: &str,
+    max_file_bytes: u64,
 ) -> Result<(), String> {
     let canonical_path = fs::canonicalize(path)
         .map_err(|e| format!("resolve source '{}': {}", path.display(), e))?;
@@ -2948,7 +2970,7 @@ fn validate_source_file(
             path.display()
         ));
     };
-    inspect_candidate_files(&approved_root, &[path.to_path_buf()])
+    inspect_candidate_files_with_limit(&approved_root, &[path.to_path_buf()], max_file_bytes)
 }
 
 fn validate_source_directory(
@@ -3568,6 +3590,71 @@ mod tests {
             .unwrap();
         assert_eq!(claude.relative_cwd.as_deref(), Some("."));
         assert!(claude.logical_paths[0].contains("/_root/"));
+    }
+
+    #[test]
+    fn conversation_files_allow_100_mib_and_block_larger_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let codex = temp.path().join("codex");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&codex).unwrap();
+        let cwd = serde_json::to_string(project.to_str().unwrap()).unwrap();
+        let write_sized_session = |name: &str, thread_id: &str, size: u64| {
+            let path = codex.join(format!("sessions/2026/07/24/{name}.jsonl"));
+            write(
+                &path,
+                format!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread_id}\",\"cwd\":{cwd}}}}}\n"
+                )
+                .as_bytes(),
+            );
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(size)
+                .unwrap();
+        };
+        write_sized_session(
+            "rollout-at-limit",
+            "thread-at-limit",
+            domain::MAX_CONVERSATION_FILE_BYTES,
+        );
+        write_sized_session(
+            "rollout-over-limit",
+            "thread-over-limit",
+            domain::MAX_CONVERSATION_FILE_BYTES + 1,
+        );
+
+        let request = CaptureRequest {
+            project_root: project,
+            codex_home: Some(codex),
+            claude_home: None,
+            excluded_project_roots: Vec::new(),
+            standalone_skills: Vec::new(),
+            global_plugins: Vec::new(),
+            blocked_global_skills: Vec::new(),
+            include_project_content: false,
+            excluded_content_roots: Vec::new(),
+        };
+        let inventory = discover_project(&request).unwrap();
+        let at_limit = inventory
+            .resources
+            .iter()
+            .find(|resource| resource.resource_id == "codex:session:thread-at-limit")
+            .unwrap();
+        assert!(at_limit.blocked_reason.is_none());
+
+        let over_limit = inventory
+            .resources
+            .iter()
+            .find(|resource| resource.resource_id == "codex:session:thread-over-limit")
+            .unwrap();
+        assert!(over_limit
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("exceeds 104857600 bytes")));
     }
 
     #[test]

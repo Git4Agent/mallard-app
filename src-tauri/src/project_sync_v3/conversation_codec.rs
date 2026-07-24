@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use super::domain::{
     conversation_chain_digests, validate_conversation_chain, CanonicalConversationMessage,
-    MessageId,
+    MessageId, MAX_CONVERSATION_FILE_BYTES,
 };
 
 pub const CODEX_LINEAGE_CODEC_KEY: &str = "codex.lineage.v1";
@@ -20,7 +20,7 @@ pub const CODEX_REWRITE_CODEC_KEY: &str = "codex.rewrite.v1";
 pub const CODEX_SEMANTIC_CODEC_KEY: &str = "codex.semantic.v1";
 pub const CODEX_CODEC_VERSION: u32 = 1;
 
-const MAX_TRANSCRIPT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TRANSCRIPT_BYTES: usize = MAX_CONVERSATION_FILE_BYTES as usize;
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_RECORDS: usize = 100_000;
 
@@ -591,6 +591,29 @@ mod tests {
         assert!(analysis.is_resumable());
         assert_eq!(analysis.source_thread_id.as_deref(), Some("thread-a"));
         assert_eq!(analysis.lineage.chain().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn codex_codec_accepts_transcripts_larger_than_16_mib() {
+        let mut bytes = transcript(
+            "thread-large",
+            "/tmp/project-large",
+            &[("m-a", None, "one")],
+        );
+        let padding = serde_json::to_vec(&json!({
+            "type": "turn_context",
+            "payload": {"padding": "x".repeat(64 * 1024)}
+        }))
+        .unwrap();
+        while bytes.len() <= 16 * 1024 * 1024 {
+            bytes.extend_from_slice(&padding);
+            bytes.push(b'\n');
+        }
+        assert!(bytes.len() < MAX_TRANSCRIPT_BYTES);
+
+        let analysis = analyze_codex_transcript(&bytes);
+        assert!(analysis.is_resumable());
+        assert_eq!(analysis.source_thread_id.as_deref(), Some("thread-large"));
     }
 
     #[test]
