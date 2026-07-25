@@ -867,7 +867,19 @@ test("completed projects use their main row for history and only mark Git reposi
   assert.match(html, /aria-label="Mallard local, Git repository"/);
   assert.doesNotMatch(html, /v3-repository-kind|>git<\/span>/);
   assert.doesNotMatch(html, /Default Codex|myconf3 · Codex/);
-  assert.match(html, /role="separator" aria-label="Resize Projects and Storage sections" aria-orientation="horizontal"/);
+  const primaryNav = html.slice(
+    html.indexOf('<nav class="v3-primary-nav"'),
+    html.indexOf("</nav>") + "</nav>".length,
+  );
+  const projectsNavIndex = primaryNav.indexOf(" Projects</button>");
+  const storagesNavIndex = primaryNav.indexOf(" Storages</button>");
+  const logsNavIndex = primaryNav.indexOf(" Logs</button>");
+  assert.ok(projectsNavIndex >= 0);
+  assert.ok(storagesNavIndex > projectsNavIndex);
+  assert.ok(logsNavIndex > storagesNavIndex);
+  assert.match(html, /aria-label="Storages"/);
+  assert.match(html, />Storages<\/span>/);
+  assert.match(html, /role="separator" aria-label="Resize Projects and Storages sections" aria-orientation="horizontal"/);
   assert.match(html, /aria-valuenow="56"/);
   assert.doesNotMatch(html, /sidebar-section-count/);
   assert.doesNotMatch(html, /Git Based|Non-Git Based/);

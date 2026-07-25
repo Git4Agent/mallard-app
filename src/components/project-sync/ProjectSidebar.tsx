@@ -125,6 +125,10 @@ export default function ProjectSidebar({
     setProjectShare(clampSectionShare(nextShare));
   };
 
+  const primaryStorageId = activeStorageId && storages.some((storage) => storage.id === activeStorageId)
+    ? activeStorageId
+    : storages[0]?.id ?? null;
+
   return (
     <aside id="project-sidebar" className="v3-sidebar">
       <div className="v3-sidebar-drag" data-tauri-drag-region />
@@ -136,7 +140,7 @@ export default function ProjectSidebar({
       <nav className="v3-primary-nav" aria-label="Project sync navigation">
         <button
           type="button"
-          className="active"
+          className={!activeStorageId ? "active" : undefined}
           onClick={() => activeProjectId && onSelectProject(activeProjectId)}
           disabled={busy}
         >
@@ -144,11 +148,19 @@ export default function ProjectSidebar({
         </button>
         <button
           type="button"
+          className={activeStorageId ? "active" : undefined}
+          onClick={() => primaryStorageId && onOpenStorage(primaryStorageId, false)}
+          disabled={busy || !primaryStorageId}
+        >
+          <Icon name="drive" size={15} /> Storages
+        </button>
+        <button
+          type="button"
           className={activityOpen ? "active" : undefined}
           onClick={onToggleActivity}
           aria-expanded={activityOpen}
         >
-          <Icon name="activity" size={15} /> Log
+          <Icon name="activity" size={15} /> Logs
           {unreadLogs > 0 && !activityOpen && (
             <span className="sidebar-nav-badge v3-activity-badge">{unreadLogs}</span>
           )}
@@ -279,7 +291,7 @@ export default function ProjectSidebar({
         <div
           className="sidebar-section-divider"
           role="separator"
-          aria-label="Resize Projects and Storage sections"
+          aria-label="Resize Projects and Storages sections"
           aria-orientation="horizontal"
           aria-valuemin={Math.round(MIN_SECTION_SHARE * 100)}
           aria-valuemax={Math.round((1 - MIN_SECTION_SHARE) * 100)}
@@ -293,10 +305,10 @@ export default function ProjectSidebar({
           onDoubleClick={() => setProjectShare(DEFAULT_PROJECT_SHARE)}
         />
 
-        <section className="sidebar-split-pane sidebar-storage-pane" aria-label="Storage">
+        <section className="sidebar-split-pane sidebar-storage-pane" aria-label="Storages">
           <div className="sidebar-section-heading">
             <div className="sidebar-section-label">
-              <span className="sidebar-section-title">Storage</span>
+              <span className="sidebar-section-title">Storages</span>
             </div>
             <button
               type="button"
