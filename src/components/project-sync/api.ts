@@ -137,9 +137,6 @@ export const projectSyncApi = {
   updateHostDisplayName: (request: UpdateHostDisplayNameRequest) =>
     invoke<HostIdentityStatus>("update_host_display_name", { request }),
 
-  registerAsNewHost: (request: RegisterNewHostRequest) =>
-    invoke<HostIdentityStatus>("register_as_new_host", { request }),
-
   rotateHostIdentity: (request: RegisterNewHostRequest) =>
     invoke<HostIdentityStatus>("rotate_host_identity", { request }),
 

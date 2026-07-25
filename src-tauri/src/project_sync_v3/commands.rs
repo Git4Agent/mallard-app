@@ -144,7 +144,6 @@ pub struct HostIdentityStatus {
     pub local_display_name: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
-    pub origin_key_available: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -775,24 +774,22 @@ pub async fn get_project_sync_config(app: tauri::AppHandle) -> Result<SyncConfig
     repository(&app)?.load_config()
 }
 
-fn host_identity_status(
-    identity: super::domain::HostIdentity,
-    origin_key_available: bool,
-) -> HostIdentityStatus {
+fn host_identity_status(identity: super::domain::HostIdentity) -> HostIdentityStatus {
     HostIdentityStatus {
         host_id: identity.host_id,
         revision: identity.revision,
         local_display_name: identity.local_display_name,
         created_at: identity.created_at,
         updated_at: identity.updated_at,
-        origin_key_available,
     }
 }
 
+/// Loading the status on app open auto-registers a fresh host whenever no
+/// valid identity exists, so this never surfaces a recovery decision.
 #[tauri::command]
 pub async fn get_host_identity_status(app: tauri::AppHandle) -> Result<HostIdentityStatus, String> {
-    let (identity, key_available) = repository(&app)?.inspect_host_identity()?;
-    Ok(host_identity_status(identity, key_available))
+    let identity = repository(&app)?.load_or_create_host_identity()?;
+    Ok(host_identity_status(identity))
 }
 
 #[tauri::command]
@@ -805,26 +802,7 @@ pub async fn update_host_display_name(
         request.expected_revision,
         request.local_display_name,
     )?;
-    Ok(host_identity_status(identity, true))
-}
-
-fn register_new_host_with_repository(
-    repository: &V3Repository,
-    request: RegisterNewHostRequest,
-) -> Result<HostIdentityStatus, String> {
-    let identity = repository.register_as_new_host(
-        Some((&request.expected_host_id, request.expected_revision)),
-        request.local_display_name,
-    )?;
-    Ok(host_identity_status(identity, true))
-}
-
-#[tauri::command]
-pub async fn register_as_new_host(
-    app: tauri::AppHandle,
-    request: RegisterNewHostRequest,
-) -> Result<HostIdentityStatus, String> {
-    register_new_host_with_repository(&repository(&app)?, request)
+    Ok(host_identity_status(identity))
 }
 
 #[tauri::command]
@@ -836,7 +814,7 @@ pub async fn rotate_host_identity(
         Some((&request.expected_host_id, request.expected_revision)),
         request.local_display_name,
     )?;
-    Ok(host_identity_status(identity, true))
+    Ok(host_identity_status(identity))
 }
 
 #[tauri::command]
@@ -6541,7 +6519,30 @@ fn capture_request_with_global_inventory(
     }
 }
 
-fn repository_fingerprint(project_root: &Path) -> Option<String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RepositoryIdentity {
+    fingerprint: String,
+    compatible_fingerprints: BTreeSet<String>,
+}
+
+impl RepositoryIdentity {
+    fn matches(&self, fingerprint: Option<&str>) -> bool {
+        fingerprint.is_some_and(|fingerprint| self.compatible_fingerprints.contains(fingerprint))
+    }
+
+    fn fingerprints(&self) -> Vec<String> {
+        let mut fingerprints = vec![self.fingerprint.clone()];
+        fingerprints.extend(
+            self.compatible_fingerprints
+                .iter()
+                .filter(|fingerprint| *fingerprint != &self.fingerprint)
+                .cloned(),
+        );
+        fingerprints
+    }
+}
+
+fn repository_identity(project_root: &Path) -> Option<RepositoryIdentity> {
     let config_path = project_root.join(".git/config");
     let metadata = fs::symlink_metadata(&config_path).ok()?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 * 1024 {
@@ -6560,13 +6561,59 @@ fn repository_fingerprint(project_root: &Path) -> Option<String> {
                 continue;
             };
             if key.trim().eq_ignore_ascii_case("url") {
-                let normalized = strip_url_userinfo(value.trim());
-                let digest = Sha256::digest(normalized.as_bytes());
-                return Some(hex_digest(&digest));
+                return Some(repository_identity_from_remote_url(value.trim()));
             }
         }
     }
     None
+}
+
+fn repository_fingerprint(project_root: &Path) -> Option<String> {
+    repository_identity(project_root).map(|identity| identity.fingerprint)
+}
+
+fn repository_identity_from_remote_url(value: &str) -> RepositoryIdentity {
+    let sanitized = strip_url_userinfo(value.trim());
+    let canonical_github = chat_history::normalize_github_repository_url(value);
+    let canonical = canonical_github.as_deref().unwrap_or(&sanitized);
+    let fingerprint = repository_url_fingerprint(canonical);
+    let mut compatible_fingerprints =
+        BTreeSet::from([fingerprint.clone(), repository_url_fingerprint(&sanitized)]);
+    if let Some(canonical_github) = canonical_github {
+        add_legacy_github_fingerprints(&mut compatible_fingerprints, &canonical_github);
+    }
+    RepositoryIdentity {
+        fingerprint,
+        compatible_fingerprints,
+    }
+}
+
+fn add_legacy_github_fingerprints(fingerprints: &mut BTreeSet<String>, canonical: &str) {
+    let Some(repository_path) = canonical.strip_prefix("https://github.com/") else {
+        return;
+    };
+    for prefix in [
+        "https://github.com/",
+        "http://github.com/",
+        "ssh://github.com/",
+        "git://github.com/",
+    ] {
+        for suffix in ["", ".git"] {
+            let value = format!("{prefix}{repository_path}{suffix}");
+            fingerprints.insert(repository_url_fingerprint(&value));
+            fingerprints.insert(repository_url_fingerprint(&format!("{value}/")));
+        }
+    }
+    for suffix in ["", ".git"] {
+        fingerprints.insert(repository_url_fingerprint(&format!(
+            "git@github.com:{repository_path}{suffix}"
+        )));
+    }
+}
+
+fn repository_url_fingerprint(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    hex_digest(&digest)
 }
 
 fn strip_url_userinfo(value: &str) -> String {
@@ -7520,6 +7567,10 @@ pub struct SetupSectionStatus {
 pub struct SetupDraftInspection {
     pub draft: ProjectSetupDraft,
     pub sections: Vec<SetupSectionStatus>,
+    /// Current canonical Git fingerprint followed by bounded legacy aliases.
+    /// This is derived from the checkout and never persisted in the draft.
+    #[serde(default)]
+    pub repository_fingerprint_candidates: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inventory: Option<ResourceInventory>,
     /// Signature of the fresh discovery; differs from the draft's stored
@@ -7973,6 +8024,13 @@ fn verified_repository_match(remote: &Option<String>, local: &Option<String>) ->
     matches!((remote, local), (Some(remote), Some(local)) if remote == local)
 }
 
+fn verified_repository_identity(
+    remote: &Option<String>,
+    local: Option<&RepositoryIdentity>,
+) -> bool {
+    local.is_some_and(|local| local.matches(remote.as_deref()))
+}
+
 fn discovery_signature(inventory: &ResourceInventory) -> String {
     let mut ids: Vec<&str> = inventory
         .resources
@@ -7992,9 +8050,17 @@ fn inspect_setup_draft_with_repository(
     repository: &V3Repository,
     draft_id: &SetupDraftId,
 ) -> Result<SetupDraftInspection, String> {
-    let draft = repository
+    let mut draft = repository
         .load_setup_draft(draft_id)?
         .ok_or_else(|| format!("setup draft '{}' does not exist", draft_id))?;
+    let local_repository_identity = repository_identity(Path::new(&draft.canonical_project_root));
+    draft.repository_fingerprint = local_repository_identity
+        .as_ref()
+        .map(|identity| identity.fingerprint.clone());
+    let repository_fingerprint_candidates = local_repository_identity
+        .as_ref()
+        .map(RepositoryIdentity::fingerprints)
+        .unwrap_or_default();
     let mut sections = Vec::new();
     let mut warnings = Vec::new();
     let mut blocked = false;
@@ -8140,8 +8206,10 @@ fn inspect_setup_draft_with_repository(
                             .to_string(),
                     ),
                 }
-            } else if !verified_repository_match(remote_fingerprint, &draft.repository_fingerprint)
-                && !mismatch_acknowledged
+            } else if !verified_repository_identity(
+                remote_fingerprint,
+                local_repository_identity.as_ref(),
+            ) && !mismatch_acknowledged
             {
                 SetupSectionStatus {
                     section: "repository".to_string(),
@@ -8170,6 +8238,7 @@ fn inspect_setup_draft_with_repository(
         can_finalize: !blocked,
         draft,
         sections,
+        repository_fingerprint_candidates,
         inventory,
         fresh_discovery_signature: fresh_signature,
         selection_stale,
@@ -8208,7 +8277,10 @@ fn build_setup_transaction(
         ));
     }
     let resolved_storage = resolve_draft_storage(repository, draft)?;
-    let local_fingerprint = repository_fingerprint(&canonical);
+    let local_repository_identity = repository_identity(&canonical);
+    let local_fingerprint = local_repository_identity
+        .as_ref()
+        .map(|identity| identity.fingerprint.clone());
 
     // Existing remote repos are revalidated against storage now, not at draft
     // time: the bundle must still exist and mismatches must be acknowledged.
@@ -8278,8 +8350,10 @@ fn build_setup_transaction(
             let engine = engine_for_storage_config(&storage.storage)?;
             let fetched = engine.fetch(bundle_id)?;
             let summary = bundle_snapshot_summary(fetched)?;
-            if !verified_repository_match(&summary.repository_fingerprint, &local_fingerprint)
-                && !mismatch_acknowledged
+            if !verified_repository_identity(
+                &summary.repository_fingerprint,
+                local_repository_identity.as_ref(),
+            ) && !mismatch_acknowledged
             {
                 return Err(
                     "the remote repo is not verified to match this folder's Git remote; acknowledge the mismatch first"
@@ -13110,5 +13184,45 @@ mod tests {
             &Some("a".repeat(64)),
             &Some("b".repeat(64))
         ));
+    }
+
+    #[test]
+    fn github_repository_identity_ignores_dot_git_and_transport() {
+        let remotes = [
+            "https://github.com/Owner/repository",
+            "https://github.com/Owner/repository.git",
+            "ssh://git@github.com/Owner/repository.git",
+            "git@github.com:Owner/repository.git",
+        ];
+        let expected = repository_identity_from_remote_url(remotes[0]).fingerprint;
+        for remote in remotes {
+            assert_eq!(
+                repository_identity_from_remote_url(remote).fingerprint,
+                expected,
+                "remote should canonicalize: {remote}"
+            );
+        }
+    }
+
+    #[test]
+    fn github_repository_identity_accepts_precanonicalization_fingerprints() {
+        let identity =
+            repository_identity_from_remote_url("https://github.com/Owner/repository.git");
+        for legacy_url in [
+            "https://github.com/Owner/repository",
+            "https://github.com/Owner/repository.git",
+            "ssh://github.com/Owner/repository.git",
+            "git@github.com:Owner/repository.git",
+        ] {
+            let fingerprint = repository_url_fingerprint(legacy_url);
+            assert!(
+                identity.matches(Some(&fingerprint)),
+                "legacy fingerprint should match: {legacy_url}"
+            );
+        }
+        assert!(!identity.matches(Some(&repository_url_fingerprint(
+            "https://github.com/Owner/different-repository"
+        ))));
+        assert!(!identity.matches(None));
     }
 }

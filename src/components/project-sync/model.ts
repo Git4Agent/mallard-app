@@ -13,6 +13,13 @@ export function projectLabel(project: { display_name: string; local_alias?: stri
   return project.local_alias?.trim() || project.display_name;
 }
 
+export function repositoryFingerprintMatches(
+  fingerprint: string | null | undefined,
+  candidates: ReadonlySet<string>,
+): boolean {
+  return !!fingerprint && candidates.has(fingerprint);
+}
+
 export const RESOURCE_GROUPS: Array<{
   id: ProjectResourceCategory;
   label: string;

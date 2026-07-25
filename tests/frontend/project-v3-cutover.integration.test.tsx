@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { repositoryFingerprintMatches } from "../../src/components/project-sync/model";
 
 test("ProjectSyncV3 is the only application interface", () => {
   const app = readFileSync("src/App.tsx", "utf8");
@@ -26,6 +27,15 @@ test("project setup does not offer an immediate push", () => {
   const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
 
   assert.doesNotMatch(setupWorkspace, /Finish & push|finalize\("push"\)/);
+});
+
+test("project setup recognizes canonical and legacy repository fingerprints", () => {
+  const candidates = new Set(["canonical", "legacy-dot-git"]);
+
+  assert.equal(repositoryFingerprintMatches("canonical", candidates), true);
+  assert.equal(repositoryFingerprintMatches("legacy-dot-git", candidates), true);
+  assert.equal(repositoryFingerprintMatches("different-repository", candidates), false);
+  assert.equal(repositoryFingerprintMatches(null, candidates), false);
 });
 
 test("the production Tauri handler exposes only V3 sync and shared log commands", () => {
@@ -75,7 +85,7 @@ test("the titlebar marks active Git projects with the Git folder icon", () => {
   assert.match(workspace, /<Icon name=\{workspaceIcon\} size=\{16\} \/>/);
 });
 
-test("the shell blocks copied host state until it is registered locally", () => {
+test("the shell verifies host identity and relies on backend auto-registration", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
   const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
   const linksWorkspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
@@ -83,7 +93,6 @@ test("the shell blocks copied host state until it is registered locally", () => 
   assert.match(workspace, /projectSyncApi\.getHostIdentityStatus\(\)/);
   assert.match(workspace, /!hostIdentityStatus && hostIdentityError/);
   assert.match(workspace, /Host identity unavailable/);
-  assert.match(workspace, /if \(!nextHostIdentity\.origin_key_available\) \{/);
   assert.match(workspace, /if \(!hostIdentityReady\) return/);
   const shellRefreshes = [...workspace.matchAll(/const \{([^}]*)\} = await loadShell\(\);/g)];
   assert.ok(shellRefreshes.length > 0);
@@ -107,18 +116,22 @@ test("the shell blocks copied host state until it is registered locally", () => 
     workspace,
     /const connectStorageBundle = async[\s\S]*const workflowGeneration = hostWorkflowGeneration\.current;[\s\S]*await loadShell\(\);[\s\S]*!hostIdentityReady \|\| hostWorkflowGeneration\.current !== workflowGeneration/,
   );
-  assert.match(workspace, /shellRequest\.current \+= 1;[\s\S]*setHostIdentityShellReady\(false\);[\s\S]*clearHostScopedWorkflows\(\);[\s\S]*registerAsNewHost/);
-  assert.match(workspace, /hostIdentityStatus && !hostIdentityStatus\.origin_key_available/);
+  // A mid-load identity change (backend auto-registration) restarts the
+  // shell load instead of surfacing stale host-scoped state.
+  assert.match(
+    workspace,
+    /verifiedHostIdentity\.host_id !== nextHostIdentity\.host_id[\s\S]*return loadShell\(\);/,
+  );
   assert.match(workspace, /if \(!hostIdentityShellReady\) \{/);
   assert.match(workspace, /Checking this installation…/);
-  assert.match(workspace, /"Register as new host"/);
-  assert.match(workspace, /projectSyncApi\.registerAsNewHost\(\{[\s\S]*expected_host_id:[\s\S]*expected_revision:/);
-  assert.match(workspace, /bindings are detached until revalidated/);
   assert.match(workspace, /nextDetail\.binding\.state !== "active"/);
   assert.match(workspace, /expected_revision: nextDetail\.binding\?\.revision \?\? null/);
   assert.match(workspace, /nextDetail\.binding\?\.state === "active"/);
-  assert.match(workspace, /const refreshed = await projectSyncApi\.getHostIdentityStatus\(\)/);
-  assert.match(workspace, /await refresh\(\);[\s\S]*Registered as a new host/);
+  // The blocking recovery gate is gone: the backend registers a fresh host
+  // automatically, so the shell never asks the user to register.
+  assert.doesNotMatch(workspace, /origin_key_available/);
+  assert.doesNotMatch(workspace, /registerAsNewHost/);
+  assert.doesNotMatch(workspace, /"Register as new host"/);
   assert.ok(
     workspace.indexOf("if (!hostIdentityShellReady)") < workspace.indexOf("className={`v3-app"),
     "the ordinary shell must remain behind the completed identity refresh gate",
@@ -220,7 +233,7 @@ test("refocus reconciles external changes narrowly and the full reload lives in 
   // refresh(): project list, repository kinds, and active detail — no audits, profiles,
   // readiness probes, inventory, or loading indicator.
   const start = workspace.indexOf("const reconcileExternalChanges = async");
-  const end = workspace.indexOf("\n  const registerNewHost =", start);
+  const end = workspace.indexOf("\n  const selectProject =", start);
   assert.ok(start >= 0 && end > start, "missing reconcileExternalChanges");
   const reconcile = workspace.slice(start, end);
   assert.match(reconcile, /if \(loading \|\| busy \|\| !hostIdentityShellReady\) return;/);

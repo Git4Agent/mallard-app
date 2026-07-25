@@ -2084,7 +2084,7 @@ fn discover_github_repository_url(project_root: &Path) -> Option<String> {
     fallback
 }
 
-fn normalize_github_repository_url(remote_url: &str) -> Option<String> {
+pub(super) fn normalize_github_repository_url(remote_url: &str) -> Option<String> {
     let remote_url = remote_url.trim();
     if remote_url.is_empty()
         || remote_url

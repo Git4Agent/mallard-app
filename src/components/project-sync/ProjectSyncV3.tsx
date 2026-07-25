@@ -257,7 +257,6 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
   const [notice, setNotice] = useState<string | null>(null);
   const [hostIdentityStatus, setHostIdentityStatus] = useState<HostIdentityStatus | null>(null);
   const [hostIdentityShellReady, setHostIdentityShellReady] = useState(false);
-  const [hostIdentityBusy, setHostIdentityBusy] = useState(false);
   const [hostIdentityError, setHostIdentityError] = useState<string | null>(null);
   const [pendingBundleConnection, setPendingBundleConnection] = useState<PendingBundleConnection | null>(null);
   const [pendingPush, setPendingPush] = useState<PendingPush | null>(null);
@@ -718,12 +717,6 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       }
       setHostIdentityStatus(nextHostIdentity);
       setHostIdentityError(null);
-      if (!nextHostIdentity.origin_key_available) {
-        setHostIdentityShellReady(false);
-        clearHostScopedWorkflows();
-        setLoading(false);
-        return unavailableResult();
-      }
     } catch (reason) {
       if (shellRequest.current !== requestId) return unavailableResult();
       setHostIdentityStatus(null);
@@ -798,13 +791,6 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       return unavailableResult();
     }
     if (shellRequest.current !== requestId) return unavailableResult();
-    if (!nextHostIdentity.origin_key_available) {
-      setHostIdentityStatus(nextHostIdentity);
-      setHostIdentityShellReady(false);
-      clearHostScopedWorkflows();
-      setLoading(false);
-      return unavailableResult();
-    }
     if (
       !verifiedHostIdentity
       || verifiedHostIdentity.host_id !== nextHostIdentity.host_id
@@ -1006,40 +992,6 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [appMenuOpen]);
-
-  const registerNewHost = async () => {
-    if (!hostIdentityStatus) return;
-    shellRequest.current += 1;
-    setHostIdentityShellReady(false);
-    clearHostScopedWorkflows();
-    setHostIdentityBusy(true);
-    setHostIdentityError(null);
-    try {
-      await projectSyncApi.registerAsNewHost({
-        expected_host_id: hostIdentityStatus.host_id,
-        expected_revision: hostIdentityStatus.revision,
-        local_display_name: hostIdentityStatus.local_display_name ?? null,
-      });
-      await refresh();
-      setNotice("Registered as a new host. Existing project bindings must be revalidated before sync resumes.");
-    } catch (reason) {
-      setHostIdentityError(errorMessage(reason));
-      try {
-        const refreshed = await projectSyncApi.getHostIdentityStatus();
-        if (refreshed.origin_key_available) {
-          setHostIdentityError(null);
-          await refresh();
-        } else {
-          setHostIdentityStatus(refreshed);
-        }
-      } catch {
-        // Preserve the actionable registration error when status refresh also
-        // fails; the recovery surface still offers a full shell retry.
-      }
-    } finally {
-      setHostIdentityBusy(false);
-    }
-  };
 
   const selectProject = async (projectId: string, preferredStorage?: string | null) => {
     setActiveProjectId(projectId);
@@ -2418,45 +2370,6 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
           </div>
           <button type="button" className="btn btn-primary" onClick={() => void refresh()} disabled={loading}>
             {loading ? "Checking…" : "Retry"}
-          </button>
-        </section>
-      </main>
-    );
-  }
-
-  if (hostIdentityStatus && !hostIdentityStatus.origin_key_available) {
-    return (
-      <main className="v3-host-recovery" aria-labelledby="v3-host-recovery-title">
-        <section className="v3-empty-state" role="alertdialog" aria-modal="true">
-          <div className="v3-empty-illustration" aria-hidden="true">
-            <Icon name="alert-triangle" size={24} />
-          </div>
-          <span className="v3-eyebrow">Host identity recovery</span>
-          <h1 id="v3-host-recovery-title">Register this installation as a new host</h1>
-          <p>
-            Mallard found local state whose protected origin key is unavailable. This usually means
-            the state was copied from another machine or OS account, so this installation cannot
-            safely represent the original host.
-          </p>
-          <p>
-            Registering creates a new private identity and fresh project replica IDs. Existing
-            bindings are detached until revalidated. Provider threads, project files, reviewed
-            history, and cloud content are not renamed or deleted.
-          </p>
-          {hostIdentityError && (
-            <div className="v3-callout error" role="alert">
-              <Icon name="alert-triangle" size={15} />
-              <span>{hostIdentityError}</span>
-            </div>
-          )}
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => void registerNewHost()}
-            disabled={hostIdentityBusy}
-            autoFocus
-          >
-            {hostIdentityBusy ? "Registering…" : "Register as new host"}
           </button>
         </section>
       </main>

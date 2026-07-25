@@ -22,7 +22,6 @@ pub fn run() {
             project_sync_v3::commands::save_project_sync_config,
             project_sync_v3::commands::get_host_identity_status,
             project_sync_v3::commands::update_host_display_name,
-            project_sync_v3::commands::register_as_new_host,
             project_sync_v3::commands::rotate_host_identity,
             project_sync_v3::commands::get_project_origin_tokens,
             project_sync_v3::commands::list_origin_host_aliases,

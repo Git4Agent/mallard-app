@@ -369,6 +369,7 @@ export interface SetupSectionStatus {
 export interface SetupDraftInspection {
   draft: ProjectSetupDraft;
   sections: SetupSectionStatus[];
+  repository_fingerprint_candidates: string[];
   inventory?: ResourceInventory | null;
   fresh_discovery_signature?: string | null;
   selection_stale: boolean;
@@ -441,7 +442,6 @@ export interface HostIdentityStatus {
   local_display_name?: string | null;
   created_at: number;
   updated_at: number;
-  origin_key_available: boolean;
 }
 
 export interface UpdateHostDisplayNameRequest {

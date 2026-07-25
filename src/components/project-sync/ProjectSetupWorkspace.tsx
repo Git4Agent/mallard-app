@@ -25,6 +25,7 @@ import {
   projectLabel,
   providerLabel,
   recipeSelection,
+  repositoryFingerprintMatches,
   singleProviderSelection,
 } from "./model";
 
@@ -246,13 +247,22 @@ export default function ProjectSetupWorkspace({
     return () => { cancelled = true; };
   }, [listableStorageId]);
 
+  const repositoryFingerprintCandidates = useMemo(() => {
+    const candidates = inspection?.repository_fingerprint_candidates ?? [];
+    if (candidates.length > 0) return new Set(candidates);
+    return new Set(draft?.repository_fingerprint ? [draft.repository_fingerprint] : []);
+  }, [draft?.repository_fingerprint, inspection?.repository_fingerprint_candidates]);
+
   // Auto-select a single exact Git match once, without overriding an
   // explicit user choice; otherwise the default stays "create new repo".
   useEffect(() => {
     if (!draft || repoAutoSelected.current || bundlesLoading) return;
-    if (draft.repository.kind !== "new" || !draft.repository_fingerprint) return;
+    if (draft.repository.kind !== "new" || repositoryFingerprintCandidates.size === 0) return;
     const matches = remoteBundles.filter((bundle) => (
-      bundle.repository_fingerprint === draft.repository_fingerprint
+      repositoryFingerprintMatches(
+        bundle.repository_fingerprint,
+        repositoryFingerprintCandidates,
+      )
     ));
     if (matches.length === 1 && listableStorageId) {
       repoAutoSelected.current = true;
@@ -268,7 +278,13 @@ export default function ProjectSetupWorkspace({
         },
       }));
     }
-  }, [bundlesLoading, draft, listableStorageId, remoteBundles]);
+  }, [
+    bundlesLoading,
+    draft,
+    listableStorageId,
+    remoteBundles,
+    repositoryFingerprintCandidates,
+  ]);
 
   // Adopt the discovered default selection the first time discovery runs.
   useEffect(() => {
@@ -287,10 +303,13 @@ export default function ProjectSetupWorkspace({
   const selectedResources = useMemo(() => new Set(draft?.selected_resource_ids ?? []), [draft?.selected_resource_ids]);
   const usesExistingRepo = draft?.repository.kind === "existing";
   const exactMatches = useMemo(() => (
-    draft?.repository_fingerprint
-      ? remoteBundles.filter((bundle) => bundle.repository_fingerprint === draft.repository_fingerprint)
-      : []
-  ), [draft?.repository_fingerprint, remoteBundles]);
+    remoteBundles.filter((bundle) => (
+      repositoryFingerprintMatches(
+        bundle.repository_fingerprint,
+        repositoryFingerprintCandidates,
+      )
+    ))
+  ), [remoteBundles, repositoryFingerprintCandidates]);
 
   const chooseProfileFolder = async (provider: ProjectProvider) => {
     const picked = await open({ directory: true, multiple: false });
@@ -639,8 +658,10 @@ export default function ProjectSetupWorkspace({
                   const active = usesExistingRepo
                     && draft.repository.kind === "existing"
                     && draft.repository.bundle_id === bundle.bundle_id;
-                  const recommended = !!draft.repository_fingerprint
-                    && bundle.repository_fingerprint === draft.repository_fingerprint
+                  const recommended = repositoryFingerprintMatches(
+                    bundle.repository_fingerprint,
+                    repositoryFingerprintCandidates,
+                  )
                     && exactMatches.length === 1;
                   return (
                     <button
@@ -674,9 +695,10 @@ export default function ProjectSetupWorkspace({
               </div>
             )}
             {usesExistingRepo && draft.repository.kind === "existing"
-              && !(draft.repository.repository_fingerprint
-                && draft.repository_fingerprint
-                && draft.repository.repository_fingerprint === draft.repository_fingerprint) && (
+              && !repositoryFingerprintMatches(
+                draft.repository.repository_fingerprint,
+                repositoryFingerprintCandidates,
+              ) && (
               <label className="v3-setup-acknowledge">
                 <input
                   type="checkbox"

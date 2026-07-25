@@ -14,7 +14,7 @@ use std::path::{Component, Path};
 
 pub const LOCAL_SCHEMA: u32 = 1;
 pub const MACHINE_PROJECT_SCHEMA: u32 = 1;
-pub const HOST_IDENTITY_SCHEMA: u32 = 1;
+pub const HOST_IDENTITY_SCHEMA: u32 = 2;
 pub const CONVERSATION_BINDINGS_SCHEMA: u32 = 1;
 pub const CONVERSATION_SYNC_JOURNAL_SCHEMA: u32 = 1;
 pub const PUSH_PLAN_SCHEMA: u32 = 1;
@@ -127,7 +127,6 @@ named_id!(MaterializationId, "materialization id");
 named_id!(ConversationOperationId, "conversation operation id");
 named_id!(LocalProviderProfileId, "local provider profile id");
 named_id!(SetupDraftId, "setup draft id");
-named_id!(OriginKeyRef, "origin key reference");
 
 macro_rules! fixed_hex_id {
     ($name:ident, $label:literal, $bytes:literal) => {
@@ -233,39 +232,11 @@ impl HostId {
     }
 }
 
-/// Privacy-sensitive machine-local key used only to derive bundle-scoped
-/// provenance tokens. It deliberately has no serde implementation so it
-/// cannot be embedded in another state document by accident.
-#[derive(Clone)]
-pub struct OriginKey([u8; 32]);
-
-impl OriginKey {
-    pub fn generate() -> Result<Self, String> {
-        let mut bytes = [0_u8; 32];
-        getrandom::fill(&mut bytes).map_err(|error| format!("random origin key: {}", error))?;
-        Ok(Self(bytes))
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let bytes: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| "origin key must be exactly 32 bytes".to_string())?;
-        Ok(Self(bytes))
-    }
-
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for OriginKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("OriginKey([REDACTED])")
-    }
-}
-
-fn derive_origin_token(key: &OriginKey, fields: &[&[u8]]) -> Result<String, String> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())
+/// Derive one bundle-scoped provenance token from the private `host_id`.
+/// The raw `host_id` never leaves the machine; bundles only ever carry these
+/// HMAC outputs, so two bundles cannot be linked to one installation.
+fn derive_origin_token(host_id: &HostId, fields: &[&[u8]]) -> Result<String, String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(host_id.as_str().as_bytes())
         .map_err(|_| "initialize origin-token HMAC".to_string())?;
     for field in fields {
         let length = u64::try_from(field.len())
@@ -277,34 +248,24 @@ fn derive_origin_token(key: &OriginKey, fields: &[&[u8]]) -> Result<String, Stri
 }
 
 pub fn derive_origin_host_token(
-    key: &OriginKey,
+    host_id: &HostId,
     bundle_id: &BundleId,
 ) -> Result<OriginHostToken, String> {
     OriginHostToken::parse(derive_origin_token(
-        key,
-        &[b"mallard-origin-host-v1", bundle_id.as_str().as_bytes()],
+        host_id,
+        &[b"mallard-origin-host-v2", bundle_id.as_str().as_bytes()],
     )?)
 }
 
-pub fn derive_origin_key_verifier(key: &OriginKey, host_id: &HostId) -> Result<String, String> {
-    derive_origin_token(
-        key,
-        &[
-            b"mallard-origin-key-verifier-v1",
-            host_id.as_str().as_bytes(),
-        ],
-    )
-}
-
 pub fn derive_origin_replica_token(
-    key: &OriginKey,
+    host_id: &HostId,
     bundle_id: &BundleId,
     replica_id: &ReplicaId,
 ) -> Result<OriginReplicaToken, String> {
     OriginReplicaToken::parse(derive_origin_token(
-        key,
+        host_id,
         &[
-            b"mallard-origin-replica-v1",
+            b"mallard-origin-replica-v2",
             bundle_id.as_str().as_bytes(),
             replica_id.as_str().as_bytes(),
         ],
@@ -1164,9 +1125,6 @@ pub struct HostIdentity {
     pub schema: u32,
     pub revision: u64,
     pub host_id: HostId,
-    pub origin_key_ref: OriginKeyRef,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin_key_verifier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_display_name: Option<String>,
     pub created_at: u64,
@@ -1183,9 +1141,6 @@ impl HostIdentity {
         }
         if let Some(name) = &self.local_display_name {
             validate_host_label("local host display name", name)?;
-        }
-        if let Some(verifier) = &self.origin_key_verifier {
-            validate_sha256("origin key verifier", verifier)?;
         }
         if self.created_at > self.updated_at {
             return Err("host identity has invalid timestamps".to_string());
@@ -4181,37 +4136,47 @@ mod tests {
         assert!(HostId::parse("00112233445566778899AABBCCDDEEFF").is_err());
         assert!(HostId::parse("short").is_err());
 
-        let key = OriginKey::from_bytes(&(0_u8..32).collect::<Vec<_>>()).unwrap();
+        let host_id = HostId::parse("00112233445566778899aabbccddeeff").unwrap();
         let bundle = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
         let replica = ReplicaId::parse("replica-a").unwrap();
-        let host_token = derive_origin_host_token(&key, &bundle).unwrap();
-        let replica_token = derive_origin_replica_token(&key, &bundle, &replica).unwrap();
+        let host_token = derive_origin_host_token(&host_id, &bundle).unwrap();
+        let replica_token = derive_origin_replica_token(&host_id, &bundle, &replica).unwrap();
 
         // Golden vectors freeze the domain-separated u64-length-prefixed
         // encoding used by every schema-5 writer.
         assert_eq!(
             host_token.as_str(),
-            "f8c99890be4775ff291c46711da68cae8a45430d944aa72c560987e358462330"
+            "a4ab94f1dfb193b63b7b1862aa6c9cabe17ff1c463287f2958281527c75bc62d"
         );
         assert_eq!(
             replica_token.as_str(),
-            "63ec7403165c8d3884e5043b29de820739338f58fff465231246ef522cbf2ffe"
+            "0399716f9fe42796b64a32c5763e91334d58017c93f0c6dd56590320530edd07"
         );
-        assert_eq!(derive_origin_host_token(&key, &bundle).unwrap(), host_token);
+        assert_eq!(
+            derive_origin_host_token(&host_id, &bundle).unwrap(),
+            host_token
+        );
         assert_ne!(
             derive_origin_host_token(
-                &key,
+                &host_id,
                 &BundleId::parse("11111111111111111111111111111111").unwrap()
             )
             .unwrap(),
             host_token
         );
         assert_ne!(
-            derive_origin_replica_token(&key, &bundle, &ReplicaId::parse("replica-b").unwrap())
+            derive_origin_replica_token(&host_id, &bundle, &ReplicaId::parse("replica-b").unwrap())
                 .unwrap(),
             replica_token
         );
-        assert_eq!(format!("{:?}", key), "OriginKey([REDACTED])");
+        assert_ne!(
+            derive_origin_host_token(
+                &HostId::parse("ffeeddccbbaa99887766554433221100").unwrap(),
+                &bundle
+            )
+            .unwrap(),
+            host_token
+        );
     }
 
     #[test]

@@ -2778,8 +2778,6 @@ dependencies = [
  "hyper-util",
  "libc",
  "rusqlite",
- "security-framework",
- "security-framework-sys",
  "serde",
  "serde_json",
  "sha2 0.10.9",
