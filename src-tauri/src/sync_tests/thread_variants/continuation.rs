@@ -533,9 +533,11 @@ fn schema6_comparison_exposes_distinct_typed_threads_without_guessing_by_title()
     let machine = world.repo_fresh.load_bindings().unwrap();
     let binding = machine.active_for(&scope.project_id).unwrap();
     let fetched = world.engine().fetch(&world.bundle_id).unwrap();
+    let mut bytes = crate::project_sync_v3::bundle_engine::PreloadedBytes::new(&fetched);
     let entries = crate::project_sync_v3::commands::schema6_thread_entries(
         &world.repo_fresh,
-        &fetched,
+        &fetched.snapshot,
+        &mut bytes,
         &captured,
         binding,
     )

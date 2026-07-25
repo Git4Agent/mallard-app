@@ -3,7 +3,6 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
   BundleReadiness,
-  BundleSnapshotSummary,
   DependencyPlan,
   DependencyResult,
   ProjectBinding,
@@ -73,22 +72,11 @@ const restorePlan: RestorePlan = {
   }],
 };
 
-const snapshot: BundleSnapshotSummary = {
-  storage_id: "storage-local",
-  bundle_id: binding.bundle_id,
-  display_name: "healthGame",
-  fetched_at: 1,
-};
-
 test("a valid Pull plan renders an enabled non-modal Apply workspace while supporting checks fail", async () => {
   const dependencies = deferred<DependencyPlan>();
   const readiness = deferred<BundleReadiness>();
   const calls: string[] = [];
   const api: PullReviewApi = {
-    fetchBundle: async () => {
-      calls.push("fetch");
-      return snapshot;
-    },
     planRestore: async () => {
       calls.push("plan-restore");
       return restorePlan;
@@ -111,7 +99,9 @@ test("a valid Pull plan renders an enabled non-modal Apply workspace while suppo
     binding,
   });
   assert.equal(review.restorePlan, restorePlan);
-  assert.deepEqual(calls, ["fetch", "plan-restore", "plan-dependencies", "readiness"]);
+  // Planning fetches the bundle itself — a separate prefetch would download
+  // the full payload twice.
+  assert.deepEqual(calls, ["plan-restore", "plan-dependencies", "readiness"]);
   let supportFinished = false;
   void review.support.then(() => {
     supportFinished = true;
@@ -711,7 +701,6 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
 
 test("a primary restore-plan failure still rejects the Pull review", async () => {
   const api: PullReviewApi = {
-    fetchBundle: async () => snapshot,
     planRestore: async () => {
       throw new Error("bundle head changed");
     },

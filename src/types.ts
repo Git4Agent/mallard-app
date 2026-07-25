@@ -662,6 +662,17 @@ export interface BundleSnapshotSummary extends RemoteBundleSummary {
   warnings?: string[];
 }
 
+/** Payload of the `project-sync-fetch-progress` Tauri event. */
+export interface BundleFetchProgress {
+  phase: "plan" | "apply";
+  storage_id: string;
+  bundle_id: string;
+  index: number;
+  total_objects: number;
+  fetched_bytes: number;
+  total_bytes: number;
+}
+
 export type RestoreActionKind =
   | { kind: "write_file"; logical_path: string }
   | { kind: "write_project_file"; logical_path: string; mode: number; source_mtime: number }
@@ -682,6 +693,8 @@ export interface RestoreAction {
   source_sha256?: string | null;
   expected_target_sha256?: string | null;
   expected_target_mode?: number | null;
+  /** Digest of the bytes apply would write; equal to expected_target_sha256 for an already-synced no-op. */
+  materialized_sha256?: string | null;
   requires_explicit_approval: boolean;
 }
 

@@ -11,6 +11,7 @@ import type {
   ActivityLogLevel,
   ActivityLogType,
   AppTheme,
+  BundleFetchProgress,
   BundleRecipe,
   BundleReadiness,
   BundleSnapshotSummary,
@@ -296,6 +297,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
   const [editingBinding, setEditingBinding] = useState<ProjectBindingDraft | null>(null);
 
   const [restorePlan, setRestorePlan] = useState<RestorePlan | null>(null);
+  const [fetchProgress, setFetchProgress] = useState<BundleFetchProgress | null>(null);
   const [restoreBinding, setRestoreBinding] = useState<ProjectBinding | null>(null);
   const [restoreProjectName, setRestoreProjectName] = useState("project");
   const [dependencyPlan, setDependencyPlan] = useState<DependencyPlan | null>(null);
@@ -464,6 +466,18 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
         setLogLines((current) => mergeLogLines(current, [event.payload]).slice(-2_000));
       }
       if (!activityOpenRef.current) setUnreadLogs((current) => Math.min(99, current + 1));
+    });
+    return () => {
+      void unlisten.then((dispose) => dispose());
+    };
+  }, []);
+
+  useEffect(() => {
+    // Live download progress for Pull plan/apply. The final per-bundle event
+    // (index == total) clears the readout so the button returns to its
+    // "Reviewing…" state while the plan is still being built.
+    const unlisten = listen<BundleFetchProgress>("project-sync-fetch-progress", (event) => {
+      setFetchProgress(event.payload.index >= event.payload.total_objects ? null : event.payload);
     });
     return () => {
       void unlisten.then((dispose) => dispose());
@@ -1609,6 +1623,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     setRestoreError(null);
     setRestoreResult(null);
     setDependencyResult(null);
+    setFetchProgress(null);
     setPullApplyPhase("idle");
     setReviewSupportLoading(true);
     setCompletedPullActionIds(new Set());
@@ -2558,6 +2573,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
             conversationPathAudits={conversationPathAudits}
             conversationPathAuditErrors={conversationPathAuditErrors}
             conversationPathAuditLoading={conversationPathAuditLoading}
+            fetchProgress={fetchProgress}
             onSelectStorage={(projectId, storageId) => selectStorage(projectId, storageId)}
             onLinkStorage={(projectId, storageId) => linkStorage(projectId, storageId)}
             onUnlinkStorage={(projectId, storageId) => unlinkStorage(projectId, storageId)}

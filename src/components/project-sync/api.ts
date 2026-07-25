@@ -161,9 +161,6 @@ export const projectSyncApi = {
   findRemoteBundleMatches: (storageId: string, repositoryFingerprint: string) =>
     invoke<BundleSnapshotSummary[]>("find_remote_bundle_matches", { storageId, repositoryFingerprint }),
 
-  fetchBundle: (storageId: string, bundleId: string) =>
-    invoke<BundleSnapshotSummary>("fetch_bundle", { storageId, bundleId }),
-
   saveLink: (request: SaveProjectLinkRequest) =>
     invoke<ProjectStorageLink>("save_project_link", { request }),
 

@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  BundleFetchProgress,
   BundlePage,
   CodexConversationPathAudit,
   LocalProjectSummary,
@@ -63,6 +64,7 @@ interface Props {
   conversationPathAudits: Record<string, CodexConversationPathAudit>;
   conversationPathAuditErrors: Record<string, string>;
   conversationPathAuditLoading: boolean;
+  fetchProgress?: BundleFetchProgress | null;
   onSelectStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onLinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onUnlinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
@@ -274,6 +276,7 @@ export default function ProjectLinksWorkspace({
   conversationPathAudits,
   conversationPathAuditErrors,
   conversationPathAuditLoading,
+  fetchProgress,
   onSelectStorage,
   onLinkStorage,
   onUnlinkStorage,
@@ -1354,7 +1357,9 @@ export default function ProjectLinksWorkspace({
                                 >
                                   <Icon name="download" size={15} />
                                   {runningAction === `pull:${actionPrefix}`
-                                    ? "Reviewing…"
+                                    ? (fetchProgress && fetchProgress.phase === "plan"
+                                      ? `${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`
+                                      : "Reviewing…")
                                     : pullReviewOpen
                                       ? "View review"
                                       : bindingActive

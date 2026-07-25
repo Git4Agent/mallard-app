@@ -7,10 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
@@ -122,6 +123,13 @@ pub struct StoreListPage {
 /// The narrow transport contract required by the bundle protocol.
 pub trait BundleObjectStore: Send + Sync {
     fn get(&self, key: &ObjectKey) -> Result<Option<StoredObject>, String>;
+
+    /// Fetch several objects; results line up with `keys`. Remote stores
+    /// override this with a bounded-concurrency implementation.
+    fn get_many(&self, keys: &[ObjectKey]) -> Result<Vec<Option<StoredObject>>, String> {
+        keys.iter().map(|key| self.get(key)).collect()
+    }
+
     fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String>;
     fn compare_and_swap(
         &self,
@@ -464,7 +472,373 @@ pub struct Schema6PublishOutcome {
 pub struct FetchedBundle {
     pub snapshot: BundleSnapshot,
     pub files: BTreeMap<LogicalPath, Vec<u8>>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub dependency_actions: Vec<DependencyAction>,
+}
+
+/// One payload object finished downloading. `fetched_bytes`/`total_bytes`
+/// are manifest-declared sizes, so consumers can render byte-accurate
+/// progress without waiting for the transfer to finish.
+#[derive(Clone, Copy, Debug)]
+pub struct FetchProgress {
+    pub index: usize,
+    pub total_objects: usize,
+    pub fetched_bytes: u64,
+    pub total_bytes: u64,
+}
+
+const OBJECT_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+/// Objects per `get_many` round in `EngineByteSource::prefetch` — one
+/// concurrent store window per batch, with progress after each object.
+const PREFETCH_BATCH_OBJECTS: usize = 6;
+
+/// Process-wide LRU for verified payload objects, keyed by content hash.
+/// Bundle objects are immutable, so an entry can never go stale; eviction
+/// exists only to bound memory. One Pull review warms the cache for the
+/// apply that follows it.
+pub struct ObjectCache {
+    inner: Mutex<ObjectCacheInner>,
+}
+
+struct ObjectCacheInner {
+    entries: HashMap<(StorageId, BundleId, String), Arc<Vec<u8>>>,
+    order: VecDeque<(StorageId, BundleId, String)>,
+    total_bytes: u64,
+}
+
+impl Default for ObjectCache {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(ObjectCacheInner {
+                entries: HashMap::new(),
+                order: VecDeque::new(),
+                total_bytes: 0,
+            }),
+        }
+    }
+}
+
+impl ObjectCache {
+    fn get(&self, key: &(StorageId, BundleId, String)) -> Option<Arc<Vec<u8>>> {
+        let mut inner = self.inner.lock().ok()?;
+        let hit = inner.entries.get(key).cloned()?;
+        if let Some(position) = inner.order.iter().position(|current| current == key) {
+            inner.order.remove(position);
+        }
+        inner.order.push_back(key.clone());
+        Some(hit)
+    }
+
+    fn insert(&self, key: (StorageId, BundleId, String), bytes: Arc<Vec<u8>>) {
+        if bytes.len() as u64 > OBJECT_CACHE_MAX_BYTES {
+            return;
+        }
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if inner.entries.contains_key(&key) {
+            return;
+        }
+        inner.total_bytes = inner.total_bytes.saturating_add(bytes.len() as u64);
+        inner.entries.insert(key.clone(), bytes);
+        inner.order.push_back(key);
+        while inner.total_bytes > OBJECT_CACHE_MAX_BYTES {
+            let Some(oldest) = inner.order.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = inner.entries.remove(&oldest) {
+                inner.total_bytes = inner.total_bytes.saturating_sub(evicted.len() as u64);
+            }
+        }
+    }
+}
+
+/// Payload access for planning and apply. Implementations verify each
+/// object against the manifest exactly once — callers trust returned bytes.
+pub trait BundleBytes {
+    fn get(&mut self, logical_path: &LogicalPath) -> Result<&[u8], String>;
+
+    /// Bulk-load a known set so progress totals reflect the real transfer.
+    /// The default sequential loop is sufficient for preloaded sources.
+    fn prefetch(&mut self, paths: &[LogicalPath]) -> Result<(), String> {
+        for path in paths {
+            self.get(path)?;
+        }
+        Ok(())
+    }
+}
+
+/// Byte source over an already fully downloaded bundle. Existing callers and
+/// engine tests use this; it re-verifies on access exactly like the historic
+/// apply path did.
+pub struct PreloadedBytes<'a> {
+    bundle: &'a FetchedBundle,
+}
+
+impl<'a> PreloadedBytes<'a> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn new(bundle: &'a FetchedBundle) -> Self {
+        Self { bundle }
+    }
+}
+
+impl BundleBytes for PreloadedBytes<'_> {
+    fn get(&mut self, logical_path: &LogicalPath) -> Result<&[u8], String> {
+        let entry = self
+            .bundle
+            .snapshot
+            .manifest
+            .files
+            .get(logical_path)
+            .ok_or_else(|| format!("manifest has no file entry for '{}'", logical_path))?;
+        let bytes = self
+            .bundle
+            .files
+            .get(logical_path)
+            .ok_or_else(|| format!("fetched bytes for '{}' are missing", logical_path))?;
+        if bytes.len() as u64 != entry.size || sha256(bytes) != entry.sha256 {
+            return Err(format!(
+                "fetched bytes for '{}' failed verification",
+                logical_path
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+/// Store-backed lazy byte source: downloads objects on demand, verifies them
+/// against the manifest, and shares them through the process-wide
+/// [`ObjectCache`].
+pub struct EngineByteSource<'a, S: BundleObjectStore> {
+    engine: &'a BundleEngine<S>,
+    snapshot: &'a BundleSnapshot,
+    cache: Option<Arc<ObjectCache>>,
+    loaded: BTreeMap<LogicalPath, Arc<Vec<u8>>>,
+    on_progress: Option<&'a mut dyn FnMut(FetchProgress)>,
+}
+
+impl<'a, S: BundleObjectStore> EngineByteSource<'a, S> {
+    fn ensure_loaded(&mut self, logical_path: &LogicalPath) -> Result<(), String> {
+        if self.loaded.contains_key(logical_path) {
+            return Ok(());
+        }
+        let entry = self
+            .snapshot
+            .manifest
+            .files
+            .get(logical_path)
+            .ok_or_else(|| format!("manifest has no file entry for '{}'", logical_path))?;
+        let bundle_id = &self.snapshot.head.bundle_id;
+        let cache_key = (
+            self.snapshot.storage_id.clone(),
+            bundle_id.clone(),
+            entry.sha256.clone(),
+        );
+        if let Some(hit) = self.cache.as_ref().and_then(|cache| cache.get(&cache_key)) {
+            self.loaded.insert(logical_path.clone(), hit);
+            return Ok(());
+        }
+        let key = repository_object_key(bundle_id, &entry.object_key)?;
+        let object = self
+            .engine
+            .store
+            .get(&key)?
+            .ok_or_else(|| format!("bundle object '{}' is missing", key))?;
+        if object.bytes.len() as u64 != entry.size || sha256(&object.bytes) != entry.sha256 {
+            return Err(format!(
+                "bundle object '{}' does not match manifest size/hash",
+                key
+            ));
+        }
+        let bytes = Arc::new(object.bytes);
+        if let Some(cache) = &self.cache {
+            cache.insert(cache_key, bytes.clone());
+        }
+        self.loaded.insert(logical_path.clone(), bytes);
+        Ok(())
+    }
+}
+
+impl<S: BundleObjectStore> BundleBytes for EngineByteSource<'_, S> {
+    fn get(&mut self, logical_path: &LogicalPath) -> Result<&[u8], String> {
+        self.ensure_loaded(logical_path)?;
+        Ok(self
+            .loaded
+            .get(logical_path)
+            .expect("object loaded by ensure_loaded")
+            .as_slice())
+    }
+
+    fn prefetch(&mut self, paths: &[LogicalPath]) -> Result<(), String> {
+        // Serve cache hits first so progress totals cover the real transfer.
+        let mut pending = Vec::new();
+        for path in paths {
+            if self.loaded.contains_key(path) {
+                continue;
+            }
+            let entry = self
+                .snapshot
+                .manifest
+                .files
+                .get(path)
+                .ok_or_else(|| format!("manifest has no file entry for '{}'", path))?;
+            let cache_key = (
+                self.snapshot.storage_id.clone(),
+                self.snapshot.head.bundle_id.clone(),
+                entry.sha256.clone(),
+            );
+            if let Some(hit) = self.cache.as_ref().and_then(|cache| cache.get(&cache_key)) {
+                self.loaded.insert(path.clone(), hit);
+                continue;
+            }
+            if pending.iter().any(|(current, _)| current == path) {
+                continue;
+            }
+            pending.push((path.clone(), entry.clone()));
+        }
+        let total_objects = pending.len();
+        let total_bytes = pending
+            .iter()
+            .fold(0_u64, |sum, (_, entry)| sum.saturating_add(entry.size));
+        let mut fetched_bytes = 0_u64;
+        let mut index = 0_usize;
+        for batch in pending.chunks(PREFETCH_BATCH_OBJECTS) {
+            let keys = batch
+                .iter()
+                .map(|(_, entry)| {
+                    repository_object_key(&self.snapshot.head.bundle_id, &entry.object_key)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let objects = self.engine.store.get_many(&keys)?;
+            for (((path, entry), key), object) in batch.iter().zip(&keys).zip(objects) {
+                let object =
+                    object.ok_or_else(|| format!("bundle object '{}' is missing", key))?;
+                if object.bytes.len() as u64 != entry.size || sha256(&object.bytes) != entry.sha256
+                {
+                    return Err(format!(
+                        "bundle object '{}' does not match manifest size/hash",
+                        key
+                    ));
+                }
+                let bytes = Arc::new(object.bytes);
+                if let Some(cache) = &self.cache {
+                    cache.insert(
+                        (
+                            self.snapshot.storage_id.clone(),
+                            self.snapshot.head.bundle_id.clone(),
+                            entry.sha256.clone(),
+                        ),
+                        bytes.clone(),
+                    );
+                }
+                self.loaded.insert(path.clone(), bytes);
+                index += 1;
+                fetched_bytes = fetched_bytes.saturating_add(entry.size);
+                if let Some(on_progress) = self.on_progress.as_mut() {
+                    on_progress(FetchProgress {
+                        index,
+                        total_objects,
+                        fetched_bytes,
+                        total_bytes,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The reviewed `(storage_digest, local_digest)` pair recorded for a
+/// conversation resource by the most recent applied Pull. When the stored
+/// object still has `storage_digest`, `local_digest` IS the materialized
+/// digest for this binding — planning needs no payload bytes to know it.
+#[derive(Clone, Debug)]
+pub struct KnownMaterializedBase {
+    pub storage_digest: String,
+    pub local_digest: String,
+    pub kept_local: bool,
+}
+
+/// Per-file planning decision from pass 1 of `build_restore_plan_lazy`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PlannedOutcome {
+    /// Blocked or unmaterializable — becomes a manual action.
+    Manual(String),
+    /// The local conversation diverged; the reviewed Pull keeps it.
+    KeepLocal,
+    /// Emit a restore action; the materialized digest is `Some` whenever it
+    /// was derivable without payload bytes.
+    Action { materialized: Option<String> },
+    /// Divergence cannot be classified from metadata — download the object.
+    NeedsBytes,
+}
+
+struct PlannedFile<'m> {
+    logical_path: &'m LogicalPath,
+    entry: &'m BundleFileEntry,
+    descriptor: &'m ResourceDescriptor,
+    target: Option<PathBuf>,
+    target_digest: Option<String>,
+    target_mode: Option<u32>,
+    outcome: PlannedOutcome,
+}
+
+/// Whether materialization rewrites this file's bytes per binding (Codex
+/// session cwd remap). Must stay in lockstep with `materialized_file_bytes`.
+fn is_remapped_conversation(logical_path: &LogicalPath, descriptor: &ResourceDescriptor) -> bool {
+    descriptor.kind == ResourceKind::CodexConversation
+        && (logical_path.as_str().starts_with("state/codex/sessions/")
+            || logical_path
+                .as_str()
+                .starts_with("state/codex/archived_sessions/"))
+}
+
+/// Decide a remapped conversation's plan outcome without payload bytes.
+///
+/// `base` must already be filtered to `storage_digest == entry_sha`, meaning
+/// the stored object is unchanged since the reviewed base — which makes
+/// `base.local_digest` the exact materialized digest for this binding (for a
+/// materialized base) or the reviewed kept-local digest (for a kept one).
+fn classify_remapped_conversation(
+    entry_sha: &str,
+    base: Option<&KnownMaterializedBase>,
+    target_digest: Option<&str>,
+) -> PlannedOutcome {
+    if let Some(base) = base {
+        if let Some(digest) = target_digest {
+            if digest == base.local_digest {
+                return if base.kept_local {
+                    // The reviewed keep-local decision still describes the
+                    // disk state; surface it again (callers routinely drop
+                    // it when the stored side is also unchanged).
+                    PlannedOutcome::KeepLocal
+                } else {
+                    PlannedOutcome::Action {
+                        materialized: Some(base.local_digest.clone()),
+                    }
+                };
+            }
+            if !base.kept_local {
+                if digest == entry_sha {
+                    return PlannedOutcome::Action {
+                        materialized: Some(base.local_digest.clone()),
+                    };
+                }
+                // The target moved away from the known materialized digest,
+                // so it cannot equal it — divergence is proven metadata-only.
+                return PlannedOutcome::KeepLocal;
+            }
+        } else if !base.kept_local {
+            return PlannedOutcome::Action {
+                materialized: Some(base.local_digest.clone()),
+            };
+        }
+    }
+    match target_digest {
+        None => PlannedOutcome::Action { materialized: None },
+        Some(digest) if digest == entry_sha => PlannedOutcome::Action { materialized: None },
+        Some(_) => PlannedOutcome::NeedsBytes,
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1054,10 +1428,31 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         })
     }
 
+    /// Whole-bundle download. Production paths plan and apply lazily via
+    /// [`Self::byte_source`]; this remains the exhaustive test surface.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn fetch(&self, bundle_id: &BundleId) -> Result<FetchedBundle, String> {
+        self.fetch_with_progress(bundle_id, &mut |_| {})
+    }
+
+    /// Full-payload fetch reporting per-object progress. The totals come from
+    /// the already-verified manifest, so observers can size progress bars
+    /// before the first payload byte arrives.
+    pub fn fetch_with_progress(
+        &self,
+        bundle_id: &BundleId,
+        on_progress: &mut dyn FnMut(FetchProgress),
+    ) -> Result<FetchedBundle, String> {
         let snapshot = self.inspect(bundle_id)?;
+        let total_objects = snapshot.manifest.files.len();
+        let total_bytes = snapshot
+            .manifest
+            .files
+            .values()
+            .fold(0_u64, |sum, entry| sum.saturating_add(entry.size));
         let mut files = BTreeMap::new();
-        for (logical_path, entry) in &snapshot.manifest.files {
+        let mut fetched_bytes = 0_u64;
+        for (index, (logical_path, entry)) in snapshot.manifest.files.iter().enumerate() {
             let key = repository_object_key(bundle_id, &entry.object_key)?;
             let object = self
                 .store
@@ -1069,6 +1464,13 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                     key
                 ));
             }
+            fetched_bytes = fetched_bytes.saturating_add(entry.size);
+            on_progress(FetchProgress {
+                index: index + 1,
+                total_objects,
+                fetched_bytes,
+                total_bytes,
+            });
             files.insert(logical_path.clone(), object.bytes);
         }
         let dependency_actions = dependencies_from_manifest(&snapshot.manifest)?;
@@ -1077,6 +1479,23 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             files,
             dependency_actions,
         })
+    }
+
+    /// Lazy payload access for `snapshot`, sharing verified objects through
+    /// `cache` and reporting bulk downloads through `on_progress`.
+    pub fn byte_source<'a>(
+        &'a self,
+        snapshot: &'a BundleSnapshot,
+        cache: Option<Arc<ObjectCache>>,
+        on_progress: Option<&'a mut dyn FnMut(FetchProgress)>,
+    ) -> EngineByteSource<'a, S> {
+        EngineByteSource {
+            engine: self,
+            snapshot,
+            cache,
+            loaded: BTreeMap::new(),
+            on_progress,
+        }
     }
 
     /// Verify a bundle's mutable head and immutable manifest without loading
@@ -1214,6 +1633,9 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         })
     }
 
+    /// Plan over a fully fetched bundle — the historic byte-verified entry
+    /// point, retained for tests; production plans lazily.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn build_restore_plan(
         &self,
         bundle: &FetchedBundle,
@@ -1222,14 +1644,40 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         expected_host_identity_revision: u64,
     ) -> Result<RestorePlan, String> {
         validate_bundle_snapshot_bytes(bundle)?;
+        let mut bytes = PreloadedBytes::new(bundle);
+        self.build_restore_plan_lazy(
+            &bundle.snapshot,
+            &mut bytes,
+            &BTreeMap::new(),
+            binding,
+            created_at,
+            expected_host_identity_revision,
+        )
+    }
+
+    /// Build a restore plan from the verified manifest, downloading payload
+    /// bytes only for conversations whose materialized digest cannot be
+    /// derived from `known_bases` and the manifest alone. In the steady
+    /// state (every conversation covered by a reviewed base) this touches
+    /// zero payload objects.
+    pub fn build_restore_plan_lazy(
+        &self,
+        snapshot: &BundleSnapshot,
+        bytes: &mut dyn BundleBytes,
+        known_bases: &BTreeMap<ResourceId, KnownMaterializedBase>,
+        binding: &ProjectBinding,
+        created_at: u64,
+        expected_host_identity_revision: u64,
+    ) -> Result<RestorePlan, String> {
+        snapshot.validate()?;
         self.validate_binding(binding, None)?;
         if binding.state != BindingState::Active {
             return Err("restore requires an active project binding".to_string());
         }
-        if binding.bundle_id != bundle.snapshot.head.bundle_id {
+        if binding.bundle_id != snapshot.head.bundle_id {
             return Err("binding and fetched bundle IDs differ".to_string());
         }
-        if bundle.snapshot.storage_id != self.storage_id {
+        if snapshot.storage_id != self.storage_id {
             return Err("fetched bundle belongs to another storage".to_string());
         }
         let plan_id = PlanId::parse(random_named_id("plan")?)?;
@@ -1246,7 +1694,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         // action per resource, never independently selectable file writes.
         let mut skill_targets = BTreeMap::<String, ResourceId>::new();
         let mut skill_capabilities = BTreeMap::<String, ResourceId>::new();
-        for descriptor in bundle.snapshot.manifest.resources.values() {
+        for descriptor in snapshot.manifest.resources.values() {
             if descriptor.kind != ResourceKind::StandaloneSkill {
                 continue;
             }
@@ -1264,7 +1712,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                     previous, descriptor.resource_id
                 ));
             }
-            let action = custom_skill_action(bundle, descriptor, binding)?;
+            let action = custom_skill_action(&snapshot.manifest, descriptor, binding)?;
             if let Some(target) = &action.target_path {
                 // Case-folded so two snapshots cannot claim one materialized
                 // directory on a case-insensitive filesystem.
@@ -1279,9 +1727,8 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             }
             actions.push(action);
         }
-        for (logical_path, entry) in &bundle.snapshot.manifest.directories {
-            let descriptor = bundle
-                .snapshot
+        for (logical_path, entry) in &snapshot.manifest.directories {
+            let descriptor = snapshot
                 .manifest
                 .resources
                 .get(&entry.resource_id)
@@ -1326,12 +1773,18 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 source_sha256: Some(directory_entry_digest(logical_path, mode)),
                 expected_target_sha256: None,
                 expected_target_mode,
+                materialized_sha256: None,
                 requires_explicit_approval: true,
             });
         }
-        for (logical_path, entry) in &bundle.snapshot.manifest.files {
-            let descriptor = bundle
-                .snapshot
+
+        // Files, pass 1: inspect targets and decide per file whether the
+        // materialized digest is already known. Only conversations that
+        // genuinely diverged from every reviewed base need payload bytes.
+        let mut planned_files = Vec::new();
+        let mut fetch_paths = Vec::new();
+        for (logical_path, entry) in &snapshot.manifest.files {
+            let descriptor = snapshot
                 .manifest
                 .resources
                 .get(&entry.resource_id)
@@ -1339,18 +1792,19 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             if descriptor.kind == ResourceKind::StandaloneSkill {
                 continue;
             }
-            let source_bytes = bundle
-                .files
-                .get(logical_path)
-                .ok_or_else(|| format!("fetched bytes for '{}' are missing", logical_path))?;
-            let materialized_bytes =
-                materialized_file_bytes(logical_path, descriptor, binding, source_bytes)?;
-            let materialized_sha256 = sha256(&materialized_bytes);
             let Some(target) = map_logical_target(logical_path, descriptor, binding)? else {
-                actions.push(manual_action(
-                    &entry.resource_id,
-                    &format!("No safe materializer is available for {}", logical_path),
-                )?);
+                planned_files.push(PlannedFile {
+                    logical_path,
+                    entry,
+                    descriptor,
+                    target: None,
+                    target_digest: None,
+                    target_mode: None,
+                    outcome: PlannedOutcome::Manual(format!(
+                        "No safe materializer is available for {}",
+                        logical_path
+                    )),
+                });
                 continue;
             };
             let folded = target.to_string_lossy().to_lowercase();
@@ -1360,48 +1814,136 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                     previous, logical_path
                 ));
             }
-            let target_state = match inspect_restore_target(&target) {
+            let target_state = match inspect_restore_target_digest(&target) {
                 Ok(state) => state,
                 Err(error) if descriptor.kind == ResourceKind::ProjectContentFile => {
-                    actions.push(manual_action(
-                        &entry.resource_id,
-                        &format!(
+                    planned_files.push(PlannedFile {
+                        logical_path,
+                        entry,
+                        descriptor,
+                        target: None,
+                        target_digest: None,
+                        target_mode: None,
+                        outcome: PlannedOutcome::Manual(format!(
                             "Project file '{}' is blocked at '{}': {}",
                             logical_path,
                             target.display(),
                             error
-                        ),
-                    )?);
+                        )),
+                    });
                     continue;
                 }
                 Err(error) => return Err(error),
             };
-            if logical_path.as_str() != "state/codex/session_index.jsonl"
-                && matches!(
-                    descriptor.kind,
-                    ResourceKind::CodexConversation | ResourceKind::ClaudeConversation
-                )
-                && target_state
-                    .digest
-                    .as_ref()
-                    .is_some_and(|digest| digest != &materialized_sha256 && digest != &entry.sha256)
-            {
-                actions.push(conversation_keep_local_action(
-                    &entry.resource_id,
-                    logical_path,
-                    &target,
-                    &entry.sha256,
-                    target_state.digest.as_deref().unwrap(),
-                )?);
-                continue;
-            }
-
-            let kind = restore_kind_for_file(logical_path, descriptor, entry)?;
-            let requires_explicit_approval = action_needs_explicit_approval(
-                descriptor,
-                target_state.digest.as_deref(),
-                &materialized_sha256,
+            let target_digest = target_state.digest;
+            let target_mode = target_state.mode;
+            let conversation_kind = matches!(
+                descriptor.kind,
+                ResourceKind::CodexConversation | ResourceKind::ClaudeConversation
             );
+            let keep_local_eligible =
+                logical_path.as_str() != "state/codex/session_index.jsonl" && conversation_kind;
+            let outcome = if !is_remapped_conversation(logical_path, descriptor) {
+                // Materialized bytes equal stored bytes, so the manifest
+                // digest is the materialized digest — no payload needed.
+                if keep_local_eligible
+                    && target_digest
+                        .as_ref()
+                        .is_some_and(|digest| digest != &entry.sha256)
+                {
+                    PlannedOutcome::KeepLocal
+                } else {
+                    PlannedOutcome::Action {
+                        materialized: Some(entry.sha256.clone()),
+                    }
+                }
+            } else {
+                classify_remapped_conversation(
+                    &entry.sha256,
+                    known_bases
+                        .get(&entry.resource_id)
+                        .filter(|base| base.storage_digest == entry.sha256),
+                    target_digest.as_deref(),
+                )
+            };
+            if matches!(outcome, PlannedOutcome::NeedsBytes) {
+                fetch_paths.push(logical_path.clone());
+            }
+            planned_files.push(PlannedFile {
+                logical_path,
+                entry,
+                descriptor,
+                target: Some(target),
+                target_digest,
+                target_mode,
+                outcome,
+            });
+        }
+
+        // Files, pass 2: bulk-load the divergent conversations (so progress
+        // totals are real), then emit actions in manifest order.
+        bytes.prefetch(&fetch_paths)?;
+        for planned in planned_files {
+            let logical_path = planned.logical_path;
+            let entry = planned.entry;
+            let descriptor = planned.descriptor;
+            let materialized = match planned.outcome {
+                PlannedOutcome::Manual(message) => {
+                    actions.push(manual_action(&entry.resource_id, &message)?);
+                    continue;
+                }
+                PlannedOutcome::KeepLocal => {
+                    let target = planned.target.as_ref().expect("keep-local has a target");
+                    let digest = planned
+                        .target_digest
+                        .as_deref()
+                        .expect("keep-local requires a target digest");
+                    actions.push(conversation_keep_local_action(
+                        &entry.resource_id,
+                        logical_path,
+                        target,
+                        &entry.sha256,
+                        digest,
+                    )?);
+                    continue;
+                }
+                PlannedOutcome::Action { materialized } => materialized,
+                PlannedOutcome::NeedsBytes => {
+                    let source_bytes = bytes.get(logical_path)?;
+                    let materialized_bytes =
+                        materialized_file_bytes(logical_path, descriptor, binding, source_bytes)?;
+                    let materialized_sha256 = sha256(&materialized_bytes);
+                    if planned.target_digest.as_ref().is_some_and(|digest| {
+                        digest != &materialized_sha256 && digest != &entry.sha256
+                    }) {
+                        let target = planned.target.as_ref().expect("keep-local has a target");
+                        actions.push(conversation_keep_local_action(
+                            &entry.resource_id,
+                            logical_path,
+                            target,
+                            &entry.sha256,
+                            planned.target_digest.as_deref().unwrap(),
+                        )?);
+                        continue;
+                    }
+                    Some(materialized_sha256)
+                }
+            };
+            let target = planned.target.as_ref().expect("file action has a target");
+            let kind = restore_kind_for_file(logical_path, descriptor, entry)?;
+            let requires_explicit_approval = match materialized.as_deref() {
+                Some(materialized) => action_needs_explicit_approval(
+                    descriptor,
+                    planned.target_digest.as_deref(),
+                    materialized,
+                ),
+                // Unknown materialized digest over an existing target cannot
+                // be proven byte-identical, so it must be reviewed.
+                None => {
+                    planned.target_digest.is_some()
+                        || action_needs_explicit_approval(descriptor, None, "")
+                }
+            };
             actions.push(RestoreAction {
                 action_id: action_id_for(
                     &entry.resource_id,
@@ -1410,12 +1952,13 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 )?,
                 resource_id: entry.resource_id.clone(),
                 kind,
-                target_path: Some(path_text(&target)?),
+                target_path: Some(path_text(target)?),
                 source_sha256: Some(entry.sha256.clone()),
-                expected_target_sha256: target_state.digest,
+                expected_target_sha256: planned.target_digest.clone(),
                 expected_target_mode: (descriptor.kind == ResourceKind::ProjectContentFile)
-                    .then_some(target_state.mode)
+                    .then_some(planned.target_mode)
                     .flatten(),
+                materialized_sha256: materialized,
                 requires_explicit_approval,
             });
             if descriptor.relative_cwd.is_some()
@@ -1425,7 +1968,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 actions.push(continuation_action(descriptor, binding)?);
             }
         }
-        for tombstone in bundle.snapshot.manifest.tombstones.values() {
+        for tombstone in snapshot.manifest.tombstones.values() {
             match &tombstone.target {
                 TombstoneTarget::ProjectContentFile {
                     resource_id,
@@ -1438,7 +1981,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                         )
                     })?;
                     let target = project_content_target(logical_path, binding)?;
-                    let target_state = match inspect_restore_target(&target) {
+                    let target_state = match inspect_restore_target_digest(&target) {
                         Ok(state) => state,
                         Err(error) => {
                             actions.push(manual_action(
@@ -1472,6 +2015,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                         source_sha256: None,
                         expected_target_sha256: Some(last_sha256),
                         expected_target_mode: target_state.mode,
+                        materialized_sha256: None,
                         requires_explicit_approval: true,
                     });
                 }
@@ -1511,6 +2055,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                         source_sha256: None,
                         expected_target_sha256: None,
                         expected_target_mode,
+                        materialized_sha256: None,
                         requires_explicit_approval: true,
                     });
                 }
@@ -1522,13 +2067,13 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             schema_version: RESTORE_PLAN_SCHEMA,
             plan_id,
             storage_id: self.storage_id.clone(),
-            bundle_id: bundle.snapshot.head.bundle_id.clone(),
+            bundle_id: snapshot.head.bundle_id.clone(),
             host_id: binding.host_id.clone(),
             replica_id: binding.replica_id.clone(),
             expected_host_identity_revision,
-            generation: bundle.snapshot.head.generation,
-            commit_id: bundle.snapshot.head.commit_id.clone(),
-            manifest_sha256: bundle.snapshot.head.manifest_sha256.clone(),
+            generation: snapshot.head.generation,
+            commit_id: snapshot.head.commit_id.clone(),
+            manifest_sha256: snapshot.head.manifest_sha256.clone(),
             binding_revision: binding.revision,
             created_at,
             expires_at: created_at.saturating_add(DEFAULT_PLAN_LIFETIME_SECS),
@@ -2044,6 +2589,219 @@ mod tests {
             .receipts
             .iter()
             .any(|receipt| receipt.status == ActionStatus::Applied));
+    }
+
+    /// Store wrapper recording every `get`/`get_many` key so tests can prove
+    /// which payload objects an operation actually downloaded.
+    #[derive(Clone)]
+    struct CountingStore {
+        inner: LocalBundleObjectStore,
+        keys: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CountingStore {
+        fn open(root: &Path) -> Self {
+            Self {
+                inner: LocalBundleObjectStore::open(root).unwrap(),
+                keys: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn reset(&self) {
+            self.keys.lock().unwrap().clear();
+        }
+
+        /// Repository object reads that are payloads — heads, tags, and
+        /// manifests are metadata and excluded.
+        fn payload_gets(&self) -> usize {
+            self.keys
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|key| {
+                    key.contains("/repositories/")
+                        && !key.ends_with("/_head.json")
+                        && !key.ends_with("/_tag.json")
+                        && !key.contains("/_manifests/")
+                })
+                .count()
+        }
+    }
+
+    impl BundleObjectStore for CountingStore {
+        fn get(&self, key: &ObjectKey) -> Result<Option<StoredObject>, String> {
+            self.keys.lock().unwrap().push(key.as_str().to_string());
+            self.inner.get(key)
+        }
+
+        fn get_many(&self, keys: &[ObjectKey]) -> Result<Vec<Option<StoredObject>>, String> {
+            let mut recorded = self.keys.lock().unwrap();
+            for key in keys {
+                recorded.push(key.as_str().to_string());
+            }
+            drop(recorded);
+            self.inner.get_many(keys)
+        }
+
+        fn put_immutable(
+            &self,
+            key: &ObjectKey,
+            bytes: &[u8],
+        ) -> Result<ImmutablePutOutcome, String> {
+            self.inner.put_immutable(key, bytes)
+        }
+
+        fn compare_and_swap(
+            &self,
+            key: &ObjectKey,
+            expectation: &CasExpectation,
+            bytes: &[u8],
+        ) -> Result<CasOutcome, String> {
+            self.inner.compare_and_swap(key, expectation, bytes)
+        }
+
+        fn list(
+            &self,
+            prefix: &ObjectPrefix,
+            cursor: Option<&str>,
+            limit: usize,
+        ) -> Result<StoreListPage, String> {
+            self.inner.list(prefix, cursor, limit)
+        }
+
+        fn local_root(&self) -> Option<&Path> {
+            self.inner.local_root()
+        }
+    }
+
+    #[test]
+    fn lazy_plan_and_apply_touch_only_needed_payload_objects() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        let target = temp.path().join("target-project");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        write(&source.join("CLAUDE.md"), b"portable guidance");
+        // The target already holds the exact bytes this plan would write.
+        write(&target.join("CLAUDE.md"), b"portable guidance");
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(&request).unwrap();
+        let resource_id = inventory
+            .resources
+            .iter()
+            .find(|resource| resource.display_name == "CLAUDE.md")
+            .unwrap()
+            .resource_id
+            .clone();
+        let recipe = recipe_for([resource_id]);
+        let id = bundle_id(97);
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        engine
+            .publish(PublishBundleRequest {
+                identity: identity(id.clone(), "Lazy project"),
+                recipe: recipe.clone(),
+                captured_with: captured_with(),
+                captured: capture_recipe(&request, &recipe).unwrap(),
+                expected_head: PublishExpectation::Absent,
+                updated_at: 10,
+            })
+            .unwrap();
+        let binding = active_binding(id.clone(), &target, None, None);
+
+        store.reset();
+        let snapshot = engine.inspect(&id).unwrap();
+        let mut plan_bytes = engine.byte_source(&snapshot, None, None);
+        let plan = engine
+            .build_restore_plan_lazy(&snapshot, &mut plan_bytes, &BTreeMap::new(), &binding, 100, 0)
+            .unwrap();
+        assert_eq!(
+            store.payload_gets(),
+            0,
+            "planning must not download payload objects"
+        );
+        let write_action = plan
+            .actions
+            .iter()
+            .find(|action| {
+                action
+                    .target_path
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with("CLAUDE.md"))
+            })
+            .unwrap();
+        assert_eq!(write_action.materialized_sha256, write_action.source_sha256);
+        assert_eq!(
+            write_action.materialized_sha256,
+            write_action.expected_target_sha256
+        );
+
+        // In-sync apply: the pinned no-op completes without any payload.
+        let approved = BTreeSet::from([write_action.action_id.clone()]);
+        store.reset();
+        let mut apply_bytes = engine.byte_source(&snapshot, None, None);
+        let result = engine
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut apply_bytes,
+                &binding,
+                &plan,
+                &approved,
+                &temp.path().join("backups"),
+                101,
+            )
+            .unwrap();
+        assert!(result
+            .receipts
+            .iter()
+            .any(|receipt| receipt.status == ActionStatus::Applied));
+        assert_eq!(
+            store.payload_gets(),
+            0,
+            "an in-sync apply must not download payload objects"
+        );
+
+        // A missing target is genuinely new work: exactly one object moves.
+        fs::remove_file(target.join("CLAUDE.md")).unwrap();
+        let snapshot = engine.inspect(&id).unwrap();
+        let mut plan_bytes = engine.byte_source(&snapshot, None, None);
+        let plan = engine
+            .build_restore_plan_lazy(&snapshot, &mut plan_bytes, &BTreeMap::new(), &binding, 102, 0)
+            .unwrap();
+        let write_action = plan
+            .actions
+            .iter()
+            .find(|action| {
+                action
+                    .target_path
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with("CLAUDE.md"))
+            })
+            .unwrap();
+        let approved = BTreeSet::from([write_action.action_id.clone()]);
+        store.reset();
+        let mut apply_bytes = engine.byte_source(&snapshot, None, None);
+        engine
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut apply_bytes,
+                &binding,
+                &plan,
+                &approved,
+                &temp.path().join("backups"),
+                103,
+            )
+            .unwrap();
+        assert_eq!(
+            store.payload_gets(),
+            1,
+            "apply downloads exactly the objects it writes"
+        );
+        assert_eq!(
+            fs::read(target.join("CLAUDE.md")).unwrap(),
+            b"portable guidance"
+        );
     }
 
     #[test]
@@ -2944,17 +3702,13 @@ fn custom_skill_target_dir(
 /// missing or matching target, Overwrite pinned to the current target digest
 /// for a different one, Manual when the target cannot be classified.
 fn custom_skill_action(
-    bundle: &FetchedBundle,
+    manifest: &BundleManifest,
     descriptor: &ResourceDescriptor,
     binding: &ProjectBinding,
 ) -> Result<RestoreAction, String> {
     let identity = custom_skill_identity(descriptor)?;
     let logical_root = custom_skill_logical_root(identity.provider, &identity.install_dir_name);
-    let files = custom_skill_manifest_files(
-        &bundle.snapshot.manifest,
-        &descriptor.resource_id,
-        &logical_root,
-    )?;
+    let files = custom_skill_manifest_files(manifest, &descriptor.resource_id, &logical_root)?;
     if files.is_empty() {
         return manual_action(
             &descriptor.resource_id,
@@ -3020,6 +3774,7 @@ fn custom_skill_action(
         source_sha256: Some(source_digest),
         expected_target_sha256: expected,
         expected_target_mode: None,
+        materialized_sha256: None,
         requires_explicit_approval: true,
     };
     action.validate()?;
@@ -3038,6 +3793,7 @@ fn manual_action(resource_id: &ResourceId, message: &str) -> Result<RestoreActio
         source_sha256: None,
         expected_target_sha256: None,
         expected_target_mode: None,
+        materialized_sha256: None,
         requires_explicit_approval: true,
     };
     action.validate()?;
@@ -3065,6 +3821,7 @@ fn conversation_keep_local_action(
         source_sha256: Some(source_sha256.to_string()),
         expected_target_sha256: Some(target_sha256.to_string()),
         expected_target_mode: None,
+        materialized_sha256: None,
         requires_explicit_approval: true,
     };
     action.validate()?;
@@ -3505,6 +4262,54 @@ struct RestoreTargetState {
     mode: Option<u32>,
 }
 
+/// Digest-and-mode-only variant of [`inspect_restore_target`] for planning:
+/// the target is hashed streaming instead of being read into memory, so a
+/// plan over many large conversations never holds their bytes at once.
+fn inspect_restore_target_digest(path: &Path) -> Result<RestoreTargetState, String> {
+    inspect_existing_ancestors_no_symlink(path)?;
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RestoreTargetState {
+                digest: None,
+                bytes: None,
+                mode: None,
+            })
+        }
+        Err(e) => {
+            return Err(format!(
+                "inspect restore target '{}': {}",
+                path.display(),
+                e
+            ))
+        }
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(format!(
+            "restore target '{}' is not a regular no-follow file",
+            path.display()
+        ));
+    }
+    if meta.len() > MAX_OBJECT_BYTES as u64 {
+        return Err(format!("restore target '{}' is too large", path.display()));
+    }
+    let mut file = fs::File::open(path)
+        .map_err(|e| format!("read restore target '{}': {}", path.display(), e))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|e| format!("read restore target '{}': {}", path.display(), e))?;
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        use std::fmt::Write as _;
+        let _ = write!(&mut digest, "{:02x}", byte);
+    }
+    Ok(RestoreTargetState {
+        digest: Some(digest),
+        bytes: None,
+        mode: Some(safe_mode(&meta)),
+    })
+}
+
 fn inspect_restore_target(path: &Path) -> Result<RestoreTargetState, String> {
     inspect_existing_ancestors_no_symlink(path)?;
     let meta = match fs::symlink_metadata(path) {
@@ -3757,7 +4562,7 @@ fn create_safe_directory_tree(base: &Path, target: &Path) -> Result<(), String> 
 
 fn validate_plan_pin(
     plan: &RestorePlan,
-    bundle: &FetchedBundle,
+    snapshot: &BundleSnapshot,
     binding: &ProjectBinding,
     storage_id: &StorageId,
     now: u64,
@@ -3766,14 +4571,14 @@ fn validate_plan_pin(
         return Err("restore plan has expired or is not active yet".to_string());
     }
     if &plan.storage_id != storage_id
-        || plan.storage_id != bundle.snapshot.storage_id
-        || plan.bundle_id != bundle.snapshot.head.bundle_id
+        || plan.storage_id != snapshot.storage_id
+        || plan.bundle_id != snapshot.head.bundle_id
         || plan.host_id != binding.host_id
         || plan.replica_id != binding.replica_id
         || plan.bundle_id != binding.bundle_id
-        || plan.generation != bundle.snapshot.head.generation
-        || plan.commit_id != bundle.snapshot.head.commit_id
-        || plan.manifest_sha256 != bundle.snapshot.head.manifest_sha256
+        || plan.generation != snapshot.head.generation
+        || plan.commit_id != snapshot.head.commit_id
+        || plan.manifest_sha256 != snapshot.head.manifest_sha256
         || plan.binding_revision != binding.revision
     {
         return Err("restore plan pin no longer matches bundle/binding state".to_string());
@@ -4209,7 +5014,9 @@ fn reconcile_manifest_content(
     Ok((resources, files, directories, tombstones))
 }
 
-fn dependencies_from_manifest(manifest: &BundleManifest) -> Result<Vec<DependencyAction>, String> {
+pub(crate) fn dependencies_from_manifest(
+    manifest: &BundleManifest,
+) -> Result<Vec<DependencyAction>, String> {
     let mut actions = Vec::new();
     for descriptor in manifest.resources.values() {
         let Some(kind) = descriptor.metadata.get("dependency_kind") else {
@@ -4337,6 +5144,7 @@ fn file_delta(previous: Option<&BundleManifest>, current: &BundleManifest) -> (u
     (added, changed, removed)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn validate_bundle_snapshot_bytes(bundle: &FetchedBundle) -> Result<(), String> {
     bundle.snapshot.validate()?;
     if bundle.files.len() != bundle.snapshot.manifest.files.len() {
@@ -4382,6 +5190,9 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     /// executable dependencies — those live in the DependencyPlan and its
     /// native runner. This engine never shells out or silently activates
     /// executable configuration.
+    /// Apply over a fully fetched bundle — the historic byte-verified entry
+    /// point, retained for tests; production applies lazily.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn apply_restore_plan(
         &self,
         bundle: &FetchedBundle,
@@ -4391,10 +5202,37 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         backup_root: &Path,
         applied_at: u64,
     ) -> Result<ApplyBundleResult, String> {
-        plan.validate()?;
         validate_bundle_snapshot_bytes(bundle)?;
+        let mut bytes = PreloadedBytes::new(bundle);
+        self.apply_restore_plan_lazy(
+            &bundle.snapshot,
+            &mut bytes,
+            binding,
+            plan,
+            approved_action_ids,
+            backup_root,
+            applied_at,
+        )
+    }
+
+    /// Apply approved actions, downloading only the payload objects that
+    /// will actually be written. Actions whose pinned materialized digest
+    /// matches the pinned target digest complete without any bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_restore_plan_lazy(
+        &self,
+        snapshot: &BundleSnapshot,
+        bytes: &mut dyn BundleBytes,
+        binding: &ProjectBinding,
+        plan: &RestorePlan,
+        approved_action_ids: &BTreeSet<ActionId>,
+        backup_root: &Path,
+        applied_at: u64,
+    ) -> Result<ApplyBundleResult, String> {
+        plan.validate()?;
+        snapshot.validate()?;
         self.validate_binding(binding, Some(backup_root))?;
-        validate_plan_pin(plan, bundle, binding, &self.storage_id, applied_at)?;
+        validate_plan_pin(plan, snapshot, binding, &self.storage_id, applied_at)?;
         let known_actions = plan
             .actions
             .iter()
@@ -4471,6 +5309,30 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         let plan_backup = canonical_backup.join(plan.plan_id.as_str());
         create_safe_directory_tree(&canonical_backup, &plan_backup)?;
 
+        // Bulk-load the payloads approved actions will actually write, so
+        // download progress reflects the real transfer. A pinned
+        // materialized digest equal to the pinned target digest is a no-op
+        // needing no bytes.
+        let mut prefetch_paths = Vec::new();
+        for action in &plan.actions {
+            if !effective_approved.contains(&action.action_id) {
+                continue;
+            }
+            let logical_path = match &action.kind {
+                RestoreActionKind::WriteFile { logical_path }
+                | RestoreActionKind::WriteProjectFile { logical_path, .. }
+                | RestoreActionKind::MergeFile { logical_path }
+                | RestoreActionKind::MaterializeConversation { logical_path, .. } => logical_path,
+                _ => continue,
+            };
+            let pinned_noop = action.materialized_sha256.is_some()
+                && action.materialized_sha256 == action.expected_target_sha256;
+            if !pinned_noop && snapshot.manifest.files.contains_key(logical_path) {
+                prefetch_paths.push(logical_path.clone());
+            }
+        }
+        bytes.prefetch(&prefetch_paths)?;
+
         let mut receipts = Vec::new();
         let mut backups = Vec::new();
 
@@ -4540,7 +5402,8 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                     skill_name,
                 } => {
                     let receipt = self.apply_custom_skill_action(
-                        bundle,
+                        snapshot,
+                        bytes,
                         binding,
                         action,
                         *provider,
@@ -4578,7 +5441,8 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 | RestoreActionKind::MergeFile { logical_path }
                 | RestoreActionKind::MaterializeConversation { logical_path, .. } => {
                     let receipt = self.apply_file_action(
-                        bundle,
+                        snapshot,
+                        bytes,
                         binding,
                         action,
                         logical_path,
@@ -4864,9 +5728,11 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn apply_file_action(
         &self,
-        bundle: &FetchedBundle,
+        snapshot: &BundleSnapshot,
+        bytes: &mut dyn BundleBytes,
         binding: &ProjectBinding,
         action: &RestoreAction,
         logical_path: &LogicalPath,
@@ -4874,8 +5740,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         applied_at: u64,
         backups: &mut Vec<BackupRecord>,
     ) -> Result<ApplyReceipt, String> {
-        let entry = bundle
-            .snapshot
+        let entry = snapshot
             .manifest
             .files
             .get(logical_path)
@@ -4883,24 +5748,11 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         if entry.resource_id != action.resource_id {
             return Err("restore action resource changed after planning".to_string());
         }
-        let descriptor = bundle
-            .snapshot
+        let descriptor = snapshot
             .manifest
             .resources
             .get(&entry.resource_id)
             .ok_or_else(|| "restore action resource is missing".to_string())?;
-        let bytes = bundle
-            .files
-            .get(logical_path)
-            .ok_or_else(|| format!("fetched bytes for '{}' are missing", logical_path))?;
-        if bytes.len() as u64 != entry.size || sha256(bytes) != entry.sha256 {
-            return Err(format!(
-                "fetched bytes for '{}' failed verification",
-                logical_path
-            ));
-        }
-        let materialized_bytes = materialized_file_bytes(logical_path, descriptor, binding, bytes)?;
-        let materialized_sha256 = sha256(&materialized_bytes);
         let target = map_logical_target(logical_path, descriptor, binding)?
             .ok_or_else(|| format!("'{}' has no file materializer", logical_path))?;
         let planned_target = action
@@ -4922,6 +5774,37 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         {
             return Err("project-file mode changed after planning".to_string());
         }
+        // Pinned no-op: the plan proved what these bytes would be, and the
+        // target already holds them — finish without touching the payload.
+        if let Some(materialized) = action
+            .materialized_sha256
+            .as_deref()
+            .filter(|materialized| before.digest.as_deref() == Some(materialized))
+        {
+            if let RestoreActionKind::WriteProjectFile {
+                mode, source_mtime, ..
+            } = &action.kind
+            {
+                if (entry.mode.unwrap_or(0o600) & 0o777) != (*mode & 0o777) {
+                    return Err("project-file metadata changed after planning".to_string());
+                }
+                set_path_mode(&target, *mode)?;
+                set_path_mtime_best_effort(&target, *source_mtime);
+            }
+            return Ok(receipt_for(
+                action,
+                ActionStatus::Applied,
+                applied_at,
+                Some(logical_path.clone()),
+                Some(materialized.to_string()),
+                None,
+            ));
+        }
+
+        let source_bytes = bytes.get(logical_path)?;
+        let materialized_bytes =
+            materialized_file_bytes(logical_path, descriptor, binding, source_bytes)?;
+        let materialized_sha256 = sha256(&materialized_bytes);
         if before.digest.as_deref() == Some(materialized_sha256.as_str()) {
             if let RestoreActionKind::WriteProjectFile {
                 mode, source_mtime, ..
@@ -4954,7 +5837,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             });
         }
         let write_bytes = if logical_path.as_str() == "state/codex/session_index.jsonl" {
-            merge_jsonl_index(before.bytes.as_deref(), bytes)?
+            merge_jsonl_index(before.bytes.as_deref(), source_bytes)?
         } else {
             materialized_bytes
         };
@@ -4985,9 +5868,11 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     /// existing directory, swap by rename, and roll back on failure. Runs
     /// under the canonical provider-home operation lock.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn apply_custom_skill_action(
         &self,
-        bundle: &FetchedBundle,
+        snapshot: &BundleSnapshot,
+        bytes: &mut dyn BundleBytes,
         binding: &ProjectBinding,
         action: &RestoreAction,
         provider: Provider,
@@ -4997,8 +5882,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         backups: &mut Vec<BackupRecord>,
     ) -> Result<ApplyReceipt, String> {
         domain::validate_skill_name("custom skill name", skill_name)?;
-        let descriptor = bundle
-            .snapshot
+        let descriptor = snapshot
             .manifest
             .resources
             .get(&action.resource_id)
@@ -5011,11 +5895,8 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             return Err("custom-skill action identity differs from its descriptor".to_string());
         }
         let logical_root = custom_skill_logical_root(identity.provider, &identity.install_dir_name);
-        let files = custom_skill_manifest_files(
-            &bundle.snapshot.manifest,
-            &action.resource_id,
-            &logical_root,
-        )?;
+        let files =
+            custom_skill_manifest_files(&snapshot.manifest, &action.resource_id, &logical_root)?;
         if files.is_empty() {
             return Err("custom skill has no payload files".to_string());
         }
@@ -5095,13 +5976,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         }
         let staging_result = (|| -> Result<(), String> {
             for (relative, logical_path, entry) in &files {
-                let bytes = bundle
-                    .files
-                    .get(*logical_path)
-                    .ok_or_else(|| format!("fetched bytes for '{}' are missing", logical_path))?;
-                if bytes.len() as u64 != entry.size || sha256(bytes) != entry.sha256 {
-                    return Err(format!("fetched '{}' failed verification", logical_path));
-                }
+                let payload = bytes.get(logical_path)?;
                 let staged = safe_lexical_join(&staging, relative)?;
                 if let Some(parent) = staged.parent() {
                     fs::create_dir_all(parent)
@@ -5109,7 +5984,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 }
                 // Set-id and non-permission bits were stripped at capture;
                 // strip again on the write path for defense in depth.
-                write_target_atomic(&staged, bytes, entry.mode.unwrap_or(0o600) & 0o777)?;
+                write_target_atomic(&staged, payload, entry.mode.unwrap_or(0o600) & 0o777)?;
             }
             match custom_skill_target_state(&staging)? {
                 SkillTargetState::Present { digest } if digest == source_digest => Ok(()),

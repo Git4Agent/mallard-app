@@ -3420,6 +3420,12 @@ pub struct RestoreAction {
     pub expected_target_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_target_mode: Option<u32>,
+    /// Digest of the exact bytes apply would write to `target_path`. When the
+    /// live target already matches, apply can complete the action without
+    /// downloading the payload. `None` means it was not derivable at plan
+    /// time; apply falls back to fetching the object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialized_sha256: Option<String>,
     pub requires_explicit_approval: bool,
 }
 
@@ -3434,6 +3440,9 @@ impl RestoreAction {
         }
         if let Some(digest) = &self.expected_target_sha256 {
             validate_sha256("restore target", digest)?;
+        }
+        if let Some(digest) = &self.materialized_sha256 {
+            validate_sha256("restore materialized", digest)?;
         }
         if self
             .expected_target_mode
@@ -4544,6 +4553,7 @@ mod tests {
             source_sha256: None,
             expected_target_sha256: None,
             expected_target_mode: None,
+            materialized_sha256: None,
             requires_explicit_approval: false,
         };
         assert!(action.validate().unwrap_err().contains("explicit approval"));

@@ -1,6 +1,5 @@
 import type {
   BundleReadiness,
-  BundleSnapshotSummary,
   DependencyPlan,
   DependencyResult,
   ProjectBinding,
@@ -10,7 +9,6 @@ import type {
 import { errorMessage } from "./model";
 
 export interface PullReviewApi {
-  fetchBundle: (storageId: string, bundleId: string) => Promise<BundleSnapshotSummary>;
   planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) => Promise<RestorePlan>;
   planDependencies: (restorePlanId: string) => Promise<DependencyPlan>;
   getRestoreReadiness: (restorePlanId: string) => Promise<BundleReadiness>;
@@ -191,13 +189,13 @@ export async function beginPullReview(
 /**
  * Load only the mutation review. This is deliberately separate from optional
  * supporting checks so a dependency/readiness error cannot hide a valid plan
- * or its Apply button.
+ * or its Apply button. Planning fetches the bundle itself — no separate
+ * prefetch, the payload must only be downloaded once.
  */
 export async function preparePullReview(
   api: PullReviewApi,
   request: PullReviewRequest,
 ): Promise<RestorePlan> {
-  await api.fetchBundle(request.storageId, request.bundleId);
   return api.planRestore(request.storageId, request.bundleId, request.binding);
 }
 

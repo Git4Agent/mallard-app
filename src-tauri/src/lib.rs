@@ -12,6 +12,18 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // A visible process boundary in the activity log: operations that
+            // died with the previous process (no terminal event) become
+            // explainable instead of mysterious.
+            activity_log::ActivityLogScope::new(activity_log::ActivityLogType::System).emit(
+                app.handle(),
+                "info",
+                "system.app_started",
+                "Mallard started",
+            );
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             activity_log::query_activity_logs,
             activity_log::get_activity_log_stats,
@@ -63,7 +75,6 @@ pub fn run() {
             project_sync_v3::commands::list_remote_bundles,
             project_sync_v3::commands::list_remote_bundle_snapshots,
             project_sync_v3::commands::find_remote_bundle_matches,
-            project_sync_v3::commands::fetch_bundle,
             project_sync_v3::commands::get_bundle_status,
             project_sync_v3::commands::get_project_capability_status,
             project_sync_v3::commands::get_project_thread_sync_comparison,

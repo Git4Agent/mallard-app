@@ -5,8 +5,9 @@
 //! S3 is rejected explicitly until a CAS-capable schema-3 adapter is wired in.
 
 use super::bundle_engine::{
-    write_immutable_backup, write_target_atomic, BundleEngine, BundleObjectStore, CasExpectation,
-    CasOutcome, FetchedBundle, ImmutablePutOutcome, LocalBundleObjectStore, ObjectKey,
+    dependencies_from_manifest, write_immutable_backup, write_target_atomic, BundleBytes,
+    BundleEngine, BundleObjectStore, CasExpectation, CasOutcome, FetchProgress,
+    ImmutablePutOutcome, KnownMaterializedBase, LocalBundleObjectStore, ObjectCache, ObjectKey,
     ObjectPrefix, PublishBundleRequest, PublishExpectation, RemoteBundlePage, StoreListPage,
     StoredObject,
 };
@@ -44,11 +45,13 @@ use crate::activity_log::{emit_typed_log, ActivityLogScope, ActivityLogType};
 use crate::codex_plugins;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tauri::Emitter as _;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use walkdir::WalkDir;
@@ -767,6 +770,45 @@ async fn run_blocking<T: Send + 'static>(
     tauri::async_runtime::spawn_blocking(operation)
         .await
         .map_err(|error| format!("project-sync worker failed: {}", error))?
+}
+
+/// Process-wide verified-object cache shared by planning, apply, and thread
+/// comparison. Content-hash keys make entries immortal-correct; the cache
+/// only bounds memory.
+fn object_cache() -> Arc<ObjectCache> {
+    static OBJECT_CACHE: OnceLock<Arc<ObjectCache>> = OnceLock::new();
+    OBJECT_CACHE
+        .get_or_init(|| Arc::new(ObjectCache::default()))
+        .clone()
+}
+
+/// Codex transcript analyses keyed by transcript sha256. Analysis is pure on
+/// the bytes, so entries never go stale; repeated thread-sync comparisons
+/// stop re-downloading unchanged rollouts entirely.
+fn cached_transcript_analysis(
+    sha256: &str,
+    bytes: &mut dyn BundleBytes,
+    logical_path: &super::domain::LogicalPath,
+) -> Result<Arc<super::conversation_codec::CodexTranscriptAnalysis>, String> {
+    static ANALYSES: OnceLock<
+        Mutex<HashMap<String, Arc<super::conversation_codec::CodexTranscriptAnalysis>>>,
+    > = OnceLock::new();
+    let cache = ANALYSES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache
+        .lock()
+        .ok()
+        .and_then(|entries| entries.get(sha256).cloned())
+    {
+        return Ok(hit);
+    }
+    let analysis = Arc::new(analyze_codex_transcript(bytes.get(logical_path)?));
+    if let Ok(mut entries) = cache.lock() {
+        if entries.len() >= 4_096 {
+            entries.clear();
+        }
+        entries.insert(sha256.to_string(), analysis.clone());
+    }
+    Ok(analysis)
 }
 
 #[tauri::command]
@@ -1537,46 +1579,6 @@ pub async fn find_remote_bundle_matches(
 }
 
 #[tauri::command]
-pub async fn fetch_bundle(
-    app: tauri::AppHandle,
-    storage_id: StorageId,
-    bundle_id: BundleId,
-) -> Result<BundleSnapshotSummary, String> {
-    let repository = repository(&app)?;
-    let storage = storage_log_label(&repository, &storage_id);
-    let log = ActivityLogScope::new(ActivityLogType::Pull).storage(&storage_id, Some(&storage));
-    log.emit(
-        &app,
-        "info",
-        "pull.fetch_started",
-        &format!("↓  Fetching bundle {} from {}", bundle_id, storage),
-    );
-    let result = run_blocking(move || {
-        let (_, fetched) = fetch_from_storage(&repository, &storage_id, &bundle_id)?;
-        bundle_snapshot_summary(fetched)
-    })
-    .await;
-    match &result {
-        Ok(snapshot) => log.emit(
-            &app,
-            "ok",
-            "pull.fetch_completed",
-            &format!(
-                "↓  Fetched {} generation {} ({} resources)",
-                snapshot.display_name, snapshot.generation, snapshot.resource_count
-            ),
-        ),
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "pull.fetch_failed",
-            &format!("✗  Pull fetch failed: {}", error),
-        ),
-    }
-    result
-}
-
-#[tauri::command]
 pub async fn get_bundle_status(
     app: tauri::AppHandle,
     local_project_id: LocalProjectId,
@@ -1711,6 +1713,119 @@ pub async fn push_bundle(
     result
 }
 
+/// Payload for the `project-sync-fetch-progress` Tauri event. Byte counts
+/// are manifest-declared, so the UI can render a determinate progress bar.
+#[derive(Serialize, Clone)]
+struct FetchProgressEventPayload {
+    phase: &'static str,
+    storage_id: String,
+    bundle_id: String,
+    index: usize,
+    total_objects: usize,
+    fetched_bytes: u64,
+    total_bytes: u64,
+}
+
+fn format_mb(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+}
+
+/// Bridges engine fetch progress to the UI: one `pull.fetch_started` log
+/// line when the first object lands, a throttled `project-sync-fetch-progress`
+/// event stream while the download runs, and a `pull.fetch_completed` line
+/// with byte and throughput totals at the end.
+struct FetchProgressEmitter {
+    app: tauri::AppHandle,
+    log: ActivityLogScope,
+    phase: &'static str,
+    storage_id: StorageId,
+    storage_name: String,
+    bundle_id: BundleId,
+    started: Option<Instant>,
+    last_event: Option<Instant>,
+}
+
+impl FetchProgressEmitter {
+    fn new(
+        app: tauri::AppHandle,
+        log: ActivityLogScope,
+        phase: &'static str,
+        storage_id: StorageId,
+        storage_name: String,
+        bundle_id: BundleId,
+    ) -> Self {
+        Self {
+            app,
+            log,
+            phase,
+            storage_id,
+            storage_name,
+            bundle_id,
+            started: None,
+            last_event: None,
+        }
+    }
+
+    fn observe(&mut self, progress: FetchProgress) {
+        let now = Instant::now();
+        if self.started.is_none() {
+            self.started = Some(now);
+            self.log.emit(
+                &self.app,
+                "info",
+                "pull.fetch_started",
+                &format!(
+                    "↓  Downloading {} objects ({}) from {}",
+                    progress.total_objects,
+                    format_mb(progress.total_bytes),
+                    self.storage_name
+                ),
+            );
+        }
+        let last = progress.index == progress.total_objects;
+        let due = self
+            .last_event
+            .is_none_or(|previous| now.duration_since(previous).as_millis() >= 150);
+        if last || due {
+            self.last_event = Some(now);
+            let _ = self.app.emit(
+                "project-sync-fetch-progress",
+                &FetchProgressEventPayload {
+                    phase: self.phase,
+                    storage_id: self.storage_id.to_string(),
+                    bundle_id: self.bundle_id.to_string(),
+                    index: progress.index,
+                    total_objects: progress.total_objects,
+                    fetched_bytes: progress.fetched_bytes,
+                    total_bytes: progress.total_bytes,
+                },
+            );
+        }
+        if last {
+            let elapsed = self
+                .started
+                .map(|start| now.duration_since(start).as_secs_f64())
+                .unwrap_or_default();
+            let rate = if elapsed > 0.0 {
+                progress.total_bytes as f64 / 1_000_000.0 / elapsed
+            } else {
+                0.0
+            };
+            self.log.emit(
+                &self.app,
+                "ok",
+                "pull.fetch_completed",
+                &format!(
+                    "↓  Downloaded {} in {:.1}s ({:.1} MB/s)",
+                    format_mb(progress.total_bytes),
+                    elapsed,
+                    rate
+                ),
+            );
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn plan_bundle_restore(
     app: tauri::AppHandle,
@@ -1730,8 +1845,20 @@ pub async fn plan_bundle_restore(
         "pull.review_started",
         &format!("↓  Preparing Pull review — {} ← {}", project, storage),
     );
+    let mut progress = FetchProgressEmitter::new(
+        app.clone(),
+        log.clone(),
+        "plan",
+        storage_id.clone(),
+        storage.clone(),
+        bundle_id.clone(),
+    );
     let result = run_blocking(move || {
-        plan_bundle_restore_with_repository(&repository, &storage_id, &bundle_id, &binding)
+        plan_bundle_restore_with_progress(&repository, &storage_id, &bundle_id, &binding, &mut |
+            update,
+        | {
+            progress.observe(update)
+        })
     })
     .await;
     match &result {
@@ -1790,8 +1917,25 @@ pub async fn apply_bundle_restore(
             approved_action_ids.len()
         ),
     );
+    let mut fetch_progress = plan_for_log.as_ref().map(|plan| {
+        let storage = storage_log_label(&repository, &plan.storage_id);
+        FetchProgressEmitter::new(
+            app.clone(),
+            log.clone().storage(&plan.storage_id, Some(&storage)),
+            "apply",
+            plan.storage_id.clone(),
+            storage,
+            plan.bundle_id.clone(),
+        )
+    });
     let result = run_blocking(move || {
-        apply_bundle_restore_with_repository(&repository, &plan_id, approved_action_ids)
+        apply_bundle_restore_with_progress(&repository, &plan_id, approved_action_ids, &mut |
+            update,
+        | {
+            if let Some(emitter) = fetch_progress.as_mut() {
+                emitter.observe(update);
+            }
+        })
     })
     .await;
     match &result {
@@ -3285,6 +3429,13 @@ impl BundleObjectStore for ConfiguredStore {
         }
     }
 
+    fn get_many(&self, keys: &[ObjectKey]) -> Result<Vec<Option<StoredObject>>, String> {
+        match self {
+            Self::Local(store) => store.get_many(keys),
+            Self::S3(store) => store.get_many(keys),
+        }
+    }
+
     fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
         match self {
             Self::Local(store) => store.put_immutable(key, bytes),
@@ -3411,18 +3562,18 @@ fn list_remote_bundle_snapshots_with_repository(
     Ok(snapshots)
 }
 
-fn fetch_from_storage(
+/// Verified head + manifest, no payload objects. Every command goes through
+/// this: metadata answers status/readiness/dependency views outright, and
+/// plan/apply/thread-comparison stream just the objects they need through a
+/// [`BundleBytes`] source on top of the returned snapshot.
+fn inspect_from_storage(
     repository: &V3Repository,
     storage_id: &StorageId,
     bundle_id: &BundleId,
-) -> Result<(StorageEngine, FetchedBundle), String> {
+) -> Result<(StorageEngine, BundleSnapshot), String> {
     let (_, engine) = storage_engine(repository, storage_id)?;
-    let fetched = engine.fetch(bundle_id)?;
-    Ok((engine, fetched))
-}
-
-fn bundle_snapshot_summary(fetched: FetchedBundle) -> Result<BundleSnapshotSummary, String> {
-    bundle_snapshot_summary_from_snapshot(fetched.snapshot)
+    let snapshot = engine.inspect(bundle_id)?;
+    Ok((engine, snapshot))
 }
 
 fn bundle_snapshot_summary_from_snapshot(
@@ -3726,17 +3877,18 @@ fn relation_sync_state(relation: ConversationRelation) -> ThreadSyncState {
 
 pub(crate) fn schema6_thread_entries(
     repository: &V3Repository,
-    fetched: &FetchedBundle,
+    snapshot: &BundleSnapshot,
+    bytes: &mut dyn BundleBytes,
     captured: &provider_capture::CapturedResources,
     binding: &ProjectBinding,
 ) -> Result<Vec<ThreadSyncEntry>, String> {
-    if fetched.snapshot.manifest.schema_version != BUNDLE_SCHEMA_V6 {
+    if snapshot.manifest.schema_version != BUNDLE_SCHEMA_V6 {
         return Ok(Vec::new());
     }
     let document = repository.load_conversation_bindings()?;
     let profile_id = binding.profile_ids.get(&Provider::Codex);
     let mut entries = Vec::new();
-    for (thread_id, thread) in &fetched.snapshot.manifest.conversations {
+    for (thread_id, thread) in &snapshot.manifest.conversations {
         if thread.provider != Provider::Codex {
             continue;
         }
@@ -3757,12 +3909,23 @@ pub(crate) fn schema6_thread_entries(
                         && conversation.source_thread_id.as_deref() == Some(provider_thread_id)
                 })
             });
-        let transcript = thread
+        let transcript_file = thread
             .files
             .iter()
-            .find(|file| file.role == ConversationFileRole::Transcript)
-            .and_then(|file| fetched.files.get(&file.logical_path));
-        let cloud_analysis = transcript.map(|bytes| analyze_codex_transcript(bytes));
+            .find(|file| file.role == ConversationFileRole::Transcript);
+        let cloud_analysis = match transcript_file {
+            // Sha-keyed analysis caching means an unchanged rollout is
+            // never downloaded again just to re-derive its lineage.
+            Some(file) => match snapshot.manifest.files.get(&file.logical_path) {
+                Some(entry) => Some(cached_transcript_analysis(
+                    &entry.sha256,
+                    bytes,
+                    &file.logical_path,
+                )?),
+                None => None,
+            },
+            None => None,
+        };
         let local_chain = local_conversation.and_then(|conversation| conversation.lineage.chain());
         let cloud_chain = cloud_analysis
             .as_ref()
@@ -3807,8 +3970,7 @@ pub(crate) fn schema6_thread_entries(
         let mut available_actions = vec![push.action, pull.action];
         available_actions.sort_by_key(|action| format!("{action:?}"));
         available_actions.dedup();
-        let descriptor = fetched
-            .snapshot
+        let descriptor = snapshot
             .manifest
             .resources
             .get(&thread.resource_id)
@@ -3820,7 +3982,7 @@ pub(crate) fn schema6_thread_entries(
             .map(|origin| {
                 repository
                     .resolve_origin_host_label(
-                        &fetched.snapshot.manifest.bundle.bundle_id,
+                        &snapshot.manifest.bundle.bundle_id,
                         &origin.origin_host_token,
                     )
                     .map(|(label, _)| label)
@@ -3976,11 +4138,9 @@ fn get_project_thread_sync_comparison_with_repository(
 
     let (_, engine) = storage_engine(repository, storage_id)?;
     let current = engine.inspect_optional(&project.bundle_id)?;
-    let schema6_fetched = current
+    let schema6_snapshot = current
         .as_ref()
-        .filter(|snapshot| snapshot.manifest.schema_version == BUNDLE_SCHEMA_V6)
-        .map(|_| engine.fetch(&project.bundle_id))
-        .transpose()?;
+        .filter(|snapshot| snapshot.manifest.schema_version == BUNDLE_SCHEMA_V6);
     let generation = current.as_ref().map(|snapshot| snapshot.head.generation);
     let remote_versions = current
         .as_ref()
@@ -4167,8 +4327,10 @@ fn get_project_thread_sync_comparison_with_repository(
             )
             .then_with(|| left.thread_id.cmp(&right.thread_id))
     });
-    if let Some(fetched) = &schema6_fetched {
-        let thread_entries = schema6_thread_entries(repository, fetched, &captured, &binding)?;
+    if let Some(snapshot) = schema6_snapshot {
+        let mut byte_source = engine.byte_source(snapshot, Some(object_cache()), None);
+        let thread_entries =
+            schema6_thread_entries(repository, snapshot, &mut byte_source, &captured, &binding)?;
         let bound_provider_ids = thread_entries
             .iter()
             .filter_map(|entry| entry.provider_thread_id.clone())
@@ -4244,16 +4406,9 @@ fn get_bundle_status_with_repository(
         .map(|id| ResourceId::parse(id.clone()))
         .collect::<Result<_, _>>()?;
     let (_, engine) = storage_engine(repository, storage_id)?;
-    let remote = match engine.read_head(&project.bundle_id)? {
-        Some(_) => Some(engine.fetch(&project.bundle_id)?),
-        None => None,
-    };
-    let generation = remote
-        .as_ref()
-        .map(|fetched| fetched.snapshot.head.generation);
-    let remote_resources = remote
-        .as_ref()
-        .map(|fetched| &fetched.snapshot.manifest.resources);
+    let remote = engine.inspect_optional(&project.bundle_id)?;
+    let generation = remote.as_ref().map(|snapshot| snapshot.head.generation);
+    let remote_resources = remote.as_ref().map(|snapshot| &snapshot.manifest.resources);
     let mut statuses = Vec::with_capacity(effective_recipe.entries.len());
     for resource_id in effective_recipe.entries.keys() {
         let local_digest = local_resources
@@ -5118,11 +5273,22 @@ fn push_bundle_reviewed_with_repository(
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn plan_bundle_restore_with_repository(
     repository: &V3Repository,
     storage_id: &StorageId,
     bundle_id: &BundleId,
     binding: &ProjectBinding,
+) -> Result<RestorePlan, String> {
+    plan_bundle_restore_with_progress(repository, storage_id, bundle_id, binding, &mut |_| {})
+}
+
+fn plan_bundle_restore_with_progress(
+    repository: &V3Repository,
+    storage_id: &StorageId,
+    bundle_id: &BundleId,
+    binding: &ProjectBinding,
+    on_progress: &mut dyn FnMut(FetchProgress),
 ) -> Result<RestorePlan, String> {
     let _host_operation = repository.acquire_host_operation()?;
     let binding = require_current_binding(repository, binding)?;
@@ -5130,7 +5296,7 @@ fn plan_bundle_restore_with_repository(
         return Err("binding and requested bundle IDs differ".to_string());
     }
     require_codex_conversation_paths_ready(repository, &binding.local_project_id)?;
-    let (engine, fetched) = fetch_from_storage(repository, storage_id, bundle_id)?;
+    let (engine, snapshot) = inspect_from_storage(repository, storage_id, bundle_id)?;
     let config = repository.load_config()?;
     let project = config
         .project(&binding.local_project_id)
@@ -5142,10 +5308,10 @@ fn plan_bundle_restore_with_repository(
         .filter(|base| base.binding_revision == Some(binding.revision));
     let base_manifest = match recipe_base {
         Some(base)
-            if fetched.snapshot.head.generation == base.generation
-                && fetched.snapshot.head.manifest_sha256 == base.manifest_sha256 =>
+            if snapshot.head.generation == base.generation
+                && snapshot.head.manifest_sha256 == base.manifest_sha256 =>
         {
-            Some(fetched.snapshot.manifest.clone())
+            Some(snapshot.manifest.clone())
         }
         Some(base) => base.commit_id.as_deref().and_then(|commit_id| {
             engine
@@ -5164,13 +5330,37 @@ fn plan_bundle_restore_with_repository(
     if identity.host_id != binding.host_id {
         return Err("host identity changed while preparing the Pull review".to_string());
     }
-    let mut plan = engine.build_restore_plan(&fetched, &binding, now_secs(), identity.revision)?;
+    // Reviewed bases let the engine derive materialized digests without
+    // payload downloads; only genuinely divergent conversations transfer.
+    let known_bases = materialized_bases
+        .iter()
+        .map(|(resource_id, base)| {
+            (
+                resource_id.clone(),
+                KnownMaterializedBase {
+                    storage_digest: base.storage_digest.clone(),
+                    local_digest: base.local_digest.clone(),
+                    kept_local: base.kept_local,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut byte_source =
+        engine.byte_source(&snapshot, Some(object_cache()), Some(on_progress));
+    let mut plan = engine.build_restore_plan_lazy(
+        &snapshot,
+        &mut byte_source,
+        &known_bases,
+        &binding,
+        now_secs(),
+        identity.revision,
+    )?;
     plan.actions.retain(|action| {
-        if !is_conversation_keep_local_action(action, &fetched.snapshot.manifest) {
+        if !is_conversation_keep_local_action(action, &snapshot.manifest) {
             return true;
         }
         let current_storage_digest =
-            single_manifest_resource_file_digest(&fetched.snapshot.manifest, &action.resource_id);
+            single_manifest_resource_file_digest(&snapshot.manifest, &action.resource_id);
         let known_storage_digest = materialized_bases
             .get(&action.resource_id)
             .filter(|materialized| {
@@ -5190,10 +5380,20 @@ fn plan_bundle_restore_with_repository(
     Ok(plan)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn apply_bundle_restore_with_repository(
     repository: &V3Repository,
     plan_id: &PlanId,
     approved_action_ids: Vec<ActionId>,
+) -> Result<RestoreResult, String> {
+    apply_bundle_restore_with_progress(repository, plan_id, approved_action_ids, &mut |_| {})
+}
+
+fn apply_bundle_restore_with_progress(
+    repository: &V3Repository,
+    plan_id: &PlanId,
+    approved_action_ids: Vec<ActionId>,
+    on_progress: &mut dyn FnMut(FetchProgress),
 ) -> Result<RestoreResult, String> {
     let _host_operation = repository.acquire_host_operation()?;
     let plan = repository.load_restore_plan(plan_id)?;
@@ -5226,11 +5426,14 @@ fn apply_bundle_restore_with_repository(
             plan.plan_id
         ));
     }
-    let (engine, fetched) = fetch_from_storage(repository, &plan.storage_id, &plan.bundle_id)?;
-    let restored_recipe = fetched.snapshot.manifest.recipe.clone();
+    let (engine, snapshot) = inspect_from_storage(repository, &plan.storage_id, &plan.bundle_id)?;
+    let restored_recipe = snapshot.manifest.recipe.clone();
     let applied_at = now_secs();
-    let applied = engine.apply_restore_plan(
-        &fetched,
+    let mut byte_source =
+        engine.byte_source(&snapshot, Some(object_cache()), Some(on_progress));
+    let applied = engine.apply_restore_plan_lazy(
+        &snapshot,
+        &mut byte_source,
         &binding,
         &plan,
         &approved,
@@ -5240,7 +5443,7 @@ fn apply_bundle_restore_with_repository(
     let kept_local_conversation_actions = plan
         .actions
         .iter()
-        .filter(|action| is_conversation_keep_local_action(action, &fetched.snapshot.manifest))
+        .filter(|action| is_conversation_keep_local_action(action, &snapshot.manifest))
         .map(|action| action.action_id.clone())
         .collect::<BTreeSet<_>>();
     let files_complete = applied
@@ -5401,19 +5604,22 @@ fn successful_pull_timestamp(
 /// Load the exact storage snapshot approved by a RestorePlan. Dependency and
 /// readiness support must never discover a different linked storage on their
 /// own, because each storage advances its bundle generations independently.
+/// Load the plan's binding and re-inspect the bundle head it pins. This is
+/// deliberately metadata-only — supporting views (dependencies, readiness)
+/// must never download payload objects.
 fn restore_support_context(
     repository: &V3Repository,
     restore_plan_id: &PlanId,
-) -> Result<(RestorePlan, ProjectBinding, FetchedBundle), String> {
+) -> Result<(RestorePlan, ProjectBinding, BundleSnapshot), String> {
     let plan = repository.load_restore_plan(restore_plan_id)?;
     let now = now_secs();
     if now < plan.created_at || now > plan.expires_at {
         return Err("restore plan has expired or is not active yet".to_string());
     }
     let binding = current_binding_for_restore_plan(repository, &plan)?;
-    let (_, fetched) = fetch_from_storage(repository, &plan.storage_id, &plan.bundle_id)?;
-    let head = &fetched.snapshot.head;
-    if plan.storage_id != fetched.snapshot.storage_id
+    let (_, snapshot) = inspect_from_storage(repository, &plan.storage_id, &plan.bundle_id)?;
+    let head = &snapshot.head;
+    if plan.storage_id != snapshot.storage_id
         || plan.bundle_id != head.bundle_id
         || plan.host_id != binding.host_id
         || plan.replica_id != binding.replica_id
@@ -5426,7 +5632,7 @@ fn restore_support_context(
             "bundle head changed after restore planning; refresh the Pull review".to_string(),
         );
     }
-    Ok((plan, binding, fetched))
+    Ok((plan, binding, snapshot))
 }
 
 fn plan_dependencies_with_repository(
@@ -5434,7 +5640,7 @@ fn plan_dependencies_with_repository(
     restore_plan_id: &PlanId,
 ) -> Result<DependencyPlan, String> {
     let _host_operation = repository.acquire_host_operation()?;
-    let (restore_plan, binding, fetched) = restore_support_context(repository, restore_plan_id)?;
+    let (restore_plan, binding, snapshot) = restore_support_context(repository, restore_plan_id)?;
     let created_at = now_secs();
     let plan = DependencyPlan {
         schema_version: DEPENDENCY_PLAN_SCHEMA,
@@ -5455,7 +5661,7 @@ fn plan_dependencies_with_repository(
         expires_at: restore_plan
             .expires_at
             .min(created_at.saturating_add(PLAN_LIFETIME_SECS)),
-        actions: fetched.dependency_actions,
+        actions: dependencies_from_manifest(&snapshot.manifest)?,
         blockers: Vec::new(),
         warnings: Vec::new(),
     };
@@ -5523,8 +5729,8 @@ fn prepare_dependency_application(
         );
     }
     let binding = resolve_project_binding(repository, &binding)?;
-    let (_, fetched) = fetch_from_storage(repository, &plan.storage_id, &plan.bundle_id)?;
-    validate_dependency_plan_pin(&plan, &fetched, &binding)?;
+    let (_, snapshot) = inspect_from_storage(repository, &plan.storage_id, &plan.bundle_id)?;
+    validate_dependency_plan_pin(&plan, &snapshot, &binding)?;
     let selected = unique_dependency_actions(&action_ids, &plan.actions)?;
 
     Ok(PreparedDependencyApplication {
@@ -5532,7 +5738,7 @@ fn prepare_dependency_application(
         binding,
         selected,
         previous,
-        resources: fetched.snapshot.manifest.resources,
+        resources: snapshot.manifest.resources,
         applied_at,
     })
 }
@@ -5705,24 +5911,24 @@ fn get_bundle_readiness_with_repository(
         .project(&binding.local_project_id)
         .ok_or_else(|| "bound project is no longer registered".to_string())?;
     require_project_link(&config, project, storage_id)?;
-    let (_, fetched) = fetch_from_storage(repository, storage_id, bundle_id)?;
-    bundle_readiness_for_fetched(repository, &binding, &fetched)
+    let (_, snapshot) = inspect_from_storage(repository, storage_id, bundle_id)?;
+    bundle_readiness_for_snapshot(repository, &binding, &snapshot)
 }
 
 fn get_restore_readiness_with_repository(
     repository: &V3Repository,
     restore_plan_id: &PlanId,
 ) -> Result<BundleReadiness, String> {
-    let (_, binding, fetched) = restore_support_context(repository, restore_plan_id)?;
-    bundle_readiness_for_fetched(repository, &binding, &fetched)
+    let (_, binding, snapshot) = restore_support_context(repository, restore_plan_id)?;
+    bundle_readiness_for_snapshot(repository, &binding, &snapshot)
 }
 
-fn bundle_readiness_for_fetched(
+fn bundle_readiness_for_snapshot(
     repository: &V3Repository,
     binding: &ProjectBinding,
-    fetched: &FetchedBundle,
+    snapshot: &BundleSnapshot,
 ) -> Result<BundleReadiness, String> {
-    let head = &fetched.snapshot.head;
+    let head = &snapshot.head;
     let bundle_id = &head.bundle_id;
     let materialization = repository
         .load_materializations()?
@@ -5761,14 +5967,12 @@ fn bundle_readiness_for_fetched(
         );
     }
     let mut issues = Vec::new();
-    let needs_codex_home = fetched
-        .snapshot
+    let needs_codex_home = snapshot
         .manifest
         .resources
         .values()
         .any(|resource| resource.kind == ResourceKind::CodexConversation);
-    let needs_claude_home = fetched
-        .snapshot
+    let needs_claude_home = snapshot
         .manifest
         .resources
         .values()
@@ -5785,7 +5989,7 @@ fn bundle_readiness_for_fetched(
         needs_claude_home,
         binding.claude_home.as_deref(),
     );
-    if !fetched.snapshot.manifest.files.is_empty() {
+    if !snapshot.manifest.files.is_empty() {
         match materialization.as_ref() {
             None => issues.push(BundleReadinessIssue {
                 issue_id: "restore-files".to_string(),
@@ -5801,12 +6005,12 @@ fn bundle_readiness_for_fetched(
                 action: Some("plan_restore".to_string()),
             }),
             Some(record) if record.status == MaterializationStatus::Partial => {
-                add_partial_materialization_issues(&mut issues, record, fetched);
+                add_partial_materialization_issues(&mut issues, record, snapshot);
             }
             Some(_) => {}
         }
     }
-    for action in &fetched.dependency_actions {
+    for action in &dependencies_from_manifest(&snapshot.manifest)? {
         if !applied_dependencies.contains(&action.action_id) {
             issues.push(BundleReadinessIssue {
                 issue_id: format!("dependency-{}", action.action_id),
@@ -5845,7 +6049,7 @@ fn bundle_readiness_for_fetched(
 fn add_partial_materialization_issues(
     issues: &mut Vec<BundleReadinessIssue>,
     materialization: &MaterializationRecord,
-    fetched: &FetchedBundle,
+    snapshot: &BundleSnapshot,
 ) {
     let unresolved = materialization
         .receipts
@@ -5858,8 +6062,7 @@ fn add_partial_materialization_issues(
         .filter(|receipt| receipt.action_type == RestoreActionType::Manual)
         .filter(|receipt| !is_kept_local_conversation_receipt(receipt))
         .filter(|receipt| {
-            fetched
-                .snapshot
+            snapshot
                 .manifest
                 .resources
                 .get(&receipt.resource_id)
@@ -5879,7 +6082,7 @@ fn add_partial_materialization_issues(
             .flatten();
         let provider = resource_id
             .as_ref()
-            .and_then(|resource_id| fetched.snapshot.manifest.resources.get(resource_id))
+            .and_then(|resource_id| snapshot.manifest.resources.get(resource_id))
             .and_then(|resource| resource.provider);
         issues.push(BundleReadinessIssue {
             issue_id: "conversation-conflicts".to_string(),
@@ -6087,17 +6290,17 @@ fn unique_dependency_actions(
 
 fn validate_dependency_plan_pin(
     plan: &DependencyPlan,
-    fetched: &FetchedBundle,
+    snapshot: &BundleSnapshot,
     binding: &ProjectBinding,
 ) -> Result<(), String> {
-    if plan.storage_id != fetched.snapshot.storage_id
-        || plan.bundle_id != fetched.snapshot.head.bundle_id
+    if plan.storage_id != snapshot.storage_id
+        || plan.bundle_id != snapshot.head.bundle_id
         || plan.bundle_id != binding.bundle_id
         || plan.host_id != binding.host_id
         || plan.replica_id != binding.replica_id
-        || plan.generation != fetched.snapshot.head.generation
-        || plan.commit_id != fetched.snapshot.head.commit_id
-        || plan.manifest_sha256 != fetched.snapshot.head.manifest_sha256
+        || plan.generation != snapshot.head.generation
+        || plan.commit_id != snapshot.head.commit_id
+        || plan.manifest_sha256 != snapshot.head.manifest_sha256
         || plan.binding_revision != binding.revision
     {
         return Err("dependency plan no longer matches the bundle or binding".to_string());
@@ -8348,8 +8551,8 @@ fn build_setup_transaction(
                         .to_string()
                 })?;
             let engine = engine_for_storage_config(&storage.storage)?;
-            let fetched = engine.fetch(bundle_id)?;
-            let summary = bundle_snapshot_summary(fetched)?;
+            let snapshot = engine.inspect(bundle_id)?;
+            let summary = bundle_snapshot_summary_from_snapshot(snapshot)?;
             if !verified_repository_identity(
                 &summary.repository_fingerprint,
                 local_repository_identity.as_ref(),

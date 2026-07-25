@@ -32,6 +32,7 @@ const MAX_LIST_PAGE: usize = 10_000;
 const S3_MAX_KEYS: usize = 1_000;
 const MAX_LIST_REQUESTS: usize = MAX_LIST_PAGE + 2;
 const R2_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const BULK_GET_CONCURRENCY: usize = 6;
 
 #[derive(Clone)]
 pub struct S3BundleObjectStore {
@@ -384,6 +385,41 @@ impl S3BundleObjectStore {
 impl BundleObjectStore for S3BundleObjectStore {
     fn get(&self, key: &ObjectKey) -> Result<Option<StoredObject>, String> {
         self.run("get", self.get_async(key))
+    }
+
+    /// Bounded-concurrency bulk download. Order matches `keys`; the first
+    /// failure aborts the remaining transfers, like the sequential loop it
+    /// replaces.
+    fn get_many(&self, keys: &[ObjectKey]) -> Result<Vec<Option<StoredObject>>, String> {
+        if keys.len() <= 1 {
+            return keys.iter().map(|key| self.get(key)).collect();
+        }
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(BULK_GET_CONCURRENCY));
+        self.run("bulk get", async {
+            let mut join_set = tokio::task::JoinSet::new();
+            for (index, key) in keys.iter().cloned().enumerate() {
+                let store = self.clone();
+                let semaphore = semaphore.clone();
+                join_set.spawn(async move {
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| "bulk get concurrency gate closed".to_string())?;
+                    Ok::<_, String>((index, store.get_async(&key).await?))
+                });
+            }
+            let mut objects: Vec<Option<Option<StoredObject>>> = Vec::new();
+            objects.resize_with(keys.len(), || None);
+            while let Some(joined) = join_set.join_next().await {
+                let (index, object) =
+                    joined.map_err(|error| format!("bulk get worker failed: {}", error))??;
+                objects[index] = Some(object);
+            }
+            Ok(objects
+                .into_iter()
+                .map(|slot| slot.expect("every bulk-get index resolves"))
+                .collect())
+        })
     }
 
     fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
