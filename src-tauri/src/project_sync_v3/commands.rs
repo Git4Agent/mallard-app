@@ -20,7 +20,7 @@ use super::conversation_sync::{
 use super::domain::{
     generated_named_id, validate_absolute_clean_path, ActionId, ActionStatus, ApplyPolicy,
     ApplyReceipt, BindingState, BundleId, BundleIdentity, BundleKind, BundleManifest, BundleRecipe,
-    BundleSnapshot, CapturedWith, ThreadId, ConversationFileRole,
+    BundleSnapshot, CapturedWith, ConversationFileRole, LogicalPath, ThreadId,
     ConversationMaterializationState, ConversationPlanActionType, ConversationPlanDirection,
     ConversationReasonCode, ConversationRelation, DependencyAction, DependencyActionKind,
     DependencyApplicationRecord, DependencyApplyReceipt, DependencyPlan, DraftProfileSelection,
@@ -3657,8 +3657,18 @@ fn is_kept_local_conversation_receipt(receipt: &ApplyReceipt) -> bool {
         && receipt.target_sha256_after.is_some()
 }
 
+const CODEX_SESSION_RESOURCE_PREFIX: &str = "codex:session:";
+const CODEX_SESSION_INDEX_LOGICAL_PATH: &str = "state/codex/session_index.jsonl";
+const CODEX_SESSION_INDEX_RESOURCE_ID: &str = "codex:session-index";
+
+fn codex_session_id(resource_id: &str) -> Option<&str> {
+    resource_id
+        .strip_prefix(CODEX_SESSION_RESOURCE_PREFIX)
+        .filter(|thread_id| !thread_id.is_empty())
+}
+
 fn is_codex_thread_resource(resource_id: &ResourceId, kind: ResourceKind) -> bool {
-    kind == ResourceKind::CodexConversation && resource_id.as_str().starts_with("codex:session:")
+    kind == ResourceKind::CodexConversation && codex_session_id(resource_id.as_str()).is_some()
 }
 
 fn manifest_thread_versions(manifest: &BundleManifest) -> BTreeMap<ResourceId, ThreadVersion> {
@@ -3676,7 +3686,9 @@ fn manifest_thread_versions(manifest: &BundleManifest) -> BTreeMap<ResourceId, T
             (
                 resource_id.clone(),
                 ThreadVersion {
-                    thread_id: descriptor.display_name.clone(),
+                    thread_id: codex_session_id(resource_id.as_str())
+                        .unwrap_or(&descriptor.display_name)
+                        .to_string(),
                     display_name: descriptor.display_name.clone(),
                     digest: single_manifest_resource_file_digest(manifest, resource_id),
                     updated_at,
@@ -3684,6 +3696,42 @@ fn manifest_thread_versions(manifest: &BundleManifest) -> BTreeMap<ResourceId, T
             )
         })
         .collect()
+}
+
+fn stored_codex_session_titles(
+    snapshot: &BundleSnapshot,
+    bytes: &mut dyn BundleBytes,
+) -> Result<BTreeMap<String, String>, String> {
+    let logical_path = LogicalPath::parse(CODEX_SESSION_INDEX_LOGICAL_PATH)?;
+    let Some(index_entry) = snapshot.manifest.files.get(&logical_path) else {
+        return Ok(BTreeMap::new());
+    };
+    if index_entry.resource_id.as_str() != CODEX_SESSION_INDEX_RESOURCE_ID {
+        return Err(format!(
+            "stored Codex session index belongs to unexpected resource '{}'",
+            index_entry.resource_id
+        ));
+    }
+    if index_entry.size > provider_capture::MAX_FILE_BYTES {
+        return Err(format!(
+            "stored Codex session index exceeds {} MiB",
+            provider_capture::MAX_FILE_BYTES / (1024 * 1024)
+        ));
+    }
+    let expected_thread_ids = snapshot
+        .manifest
+        .resources
+        .iter()
+        .filter(|(resource_id, descriptor)| {
+            is_codex_thread_resource(resource_id, descriptor.kind)
+        })
+        .filter_map(|(resource_id, _)| {
+            codex_session_id(resource_id.as_str()).map(str::to_string)
+        })
+        .collect::<BTreeSet<_>>();
+    let mut titles = chat_history::parse_session_index_titles(bytes.get(&logical_path)?);
+    titles.retain(|thread_id, _| expected_thread_ids.contains(thread_id));
+    Ok(titles)
 }
 
 fn single_manifest_resource_file_digest(
@@ -4087,10 +4135,13 @@ fn get_project_thread_sync_comparison_with_repository(
                 && candidate.resource_id.starts_with("codex:session:")
         })
         .map(|candidate| {
+            let thread_id = codex_session_id(&candidate.resource_id)
+                .unwrap_or(&candidate.display_name)
+                .to_string();
             Ok((
                 ResourceId::parse(candidate.resource_id.clone())?,
                 LocalThreadDescriptor {
-                    thread_id: candidate.display_name.clone(),
+                    thread_id,
                     display_name: candidate.display_name.clone(),
                     blocked_reason: candidate.blocked_reason.clone(),
                 },
@@ -4118,6 +4169,9 @@ fn get_project_thread_sync_comparison_with_repository(
         })
         .map(|(resource_id, resource)| {
             let parsed_id = ResourceId::parse(resource_id.clone())?;
+            let thread_id = codex_session_id(resource_id)
+                .unwrap_or(&resource.descriptor.display_name)
+                .to_string();
             let updated_at = captured
                 .files
                 .values()
@@ -4127,7 +4181,7 @@ fn get_project_thread_sync_comparison_with_repository(
             Ok((
                 parsed_id,
                 ThreadVersion {
-                    thread_id: resource.descriptor.display_name.clone(),
+                    thread_id,
                     display_name: resource.descriptor.display_name.clone(),
                     digest: single_captured_resource_file_digest(&captured, resource_id),
                     updated_at,
@@ -4141,6 +4195,20 @@ fn get_project_thread_sync_comparison_with_repository(
     let schema6_snapshot = current
         .as_ref()
         .filter(|snapshot| snapshot.manifest.schema_version == BUNDLE_SCHEMA_V6);
+    let stored_titles = if let Some(snapshot) = current.as_ref() {
+        match {
+            let mut byte_source = engine.byte_source(snapshot, Some(object_cache()), None);
+            stored_codex_session_titles(snapshot, &mut byte_source)
+        } {
+            Ok(titles) => titles,
+            Err(error) => {
+                warnings.push(format!("Stored Codex thread titles are unavailable: {error}"));
+                BTreeMap::new()
+            }
+        }
+    } else {
+        BTreeMap::new()
+    };
     let generation = current.as_ref().map(|snapshot| snapshot.head.generation);
     let remote_versions = current
         .as_ref()
@@ -4284,8 +4352,10 @@ fn get_project_thread_sync_comparison_with_repository(
             .map(|version| version.thread_id.clone())
             .or_else(|| local_descriptor.map(|descriptor| descriptor.thread_id.clone()))
             .unwrap_or_else(|| resource_id.as_str().to_string());
-        let display_name = descriptor
-            .map(|version| version.display_name.clone())
+        let display_name = stored_titles
+            .get(&thread_id)
+            .cloned()
+            .or_else(|| descriptor.map(|version| version.display_name.clone()))
             .or_else(|| local_descriptor.map(|descriptor| descriptor.display_name.clone()))
             .unwrap_or_else(|| thread_id.clone());
         count_thread_sync_state(&mut counts, state);
@@ -12092,6 +12162,33 @@ mod tests {
             .active_for(&target.local_project_id)
             .cloned()
             .unwrap();
+
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &target.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        let stored_thread = comparison
+            .entries
+            .iter()
+            .find(|entry| entry.thread_id == session_id)
+            .unwrap();
+        assert_eq!(stored_thread.state, ThreadSyncState::StorageOnly);
+        assert_eq!(stored_thread.thread_id, session_id);
+        assert_eq!(
+            stored_thread.resource_id.as_str(),
+            format!("codex:session:{session_id}")
+        );
+        assert_eq!(stored_thread.display_name, "Change glb color to yellow");
+        assert!(
+            !target_codex.join(&session_relative).exists(),
+            "title lookup must not materialize the stored transcript"
+        );
+        assert!(
+            !target_codex.join("session_index.jsonl").exists(),
+            "title lookup must not apply the stored session index"
+        );
 
         let restore =
             plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &target_binding)

@@ -598,7 +598,7 @@ test("selected storage adds directional indicators and storage-only threads", ()
       {
         thread_id: "019f7798-5437-7632-9dbc-5b589cf68bf1",
         resource_id: "codex:session:019f7798-5437-7632-9dbc-5b589cf68bf1",
-        display_name: "019f7798-5437-7632-9dbc-5b589cf68bf1",
+        display_name: "Improve cloud thread titles",
         state: "storage_only" as const,
         local_present: false,
         storage_present: true,
@@ -656,7 +656,10 @@ test("selected storage adds directional indicators and storage-only threads", ()
   assert.match(html, /v3-thread-sync-indicator local[^>]+aria-label="Newer on this computer\.[^"]+"[^>]*><svg[^>]+>/);
   assert.match(html, /v3-thread-sync-indicator storage[^>]+aria-label="Only in Local storage 1\.[^"]+"[^>]*><svg[^>]+>/);
   assert.doesNotMatch(html, /v3-thread-sync-glyph/);
-  assert.match(html, /Stored thread 019f7798/);
+  assert.match(html, /Improve cloud thread titles/);
+  assert.match(html, /v3-history-stored-thread-meta/);
+  assert.match(html, /Updated [^<]+ · Codex thread 019f7798/);
+  assert.doesNotMatch(html, /Stored thread 019f7798/);
   assert.match(html, /aria-label="2 threads"/);
   assert.ok(
     html.indexOf('aria-label="Newer on this computer. Push to update Local storage 1."')
@@ -664,8 +667,12 @@ test("selected storage adds directional indicators and storage-only threads", ()
   );
   assert.ok(
     html.indexOf('aria-label="Only in Local storage 1. Pull to download it here."')
-      < html.indexOf("Stored thread 019f7798"),
+      < html.indexOf("Improve cloud thread titles"),
   );
+
+  const css = readFileSync("src/App.css", "utf8");
+  const storedCopyRule = css.match(/\.v3-history-stored-thread-copy\s*\{[^}]+\}/s)?.[0] ?? "";
+  assert.match(storedCopyRule, /flex-direction:\s*column/);
 });
 
 test("unavailable sessions explain why they cannot be synced", () => {

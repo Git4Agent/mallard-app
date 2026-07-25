@@ -1013,6 +1013,18 @@ fn parse_session_index_lines<'a>(
     result
 }
 
+pub(crate) fn parse_session_index_titles(bytes: &[u8]) -> BTreeMap<String, String> {
+    parse_session_index_lines(
+        bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| line.len() <= MAX_LINE_BYTES)
+            .filter_map(|line| std::str::from_utf8(line).ok()),
+    )
+    .into_iter()
+    .filter_map(|(thread_id, entry)| entry.title.map(|title| (thread_id, title)))
+    .collect()
+}
+
 #[cfg(test)]
 fn parse_rollout_lines<'a>(
     lines: impl IntoIterator<Item = &'a str>,
@@ -3309,6 +3321,23 @@ mod tests {
         let title = truncated["thread-long"].title.as_deref().unwrap();
         assert_eq!(title.chars().count(), MAX_SUMMARY_CHARS);
         assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn portable_index_title_parser_skips_invalid_rows_and_normalizes_titles() {
+        let bytes = b"not json\n\
+            {\"id\":\"thread-a\",\"thread_name\":\"  Improve   cloud titles  \"}\n\
+            \xff\n\
+            {\"thread_id\":\"thread-b\",\"title\":\"Second title\"}\n";
+        let titles = parse_session_index_titles(bytes);
+
+        assert_eq!(
+            titles,
+            BTreeMap::from([
+                ("thread-a".to_string(), "Improve cloud titles".to_string()),
+                ("thread-b".to_string(), "Second title".to_string()),
+            ])
+        );
     }
 
     #[test]

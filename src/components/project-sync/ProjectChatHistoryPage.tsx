@@ -456,27 +456,35 @@ function StoredThreadCard({
   onToggleResource?: (resourceId: string) => void;
 }) {
   const shortId = entry.thread_id.length > 12 ? entry.thread_id.slice(0, 8) : entry.thread_id;
-  const title = entry.display_name && entry.display_name !== entry.thread_id
+  const title = entry.display_name.trim() && entry.display_name !== entry.thread_id
     ? entry.display_name
-    : `Stored thread ${shortId}`;
+    : "Untitled thread";
+  const identityLabel = `${title}, Codex thread ${entry.thread_id}`;
+  const metadata = [
+    entry.storage_updated_at ? `Updated ${formatDate(entry.storage_updated_at)}` : null,
+    `Codex thread ${shortId}`,
+  ].filter((item): item is string => item !== null).join(" · ");
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, entry, selected) : null;
   return (
     <article className={`v3-history-thread-card v3-history-stored-thread${selectionMode ? " v3-sync-selectable-row" : ""}${selected ? " selected" : ""}`}>
       <div className="v3-history-thread-topline">
         {selectionMode && (
-          <label className="v3-sync-row-choice" title={selectable ? `${selected ? "Exclude" : "Include"} ${title}` : reviewStateLabel ?? "No sync action available"}>
+          <label className="v3-sync-row-choice" title={selectable ? `${selected ? "Exclude" : "Include"} ${identityLabel}` : reviewStateLabel ?? "No sync action available"}>
             <input
               type="checkbox"
               checked={selected}
               disabled={selectionDisabled || !selectable}
-              aria-label={`${selected ? "Exclude" : "Include"} ${title}`}
+              aria-label={`${selected ? "Exclude" : "Include"} ${identityLabel}`}
               onChange={() => onToggleResource?.(entry.resource_id)}
             />
           </label>
         )}
         <div className="v3-history-thread-title" title={entry.thread_id}>
           <ThreadSyncIndicator entry={entry} storageName={storageName} />
-          <strong>{title}</strong>
+          <div className="v3-history-stored-thread-copy">
+            <strong>{title}</strong>
+            <span className="v3-history-stored-thread-meta">{metadata}</span>
+          </div>
           {reviewStateLabel && <span className={`v3-sync-review-state state-${entry.state}`}>{reviewStateLabel}</span>}
         </div>
       </div>
