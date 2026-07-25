@@ -5024,7 +5024,7 @@ summary:focus-visible {
 }
 
 .v3-project-combined-page .v3-combined-project-heading {
-  align-items: center;
+  align-items: stretch;
   margin-bottom: 0;
   border-bottom: 0;
 }

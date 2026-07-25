@@ -28,7 +28,7 @@ import {
   singleProviderSelection,
 } from "./model";
 
-export type SetupCompletion = "open" | "push" | "pull";
+export type SetupCompletion = "open" | "pull";
 
 interface Props {
   draftId: string;
@@ -792,14 +792,9 @@ export default function ProjectSetupWorkspace({
               {finalizing ? "Finishing…" : "Finish & review"}
             </button>
           ) : selectedStorage ? (
-            <>
-              <button type="button" className="btn" disabled={!canFinalize} onClick={() => void finalize("open")}>
-                {finalizing ? "Finishing…" : "Finish"}
-              </button>
-              <button type="button" className="btn btn-primary" disabled={!canFinalize} onClick={() => void finalize("push")}>
-                Finish & push
-              </button>
-            </>
+            <button type="button" className="btn btn-primary" disabled={!canFinalize} onClick={() => void finalize("open")}>
+              {finalizing ? "Finishing…" : "Finish"}
+            </button>
           ) : (
             <button type="button" className="btn btn-primary" disabled={!canFinalize} onClick={() => void finalize("open")}>
               {finalizing ? "Finishing…" : "Finish locally"}

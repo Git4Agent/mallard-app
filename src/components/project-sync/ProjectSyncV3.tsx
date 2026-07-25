@@ -1186,8 +1186,6 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     if (hostWorkflowGeneration.current !== workflowGeneration) return;
     if (completion === "pull" && storageId && detail.binding) {
       await planRestore(storageId, detail.project.bundle_id, detail.binding, projectLabel(detail.project));
-    } else if (completion === "push" && storageId) {
-      await publishProject(projectId, storageId, detail.project.recipe);
     }
   };
 

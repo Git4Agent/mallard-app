@@ -191,11 +191,12 @@ test("completed Push and Pull operations reset the project workspace to its firs
   assert.match(pullHandler, /!result\.error && pullMutationCompleted/);
 });
 
-test("the combined project header and Storage section share one divider", () => {
+test("the combined project header stays aligned with Storage and shares its divider", () => {
   const css = readFileSync("src/App.css", "utf8");
   const combinedHeadingRule = css.match(/\.v3-project-combined-page \.v3-combined-project-heading\s*\{[^}]+\}/s)?.[0] ?? "";
   const storageGroupRule = css.match(/\.v3-project-combined-page \.project-storage-group\s*\{[^}]+\}/s)?.[0] ?? "";
 
+  assert.match(combinedHeadingRule, /align-items:\s*stretch/);
   assert.match(combinedHeadingRule, /margin-bottom:\s*0/);
   assert.match(combinedHeadingRule, /border-bottom:\s*0/);
   assert.match(storageGroupRule, /border-top:\s*1px/);

@@ -22,6 +22,12 @@ test("ProjectSyncV3 is the only application interface", () => {
   }
 });
 
+test("project setup does not offer an immediate push", () => {
+  const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
+
+  assert.doesNotMatch(setupWorkspace, /Finish & push|finalize\("push"\)/);
+});
+
 test("the production Tauri handler exposes only V3 sync and shared log commands", () => {
   const backend = readFileSync("src-tauri/src/lib.rs", "utf8");
   assert.match(backend, /project_sync_v3::commands::get_project_sync_config/);
