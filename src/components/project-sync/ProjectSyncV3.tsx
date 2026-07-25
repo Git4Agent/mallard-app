@@ -243,6 +243,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
   const [readiness, setReadiness] = useState<BundleReadiness | null>(null);
   const [activeStorageByProject, setActiveStorageByProject] = useState<Record<string, string>>(storedActiveStorages);
   const [activeStorageSettingsId, setActiveStorageSettingsId] = useState<string | null>(null);
+  const [storageIssues, setStorageIssues] = useState<Record<string, string>>({});
   const [storageEditorRequest, setStorageEditorRequest] = useState<
     | { mode: "open"; storageId: string; settingsExpanded: boolean; requestId: number }
     | { mode: "create"; storageKind: "local" | "s3"; requestId: number }
@@ -319,6 +320,29 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     setResizingSidebar(false);
     setSidebarVisible((current) => !current);
   }, []);
+
+  const updateStorageIssue = useCallback((storageId: string, issue: string | null) => {
+    if (issue) setNotice(null);
+    setStorageIssues((current) => {
+      if (issue) {
+        return current[storageId] === issue ? current : { ...current, [storageId]: issue };
+      }
+      if (!(storageId in current)) return current;
+      const next = { ...current };
+      delete next[storageId];
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const storageIds = new Set(config.storages.map((storage) => storage.id));
+    setStorageIssues((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([storageId]) => storageIds.has(storageId)),
+      );
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+  }, [config.storages]);
 
   useEffect(() => {
     activityOpenRef.current = activityOpen;
@@ -2481,6 +2505,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
           storage.id,
           config.links.filter((link) => link.storage_id === storage.id).length,
         ]))}
+        storageIssues={storageIssues}
         activeProjectId={activeProjectId}
         activeStorageId={activeStorageSettingsId}
         loading={loading}
@@ -2635,6 +2660,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
             storageEditorRequest={storageEditorRequest}
             onStorageEditorRequestHandled={() => setStorageEditorRequest(null)}
             onStorageEditorChange={setActiveStorageSettingsId}
+            onStorageIssueChange={updateStorageIssue}
             historyRefreshEpoch={historyRefreshEpoch}
             projectTabResetEpoch={projectTabResetEpoch}
             inlineStorageReview={inlineStorageReview}

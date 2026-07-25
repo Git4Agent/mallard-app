@@ -533,6 +533,12 @@ export function ProjectChatHistoryContent({
     + visibleComparisonCounts.diverged
     + visibleComparisonCounts.unavailable
     + visibleComparisonCounts.needsBaseline;
+  const refreshing = loading || comparisonLoading;
+  const refreshStatus = comparisonLoading
+    ? `Comparing threads with ${activeStorageName ?? "storage"}`
+    : loading
+      ? "Refreshing project activity"
+      : null;
   const showEmbeddedThreadCount = embedded && !compactSelectionReview && !history?.git && embeddedThreadCount !== null;
   const showComparisonSummary = comparison != null && visibleComparisonChangeCount > 0;
   const renderThread = (thread: CodexThreadSummary, key: string) => {
@@ -636,10 +642,19 @@ export function ProjectChatHistoryContent({
                 )}
               </span>
             )}
-            {comparisonLoading && <span className="v3-thread-sync-loading" role="status" aria-label={`Comparing threads with ${activeStorageName ?? "storage"}`}><Icon name="refresh" size={13} className="icon-spin" /></span>}
             {comparisonError && <span className="v3-thread-sync-error" tabIndex={0} data-tooltip={comparisonError} aria-label={`Storage comparison failed: ${comparisonError}`}><Icon name="octagon-x" size={13} /></span>}
-            <button type="button" className="v3-history-icon-action v3-history-refresh" onClick={onRefresh} disabled={loading || comparisonLoading}
-              title="Refresh activity" aria-label="Refresh activity"><Icon name="refresh" size={15} className={loading || comparisonLoading ? "icon-spin" : undefined} /></button>
+            <button
+              type="button"
+              className={`v3-history-icon-action v3-history-refresh${refreshing ? " loading" : ""}`}
+              onClick={onRefresh}
+              disabled={refreshing}
+              aria-busy={refreshing}
+              title={refreshing ? "Refreshing activity" : "Refresh activity"}
+              aria-label={refreshing ? "Refreshing activity" : "Refresh activity"}
+            >
+              <Icon name="refresh" size={15} className={refreshing ? "icon-spin" : undefined} />
+            </button>
+            {refreshStatus && <span className="v3-visually-hidden" role="status">{refreshStatus}</span>}
           </div>
         </header>}
 

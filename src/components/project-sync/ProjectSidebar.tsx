@@ -31,6 +31,7 @@ interface Props {
   activeDraftId: string | null;
   storages: StorageConfigV3[];
   storageUsage: Record<string, number>;
+  storageIssues?: Record<string, string>;
   activeProjectId: string | null;
   activeStorageId: string | null;
   loading: boolean;
@@ -54,6 +55,7 @@ export default function ProjectSidebar({
   activeDraftId,
   storages,
   storageUsage,
+  storageIssues = {},
   activeProjectId,
   activeStorageId,
   loading,
@@ -311,6 +313,7 @@ export default function ProjectSidebar({
             {storages.map((storage) => {
               const usage = storageUsage[storage.id] ?? 0;
               const storageName = storage.name || "storage";
+              const storageIssue = storageIssues[storage.id] ?? null;
               return (
                 <div
                   key={storage.id}
@@ -321,11 +324,21 @@ export default function ProjectSidebar({
                     className="sidebar-profile-main"
                     onClick={() => onOpenStorage(storage.id, false)}
                     disabled={busy}
-                    title={`Open ${storageName}`}
-                    aria-label={`Open ${storageName}`}
+                    title={storageIssue ? `Open ${storageName} — ${storageIssue}` : `Open ${storageName}`}
+                    aria-label={storageIssue
+                      ? `Open ${storageName}. Storage issue: ${storageIssue}`
+                      : `Open ${storageName}`}
                   >
                     <Icon name={storage.kind === "local" ? "drive" : "cloud"} size={16} />
                     <span>{storage.name || "(unnamed)"}</span>
+                    {storageIssue && (
+                      <Icon
+                        name="alert-triangle"
+                        size={12}
+                        className="v3-sidebar-storage-warning"
+                        aria-hidden="true"
+                      />
+                    )}
                   </button>
                   <div className="sidebar-profile-actions">
                     <button

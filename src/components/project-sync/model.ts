@@ -4,6 +4,7 @@ import type {
   ProjectResourceCategory,
   ProjectResourceDescriptor,
   ResourceInventory,
+  StorageConfigV3,
 } from "../../types";
 import { userFacingRepoTerms } from "../../terminology";
 
@@ -121,4 +122,15 @@ export function formatRelativeTime(epoch?: number): string {
 
 export function errorMessage(error: unknown): string {
   return userFacingRepoTerms(error instanceof Error ? error.message : String(error));
+}
+
+export function storageAccessErrorMessage(
+  storage: Pick<StorageConfigV3, "kind"> | null | undefined,
+  error: unknown,
+): string {
+  const message = errorMessage(error);
+  const looksLikeR2ConnectionFailure = /^S3 (?:get|body|conditional put)/i.test(message)
+    && /dispatch failure|service error|timed out|access denied|credentials?|invalid access key|signature|no such bucket/i.test(message);
+  if (storage?.kind !== "s3" || !looksLikeR2ConnectionFailure) return message;
+  return "Couldn’t connect to Cloudflare R2. Check the S3 API URL, bucket name, Account ID, and credentials, then try again.";
 }

@@ -98,6 +98,12 @@ export function newStorage(kind: "s3" | "local", index: number): StorageConfigV3
   };
 }
 
+export function storageNameForKind(name: string, kind: "s3" | "local"): string {
+  const defaultName = /^(?:Local storage|R2 storage) (\d+)$/.exec(name);
+  if (!defaultName) return name;
+  return `${kind === "local" ? "Local storage" : "R2 storage"} ${defaultName[1]}`;
+}
+
 export function StorageEditor({
   storage,
   disabled,
@@ -160,6 +166,7 @@ export function StorageEditor({
             aria-checked={storage.kind !== "local"}
             className={storage.kind !== "local" ? "active" : undefined}
             onClick={() => set({
+              name: storageNameForKind(storage.name, "s3"),
               kind: "s3",
               region: "auto",
               s3_endpoint: r2EndpointForAccount(storage.account_id ?? ""),
@@ -173,7 +180,10 @@ export function StorageEditor({
             role="radio"
             aria-checked={storage.kind === "local"}
             className={storage.kind === "local" ? "active" : undefined}
-            onClick={() => set({ kind: "local" })}
+            onClick={() => set({
+              name: storageNameForKind(storage.name, "local"),
+              kind: "local",
+            })}
             disabled={disabled}
           >
             Local folder

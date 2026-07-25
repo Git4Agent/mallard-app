@@ -25,11 +25,11 @@ import { projectSyncApi } from "./api";
 import {
   compactProjectPath,
   configuredProjectProvider,
-  errorMessage,
   formatRelativeTime,
   PROJECT_PROVIDERS,
   projectLabel,
   providerLabel,
+  storageAccessErrorMessage,
 } from "./model";
 
 type LinkKey = { projectId: string; storageId: string };
@@ -78,6 +78,7 @@ interface Props {
   storageEditorRequest?: StorageEditorRequest | null;
   onStorageEditorRequestHandled?: () => void;
   onStorageEditorChange?: (storageId: string | null) => void;
+  onStorageIssueChange?: (storageId: string, issue: string | null) => void;
   newProjectSetup?: ReactNode;
   historyRefreshEpoch?: number;
   projectTabResetEpoch?: number;
@@ -288,6 +289,7 @@ export default function ProjectLinksWorkspace({
   storageEditorRequest,
   onStorageEditorRequestHandled,
   onStorageEditorChange,
+  onStorageIssueChange,
   newProjectSetup,
   historyRefreshEpoch = 0,
   projectTabResetEpoch = 0,
@@ -439,17 +441,23 @@ export default function ProjectLinksWorkspace({
     }
   };
 
-  const loadStorageBundles = async (storageId: string) => {
+  const loadStorageBundles = async (storage: StorageConfigV3) => {
+    const storageId = storage.id;
     const requestId = ++bundleRequestRef.current;
     setBundlePage(null);
     setBundleError(null);
     setBundleLoading(true);
     try {
       const bundles = await projectSyncApi.listRemoteBundleSnapshots(storageId);
-      if (bundleRequestRef.current === requestId) setBundlePage({ bundles });
+      if (bundleRequestRef.current === requestId) {
+        setBundlePage({ bundles });
+        onStorageIssueChange?.(storageId, null);
+      }
     } catch (reason) {
       if (bundleRequestRef.current === requestId) {
-        setBundleError(errorMessage(reason));
+        const issue = storageAccessErrorMessage(storage, reason);
+        setBundleError(issue);
+        onStorageIssueChange?.(storageId, issue);
       }
     } finally {
       if (bundleRequestRef.current === requestId) setBundleLoading(false);
@@ -490,7 +498,7 @@ export default function ProjectLinksWorkspace({
     if (editingStorage?.storageId !== storage.id) {
       setEditingStorage({ projectId: "", storageId: storage.id });
       setStorageDraft({ ...storage });
-      void loadStorageBundles(storage.id);
+      void loadStorageBundles(storage);
     }
     setStorageDetailsExpanded(storageEditorRequest.settingsExpanded);
     onStorageEditorRequestHandled?.();
@@ -504,7 +512,7 @@ export default function ProjectLinksWorkspace({
     }
 
     setStorageDetailsExpanded(true);
-    if (switchingStorage) await loadStorageBundles(storage.id);
+    if (switchingStorage) await loadStorageBundles(storage);
   };
 
   const activeProject = projects.find((project) => project.local_project_id === activeProjectId) ?? null;
@@ -705,7 +713,7 @@ export default function ProjectLinksWorkspace({
                         const saved = await onSaveStorage(storageDraft);
                         if (saved === false) return;
                         setStorageDetailsExpanded(false);
-                        await loadStorageBundles(editedStorageConfig.id);
+                        await loadStorageBundles(storageDraft);
                       })}
                     >
                       {runningAction === `storage:${editedStorageConfig.id}` ? "Saving…" : creatingStorage ? "Create storage" : "Save storage"}
@@ -725,7 +733,7 @@ export default function ProjectLinksWorkspace({
                   <button
                     type="button"
                     className="btn btn-ghost"
-                    onClick={() => void loadStorageBundles(editedStorageConfig.id)}
+                    onClick={() => void loadStorageBundles(editedStorageConfig)}
                     disabled={busy || bundleLoading}
                     title="Refresh repositories"
                     aria-label={`Refresh repositories in ${editedStorageConfig.name || "storage"}`}
@@ -737,7 +745,10 @@ export default function ProjectLinksWorkspace({
                 {bundleLoading ? (
                   <div className="v3-storage-repository-state"><span className="status-loader" /> Loading repositories…</div>
                 ) : bundleError ? (
-                  <div className="v3-callout error"><Icon name="alert-triangle" size={15} /> {bundleError}</div>
+                  <div className="v3-callout error" role="alert">
+                    <Icon name="alert-triangle" size={15} />
+                    <span>{bundleError}</span>
+                  </div>
                 ) : orderedRemoteBundles.length === 0 ? (
                   <div className="v3-storage-repository-state">No repositories in this storage.</div>
                 ) : (

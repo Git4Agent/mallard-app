@@ -7,12 +7,14 @@ import {
   r2EndpointForAccount,
   r2S3ApiUrl,
   storageConfigReady,
+  storageNameForKind,
   StorageEditor,
 } from "../../src/components/project-sync/StorageSettingsV3";
 import {
   StorageRepositoryRow,
   StorageSettingsMeta,
 } from "../../src/components/project-sync/ProjectLinksWorkspace";
+import { storageAccessErrorMessage } from "../../src/components/project-sync/model";
 import type { RemoteBundleSummary, StorageConfigV3 } from "../../src/types";
 
 function r2Storage(patch: Partial<StorageConfigV3> = {}): StorageConfigV3 {
@@ -44,6 +46,26 @@ test("R2 configuration derives the endpoint and requires the four user-provided 
     access_key_id: "access-key",
     secret_access_key: "secret-key",
   })), true);
+});
+
+test("R2 connection failures use actionable storage language", () => {
+  assert.equal(
+    storageAccessErrorMessage(
+      r2Storage(),
+      "S3 get '.mallard/_storage.json': dispatch failure",
+    ),
+    "Couldn’t connect to Cloudflare R2. Check the S3 API URL, bucket name, Account ID, and credentials, then try again.",
+  );
+  assert.equal(
+    storageAccessErrorMessage(r2Storage(), "remote bundle cursor did not advance"),
+    "remote repo cursor did not advance",
+  );
+});
+
+test("switching storage type updates only its generated default name", () => {
+  assert.equal(storageNameForKind("Local storage 2", "s3"), "R2 storage 2");
+  assert.equal(storageNameForKind("R2 storage 2", "local"), "Local storage 2");
+  assert.equal(storageNameForKind("Team backup", "s3"), "Team backup");
 });
 
 test("R2 S3 API URLs map to and from an Account ID and bucket", () => {

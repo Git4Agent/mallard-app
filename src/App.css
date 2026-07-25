@@ -4975,6 +4975,11 @@ summary:focus-visible {
   color: var(--yellow);
 }
 
+.sidebar-profile-main svg.v3-sidebar-storage-warning {
+  margin-left: auto;
+  color: var(--red);
+}
+
 .sidebar-profile-main > span:first-of-type { flex: 1; }
 
 .v3-primary-nav button > .v3-activity-badge {
@@ -8959,15 +8964,6 @@ div.storage-link-main {
 .v3-thread-sync-summary .unavailable { color: var(--red); }
 .v3-thread-sync-summary .needs-baseline { color: var(--text-2); }
 
-.v3-thread-sync-loading {
-  width: 24px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--blue);
-}
-
 .v3-history-branch-select {
   position: relative;
   min-width: 0;
@@ -9198,6 +9194,11 @@ div.storage-link-main {
 .v3-history-icon-action:disabled {
   opacity: .42;
   cursor: default;
+}
+
+.v3-history-icon-action.loading:disabled {
+  color: var(--blue);
+  opacity: 1;
 }
 
 .v3-history-branch-trigger:focus-visible {

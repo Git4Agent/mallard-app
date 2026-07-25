@@ -123,7 +123,47 @@ test("V3 thread indicators use the quiet desktop sync vocabulary", () => {
   assert.match(css, /\.v3-thread-sync-indicator\.diverged \{ color: var\(--yellow\); \}/);
   assert.match(css, /\.v3-thread-sync-indicator\.unavailable,\s*\n\.v3-thread-sync-error \{ color: var\(--red\); \}/);
   assert.match(css, /\.v3-thread-sync-indicator\.needs-baseline \{ color: var\(--text-2\); \}/);
-  assert.match(css, /\.v3-thread-sync-loading\s*\{[^}]*color:\s*var\(--blue\);/s);
+});
+
+test("refreshing project activity uses one busy refresh icon", () => {
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      project={project}
+      binding={{
+        host_id: "00112233445566778899aabbccddeeff",
+        replica_id: "replica",
+        local_project_id: project.local_project_id,
+        bundle_id: project.bundle_id,
+        project_root: project.project_root,
+        canonical_project_root: project.project_root,
+        profile_ids: { codex: "profile-codex" },
+        state: "active",
+        revision: 1,
+        updated_at: 2,
+      }}
+      history={history}
+      loading
+      loadingMore={false}
+      actionError={null}
+      actionBusyThreadId={null}
+      comparisonLoading
+      activeStorageName="R2 storage 1"
+      onBranchChange={() => undefined}
+      onRefresh={() => undefined}
+      onLoadMore={() => undefined}
+      onOpenCodex={() => undefined}
+      onOpenTerminal={() => undefined}
+    />,
+  );
+
+  assert.equal(html.match(/icon-spin/g)?.length, 1);
+  assert.doesNotMatch(html, /v3-thread-sync-loading/);
+  assert.match(html, /v3-history-refresh loading/);
+  assert.match(html, /aria-busy="true"/);
+  assert.match(html, /role="status">Comparing threads with R2 storage 1/);
+
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.v3-history-icon-action\.loading:disabled\s*\{[^}]*color:\s*var\(--blue\);[^}]*opacity:\s*1;/s);
 });
 
 test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
@@ -855,6 +895,7 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
         included_default_exclusions: [],
       }]}
       storageUsage={{ "storage-1": 1 }}
+      storageIssues={{ "storage-1": "Storage folder unavailable." }}
       activeProjectId={project.local_project_id}
       activeStorageId={null}
       loading={false}
@@ -884,6 +925,8 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
   assert.match(projectButton, /disabled=""/);
   assert.match(storageButton, /disabled=""/);
   assert.match(addStorageButton, /disabled=""/);
+  assert.match(html, /v3-sidebar-storage-warning/);
+  assert.match(storageButton, /Storage issue: Storage folder unavailable\./);
   assert.doesNotMatch(html, /Legacy profiles|Open legacy/);
 });
 
