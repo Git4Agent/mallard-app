@@ -169,7 +169,7 @@ test("a valid Pull plan renders an enabled non-modal Apply workspace while suppo
   ]);
 });
 
-test("a Pull review opens on the Apply summary by default", () => {
+test("a Pull review opens on the first step by default", () => {
   const html = renderToStaticMarkup(
     <RestorePlanView
       projectName="gam2"
@@ -193,8 +193,9 @@ test("a Pull review opens on the Apply summary by default", () => {
     />,
   );
 
-  assert.match(html, /aria-selected="true"[^>]*aria-label="Review"/);
-  assert.match(html, />Apply changes</);
+  assert.match(html, /aria-selected="true"[^>]*aria-label="Git &amp; sessions, 1 selected"/);
+  assert.doesNotMatch(html, /aria-selected="true"[^>]*aria-label="Review"/);
+  assert.match(html, />Next: Skills</, "the first step advances instead of applying");
 });
 
 test("the embedded Pull footer omits redundant helper copy", () => {
