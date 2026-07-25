@@ -677,13 +677,15 @@ export default function PushResourceWorkspace({
                 <span><Icon name="link" size={15} /><strong>Plugins</strong></span>
                 <span>{counts.plugins} included<Icon name="chevron-right" size={13} /></span>
               </button>
-              <details className="v3-sync-review-other">
-                <summary>
-                  <span><Icon name="settings" size={15} /><strong>Agent setup & tools</strong></span>
-                  <span>{countSelected(other, effectiveSelected)} included<Icon name="chevron-right" size={13} /></span>
-                </summary>
-                <ResourceInventory resources={other} selected={effectiveSelected} statuses={EMPTY_STATUSES} disabled={busy} onToggle={toggleResource} />
-              </details>
+              {other.length > 0 && (
+                <details className="v3-sync-review-other">
+                  <summary>
+                    <span><Icon name="settings" size={15} /><strong>Requirements</strong></span>
+                    <span>{other.length} unavailable<Icon name="chevron-right" size={13} /></span>
+                  </summary>
+                  <ResourceInventory resources={other} selected={effectiveSelected} statuses={EMPTY_STATUSES} disabled={busy} onToggle={toggleResource} />
+                </details>
+              )}
               {sessionIndex && effectiveSelected.has(sessionIndex.resource_id) && (
                 <p className="v3-sync-review-derived"><Icon name="check-circle" size={13} />The project session index is included automatically.</p>
               )}

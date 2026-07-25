@@ -40,7 +40,6 @@ const CATEGORY_BY_KIND: Record<string, ProjectResourceCategory> = {
   standalone_skill: "skills",
   plugin_skill: "skills",
   plugin: "plugins",
-  tool: "tools",
   requirement: "tools",
 };
 
