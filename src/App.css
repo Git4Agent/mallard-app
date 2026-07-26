@@ -3326,6 +3326,137 @@ summary:focus-visible {
   height: 28px;
   border: 0;
 }
+
+.v3-startup-screen {
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  color: var(--text-0);
+  background: var(--bg-0);
+}
+
+.v3-startup-drag-region {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 52px;
+}
+
+.v3-startup-content {
+  width: min(292px, calc(100vw - 64px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  animation: v3-startup-rise 360ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.v3-startup-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.v3-startup-mark {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+}
+
+.v3-startup-mark::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 7px;
+  height: 7px;
+  border: 2px solid var(--bg-0);
+  border-radius: 50%;
+  background: var(--accent);
+  animation: v3-startup-pulse 1.8s ease-in-out infinite;
+}
+
+.v3-startup-mark img {
+  width: 36px;
+  height: 36px;
+  display: block;
+  border-radius: 50%;
+}
+
+.v3-startup-brand h1 {
+  color: var(--text-0);
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.v3-startup-progress {
+  width: 100%;
+  margin-top: 22px;
+}
+
+.v3-startup-progress-track {
+  position: relative;
+  height: 2px;
+  display: block;
+  overflow: hidden;
+  border-radius: var(--r-pill);
+  background: var(--loader-track);
+}
+
+.v3-startup-progress-track > span {
+  position: relative;
+  width: var(--v3-startup-progress);
+  height: 100%;
+  display: block;
+  overflow: hidden;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 320ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.v3-startup-progress-track > span::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 22px;
+  background: color-mix(in srgb, var(--text-0) 38%, transparent);
+  animation: v3-startup-progress-glint 1.8s ease-in-out infinite;
+}
+
+.v3-startup-progress > p {
+  margin-top: 9px;
+  color: var(--text-2);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes v3-startup-rise {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes v3-startup-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+@keyframes v3-startup-progress-glint {
+  from { left: -42px; }
+  to { left: calc(100% + 12px); }
+}
+
 .v3-host-recovery {
   min-height: 100vh;
   min-height: 100svh;

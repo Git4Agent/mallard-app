@@ -56,6 +56,7 @@ import PushResourceWorkspace, {
 import ProjectSetupWorkspace, { type SetupCompletion } from "./ProjectSetupWorkspace";
 import ProjectSidebar from "./ProjectSidebar";
 import RestorePlanView from "./RestorePlanView";
+import StartupLoadingScreen, { type StartupStage } from "./StartupLoadingScreen";
 import { syncReviewSteps, type SyncReviewStep } from "./SyncReviewTabs";
 import { projectSyncApi } from "./api";
 import {
@@ -259,6 +260,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
   const [hostIdentityStatus, setHostIdentityStatus] = useState<HostIdentityStatus | null>(null);
   const [hostIdentityShellReady, setHostIdentityShellReady] = useState(false);
   const [hostIdentityError, setHostIdentityError] = useState<string | null>(null);
+  const [startupStage, setStartupStage] = useState<StartupStage>("installation");
   const [pendingBundleConnection, setPendingBundleConnection] = useState<PendingBundleConnection | null>(null);
   const [pendingPush, setPendingPush] = useState<PendingPush | null>(null);
   const [pushSelected, setPushSelected] = useState<Set<string>>(new Set());
@@ -711,6 +713,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       hostIdentityReady: false,
     });
     setLoading(true);
+    setStartupStage("installation");
     const failures: string[] = [];
     let nextProjects: LocalProjectRegistration[] = [];
     let nextConfig: SyncConfigV3 = EMPTY_CONFIG;
@@ -731,6 +734,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       }
       setHostIdentityStatus(nextHostIdentity);
       setHostIdentityError(null);
+      setStartupStage("settings");
     } catch (reason) {
       if (shellRequest.current !== requestId) return unavailableResult();
       setHostIdentityStatus(null);
@@ -753,6 +757,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       failures.push(`Configuration: ${errorMessage(reason)}`);
       setConfig(EMPTY_CONFIG);
     }
+    setStartupStage("projects");
     try {
       // Listing projects also completes any interrupted setup finalization,
       // so drafts are refreshed afterwards to reflect consumed drafts.
@@ -773,6 +778,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       failures.push(`Repository types: ${errorMessage(reason)}`);
       setRepositoryKinds({});
     }
+    setStartupStage("providers");
     try {
       nextProfiles = await projectSyncApi.listProviderProfiles();
       if (shellRequest.current !== requestId) return unavailableResult();
@@ -789,6 +795,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       failures.push(`Bindings: ${errorMessage(reason)}`);
       setBindings([]);
     }
+    setStartupStage("workspace");
     await loadConversationPathAudits(nextBindings, requestId);
     if (shellRequest.current !== requestId) return unavailableResult();
     setBackendError(failures.length > 0 ? failures.join(" · ") : null);
@@ -2410,16 +2417,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
   }
 
   if (!hostIdentityShellReady) {
-    return (
-      <main className="v3-host-recovery" aria-labelledby="v3-host-check-title">
-        <section className="v3-empty-state" role="status" aria-live="polite">
-          <div className="v3-empty-illustration" aria-hidden="true">
-            <Icon name="refresh" size={24} className="icon-spin" />
-          </div>
-          <h1 id="v3-host-check-title">Checking this installation…</h1>
-        </section>
-      </main>
-    );
+    return <StartupLoadingScreen stage={startupStage} />;
   }
 
   return (

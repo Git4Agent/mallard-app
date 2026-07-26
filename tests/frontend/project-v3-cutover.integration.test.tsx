@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { renderToStaticMarkup } from "react-dom/server";
+import StartupLoadingScreen from "../../src/components/project-sync/StartupLoadingScreen";
 import { repositoryFingerprintMatches } from "../../src/components/project-sync/model";
 
 test("ProjectSyncV3 is the only application interface", () => {
@@ -87,6 +89,7 @@ test("the titlebar marks active Git projects with the Git folder icon", () => {
 
 test("the shell verifies host identity and relies on backend auto-registration", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
+  const startupScreen = readFileSync("src/components/project-sync/StartupLoadingScreen.tsx", "utf8");
   const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
   const linksWorkspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
 
@@ -123,7 +126,8 @@ test("the shell verifies host identity and relies on backend auto-registration",
     /verifiedHostIdentity\.host_id !== nextHostIdentity\.host_id[\s\S]*return loadShell\(\);/,
   );
   assert.match(workspace, /if \(!hostIdentityShellReady\) \{/);
-  assert.match(workspace, /Checking this installation…/);
+  assert.match(workspace, /<StartupLoadingScreen stage=\{startupStage\} \/>/);
+  assert.match(startupScreen, /Checking installation…/);
   assert.match(workspace, /nextDetail\.binding\.state !== "active"/);
   assert.match(workspace, /expected_revision: nextDetail\.binding\?\.revision \?\? null/);
   assert.match(workspace, /nextDetail\.binding\?\.state === "active"/);
@@ -142,6 +146,21 @@ test("the shell verifies host identity and relies on backend auto-registration",
   assert.match(setupWorkspace, /mountedRef\.current && isWorkflowCurrent\(workflowGeneration\)/);
   assert.match(setupWorkspace, /if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, completion, workflowGeneration\)/);
   assert.doesNotMatch(workspace, /Host settings/);
+});
+
+test("the startup screen communicates minimal, staged loading progress", () => {
+  const html = renderToStaticMarkup(<StartupLoadingScreen stage="projects" />);
+  const css = readFileSync("src/App.css", "utf8");
+
+  assert.match(html, /<h1 id="v3-startup-title">Mallard<\/h1>/);
+  assert.match(html, /Finding projects…/);
+  assert.doesNotMatch(html, /Preparing your workspace/);
+  assert.match(html, /role="progressbar"/);
+  assert.match(html, /aria-valuenow="3"/);
+  assert.match(html, /aria-valuemax="5"/);
+  assert.match(css, /\.v3-startup-screen \{/);
+  assert.match(css, /@keyframes v3-startup-pulse/);
+  assert.match(css, /@keyframes v3-startup-progress-glint/);
 });
 
 test("host-scoped workflows keep their originating generation across async continuations", () => {
