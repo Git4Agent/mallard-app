@@ -664,7 +664,7 @@ export interface BundleSnapshotSummary extends RemoteBundleSummary {
 
 /** Payload of the `project-sync-fetch-progress` Tauri event. */
 export interface BundleFetchProgress {
-  phase: "plan" | "apply";
+  phase: "plan" | "apply" | "push";
   storage_id: string;
   bundle_id: string;
   index: number;

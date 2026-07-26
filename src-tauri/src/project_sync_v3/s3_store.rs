@@ -33,6 +33,7 @@ const S3_MAX_KEYS: usize = 1_000;
 const MAX_LIST_REQUESTS: usize = MAX_LIST_PAGE + 2;
 const R2_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const BULK_GET_CONCURRENCY: usize = 6;
+const BULK_PUT_CONCURRENCY: usize = 6;
 
 #[derive(Clone)]
 pub struct S3BundleObjectStore {
@@ -160,7 +161,7 @@ impl S3BundleObjectStore {
     async fn conditional_put_async(
         &self,
         key: &ObjectKey,
-        bytes: &[u8],
+        body: Bytes,
         expectation: &CasExpectation,
     ) -> Result<PutAttempt, String> {
         let mut request = self
@@ -168,7 +169,7 @@ impl S3BundleObjectStore {
             .put_object()
             .bucket(&self.bucket)
             .key(key.as_str())
-            .body(ByteStream::from(Bytes::copy_from_slice(bytes)));
+            .body(ByteStream::from(body));
         request = match expectation {
             CasExpectation::Absent => request.if_none_match("*"),
             CasExpectation::Match(etag) => {
@@ -202,15 +203,15 @@ impl S3BundleObjectStore {
     async fn put_immutable_async(
         &self,
         key: &ObjectKey,
-        bytes: &[u8],
+        bytes: Bytes,
     ) -> Result<ImmutablePutOutcome, String> {
         match self
-            .conditional_put_async(key, bytes, &CasExpectation::Absent)
+            .conditional_put_async(key, bytes.clone(), &CasExpectation::Absent)
             .await?
         {
             PutAttempt::Written(_) => Ok(ImmutablePutOutcome::Written),
             PutAttempt::PreconditionFailed => match self.get_async(key).await? {
-                Some(existing) => immutable_existing_outcome(key, bytes, existing),
+                Some(existing) => immutable_existing_outcome(key, &bytes, existing),
                 None => Err(format!(
                     "immutable put '{}' failed its absent precondition but the object is missing",
                     key
@@ -240,15 +241,18 @@ impl S3BundleObjectStore {
         &self,
         key: &ObjectKey,
         expectation: &CasExpectation,
-        bytes: &[u8],
+        bytes: Bytes,
     ) -> Result<CasOutcome, String> {
-        match self.conditional_put_async(key, bytes, expectation).await? {
+        match self
+            .conditional_put_async(key, bytes.clone(), expectation)
+            .await?
+        {
             PutAttempt::Written(Some(etag)) => Ok(CasOutcome::Written { etag }),
-            PutAttempt::Written(None) => self.resolve_cas_write(key, bytes).await,
+            PutAttempt::Written(None) => self.resolve_cas_write(key, &bytes).await,
             PutAttempt::PreconditionFailed => Ok(CasOutcome::Conflict {
                 current_etag: self.get_async(key).await?.map(|object| object.etag),
             }),
-            PutAttempt::Ambiguous(_) => self.resolve_cas_write(key, bytes).await,
+            PutAttempt::Ambiguous(_) => self.resolve_cas_write(key, &bytes).await,
         }
     }
 
@@ -426,7 +430,54 @@ impl BundleObjectStore for S3BundleObjectStore {
         if bytes.len() as u64 > MAX_FILE_BYTES {
             return Err(format!("object '{}' exceeds the write limit", key));
         }
-        self.run("immutable put", self.put_immutable_async(key, bytes))
+        self.run(
+            "immutable put",
+            self.put_immutable_async(key, Bytes::copy_from_slice(bytes)),
+        )
+    }
+
+    /// Bounded-concurrency bulk upload. Outcomes line up with `objects`; the
+    /// first failure aborts the remaining transfers, like the sequential loop
+    /// it replaces.
+    fn put_many(&self, objects: Vec<(ObjectKey, Bytes)>) -> Result<Vec<ImmutablePutOutcome>, String> {
+        for (key, bytes) in &objects {
+            if bytes.len() as u64 > MAX_FILE_BYTES {
+                return Err(format!("object '{}' exceeds the write limit", key));
+            }
+        }
+        if objects.len() <= 1 {
+            return objects
+                .into_iter()
+                .map(|(key, bytes)| self.run("immutable put", self.put_immutable_async(&key, bytes)))
+                .collect();
+        }
+        let count = objects.len();
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(BULK_PUT_CONCURRENCY));
+        self.run("bulk put", async {
+            let mut join_set = tokio::task::JoinSet::new();
+            for (index, (key, bytes)) in objects.into_iter().enumerate() {
+                let store = self.clone();
+                let semaphore = semaphore.clone();
+                join_set.spawn(async move {
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| "bulk put concurrency gate closed".to_string())?;
+                    Ok::<_, String>((index, store.put_immutable_async(&key, bytes).await?))
+                });
+            }
+            let mut outcomes: Vec<Option<ImmutablePutOutcome>> = Vec::new();
+            outcomes.resize_with(count, || None);
+            while let Some(joined) = join_set.join_next().await {
+                let (index, outcome) =
+                    joined.map_err(|error| format!("bulk put worker failed: {}", error))??;
+                outcomes[index] = Some(outcome);
+            }
+            Ok(outcomes
+                .into_iter()
+                .map(|slot| slot.expect("every bulk-put index resolves"))
+                .collect())
+        })
     }
 
     fn compare_and_swap(
@@ -443,7 +494,7 @@ impl BundleObjectStore for S3BundleObjectStore {
         }
         self.run(
             "compare-and-swap",
-            self.compare_and_swap_async(key, expectation, bytes),
+            self.compare_and_swap_async(key, expectation, Bytes::copy_from_slice(bytes)),
         )
     }
 
@@ -844,6 +895,72 @@ mod tests {
                 etag: sha256_bytes(b"head-two")
             }
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn put_many_bulk_uploads_and_adopts_existing_objects() {
+        let server = TestS3::start().await;
+        let store = server.store();
+        let repository = ".mallard/v1/repositories/0123456789abcdef0123456789abcdef";
+        let existing =
+            ObjectKey::parse(format!("{}/_objects/{}", repository, "b".repeat(64))).unwrap();
+        server.seed(existing.as_str().to_string(), b"already there".to_vec());
+        let fresh_one =
+            ObjectKey::parse(format!("{}/_objects/{}", repository, "c".repeat(64))).unwrap();
+        let fresh_two =
+            ObjectKey::parse(format!("{}/_objects/{}", repository, "d".repeat(64))).unwrap();
+        // More objects than the concurrency window, exercising the semaphore.
+        let filler: Vec<ObjectKey> = (0..8)
+            .map(|index| {
+                ObjectKey::parse(format!("{}/_objects/{:064x}", repository, index)).unwrap()
+            })
+            .collect();
+        let mut objects = vec![
+            (fresh_one.clone(), Bytes::from_static(b"payload one")),
+            (existing.clone(), Bytes::from_static(b"already there")),
+            (fresh_two.clone(), Bytes::from_static(b"payload two")),
+        ];
+        for (index, key) in filler.iter().enumerate() {
+            objects.push((
+                key.clone(),
+                Bytes::from(format!("filler {}", index).into_bytes()),
+            ));
+        }
+        let store_for_bulk = store.clone();
+        let outcomes = blocking(move || store_for_bulk.put_many(objects))
+            .await
+            .unwrap();
+        assert_eq!(outcomes.len(), 11);
+        assert_eq!(outcomes[0], ImmutablePutOutcome::Written);
+        assert_eq!(outcomes[1], ImmutablePutOutcome::AlreadyPresent);
+        assert_eq!(outcomes[2], ImmutablePutOutcome::Written);
+        assert!(outcomes[3..]
+            .iter()
+            .all(|outcome| *outcome == ImmutablePutOutcome::Written));
+        {
+            let stored = server.objects.lock().expect("test S3 lock");
+            assert_eq!(
+                stored.get(fresh_one.as_str()).map(Vec::as_slice),
+                Some(&b"payload one"[..])
+            );
+            assert_eq!(
+                stored.get(fresh_two.as_str()).map(Vec::as_slice),
+                Some(&b"payload two"[..])
+            );
+            for (index, key) in filler.iter().enumerate() {
+                assert_eq!(
+                    stored.get(key.as_str()).cloned(),
+                    Some(format!("filler {}", index).into_bytes())
+                );
+            }
+        }
+
+        // Conflicting bytes at an existing key fail the batch.
+        let conflict = vec![(existing, Bytes::from_static(b"different bytes"))];
+        let store_for_conflict = store.clone();
+        assert!(blocking(move || store_for_conflict.put_many(conflict))
+            .await
+            .is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

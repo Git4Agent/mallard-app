@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  BundleFetchProgress,
   BundleRecipe,
   CapabilityStatusReport,
   LocalProjectSummary,
@@ -54,6 +55,8 @@ interface Props {
   projectContentLoading?: boolean;
   projectContentRemovals?: ReadonlySet<string>;
   acknowledgedWarningDigests?: ReadonlySet<string>;
+  /** Live upload progress while the push publishes; renders in the footer button. */
+  fetchProgress?: BundleFetchProgress | null;
   showProjectFiles?: boolean;
   initialStep?: SyncReviewStep;
   activeStep?: SyncReviewStep;
@@ -323,6 +326,7 @@ export default function PushResourceWorkspace({
   projectContentLoading = false,
   projectContentRemovals = new Set(),
   acknowledgedWarningDigests = new Set(),
+  fetchProgress = null,
   showProjectFiles = false,
   initialStep = "history",
   activeStep: controlledActiveStep,
@@ -719,7 +723,11 @@ export default function PushResourceWorkspace({
         ) : (
           <button type="button" className="btn btn-primary v3-pull-apply-button" onClick={onPush} disabled={busy || (selectedCount === 0 && projectContentRemovals.size === 0) || blockingCount > 0}>
             <Icon name={busy ? "refresh" : "upload"} size={16} className={busy ? "icon-spin" : undefined} />
-            {busy ? "Pushing…" : "Push"}
+            {busy
+              ? (fetchProgress && fetchProgress.phase === "push"
+                ? `${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`
+                : "Pushing…")
+              : "Push"}
           </button>
         )}
       </footer>

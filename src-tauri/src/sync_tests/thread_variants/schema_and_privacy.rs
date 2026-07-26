@@ -1,7 +1,5 @@
 use super::harness::{chain, ThreadSpec, VariantWorld};
-use crate::project_sync_v3::bundle_engine::{
-    BundleObjectStore, PublishBundleRequest, PublishExpectation,
-};
+use crate::project_sync_v3::bundle_engine::{BundleObjectStore, PublishBundleRequest};
 use crate::project_sync_v3::domain::{
     BundleId, BundleIdentity, BundleKind, CapturedWith,
     ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
@@ -423,7 +421,7 @@ fn schema4_writer_is_rejected_on_a_schema6_head() {
             codec_versions: BTreeMap::new(),
         },
         captured: CapturedResources::default(),
-        expected_head: PublishExpectation::Match(published.head_token),
+        observed_head: Some((published.snapshot.head.clone(), published.head_token)),
         updated_at: 20,
     });
     assert!(schema4_attempt

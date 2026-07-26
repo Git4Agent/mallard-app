@@ -8,7 +8,7 @@ use super::bundle_engine::{
     dependencies_from_manifest, write_immutable_backup, write_target_atomic, BundleBytes,
     BundleEngine, BundleObjectStore, CasExpectation, CasOutcome, FetchProgress,
     ImmutablePutOutcome, KnownMaterializedBase, LocalBundleObjectStore, ObjectCache, ObjectKey,
-    ObjectPrefix, PublishBundleRequest, PublishExpectation, RemoteBundlePage, StoreListPage,
+    ObjectPrefix, PublishBundleRequest, RemoteBundlePage, StoreListPage,
     StoredObject,
 };
 use super::chat_history::{self, CodexThreadDetailsPage, ProjectChatHistory};
@@ -1650,6 +1650,20 @@ pub async fn push_bundle(
     let worker_app = app.clone();
     let worker_log = log.clone();
     let selected_count = recipe.as_ref().map(|recipe| recipe.entries.len());
+    let mut upload_progress = repository
+        .load_config()
+        .ok()
+        .and_then(|config| config.project(&local_project_id).cloned())
+        .map(|project| {
+            FetchProgressEmitter::new(
+                app.clone(),
+                log.clone(),
+                "push",
+                storage_id.clone(),
+                storage.clone(),
+                project.bundle_id,
+            )
+        });
     let result = run_blocking(move || {
         worker_log.emit(
             &worker_app,
@@ -1674,6 +1688,11 @@ pub async fn push_bundle(
                     .unwrap_or_default()
                     .into_iter()
                     .collect(),
+            },
+            &mut |update| {
+                if let Some(emitter) = upload_progress.as_mut() {
+                    emitter.observe(update);
+                }
             },
         )
     })
@@ -1730,10 +1749,11 @@ fn format_mb(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
 
-/// Bridges engine fetch progress to the UI: one `pull.fetch_started` log
-/// line when the first object lands, a throttled `project-sync-fetch-progress`
-/// event stream while the download runs, and a `pull.fetch_completed` line
-/// with byte and throughput totals at the end.
+/// Bridges engine transfer progress to the UI: one started log line when the
+/// first object lands, a throttled `project-sync-fetch-progress` event stream
+/// while the transfer runs, and a completed line with byte and throughput
+/// totals at the end. Pull phases (`plan`/`apply`) log as downloads; the
+/// `push` phase logs as uploads.
 struct FetchProgressEmitter {
     app: tauri::AppHandle,
     log: ActivityLogScope,
@@ -1768,18 +1788,32 @@ impl FetchProgressEmitter {
 
     fn observe(&mut self, progress: FetchProgress) {
         let now = Instant::now();
+        let upload = self.phase == "push";
         if self.started.is_none() {
             self.started = Some(now);
             self.log.emit(
                 &self.app,
                 "info",
-                "pull.fetch_started",
-                &format!(
-                    "↓  Downloading {} objects ({}) from {}",
-                    progress.total_objects,
-                    format_mb(progress.total_bytes),
-                    self.storage_name
-                ),
+                if upload {
+                    "push.upload_started"
+                } else {
+                    "pull.fetch_started"
+                },
+                &if upload {
+                    format!(
+                        "↑  Uploading {} objects ({}) to {}",
+                        progress.total_objects,
+                        format_mb(progress.total_bytes),
+                        self.storage_name
+                    )
+                } else {
+                    format!(
+                        "↓  Downloading {} objects ({}) from {}",
+                        progress.total_objects,
+                        format_mb(progress.total_bytes),
+                        self.storage_name
+                    )
+                },
             );
         }
         let last = progress.index == progress.total_objects;
@@ -1814,9 +1848,15 @@ impl FetchProgressEmitter {
             self.log.emit(
                 &self.app,
                 "ok",
-                "pull.fetch_completed",
+                if upload {
+                    "push.upload_completed"
+                } else {
+                    "pull.fetch_completed"
+                },
                 &format!(
-                    "↓  Downloaded {} in {:.1}s ({:.1} MB/s)",
+                    "{}  {} {} in {:.1}s ({:.1} MB/s)",
+                    if upload { "↑" } else { "↓" },
+                    if upload { "Uploaded" } else { "Downloaded" },
                     format_mb(progress.total_bytes),
                     elapsed,
                     rate
@@ -3443,6 +3483,16 @@ impl BundleObjectStore for ConfiguredStore {
         }
     }
 
+    fn put_many(
+        &self,
+        objects: Vec<(ObjectKey, bytes::Bytes)>,
+    ) -> Result<Vec<ImmutablePutOutcome>, String> {
+        match self {
+            Self::Local(store) => store.put_many(objects),
+            Self::S3(store) => store.put_many(objects),
+        }
+    }
+
     fn compare_and_swap(
         &self,
         key: &ObjectKey,
@@ -4617,7 +4667,6 @@ fn get_project_capability_status_with_repository(
                 local_project_id
             )
         })?;
-
     let mut warnings = Vec::new();
     let mut profiles = Vec::new();
     for (provider, profile_id) in &binding.profile_ids {
@@ -4963,6 +5012,7 @@ fn push_bundle_with_recipe_with_repository(
         storage_id,
         requested_recipe,
         ProjectContentPushReview::default(),
+        &mut |_| {},
     )
 }
 
@@ -4972,6 +5022,7 @@ fn push_bundle_reviewed_with_repository(
     storage_id: &StorageId,
     requested_recipe: Option<BundleRecipe>,
     project_content_review: ProjectContentPushReview,
+    on_progress: &mut dyn FnMut(FetchProgress),
 ) -> Result<ProjectOperationResult, String> {
     let _host_operation = repository.acquire_host_operation()?;
     let config = repository.load_config()?;
@@ -5177,18 +5228,16 @@ fn push_bundle_reviewed_with_repository(
     }
     let capture = provider_capture::capture_recipe(&capture_request, &push_recipe)?;
     let (_, engine) = storage_engine(repository, storage_id)?;
-    let expected_head = match (
-        engine.read_head(&project.bundle_id)?,
-        project.recipe_bases.get(storage_id),
-    ) {
-        (None, None) => PublishExpectation::Absent,
+    let observed_head = engine.read_head(&project.bundle_id)?;
+    match (observed_head.as_ref(), project.recipe_bases.get(storage_id)) {
+        (None, None) => {}
         (None, Some(_)) => {
             return Err(
                 "remote bundle head is missing but this project has a prior base; review before republishing"
                     .to_string(),
             )
         }
-        (Some((_, _)), None) => {
+        (Some(_), None) => {
             return Err(
                 "remote bundle already exists and this replica has no reviewed base; pull and review it before pushing"
                     .to_string(),
@@ -5200,38 +5249,38 @@ fn push_bundle_reviewed_with_repository(
                     .to_string(),
             )
         }
-        (Some((head, token)), Some(base))
+        (Some((head, _)), Some(base))
             if head.generation == base.generation
-                && head.manifest_sha256 == base.manifest_sha256 =>
-        {
-            PublishExpectation::Match(token)
-        }
+                && head.manifest_sha256 == base.manifest_sha256 => {}
         (Some(_), Some(_)) => {
             return Err(
                 "remote bundle advanced since this replica's base; pull and review before pushing"
                     .to_string(),
             )
         }
-    };
+    }
     let pushed_at = now_secs();
-    let published = engine.publish(PublishBundleRequest {
-        identity: BundleIdentity {
-            bundle_id: project.bundle_id.clone(),
-            display_name: project.display_name.clone(),
-            kind: BundleKind::Project,
-            repository_fingerprint: project.repository_fingerprint.clone(),
+    let published = engine.publish_with_progress(
+        PublishBundleRequest {
+            identity: BundleIdentity {
+                bundle_id: project.bundle_id.clone(),
+                display_name: project.display_name.clone(),
+                kind: BundleKind::Project,
+                repository_fingerprint: project.repository_fingerprint.clone(),
+            },
+            recipe: push_recipe.clone(),
+            captured_with: CapturedWith {
+                app_version: env!("CARGO_PKG_VERSION").to_string(),
+                codex_version: None,
+                claude_version: None,
+                codec_versions: BTreeMap::new(),
+            },
+            captured: capture,
+            observed_head,
+            updated_at: pushed_at,
         },
-        recipe: push_recipe.clone(),
-        captured_with: CapturedWith {
-            app_version: env!("CARGO_PKG_VERSION").to_string(),
-            codex_version: None,
-            claude_version: None,
-            codec_versions: BTreeMap::new(),
-        },
-        captured: capture,
-        expected_head,
-        updated_at: pushed_at,
-    })?;
+        on_progress,
+    )?;
     let generation = published.snapshot.head.generation;
     let commit_id = published.snapshot.head.commit_id.clone();
     let manifest_sha256 = published.snapshot.head.manifest_sha256.clone();
@@ -5321,6 +5370,11 @@ fn push_bundle_reviewed_with_repository(
         current.updated_at = pushed_at;
         Ok(())
     })?;
+    let state = if published.published {
+        "synced"
+    } else {
+        "unchanged"
+    };
     let results = published
         .snapshot
         .manifest
@@ -5329,15 +5383,19 @@ fn push_bundle_reviewed_with_repository(
         .cloned()
         .map(|resource_id| OperationResourceResult {
             resource_id,
-            state: "synced".to_string(),
+            state: state.to_string(),
             message: None,
         })
         .collect::<Vec<_>>();
     Ok(ProjectOperationResult {
         success: true,
-        message: format!("Published generation {}", generation),
+        message: if published.published {
+            format!("Published generation {}", generation)
+        } else {
+            format!("Already up to date — generation {}", generation)
+        },
         operation_id: Some(commit_id),
-        resources_changed: Some(results.len()),
+        resources_changed: Some(if published.published { results.len() } else { 0 }),
         generation: Some(generation),
         results,
     })
@@ -10386,6 +10444,7 @@ mod tests {
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
+            &mut |_| {},
         )
         .unwrap();
         assert!(pushed.success, "{}", pushed.message);
@@ -10601,6 +10660,7 @@ mod tests {
                 removal_ids: selected_ids.clone(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
+            &mut |_| {},
         )
         .unwrap();
 
@@ -10751,6 +10811,7 @@ mod tests {
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
+            &mut |_| {},
         )
         .unwrap_err();
         assert!(error.contains("Git"), "{error}");
@@ -10791,6 +10852,7 @@ mod tests {
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
+            &mut |_| {},
         )
         .unwrap_err();
         assert!(missing_ack.contains("acknowledgement"));
@@ -10806,6 +10868,7 @@ mod tests {
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::from([first_warning.clone()]),
             },
+            &mut |_| {},
         )
         .unwrap_err();
         assert!(stale.contains("changed after Scan"), "{stale}");
@@ -10825,6 +10888,7 @@ mod tests {
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::from([refreshed_warning]),
             },
+            &mut |_| {},
         )
         .unwrap();
         assert!(published.success);
@@ -11987,11 +12051,45 @@ mod tests {
             .unwrap();
         }
 
+        // Identical content republishes as a no-op, so each push appends a
+        // turn to an owned Codex session first to genuinely advance the
+        // generation on its storage.
+        let session_id = "019f7500-0000-7000-8000-0000000000aa";
+        let sessions = temp.path().join("codex-home/sessions/2026/07/20");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join(format!("rollout-{}.jsonl", session_id));
+        std::fs::write(
+            &rollout,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n",
+                session_id,
+                serde_json::to_string(project_root.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+        let mut turn = 0_usize;
+        let mut advance_local_content = move || {
+            turn += 1;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&rollout)
+                .and_then(|mut file| {
+                    use std::io::Write as _;
+                    writeln!(
+                        file,
+                        "{{\"type\":\"response_item\",\"payload\":{{\"text\":\"turn {}\"}}}}",
+                        turn
+                    )
+                })
+                .unwrap();
+        };
         for _ in 0..2 {
+            advance_local_content();
             push_bundle_with_repository(&repo, &project.local_project_id, &first_storage_id)
                 .unwrap();
         }
         for _ in 0..3 {
+            advance_local_content();
             push_bundle_with_repository(&repo, &project.local_project_id, &selected_storage_id)
                 .unwrap();
         }
@@ -12025,6 +12123,7 @@ mod tests {
             restore.bundle_id
         );
 
+        advance_local_content();
         push_bundle_with_repository(&repo, &project.local_project_id, &selected_storage_id)
             .unwrap();
         assert!(plan_dependencies_with_repository(&repo, &restore.plan_id)
@@ -12034,6 +12133,85 @@ mod tests {
             get_restore_readiness_with_repository(&repo, &restore.plan_id)
                 .unwrap_err()
                 .contains("bundle head changed after restore planning")
+        );
+    }
+
+    #[test]
+    fn push_without_changes_is_a_noop_that_records_the_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("noop-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+
+        let session_id = "019f7500-0000-7000-8000-0000000000bb";
+        let sessions = codex_home.join("sessions/2026/07/21");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join(format!("rollout-{}.jsonl", session_id)),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n",
+                session_id,
+                serde_json::to_string(project_root.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let first =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert!(first.success);
+        assert_eq!(first.generation, Some(1));
+        assert!(
+            first.message.contains("Published generation 1"),
+            "{}",
+            first.message
+        );
+        let first_base = repo
+            .load_config()
+            .unwrap()
+            .project(&project.local_project_id)
+            .unwrap()
+            .recipe_bases
+            .get(&storage_id)
+            .cloned()
+            .unwrap();
+
+        let repeat =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert!(repeat.success);
+        assert_eq!(repeat.generation, Some(1));
+        assert!(
+            repeat.message.contains("Already up to date"),
+            "{}",
+            repeat.message
+        );
+        assert!(!repeat.results.is_empty());
+        assert!(repeat
+            .results
+            .iter()
+            .all(|result| result.state == "unchanged"));
+        assert_eq!(repeat.resources_changed, Some(0));
+
+        let repeat_base = repo
+            .load_config()
+            .unwrap()
+            .project(&project.local_project_id)
+            .unwrap()
+            .recipe_bases
+            .get(&storage_id)
+            .cloned()
+            .unwrap();
+        assert_eq!(repeat_base.generation, first_base.generation);
+        assert_eq!(repeat_base.manifest_sha256, first_base.manifest_sha256);
+        assert!(repeat_base.last_push_at >= first_base.last_push_at);
+
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        assert_eq!(
+            engine.inspect(&project.bundle_id).unwrap().head.generation,
+            1
         );
     }
 

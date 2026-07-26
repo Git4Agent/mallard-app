@@ -1103,6 +1103,9 @@ export default function ProjectLinksWorkspace({
                         publishing: pushPublishing,
                       });
                       const pushProgress = pushPreparing || pushPublishing;
+                      const pushUploadReadout = pushPublishing && fetchProgress?.phase === "push"
+                        ? `${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`
+                        : null;
                       const storageControlsLocked = busy
                         || !!runningAction
                         || storageActionLockedForReview(activeReviewKind, "storage");
@@ -1402,7 +1405,7 @@ export default function ProjectLinksWorkspace({
                                     size={15}
                                     className={pushProgress ? "icon-spin" : undefined}
                                   />
-                                  {pushLabel}
+                                  {pushUploadReadout ?? pushLabel}
                                 </button>
                               </div>
                             </div>

@@ -473,9 +473,9 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
   }, []);
 
   useEffect(() => {
-    // Live download progress for Pull plan/apply. The final per-bundle event
-    // (index == total) clears the readout so the button returns to its
-    // "Reviewing…" state while the plan is still being built.
+    // Live transfer progress for Pull plan/apply and Push uploads. The final
+    // per-bundle event (index == total) clears the readout so the button
+    // returns to its static busy label while the remaining work finishes.
     const unlisten = listen<BundleFetchProgress>("project-sync-fetch-progress", (event) => {
       setFetchProgress(event.payload.index >= event.payload.total_objects ? null : event.payload);
     });
@@ -1466,6 +1466,42 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     }
   };
 
+  // Narrow post-push reconcile, modeled on reconcileExternalChanges: the push
+  // already succeeded and reported, so the UI unblocks immediately while this
+  // refreshes config/link/project state in the background. Inventory refresh
+  // is deliberately deferred to the next dialog open or full refresh().
+  const refreshAfterPush = async (
+    projectId: string,
+    storageId: string,
+    workflowGeneration: number,
+  ) => {
+    const stale = () => hostWorkflowGeneration.current !== workflowGeneration;
+    try {
+      const [nextConfig, nextDetail] = await Promise.all([
+        projectSyncApi.getConfig(),
+        projectSyncApi.getProject(projectId),
+      ]);
+      if (stale()) return;
+      if (nextConfig.schema === PROJECT_SYNC_SCHEMA) setConfig(nextConfig);
+      if (!nextDetail) return;
+      setDetail(nextDetail);
+      setRegistrations((current) => upsertProject(current, nextDetail.project));
+      if (nextDetail.binding) {
+        setBindings((current) => upsertBinding(current, nextDetail.binding as ProjectBinding));
+      }
+      if (nextDetail.binding?.state === "active") {
+        const nextReadiness = await projectSyncApi.getReadiness(
+          storageId,
+          nextDetail.project.bundle_id,
+          nextDetail.binding,
+        );
+        if (!stale()) setReadiness(nextReadiness);
+      }
+    } catch {
+      // Background reconcile stays silent; the push result was already shown.
+    }
+  };
+
   const publishProject = async (
     projectId: string,
     storageId: string,
@@ -1497,9 +1533,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       setPushWarningAcknowledgements(new Set());
       setActiveProjectId(projectId);
       setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
-      const { nextConfig, hostIdentityReady } = await loadShell();
-      if (!hostIdentityReady || hostWorkflowGeneration.current !== workflowGeneration) return;
-      await loadProjectData(projectId, nextConfig, storageId, workflowGeneration);
+      void refreshAfterPush(projectId, storageId, workflowGeneration);
     } catch (reason) {
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
       const message = errorMessage(reason);
@@ -2278,6 +2312,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
         projectContentLoading={projectContentLoading}
         projectContentRemovals={pushProjectContentRemovals}
         acknowledgedWarningDigests={pushWarningAcknowledgements}
+        fetchProgress={fetchProgress}
         showProjectFiles={pendingPush.showProjectFiles}
         activeStep={pushReviewStep}
         onStepChange={setPushReviewStep}

@@ -5,6 +5,7 @@
 //! the same immutable-object and head-CAS protocol without exposing UI paths
 //! to manifests.
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -131,6 +132,16 @@ pub trait BundleObjectStore: Send + Sync {
     }
 
     fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String>;
+
+    /// Store several immutable objects; outcomes line up with `objects`.
+    /// Remote stores override this with a bounded-concurrency implementation.
+    fn put_many(&self, objects: Vec<(ObjectKey, Bytes)>) -> Result<Vec<ImmutablePutOutcome>, String> {
+        objects
+            .iter()
+            .map(|(key, bytes)| self.put_immutable(key, bytes))
+            .collect()
+    }
+
     fn compare_and_swap(
         &self,
         key: &ObjectKey,
@@ -422,12 +433,18 @@ pub struct PublishBundleRequest {
     pub recipe: BundleRecipe,
     pub captured_with: CapturedWith,
     pub captured: CapturedResources,
-    pub expected_head: PublishExpectation,
+    /// Head observed by the caller's single read; the head CAS on its etag is
+    /// the concurrency guard, so publish never re-reads the head itself.
+    pub observed_head: Option<(BundleHead, HeadToken)>,
     pub updated_at: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct PublishedBundle {
+    /// False when the candidate manifest was semantically identical to the
+    /// observed head's: nothing was written and `snapshot`/`head_token` are
+    /// the observed generation's.
+    pub published: bool,
     pub snapshot: BundleSnapshot,
     // Read by CAS-chaining tests; command flows re-read the head instead.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -491,6 +508,9 @@ const OBJECT_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 /// Objects per `get_many` round in `EngineByteSource::prefetch` — one
 /// concurrent store window per batch, with progress after each object.
 const PREFETCH_BATCH_OBJECTS: usize = 6;
+/// Objects per `put_many` round in `publish_with_progress`; same shape as
+/// the prefetch batching, with progress after each object.
+const UPLOAD_BATCH_OBJECTS: usize = 6;
 
 /// Process-wide LRU for verified payload objects, keyed by content hash.
 /// Bundle objects are immutable, so an entry can never go stale; eviction
@@ -979,8 +999,23 @@ impl<S: BundleObjectStore> BundleEngine<S> {
 
     /// Publish immutable objects and history first, then compare-and-swap the
     /// single bundle head. A failed CAS can leave only unreachable immutable
-    /// objects, never a partially visible generation.
+    /// objects, never a partially visible generation. Payloads are content-
+    /// addressed under `_objects/<sha256>`, so bytes already referenced by the
+    /// previous manifest never travel again and a semantically unchanged
+    /// publish writes nothing at all.
     pub fn publish(&self, request: PublishBundleRequest) -> Result<PublishedBundle, String> {
+        self.publish_with_progress(request, &mut |_| {})
+    }
+
+    /// `publish` with per-object upload progress, mirroring the
+    /// `fetch`/`fetch_with_progress` split. Progress totals cover only the
+    /// objects that actually upload; a publish with full payload reuse emits
+    /// no events.
+    pub fn publish_with_progress(
+        &self,
+        mut request: PublishBundleRequest,
+        on_progress: &mut dyn FnMut(FetchProgress),
+    ) -> Result<PublishedBundle, String> {
         request.identity.validate()?;
         request.recipe.validate()?;
         if request.identity.kind != BundleKind::Project {
@@ -990,7 +1025,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             return Err("publish timestamp must be non-zero".to_string());
         }
 
-        let current = self.read_head(&request.identity.bundle_id)?;
+        let current = request.observed_head.take();
         if current
             .as_ref()
             .is_some_and(|(head, _)| head.schema_version == BUNDLE_SCHEMA_V6)
@@ -999,22 +1034,15 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 "schema-6 bundle requires the conversation-thread publication path".to_string(),
             );
         }
-        let cas_expectation = match (&request.expected_head, &current) {
-            (PublishExpectation::Absent, None) => CasExpectation::Absent,
-            (PublishExpectation::Absent, Some(_)) => {
-                return Err("bundle head changed: expected an absent head".to_string())
-            }
-            (PublishExpectation::Match(expected), Some((head, token)))
-                if expected == token
-                    && expected.generation == head.generation
-                    && expected.commit_id == head.commit_id
-                    && expected.manifest_sha256 == head.manifest_sha256 =>
-            {
-                CasExpectation::Match(token.etag.clone())
-            }
-            (PublishExpectation::Match(_), _) => {
-                return Err("bundle head changed before publication".to_string())
-            }
+        if current
+            .as_ref()
+            .is_some_and(|(head, _)| head.bundle_id != request.identity.bundle_id)
+        {
+            return Err("observed head belongs to a different bundle".to_string());
+        }
+        let cas_expectation = match &current {
+            None => CasExpectation::Absent,
+            Some((_, token)) => CasExpectation::Match(token.etag.clone()),
         };
         let previous_manifest = current
             .as_ref()
@@ -1025,7 +1053,6 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             .map(|(head, _)| head.generation.saturating_add(1))
             .unwrap_or(1);
         let commit_id = random_named_id("commit")?;
-        let upload_id = random_named_id("upload")?;
 
         let captured_descriptors = provider_capture::domain_resources(&request.captured)?;
         // Only fetch materializes dependency actions, but invalid captured
@@ -1039,8 +1066,26 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             request.updated_at,
         )?;
 
-        for (logical_path, captured) in &request.captured.files {
-            let logical = LogicalPath::parse(logical_path.clone())?;
+        // Content identities the previous manifest already backs with a
+        // content-addressed object; those bytes are known-present remotely
+        // and never travel again.
+        let previous_shas: BTreeSet<&str> = previous_manifest
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .files
+                    .values()
+                    .filter(|entry| entry.object_key == format!("_objects/{}", entry.sha256))
+                    .map(|entry| entry.sha256.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let captured_files = std::mem::take(&mut request.captured.files);
+        // Keyed by digest: identical bytes captured under several logical
+        // paths upload once and share one object.
+        let mut pending: BTreeMap<String, Bytes> = BTreeMap::new();
+        for (logical_path, captured) in captured_files {
+            let logical = LogicalPath::parse(logical_path)?;
             let resource_id = ResourceId::parse(captured.resource_id.clone())?;
             if !request.recipe.entries.contains_key(&resource_id) {
                 return Err(format!(
@@ -1048,23 +1093,31 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                     logical, resource_id
                 ));
             }
+            // Reused payloads bypass the store's write-time size check, so
+            // enforce the limit here for every entry.
+            if captured.bytes.len() as u64 > domain::MAX_FILE_BYTES {
+                return Err(format!(
+                    "captured file '{}' exceeds the write limit",
+                    logical
+                ));
+            }
             let digest = sha256(&captured.bytes);
-            let relative_object_key = format!("_uploads/{}/files/{}", upload_id, logical);
-            let full_object_key =
-                repository_object_key(&request.identity.bundle_id, &relative_object_key)?;
-            self.store
-                .put_immutable(&full_object_key, &captured.bytes)?;
             files.insert(
                 logical,
                 BundleFileEntry {
                     resource_id,
-                    sha256: digest,
+                    sha256: digest.clone(),
                     size: captured.bytes.len() as u64,
                     source_mtime: captured.source_mtime,
-                    object_key: relative_object_key,
+                    object_key: format!("_objects/{}", digest),
                     mode: Some(captured.mode & 0o777),
                 },
             );
+            if !previous_shas.contains(digest.as_str()) {
+                pending
+                    .entry(digest)
+                    .or_insert_with(|| Bytes::from(captured.bytes));
+            }
         }
 
         for (logical_path, captured) in &request.captured.directories {
@@ -1102,6 +1155,55 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             tombstones,
         };
         manifest.validate()?;
+
+        // A semantically identical publish returns the observed generation
+        // untouched: no payloads, no manifest, no commit, no head CAS.
+        if let (Some((head, token)), Some(previous)) = (&current, &previous_manifest) {
+            if manifest_is_semantic_noop(previous, &manifest) {
+                return Ok(PublishedBundle {
+                    published: false,
+                    snapshot: BundleSnapshot {
+                        storage_id: self.storage_id.clone(),
+                        head: head.clone(),
+                        manifest: previous.clone(),
+                        fetched_at: request.updated_at,
+                    },
+                    head_token: token.clone(),
+                });
+            }
+        }
+
+        // Upload new payloads in bounded-concurrency batches, all strictly
+        // before the manifest/commit/head writes that reference them.
+        let total_objects = pending.len();
+        let total_bytes: u64 = pending.values().map(|bytes| bytes.len() as u64).sum();
+        let pending: Vec<(String, Bytes)> = pending.into_iter().collect();
+        let mut uploaded_objects = 0_usize;
+        let mut uploaded_bytes = 0_u64;
+        for chunk in pending.chunks(UPLOAD_BATCH_OBJECTS) {
+            let mut batch = Vec::with_capacity(chunk.len());
+            for (digest, bytes) in chunk {
+                let key = repository_object_key(
+                    &request.identity.bundle_id,
+                    &format!("_objects/{}", digest),
+                )?;
+                batch.push((key, bytes.clone()));
+            }
+            // `AlreadyPresent` outcomes are success: the object was adopted
+            // from an earlier interrupted publish of the same content.
+            self.store.put_many(batch)?;
+            for (_, bytes) in chunk {
+                uploaded_objects += 1;
+                uploaded_bytes = uploaded_bytes.saturating_add(bytes.len() as u64);
+                on_progress(FetchProgress {
+                    index: uploaded_objects,
+                    total_objects,
+                    fetched_bytes: uploaded_bytes,
+                    total_bytes,
+                });
+            }
+        }
+
         let manifest_bytes = serde_json::to_vec(&manifest)
             .map_err(|e| format!("serialize bundle manifest: {}", e))?;
         let manifest_sha256 = sha256(&manifest_bytes);
@@ -1172,6 +1274,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             fetched_at: request.updated_at,
         };
         Ok(PublishedBundle {
+            published: true,
             snapshot,
             head_token: HeadToken {
                 generation: head.generation,
@@ -1318,7 +1421,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
 
         if let (Some((head, token)), Some(previous)) = (&current, &previous_manifest) {
             if previous.schema_version == BUNDLE_SCHEMA_V6
-                && schema6_manifest_is_semantic_noop(previous, &manifest)
+                && manifest_is_semantic_noop(previous, &manifest)
             {
                 return Ok(Schema6PublishOutcome {
                     published: false,
@@ -2386,6 +2489,15 @@ mod tests {
     }
 
     #[test]
+    fn content_addressed_object_keys_stay_inside_the_allowlist() {
+        let id = bundle_id(7);
+        let digest = "a".repeat(64);
+        assert!(repository_object_key(&id, &format!("_objects/{}", digest)).is_ok());
+        assert!(repository_object_key(&id, "_objects/../escape").is_err());
+        assert!(repository_object_key(&id, "_payloads/unknown-namespace").is_err());
+    }
+
+    #[test]
     fn publish_fetch_update_and_tombstone_round_trip() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
@@ -2413,7 +2525,7 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured,
-                expected_head: PublishExpectation::Absent,
+                observed_head: None,
                 updated_at: 10,
             })
             .unwrap();
@@ -2424,7 +2536,7 @@ mod tests {
         assert!(repository_root.join(TAG_FILE).is_file());
         assert!(repository_root.join("_manifests").is_dir());
         assert!(repository_root.join("_commits").is_dir());
-        assert!(repository_root.join("_uploads").is_dir());
+        assert!(repository_root.join("_objects").is_dir());
         let fetched = engine.fetch(&id).unwrap();
         assert_eq!(fetched.files.values().next().unwrap(), b"version one");
 
@@ -2436,7 +2548,7 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured,
-                expected_head: PublishExpectation::Match(first.head_token.clone()),
+                observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
                 updated_at: 20,
             })
             .unwrap();
@@ -2447,7 +2559,7 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(&request, &recipe).unwrap(),
-                expected_head: PublishExpectation::Match(first.head_token),
+                observed_head: Some((first.snapshot.head.clone(), first.head_token)),
                 updated_at: 21,
             })
             .is_err());
@@ -2459,7 +2571,7 @@ mod tests {
                 recipe: empty_recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(&request, &empty_recipe).unwrap(),
-                expected_head: PublishExpectation::Match(second.head_token),
+                observed_head: Some((second.snapshot.head.clone(), second.head_token)),
                 updated_at: 30,
             })
             .unwrap();
@@ -2545,7 +2657,7 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(&request, &recipe).unwrap(),
-                expected_head: PublishExpectation::Absent,
+                observed_head: None,
                 updated_at: 10,
             })
             .unwrap();
@@ -2591,12 +2703,16 @@ mod tests {
             .any(|receipt| receipt.status == ActionStatus::Applied));
     }
 
-    /// Store wrapper recording every `get`/`get_many` key so tests can prove
-    /// which payload objects an operation actually downloaded.
+    /// Store wrapper recording every `get`/`get_many` key and every write so
+    /// tests can prove which payload objects an operation actually downloaded
+    /// or uploaded. The trait-default `put_many` routes through
+    /// `put_immutable`, so bulk uploads are recorded per object.
     #[derive(Clone)]
     struct CountingStore {
         inner: LocalBundleObjectStore,
         keys: Arc<Mutex<Vec<String>>>,
+        puts: Arc<Mutex<Vec<String>>>,
+        cas_writes: Arc<Mutex<Vec<String>>>,
     }
 
     impl CountingStore {
@@ -2604,11 +2720,34 @@ mod tests {
             Self {
                 inner: LocalBundleObjectStore::open(root).unwrap(),
                 keys: Arc::new(Mutex::new(Vec::new())),
+                puts: Arc::new(Mutex::new(Vec::new())),
+                cas_writes: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
         fn reset(&self) {
             self.keys.lock().unwrap().clear();
+            self.puts.lock().unwrap().clear();
+            self.cas_writes.lock().unwrap().clear();
+        }
+
+        /// Immutable payload writes under the content-addressed namespace.
+        fn payload_puts(&self) -> Vec<String> {
+            self.puts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|key| key.contains("/_objects/"))
+                .cloned()
+                .collect()
+        }
+
+        fn put_count(&self) -> usize {
+            self.puts.lock().unwrap().len()
+        }
+
+        fn cas_count(&self) -> usize {
+            self.cas_writes.lock().unwrap().len()
         }
 
         /// Repository object reads that are payloads — heads, tags, and
@@ -2648,6 +2787,7 @@ mod tests {
             key: &ObjectKey,
             bytes: &[u8],
         ) -> Result<ImmutablePutOutcome, String> {
+            self.puts.lock().unwrap().push(key.as_str().to_string());
             self.inner.put_immutable(key, bytes)
         }
 
@@ -2657,6 +2797,7 @@ mod tests {
             expectation: &CasExpectation,
             bytes: &[u8],
         ) -> Result<CasOutcome, String> {
+            self.cas_writes.lock().unwrap().push(key.as_str().to_string());
             self.inner.compare_and_swap(key, expectation, bytes)
         }
 
@@ -2672,6 +2813,246 @@ mod tests {
         fn local_root(&self) -> Option<&Path> {
             self.inner.local_root()
         }
+    }
+
+    #[test]
+    fn publish_skips_payloads_already_in_previous_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        fs::create_dir_all(&source).unwrap();
+        write(&source.join("stable.md"), b"stable contents");
+        write(&source.join("changing.md"), b"first draft");
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(&request).unwrap();
+        let recipe = recipe_for(
+            inventory
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id.clone()),
+        );
+        let id = bundle_id(41);
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let first = engine
+            .publish(PublishBundleRequest {
+                identity: identity(id.clone(), "Incremental"),
+                recipe: recipe.clone(),
+                captured_with: captured_with(),
+                captured: capture_recipe(&request, &recipe).unwrap(),
+                observed_head: None,
+                updated_at: 10,
+            })
+            .unwrap();
+        assert!(first.published);
+        assert_eq!(store.payload_puts().len(), 2);
+        for entry in first.snapshot.manifest.files.values() {
+            assert_eq!(entry.object_key, format!("_objects/{}", entry.sha256));
+        }
+
+        write(&source.join("changing.md"), b"second draft");
+        store.reset();
+        let second = engine
+            .publish(PublishBundleRequest {
+                identity: identity(id.clone(), "Incremental"),
+                recipe: recipe.clone(),
+                captured_with: captured_with(),
+                captured: capture_recipe(&request, &recipe).unwrap(),
+                observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
+                updated_at: 20,
+            })
+            .unwrap();
+        assert!(second.published);
+        assert_eq!(second.snapshot.head.generation, 2);
+        let changed_key = repository_object_key(
+            &id,
+            &format!("_objects/{}", sha256(b"second draft")),
+        )
+        .unwrap();
+        assert_eq!(
+            store.payload_puts(),
+            vec![changed_key.as_str().to_string()],
+            "only the changed payload uploads"
+        );
+        let stable_path = second
+            .snapshot
+            .manifest
+            .files
+            .iter()
+            .find(|(_, entry)| entry.sha256 == sha256(b"stable contents"))
+            .map(|(path, _)| path.clone())
+            .unwrap();
+        assert_eq!(
+            second.snapshot.manifest.files[&stable_path],
+            first.snapshot.manifest.files[&stable_path],
+            "the unchanged entry carries over verbatim, object key included"
+        );
+    }
+
+    #[test]
+    fn publish_dedupes_identical_bytes_within_one_push() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        fs::create_dir_all(&source).unwrap();
+        write(&source.join("left.md"), b"same bytes either way");
+        write(&source.join("right.md"), b"same bytes either way");
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(&request).unwrap();
+        let recipe = recipe_for(
+            inventory
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id.clone()),
+        );
+        let id = bundle_id(42);
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let published = engine
+            .publish(PublishBundleRequest {
+                identity: identity(id.clone(), "Dedupe"),
+                recipe: recipe.clone(),
+                captured_with: captured_with(),
+                captured: capture_recipe(&request, &recipe).unwrap(),
+                observed_head: None,
+                updated_at: 10,
+            })
+            .unwrap();
+        assert_eq!(store.payload_puts().len(), 1);
+        let shared_key = format!("_objects/{}", sha256(b"same bytes either way"));
+        let file_entries: Vec<_> = published.snapshot.manifest.files.values().collect();
+        assert_eq!(file_entries.len(), 2);
+        for entry in file_entries {
+            assert_eq!(entry.object_key, shared_key);
+        }
+    }
+
+    #[test]
+    fn publish_semantic_noop_writes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        fs::create_dir_all(&source).unwrap();
+        write(&source.join("CLAUDE.md"), b"steady state");
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(&request).unwrap();
+        let recipe = recipe_for(
+            inventory
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id.clone()),
+        );
+        let id = bundle_id(43);
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let first = engine
+            .publish(PublishBundleRequest {
+                identity: identity(id.clone(), "Noop"),
+                recipe: recipe.clone(),
+                captured_with: captured_with(),
+                captured: capture_recipe(&request, &recipe).unwrap(),
+                observed_head: None,
+                updated_at: 10,
+            })
+            .unwrap();
+        assert!(first.published);
+
+        store.reset();
+        let noop = engine
+            .publish(PublishBundleRequest {
+                identity: identity(id.clone(), "Noop"),
+                recipe: recipe.clone(),
+                captured_with: captured_with(),
+                captured: capture_recipe(&request, &recipe).unwrap(),
+                observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
+                updated_at: 20,
+            })
+            .unwrap();
+        assert!(!noop.published);
+        assert_eq!(noop.snapshot.head.generation, 1);
+        assert_eq!(noop.head_token, first.head_token);
+        assert_eq!(store.put_count(), 0, "a semantic no-op writes no objects");
+        assert_eq!(store.cas_count(), 0, "a semantic no-op never touches the head");
+        assert_eq!(engine.inspect(&id).unwrap().head.generation, 1);
+    }
+
+    #[test]
+    fn publish_reports_upload_progress_for_pending_objects_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        fs::create_dir_all(&source).unwrap();
+        write(&source.join("small.md"), b"tiny");
+        write(&source.join("large.md"), b"a considerably longer payload");
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(&request).unwrap();
+        let recipe = recipe_for(
+            inventory
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id.clone()),
+        );
+        let id = bundle_id(44);
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let mut events: Vec<FetchProgress> = Vec::new();
+        let first = engine
+            .publish_with_progress(
+                PublishBundleRequest {
+                    identity: identity(id.clone(), "Progress"),
+                    recipe: recipe.clone(),
+                    captured_with: captured_with(),
+                    captured: capture_recipe(&request, &recipe).unwrap(),
+                    observed_head: None,
+                    updated_at: 10,
+                },
+                &mut |progress| events.push(progress),
+            )
+            .unwrap();
+        let full_bytes = (b"tiny".len() + b"a considerably longer payload".len()) as u64;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.last().unwrap().index, 2);
+        assert_eq!(events.last().unwrap().total_objects, 2);
+        assert_eq!(events.last().unwrap().fetched_bytes, full_bytes);
+        assert_eq!(events.last().unwrap().total_bytes, full_bytes);
+
+        events.clear();
+        let noop = engine
+            .publish_with_progress(
+                PublishBundleRequest {
+                    identity: identity(id.clone(), "Progress"),
+                    recipe: recipe.clone(),
+                    captured_with: captured_with(),
+                    captured: capture_recipe(&request, &recipe).unwrap(),
+                    observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
+                    updated_at: 20,
+                },
+                &mut |progress| events.push(progress),
+            )
+            .unwrap();
+        assert!(!noop.published);
+        assert!(events.is_empty(), "a no-op publish reports no transfer");
+
+        write(&source.join("large.md"), b"a different considerably longer payload");
+        events.clear();
+        engine
+            .publish_with_progress(
+                PublishBundleRequest {
+                    identity: identity(id.clone(), "Progress"),
+                    recipe: recipe.clone(),
+                    captured_with: captured_with(),
+                    captured: capture_recipe(&request, &recipe).unwrap(),
+                    observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
+                    updated_at: 30,
+                },
+                &mut |progress| events.push(progress),
+            )
+            .unwrap();
+        let changed_bytes = b"a different considerably longer payload".len() as u64;
+        assert_eq!(events.len(), 1, "unchanged payloads never enter the totals");
+        assert_eq!(events[0].total_objects, 1);
+        assert_eq!(events[0].total_bytes, changed_bytes);
+        assert_eq!(events[0].fetched_bytes, changed_bytes);
     }
 
     #[test]
@@ -2704,7 +3085,7 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(&request, &recipe).unwrap(),
-                expected_head: PublishExpectation::Absent,
+                observed_head: None,
                 updated_at: 10,
             })
             .unwrap();
@@ -2856,7 +3237,7 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(&request, &recipe).unwrap(),
-                expected_head: PublishExpectation::Absent,
+                observed_head: None,
                 updated_at: 10,
             })
             .unwrap();
@@ -2964,7 +3345,7 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(&request, &recipe).unwrap(),
-                expected_head: PublishExpectation::Absent,
+                observed_head: None,
                 updated_at: 10,
             })
             .unwrap();
@@ -3087,7 +3468,7 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(&request, &recipe).unwrap(),
-                expected_head: PublishExpectation::Absent,
+                observed_head: None,
                 updated_at: 10,
             })
             .unwrap();
@@ -3158,7 +3539,7 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(request, &recipe).unwrap(),
-                expected_head: PublishExpectation::Absent,
+                observed_head: None,
                 updated_at: 10,
             })
             .unwrap();
@@ -3422,7 +3803,7 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(&request, &recipe).unwrap(),
-                expected_head: PublishExpectation::Absent,
+                observed_head: None,
                 updated_at: 10,
             })
             .unwrap();
@@ -4776,6 +5157,7 @@ fn validate_bundle_relative_object_key(value: &str) -> Result<(), String> {
         || value == TAG_FILE
         || value.starts_with("_manifests/")
         || value.starts_with("_commits/")
+        || value.starts_with("_objects/")
         || value.starts_with("_uploads/"))
     {
         return Err(format!("unknown bundle object namespace '{}'", value));
@@ -5087,21 +5469,22 @@ fn validate_schema6_conversation_retention(
     Ok(())
 }
 
-fn schema6_manifest_is_semantic_noop(
-    previous: &BundleManifest,
-    candidate: &BundleManifest,
-) -> bool {
+/// Semantic manifest equality for both publication paths: `object_key` is
+/// deliberately excluded (content addressing and historical upload ids both
+/// let the key vary for identical content), as are generation/commit/time
+/// coordinates. Schema-4 manifests compare with empty conversation maps.
+fn manifest_is_semantic_noop(previous: &BundleManifest, candidate: &BundleManifest) -> bool {
     previous.bundle == candidate.bundle
         && previous.recipe == candidate.recipe
         && previous.captured_with.codec_versions == candidate.captured_with.codec_versions
         && previous.conversations == candidate.conversations
         && previous.resources == candidate.resources
-        && schema6_files_are_semantically_equal(&previous.files, &candidate.files)
+        && files_are_semantically_equal(&previous.files, &candidate.files)
         && previous.directories == candidate.directories
         && previous.tombstones == candidate.tombstones
 }
 
-fn schema6_files_are_semantically_equal(
+fn files_are_semantically_equal(
     previous: &BTreeMap<LogicalPath, BundleFileEntry>,
     candidate: &BTreeMap<LogicalPath, BundleFileEntry>,
 ) -> bool {
