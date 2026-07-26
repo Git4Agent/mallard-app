@@ -78,6 +78,7 @@ pub fn run() {
             project_sync_v3::commands::get_bundle_status,
             project_sync_v3::commands::get_project_capability_status,
             project_sync_v3::commands::get_project_thread_sync_comparison,
+            project_sync_v3::commands::prepare_push_review,
             project_sync_v3::commands::push_bundle,
             project_sync_v3::commands::plan_bundle_restore,
             project_sync_v3::commands::apply_bundle_restore,

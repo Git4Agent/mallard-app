@@ -662,6 +662,23 @@ export interface BundleSnapshotSummary extends RemoteBundleSummary {
   warnings?: string[];
 }
 
+/**
+ * Composite payload of `prepare_push_review`: one discovery pass and one
+ * remote snapshot feed every push-dialog section. Degradable sections carry
+ * per-section errors instead of failing the dialog.
+ */
+export interface PushReviewContext {
+  project: ProjectDetail;
+  inventory: ResourceInventory;
+  thread_comparison: ThreadSyncComparison | null;
+  thread_comparison_error: string | null;
+  capability_report: CapabilityStatusReport | null;
+  capability_report_error: string | null;
+  project_files: ProjectContentInventory | null;
+  project_files_error: string | null;
+  prepared_at: number;
+}
+
 /** Payload of the `project-sync-fetch-progress` Tauri event. */
 export interface BundleFetchProgress {
   phase: "plan" | "apply" | "push";

@@ -267,8 +267,12 @@ struct DiscoveredResource {
     files: Vec<SourceFile>,
 }
 
+/// One full provider walk. Fields stay private to this module: callers hold
+/// a Discovery opaquely and feed it back into the inventory/capture views,
+/// sharing the walk (and derived candidates such as the filtered session
+/// index) across several consumers without re-scanning.
 #[derive(Clone, Debug)]
-struct Discovery {
+pub struct Discovery {
     resources: BTreeMap<String, DiscoveredResource>,
     directories: BTreeMap<String, SourceDirectory>,
     warnings: Vec<String>,
@@ -276,20 +280,27 @@ struct Discovery {
     blocked_count: usize,
 }
 
+impl Discovery {
+    /// Descriptor-only view for inventory-style callers. The Discovery keeps
+    /// its physical paths for a later capture.
+    pub fn project_inventory(&self) -> ProjectInventory {
+        ProjectInventory {
+            resources: self
+                .resources
+                .values()
+                .map(|candidate| candidate.descriptor.clone())
+                .collect(),
+            warnings: self.warnings.clone(),
+            ignored_count: self.ignored_count,
+            blocked_count: self.blocked_count,
+        }
+    }
+}
+
 /// Discover resources without retaining file bytes. Absolute source paths are
 /// kept only inside this module and never become resource identity.
 pub fn discover_project(request: &CaptureRequest) -> Result<ProjectInventory, String> {
-    let discovery = discover(request)?;
-    Ok(ProjectInventory {
-        resources: discovery
-            .resources
-            .into_values()
-            .map(|candidate| candidate.descriptor)
-            .collect(),
-        warnings: discovery.warnings,
-        ignored_count: discovery.ignored_count,
-        blocked_count: discovery.blocked_count,
-    })
+    Ok(discover_full(request)?.project_inventory())
 }
 
 /// Capture exactly the live resource IDs selected by the persistent recipe.
@@ -299,10 +310,21 @@ pub fn capture_selected(
     request: &CaptureRequest,
     selected_resource_ids: &BTreeSet<String>,
 ) -> Result<CapturedResources, String> {
-    let discovery = discover(request)?;
+    let discovery = discover_full(request)?;
+    capture_from_discovery(request, &discovery, selected_resource_ids)
+}
+
+/// `capture_selected` over an existing Discovery. Only the walk and its
+/// derived candidates are shared: file bytes and metadata are re-read at
+/// call time, so captured content is always current.
+pub fn capture_from_discovery(
+    request: &CaptureRequest,
+    discovery: &Discovery,
+    selected_resource_ids: &BTreeSet<String>,
+) -> Result<CapturedResources, String> {
     let canonical_project = canonical_existing_dir(&request.project_root, "project root")?;
     let mut result = CapturedResources {
-        warnings: discovery.warnings,
+        warnings: discovery.warnings.clone(),
         ..CapturedResources::default()
     };
     let mut total_bytes = 0_u64;
@@ -520,13 +542,24 @@ pub fn capture_recipe(
     request: &CaptureRequest,
     recipe: &domain::BundleRecipe,
 ) -> Result<CapturedResources, String> {
+    let discovery = discover_full(request)?;
+    capture_recipe_from_discovery(request, &discovery, recipe)
+}
+
+/// `capture_recipe` over an existing Discovery, sharing one walk between
+/// selection persistence, freshness checks, and the byte capture.
+pub fn capture_recipe_from_discovery(
+    request: &CaptureRequest,
+    discovery: &Discovery,
+    recipe: &domain::BundleRecipe,
+) -> Result<CapturedResources, String> {
     recipe.validate()?;
     let selected = recipe
         .entries
         .keys()
         .map(|id| id.as_str().to_string())
         .collect();
-    capture_selected(request, &selected)
+    capture_from_discovery(request, discovery, &selected)
 }
 
 /// Convert captured descriptors into the shared schema-3 domain model. This
@@ -688,7 +721,8 @@ fn dependency_scope_name(scope: &DependencyScope) -> &'static str {
     }
 }
 
-fn discover(request: &CaptureRequest) -> Result<Discovery, String> {
+/// The one full provider walk behind every inventory and capture view.
+pub fn discover_full(request: &CaptureRequest) -> Result<Discovery, String> {
     let canonical_project = canonical_existing_dir(&request.project_root, "project root")?;
     let excluded_roots = request
         .excluded_project_roots
@@ -2605,6 +2639,70 @@ mod tests {
     fn write(path: &Path, bytes: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn capture_from_discovery_matches_capture_selected_and_unions_disjoint_sets() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("repo");
+        let codex = temp.path().join("codex");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&codex).unwrap();
+        write(
+            &codex.join("sessions/2026/07/17/rollout-shared.jsonl"),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-shared\",\"cwd\":{}}}}}\n",
+                serde_json::to_string(project.to_str().unwrap()).unwrap()
+            )
+            .as_bytes(),
+        );
+        write(&project.join("notes.md"), b"project notes");
+
+        let request = CaptureRequest {
+            project_root: project,
+            codex_home: Some(codex),
+            claude_home: None,
+            excluded_project_roots: Vec::new(),
+            standalone_skills: Vec::new(),
+            global_plugins: Vec::new(),
+            blocked_global_skills: Vec::new(),
+            include_project_content: true,
+            excluded_content_roots: Vec::new(),
+        };
+        let discovery = discover_full(&request).unwrap();
+        let all_ids: BTreeSet<String> = discovery
+            .project_inventory()
+            .resources
+            .iter()
+            .map(|resource| resource.resource_id.clone())
+            .collect();
+        assert!(all_ids.len() >= 2, "fixture must span several resources");
+
+        let direct = capture_selected(&request, &all_ids).unwrap();
+        let shared = capture_from_discovery(&request, &discovery, &all_ids).unwrap();
+        assert_eq!(direct, shared, "the wrapper and the seam capture identically");
+
+        let conversation_ids: BTreeSet<String> = all_ids
+            .iter()
+            .filter(|resource_id| resource_id.starts_with("codex:"))
+            .cloned()
+            .collect();
+        let other_ids: BTreeSet<String> =
+            all_ids.difference(&conversation_ids).cloned().collect();
+        assert!(!conversation_ids.is_empty() && !other_ids.is_empty());
+        let first = capture_from_discovery(&request, &discovery, &conversation_ids).unwrap();
+        let second = capture_from_discovery(&request, &discovery, &other_ids).unwrap();
+        let union_files: BTreeSet<String> =
+            first.files.keys().chain(second.files.keys()).cloned().collect();
+        assert_eq!(
+            union_files,
+            shared.files.keys().cloned().collect::<BTreeSet<String>>(),
+            "disjoint captures from one Discovery cover the union without overlap"
+        );
+        assert!(first
+            .files
+            .keys()
+            .all(|logical_path| !second.files.contains_key(logical_path)));
     }
 
     #[test]

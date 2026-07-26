@@ -1612,16 +1612,31 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     /// The optional form is used by read-only status views where an empty
     /// linked destination is a valid state rather than an error.
     pub fn inspect_optional(&self, bundle_id: &BundleId) -> Result<Option<BundleSnapshot>, String> {
-        let Some((head, _)) = self.read_head(bundle_id)? else {
+        Ok(self
+            .inspect_optional_with_token(bundle_id)?
+            .map(|(snapshot, _)| snapshot))
+    }
+
+    /// `inspect_optional` that also returns the head token, so a command can
+    /// take one remote snapshot and later hand the observed head to `publish`
+    /// without a second read.
+    pub fn inspect_optional_with_token(
+        &self,
+        bundle_id: &BundleId,
+    ) -> Result<Option<(BundleSnapshot, HeadToken)>, String> {
+        let Some((head, token)) = self.read_head(bundle_id)? else {
             return Ok(None);
         };
         let manifest = self.read_manifest(&head)?;
-        Ok(Some(BundleSnapshot {
-            storage_id: self.storage_id.clone(),
-            head,
-            manifest,
-            fetched_at: now_secs(),
-        }))
+        Ok(Some((
+            BundleSnapshot {
+                storage_id: self.storage_id.clone(),
+                head,
+                manifest,
+                fetched_at: now_secs(),
+            },
+            token,
+        )))
     }
 
     /// Load one immutable historical manifest using the coordinates retained

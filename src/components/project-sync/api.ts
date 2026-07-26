@@ -35,6 +35,7 @@ import type {
   ProviderProfile,
   ProviderProfileProbe,
   ProviderProfileSummary,
+  PushReviewContext,
   RegisterLocalProjectRequest,
   RegisterNewHostRequest,
   ResourceInventory,
@@ -172,6 +173,9 @@ export const projectSyncApi = {
 
   getInventory: (localProjectId: string) =>
     invoke<ResourceInventory>("get_bundle_inventory", { localProjectId }),
+
+  preparePushReview: (localProjectId: string, storageId: string) =>
+    invoke<PushReviewContext>("prepare_push_review", { localProjectId, storageId }),
 
   getCapabilityStatus: (localProjectId: string, storageId?: string | null) =>
     invoke<CapabilityStatusReport>("get_project_capability_status", {

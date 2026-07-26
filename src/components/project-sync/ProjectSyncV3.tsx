@@ -1296,45 +1296,28 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     setError(null);
     setPushError(null);
     try {
-      const [nextInventory, nextDetail] = await Promise.all([
-        projectSyncApi.getInventory(projectId),
-        projectSyncApi.getProject(projectId),
-      ]);
+      // One backend call runs a single discovery pass and a single remote
+      // snapshot for every review section.
+      const context = await projectSyncApi.preparePushReview(projectId, storageId);
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
-      if (!nextDetail) throw new Error("The selected local project no longer exists.");
+      const nextDetail = context.project;
+      const nextInventory = context.inventory;
       const storage = config.storages.find((candidate) => candidate.id === storageId);
       if (!storage) throw new Error("The selected storage no longer exists.");
       const link = nextDetail.links.find((candidate) => candidate.storage_id === storageId);
       if (!link) throw new Error("This project is no longer linked to the selected storage.");
 
       const savedRecipe = link.recipe ?? null;
-      const [threadComparisonResult, capabilityReportResult] = await Promise.allSettled([
-        nextDetail.binding?.profile_ids.codex
-          ? projectSyncApi.getThreadSyncComparison(projectId, storageId)
-          : Promise.resolve(null),
-        nextDetail.binding
-          ? projectSyncApi.getCapabilityStatus(projectId, storageId)
-          : Promise.resolve(null),
-      ]);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
       const nextResources = inventoryResources(nextInventory);
-      const nextThreadComparison = threadComparisonResult.status === "fulfilled"
-        ? threadComparisonResult.value
-        : undefined;
-      const nextCapabilityReport = capabilityReportResult.status === "fulfilled"
-        ? capabilityReportResult.value
-        : undefined;
+      // Degraded sections (storage offline, capture failures) open the dialog
+      // without their comparison, exactly like the old per-command flow.
+      const nextThreadComparison = context.thread_comparison ?? undefined;
+      const nextCapabilityReport = context.capability_report ?? undefined;
       const isGitRepository = repositoryKinds[projectId] ?? false;
-      let lockedProjectContentInventory: ProjectContentInventory | null = null;
-      if (isGitRepository && nextDetail.binding) {
-        try {
-          const inspected = await projectSyncApi.inspectProjectFiles(projectId, storageId);
-          if (hostWorkflowGeneration.current !== workflowGeneration) return;
-          if (inspected.entries.length > 0) lockedProjectContentInventory = inspected;
-        } catch {
-          // A Git project without stored generic content keeps the normal four-step review.
-        }
-      }
+      const lockedProjectContentInventory =
+        context.project_files && context.project_files.entries.length > 0
+          ? context.project_files
+          : null;
       const projectDefaults = recommendedPushSelection(
         recipeSelection(nextInventory.recipe),
         nextResources,
