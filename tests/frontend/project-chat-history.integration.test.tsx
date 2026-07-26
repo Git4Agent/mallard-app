@@ -574,6 +574,121 @@ test("selection review removes repeated history and storage labels", () => {
   assert.match(compactHeadingRule, /margin-top:\s*8px/);
 });
 
+test("Push and Pull reviews separate outstanding and up-to-date sessions without extra status copy", () => {
+  const outstandingThread = history.threads[0];
+  const syncedThread = {
+    ...outstandingThread,
+    thread_id: "019f7798-5437-7632-9dbc-5b589cf68bf3",
+    title: "Already synced thread",
+    started_at: outstandingThread.started_at - 7_200,
+    ended_at: outstandingThread.ended_at - 7_200,
+    commit_occurrence_count: 0,
+  };
+  const outstandingResourceId = `codex:session:${outstandingThread.thread_id}`;
+  const syncedResourceId = `codex:session:${syncedThread.thread_id}`;
+  const comparison = {
+    project_id: project.local_project_id,
+    storage_id: "storage-1",
+    storage_name: "R2 storage 1",
+    generation: 4,
+    base_generation: 3,
+    compared_at: 1_752_804_000,
+    counts: { synced: 1, local: 0, storage: 1, diverged: 0, unavailable: 0, unknown: 0 },
+    warnings: [],
+    entries: [
+      {
+        thread_id: outstandingThread.thread_id,
+        resource_id: outstandingResourceId,
+        display_name: outstandingThread.title,
+        state: "storage_ahead" as const,
+        local_present: true,
+        storage_present: true,
+        local_updated_at: outstandingThread.ended_at - 60,
+        storage_updated_at: outstandingThread.ended_at,
+      },
+      {
+        thread_id: syncedThread.thread_id,
+        resource_id: syncedResourceId,
+        display_name: syncedThread.title,
+        state: "synced" as const,
+        local_present: true,
+        storage_present: true,
+        local_updated_at: syncedThread.ended_at,
+        storage_updated_at: syncedThread.ended_at,
+      },
+    ],
+  };
+  const renderReview = (selectionMode: "push" | "pull") => renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      embedded
+      project={project}
+      binding={{
+        host_id: "00112233445566778899aabbccddeeff",
+        replica_id: "replica",
+        local_project_id: project.local_project_id,
+        bundle_id: project.bundle_id,
+        project_root: project.project_root,
+        canonical_project_root: project.project_root,
+        profile_ids: { codex: "profile-codex" },
+        state: "active",
+        revision: 1,
+        updated_at: 2,
+      }}
+      history={{
+        ...history,
+        threads: [outstandingThread, syncedThread],
+      }}
+      comparison={{
+        ...comparison,
+        entries: comparison.entries.map((entry) => (
+          entry.resource_id === outstandingResourceId && selectionMode === "push"
+            ? { ...entry, state: "local_ahead" as const }
+            : entry
+        )),
+      }}
+      activeStorageName="R2 storage 1"
+      loading={false}
+      loadingMore={false}
+      actionError={null}
+      actionBusyThreadId={null}
+      selectionMode={selectionMode}
+      selectedResourceIds={new Set([outstandingResourceId, syncedResourceId])}
+      selectableResourceIds={new Set([outstandingResourceId])}
+      reviewResourceIds={new Set([outstandingResourceId, syncedResourceId])}
+      upToDateResourceIds={new Set([syncedResourceId])}
+      onBranchChange={() => undefined}
+      onRefresh={() => undefined}
+      onLoadMore={() => undefined}
+      onOpenCodex={() => undefined}
+      onOpenTerminal={() => undefined}
+      onToggleResource={() => undefined}
+    />,
+  );
+  const pullHtml = renderReview("pull");
+  const pushHtml = renderReview("push");
+
+  for (const html of [pullHtml, pushHtml]) {
+    assert.match(html, /<h2 id="sync-uncommitted-heading">Uncommitted<\/h2>/);
+    assert.match(html, /<details class="v3-history-up-to-date">/);
+    assert.match(html, /aria-label="Up to date, 1 session"/);
+    assert.match(html, /<strong>Up to date<\/strong><small>1<\/small>/);
+    assert.equal(html.match(/type="checkbox"/g)?.length, 1);
+    assert.match(html, /v3-thread-sync-indicator synced/);
+    assert.match(html, /aria-label="Up to date here and in R2 storage 1\."/);
+    assert.doesNotMatch(html, /Restore from storage|Keep local|Use storage version|Add to push/);
+    assert.doesNotMatch(html, /Add project-scoped history|Load previous 30 days/);
+  }
+  assert.match(pullHtml, /v3-thread-sync-indicator storage/);
+  assert.match(pullHtml, /aria-label="Newer in R2 storage 1\. Pull to update this computer\."/);
+  assert.match(pushHtml, /v3-thread-sync-indicator local/);
+  assert.match(pushHtml, /aria-label="Newer on this computer\. Push to update R2 storage 1\."/);
+
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.v3-history-sync-review-groups\s*\{[^}]*display:\s*grid/s);
+  assert.match(css, /\.v3-history-up-to-date\s*\{[^}]*border-top:\s*1px solid var\(--border\)/s);
+  assert.match(css, /\.v3-history-up-to-date > summary\s*\{[^}]*min-height:\s*48px/s);
+});
+
 test("selected storage adds directional indicators and storage-only threads", () => {
   const comparison = {
     project_id: project.local_project_id,

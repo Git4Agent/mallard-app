@@ -25,6 +25,8 @@ interface PageProps {
   selectionMode?: "push" | "pull";
   selectedResourceIds?: ReadonlySet<string>;
   selectableResourceIds?: ReadonlySet<string>;
+  reviewResourceIds?: ReadonlySet<string>;
+  upToDateResourceIds?: ReadonlySet<string>;
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   comparisonOverride?: ThreadSyncComparison | null;
@@ -61,6 +63,8 @@ interface ContentProps {
   selectionMode?: "push" | "pull";
   selectedResourceIds?: ReadonlySet<string>;
   selectableResourceIds?: ReadonlySet<string>;
+  reviewResourceIds?: ReadonlySet<string>;
+  upToDateResourceIds?: ReadonlySet<string>;
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
 }
@@ -329,6 +333,7 @@ interface ThreadCardProps {
   selected?: boolean;
   selectable?: boolean;
   selectionDisabled?: boolean;
+  showReviewStateLabel?: boolean;
   onToggleResource?: (resourceId: string) => void;
 }
 
@@ -356,7 +361,7 @@ function syncReviewStateLabel(
 function ThreadCard({
   thread, occurrenceKey, busy = false, details, detailsOpen = false, onOpenCodex, onOpenTerminal, onToggleDetails, onLoadMoreDetails,
   syncEntry, storageName, resourceId, selectionMode, selected = false, selectable = false,
-  selectionDisabled = false, onToggleResource,
+  selectionDisabled = false, showReviewStateLabel = true, onToggleResource,
 }: ThreadCardProps) {
   const launchable = THREAD_UUID.test(thread.thread_id);
   const chatDetailsId = `thread-chat-${occurrenceKey.replace(/[^a-z0-9_-]/gi, "-")}`;
@@ -365,7 +370,9 @@ function ThreadCard({
     : details?.page
       ? "Show chat history"
       : "Load chat history";
-  const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, syncEntry, selected) : null;
+  const reviewStateLabel = selectionMode && showReviewStateLabel
+    ? syncReviewStateLabel(selectionMode, syncEntry, selected)
+    : null;
   return (
     <article className={`v3-history-thread-card${selectionMode ? " v3-sync-selectable-row" : ""}${selected ? " selected" : ""}`}>
       <div className="v3-history-thread-topline">
@@ -445,6 +452,7 @@ function StoredThreadCard({
   selected = false,
   selectable = false,
   selectionDisabled = false,
+  showReviewStateLabel = true,
   onToggleResource,
 }: {
   entry: ThreadSyncEntry;
@@ -453,6 +461,7 @@ function StoredThreadCard({
   selected?: boolean;
   selectable?: boolean;
   selectionDisabled?: boolean;
+  showReviewStateLabel?: boolean;
   onToggleResource?: (resourceId: string) => void;
 }) {
   const shortId = entry.thread_id.length > 12 ? entry.thread_id.slice(0, 8) : entry.thread_id;
@@ -464,7 +473,9 @@ function StoredThreadCard({
     entry.storage_updated_at ? `Updated ${formatDate(entry.storage_updated_at)}` : null,
     `Codex thread ${shortId}`,
   ].filter((item): item is string => item !== null).join(" · ");
-  const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, entry, selected) : null;
+  const reviewStateLabel = selectionMode && showReviewStateLabel
+    ? syncReviewStateLabel(selectionMode, entry, selected)
+    : null;
   return (
     <article className={`v3-history-thread-card v3-history-stored-thread${selectionMode ? " v3-sync-selectable-row" : ""}${selected ? " selected" : ""}`}>
       <div className="v3-history-thread-topline">
@@ -498,6 +509,7 @@ export function ProjectChatHistoryContent({
   onOpenTerminal, onToggleDetails, onLoadMoreDetails, embedded = false, comparison = null,
   comparisonLoading = false, comparisonError = null, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
+  reviewResourceIds, upToDateResourceIds,
   selectionDisabled = false, onToggleResource,
 }: ContentProps) {
   const label = projectLabel(project);
@@ -510,6 +522,9 @@ export function ProjectChatHistoryContent({
     [comparison?.entries],
   );
   const compactSelectionReview = embedded && selectionMode != null;
+  const compactSyncSelectionReview = compactSelectionReview
+    && reviewResourceIds !== undefined
+    && upToDateResourceIds !== undefined;
   const storedOnlyEntries = useMemo(() => (comparison?.entries ?? [])
     .filter((entry) => !entry.cloud_thread_id)
     .filter((entry) => !entry.local_present && entry.storage_present && !threads.has(entry.thread_id))
@@ -549,7 +564,12 @@ export function ProjectChatHistoryContent({
       : null;
   const showEmbeddedThreadCount = embedded && !compactSelectionReview && !history?.git && embeddedThreadCount !== null;
   const showComparisonSummary = comparison != null && visibleComparisonChangeCount > 0;
-  const renderThread = (thread: CodexThreadSummary, key: string) => {
+  const renderThread = (
+    thread: CodexThreadSummary,
+    key: string,
+    cardSelectionMode: "push" | "pull" | null = selectionMode ?? null,
+    showReviewStateLabel = true,
+  ) => {
     const entry = syncByThread.get(thread.thread_id);
     const resourceId = entry?.resource_id ?? `codex:session:${thread.thread_id}`;
     return (
@@ -557,9 +577,11 @@ export function ProjectChatHistoryContent({
       details={detailsByThread[thread.thread_id]} detailsOpen={openDetailOccurrences.has(key)} onOpenCodex={onOpenCodex} onOpenTerminal={onOpenTerminal}
       onToggleDetails={onToggleDetails} onLoadMoreDetails={onLoadMoreDetails}
       syncEntry={entry} storageName={comparison ? comparisonStorageName : null}
-      resourceId={resourceId} selectionMode={selectionMode} selected={selectedResourceIds.has(resourceId)}
-      selectable={selectableResourceIds?.has(resourceId) ?? !!selectionMode}
-      selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} />
+      resourceId={resourceId} selectionMode={cardSelectionMode ?? undefined}
+      selected={cardSelectionMode !== null ? selectedResourceIds.has(resourceId) : false}
+      selectable={selectableResourceIds?.has(resourceId) ?? cardSelectionMode !== null}
+      selectionDisabled={selectionDisabled} showReviewStateLabel={showReviewStateLabel}
+      onToggleResource={onToggleResource} />
     );
   };
   const orderedReferences = (references: { thread_id: string }[]) => [...references].sort((left, right) => {
@@ -570,23 +592,81 @@ export function ProjectChatHistoryContent({
       || leftThread.started_at - rightThread.started_at
       || left.thread_id.localeCompare(right.thread_id);
   });
+  const reviewedIds = reviewResourceIds ?? new Set<string>();
+  const compactVariantEntries = compactSyncSelectionReview
+    ? threadEntries.filter((entry) => (
+        reviewedIds.has(entry.resource_id)
+        && !upToDateResourceIds?.has(entry.resource_id)
+      ))
+    : [];
+  const compactVariantResourceIds = new Set(compactVariantEntries.map((entry) => entry.resource_id));
   const flatThreadRows: Array<
-    | { kind: "local"; id: string; updatedAt: number; thread: CodexThreadSummary }
-    | { kind: "stored"; id: string; updatedAt: number; entry: ThreadSyncEntry }
+    | { kind: "local"; id: string; resourceId: string; updatedAt: number; thread: CodexThreadSummary }
+    | { kind: "stored"; id: string; resourceId: string; updatedAt: number; entry: ThreadSyncEntry }
   > = [
     ...(history?.threads ?? []).map((thread) => ({
       kind: "local" as const,
       id: thread.thread_id,
+      resourceId: syncByThread.get(thread.thread_id)?.resource_id ?? `codex:session:${thread.thread_id}`,
       updatedAt: thread.ended_at,
       thread,
     })),
     ...storedOnlyEntries.map((entry) => ({
       kind: "stored" as const,
       id: entry.thread_id,
+      resourceId: entry.resource_id,
       updatedAt: entry.storage_updated_at ?? entry.local_updated_at ?? 0,
       entry,
     })),
   ].sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
+  const compactReviewRows = compactSyncSelectionReview ? (() => {
+    const rows = new Map(flatThreadRows
+      .filter((row) => reviewedIds.has(row.resourceId) && !compactVariantResourceIds.has(row.resourceId))
+      .map((row) => [row.resourceId, row]));
+    for (const entry of comparison?.entries ?? []) {
+      if (entry.cloud_thread_id
+        || !reviewedIds.has(entry.resource_id)
+        || rows.has(entry.resource_id)) continue;
+      rows.set(entry.resource_id, {
+        kind: "stored" as const,
+        id: entry.thread_id,
+        resourceId: entry.resource_id,
+        updatedAt: entry.storage_updated_at ?? entry.local_updated_at ?? 0,
+        entry,
+      });
+    }
+    return [...rows.values()].sort((left, right) => (
+      right.updatedAt - left.updatedAt || left.id.localeCompare(right.id)
+    ));
+  })() : [];
+  const upToDateRows = compactReviewRows.filter((row) => upToDateResourceIds?.has(row.resourceId));
+  const outstandingRows = compactReviewRows.filter((row) => !upToDateResourceIds?.has(row.resourceId));
+  const upToDateCount = [...reviewedIds].filter((resourceId) => (
+    upToDateResourceIds?.has(resourceId)
+  )).length;
+  const outstandingCount = Math.max(0, reviewedIds.size - upToDateCount);
+  const compactReviewKeyPrefix = selectionMode ?? "sync";
+  const renderCompactReviewRow = (
+    row: (typeof compactReviewRows)[number],
+    readOnly: boolean,
+  ) => row.kind === "local"
+    ? renderThread(
+        row.thread,
+        `${compactReviewKeyPrefix}:${row.resourceId}`,
+        readOnly ? null : selectionMode ?? null,
+        false,
+      )
+    : <StoredThreadCard
+        key={`${compactReviewKeyPrefix}:${row.resourceId}`}
+        entry={row.entry}
+        storageName={comparisonStorageName}
+        selectionMode={readOnly ? undefined : selectionMode}
+        selected={!readOnly && selectedResourceIds.has(row.resourceId)}
+        selectable={!readOnly && (selectableResourceIds?.has(row.resourceId) ?? true)}
+        selectionDisabled={selectionDisabled}
+        showReviewStateLabel={false}
+        onToggleResource={onToggleResource}
+      />;
 
   const content = (
       <section
@@ -690,18 +770,59 @@ export function ProjectChatHistoryContent({
               </section>
             )}
 
-            {threadEntries.length > 0 && (
-              <ThreadVariantReview
-                entries={threadEntries}
-                selectedResourceIds={selectedResourceIds}
-                disabled={selectionDisabled}
-                onToggleResource={onToggleResource}
-                onOpenProviderThread={onOpenCodex}
-              />
-            )}
-
-            {history.git ? (
+            {compactSyncSelectionReview ? (
+              <div className="v3-history-sync-review-groups">
+                {outstandingCount > 0 && (
+                  <section className="v3-history-uncommitted" aria-labelledby="sync-uncommitted-heading">
+                    <div className="v3-history-section-heading">
+                      <h2 id="sync-uncommitted-heading">Uncommitted</h2>
+                    </div>
+                    {compactVariantEntries.length > 0 && (
+                      <ThreadVariantReview
+                        entries={compactVariantEntries}
+                        selectedResourceIds={selectedResourceIds}
+                        disabled={selectionDisabled}
+                        onToggleResource={onToggleResource}
+                        onOpenProviderThread={onOpenCodex}
+                      />
+                    )}
+                    <div className="v3-history-thread-list flat">
+                      {outstandingRows.map((row) => renderCompactReviewRow(row, false))}
+                    </div>
+                  </section>
+                )}
+                {upToDateCount > 0 && (
+                  <details className="v3-history-up-to-date">
+                    <summary aria-label={`Up to date, ${upToDateCount} session${upToDateCount === 1 ? "" : "s"}`}>
+                      <span>
+                        <Icon name="badge-check" size={14} />
+                        <strong>Up to date</strong>
+                        <small>{upToDateCount}</small>
+                      </span>
+                      <Icon name="chevron-down" size={13} className="v3-history-up-to-date-chevron" />
+                    </summary>
+                    {upToDateRows.length > 0 && (
+                      <div className="v3-history-thread-list flat">
+                        {upToDateRows.map((row) => renderCompactReviewRow(row, true))}
+                      </div>
+                    )}
+                  </details>
+                )}
+              </div>
+            ) : (
               <>
+                {threadEntries.length > 0 && (
+                  <ThreadVariantReview
+                    entries={threadEntries}
+                    selectedResourceIds={selectedResourceIds}
+                    disabled={selectionDisabled}
+                    onToggleResource={onToggleResource}
+                    onOpenProviderThread={onOpenCodex}
+                  />
+                )}
+
+                {history.git ? (
+                  <>
                 {storedOnlyEntries.length > 0 && (
                   <section className="v3-history-storage-only" aria-labelledby="storage-only-heading">
                     <div className="v3-history-section-heading">
@@ -745,23 +866,25 @@ export function ProjectChatHistoryContent({
                     })}</ol>
                   )}
                 </section>
+                  </>
+                ) : (
+                  <section
+                    aria-labelledby={embedded && !compactSelectionReview ? "project-activity-heading" : !embedded ? "codex-sessions-heading" : undefined}
+                    aria-label={compactSelectionReview ? embeddedTitle : undefined}
+                  >
+                    {!embedded && <div className="v3-history-section-heading"><h2 id="codex-sessions-heading" className="v3-history-codex-heading"><Icon name="openai" size={14} className="v3-openai-icon" />Codex threads</h2><span className="v3-history-heading-count" title={`${history.threads.length} threads`}><Icon name="message" size={12} />{history.threads.length}</span></div>}
+                    <div className="v3-history-thread-list flat">{flatThreadRows.length ? flatThreadRows.map((row) => row.kind === "local"
+                      ? renderThread(row.thread, row.thread.thread_id)
+                      : <StoredThreadCard key={`stored:${row.entry.resource_id}`} entry={row.entry} storageName={comparisonStorageName}
+                        selectionMode={selectionMode} selected={selectedResourceIds.has(row.entry.resource_id)}
+                        selectable={selectableResourceIds?.has(row.entry.resource_id) ?? !!selectionMode}
+                        selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} />)
+                      : <div className="v3-history-state">No project-owned Codex sessions were found in this 30-day window.</div>}</div>
+                  </section>
+                )}
+                {history.next_before != null && <button type="button" className="btn v3-history-load-more" disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? "Loading…" : "Load previous 30 days"}</button>}
               </>
-            ) : (
-              <section
-                aria-labelledby={embedded && !compactSelectionReview ? "project-activity-heading" : !embedded ? "codex-sessions-heading" : undefined}
-                aria-label={compactSelectionReview ? embeddedTitle : undefined}
-              >
-                {!embedded && <div className="v3-history-section-heading"><h2 id="codex-sessions-heading" className="v3-history-codex-heading"><Icon name="openai" size={14} className="v3-openai-icon" />Codex threads</h2><span className="v3-history-heading-count" title={`${history.threads.length} threads`}><Icon name="message" size={12} />{history.threads.length}</span></div>}
-                <div className="v3-history-thread-list flat">{flatThreadRows.length ? flatThreadRows.map((row) => row.kind === "local"
-                  ? renderThread(row.thread, row.thread.thread_id)
-                  : <StoredThreadCard key={`stored:${row.entry.resource_id}`} entry={row.entry} storageName={comparisonStorageName}
-                    selectionMode={selectionMode} selected={selectedResourceIds.has(row.entry.resource_id)}
-                    selectable={selectableResourceIds?.has(row.entry.resource_id) ?? !!selectionMode}
-                    selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} />)
-                  : <div className="v3-history-state">No project-owned Codex sessions were found in this 30-day window.</div>}</div>
-              </section>
             )}
-            {history.next_before != null && <button type="button" className="btn v3-history-load-more" disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? "Loading…" : "Load previous 30 days"}</button>}
           </>
         )}
       </section>
@@ -807,6 +930,8 @@ export default function ProjectChatHistoryPage({
   selectionMode,
   selectedResourceIds,
   selectableResourceIds,
+  reviewResourceIds,
+  upToDateResourceIds,
   selectionDisabled = false,
   onToggleResource,
   comparisonOverride,
@@ -936,5 +1061,5 @@ export default function ProjectChatHistoryPage({
     if (!wasOpen && !detailsByThread[threadId]?.page && !detailsByThread[threadId]?.loading) void loadDetails(threadId);
   };
 
-  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void load(null, branch, true); void loadComparison(); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} />;
+  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void load(null, branch, true); void loadComparison(); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} reviewResourceIds={reviewResourceIds} upToDateResourceIds={upToDateResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} />;
 }

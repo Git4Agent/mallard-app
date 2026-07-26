@@ -327,6 +327,16 @@ export function itemKindLabel(item: PullReviewItem): string {
   return "Definition";
 }
 
+export function isPinnedNoopConversation(item: PullReviewItem): boolean {
+  if (itemKindLabel(item) !== "Conversation" || item.dependencyActions.length > 0) return false;
+  const actions = item.restoreActions.filter((action) => action.kind.kind !== "manual");
+  return actions.length > 0 && actions.every((action) => (
+    action.kind.kind === "materialize_conversation"
+    && action.materialized_sha256 != null
+    && action.materialized_sha256 === action.expected_target_sha256
+  ));
+}
+
 export function buildPullReviewSelection(
   items: PullReviewItem[],
   selected: ReadonlySet<string>,

@@ -176,25 +176,29 @@ export function pushSelectableResourceIds(
   capabilityReport?: CapabilityStatusReport | null,
   projectContentInventory?: ProjectContentInventory | null,
 ): Set<string> {
-  const blockedIds = new Set<string>();
+  const excludedIds = new Set<string>();
   for (const entry of threadComparison?.entries ?? []) {
-    if (entry.state === "unavailable" || (entry.state as string) === "blocked") {
-      blockedIds.add(entry.resource_id);
+    if (
+      entry.state === "synced"
+      || entry.state === "unavailable"
+      || (entry.state as string) === "blocked"
+    ) {
+      excludedIds.add(entry.resource_id);
     }
   }
   for (const item of capabilityReport?.items ?? []) {
-    if (item.state === "blocked" || item.blocked_reason) blockedIds.add(item.resource_id);
+    if (item.state === "blocked" || item.blocked_reason) excludedIds.add(item.resource_id);
   }
   for (const entry of projectContentInventory?.entries ?? []) {
     if (entry.blocked_reason || STORAGE_BLOCKING_STATES.has(entry.state)) {
-      blockedIds.add(entry.descriptor.resource_id);
+      excludedIds.add(entry.descriptor.resource_id);
     }
   }
   return new Set(resources
     .filter((resource) => (
       !resource.blocked_reason
       && resource.apply_policy !== "never"
-      && !blockedIds.has(resource.resource_id)
+      && !excludedIds.has(resource.resource_id)
     ))
     .map((resource) => resource.resource_id));
 }
@@ -212,7 +216,16 @@ export function sanitizePushSelection(
     capabilityReport,
     projectContentInventory,
   );
-  return new Set([...selected].filter((resourceId) => selectableIds.has(resourceId)));
+  const sanitized = new Set([...selected].filter((resourceId) => selectableIds.has(resourceId)));
+  const conversations = resources.filter((resource) => categoryFor(resource) === "conversations");
+  const sessionIndex = conversations.find((resource) => resource.resource_id === "codex:session-index");
+  if (sessionIndex && !conversations.some((resource) => (
+    resource.resource_id !== sessionIndex.resource_id
+    && sanitized.has(resource.resource_id)
+  ))) {
+    sanitized.delete(sessionIndex.resource_id);
+  }
+  return sanitized;
 }
 
 const RECOMMENDED_PUSH_THREAD_STATES = new Set(["local_only", "local_ahead"]);
@@ -364,7 +377,32 @@ export default function PushResourceWorkspace({
     [resources],
   );
   const sessionIndex = conversations.find((resource) => resource.resource_id === "codex:session-index") ?? null;
-  const visibleConversations = conversations.filter((resource) => resource.resource_id !== sessionIndex?.resource_id);
+  const visibleConversations = useMemo(
+    () => conversations.filter((resource) => resource.resource_id !== sessionIndex?.resource_id),
+    [conversations, sessionIndex?.resource_id],
+  );
+  const reviewedConversationIds = useMemo(
+    () => new Set(visibleConversations.map((resource) => resource.resource_id)),
+    [visibleConversations],
+  );
+  const upToDateConversationIds = useMemo(
+    () => new Set((threadComparison?.entries ?? [])
+      .filter((entry) => entry.state === "synced" && reviewedConversationIds.has(entry.resource_id))
+      .map((entry) => entry.resource_id)),
+    [reviewedConversationIds, threadComparison?.entries],
+  );
+  const outstandingConversations = useMemo(
+    () => visibleConversations.filter((resource) => !upToDateConversationIds.has(resource.resource_id)),
+    [upToDateConversationIds, visibleConversations],
+  );
+  const hiddenPushResourceIds = useMemo(() => new Set([
+    ...upToDateConversationIds,
+    ...(sessionIndex ? [sessionIndex.resource_id] : []),
+  ]), [sessionIndex, upToDateConversationIds]);
+  const visibleResources = useMemo(
+    () => resources.filter((resource) => !hiddenPushResourceIds.has(resource.resource_id)),
+    [hiddenPushResourceIds, resources],
+  );
   const skills = useMemo(() => resources.filter((resource) => categoryFor(resource) === "skills"), [resources]);
   const plugins = useMemo(() => resources.filter((resource) => categoryFor(resource) === "plugins"), [resources]);
   const projectFiles = useMemo(
@@ -380,20 +418,40 @@ export default function PushResourceWorkspace({
     [capabilityReport, projectContentInventory, resources, threadComparison],
   );
   const effectiveSelected = useMemo(
-    () => new Set([...selected].filter((resourceId) => selectableIds.has(resourceId))),
-    [selectableIds, selected],
+    () => sanitizePushSelection(
+      selected,
+      resources,
+      threadComparison,
+      capabilityReport,
+      projectContentInventory,
+    ),
+    [capabilityReport, projectContentInventory, resources, selected, threadComparison],
   );
   const safeProjectDefaults = useMemo(
-    () => new Set([...projectDefaults].filter((resourceId) => selectableIds.has(resourceId))),
-    [projectDefaults, selectableIds],
+    () => sanitizePushSelection(
+      projectDefaults,
+      resources,
+      threadComparison,
+      capabilityReport,
+      projectContentInventory,
+    ),
+    [capabilityReport, projectContentInventory, projectDefaults, resources, threadComparison],
+  );
+  const visibleEffectiveSelected = useMemo(
+    () => new Set([...effectiveSelected].filter((resourceId) => !hiddenPushResourceIds.has(resourceId))),
+    [effectiveSelected, hiddenPushResourceIds],
+  );
+  const visibleSafeProjectDefaults = useMemo(
+    () => new Set([...safeProjectDefaults].filter((resourceId) => !hiddenPushResourceIds.has(resourceId))),
+    [hiddenPushResourceIds, safeProjectDefaults],
   );
 
   const counts = {
-    history: countSelected(visibleConversations, effectiveSelected),
+    history: countSelected(outstandingConversations, visibleEffectiveSelected),
     skills: countSelected(skills, effectiveSelected),
     plugins: countSelected(plugins, effectiveSelected),
     project_files: countSelected(projectFiles, effectiveSelected),
-    review: effectiveSelected.size,
+    review: visibleEffectiveSelected.size,
   };
   const blockers = pushReviewBlockers(
     effectiveSelected,
@@ -442,6 +500,14 @@ export default function PushResourceWorkspace({
       if (selected.has(resourceId) !== safeNext.has(resourceId)) onToggle(resourceId);
     });
   };
+  const syncSessionIndexSelection = (next: Set<string>) => {
+    if (!sessionIndex) return;
+    if (outstandingConversations.some((resource) => next.has(resource.resource_id))) {
+      next.add(sessionIndex.resource_id);
+    } else {
+      next.delete(sessionIndex.resource_id);
+    }
+  };
   const toggleResource = (resourceId: string) => {
     if (!selectableIds.has(resourceId)) return;
     const next = new Set(effectiveSelected);
@@ -450,9 +516,7 @@ export default function PushResourceWorkspace({
     if (next.has(resourceId)) next.delete(resourceId);
     else next.add(resourceId);
     if (conversations.some((resource) => resource.resource_id === resourceId) && sessionIndex) {
-      const selectedSessionCount = visibleConversations.filter((resource) => next.has(resource.resource_id)).length;
-      if (selectedSessionCount > 0) next.add(sessionIndex.resource_id);
-      else next.delete(sessionIndex.resource_id);
+      syncSessionIndexSelection(next);
     }
     commitSelection(next);
   };
@@ -462,12 +526,13 @@ export default function PushResourceWorkspace({
       else commitSelection(new Set(safeProjectDefaults));
       return;
     }
-    const group = groupForStep(activeStep, resources);
+    const group = groupForStep(activeStep, visibleResources);
     const next = new Set(effectiveSelected);
     group.forEach((resource) => next.delete(resource.resource_id));
     group.forEach((resource) => {
       if (safeProjectDefaults.has(resource.resource_id)) next.add(resource.resource_id);
     });
+    if (activeStep === "history") syncSessionIndexSelection(next);
     commitSelection(next);
   };
   const clearStep = () => {
@@ -475,7 +540,7 @@ export default function PushResourceWorkspace({
       onClear();
       return;
     }
-    const group = groupForStep(activeStep, resources);
+    const group = groupForStep(activeStep, visibleResources);
     const next = new Set(effectiveSelected);
     group.forEach((resource) => {
       const projectEntry = projectContentInventory?.entries.find((entry) => (
@@ -485,6 +550,7 @@ export default function PushResourceWorkspace({
         next.delete(resource.resource_id);
       }
     });
+    if (activeStep === "history") syncSessionIndexSelection(next);
     commitSelection(next);
   };
   const stepIndex = steps.indexOf(activeStep);
@@ -492,8 +558,8 @@ export default function PushResourceWorkspace({
   const nextStep = nextPushReviewStep(activeStep, steps);
   const goBack = () => selectStep(previousStep);
   const goNext = () => selectStep(nextStep);
-  const selectedCount = effectiveSelected.size;
-  const selectableConversationIds = new Set(visibleConversations
+  const selectedCount = visibleEffectiveSelected.size;
+  const selectableConversationIds = new Set(outstandingConversations
     .filter((resource) => selectableIds.has(resource.resource_id))
     .map((resource) => resource.resource_id));
   const selectableSkillIds = new Set(skills
@@ -522,15 +588,15 @@ export default function PushResourceWorkspace({
     warningCode: entry.warning_code,
     warningDigest: entry.warning_digest,
   }));
-  const currentGroup = groupForStep(activeStep, resources);
+  const currentGroup = groupForStep(activeStep, visibleResources);
   const currentDefaults = currentGroup.filter((resource) => safeProjectDefaults.has(resource.resource_id));
   const currentMatchesDefaults = activeStep === "review"
-    ? effectiveSelected.size === safeProjectDefaults.size
-      && [...effectiveSelected].every((resourceId) => safeProjectDefaults.has(resourceId))
+    ? visibleEffectiveSelected.size === visibleSafeProjectDefaults.size
+      && [...visibleEffectiveSelected].every((resourceId) => visibleSafeProjectDefaults.has(resourceId))
     : currentGroup.every((resource) => (
       effectiveSelected.has(resource.resource_id) === safeProjectDefaults.has(resource.resource_id)
     ));
-  const recommendedCount = activeStep === "review" ? safeProjectDefaults.size : currentDefaults.length;
+  const recommendedCount = activeStep === "review" ? visibleSafeProjectDefaults.size : currentDefaults.length;
 
   return (
     <section className="v3-inline-action-review v3-inline-push-review v3-sync-review-workspace" aria-labelledby="v3-push-resource-title">
@@ -543,7 +609,7 @@ export default function PushResourceWorkspace({
             type="button"
             className="btn btn-ghost v3-sync-review-icon-action has-count"
             onClick={useRecommendedForStep}
-            disabled={busy || safeProjectDefaults.size === 0 || currentMatchesDefaults}
+            disabled={busy || visibleSafeProjectDefaults.size === 0 || currentMatchesDefaults}
             title={`Use the recommended ${activeStep === "review" ? "selection" : `${activeStep} selection`}`}
             aria-label={`Use recommended selection (${recommendedCount})`}
           >
@@ -601,12 +667,14 @@ export default function PushResourceWorkspace({
               selectionMode="push"
               selectedResourceIds={effectiveSelected}
               selectableResourceIds={selectableConversationIds}
+              reviewResourceIds={reviewedConversationIds}
+              upToDateResourceIds={upToDateConversationIds}
               selectionDisabled={busy}
               onToggleResource={toggleResource}
               comparisonOverride={threadComparison}
             />
           ) : activeStep === "history" ? (
-            <ResourceInventory resources={conversations} selected={effectiveSelected} statuses={EMPTY_STATUSES} disabled={busy} onToggle={toggleResource} />
+            <ResourceInventory resources={outstandingConversations} selected={effectiveSelected} statuses={EMPTY_STATUSES} disabled={busy} onToggle={toggleResource} />
           ) : null}
 
           {(activeStep === "skills" || activeStep === "plugins") && project ? (
@@ -689,9 +757,6 @@ export default function PushResourceWorkspace({
                   </summary>
                   <ResourceInventory resources={other} selected={effectiveSelected} statuses={EMPTY_STATUSES} disabled={busy} onToggle={toggleResource} />
                 </details>
-              )}
-              {sessionIndex && effectiveSelected.has(sessionIndex.resource_id) && (
-                <p className="v3-sync-review-derived"><Icon name="check-circle" size={13} />The project session index is included automatically.</p>
               )}
               {blockingCount > 0 && (
                 <div className="v3-callout v3-sync-review-blocker" role="alert">

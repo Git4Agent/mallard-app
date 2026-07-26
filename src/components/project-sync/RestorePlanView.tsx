@@ -23,6 +23,7 @@ import {
   buildPullReviewSelection,
   defaultSelected,
   dependencyActionIds,
+  isPinnedNoopConversation,
   itemKindLabel,
   includeRequiredPullProjectDirectories,
   pendingIds,
@@ -304,20 +305,47 @@ export default function RestorePlanView({
     () => items.filter((item) => itemKindLabel(item) === "Conversation"),
     [items],
   );
+  const upToDateConversationItems = useMemo(
+    () => conversationItems.filter(isPinnedNoopConversation),
+    [conversationItems],
+  );
+  const upToDateConversationIds = useMemo(
+    () => new Set(upToDateConversationItems.map((item) => item.resourceId)),
+    [upToDateConversationItems],
+  );
+  const internalResourceIds = useMemo(() => {
+    const resourceIds = new Set(upToDateConversationIds);
+    if (items.some((item) => item.resourceId === "codex:session-index")) {
+      resourceIds.add("codex:session-index");
+    }
+    return resourceIds;
+  }, [items, upToDateConversationIds]);
+  const visibleItems = useMemo(
+    () => items.filter((item) => !internalResourceIds.has(item.resourceId)),
+    [items, internalResourceIds],
+  );
+  const visibleConversationItems = useMemo(
+    () => conversationItems.filter((item) => !upToDateConversationIds.has(item.resourceId)),
+    [conversationItems, upToDateConversationIds],
+  );
+  const conversationReviewIds = useMemo(
+    () => new Set(conversationItems.map((item) => item.resourceId)),
+    [conversationItems],
+  );
   const skillItems = useMemo(() => items.filter((item) => item.toolKind === "custom_skill"), [items]);
   const pluginItems = useMemo(() => items.filter((item) => item.toolKind === "plugin"), [items]);
   const projectContentItems = useMemo(
     () => items.filter((item) => item.category === "project_content"),
     [items],
   );
-  const otherItems = useMemo(() => items.filter((item) => (
+  const otherItems = useMemo(() => visibleItems.filter((item) => (
     itemKindLabel(item) !== "Conversation"
     && item.toolKind !== "custom_skill"
     && item.toolKind !== "plugin"
     && item.category !== "project_content"
-  )), [items]);
-  const projectItems = useMemo(() => items.filter((item) => item.category === "project_data"), [items]);
-  const globalItems = useMemo(() => items.filter((item) => item.category === "global_tool"), [items]);
+  )), [visibleItems]);
+  const projectItems = useMemo(() => visibleItems.filter((item) => item.category === "project_data"), [visibleItems]);
+  const globalItems = useMemo(() => visibleItems.filter((item) => item.category === "global_tool"), [visibleItems]);
   const showProjectFiles = plan.project_content_eligibility?.state === "eligible" || projectContentItems.length > 0;
   const reviewSteps = useMemo(() => syncReviewSteps(showProjectFiles), [showProjectFiles]);
   const knownItems = useRef(new Set<string>());
@@ -347,21 +375,21 @@ export default function RestorePlanView({
     () => buildPullReviewSelection(items, selected, completedActionIds, completedResourceIds),
     [items, selected, completedActionIds, completedResourceIds],
   );
-  const selectedCount = selection.resourceIds.length;
+  const selectedCount = selection.resourceIds.filter((resourceId) => !internalResourceIds.has(resourceId)).length;
   const pendingProjectContentDecisionCount = projectContentItems.filter((item) => (
     pendingIds(item, completedActionIds).length > 0 && !completedResourceIds.has(item.resourceId)
   )).length;
   const hasResult = phase === "complete" || restoreResult !== null || dependencyResult !== null;
-  const approvalItems = items.filter((item) => (
+  const approvalItems = visibleItems.filter((item) => (
     item.category !== "project_content"
     && requiresApproval(item)
     && !selected.has(item.resourceId)
     && !completedResourceIds.has(item.resourceId)
   ));
-  const manualItems = items.filter((item) => (
+  const manualItems = visibleItems.filter((item) => (
     requiresManualResolution(item) && !completedResourceIds.has(item.resourceId)
   ));
-  const keptLocalConversationItems = items.filter((item) => (
+  const keptLocalConversationItems = visibleItems.filter((item) => (
     keepsLocalConversation(item) && !completedResourceIds.has(item.resourceId)
   ));
 
@@ -379,9 +407,13 @@ export default function RestorePlanView({
   )).length;
   const unchangedCount = skippedTools + manualItems.length;
   const finalReady = hasResult && !error && failureCount === 0 && skippedTools === 0 && readiness?.state === "ready";
-  const reviewCanClose = hasResult && (
+  const reviewCanClose = (hasResult && (
     finalReady || (selectedCount === 0 && pendingProjectContentDecisionCount === 0)
-  );
+  )) || (!hasResult
+    && !supportLoading
+    && visibleItems.length === 0
+    && pendingProjectContentDecisionCount === 0
+    && keptLocalConversationItems.length === 0);
   const completedProjectItems = projectItems.filter((item) => completedResourceIds.has(item.resourceId));
   const completedSkills = globalItems.filter((item) => (
     item.toolKind === "custom_skill" && completedResourceIds.has(item.resourceId)
@@ -437,14 +469,14 @@ export default function RestorePlanView({
   const dependencyMessages = (dependencyPlan?.blockers?.length ?? 0) + (dependencyPlan?.warnings?.length ?? 0);
   const recommendedIds = new Set(items.filter(defaultSelected).map((item) => item.resourceId));
   const stepItems = activeStep === "history"
-    ? conversationItems
+    ? visibleConversationItems
     : activeStep === "skills"
       ? skillItems
       : activeStep === "plugins"
         ? pluginItems
         : activeStep === "project_files"
           ? projectContentItems
-        : items;
+        : visibleItems;
   const pendingStepItems = stepItems.filter((item) => (
     pendingIds(item, completedActionIds).length > 0 && !completedResourceIds.has(item.resourceId)
   ));
@@ -462,14 +494,14 @@ export default function RestorePlanView({
     return includeRequiredPullProjectDirectories(items, next);
   });
   const clearStep = () => setSelected((current) => {
-    if (activeStep === "review") return new Set();
+    if (activeStep === "review") return new Set(internalResourceIds);
     const next = new Set(current);
     for (const item of stepItems) next.delete(item.resourceId);
     return next;
   });
   const selectedIn = (chosen: PullReviewItem[]) => chosen.filter((item) => selected.has(item.resourceId)).length;
   const counts = {
-    history: selectedIn(conversationItems),
+    history: selectedIn(visibleConversationItems),
     skills: selectedIn(skillItems),
     plugins: selectedIn(pluginItems),
     project_files: selectedIn(projectContentItems),
@@ -610,12 +642,14 @@ export default function RestorePlanView({
               selectionMode="pull"
               selectedResourceIds={selected}
               selectableResourceIds={conversationIds}
+              reviewResourceIds={conversationReviewIds}
+              upToDateResourceIds={upToDateConversationIds}
               selectionDisabled={busy || finalReady}
               onToggleResource={toggle}
             />
-          ) : activeStep === "history" && conversationItems.length > 0 ? (
+          ) : activeStep === "history" && visibleConversationItems.length > 0 ? (
             <ItemList
-              items={conversationItems}
+              items={visibleConversationItems}
               selected={selected}
               completedActionIds={completedActionIds}
               completedResourceIds={completedResourceIds}

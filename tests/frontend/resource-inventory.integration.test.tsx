@@ -4,7 +4,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import PushResourceWorkspace, {
   nextPushReviewStep,
   preserveSyncedPushRecipeEntries,
+  pushSelectableResourceIds,
   recommendedPushSelection,
+  sanitizePushSelection,
 } from "../../src/components/project-sync/PushResourceWorkspace";
 import ResourceInventory from "../../src/components/project-sync/ResourceInventory";
 import { recipeWithSelection } from "../../src/components/project-sync/model";
@@ -106,6 +108,23 @@ test("recommended Push selection includes only locally changed sessions", () => 
   assert.deepEqual(
     [...recommended].sort(),
     [localAhead.resource_id, sessionIndex.resource_id, skill.resource_id].sort(),
+  );
+  assert.equal(
+    pushSelectableResourceIds(
+      [localAhead, synced, storageAhead, sessionIndex, skill],
+      comparison,
+    ).has(synced.resource_id),
+    false,
+    "an up-to-date session is informational, not a Push action",
+  );
+  assert.deepEqual(
+    [...sanitizePushSelection(
+      new Set([synced.resource_id, sessionIndex.resource_id]),
+      [localAhead, synced, storageAhead, sessionIndex, skill],
+      comparison,
+    )],
+    [],
+    "the internal session index cannot keep an otherwise empty Push selected",
   );
 
   const sourceRecipe: BundleRecipe = {
@@ -237,6 +256,90 @@ test("the push chooser shows one concise selection summary", () => {
   assert.doesNotMatch(html, /Choose resources to push/);
   assert.doesNotMatch(html, /Selections are saved after Push succeeds/);
   assert.doesNotMatch(html, /last selection|selection will be remembered|resource selected/i);
+});
+
+test("Push review counts only outstanding sessions and keeps synced sessions informational", () => {
+  const localAhead = conversation("codex:session:local-ahead");
+  const synced = conversation("codex:session:synced");
+  const sessionIndex = conversation("codex:session-index");
+  const resources = [localAhead, synced, sessionIndex];
+  const comparison: ThreadSyncComparison = {
+    project_id: "project-a",
+    storage_id: "storage-a",
+    storage_name: "R2 storage 1",
+    compared_at: 1,
+    counts: { synced: 1, local: 1, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
+    warnings: [],
+    entries: [
+      {
+        thread_id: "local-ahead",
+        resource_id: localAhead.resource_id,
+        display_name: "Local ahead",
+        state: "local_ahead",
+        local_present: true,
+        storage_present: true,
+      },
+      {
+        thread_id: "synced",
+        resource_id: synced.resource_id,
+        display_name: "Synced",
+        state: "synced",
+        local_present: true,
+        storage_present: true,
+      },
+    ],
+  };
+  const mixedHtml = renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={resources}
+      selected={new Set(resources.map((resource) => resource.resource_id))}
+      projectDefaults={new Set(resources.map((resource) => resource.resource_id))}
+      busy={false}
+      error={null}
+      initialStep="review"
+      threadComparison={comparison}
+      onToggle={() => undefined}
+      onUseProjectDefaults={() => undefined}
+      onClear={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+    />,
+  );
+
+  assert.match(mixedHtml, /aria-label="Git &amp; sessions, 1 selected"/);
+  assert.match(mixedHtml, /aria-label="Use recommended selection \(1\)"/);
+  assert.match(mixedHtml, />1 included/);
+  assert.doesNotMatch(mixedHtml, /project session index|codex:session-index/i);
+
+  const syncedOnlyHtml = renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={[synced, sessionIndex]}
+      selected={new Set([synced.resource_id, sessionIndex.resource_id])}
+      projectDefaults={new Set([synced.resource_id, sessionIndex.resource_id])}
+      busy={false}
+      error={null}
+      initialStep="review"
+      threadComparison={{
+        ...comparison,
+        counts: { ...comparison.counts, local: 0 },
+        entries: comparison.entries.filter((entry) => entry.state === "synced"),
+      }}
+      onToggle={() => undefined}
+      onUseProjectDefaults={() => undefined}
+      onClear={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+    />,
+  );
+  const pushButton = syncedOnlyHtml.match(
+    /<button[^>]*v3-pull-apply-button[^>]*>.*?Push<\/button>/s,
+  )?.[0] ?? "";
+
+  assert.match(syncedOnlyHtml, /aria-label="Git &amp; sessions, 0 selected"/);
+  assert.match(syncedOnlyHtml, /aria-label="Use recommended selection \(0\)"/);
+  assert.match(syncedOnlyHtml, />0 included/);
+  assert.match(pushButton, /disabled=""/);
+  assert.doesNotMatch(syncedOnlyHtml, /project session index|codex:session-index/i);
 });
 
 test("the push chooser provides contextual back and next actions", () => {

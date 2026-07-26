@@ -13,6 +13,7 @@ import RestorePlanView from "../../src/components/project-sync/RestorePlanView";
 import {
   buildPullReviewItems,
   buildPullReviewSelection,
+  isPinnedNoopConversation,
 } from "../../src/components/project-sync/pullReviewModel";
 import {
   applyPullReview,
@@ -186,6 +187,118 @@ test("a Pull review opens on the first step by default", () => {
   assert.match(html, /aria-selected="true"[^>]*aria-label="Git &amp; sessions, 1 selected"/);
   assert.doesNotMatch(html, /aria-selected="true"[^>]*aria-label="Review"/);
   assert.match(html, />Next: Skills</, "the first step advances instead of applying");
+});
+
+test("pinned conversation no-ops stay internal and do not inflate Pull review counts", () => {
+  const digest = "c".repeat(64);
+  const mixedPlan: RestorePlan = {
+    ...restorePlan,
+    actions: [
+      restorePlan.actions[0],
+      {
+        action_id: "action-session-synced",
+        resource_id: "codex:session:thread-synced",
+        kind: {
+          kind: "materialize_conversation",
+          provider: "codex",
+          logical_path: "state/codex/sessions/2026/07/18/thread-synced.jsonl",
+        },
+        target_path: "/Users/test/.codex/sessions/2026/07/18/thread-synced.jsonl",
+        source_sha256: digest,
+        expected_target_sha256: digest,
+        materialized_sha256: digest,
+        requires_explicit_approval: false,
+      },
+      {
+        action_id: "action-session-index",
+        resource_id: "codex:session-index",
+        kind: {
+          kind: "merge_file",
+          logical_path: "state/codex/session_index.jsonl",
+        },
+        target_path: "/Users/test/.codex/session_index.jsonl",
+        source_sha256: "d".repeat(64),
+        expected_target_sha256: null,
+        requires_explicit_approval: false,
+      },
+    ],
+  };
+  const items = buildPullReviewItems(mixedPlan, null);
+  const synced = items.find((item) => item.resourceId === "codex:session:thread-synced");
+  const outstanding = items.find((item) => item.resourceId === "codex:session:thread-a");
+  assert.ok(synced);
+  assert.ok(outstanding);
+  assert.equal(isPinnedNoopConversation(synced), true);
+  assert.equal(isPinnedNoopConversation(outstanding), false);
+
+  const selection = buildPullReviewSelection(
+    items,
+    new Set(items.map((item) => item.resourceId)),
+    new Set(),
+    new Set(),
+  );
+  assert.deepEqual(
+    [...selection.restoreActionIds].sort(),
+    ["action-session", "action-session-index", "action-session-synced"],
+    "hidden pinned and index actions accompany a real Apply",
+  );
+
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      embedded
+      projectName="gam2"
+      profileLabel="myconf2"
+      plan={mixedPlan}
+      binding={binding}
+      dependencyPlan={null}
+      readiness={null}
+      restoreResult={null}
+      dependencyResult={null}
+      phase="idle"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      onApply={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+
+  assert.match(html, /aria-label="Git &amp; sessions, 1 selected"/);
+  assert.match(html, /aria-label="Use recommended selection \(1\)"/);
+  assert.doesNotMatch(html, /Git &amp; sessions, 2 selected/);
+
+  const syncedOnlyHtml = renderToStaticMarkup(
+    <RestorePlanView
+      embedded
+      projectName="gam2"
+      profileLabel="myconf2"
+      plan={{ ...mixedPlan, actions: [mixedPlan.actions[1], mixedPlan.actions[2]] }}
+      binding={binding}
+      dependencyPlan={null}
+      readiness={null}
+      restoreResult={null}
+      dependencyResult={null}
+      phase="idle"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="review"
+      onApply={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.match(syncedOnlyHtml, /aria-label="Git &amp; sessions, 0 selected"/);
+  assert.match(syncedOnlyHtml, /aria-label="Use recommended selection \(0\)"/);
+  assert.match(syncedOnlyHtml, />Done<\/button>/);
+  assert.doesNotMatch(syncedOnlyHtml, /Agent setup &amp; tools/);
 });
 
 test("the embedded Pull footer omits redundant helper copy", () => {
