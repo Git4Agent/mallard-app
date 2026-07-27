@@ -14,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use walkdir::{DirEntry, WalkDir};
 
+use super::codex_rollout::{self, CodexRolloutClass, CodexRolloutClassification};
 use super::conversation_codec::{
     analyze_codex_transcript, CodecLineage, CodecUnknownReason, CODEX_LINEAGE_CODEC_KEY,
 };
@@ -338,6 +339,32 @@ pub fn capture_from_discovery(
         if discovered.descriptor.blocked_reason.is_some() {
             result.unavailable_resource_ids.push(resource_id.clone());
             continue;
+        }
+
+        // Discovery already excludes Codex subagent rollouts, but file
+        // bytes are re-read at capture time, so the current file must still
+        // be a root task: a stale selection or a rollout rewritten since
+        // discovery is rejected fail-closed instead of being published.
+        if discovered.descriptor.kind == CaptureResourceKind::Conversation
+            && discovered.descriptor.provider == Some(Provider::Codex)
+            && resource_id.starts_with("codex:session:")
+        {
+            for source in &discovered.files {
+                let meta = scan_jsonl_metadata(&source.physical_path, Provider::Codex).map_err(
+                    |error| {
+                        format!(
+                            "resource '{}' transcript could not be classified: {}",
+                            resource_id, error
+                        )
+                    },
+                )?;
+                if !meta.rollout_class.is_root() {
+                    return Err(format!(
+                        "resource '{}' is a Codex subagent rollout; only root tasks are portable",
+                        resource_id
+                    ));
+                }
+            }
         }
 
         let file_limit = capture_file_limit(&discovered.descriptor.kind);
@@ -1343,6 +1370,19 @@ fn discover_codex(
                     continue;
                 }
             };
+            // Only user-visible root tasks are portable. Subagent rollouts
+            // (guardian/review/compact, spawned descendants, and unknown
+            // shapes) never become resources, recipe entries, captured
+            // files, or session-index rows; their exclusion is expected
+            // behavior, not an error, so no warning is emitted.
+            // TODO(codex-task-tree-sync): Preserve genuine thread_spawn
+            // descendants as hidden members of their root task after
+            // task-level comparison, review, restore, and crash-recovery
+            // semantics are designed together. Reuse the parsed
+            // rollout_class and parent_thread_id from SessionMetadata.
+            if !meta.rollout_class.is_root() {
+                continue;
+            }
             let Some(relative_cwd) = owned_relative_cwd(project_root, &meta.cwd, excluded_roots)?
             else {
                 continue;
@@ -1882,6 +1922,22 @@ fn discover_blocked_global_skill(
 pub(crate) struct SessionMetadata {
     pub(crate) session_id: String,
     pub(crate) cwd: PathBuf,
+    /// Shared Codex rollout classification. Claude scans are always `Root`.
+    pub(crate) rollout_class: CodexRolloutClass,
+    /// Validated parent thread ID retained for genuine `thread_spawn`
+    /// descendants; `None` for every other class, including roots. Not yet
+    /// consumed outside tests: it exists for
+    /// TODO(codex-task-tree-sync) so future task-tree support starts from
+    /// typed, already-parsed relationship metadata.
+    #[allow(dead_code)]
+    pub(crate) parent_thread_id: Option<String>,
+}
+
+const SESSION_META_MARKER: &[u8] = b"session_meta";
+
+fn contains_session_meta_marker(line: &[u8]) -> bool {
+    line.windows(SESSION_META_MARKER.len())
+        .any(|window| window.eq_ignore_ascii_case(SESSION_META_MARKER))
 }
 
 pub(crate) fn scan_jsonl_metadata(
@@ -1893,6 +1949,12 @@ pub(crate) fn scan_jsonl_metadata(
     let mut total = 0_usize;
     let mut fallback_id = None;
     let mut fallback_cwd = None;
+    // Codex identity comes from the first authoritative record, but the
+    // classification folds over every `session_meta` record in the bounded
+    // window: resumed rollouts can append later records, local History
+    // honors their subagent markers, and capture must agree with History.
+    let mut codex_identity: Option<(String, String)> = None;
+    let mut classification = CodexRolloutClassification::root();
     for _ in 0..MAX_METADATA_LINES {
         let mut line = Vec::new();
         let read = reader
@@ -1908,6 +1970,12 @@ pub(crate) fn scan_jsonl_metadata(
         if line.len() > 256 * 1024 {
             continue;
         }
+        // Once the identity is fixed, later lines only matter when they can
+        // carry another `session_meta` record; skip the JSON parse for
+        // everything else.
+        if codex_identity.is_some() && !contains_session_meta_marker(&line) {
+            continue;
+        }
         let value: serde_json::Value = match serde_json::from_slice(&line) {
             Ok(value) => value,
             Err(_) => continue,
@@ -1915,6 +1983,21 @@ pub(crate) fn scan_jsonl_metadata(
         let event_type = find_string_for_keys(&value, &["type"])
             .unwrap_or_default()
             .to_ascii_lowercase();
+        let authoritative = match provider {
+            Provider::Codex => event_type.contains("session_meta"),
+            Provider::Claude => {
+                event_type.contains("system")
+                    || event_type.contains("init")
+                    || value.get("sessionId").is_some()
+            }
+        };
+        if authoritative && provider == Provider::Codex {
+            let payload = value.get("payload").unwrap_or(&value);
+            classification.absorb(codex_rollout::classify_session_meta(payload));
+        }
+        if codex_identity.is_some() {
+            continue;
+        }
         let cwd = find_string_for_keys(
             &value,
             &[
@@ -1924,14 +2007,6 @@ pub(crate) fn scan_jsonl_metadata(
                 "projectPath",
             ],
         );
-        let authoritative = match provider {
-            Provider::Codex => event_type.contains("session_meta"),
-            Provider::Claude => {
-                event_type.contains("system")
-                    || event_type.contains("init")
-                    || value.get("sessionId").is_some()
-            }
-        };
         let id = match provider {
             // Modern Codex subagent metadata carries both `id` (this
             // transcript) and `session_id` (its parent). Prefer `id` on the
@@ -1959,17 +2034,27 @@ pub(crate) fn scan_jsonl_metadata(
         }
         if authoritative {
             if let (Some(id), Some(cwd)) = (id, cwd) {
-                return validated_session_metadata(id, cwd);
+                match provider {
+                    Provider::Claude => return validated_session_metadata(id, cwd, classification),
+                    Provider::Codex => codex_identity = Some((id, cwd)),
+                }
             }
         }
+    }
+    if let Some((id, cwd)) = codex_identity {
+        return validated_session_metadata(id, cwd, classification);
     }
     let id =
         fallback_id.ok_or_else(|| "session ID was not found in bounded metadata".to_string())?;
     let cwd = fallback_cwd.ok_or_else(|| "cwd was not found in bounded metadata".to_string())?;
-    validated_session_metadata(id, cwd)
+    validated_session_metadata(id, cwd, classification)
 }
 
-fn validated_session_metadata(id: String, cwd: String) -> Result<SessionMetadata, String> {
+fn validated_session_metadata(
+    id: String,
+    cwd: String,
+    classification: CodexRolloutClassification,
+) -> Result<SessionMetadata, String> {
     if id.is_empty()
         || id.len() > 512
         || id.chars().any(char::is_control)
@@ -1986,6 +2071,8 @@ fn validated_session_metadata(id: String, cwd: String) -> Result<SessionMetadata
     Ok(SessionMetadata {
         session_id: id,
         cwd,
+        rollout_class: classification.class,
+        parent_thread_id: classification.parent_thread_id,
     })
 }
 
@@ -2839,7 +2926,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_subagent_uses_its_own_id_instead_of_parent_session_id() {
+    fn codex_subagent_keeps_own_identity_and_is_excluded_from_discovery() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         let codex = temp.path().join("codex");
@@ -2853,13 +2940,21 @@ mod tests {
             )
             .as_bytes(),
         );
+        let child_path = codex.join("sessions/2026/07/17/rollout-child.jsonl");
         write(
-            &codex.join("sessions/2026/07/17/rollout-child.jsonl"),
+            &child_path,
             format!(
                 "{{\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"parent-thread\",\"id\":\"child-thread\",\"parent_thread_id\":\"parent-thread\",\"cwd\":{cwd},\"source\":{{\"subagent\":{{\"other\":\"guardian\"}}}}}}}}\n"
             )
             .as_bytes(),
         );
+
+        // The child's own `id` remains its identity even though the rollout
+        // is excluded; a parent-valued `session_id` must never replace it.
+        let meta = scan_jsonl_metadata(&child_path, Provider::Codex).unwrap();
+        assert_eq!(meta.session_id, "child-thread");
+        assert_eq!(meta.rollout_class, CodexRolloutClass::InternalSubagent);
+        assert_eq!(meta.parent_thread_id, None);
 
         let request = CaptureRequest {
             project_root: project,
@@ -2881,7 +2976,190 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert!(conversation_ids.contains("codex:session:parent-thread"));
-        assert!(conversation_ids.contains("codex:session:child-thread"));
+        assert!(!conversation_ids.contains("codex:session:child-thread"));
+        // Exclusion is expected behavior, not an error.
+        assert!(inventory
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("child-thread")));
+    }
+
+    #[test]
+    fn codex_thread_spawn_descendants_are_excluded_and_index_stays_root_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let codex = temp.path().join("codex");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&codex).unwrap();
+        let cwd = serde_json::to_string(project.to_str().unwrap()).unwrap();
+        write(
+            &codex.join("sessions/2026/07/26/rollout-root.jsonl"),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"root-thread\",\"cwd\":{cwd},\"source\":\"vscode\",\"thread_source\":\"user\"}}}}\n"
+            )
+            .as_bytes(),
+        );
+        // Real-shaped spawned descendant: both markers, parent everywhere.
+        let spawn_child_path = codex.join("sessions/2026/07/26/rollout-spawn-child.jsonl");
+        write(
+            &spawn_child_path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"spawn-child\",\"session_id\":\"root-thread\",\"parent_thread_id\":\"root-thread\",\"forked_from_id\":\"root-thread\",\"cwd\":{cwd},\"thread_source\":\"subagent\",\"source\":{{\"subagent\":{{\"thread_spawn\":{{\"parent_thread_id\":\"root-thread\",\"depth\":1,\"agent_nickname\":\"Aquinas\"}}}}}}}}}}\n"
+            )
+            .as_bytes(),
+        );
+        // Nested descendant spawned by the first child.
+        write(
+            &codex.join("sessions/2026/07/26/rollout-spawn-grandchild.jsonl"),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"spawn-grandchild\",\"session_id\":\"spawn-child\",\"cwd\":{cwd},\"thread_source\":\"subagent\",\"source\":{{\"subagent\":{{\"thread_spawn\":{{\"parent_thread_id\":\"spawn-child\",\"depth\":2}}}}}}}}}}\n"
+            )
+            .as_bytes(),
+        );
+        // Guardian running under the spawned descendant stays excluded too.
+        write(
+            &codex.join("sessions/2026/07/26/rollout-guardian.jsonl"),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"guardian-thread\",\"session_id\":\"spawn-child\",\"cwd\":{cwd},\"thread_source\":\"subagent\",\"source\":{{\"subagent\":{{\"other\":\"guardian\"}}}}}}}}\n"
+            )
+            .as_bytes(),
+        );
+        // A hostile or legacy index row for the descendant must not survive
+        // the root-only filter.
+        write(
+            &codex.join("session_index.jsonl"),
+            b"{\"thread_id\":\"root-thread\",\"title\":\"Root\"}\n{\"thread_id\":\"spawn-child\",\"title\":\"Spawned\"}\n",
+        );
+
+        let meta = scan_jsonl_metadata(&spawn_child_path, Provider::Codex).unwrap();
+        assert_eq!(meta.rollout_class, CodexRolloutClass::ThreadSpawn);
+        assert_eq!(meta.parent_thread_id.as_deref(), Some("root-thread"));
+
+        let request = CaptureRequest {
+            project_root: project,
+            codex_home: Some(codex),
+            claude_home: None,
+            excluded_project_roots: Vec::new(),
+            standalone_skills: Vec::new(),
+            global_plugins: Vec::new(),
+            blocked_global_skills: Vec::new(),
+            include_project_content: false,
+            excluded_content_roots: Vec::new(),
+        };
+        let discovery = discover_full(&request).unwrap();
+        let conversation_ids = discovery
+            .resources
+            .values()
+            .filter(|resource| resource.descriptor.kind == CaptureResourceKind::Conversation)
+            .map(|resource| resource.descriptor.resource_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            conversation_ids,
+            BTreeSet::from(["codex:session:root-thread", "codex:session-index"])
+        );
+
+        let index = discovery.resources.get("codex:session-index").unwrap();
+        let filtered =
+            String::from_utf8(index.files[0].derived_bytes.clone().unwrap()).unwrap();
+        assert!(filtered.contains("root-thread"));
+        assert!(!filtered.contains("spawn-child"));
+
+        for excluded in ["spawn-child", "spawn-grandchild", "guardian-thread"] {
+            assert!(discovery
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains(excluded)));
+        }
+    }
+
+    #[test]
+    fn codex_multi_record_rollout_with_late_subagent_marker_is_excluded() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let codex = temp.path().join("codex");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&codex).unwrap();
+        let cwd = serde_json::to_string(project.to_str().unwrap()).unwrap();
+        // Resumed rollouts can append additional session_meta records; a
+        // marker on any record within the bounded window excludes the
+        // rollout, exactly as local History treats it.
+        let path = codex.join("sessions/2026/07/26/rollout-late-marker.jsonl");
+        write(
+            &path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"late-marker\",\"cwd\":{cwd},\"source\":\"vscode\"}}}}\n\
+                 {{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[]}}}}\n\
+                 {{\"type\":\"session_meta\",\"payload\":{{\"id\":\"late-marker\",\"cwd\":{cwd},\"thread_source\":\"subagent\",\"source\":{{\"subagent\":{{\"thread_spawn\":{{\"parent_thread_id\":\"root-thread\"}}}}}}}}}}\n"
+            )
+            .as_bytes(),
+        );
+
+        let meta = scan_jsonl_metadata(&path, Provider::Codex).unwrap();
+        assert_eq!(meta.session_id, "late-marker");
+        assert_eq!(meta.rollout_class, CodexRolloutClass::ThreadSpawn);
+        assert_eq!(meta.parent_thread_id.as_deref(), Some("root-thread"));
+
+        let request = CaptureRequest {
+            project_root: project,
+            codex_home: Some(codex),
+            claude_home: None,
+            excluded_project_roots: Vec::new(),
+            standalone_skills: Vec::new(),
+            global_plugins: Vec::new(),
+            blocked_global_skills: Vec::new(),
+            include_project_content: false,
+            excluded_content_roots: Vec::new(),
+        };
+        let inventory = discover_project(&request).unwrap();
+        assert!(inventory
+            .resources
+            .iter()
+            .all(|resource| resource.resource_id != "codex:session:late-marker"));
+    }
+
+    #[test]
+    fn capture_rejects_codex_rollout_that_turns_into_subagent_after_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let codex = temp.path().join("codex");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&codex).unwrap();
+        let cwd = serde_json::to_string(project.to_str().unwrap()).unwrap();
+        let rollout = codex.join("sessions/2026/07/26/rollout-flipped.jsonl");
+        write(
+            &rollout,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"flipped-thread\",\"cwd\":{cwd}}}}}\n"
+            )
+            .as_bytes(),
+        );
+
+        let request = CaptureRequest {
+            project_root: project,
+            codex_home: Some(codex),
+            claude_home: None,
+            excluded_project_roots: Vec::new(),
+            standalone_skills: Vec::new(),
+            global_plugins: Vec::new(),
+            blocked_global_skills: Vec::new(),
+            include_project_content: false,
+            excluded_content_roots: Vec::new(),
+        };
+        let discovery = discover_full(&request).unwrap();
+        assert!(discovery.resources.contains_key("codex:session:flipped-thread"));
+
+        // The rollout is rewritten as a subagent between discovery and
+        // capture; the stale selection must be rejected fail-closed.
+        write(
+            &rollout,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"flipped-thread\",\"cwd\":{cwd},\"source\":{{\"subagent\":{{\"other\":\"guardian\"}}}}}}}}\n"
+            )
+            .as_bytes(),
+        );
+        let selected = BTreeSet::from(["codex:session:flipped-thread".to_string()]);
+        let error = capture_from_discovery(&request, &discovery, &selected).unwrap_err();
+        assert!(error.contains("subagent rollout"), "unexpected error: {error}");
     }
 
     #[test]

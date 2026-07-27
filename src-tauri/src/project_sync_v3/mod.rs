@@ -6,6 +6,7 @@
 
 pub mod bundle_engine;
 pub mod chat_history;
+pub(crate) mod codex_rollout;
 pub mod commands;
 pub mod conversation_codec;
 pub mod conversation_materialization;

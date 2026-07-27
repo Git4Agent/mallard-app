@@ -4,6 +4,7 @@
 //! first-message summaries, and inferred Git relationships stay on this
 //! machine and are recomputed from the active project binding on demand.
 
+use super::codex_rollout;
 use super::domain::{BindingState, LocalProjectId, MaterializationStatus, Provider};
 use super::persistence::{read_json_bounded, write_json_atomic, V3Repository};
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -1142,16 +1143,15 @@ fn rollout_identity_from_value(value: &Value) -> Option<RolloutIdentity> {
     Some(RolloutIdentity {
         thread_id: string_alias(payload, &["id", "thread_id", "session_id"]).map(ToOwned::to_owned),
         cwd: PathBuf::from(cwd),
-        is_internal_subagent: session_meta_is_internal_subagent(payload),
+        is_internal_subagent: session_meta_is_subagent(payload),
     })
 }
 
-fn session_meta_is_internal_subagent(payload: &Value) -> bool {
-    payload.get("thread_source").and_then(Value::as_str) == Some("subagent")
-        || payload
-            .get("source")
-            .and_then(|source| source.get("subagent"))
-            .is_some()
+/// History hides every non-root rollout. The class boundary itself is the
+/// shared `codex_rollout` classifier so History can never hide a rollout
+/// that provider capture would upload.
+fn session_meta_is_subagent(payload: &Value) -> bool {
+    !codex_rollout::classify_session_meta(payload).is_root()
 }
 
 struct RolloutParser {
@@ -1213,7 +1213,7 @@ impl RolloutParser {
             self.last_timestamp = Some(timestamp);
         }
         if event_type == "session_meta" || payload_type == "session_meta" {
-            self.is_internal_subagent |= session_meta_is_internal_subagent(payload);
+            self.is_internal_subagent |= session_meta_is_subagent(payload);
             if self.thread_id.is_none() {
                 self.thread_id = string_alias(payload, &["id", "thread_id", "session_id"])
                     .map(ToOwned::to_owned);
@@ -2702,6 +2702,35 @@ mod tests {
         let parsed = parse_rollout_lines(lines.iter().map(String::as_str), 99).unwrap();
 
         assert!(!rollout_is_user_visible(&parsed));
+    }
+
+    #[test]
+    fn thread_spawn_rollouts_are_not_user_visible_chats() {
+        // Real-shaped Codex spawned descendant: both subagent markers set,
+        // the parent ID mirrored across the provenance fields.
+        let lines = vec![json!({
+            "timestamp": 100,
+            "type": "session_meta",
+            "payload": {
+                "id": "spawn-child",
+                "session_id": "root-thread",
+                "parent_thread_id": "root-thread",
+                "forked_from_id": "root-thread",
+                "cwd": "/tmp/project",
+                "thread_source": "subagent",
+                "source": {"subagent": {"thread_spawn": {
+                    "parent_thread_id": "root-thread",
+                    "depth": 1,
+                    "agent_nickname": "Aquinas"
+                }}}
+            }
+        })
+        .to_string()];
+
+        let parsed = parse_rollout_lines(lines.iter().map(String::as_str), 99).unwrap();
+
+        assert!(!rollout_is_user_visible(&parsed));
+        assert_eq!(parsed.thread.thread_id, "spawn-child");
     }
 
     #[test]
