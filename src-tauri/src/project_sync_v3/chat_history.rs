@@ -29,7 +29,7 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_ROLLOUT_IDENTITY_RECORDS: usize = 16;
 const DEFAULT_HISTORY_WINDOW_DAYS: u64 = 30;
 const DAY_SECS: u64 = 24 * 60 * 60;
-const CHAT_CACHE_SCHEMA: u32 = 3;
+const CHAT_CACHE_SCHEMA: u32 = 4;
 const MAX_CHAT_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_CHAT_CACHE_ENTRIES: usize = 50_000;
 #[cfg(target_os = "macos")]
@@ -154,6 +154,7 @@ struct SessionIndexEntry {
 struct ParsedRollout {
     thread: CodexThreadSummary,
     cwd: PathBuf,
+    repository_url: Option<String>,
     #[serde(default)]
     has_record_endpoints: bool,
     #[serde(default)]
@@ -165,6 +166,7 @@ struct RolloutIdentity {
     #[serde(default)]
     thread_id: Option<String>,
     cwd: PathBuf,
+    repository_url: Option<String>,
     is_internal_subagent: bool,
 }
 
@@ -263,10 +265,12 @@ pub fn get_project_chat_history(
 ) -> Result<ProjectChatHistory, String> {
     let resolved = resolve_project(repository, local_project_id)?;
     let mut warnings = Vec::new();
+    let project_repository_url = discover_github_repository_url(&resolved.project_root);
     let mut all_threads = scan_codex_threads(
         repository,
         &resolved.codex_home,
         &resolved.project_root,
+        project_repository_url.as_deref(),
         force_revalidate,
         &mut warnings,
     )?;
@@ -303,7 +307,7 @@ pub fn get_project_chat_history(
     let mut unmapped = Vec::new();
 
     let git_page = if let Some(discovery) = git.as_mut() {
-        let github_repository_url = discover_github_repository_url(&resolved.project_root);
+        let github_repository_url = project_repository_url;
         // Mapping must use the complete bounded first-parent rail, rather than
         // just the visible page, so pagination does not change classification.
         let all_commits = if discovery.selected_ref_available {
@@ -507,10 +511,12 @@ fn resolve_owned_thread(
     validate_thread_uuid(thread_id)?;
     let resolved = resolve_project(repository, local_project_id)?;
     let mut warnings = Vec::new();
+    let project_repository_url = discover_github_repository_url(&resolved.project_root);
     let owned = scan_codex_threads(
         repository,
         &resolved.codex_home,
         &resolved.project_root,
+        project_repository_url.as_deref(),
         false,
         &mut warnings,
     )?
@@ -529,13 +535,20 @@ fn resolve_owned_rollout(
 ) -> Result<(ResolvedProject, PathBuf), String> {
     validate_thread_uuid(thread_id)?;
     let resolved = resolve_project(repository, local_project_id)?;
-    let rollout_path = find_owned_rollout(&resolved.codex_home, &resolved.project_root, thread_id)?;
+    let project_repository_url = discover_github_repository_url(&resolved.project_root);
+    let rollout_path = find_owned_rollout(
+        &resolved.codex_home,
+        &resolved.project_root,
+        project_repository_url.as_deref(),
+        thread_id,
+    )?;
     Ok((resolved, rollout_path))
 }
 
 fn find_owned_rollout(
     codex_home: &Path,
     project_root: &Path,
+    project_repository_url: Option<&str>,
     thread_id: &str,
 ) -> Result<PathBuf, String> {
     let mut rollout_paths = Vec::new();
@@ -566,7 +579,13 @@ fn find_owned_rollout(
 
     let mut best: Option<(ParsedRollout, PathBuf)> = None;
     for path in &named_candidates {
-        consider_owned_rollout(path, project_root, thread_id, &mut best)?;
+        consider_owned_rollout(
+            path,
+            project_root,
+            project_repository_url,
+            thread_id,
+            &mut best,
+        )?;
     }
 
     // Current Codex rollouts end with their UUID, so the normal path parses
@@ -584,7 +603,13 @@ fn find_owned_rollout(
             if identity.thread_id.as_deref() != Some(thread_id) {
                 continue;
             }
-            consider_owned_rollout(path, project_root, thread_id, &mut best)?;
+            consider_owned_rollout(
+                path,
+                project_root,
+                project_repository_url,
+                thread_id,
+                &mut best,
+            )?;
         }
     }
 
@@ -601,6 +626,7 @@ fn rollout_filename_matches_thread(path: &Path, thread_id: &str) -> bool {
 fn consider_owned_rollout(
     path: &Path,
     project_root: &Path,
+    project_repository_url: Option<&str>,
     thread_id: &str,
     best: &mut Option<(ParsedRollout, PathBuf)>,
 ) -> Result<(), String> {
@@ -611,7 +637,14 @@ fn consider_owned_rollout(
     else {
         return Ok(());
     };
-    if parsed.thread.thread_id != thread_id || !cwd_belongs_to_project(&parsed.cwd, project_root) {
+    if parsed.thread.thread_id != thread_id
+        || !rollout_belongs_to_project(
+            &parsed.cwd,
+            parsed.repository_url.as_deref(),
+            project_root,
+            project_repository_url,
+        )
+    {
         return Ok(());
     }
     let replace = best
@@ -689,6 +722,7 @@ fn scan_codex_threads(
     repository: &V3Repository,
     codex_home: &Path,
     project_root: &Path,
+    project_repository_url: Option<&str>,
     force_revalidate: bool,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<CodexThreadSummary>, String> {
@@ -751,18 +785,29 @@ fn scan_codex_threads(
                         .map(|cached| RolloutIdentity {
                             thread_id: Some(cached.parsed.thread.thread_id.clone()),
                             cwd: cached.parsed.cwd.clone(),
+                            repository_url: cached.parsed.repository_url.clone(),
                             is_internal_subagent: cached.parsed.is_internal_subagent,
                         })
                 });
             let belongs_to_project = match cached_identity {
                 Some(identity) => {
                     !identity.is_internal_subagent
-                        && cwd_belongs_to_project(&identity.cwd, project_root)
+                        && rollout_belongs_to_project(
+                            &identity.cwd,
+                            identity.repository_url.as_deref(),
+                            project_root,
+                            project_repository_url,
+                        )
                 }
                 None => match read_rollout_identity(entry.path()) {
                     Ok(Some(identity)) => {
                         let belongs = !identity.is_internal_subagent
-                            && cwd_belongs_to_project(&identity.cwd, project_root);
+                            && rollout_belongs_to_project(
+                                &identity.cwd,
+                                identity.repository_url.as_deref(),
+                                project_root,
+                                project_repository_url,
+                            );
                         cache.ownership.insert(
                             cache_key.clone(),
                             RolloutIdentityCacheEntry {
@@ -808,6 +853,7 @@ fn scan_codex_threads(
                                 identity: RolloutIdentity {
                                     thread_id: Some(parsed.thread.thread_id.clone()),
                                     cwd: parsed.cwd.clone(),
+                                    repository_url: parsed.repository_url.clone(),
                                     is_internal_subagent: parsed.is_internal_subagent,
                                 },
                             },
@@ -831,7 +877,12 @@ fn scan_codex_threads(
             if !rollout_is_user_visible(&parsed) {
                 continue;
             }
-            if !cwd_belongs_to_project(&parsed.cwd, project_root) {
+            if !rollout_belongs_to_project(
+                &parsed.cwd,
+                parsed.repository_url.as_deref(),
+                project_root,
+                project_repository_url,
+            ) {
                 continue;
             }
             let has_record_endpoints = parsed.has_record_endpoints;
@@ -1143,9 +1194,13 @@ fn rollout_identity_from_value(value: &Value) -> Option<RolloutIdentity> {
         return None;
     }
     let cwd = string_alias(payload, &["cwd", "working_directory", "project_path"])?;
+    let git = payload.get("git").unwrap_or(payload);
+    let repository_url =
+        string_alias(git, &["repository_url"]).and_then(normalize_github_repository_url);
     Some(RolloutIdentity {
         thread_id: string_alias(payload, &["id", "thread_id", "session_id"]).map(ToOwned::to_owned),
         cwd: PathBuf::from(cwd),
+        repository_url,
         is_internal_subagent: session_meta_is_subagent(payload),
     })
 }
@@ -1166,6 +1221,7 @@ struct RolloutParser {
     metadata_timestamp: Option<u64>,
     branch: Option<String>,
     recorded_sha: Option<String>,
+    repository_url: Option<String>,
     summary: Option<String>,
     fallback_summary: Option<String>,
     user_round_count: usize,
@@ -1187,6 +1243,7 @@ impl RolloutParser {
             metadata_timestamp: None,
             branch: None,
             recorded_sha: None,
+            repository_url: None,
             summary: None,
             fallback_summary: None,
             user_round_count: 0,
@@ -1234,6 +1291,10 @@ impl RolloutParser {
                         .and_then(parse_timestamp_value);
             }
             let git = payload.get("git").unwrap_or(payload);
+            if self.repository_url.is_none() {
+                self.repository_url = string_alias(git, &["repository_url"])
+                    .and_then(normalize_github_repository_url);
+            }
             if self.branch.is_none() {
                 self.branch = string_alias(git, &["branch", "git_branch"])
                     .or_else(|| string_alias(payload, &["git_branch", "branch"]))
@@ -1312,6 +1373,7 @@ impl RolloutParser {
                 commit_occurrence_count: 0,
             },
             cwd,
+            repository_url: self.repository_url,
             has_record_endpoints: self.first_timestamp.is_some() && self.last_timestamp.is_some(),
             is_internal_subagent: self.is_internal_subagent,
         })
@@ -2065,7 +2127,7 @@ fn map_threads_to_commits(
     }
 }
 
-fn discover_github_repository_url(project_root: &Path) -> Option<String> {
+pub(super) fn discover_github_repository_url(project_root: &Path) -> Option<String> {
     let output = git_output(
         project_root,
         &["config", "--get-regexp", r"^remote\..*\.url$"],
@@ -2419,6 +2481,29 @@ fn cwd_belongs_to_project(cwd: &Path, project_root: &Path) -> bool {
     resolved == project_root || resolved.starts_with(project_root)
 }
 
+fn rollout_belongs_to_project(
+    cwd: &Path,
+    recorded_repository_url: Option<&str>,
+    project_root: &Path,
+    project_repository_url: Option<&str>,
+) -> bool {
+    cwd_belongs_to_project(cwd, project_root)
+        && recorded_repository_matches_project(recorded_repository_url, project_repository_url)
+}
+
+/// Cwd remains the positive checkout-ownership signal. When both sides expose
+/// canonical GitHub metadata, a disagreement is authoritative negative
+/// evidence and prevents a multi-root task from entering the wrong project.
+pub(super) fn recorded_repository_matches_project(
+    recorded_repository_url: Option<&str>,
+    project_repository_url: Option<&str>,
+) -> bool {
+    match (recorded_repository_url, project_repository_url) {
+        (Some(recorded), Some(project)) => recorded.eq_ignore_ascii_case(project),
+        _ => true,
+    }
+}
+
 fn value_alias<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
     names.iter().find_map(|name| value.get(*name))
 }
@@ -2660,7 +2745,7 @@ mod tests {
     #[test]
     fn rollout_parsing_accepts_metadata_aliases_and_first_user_message() {
         let lines = vec![
-            json!({"timestamp":"2026-07-18T16:20:00Z","type":"session_meta","payload":{"id":"019f742a-a206-7932-876c-9db8d8ce575a","cwd":"/tmp/project","git":{"branch":"feature/x","commit_hash":"abc"}}}).to_string(),
+            json!({"timestamp":"2026-07-18T16:20:00Z","type":"session_meta","payload":{"id":"019f742a-a206-7932-876c-9db8d8ce575a","cwd":"/tmp/project","git":{"branch":"feature/x","commit_hash":"abc","repository_url":"git@github.com:Git4Agent/mallard-app.git"}}}).to_string(),
             json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"  Build   the history page please  "}]}}).to_string(),
         ];
         let parsed = parse_rollout_lines(lines.iter().map(String::as_str), 123).unwrap();
@@ -2672,6 +2757,10 @@ mod tests {
         assert_eq!(parsed.cwd, Path::new("/tmp/project"));
         assert_eq!(parsed.thread.branch.as_deref(), Some("feature/x"));
         assert_eq!(parsed.thread.recorded_sha.as_deref(), Some("abc"));
+        assert_eq!(
+            parsed.repository_url.as_deref(),
+            Some("https://github.com/Git4Agent/mallard-app")
+        );
         assert_eq!(parsed.thread.summary, "Build the history page please");
         assert_eq!(parsed.thread.started_at, 1_784_391_600);
     }
@@ -2787,9 +2876,15 @@ mod tests {
 
         let repository = V3Repository::from_home_dir(temp.path().join("home")).unwrap();
         let mut warnings = Vec::new();
-        let threads =
-            scan_codex_threads(&repository, &codex_home, &project_root, true, &mut warnings)
-                .unwrap();
+        let threads = scan_codex_threads(
+            &repository,
+            &codex_home,
+            &project_root,
+            None,
+            true,
+            &mut warnings,
+        )
+        .unwrap();
 
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].thread_id, "019f742a-a206-7932-876c-9db8d8ce575a");
@@ -2805,6 +2900,77 @@ mod tests {
             .ownership
             .values()
             .all(|entry| entry.identity.thread_id.is_some()));
+    }
+
+    #[test]
+    fn project_scan_rejects_rollout_when_repository_metadata_conflicts_with_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("selected-project");
+        let codex_home = temp.path().join("codex-home");
+        let sessions = codex_home.join("sessions/2026/07/27");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::create_dir_all(&sessions).unwrap();
+        let project_root = fs::canonicalize(project_root).unwrap();
+        let expected_thread = "019f742a-a206-7932-876c-9db8d8ce575a";
+        let foreign_thread = "019f742a-a206-7932-876c-9db8d8ce575b";
+
+        fs::write(
+            sessions.join("matching.jsonl"),
+            format!(
+                "{}\n",
+                json!({
+                    "timestamp": 100,
+                    "type": "session_meta",
+                    "payload": {
+                        "id": expected_thread,
+                        "cwd": project_root,
+                        "git": {
+                            "repository_url": "git@github.com:Git4Agent/mallard-app.git"
+                        }
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        fs::write(
+            sessions.join("foreign.jsonl"),
+            format!(
+                "{}\n",
+                json!({
+                    "timestamp": 100,
+                    "type": "session_meta",
+                    "payload": {
+                        "id": foreign_thread,
+                        "cwd": project_root,
+                        "git": {
+                            "repository_url": "https://github.com/Rika321/danci_nextjs.git"
+                        }
+                    }
+                })
+            ),
+        )
+        .unwrap();
+
+        let repository = V3Repository::from_home_dir(temp.path().join("home")).unwrap();
+        let mut warnings = Vec::new();
+        let threads = scan_codex_threads(
+            &repository,
+            &codex_home,
+            &project_root,
+            Some("https://github.com/Git4Agent/mallard-app"),
+            true,
+            &mut warnings,
+        )
+        .unwrap();
+
+        assert_eq!(
+            threads
+                .iter()
+                .map(|thread| thread.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![expected_thread]
+        );
+        assert!(warnings.is_empty());
     }
 
     #[test]
@@ -2828,7 +2994,7 @@ mod tests {
         .unwrap();
 
         let found =
-            find_owned_rollout(&temp.path().join("codex"), &project_root, thread_id).unwrap();
+            find_owned_rollout(&temp.path().join("codex"), &project_root, None, thread_id).unwrap();
 
         assert_eq!(found, target);
     }
@@ -2854,7 +3020,7 @@ mod tests {
         .unwrap();
 
         let found =
-            find_owned_rollout(&temp.path().join("codex"), &project_root, thread_id).unwrap();
+            find_owned_rollout(&temp.path().join("codex"), &project_root, None, thread_id).unwrap();
 
         assert_eq!(found, target);
     }
@@ -2879,8 +3045,13 @@ mod tests {
         )
         .unwrap();
 
-        let error = find_owned_rollout(&temp.path().join("codex"), &project_root, requested_id)
-            .unwrap_err();
+        let error = find_owned_rollout(
+            &temp.path().join("codex"),
+            &project_root,
+            None,
+            requested_id,
+        )
+        .unwrap_err();
 
         assert_eq!(
             error,
@@ -3139,8 +3310,8 @@ mod tests {
     }
 
     #[test]
-    fn chat_cache_schema_invalidates_entries_without_subagent_metadata() {
-        assert_eq!(CHAT_CACHE_SCHEMA, 3);
+    fn chat_cache_schema_invalidates_entries_without_repository_metadata() {
+        assert_eq!(CHAT_CACHE_SCHEMA, 4);
     }
 
     #[test]

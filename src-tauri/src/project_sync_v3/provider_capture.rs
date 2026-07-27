@@ -330,6 +330,8 @@ pub fn capture_from_discovery(
     selected_resource_ids: &BTreeSet<String>,
 ) -> Result<CapturedResources, String> {
     let canonical_project = canonical_existing_dir(&request.project_root, "project root")?;
+    let project_repository_url =
+        super::chat_history::discover_github_repository_url(&canonical_project);
     let mut result = CapturedResources {
         warnings: discovery.warnings.clone(),
         ..CapturedResources::default()
@@ -367,6 +369,15 @@ pub fn capture_from_discovery(
                 if !meta.rollout_class.is_root() {
                     return Err(format!(
                         "resource '{}' is a Codex subagent rollout; only root tasks are portable",
+                        resource_id
+                    ));
+                }
+                if !super::chat_history::recorded_repository_matches_project(
+                    meta.repository_url.as_deref(),
+                    project_repository_url.as_deref(),
+                ) {
+                    return Err(format!(
+                        "resource '{}' recorded Git repository does not match the selected project",
                         resource_id
                     ));
                 }
@@ -1365,6 +1376,7 @@ fn discover_codex(
     discovery: &mut Discovery,
 ) -> Result<(), String> {
     let canonical_home = canonical_existing_dir(home, "Codex home")?;
+    let project_repository_url = super::chat_history::discover_github_repository_url(project_root);
     let mut selected_thread_ids = BTreeSet::new();
     for directory in ["sessions", "archived_sessions"] {
         let state_root = canonical_home.join(directory);
@@ -1405,6 +1417,12 @@ fn discover_codex(
             // semantics are designed together. Reuse the parsed
             // rollout_class and parent_thread_id from SessionMetadata.
             if !meta.rollout_class.is_root() {
+                continue;
+            }
+            if !super::chat_history::recorded_repository_matches_project(
+                meta.repository_url.as_deref(),
+                project_repository_url.as_deref(),
+            ) {
                 continue;
             }
             let Some(relative_cwd) = owned_relative_cwd(project_root, &meta.cwd, excluded_roots)?
@@ -1946,6 +1964,8 @@ fn discover_blocked_global_skill(
 pub(crate) struct SessionMetadata {
     pub(crate) session_id: String,
     pub(crate) cwd: PathBuf,
+    /// Canonical GitHub repository recorded by Codex, when present.
+    pub(crate) repository_url: Option<String>,
     /// Shared Codex rollout classification. Claude scans are always `Root`.
     pub(crate) rollout_class: CodexRolloutClass,
     /// Validated parent thread ID retained for genuine `thread_spawn`
@@ -1973,11 +1993,12 @@ pub(crate) fn scan_jsonl_metadata(
     let mut total = 0_usize;
     let mut fallback_id = None;
     let mut fallback_cwd = None;
+    let mut fallback_repository_url = None;
     // Codex identity comes from the first authoritative record, but the
     // classification folds over every `session_meta` record in the bounded
     // window: resumed rollouts can append later records, local History
     // honors their subagent markers, and capture must agree with History.
-    let mut codex_identity: Option<(String, String)> = None;
+    let mut codex_identity: Option<(String, String, Option<String>)> = None;
     let mut classification = CodexRolloutClassification::root();
     for _ in 0..MAX_METADATA_LINES {
         let mut line = Vec::new();
@@ -2050,33 +2071,42 @@ pub(crate) fn scan_jsonl_metadata(
                 &["sessionId", "session_id", "threadId", "thread_id", "id"],
             ),
         };
+        let repository_url = (provider == Provider::Codex)
+            .then(|| codex_repository_url(&value))
+            .flatten();
         if fallback_cwd.is_none() {
             fallback_cwd = cwd.clone();
         }
         if fallback_id.is_none() {
             fallback_id = id.clone();
         }
+        if fallback_repository_url.is_none() {
+            fallback_repository_url = repository_url.clone();
+        }
         if authoritative {
             if let (Some(id), Some(cwd)) = (id, cwd) {
                 match provider {
-                    Provider::Claude => return validated_session_metadata(id, cwd, classification),
-                    Provider::Codex => codex_identity = Some((id, cwd)),
+                    Provider::Claude => {
+                        return validated_session_metadata(id, cwd, None, classification)
+                    }
+                    Provider::Codex => codex_identity = Some((id, cwd, repository_url)),
                 }
             }
         }
     }
-    if let Some((id, cwd)) = codex_identity {
-        return validated_session_metadata(id, cwd, classification);
+    if let Some((id, cwd, repository_url)) = codex_identity {
+        return validated_session_metadata(id, cwd, repository_url, classification);
     }
     let id =
         fallback_id.ok_or_else(|| "session ID was not found in bounded metadata".to_string())?;
     let cwd = fallback_cwd.ok_or_else(|| "cwd was not found in bounded metadata".to_string())?;
-    validated_session_metadata(id, cwd, classification)
+    validated_session_metadata(id, cwd, fallback_repository_url, classification)
 }
 
 fn validated_session_metadata(
     id: String,
     cwd: String,
+    repository_url: Option<String>,
     classification: CodexRolloutClassification,
 ) -> Result<SessionMetadata, String> {
     if id.is_empty()
@@ -2095,9 +2125,18 @@ fn validated_session_metadata(
     Ok(SessionMetadata {
         session_id: id,
         cwd,
+        repository_url,
         rollout_class: classification.class,
         parent_thread_id: classification.parent_thread_id,
     })
+}
+
+fn codex_repository_url(value: &serde_json::Value) -> Option<String> {
+    let payload = value.get("payload").unwrap_or(value);
+    let git = payload.get("git").unwrap_or(payload);
+    git.get("repository_url")
+        .and_then(serde_json::Value::as_str)
+        .and_then(super::chat_history::normalize_github_repository_url)
 }
 
 fn find_string_for_keys(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -2746,6 +2785,7 @@ fn is_executable_path(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::process::Command;
 
     fn write(path: &Path, bytes: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2888,6 +2928,70 @@ mod tests {
             .unwrap();
         assert_eq!(claude.relative_cwd.as_deref(), Some("."));
         assert!(claude.logical_paths[0].contains("/_root/"));
+    }
+
+    #[test]
+    fn codex_membership_rejects_conflicting_recorded_repository() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("repo");
+        let codex = temp.path().join("codex");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&codex).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Git4Agent/mallard-app.git",
+            ])
+            .current_dir(&project)
+            .status()
+            .unwrap()
+            .success());
+        let cwd = serde_json::to_string(project.to_str().unwrap()).unwrap();
+        for (name, repository_url) in [
+            ("matching", Some("git@github.com:Git4Agent/mallard-app.git")),
+            (
+                "foreign",
+                Some("https://github.com/Rika321/danci_nextjs.git"),
+            ),
+            ("without-repository", None),
+        ] {
+            let git = repository_url
+                .map(|url| {
+                    format!(
+                        ",\"git\":{{\"repository_url\":{}}}",
+                        serde_json::to_string(url).unwrap()
+                    )
+                })
+                .unwrap_or_default();
+            write(
+                &codex.join(format!("sessions/2026/07/27/{name}.jsonl")),
+                format!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-{name}\",\"cwd\":{cwd}{git}}}}}\n"
+                )
+                .as_bytes(),
+            );
+        }
+
+        let mut request = CaptureRequest::for_project(project);
+        request.codex_home = Some(codex);
+        let ids = discover_project(&request)
+            .unwrap()
+            .resources
+            .into_iter()
+            .map(|resource| resource.resource_id)
+            .collect::<BTreeSet<_>>();
+
+        assert!(ids.contains("codex:session:thread-matching"));
+        assert!(ids.contains("codex:session:thread-without-repository"));
+        assert!(!ids.contains("codex:session:thread-foreign"));
     }
 
     #[test]
@@ -3192,6 +3296,62 @@ mod tests {
         let error = capture_from_discovery(&request, &discovery, &selected).unwrap_err();
         assert!(
             error.contains("subagent rollout"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn capture_rejects_codex_rollout_that_changes_repository_after_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let codex = temp.path().join("codex");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&codex).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Git4Agent/mallard-app.git",
+            ])
+            .current_dir(&project)
+            .status()
+            .unwrap()
+            .success());
+        let cwd = serde_json::to_string(project.to_str().unwrap()).unwrap();
+        let rollout = codex.join("sessions/2026/07/27/rollout-repository-flipped.jsonl");
+        write(
+            &rollout,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"repository-flipped\",\"cwd\":{cwd},\"git\":{{\"repository_url\":\"https://github.com/Git4Agent/mallard-app\"}}}}}}\n"
+            )
+            .as_bytes(),
+        );
+
+        let mut request = CaptureRequest::for_project(project);
+        request.codex_home = Some(codex);
+        let discovery = discover_full(&request).unwrap();
+        assert!(discovery
+            .resources
+            .contains_key("codex:session:repository-flipped"));
+
+        write(
+            &rollout,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"repository-flipped\",\"cwd\":{cwd},\"git\":{{\"repository_url\":\"https://github.com/Rika321/danci_nextjs\"}}}}}}\n"
+            )
+            .as_bytes(),
+        );
+        let selected = BTreeSet::from(["codex:session:repository-flipped".to_string()]);
+        let error = capture_from_discovery(&request, &discovery, &selected).unwrap_err();
+        assert!(
+            error.contains("recorded Git repository does not match"),
             "unexpected error: {error}"
         );
     }

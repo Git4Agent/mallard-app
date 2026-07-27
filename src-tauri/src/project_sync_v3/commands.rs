@@ -10091,6 +10091,9 @@ fn audit_codex_conversation_paths_with_repository(
         }
     }
 
+    // Only an explicit Codex Desktop project assignment establishes ownership.
+    // Writable roots and workspace hints are execution scope and can include
+    // secondary checkouts, so they must never authorize transcript rewrites.
     let mut assigned_thread_ids = BTreeSet::new();
     for assignments in state_object_maps(&state, "thread-project-assignments") {
         for (thread_id, assignment) in assignments {
@@ -10104,15 +10107,10 @@ fn audit_codex_conversation_paths_with_repository(
                 .get("projectId")
                 .or_else(|| assignment.get("project_id"))
                 .and_then(serde_json::Value::as_str);
-            let legacy_cwd_matches = assigned_project.is_none()
-                && json_path_values(assignment, &["cwd"])
-                    .into_iter()
-                    .any(|cwd| path_belongs_to_project(Path::new(cwd), &canonical_project_root));
             if local_assignment
-                && (assigned_project
+                && assigned_project
                     .map(|project_id| desktop_project_ids.contains(project_id))
                     .unwrap_or(false)
-                    || legacy_cwd_matches)
             {
                 insert_safe_assigned_thread(
                     thread_id,
@@ -10122,40 +10120,14 @@ fn audit_codex_conversation_paths_with_repository(
             }
         }
     }
-    for writable_roots in state_object_maps(&state, "thread-writable-roots") {
-        for (thread_id, roots) in writable_roots {
-            if json_path_values(roots, &["roots", "rootPaths", "root_paths"])
-                .into_iter()
-                .chain(json_direct_path_values(roots))
-                .any(|root| path_belongs_to_project(Path::new(root), &canonical_project_root))
-            {
-                insert_safe_assigned_thread(
-                    thread_id,
-                    &mut assigned_thread_ids,
-                    &mut audit.blockers,
-                );
-            }
-        }
-    }
-    for root_hints in state_object_maps(&state, "thread-workspace-root-hints") {
-        for (thread_id, hint) in root_hints {
-            if json_direct_path_values(hint)
-                .any(|root| path_belongs_to_project(Path::new(root), &canonical_project_root))
-            {
-                insert_safe_assigned_thread(
-                    thread_id,
-                    &mut assigned_thread_ids,
-                    &mut audit.blockers,
-                );
-            }
-        }
-    }
-    audit.assigned_thread_count = assigned_thread_ids.len();
     if assigned_thread_ids.is_empty() {
         return Ok(finalize_conversation_path_audit(audit));
     }
 
+    let project_repository_url =
+        chat_history::discover_github_repository_url(&canonical_project_root);
     let mut transcript_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    let mut repository_mismatch_thread_ids = BTreeSet::new();
     let mut visited_files = 0_usize;
     let mut limit_reached = false;
     for directory in ["sessions", "archived_sessions"] {
@@ -10228,6 +10200,19 @@ fn audit_codex_conversation_paths_with_repository(
             if !assigned_thread_ids.contains(&metadata.session_id) {
                 continue;
             }
+            if !chat_history::recorded_repository_matches_project(
+                metadata.repository_url.as_deref(),
+                project_repository_url.as_deref(),
+            ) {
+                // Recorded repository identity is authoritative negative
+                // evidence even when Desktop has a stale explicit assignment.
+                transcript_paths.remove(&metadata.session_id);
+                repository_mismatch_thread_ids.insert(metadata.session_id);
+                continue;
+            }
+            if repository_mismatch_thread_ids.contains(&metadata.session_id) {
+                continue;
+            }
             let canonical_path = match fs_canonicalize(entry.path()) {
                 Ok(path) => path,
                 Err(error) => {
@@ -10252,6 +10237,8 @@ fn audit_codex_conversation_paths_with_repository(
         }
     }
 
+    assigned_thread_ids.retain(|thread_id| !repository_mismatch_thread_ids.contains(thread_id));
+    audit.assigned_thread_count = assigned_thread_ids.len();
     for thread_id in assigned_thread_ids {
         let Some(paths) = transcript_paths.get(&thread_id) else {
             audit.warnings.push(format!(
@@ -12035,13 +12022,25 @@ mod tests {
                         "rootPaths": [project_root.to_str().unwrap()]
                     }
                 },
-                "thread-project-assignments": {},
-                "thread-writable-roots": {
-                    (stale_thread): [project_root.to_str().unwrap()],
-                    (matching_thread): [project_root.to_str().unwrap()],
-                    (unrelated_thread): [stale_root.to_str().unwrap()]
+                "thread-project-assignments": {
+                    (stale_thread): {
+                        "projectId": "local-health",
+                        "projectKind": "local"
+                    },
+                    (matching_thread): {
+                        "projectId": "local-health",
+                        "projectKind": "local"
+                    }
                 },
-                "thread-workspace-root-hints": {}
+                "thread-writable-roots": {
+                    (unrelated_thread): [
+                        stale_root.to_str().unwrap(),
+                        project_root.to_str().unwrap()
+                    ]
+                },
+                "thread-workspace-root-hints": {
+                    (unrelated_thread): project_root.to_str().unwrap()
+                }
             }))
             .unwrap(),
         )
@@ -12092,6 +12091,140 @@ mod tests {
             stale_source.as_bytes()
         );
         require_codex_conversation_paths_ready(&repo, &project.local_project_id).unwrap();
+    }
+
+    #[test]
+    fn conversation_path_repair_ignores_assignment_from_another_repository() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = V3Repository::from_home_dir(temp.path().join("agent-sync-home")).unwrap();
+        let project = register(&repo);
+        let project_root = temp.path().join("danci");
+        let foreign_root = temp.path().join("mallard-app");
+        let codex_home = temp.path().join(".codex");
+        let sessions = codex_home.join("sessions/2026/07/27");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&foreign_root).unwrap();
+        std::fs::create_dir_all(&sessions).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Rika321/danci_nextjs.git",
+            ])
+            .current_dir(&project_root)
+            .status()
+            .unwrap()
+            .success());
+        let profile_id = add_profile(&repo, Provider::Codex, &codex_home);
+        save_project_binding_with_repository(
+            &repo,
+            SaveProjectBindingRequest {
+                local_project_id: project.local_project_id.clone(),
+                project_root: project_root.to_string_lossy().into_owned(),
+                profile_ids: BTreeMap::from([(Provider::Codex, profile_id)]),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+
+        let matching_thread = "019f7500-0000-7000-8000-000000000011";
+        let foreign_thread = "019f7500-0000-7000-8000-000000000012";
+        let matching_path = sessions.join(format!("rollout-{}.jsonl", matching_thread));
+        let foreign_path = sessions.join(format!("rollout-{}.jsonl", foreign_thread));
+        let matching_source = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": matching_thread,
+                    "cwd": project_root,
+                    "git": {
+                        "repository_url": "git@github.com:Rika321/danci_nextjs.git"
+                    }
+                }
+            })
+        );
+        let foreign_source = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": foreign_thread,
+                    "cwd": foreign_root,
+                    "git": {
+                        "repository_url": "https://github.com/Git4Agent/mallard-app.git"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "type": "turn_context",
+                "payload": {
+                    "cwd": foreign_root
+                }
+            })
+        );
+        std::fs::write(&matching_path, matching_source).unwrap();
+        std::fs::write(&foreign_path, foreign_source.as_bytes()).unwrap();
+        std::fs::write(
+            codex_home.join(".codex-global-state.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "local-projects": {
+                    "local-danci": {
+                        "id": "local-danci",
+                        "name": "danci",
+                        "rootPaths": [project_root.to_str().unwrap()]
+                    }
+                },
+                "thread-project-assignments": {
+                    (matching_thread): {
+                        "projectId": "local-danci",
+                        "projectKind": "local"
+                    },
+                    (foreign_thread): {
+                        "projectId": "local-danci",
+                        "projectKind": "local"
+                    }
+                },
+                "thread-writable-roots": {
+                    (foreign_thread): [
+                        foreign_root.to_str().unwrap(),
+                        project_root.to_str().unwrap()
+                    ]
+                },
+                "thread-workspace-root-hints": {
+                    (foreign_thread): project_root.to_str().unwrap()
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let audit =
+            audit_codex_conversation_paths_with_repository(&repo, &project.local_project_id)
+                .unwrap();
+        assert_eq!(audit.assigned_thread_count, 1);
+        assert_eq!(audit.matching_thread_count, 1);
+        assert!(audit.issues.is_empty());
+        assert!(audit.blockers.is_empty());
+        assert!(audit.ready);
+        require_codex_conversation_paths_ready(&repo, &project.local_project_id).unwrap();
+
+        let repaired =
+            repair_codex_conversation_paths_with_repository(&repo, &project.local_project_id)
+                .unwrap();
+        assert!(repaired.repaired_thread_ids.is_empty());
+        assert!(repaired.backup_dir.is_none());
+        assert_eq!(
+            std::fs::read(&foreign_path).unwrap(),
+            foreign_source.as_bytes()
+        );
     }
 
     #[test]
