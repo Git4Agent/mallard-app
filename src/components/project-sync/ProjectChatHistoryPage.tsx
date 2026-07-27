@@ -503,6 +503,15 @@ function StoredThreadCard({
   );
 }
 
+export function normalHistoryThreadVariants(
+  entries: readonly ThreadSyncEntry[],
+): ThreadSyncEntry[] {
+  return entries.filter((entry) => (
+    !!entry.cloud_thread_id
+    && !(entry.state === "synced" && entry.proposed_action === "no_op")
+  ));
+}
+
 export function ProjectChatHistoryContent({
   project, binding, history, loading, loadingMore, actionError, actionBusyThreadId,
   detailsByThread = {}, openDetailOccurrences = new Set(), onBranchChange, onRefresh, onLoadMore, onOpenCodex,
@@ -518,7 +527,7 @@ export function ProjectChatHistoryContent({
   const syncByThread = useMemo(() => new Map((comparison?.entries ?? []).map((entry) => [entry.thread_id, entry])), [comparison?.entries]);
   const comparisonStorageName = comparison?.storage_name ?? activeStorageName ?? "selected storage";
   const threadEntries = useMemo(
-    () => (comparison?.entries ?? []).filter((entry) => entry.cloud_thread_id),
+    () => normalHistoryThreadVariants(comparison?.entries ?? []),
     [comparison?.entries],
   );
   const compactSelectionReview = embedded && selectionMode != null;

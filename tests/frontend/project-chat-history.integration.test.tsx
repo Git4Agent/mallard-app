@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import Icon from "../../src/components/Icons";
 import ProjectChatHistoryPage, {
   BranchPicker,
+  normalHistoryThreadVariants,
   ProjectChatHistoryContent,
   ThreadMetrics,
   threadSyncPresentation,
@@ -687,6 +688,88 @@ test("Push and Pull reviews separate outstanding and up-to-date sessions without
   assert.match(css, /\.v3-history-sync-review-groups\s*\{[^}]*display:\s*grid/s);
   assert.match(css, /\.v3-history-up-to-date\s*\{[^}]*border-top:\s*1px solid var\(--border\)/s);
   assert.match(css, /\.v3-history-up-to-date > summary\s*\{[^}]*min-height:\s*48px/s);
+});
+
+test("normal Git and sessions hides synced no-op cards but keeps actionable variants", () => {
+  const synced = {
+    thread_id: "provider-synced",
+    resource_id: "codex:session:provider-synced",
+    display_name: "Synced card should be hidden",
+    state: "synced" as const,
+    local_present: true,
+    storage_present: true,
+    cloud_thread_id: "thread-synced",
+    provider_thread_id: "provider-synced",
+    relation: "identical" as const,
+    proposed_action: "no_op" as const,
+    reason_code: "identical" as const,
+    materialization_state: "resumable" as const,
+    resumable: true,
+    origin_label: "This host",
+    available_actions: ["no_op" as const],
+    requires_explicit_approval: false,
+  };
+  const actionable = {
+    ...synced,
+    thread_id: "provider-unknown",
+    resource_id: "codex:session:provider-unknown",
+    display_name: "Actionable card stays visible",
+    state: "unknown" as const,
+    cloud_thread_id: "thread-unknown",
+    provider_thread_id: "provider-unknown",
+    relation: "unknown" as const,
+    proposed_action: "store_only" as const,
+    reason_code: "unknown_lineage" as const,
+    available_actions: ["store_only" as const],
+  };
+  assert.deepEqual(
+    normalHistoryThreadVariants([synced, actionable]).map((entry) => entry.resource_id),
+    [actionable.resource_id],
+  );
+
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      project={project}
+      binding={{
+        host_id: "00112233445566778899aabbccddeeff",
+        replica_id: "replica",
+        local_project_id: project.local_project_id,
+        bundle_id: project.bundle_id,
+        project_root: project.project_root,
+        canonical_project_root: project.project_root,
+        profile_ids: { codex: "profile-codex" },
+        state: "active",
+        revision: 1,
+        updated_at: 2,
+      }}
+      history={history}
+      comparison={{
+        project_id: project.local_project_id,
+        storage_id: "storage-1",
+        storage_name: "Local storage 1",
+        generation: 1,
+        base_generation: 1,
+        compared_at: 1_752_804_000,
+        counts: { synced: 1, local: 0, storage: 0, diverged: 0, unavailable: 0, unknown: 1 },
+        warnings: [],
+        entries: [synced, actionable],
+      }}
+      loading={false}
+      loadingMore={false}
+      actionError={null}
+      actionBusyThreadId={null}
+      onBranchChange={() => undefined}
+      onRefresh={() => undefined}
+      onLoadMore={() => undefined}
+      onOpenCodex={() => undefined}
+      onOpenTerminal={() => undefined}
+    />,
+  );
+
+  assert.doesNotMatch(html, /Synced card should be hidden/);
+  assert.match(html, /Actionable card stays visible/);
+  assert.match(html, /Ancestry unknown/);
+  assert.match(html, /Store without resume/);
 });
 
 test("selected storage adds directional indicators and storage-only threads", () => {
