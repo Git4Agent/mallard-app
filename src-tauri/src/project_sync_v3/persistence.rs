@@ -445,7 +445,11 @@ impl V3Repository {
         Ok((
             binding.bundle_id.clone(),
             derive_origin_host_token(&identity.host_id, &binding.bundle_id)?,
-            derive_origin_replica_token(&identity.host_id, &binding.bundle_id, &binding.replica_id)?,
+            derive_origin_replica_token(
+                &identity.host_id,
+                &binding.bundle_id,
+                &binding.replica_id,
+            )?,
         ))
     }
 
@@ -1769,9 +1773,7 @@ impl V3Repository {
         Ok(applications)
     }
 
-    fn read_conversation_bindings_unlocked(
-        &self,
-    ) -> Result<Option<ConversationBindings>, String> {
+    fn read_conversation_bindings_unlocked(&self) -> Result<Option<ConversationBindings>, String> {
         read_json_bounded(
             &self.root,
             &self.conversation_bindings_path(),
@@ -2210,10 +2212,9 @@ fn write_bytes_atomic(
 mod tests {
     use super::*;
     use crate::project_sync_v3::domain::{
-        generated_named_id, BindingState, BundleId, BundleRecipe, ThreadId,
-        ConversationMaterializationState, LocalConversationBinding,
-        LocalProjectRegistration, LocalProviderProfileId, MaterializationRecord, OriginHostAlias,
-        ProjectBinding, Provider, ProviderProfile, LOCAL_SCHEMA,
+        generated_named_id, BindingState, BundleId, BundleRecipe, ConversationMaterializationState,
+        LocalConversationBinding, LocalProjectRegistration, LocalProviderProfileId,
+        OriginHostAlias, ProjectBinding, Provider, ProviderProfile, ThreadId, LOCAL_SCHEMA,
     };
     use std::collections::BTreeMap;
 
@@ -2494,7 +2495,10 @@ mod tests {
         let other = second_repo.load_or_create_host_identity().unwrap();
         assert_ne!(first.host_id, other.host_id);
         assert_ne!(
-            second_repo.derive_origin_tokens(&bundle_a, &replica).unwrap().0,
+            second_repo
+                .derive_origin_tokens(&bundle_a, &replica)
+                .unwrap()
+                .0,
             a.0
         );
 

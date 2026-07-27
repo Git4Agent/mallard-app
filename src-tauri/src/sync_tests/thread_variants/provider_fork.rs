@@ -3,17 +3,11 @@
 //! SQLite thread index there, and prove Codex-side discovery and capture
 //! still work on both hosts afterwards.
 
-use super::harness::{chain, schema6_request, sha256, ThreadSpec, VariantWorld};
+use super::harness::{chain, publish_request, sha256, ThreadSpec, VariantWorld};
 use super::recovery::{install_scope, install_scope_for_provider};
 use crate::project_sync_v3::bundle_engine::{
-    PublishExpectation, PublishSchema6Request, Schema6CapturedFile,
+    HeadToken, PublishBundleRequest, PublishContent, PublishFile,
 };
-use crate::project_sync_v3::domain::{
-    conversation_resource_id, ApplyPolicy, BundleIdentity, BundleKind, BundleRecipe, CapturedWith,
-    ConversationFileRef, ConversationLineageStatus, ConversationThread, LogicalPath,
-    PortableOrigin, Provenance, RecipeEntry, ResourceDescriptor, ResourceKind, ResourceScope,
-};
-use std::collections::BTreeMap;
 use crate::project_sync_v3::conversation_codec::{
     analyze_codex_transcript, rewrite_codex_transcript, CodecLineage,
 };
@@ -28,14 +22,22 @@ use crate::project_sync_v3::domain::{
     ConversationRelation, ConversationSyncOperation, ConversationSyncPhase,
     LocalConversationBinding, PlanId, Provider, TargetExpectation, ThreadId,
 };
-use crate::project_sync_v3::provider_capture::{capture_selected, discover_project, CaptureRequest};
+use crate::project_sync_v3::domain::{
+    conversation_resource_id, ApplyPolicy, BundleHead, BundleIdentity, BundleKind, BundleRecipe,
+    CapturedWith, ConversationFileRef, ConversationLineageStatus, ConversationThread, LogicalPath,
+    PortableOrigin, Provenance, RecipeEntry, ResourceDescriptor, ResourceKind, ResourceScope,
+};
+use crate::project_sync_v3::provider_capture::{
+    capture_selected, discover_project, CaptureRequest,
+};
 use crate::project_sync_v3::provider_fork::{
     claude_project_dir_name, fork_claude_session, fork_codex_session,
-    reconstruct_codex_sqlite_index, rewrite_claude_transcript, ClaudeForkRequest,
-    CodexForkRequest, CodexIndexOutcome, ProviderCliInvocation, ProviderCliOutput,
-    ProviderCliRunner, ProviderForkMethod,
+    reconstruct_codex_sqlite_index, rewrite_claude_transcript, ClaudeForkRequest, CodexForkRequest,
+    CodexIndexOutcome, ProviderCliInvocation, ProviderCliOutput, ProviderCliRunner,
+    ProviderForkMethod,
 };
 use chrono::Utc;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -108,11 +110,19 @@ fn codex_fork_push_pull_reconstruction_round_trip() {
     // session for it under a provider-native UUID.
     let cloud_portable = chain(
         "shared-source-thread",
-        &[("m-a", "base"), ("m-b", "answer"), ("m-cloud", "cloud tail")],
+        &[
+            ("m-a", "base"),
+            ("m-b", "answer"),
+            ("m-cloud", "cloud tail"),
+        ],
     );
     let local_portable = chain(
         "shared-source-thread",
-        &[("m-a", "base"), ("m-b", "answer"), ("m-local", "local tail")],
+        &[
+            ("m-a", "base"),
+            ("m-b", "answer"),
+            ("m-local", "local tail"),
+        ],
     );
     let published = world.publish(
         &[ThreadSpec::new(
@@ -163,8 +173,10 @@ fn codex_fork_push_pull_reconstruction_round_trip() {
                 last_observed_head_message_id: Some("m-local".to_string()),
                 last_observed_lineage_digest: Some(local_lineage.clone()),
                 last_observed_semantic_digest: Some(local_semantic.clone()),
-                source_generation: Some(published.snapshot.head.generation),
-                source_manifest_sha256: Some(published.snapshot.head.manifest_sha256.clone()),
+                source_generation: Some(published.snapshot.head.latest.generation),
+                source_manifest_sha256: Some(
+                    published.snapshot.head.latest.manifest_sha256.clone(),
+                ),
                 revision: 0,
                 created_at: 10,
                 updated_at: 10,
@@ -226,7 +238,7 @@ fn codex_fork_push_pull_reconstruction_round_trip() {
         20,
     );
     forked_spec.forked_from = Some(cloud_id.clone());
-    let push_request = schema6_request(
+    let push_request = publish_request(
         world.bundle_id.clone(),
         &[
             ThreadSpec::new(
@@ -241,9 +253,10 @@ fn codex_fork_push_pull_reconstruction_round_trip() {
         origin_a,
         20,
         Some(&published.snapshot.manifest),
-        crate::project_sync_v3::bundle_engine::PublishExpectation::Match(
+        Some((
+            published.snapshot.head.clone(),
             published.head_token.clone(),
-        ),
+        )),
     );
     let push_operation = ConversationSyncOperation {
         operation_id: ConversationOperationId::parse("operation-provider-fork-push").unwrap(),
@@ -252,9 +265,9 @@ fn codex_fork_push_pull_reconstruction_round_trip() {
         phase: ConversationSyncPhase::Prepared,
         storage_id: world.storage_id.clone(),
         bundle_id: world.bundle_id.clone(),
-        generation: published.snapshot.head.generation,
-        commit_id: published.snapshot.head.commit_id.clone(),
-        manifest_sha256: published.snapshot.head.manifest_sha256.clone(),
+        generation: published.snapshot.head.latest.generation,
+        commit_id: published.snapshot.head.latest.commit_id.clone(),
+        manifest_sha256: published.snapshot.head.latest.manifest_sha256.clone(),
         host_id: scope_a.host_id.clone(),
         replica_id: scope_a.replica_id.clone(),
         local_project_id: scope_a.project_id.clone(),
@@ -285,11 +298,11 @@ fn codex_fork_push_pull_reconstruction_round_trip() {
         push_operation,
         || {
             engine
-                .publish_schema6(push_request)
+                .publish(push_request)
                 .map(|outcome| ConversationCloudPublication {
-                    generation: outcome.snapshot.head.generation,
-                    commit_id: outcome.snapshot.head.commit_id,
-                    manifest_sha256: outcome.snapshot.head.manifest_sha256,
+                    generation: outcome.snapshot.head.latest.generation,
+                    commit_id: outcome.snapshot.head.latest.commit_id,
+                    manifest_sha256: outcome.snapshot.head.latest.manifest_sha256,
                 })
         },
         || Ok(None),
@@ -352,9 +365,9 @@ fn codex_fork_push_pull_reconstruction_round_trip() {
         phase: ConversationSyncPhase::Prepared,
         storage_id: world.storage_id.clone(),
         bundle_id: world.bundle_id.clone(),
-        generation: fetched.snapshot.head.generation,
-        commit_id: fetched.snapshot.head.commit_id.clone(),
-        manifest_sha256: fetched.snapshot.head.manifest_sha256.clone(),
+        generation: fetched.snapshot.head.latest.generation,
+        commit_id: fetched.snapshot.head.latest.commit_id.clone(),
+        manifest_sha256: fetched.snapshot.head.latest.manifest_sha256.clone(),
         host_id: scope_b.host_id.clone(),
         replica_id: scope_b.replica_id.clone(),
         local_project_id: scope_b.project_id.clone(),
@@ -457,10 +470,7 @@ fn codex_fork_push_pull_reconstruction_round_trip() {
         let conversation = captured.conversations.get(&resource_id).unwrap();
         assert!(conversation.lineage.is_complete());
         assert_eq!(
-            classify_conversation_relation(
-                conversation.lineage.chain(),
-                Some(&forked_cloud_chain),
-            ),
+            classify_conversation_relation(conversation.lineage.chain(), Some(&forked_cloud_chain),),
             ConversationRelation::Identical,
             "captured fork on '{}' matches the published fork thread",
             scope.project_id,
@@ -553,17 +563,17 @@ fn claude_transcript(session_id: &str, cwd: &str, tail: &str) -> Vec<u8> {
 /// Claude threads publish as stored bytes with Unknown lineage: there is no
 /// Claude lineage codec, so the manifest records the transcript without
 /// chain metadata.
-fn claude_schema6_request(
+fn claude_publish_request(
     world: &VariantWorld,
     threads: &[(ThreadId, String, Vec<u8>, Option<ThreadId>, u64)],
     publisher: PortableOrigin,
     updated_at: u64,
-    expected_head: PublishExpectation,
-) -> PublishSchema6Request {
+    observed_head: Option<(BundleHead, HeadToken)>,
+) -> PublishBundleRequest {
     const CLAUDE_CODEC: &str = "claude.lineage.unavailable.v1";
     let mut recipe = BundleRecipe::default();
     let mut resources = BTreeMap::new();
-    let mut captured_files = BTreeMap::new();
+    let mut files = BTreeMap::new();
     let mut conversations = BTreeMap::new();
     for (thread_id, session_id, bytes, forked_from, thread_updated_at) in threads {
         let resource_id = conversation_resource_id(Provider::Claude, thread_id).unwrap();
@@ -621,9 +631,9 @@ fn claude_schema6_request(
                 required: false,
             },
         );
-        captured_files.insert(
+        files.insert(
             logical_path,
-            Schema6CapturedFile {
+            PublishFile::Captured {
                 resource_id,
                 bytes: bytes.clone(),
                 source_mtime: *thread_updated_at,
@@ -631,7 +641,7 @@ fn claude_schema6_request(
             },
         );
     }
-    PublishSchema6Request {
+    PublishBundleRequest {
         identity: BundleIdentity {
             bundle_id: world.bundle_id.clone(),
             display_name: "Claude fork bundle".to_string(),
@@ -646,13 +656,14 @@ fn claude_schema6_request(
             codec_versions: BTreeMap::from([(CLAUDE_CODEC.to_string(), 1)]),
         },
         published_by_origin: publisher,
-        conversations,
-        resources,
-        retained_files: BTreeMap::new(),
-        captured_files,
-        directories: BTreeMap::new(),
-        tombstones: BTreeMap::new(),
-        expected_head,
+        content: PublishContent {
+            conversations,
+            resources,
+            files,
+            directories: BTreeMap::new(),
+            tombstones: BTreeMap::new(),
+        },
+        observed_head,
         updated_at,
     }
 }
@@ -683,7 +694,7 @@ fn claude_fork_push_pull_reconstruction_round_trip() {
     // Claude session for it.
     let cloud_bytes = claude_transcript("shared-claude-session", "/tmp/project", "cloud tail");
     let published = {
-        let request = claude_schema6_request(
+        let request = claude_publish_request(
             &world,
             &[(
                 cloud_id.clone(),
@@ -694,9 +705,9 @@ fn claude_fork_push_pull_reconstruction_round_trip() {
             )],
             origin_b,
             10,
-            PublishExpectation::Absent,
+            None,
         );
-        world.engine().publish_schema6(request).unwrap()
+        world.engine().publish(request).unwrap()
     };
     let source_session_id = generated_uuid_v4().unwrap();
     let project_dir_a = scope_a
@@ -732,8 +743,10 @@ fn claude_fork_push_pull_reconstruction_round_trip() {
                 last_observed_head_message_id: None,
                 last_observed_lineage_digest: None,
                 last_observed_semantic_digest: None,
-                source_generation: Some(published.snapshot.head.generation),
-                source_manifest_sha256: Some(published.snapshot.head.manifest_sha256.clone()),
+                source_generation: Some(published.snapshot.head.latest.generation),
+                source_manifest_sha256: Some(
+                    published.snapshot.head.latest.manifest_sha256.clone(),
+                ),
                 revision: 0,
                 created_at: 10,
                 updated_at: 10,
@@ -758,7 +771,10 @@ fn claude_fork_push_pull_reconstruction_round_trip() {
     let forked_bytes = fs::read(&forked.transcript_path).unwrap();
     assert!(String::from_utf8_lossy(&forked_bytes).contains(&fork_request.new_session_id));
     let retried = fork_claude_session(&CopyingClaudeCli, &fork_request).unwrap();
-    assert!(retried.already_existed, "pinned UUID makes retries idempotent");
+    assert!(
+        retried.already_existed,
+        "pinned UUID makes retries idempotent"
+    );
 
     // Step 2 — push: publish the fork as cloud thread t' (portable cwd) and
     // hand the binding over to the forked session.
@@ -771,7 +787,7 @@ fn claude_fork_push_pull_reconstruction_round_trip() {
     )
     .unwrap();
     let bindings_before_push = world.repo_a.load_conversation_bindings().unwrap();
-    let push_request = claude_schema6_request(
+    let push_request = claude_publish_request(
         &world,
         &[
             (
@@ -791,7 +807,10 @@ fn claude_fork_push_pull_reconstruction_round_trip() {
         ],
         origin_a,
         20,
-        PublishExpectation::Match(published.head_token.clone()),
+        Some((
+            published.snapshot.head.clone(),
+            published.head_token.clone(),
+        )),
     );
     let push_operation = ConversationSyncOperation {
         operation_id: ConversationOperationId::parse("operation-claude-fork-push").unwrap(),
@@ -800,9 +819,9 @@ fn claude_fork_push_pull_reconstruction_round_trip() {
         phase: ConversationSyncPhase::Prepared,
         storage_id: world.storage_id.clone(),
         bundle_id: world.bundle_id.clone(),
-        generation: published.snapshot.head.generation,
-        commit_id: published.snapshot.head.commit_id.clone(),
-        manifest_sha256: published.snapshot.head.manifest_sha256.clone(),
+        generation: published.snapshot.head.latest.generation,
+        commit_id: published.snapshot.head.latest.commit_id.clone(),
+        manifest_sha256: published.snapshot.head.latest.manifest_sha256.clone(),
         host_id: scope_a.host_id.clone(),
         replica_id: scope_a.replica_id.clone(),
         local_project_id: scope_a.project_id.clone(),
@@ -833,11 +852,11 @@ fn claude_fork_push_pull_reconstruction_round_trip() {
         push_operation,
         || {
             engine
-                .publish_schema6(push_request)
+                .publish(push_request)
                 .map(|outcome| ConversationCloudPublication {
-                    generation: outcome.snapshot.head.generation,
-                    commit_id: outcome.snapshot.head.commit_id,
-                    manifest_sha256: outcome.snapshot.head.manifest_sha256,
+                    generation: outcome.snapshot.head.latest.generation,
+                    commit_id: outcome.snapshot.head.latest.commit_id,
+                    manifest_sha256: outcome.snapshot.head.latest.manifest_sha256,
                 })
         },
         || Ok(None),
@@ -885,9 +904,9 @@ fn claude_fork_push_pull_reconstruction_round_trip() {
         phase: ConversationSyncPhase::Prepared,
         storage_id: world.storage_id.clone(),
         bundle_id: world.bundle_id.clone(),
-        generation: fetched.snapshot.head.generation,
-        commit_id: fetched.snapshot.head.commit_id.clone(),
-        manifest_sha256: fetched.snapshot.head.manifest_sha256.clone(),
+        generation: fetched.snapshot.head.latest.generation,
+        commit_id: fetched.snapshot.head.latest.commit_id.clone(),
+        manifest_sha256: fetched.snapshot.head.latest.manifest_sha256.clone(),
         host_id: scope_b.host_id.clone(),
         replica_id: scope_b.replica_id.clone(),
         local_project_id: scope_b.project_id.clone(),

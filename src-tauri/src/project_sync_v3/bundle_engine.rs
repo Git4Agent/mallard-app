@@ -1,4 +1,4 @@
-//! Schema-4/schema-6 bundle storage, publication, fetch, restore planning, and apply.
+//! Bundle storage, publication, fetch, restore planning, and apply.
 //!
 //! The engine operates on validated logical/store keys and a small object
 //! store trait. Its local implementation is complete; an S3 adapter can reuse
@@ -16,14 +16,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
+use super::conversation_codec::CodecLineage;
 use super::domain::{
     self, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt, BindingState, BundleDirectoryEntry,
     BundleFileEntry, BundleHead, BundleId, BundleIdentity, BundleKind, BundleManifest,
-    BundleRecipe, BundleSnapshot, CapturedWith, ConversationThread, DependencyAction,
-    DependencyActionKind, LogicalPath, PlanId, PortableOrigin, ProjectBinding, ThreadId,
-    Provider, ResourceDescriptor, ResourceId, ResourceKind, RestoreAction,
-    RestoreActionKind, RestorePlan, StorageId, Tombstone, TombstoneTarget, BUNDLE_SCHEMA_V4,
-    BUNDLE_SCHEMA_V6, RESTORE_PLAN_SCHEMA,
+    BundleRecipe, BundleSnapshot, BundleVersionRef, BundleVersionSnapshot, CapturedWith,
+    ConversationFileRef, ConversationFileRole, ConversationLineageStatus, ConversationThread,
+    DependencyAction, DependencyActionKind, LogicalPath, PlanId, PortableOrigin, ProjectBinding,
+    Provider, ResourceDescriptor, ResourceId, ResourceKind, RestoreAction, RestoreActionKind,
+    RestorePlan, StorageId, ThreadId, Tombstone, TombstoneTarget, BUNDLE_SCHEMA,
+    RESTORE_PLAN_SCHEMA,
 };
 use super::provider_capture::{self, CapturedResources};
 
@@ -135,7 +137,10 @@ pub trait BundleObjectStore: Send + Sync {
 
     /// Store several immutable objects; outcomes line up with `objects`.
     /// Remote stores override this with a bounded-concurrency implementation.
-    fn put_many(&self, objects: Vec<(ObjectKey, Bytes)>) -> Result<Vec<ImmutablePutOutcome>, String> {
+    fn put_many(
+        &self,
+        objects: Vec<(ObjectKey, Bytes)>,
+    ) -> Result<Vec<ImmutablePutOutcome>, String> {
         objects
             .iter()
             .map(|(key, bytes)| self.put_immutable(key, bytes))
@@ -413,6 +418,100 @@ impl BundleObjectStore for LocalBundleObjectStore {
     }
 }
 
+const MAX_GENERATION_PAGE: usize = 500;
+
+/// One reachable generation whose record hash was verified against the
+/// chain during traversal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedGeneration {
+    pub version: BundleVersionRef,
+    pub record: domain::BundleGenerationRecord,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedGenerationPage {
+    pub generations: Vec<VerifiedGeneration>,
+    pub next_cursor: Option<u64>,
+    pub observed_head: BundleHead,
+}
+
+/// Portable description of one reachable generation for listing and
+/// comparison responses. Everything here comes from verified metadata.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BundleGenerationSummary {
+    pub version: BundleVersionRef,
+    pub created_at: u64,
+    pub published_by_origin: PortableOrigin,
+    pub delta: domain::GenerationDelta,
+}
+
+impl From<VerifiedGeneration> for BundleGenerationSummary {
+    fn from(verified: VerifiedGeneration) -> Self {
+        Self {
+            version: verified.version,
+            created_at: verified.record.created_at,
+            published_by_origin: verified.record.published_by_origin,
+            delta: verified.record.delta,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BundleGenerationPage {
+    pub generations: Vec<BundleGenerationSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    pub observed_head: BundleVersionRef,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BundleResourceChangeState {
+    Added,
+    Removed,
+    Changed,
+    Unchanged,
+}
+
+/// One resource row of a generation comparison, labeled from manifest
+/// metadata only. Titles are the stored conversation display titles of each
+/// side, so a rename is visible as left/right disagreement.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BundleResourceChange {
+    pub resource_id: ResourceId,
+    pub kind: ResourceKind,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_thread_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_thread_title: Option<String>,
+    pub state: BundleResourceChangeState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_content_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_content_sha256: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BundleGenerationComparison {
+    pub left: BundleGenerationSummary,
+    pub right: BundleGenerationSummary,
+    /// Logical snapshot equality via the canonical content digests. This is
+    /// deliberately separate from manifest identity: two generations with
+    /// different manifests (coordinates, timestamps) can carry the same
+    /// snapshot.
+    pub same_snapshot: bool,
+    pub added: u64,
+    pub removed: u64,
+    pub changed: u64,
+    pub unchanged: u64,
+    pub resource_changes: Vec<BundleResourceChange>,
+    pub bundle_metadata_changed: bool,
+    pub recipe_changed: bool,
+    pub codec_changed: bool,
+    pub tombstones_changed: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeadToken {
     pub generation: u64,
@@ -421,10 +520,32 @@ pub struct HeadToken {
     pub etag: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PublishExpectation {
-    Absent,
-    Match(HeadToken),
+/// One file in the candidate snapshot. `Retained` entries are copied from the
+/// observed previous manifest and re-verified against it by metadata, so their
+/// payloads never travel again. `Captured` entries carry fresh bytes and are
+/// stored content-addressed under `_objects/<sha256>`.
+#[derive(Clone, Debug)]
+pub enum PublishFile {
+    Retained(BundleFileEntry),
+    Captured {
+        resource_id: ResourceId,
+        bytes: Vec<u8>,
+        source_mtime: u64,
+        mode: Option<u32>,
+    },
+}
+
+/// Fully reconciled manifest-shaped content for one candidate generation.
+/// Production Push builds this from a provider capture with
+/// [`BundleEngine::build_publish_content`]; reviewed flows may construct it
+/// directly. The publisher validates it as a whole — it never re-reconciles.
+#[derive(Clone, Debug, Default)]
+pub struct PublishContent {
+    pub conversations: BTreeMap<ThreadId, ConversationThread>,
+    pub resources: BTreeMap<ResourceId, ResourceDescriptor>,
+    pub files: BTreeMap<LogicalPath, PublishFile>,
+    pub directories: BTreeMap<LogicalPath, BundleDirectoryEntry>,
+    pub tombstones: BTreeMap<String, Tombstone>,
 }
 
 #[derive(Clone, Debug)]
@@ -432,7 +553,8 @@ pub struct PublishBundleRequest {
     pub identity: BundleIdentity,
     pub recipe: BundleRecipe,
     pub captured_with: CapturedWith,
-    pub captured: CapturedResources,
+    pub published_by_origin: PortableOrigin,
+    pub content: PublishContent,
     /// Head observed by the caller's single read; the head CAS on its etag is
     /// the concurrency guard, so publish never re-reads the head itself.
     pub observed_head: Option<(BundleHead, HeadToken)>,
@@ -448,40 +570,6 @@ pub struct PublishedBundle {
     pub snapshot: BundleSnapshot,
     // Read by CAS-chaining tests; command flows re-read the head instead.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub head_token: HeadToken,
-}
-
-#[derive(Clone, Debug)]
-pub struct Schema6CapturedFile {
-    pub resource_id: ResourceId,
-    pub bytes: Vec<u8>,
-    pub source_mtime: u64,
-    pub mode: Option<u32>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PublishSchema6Request {
-    pub identity: BundleIdentity,
-    pub recipe: BundleRecipe,
-    pub captured_with: CapturedWith,
-    pub published_by_origin: PortableOrigin,
-    pub conversations: BTreeMap<ThreadId, ConversationThread>,
-    pub resources: BTreeMap<ResourceId, ResourceDescriptor>,
-    /// Entries copied byte-for-byte from the reviewed previous manifest. The
-    /// engine verifies every referenced immutable object before publishing.
-    pub retained_files: BTreeMap<LogicalPath, BundleFileEntry>,
-    /// New or changed payloads. A path cannot also appear in retained_files.
-    pub captured_files: BTreeMap<LogicalPath, Schema6CapturedFile>,
-    pub directories: BTreeMap<LogicalPath, BundleDirectoryEntry>,
-    pub tombstones: BTreeMap<String, Tombstone>,
-    pub expected_head: PublishExpectation,
-    pub updated_at: u64,
-}
-
-#[derive(Clone, Debug)]
-pub struct Schema6PublishOutcome {
-    pub published: bool,
-    pub snapshot: BundleSnapshot,
     pub head_token: HeadToken,
 }
 
@@ -631,7 +719,7 @@ impl BundleBytes for PreloadedBytes<'_> {
 /// [`ObjectCache`].
 pub struct EngineByteSource<'a, S: BundleObjectStore> {
     engine: &'a BundleEngine<S>,
-    snapshot: &'a BundleSnapshot,
+    snapshot: &'a BundleVersionSnapshot,
     cache: Option<Arc<ObjectCache>>,
     loaded: BTreeMap<LogicalPath, Arc<Vec<u8>>>,
     on_progress: Option<&'a mut dyn FnMut(FetchProgress)>,
@@ -648,7 +736,7 @@ impl<'a, S: BundleObjectStore> EngineByteSource<'a, S> {
             .files
             .get(logical_path)
             .ok_or_else(|| format!("manifest has no file entry for '{}'", logical_path))?;
-        let bundle_id = &self.snapshot.head.bundle_id;
+        let bundle_id = self.snapshot.bundle_id();
         let cache_key = (
             self.snapshot.storage_id.clone(),
             bundle_id.clone(),
@@ -704,7 +792,7 @@ impl<S: BundleObjectStore> BundleBytes for EngineByteSource<'_, S> {
                 .ok_or_else(|| format!("manifest has no file entry for '{}'", path))?;
             let cache_key = (
                 self.snapshot.storage_id.clone(),
-                self.snapshot.head.bundle_id.clone(),
+                self.snapshot.bundle_id().clone(),
                 entry.sha256.clone(),
             );
             if let Some(hit) = self.cache.as_ref().and_then(|cache| cache.get(&cache_key)) {
@@ -726,13 +814,12 @@ impl<S: BundleObjectStore> BundleBytes for EngineByteSource<'_, S> {
             let keys = batch
                 .iter()
                 .map(|(_, entry)| {
-                    repository_object_key(&self.snapshot.head.bundle_id, &entry.object_key)
+                    repository_object_key(self.snapshot.bundle_id(), &entry.object_key)
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             let objects = self.engine.store.get_many(&keys)?;
             for (((path, entry), key), object) in batch.iter().zip(&keys).zip(objects) {
-                let object =
-                    object.ok_or_else(|| format!("bundle object '{}' is missing", key))?;
+                let object = object.ok_or_else(|| format!("bundle object '{}' is missing", key))?;
                 if object.bytes.len() as u64 != entry.size || sha256(&object.bytes) != entry.sha256
                 {
                     return Err(format!(
@@ -745,7 +832,7 @@ impl<S: BundleObjectStore> BundleBytes for EngineByteSource<'_, S> {
                     cache.insert(
                         (
                             self.snapshot.storage_id.clone(),
-                            self.snapshot.head.bundle_id.clone(),
+                            self.snapshot.bundle_id().clone(),
                             entry.sha256.clone(),
                         ),
                         bytes.clone(),
@@ -862,24 +949,6 @@ fn classify_remapped_conversation(
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-struct CommitRecord {
-    schema_version: u32,
-    bundle_id: BundleId,
-    generation: u64,
-    commit_id: String,
-    manifest_key: String,
-    manifest_sha256: String,
-    created_at: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    previous_commit_id: Option<String>,
-    added_files: u64,
-    changed_files: u64,
-    removed_files: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    published_by_origin: Option<PortableOrigin>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 struct BundleTag {
     schema_version: u32,
     bundle_id: BundleId,
@@ -989,9 +1058,9 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             ));
         }
         let token = HeadToken {
-            generation: head.generation,
-            commit_id: head.commit_id.clone(),
-            manifest_sha256: head.manifest_sha256.clone(),
+            generation: head.latest.generation,
+            commit_id: head.latest.commit_id.clone(),
+            manifest_sha256: head.latest.manifest_sha256.clone(),
             etag: stored.etag,
         };
         Ok(Some((head, token)))
@@ -1003,6 +1072,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     /// addressed under `_objects/<sha256>`, so bytes already referenced by the
     /// previous manifest never travel again and a semantically unchanged
     /// publish writes nothing at all.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn publish(&self, request: PublishBundleRequest) -> Result<PublishedBundle, String> {
         self.publish_with_progress(request, &mut |_| {})
     }
@@ -1018,22 +1088,15 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     ) -> Result<PublishedBundle, String> {
         request.identity.validate()?;
         request.recipe.validate()?;
+        request.published_by_origin.validate()?;
         if request.identity.kind != BundleKind::Project {
-            return Err("schema-3 v1 supports only project bundles".to_string());
+            return Err("bundle publication supports only project bundles".to_string());
         }
         if request.updated_at == 0 {
             return Err("publish timestamp must be non-zero".to_string());
         }
 
         let current = request.observed_head.take();
-        if current
-            .as_ref()
-            .is_some_and(|(head, _)| head.schema_version == BUNDLE_SCHEMA_V6)
-        {
-            return Err(
-                "schema-6 bundle requires the conversation-thread publication path".to_string(),
-            );
-        }
         if current
             .as_ref()
             .is_some_and(|(head, _)| head.bundle_id != request.identity.bundle_id)
@@ -1050,22 +1113,11 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             .transpose()?;
         let generation = current
             .as_ref()
-            .map(|(head, _)| head.generation.saturating_add(1))
+            .map(|(head, _)| head.latest.generation.saturating_add(1))
             .unwrap_or(1);
         let commit_id = random_named_id("commit")?;
 
-        let captured_descriptors = provider_capture::domain_resources(&request.captured)?;
-        // Only fetch materializes dependency actions, but invalid captured
-        // dependency intent must still fail the publish, not the next pull.
-        provider_capture::domain_dependency_actions(&request.captured)?;
-        let (resources, mut files, mut directories, tombstones) = reconcile_manifest_content(
-            &request.recipe,
-            &captured_descriptors,
-            &request.captured,
-            previous_manifest.as_ref(),
-            request.updated_at,
-        )?;
-
+        let content = std::mem::take(&mut request.content);
         // Content identities the previous manifest already backs with a
         // content-addressed object; those bytes are known-present remotely
         // and never travel again.
@@ -1080,86 +1132,109 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                     .collect()
             })
             .unwrap_or_default();
-        let captured_files = std::mem::take(&mut request.captured.files);
+        let mut files = BTreeMap::new();
         // Keyed by digest: identical bytes captured under several logical
         // paths upload once and share one object.
         let mut pending: BTreeMap<String, Bytes> = BTreeMap::new();
-        for (logical_path, captured) in captured_files {
-            let logical = LogicalPath::parse(logical_path)?;
-            let resource_id = ResourceId::parse(captured.resource_id.clone())?;
-            if !request.recipe.entries.contains_key(&resource_id) {
-                return Err(format!(
-                    "captured file '{}' belongs to unselected resource '{}'",
-                    logical, resource_id
-                ));
-            }
-            // Reused payloads bypass the store's write-time size check, so
-            // enforce the limit here for every entry.
-            if captured.bytes.len() as u64 > domain::MAX_FILE_BYTES {
-                return Err(format!(
-                    "captured file '{}' exceeds the write limit",
-                    logical
-                ));
-            }
-            let digest = sha256(&captured.bytes);
-            files.insert(
-                logical,
-                BundleFileEntry {
+        for (logical, file) in content.files {
+            match file {
+                PublishFile::Retained(entry) => {
+                    entry.validate()?;
+                    let previous = previous_manifest.as_ref().ok_or_else(|| {
+                        format!("retained file '{}' has no previous manifest", logical)
+                    })?;
+                    let was_published = previous.files.values().any(|candidate| {
+                        candidate.object_key == entry.object_key
+                            && candidate.sha256 == entry.sha256
+                            && candidate.size == entry.size
+                    });
+                    if !was_published {
+                        return Err(format!(
+                            "retained file '{}' was not in the observed manifest",
+                            logical
+                        ));
+                    }
+                    files.insert(logical, entry);
+                }
+                PublishFile::Captured {
                     resource_id,
-                    sha256: digest.clone(),
-                    size: captured.bytes.len() as u64,
-                    source_mtime: captured.source_mtime,
-                    object_key: format!("_objects/{}", digest),
-                    mode: Some(captured.mode & 0o777),
-                },
-            );
-            if !previous_shas.contains(digest.as_str()) {
-                pending
-                    .entry(digest)
-                    .or_insert_with(|| Bytes::from(captured.bytes));
+                    bytes,
+                    source_mtime,
+                    mode,
+                } => {
+                    if !content.resources.contains_key(&resource_id) {
+                        return Err(format!(
+                            "captured file '{}' belongs to missing resource '{}'",
+                            logical, resource_id
+                        ));
+                    }
+                    // Reused payloads bypass the store's write-time size
+                    // check, so enforce the limit here for every entry.
+                    if bytes.len() as u64 > domain::MAX_FILE_BYTES {
+                        return Err(format!(
+                            "captured file '{}' exceeds the write limit",
+                            logical
+                        ));
+                    }
+                    if mode.is_some_and(|mode| mode & !0o777 != 0) {
+                        return Err(format!("captured file '{}' has unsafe mode bits", logical));
+                    }
+                    let digest = sha256(&bytes);
+                    files.insert(
+                        logical,
+                        BundleFileEntry {
+                            resource_id,
+                            sha256: digest.clone(),
+                            size: bytes.len() as u64,
+                            source_mtime,
+                            object_key: format!("_objects/{}", digest),
+                            mode,
+                        },
+                    );
+                    if !previous_shas.contains(digest.as_str()) {
+                        pending.entry(digest).or_insert_with(|| Bytes::from(bytes));
+                    }
+                }
             }
         }
 
-        for (logical_path, captured) in &request.captured.directories {
-            let logical = LogicalPath::parse(logical_path.clone())?;
-            let resource_id = ResourceId::parse(captured.resource_id.clone())?;
-            if !request.recipe.entries.contains_key(&resource_id) {
-                return Err(format!(
-                    "captured directory '{}' belongs to unselected resource '{}'",
-                    logical, resource_id
-                ));
-            }
-            directories.insert(
-                logical,
-                BundleDirectoryEntry {
-                    resource_id,
-                    mode: Some(captured.mode & 0o777),
-                    source_mtime: captured.source_mtime,
-                },
-            );
-        }
-
+        let resource_content_sha256 = domain::compute_resource_content_digests(
+            &content.resources,
+            &content.conversations,
+            &files,
+            &content.directories,
+            &content.tombstones,
+        )?;
         let manifest = BundleManifest {
-            schema_version: BUNDLE_SCHEMA_V4,
+            schema_version: BUNDLE_SCHEMA,
             generation,
             commit_id: commit_id.clone(),
             updated_at: request.updated_at,
             bundle: request.identity.clone(),
             recipe: request.recipe,
             captured_with: request.captured_with,
-            published_by_origin: None,
-            conversations: BTreeMap::new(),
-            resources,
+            published_by_origin: request.published_by_origin,
+            resource_content_sha256,
+            conversations: content.conversations,
+            resources: content.resources,
             files,
-            directories,
-            tombstones,
+            directories: content.directories,
+            tombstones: content.tombstones,
         };
         manifest.validate()?;
+        if let Some(previous) = &previous_manifest {
+            validate_conversation_retention(previous, &manifest)?;
+        }
 
-        // A semantically identical publish returns the observed generation
-        // untouched: no payloads, no manifest, no commit, no head CAS.
+        // A logically identical publish returns the observed generation
+        // untouched: no payloads, no manifest, no commit, no head CAS. The
+        // digests are recomputed from both full manifests here, never read
+        // from a stored field, so a corrupt stored digest cannot spoof a
+        // no-op.
         if let (Some((head, token)), Some(previous)) = (&current, &previous_manifest) {
-            if manifest_is_semantic_noop(previous, &manifest) {
+            if domain::snapshot_content_sha256(previous)?
+                == domain::snapshot_content_sha256(&manifest)?
+            {
                 return Ok(PublishedBundle {
                     published: false,
                     snapshot: BundleSnapshot {
@@ -1212,38 +1287,36 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             repository_object_key(&request.identity.bundle_id, &manifest_relative_key)?;
         self.store.put_immutable(&manifest_key, &manifest_bytes)?;
 
-        let (added_files, changed_files, removed_files) =
-            file_delta(previous_manifest.as_ref(), &manifest);
-        let commit = CommitRecord {
-            schema_version: BUNDLE_SCHEMA_V4,
+        // The generation record pins this manifest, its logical snapshot
+        // digest, and the complete parent reference; the head then pins the
+        // record's own bytes. Everything is immutable before the CAS makes
+        // the generation visible.
+        let record = domain::BundleGenerationRecord {
+            schema_version: BUNDLE_SCHEMA,
             bundle_id: request.identity.bundle_id.clone(),
             generation,
             commit_id: commit_id.clone(),
-            manifest_key: manifest_relative_key.clone(),
             manifest_sha256: manifest_sha256.clone(),
+            snapshot_content_sha256: domain::snapshot_content_sha256(&manifest)?,
+            previous: current.as_ref().map(|(head, _)| head.latest.clone()),
             created_at: request.updated_at,
-            previous_commit_id: current.as_ref().map(|(head, _)| head.commit_id.clone()),
-            added_files,
-            changed_files,
-            removed_files,
-            published_by_origin: None,
+            published_by_origin: manifest.published_by_origin.clone(),
+            delta: generation_delta(previous_manifest.as_ref(), &manifest),
         };
-        let commit_bytes =
-            serde_json::to_vec(&commit).map_err(|e| format!("serialize bundle commit: {}", e))?;
-        let commit_key = repository_object_key(
+        record.validate()?;
+        let record_bytes = serde_json::to_vec(&record)
+            .map_err(|e| format!("serialize generation record: {}", e))?;
+        let record_key = repository_object_key(
             &request.identity.bundle_id,
-            &format!("_commits/{}-{}.json", generation, commit_id),
+            &format!("_versions/{}-{}.json", generation, commit_id),
         )?;
-        self.store.put_immutable(&commit_key, &commit_bytes)?;
+        self.store.put_immutable(&record_key, &record_bytes)?;
 
         let head = BundleHead {
-            schema_version: BUNDLE_SCHEMA_V4,
+            schema_version: BUNDLE_SCHEMA,
             bundle_id: request.identity.bundle_id.clone(),
             kind: request.identity.kind,
-            generation,
-            commit_id,
-            manifest_key: manifest_relative_key,
-            manifest_sha256,
+            latest: record.version_ref(sha256(&record_bytes)),
             updated_at: request.updated_at,
         };
         head.validate()?;
@@ -1277,255 +1350,9 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             published: true,
             snapshot,
             head_token: HeadToken {
-                generation: head.generation,
-                commit_id: head.commit_id.clone(),
-                manifest_sha256: head.manifest_sha256.clone(),
-                etag: head_etag,
-            },
-        })
-    }
-
-    /// Publish a complete schema-6 conversation snapshot. The caller supplies
-    /// the reviewed live set; the engine enforces remote-variant retention,
-    /// verifies retained immutable objects, skips true no-ops, and advances
-    /// the head only through compare-and-swap.
-    pub fn publish_schema6(
-        &self,
-        request: PublishSchema6Request,
-    ) -> Result<Schema6PublishOutcome, String> {
-        request.identity.validate()?;
-        request.recipe.validate()?;
-        request.published_by_origin.validate()?;
-        if request.identity.kind != BundleKind::Project {
-            return Err("schema-6 supports only project bundles".to_string());
-        }
-        if request.updated_at == 0 {
-            return Err("publish timestamp must be non-zero".to_string());
-        }
-        for path in request.captured_files.keys() {
-            if request.retained_files.contains_key(path) {
-                return Err(format!(
-                    "schema-6 file '{}' is both retained and captured",
-                    path
-                ));
-            }
-        }
-
-        let current = self.read_head(&request.identity.bundle_id)?;
-        let cas_expectation = match (&request.expected_head, &current) {
-            (PublishExpectation::Absent, None) => CasExpectation::Absent,
-            (PublishExpectation::Absent, Some(_)) => {
-                return Err("bundle head changed: expected an absent head".to_string())
-            }
-            (PublishExpectation::Match(expected), Some((head, token)))
-                if expected == token
-                    && expected.generation == head.generation
-                    && expected.commit_id == head.commit_id
-                    && expected.manifest_sha256 == head.manifest_sha256 =>
-            {
-                CasExpectation::Match(token.etag.clone())
-            }
-            (PublishExpectation::Match(_), _) => {
-                return Err("bundle head changed before publication".to_string())
-            }
-        };
-        let previous_manifest = current
-            .as_ref()
-            .map(|(head, _)| self.read_manifest(head))
-            .transpose()?;
-
-        for (path, entry) in &request.retained_files {
-            entry.validate()?;
-            let previous = previous_manifest.as_ref().ok_or_else(|| {
-                format!("schema-6 retained file '{}' has no previous manifest", path)
-            })?;
-            let was_published = previous.files.values().any(|candidate| {
-                candidate.object_key == entry.object_key
-                    && candidate.sha256 == entry.sha256
-                    && candidate.size == entry.size
-            });
-            if !was_published {
-                return Err(format!(
-                    "schema-6 retained file '{}' was not in the reviewed manifest",
-                    path
-                ));
-            }
-            let key = repository_object_key(&request.identity.bundle_id, &entry.object_key)?;
-            let object = self
-                .store
-                .get(&key)?
-                .ok_or_else(|| format!("retained bundle object '{}' is missing", key))?;
-            if object.bytes.len() as u64 != entry.size || sha256(&object.bytes) != entry.sha256 {
-                return Err(format!(
-                    "retained bundle object '{}' does not match its reviewed digest",
-                    key
-                ));
-            }
-        }
-
-        let generation = current
-            .as_ref()
-            .map(|(head, _)| head.generation.saturating_add(1))
-            .unwrap_or(1);
-        let commit_id = random_named_id("commit")?;
-        let upload_id = random_named_id("upload")?;
-        let mut files = request.retained_files.clone();
-        for (path, captured) in &request.captured_files {
-            if captured.bytes.len() as u64 > domain::MAX_FILE_BYTES {
-                return Err(format!(
-                    "schema-6 file '{}' exceeds the portable limit",
-                    path
-                ));
-            }
-            if captured.mode.is_some_and(|mode| mode & !0o777 != 0) {
-                return Err(format!("schema-6 file '{}' has unsafe mode bits", path));
-            }
-            if !request.resources.contains_key(&captured.resource_id) {
-                return Err(format!(
-                    "schema-6 file '{}' belongs to missing resource '{}'",
-                    path, captured.resource_id
-                ));
-            }
-            files.insert(
-                path.clone(),
-                BundleFileEntry {
-                    resource_id: captured.resource_id.clone(),
-                    sha256: sha256(&captured.bytes),
-                    size: captured.bytes.len() as u64,
-                    source_mtime: captured.source_mtime,
-                    object_key: format!("_uploads/{}/files/{}", upload_id, path),
-                    mode: captured.mode,
-                },
-            );
-        }
-
-        let manifest = BundleManifest {
-            schema_version: BUNDLE_SCHEMA_V6,
-            generation,
-            commit_id: commit_id.clone(),
-            updated_at: request.updated_at,
-            bundle: request.identity.clone(),
-            recipe: request.recipe,
-            captured_with: request.captured_with,
-            published_by_origin: Some(request.published_by_origin.clone()),
-            conversations: request.conversations,
-            resources: request.resources,
-            files,
-            directories: request.directories,
-            tombstones: request.tombstones,
-        };
-        manifest.validate()?;
-        if let Some(previous) = &previous_manifest {
-            validate_schema6_conversation_retention(previous, &manifest)?;
-        }
-
-        if let (Some((head, token)), Some(previous)) = (&current, &previous_manifest) {
-            if previous.schema_version == BUNDLE_SCHEMA_V6
-                && manifest_is_semantic_noop(previous, &manifest)
-            {
-                return Ok(Schema6PublishOutcome {
-                    published: false,
-                    snapshot: BundleSnapshot {
-                        storage_id: self.storage_id.clone(),
-                        head: head.clone(),
-                        manifest: previous.clone(),
-                        fetched_at: request.updated_at,
-                    },
-                    head_token: token.clone(),
-                });
-            }
-        }
-
-        for (path, captured) in &request.captured_files {
-            let entry = manifest
-                .files
-                .get(path)
-                .expect("captured schema-6 file was inserted");
-            let key = repository_object_key(&request.identity.bundle_id, &entry.object_key)?;
-            self.store.put_immutable(&key, &captured.bytes)?;
-            let stored = self
-                .store
-                .get(&key)?
-                .ok_or_else(|| format!("schema-6 object '{}' disappeared", key))?;
-            if stored.bytes.len() as u64 != entry.size || sha256(&stored.bytes) != entry.sha256 {
-                return Err(format!(
-                    "schema-6 object '{}' failed post-publication verification",
-                    key
-                ));
-            }
-        }
-
-        let manifest_bytes = serde_json::to_vec(&manifest)
-            .map_err(|error| format!("serialize schema-6 manifest: {error}"))?;
-        let manifest_sha256 = sha256(&manifest_bytes);
-        let manifest_relative_key = format!("_manifests/{}-{}.json", generation, commit_id);
-        let manifest_key =
-            repository_object_key(&request.identity.bundle_id, &manifest_relative_key)?;
-        self.store.put_immutable(&manifest_key, &manifest_bytes)?;
-
-        let (added_files, changed_files, removed_files) =
-            file_delta(previous_manifest.as_ref(), &manifest);
-        let commit = CommitRecord {
-            schema_version: BUNDLE_SCHEMA_V6,
-            bundle_id: request.identity.bundle_id.clone(),
-            generation,
-            commit_id: commit_id.clone(),
-            manifest_key: manifest_relative_key.clone(),
-            manifest_sha256: manifest_sha256.clone(),
-            created_at: request.updated_at,
-            previous_commit_id: current.as_ref().map(|(head, _)| head.commit_id.clone()),
-            added_files,
-            changed_files,
-            removed_files,
-            published_by_origin: Some(request.published_by_origin),
-        };
-        let commit_bytes = serde_json::to_vec(&commit)
-            .map_err(|error| format!("serialize schema-6 commit: {error}"))?;
-        let commit_key = repository_object_key(
-            &request.identity.bundle_id,
-            &format!("_commits/{}-{}.json", generation, commit_id),
-        )?;
-        self.store.put_immutable(&commit_key, &commit_bytes)?;
-
-        let head = BundleHead {
-            schema_version: BUNDLE_SCHEMA_V6,
-            bundle_id: request.identity.bundle_id.clone(),
-            kind: request.identity.kind,
-            generation,
-            commit_id,
-            manifest_key: manifest_relative_key,
-            manifest_sha256,
-            updated_at: request.updated_at,
-        };
-        head.validate()?;
-        let head_bytes = serde_json::to_vec(&head)
-            .map_err(|error| format!("serialize schema-6 head: {error}"))?;
-        let head_key = repository_object_key(&request.identity.bundle_id, HEAD_FILE)?;
-        let head_etag =
-            match self
-                .store
-                .compare_and_swap(&head_key, &cas_expectation, &head_bytes)?
-            {
-                CasOutcome::Written { etag } => etag,
-                CasOutcome::Conflict { .. } => {
-                    return Err(
-                        "bundle head CAS conflict; fetch and rebase before retrying".to_string()
-                    )
-                }
-            };
-        let _ = self.publish_tag(&manifest);
-        Ok(Schema6PublishOutcome {
-            published: true,
-            snapshot: BundleSnapshot {
-                storage_id: self.storage_id.clone(),
-                head: head.clone(),
-                manifest,
-                fetched_at: request.updated_at,
-            },
-            head_token: HeadToken {
-                generation: head.generation,
-                commit_id: head.commit_id.clone(),
-                manifest_sha256: head.manifest_sha256.clone(),
+                generation: head.latest.generation,
+                commit_id: head.latest.commit_id.clone(),
+                manifest_sha256: head.latest.manifest_sha256.clone(),
                 etag: head_etag,
             },
         })
@@ -1588,7 +1415,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     /// `cache` and reporting bulk downloads through `on_progress`.
     pub fn byte_source<'a>(
         &'a self,
-        snapshot: &'a BundleSnapshot,
+        snapshot: &'a BundleVersionSnapshot,
         cache: Option<Arc<ObjectCache>>,
         on_progress: Option<&'a mut dyn FnMut(FetchProgress)>,
     ) -> EngineByteSource<'a, S> {
@@ -1637,6 +1464,410 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             },
             token,
         )))
+    }
+
+    /// Read and verify one immutable generation record against the digest a
+    /// verified parent (or the head) pins for it. The record key is derived
+    /// canonically; a caller-supplied object key is never accepted.
+    pub fn read_generation_record(
+        &self,
+        bundle_id: &BundleId,
+        version: &BundleVersionRef,
+    ) -> Result<domain::BundleGenerationRecord, String> {
+        version.validate()?;
+        let relative_key = format!(
+            "_versions/{}-{}.json",
+            version.generation, version.commit_id
+        );
+        let key = repository_object_key(bundle_id, &relative_key)?;
+        let stored = self
+            .store
+            .get(&key)?
+            .ok_or_else(|| format!("generation record '{}' is missing", key))?;
+        if sha256(&stored.bytes) != version.generation_record_sha256 {
+            return Err(format!(
+                "generation record '{}' failed hash verification",
+                key
+            ));
+        }
+        let record: domain::BundleGenerationRecord =
+            parse_bounded_json(&stored.bytes, "generation record")?;
+        record.validate()?;
+        if record.bundle_id != *bundle_id
+            || record.generation != version.generation
+            || record.commit_id != version.commit_id
+            || record.manifest_sha256 != version.manifest_sha256
+            || record.snapshot_content_sha256 != version.snapshot_content_sha256
+        {
+            return Err(format!(
+                "generation record '{}' does not match its pinned coordinates",
+                key
+            ));
+        }
+        Ok(record)
+    }
+
+    /// Walk the verified reachable chain newest-first from `start`, calling
+    /// `visit` for every hop until it returns `false` or generation 1 is
+    /// reached. Contiguous strictly-descending generation numbers make
+    /// cycles impossible; the depth bound is a malformed-data backstop far
+    /// above any real history length, never a history-age limit. History is
+    /// never recovered by listing `_versions/`: an orphaned CAS-loser
+    /// record is unreachable from the head and therefore invisible here.
+    fn walk_reachable_generations(
+        &self,
+        bundle_id: &BundleId,
+        start: &BundleVersionRef,
+        visit: &mut dyn FnMut(
+            &BundleVersionRef,
+            &domain::BundleGenerationRecord,
+        ) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        const MAX_CHAIN_TRAVERSAL: u64 = 100_000;
+        let mut cursor = Some(start.clone());
+        let mut hops = 0_u64;
+        while let Some(version) = cursor {
+            if hops >= MAX_CHAIN_TRAVERSAL {
+                return Err("generation chain exceeds the traversal backstop".to_string());
+            }
+            hops = hops.saturating_add(1);
+            let record = self.read_generation_record(bundle_id, &version)?;
+            if !visit(&version, &record)? {
+                return Ok(());
+            }
+            cursor = match record.previous {
+                Some(previous) => {
+                    // record.validate() already proved adjacency; repeat the
+                    // check here so traversal safety never depends on a
+                    // remote validation path.
+                    if previous.generation.saturating_add(1) != version.generation {
+                        return Err("generation chain is not contiguous".to_string());
+                    }
+                    Some(previous)
+                }
+                None => {
+                    if version.generation != 1 {
+                        return Err(format!(
+                            "generation {} chain ends without reaching generation 1",
+                            version.generation
+                        ));
+                    }
+                    None
+                }
+            };
+        }
+        Ok(())
+    }
+
+    /// One page of the verified reachable history, newest first. `cursor` is
+    /// the last generation of the previous page; rows strictly below it are
+    /// returned. Every page walks from a freshly read head so an orphaned or
+    /// tampered record can never enter a response.
+    pub fn list_reachable_generations(
+        &self,
+        bundle_id: &BundleId,
+        cursor: Option<u64>,
+        limit: usize,
+    ) -> Result<VerifiedGenerationPage, String> {
+        if limit == 0 || limit > MAX_GENERATION_PAGE {
+            return Err(format!(
+                "generation page limit must be between 1 and {}",
+                MAX_GENERATION_PAGE
+            ));
+        }
+        let (head, _) = self
+            .read_head(bundle_id)?
+            .ok_or_else(|| format!("bundle '{}' has no published head", bundle_id))?;
+        if cursor == Some(0) {
+            return Err("generation cursor 0 has no predecessors".to_string());
+        }
+        let mut generations: Vec<VerifiedGeneration> = Vec::new();
+        let mut next_cursor = None;
+        self.walk_reachable_generations(bundle_id, &head.latest, &mut |version, record| {
+            if cursor.is_some_and(|after| version.generation >= after) {
+                return Ok(true);
+            }
+            generations.push(VerifiedGeneration {
+                version: version.clone(),
+                record: record.clone(),
+            });
+            if generations.len() == limit {
+                if record.previous.is_some() {
+                    next_cursor = Some(version.generation);
+                }
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
+        Ok(VerifiedGenerationPage {
+            generations,
+            next_cursor,
+            observed_head: head,
+        })
+    }
+
+    /// Resolve requested generation numbers through the verified reachable
+    /// chain in a single walk. Numbers are selectors, never trust anchors:
+    /// each result carries the full hash-pinned reference the chain proved.
+    pub fn resolve_reachable_generations(
+        &self,
+        bundle_id: &BundleId,
+        generations: &BTreeSet<u64>,
+    ) -> Result<(BTreeMap<u64, VerifiedGeneration>, BundleHead), String> {
+        let (head, _) = self
+            .read_head(bundle_id)?
+            .ok_or_else(|| format!("bundle '{}' has no published head", bundle_id))?;
+        let mut remaining = generations.clone();
+        if remaining.is_empty() {
+            return Ok((BTreeMap::new(), head));
+        }
+        if let Some(zero) = remaining.iter().find(|generation| **generation == 0) {
+            return Err(format!("generation {} is not a valid selector", zero));
+        }
+        if let Some(future) = remaining
+            .iter()
+            .find(|generation| **generation > head.latest.generation)
+        {
+            return Err(format!(
+                "generation {} is not reachable from the current head (latest is {})",
+                future, head.latest.generation
+            ));
+        }
+        let mut resolved = BTreeMap::new();
+        self.walk_reachable_generations(bundle_id, &head.latest, &mut |version, record| {
+            if remaining.remove(&version.generation) {
+                resolved.insert(
+                    version.generation,
+                    VerifiedGeneration {
+                        version: version.clone(),
+                        record: record.clone(),
+                    },
+                );
+            }
+            Ok(!remaining.is_empty()
+                && remaining
+                    .iter()
+                    .next()
+                    .is_some_and(|lowest| *lowest < version.generation))
+        })?;
+        if let Some(unreachable) = remaining.iter().next() {
+            return Err(format!(
+                "generation {} is not reachable from the current head",
+                unreachable
+            ));
+        }
+        Ok((resolved, head))
+    }
+
+    /// Resolve one generation number; see `resolve_reachable_generations`.
+    pub fn resolve_reachable_generation(
+        &self,
+        bundle_id: &BundleId,
+        generation: u64,
+    ) -> Result<(VerifiedGeneration, BundleHead), String> {
+        let (mut resolved, head) =
+            self.resolve_reachable_generations(bundle_id, &BTreeSet::from([generation]))?;
+        let verified = resolved
+            .remove(&generation)
+            .ok_or_else(|| format!("generation {} is not reachable", generation))?;
+        Ok((verified, head))
+    }
+
+    /// Load and fully verify the immutable manifest a version reference
+    /// pins: exact manifest bytes, validated content, matching coordinates,
+    /// and a recomputed logical snapshot digest. Payload objects are never
+    /// touched.
+    pub fn inspect_version(
+        &self,
+        bundle_id: &BundleId,
+        version: &BundleVersionRef,
+    ) -> Result<BundleManifest, String> {
+        self.read_generation_record(bundle_id, version)?;
+        let manifest = self.inspect_manifest_version(
+            bundle_id,
+            version.generation,
+            &version.commit_id,
+            &version.manifest_sha256,
+        )?;
+        let snapshot_digest = domain::snapshot_content_sha256(&manifest)?;
+        if snapshot_digest != version.snapshot_content_sha256 {
+            return Err(format!(
+                "manifest for generation {} does not match its pinned snapshot digest",
+                version.generation
+            ));
+        }
+        Ok(manifest)
+    }
+
+    /// Compare two reachable generations from verified metadata only. The
+    /// fast path answers equal snapshots straight from the hash-linked
+    /// records; the detailed path reads exactly the two immutable manifests
+    /// in one bulk metadata fetch and never touches `_objects/*` payloads.
+    pub fn compare_generations(
+        &self,
+        bundle_id: &BundleId,
+        left_generation: u64,
+        right_generation: u64,
+        include_unchanged: bool,
+    ) -> Result<BundleGenerationComparison, String> {
+        if left_generation == right_generation {
+            return Err("comparison requires two distinct generations".to_string());
+        }
+        let (mut resolved, _head) = self.resolve_reachable_generations(
+            bundle_id,
+            &BTreeSet::from([left_generation, right_generation]),
+        )?;
+        let left = resolved
+            .remove(&left_generation)
+            .ok_or_else(|| format!("generation {} is not reachable", left_generation))?;
+        let right = resolved
+            .remove(&right_generation)
+            .ok_or_else(|| format!("generation {} is not reachable", right_generation))?;
+
+        if left.version.snapshot_content_sha256 == right.version.snapshot_content_sha256 {
+            // Identical logical snapshots: both verified refs already carry
+            // the digest, so no manifest or payload is fetched and there are
+            // no per-resource rows to report.
+            return Ok(BundleGenerationComparison {
+                left: left.into(),
+                right: right.into(),
+                same_snapshot: true,
+                added: 0,
+                removed: 0,
+                changed: 0,
+                unchanged: 0,
+                resource_changes: Vec::new(),
+                bundle_metadata_changed: false,
+                recipe_changed: false,
+                codec_changed: false,
+                tombstones_changed: false,
+            });
+        }
+
+        let [left_manifest, right_manifest] =
+            self.read_manifest_pair(bundle_id, &left.version, &right.version)?;
+
+        let mut resource_changes = Vec::new();
+        let (mut added, mut removed, mut changed, mut unchanged) = (0_u64, 0_u64, 0_u64, 0_u64);
+        let resource_ids: BTreeSet<&ResourceId> = left_manifest
+            .resource_content_sha256
+            .keys()
+            .chain(right_manifest.resource_content_sha256.keys())
+            .collect();
+        for resource_id in resource_ids {
+            let left_digest = left_manifest.resource_content_sha256.get(resource_id);
+            let right_digest = right_manifest.resource_content_sha256.get(resource_id);
+            let state = match (left_digest, right_digest) {
+                (None, Some(_)) => BundleResourceChangeState::Added,
+                (Some(_), None) => BundleResourceChangeState::Removed,
+                (Some(left), Some(right)) if left == right => BundleResourceChangeState::Unchanged,
+                (Some(_), Some(_)) => BundleResourceChangeState::Changed,
+                (None, None) => continue,
+            };
+            match state {
+                BundleResourceChangeState::Added => added += 1,
+                BundleResourceChangeState::Removed => removed += 1,
+                BundleResourceChangeState::Changed => changed += 1,
+                BundleResourceChangeState::Unchanged => unchanged += 1,
+            }
+            if state == BundleResourceChangeState::Unchanged && !include_unchanged {
+                continue;
+            }
+            let descriptor = right_manifest
+                .resources
+                .get(resource_id)
+                .or_else(|| left_manifest.resources.get(resource_id))
+                .ok_or_else(|| {
+                    format!(
+                        "resource '{}' has a content digest but no descriptor",
+                        resource_id
+                    )
+                })?;
+            resource_changes.push(BundleResourceChange {
+                resource_id: resource_id.clone(),
+                kind: descriptor.kind,
+                display_name: descriptor.display_name.clone(),
+                left_thread_title: manifest_thread_title(&left_manifest, resource_id),
+                right_thread_title: manifest_thread_title(&right_manifest, resource_id),
+                state,
+                left_content_sha256: left_digest.cloned(),
+                right_content_sha256: right_digest.cloned(),
+            });
+        }
+
+        Ok(BundleGenerationComparison {
+            left: left.into(),
+            right: right.into(),
+            same_snapshot: false,
+            added,
+            removed,
+            changed,
+            unchanged,
+            resource_changes,
+            bundle_metadata_changed: left_manifest.bundle != right_manifest.bundle,
+            recipe_changed: left_manifest.recipe != right_manifest.recipe,
+            codec_changed: left_manifest.captured_with.codec_versions
+                != right_manifest.captured_with.codec_versions,
+            tombstones_changed: left_manifest.tombstones != right_manifest.tombstones,
+        })
+    }
+
+    /// Fetch and fully verify two immutable manifests in one bounded
+    /// metadata `get_many` round. Each manifest is checked against its
+    /// pinned byte digest, validated, and re-hashed against the pinned
+    /// logical snapshot digest.
+    fn read_manifest_pair(
+        &self,
+        bundle_id: &BundleId,
+        left: &BundleVersionRef,
+        right: &BundleVersionRef,
+    ) -> Result<[BundleManifest; 2], String> {
+        let keys = [left, right]
+            .into_iter()
+            .map(|version| {
+                repository_object_key(
+                    bundle_id,
+                    &format!(
+                        "_manifests/{}-{}.json",
+                        version.generation, version.commit_id
+                    ),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let stored = self.store.get_many(&keys)?;
+        let mut manifests = Vec::with_capacity(2);
+        for (version, stored) in [left, right].into_iter().zip(stored) {
+            let stored = stored.ok_or_else(|| {
+                format!(
+                    "bundle manifest for generation {} is missing",
+                    version.generation
+                )
+            })?;
+            if sha256(&stored.bytes) != version.manifest_sha256 {
+                return Err(format!(
+                    "bundle manifest for generation {} failed hash verification",
+                    version.generation
+                ));
+            }
+            let manifest: BundleManifest = parse_bounded_json(&stored.bytes, "bundle manifest")?;
+            manifest.validate()?;
+            if &manifest.bundle.bundle_id != bundle_id
+                || manifest.generation != version.generation
+                || manifest.commit_id != version.commit_id
+            {
+                return Err("historical manifest coordinates do not match its contents".to_string());
+            }
+            if domain::snapshot_content_sha256(&manifest)? != version.snapshot_content_sha256 {
+                return Err(format!(
+                    "manifest for generation {} does not match its pinned snapshot digest",
+                    version.generation
+                ));
+            }
+            manifests.push(manifest);
+        }
+        manifests
+            .try_into()
+            .map_err(|_| "manifest pair fetch returned the wrong arity".to_string())
     }
 
     /// Load one immutable historical manifest using the coordinates retained
@@ -1726,9 +1957,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 .get(&key)?
                 .ok_or_else(|| format!("listed bundle tag '{}' disappeared", key))?;
             let tag: BundleTag = parse_bounded_json(&stored.bytes, "bundle tag")?;
-            if !matches!(tag.schema_version, BUNDLE_SCHEMA_V4 | BUNDLE_SCHEMA_V6)
-                || tag.bundle_id != bundle_id
-            {
+            if tag.schema_version != BUNDLE_SCHEMA || tag.bundle_id != bundle_id {
                 return Err(format!("bundle tag '{}' has inconsistent identity", key));
             }
             summaries.push(RemoteBundleSummary {
@@ -1764,7 +1993,8 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         validate_bundle_snapshot_bytes(bundle)?;
         let mut bytes = PreloadedBytes::new(bundle);
         self.build_restore_plan_lazy(
-            &bundle.snapshot,
+            &bundle.snapshot.version_snapshot(),
+            &bundle.snapshot.head.latest,
             &mut bytes,
             &BTreeMap::new(),
             binding,
@@ -1780,7 +2010,8 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     /// zero payload objects.
     pub fn build_restore_plan_lazy(
         &self,
-        snapshot: &BundleSnapshot,
+        snapshot: &BundleVersionSnapshot,
+        observed_head: &BundleVersionRef,
         bytes: &mut dyn BundleBytes,
         known_bases: &BTreeMap<ResourceId, KnownMaterializedBase>,
         binding: &ProjectBinding,
@@ -1792,7 +2023,11 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         if binding.state != BindingState::Active {
             return Err("restore requires an active project binding".to_string());
         }
-        if binding.bundle_id != snapshot.head.bundle_id {
+        observed_head.validate()?;
+        if snapshot.version.generation > observed_head.generation {
+            return Err("restore source cannot be newer than the observed head".to_string());
+        }
+        if &binding.bundle_id != snapshot.bundle_id() {
             return Err("binding and fetched bundle IDs differ".to_string());
         }
         if snapshot.storage_id != self.storage_id {
@@ -2185,13 +2420,12 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             schema_version: RESTORE_PLAN_SCHEMA,
             plan_id,
             storage_id: self.storage_id.clone(),
-            bundle_id: snapshot.head.bundle_id.clone(),
+            bundle_id: snapshot.bundle_id().clone(),
             host_id: binding.host_id.clone(),
             replica_id: binding.replica_id.clone(),
             expected_host_identity_revision,
-            generation: snapshot.head.generation,
-            commit_id: snapshot.head.commit_id.clone(),
-            manifest_sha256: snapshot.head.manifest_sha256.clone(),
+            source_version: snapshot.version.clone(),
+            observed_head: observed_head.clone(),
             binding_revision: binding.revision,
             created_at,
             expires_at: created_at.saturating_add(DEFAULT_PLAN_LIFETIME_SECS),
@@ -2205,13 +2439,18 @@ impl<S: BundleObjectStore> BundleEngine<S> {
 
     fn read_manifest(&self, head: &BundleHead) -> Result<BundleManifest, String> {
         head.validate()?;
-        validate_bundle_relative_object_key(&head.manifest_key)?;
-        let key = repository_object_key(&head.bundle_id, &head.manifest_key)?;
+        // Manifest keys are always derived canonically from the pinned
+        // coordinates; a stored key is never trusted or even carried.
+        let relative_key = format!(
+            "_manifests/{}-{}.json",
+            head.latest.generation, head.latest.commit_id
+        );
+        let key = repository_object_key(&head.bundle_id, &relative_key)?;
         let stored = self
             .store
             .get(&key)?
             .ok_or_else(|| format!("bundle manifest '{}' is missing", key))?;
-        if sha256(&stored.bytes) != head.manifest_sha256 {
+        if sha256(&stored.bytes) != head.latest.manifest_sha256 {
             return Err(format!(
                 "bundle manifest '{}' failed hash verification",
                 key
@@ -2362,6 +2601,72 @@ mod tests {
         }
     }
 
+    fn test_publish_origin() -> PortableOrigin {
+        PortableOrigin {
+            origin_host_token: domain::OriginHostToken::parse("7a".repeat(32)).unwrap(),
+            origin_replica_token: domain::OriginReplicaToken::parse("8b".repeat(32)).unwrap(),
+            shared_label: None,
+        }
+    }
+
+    /// Capture-shaped publish used by engine tests: reconciles the capture
+    /// against the observed head's manifest exactly like production Push.
+    fn publish_capture<S: BundleObjectStore>(
+        engine: &BundleEngine<S>,
+        identity: BundleIdentity,
+        recipe: BundleRecipe,
+        captured: CapturedResources,
+        observed_head: Option<(BundleHead, HeadToken)>,
+        updated_at: u64,
+    ) -> Result<PublishedBundle, String> {
+        publish_capture_with_progress(
+            engine,
+            identity,
+            recipe,
+            captured,
+            observed_head,
+            updated_at,
+            &mut |_| {},
+        )
+    }
+
+    fn publish_capture_with_progress<S: BundleObjectStore>(
+        engine: &BundleEngine<S>,
+        identity: BundleIdentity,
+        recipe: BundleRecipe,
+        captured: CapturedResources,
+        observed_head: Option<(BundleHead, HeadToken)>,
+        updated_at: u64,
+        on_progress: &mut dyn FnMut(FetchProgress),
+    ) -> Result<PublishedBundle, String> {
+        let previous = observed_head
+            .as_ref()
+            .map(|(head, _)| engine.read_manifest(head))
+            .transpose()?;
+        let origin = test_publish_origin();
+        let content =
+            build_publish_content(&recipe, &captured, previous.as_ref(), &origin, updated_at)?;
+        let mut captured_with = captured_with();
+        for thread in content.conversations.values() {
+            captured_with
+                .codec_versions
+                .entry(thread.lineage_codec.clone())
+                .or_insert(1);
+        }
+        engine.publish_with_progress(
+            PublishBundleRequest {
+                identity,
+                recipe,
+                captured_with,
+                published_by_origin: origin,
+                content,
+                observed_head,
+                updated_at,
+            },
+            on_progress,
+        )
+    }
+
     fn write(path: &Path, bytes: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
@@ -2428,8 +2733,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = LocalBundleObjectStore::open(temp.path().join("store")).unwrap();
         let key = ObjectKey::parse(format!(
-            ".mallard/v1/repositories/{}/_uploads/upload-a/files/project/AGENTS.md",
-            bundle_id(1)
+            ".mallard/v1/repositories/{}/_objects/{}",
+            bundle_id(1),
+            "a".repeat(64)
         ))
         .unwrap();
         assert_eq!(
@@ -2534,62 +2840,58 @@ mod tests {
         let store_root = temp.path().join("store");
         let store = LocalBundleObjectStore::open(&store_root).unwrap();
         let engine = BundleEngine::open(store, storage_id()).unwrap();
-        let first = engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured,
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
-        assert_eq!(first.snapshot.head.generation, 1);
+        let first = publish_capture(
+            &engine,
+            identity(id.clone(), "Project"),
+            recipe.clone(),
+            captured,
+            None,
+            10,
+        )
+        .unwrap();
+        assert_eq!(first.snapshot.head.latest.generation, 1);
         let repository_root = store_root.join(format!("{}/{}", REPOSITORY_PREFIX, id));
         assert!(store_root.join(STORAGE_MARKER_KEY).is_file());
         assert!(repository_root.join(HEAD_FILE).is_file());
         assert!(repository_root.join(TAG_FILE).is_file());
         assert!(repository_root.join("_manifests").is_dir());
-        assert!(repository_root.join("_commits").is_dir());
+        assert!(repository_root.join("_versions").is_dir());
         assert!(repository_root.join("_objects").is_dir());
         let fetched = engine.fetch(&id).unwrap();
         assert_eq!(fetched.files.values().next().unwrap(), b"version one");
 
         write(&project.join("CLAUDE.md"), b"version two");
         let captured = capture_recipe(&request, &recipe).unwrap();
-        let second = engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Renamed Project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured,
-                observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
-                updated_at: 20,
-            })
-            .unwrap();
-        assert_eq!(second.snapshot.head.generation, 2);
-        assert!(engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Stale"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: Some((first.snapshot.head.clone(), first.head_token)),
-                updated_at: 21,
-            })
-            .is_err());
+        let second = publish_capture(
+            &engine,
+            identity(id.clone(), "Renamed Project"),
+            recipe.clone(),
+            captured,
+            Some((first.snapshot.head.clone(), first.head_token.clone())),
+            20,
+        )
+        .unwrap();
+        assert_eq!(second.snapshot.head.latest.generation, 2);
+        assert!(publish_capture(
+            &engine,
+            identity(id.clone(), "Stale"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            Some((first.snapshot.head.clone(), first.head_token)),
+            21,
+        )
+        .is_err());
 
         let empty_recipe = BundleRecipe::default();
-        let removed = engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Renamed Project"),
-                recipe: empty_recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &empty_recipe).unwrap(),
-                observed_head: Some((second.snapshot.head.clone(), second.head_token)),
-                updated_at: 30,
-            })
-            .unwrap();
+        let removed = publish_capture(
+            &engine,
+            identity(id.clone(), "Renamed Project"),
+            empty_recipe.clone(),
+            capture_recipe(&request, &empty_recipe).unwrap(),
+            Some((second.snapshot.head.clone(), second.head_token)),
+            30,
+        )
+        .unwrap();
         assert!(removed.snapshot.manifest.files.is_empty());
         assert!(removed.snapshot.manifest.resources.is_empty());
         assert!(removed
@@ -2607,7 +2909,7 @@ mod tests {
         for number in 1..=1_005_u64 {
             let id = bundle_id(number);
             let tag = BundleTag {
-                schema_version: BUNDLE_SCHEMA_V4,
+                schema_version: BUNDLE_SCHEMA,
                 bundle_id: id.clone(),
                 display_name: format!("Bundle {}", number),
                 kind: BundleKind::Project,
@@ -2666,16 +2968,15 @@ mod tests {
             storage_id(),
         )
         .unwrap();
-        engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Portable project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        publish_capture(
+            &engine,
+            identity(id.clone(), "Portable project"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         let fetched = engine.fetch(&id).unwrap();
         let binding = active_binding(id, &target, None, None);
         let plan = engine
@@ -2777,6 +3078,7 @@ mod tests {
                         && !key.ends_with("/_head.json")
                         && !key.ends_with("/_tag.json")
                         && !key.contains("/_manifests/")
+                        && !key.contains("/_versions/")
                 })
                 .count()
         }
@@ -2812,7 +3114,10 @@ mod tests {
             expectation: &CasExpectation,
             bytes: &[u8],
         ) -> Result<CasOutcome, String> {
-            self.cas_writes.lock().unwrap().push(key.as_str().to_string());
+            self.cas_writes
+                .lock()
+                .unwrap()
+                .push(key.as_str().to_string());
             self.inner.compare_and_swap(key, expectation, bytes)
         }
 
@@ -2849,16 +3154,15 @@ mod tests {
         let id = bundle_id(41);
         let store = CountingStore::open(&temp.path().join("store"));
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
-        let first = engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Incremental"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        let first = publish_capture(
+            &engine,
+            identity(id.clone(), "Incremental"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         assert!(first.published);
         assert_eq!(store.payload_puts().len(), 2);
         for entry in first.snapshot.manifest.files.values() {
@@ -2867,23 +3171,19 @@ mod tests {
 
         write(&source.join("changing.md"), b"second draft");
         store.reset();
-        let second = engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Incremental"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
-                updated_at: 20,
-            })
-            .unwrap();
-        assert!(second.published);
-        assert_eq!(second.snapshot.head.generation, 2);
-        let changed_key = repository_object_key(
-            &id,
-            &format!("_objects/{}", sha256(b"second draft")),
+        let second = publish_capture(
+            &engine,
+            identity(id.clone(), "Incremental"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            Some((first.snapshot.head.clone(), first.head_token.clone())),
+            20,
         )
         .unwrap();
+        assert!(second.published);
+        assert_eq!(second.snapshot.head.latest.generation, 2);
+        let changed_key =
+            repository_object_key(&id, &format!("_objects/{}", sha256(b"second draft"))).unwrap();
         assert_eq!(
             store.payload_puts(),
             vec![changed_key.as_str().to_string()],
@@ -2923,16 +3223,15 @@ mod tests {
         let id = bundle_id(42);
         let store = CountingStore::open(&temp.path().join("store"));
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
-        let published = engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Dedupe"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        let published = publish_capture(
+            &engine,
+            identity(id.clone(), "Dedupe"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(store.payload_puts().len(), 1);
         let shared_key = format!("_objects/{}", sha256(b"same bytes either way"));
         let file_entries: Vec<_> = published.snapshot.manifest.files.values().collect();
@@ -2940,6 +3239,447 @@ mod tests {
         for entry in file_entries {
             assert_eq!(entry.object_key, shared_key);
         }
+    }
+
+    /// Three generations published through the production capture path,
+    /// returning (engine, store root, bundle id, published outcomes).
+    fn publish_three_generations(
+        temp: &tempfile::TempDir,
+    ) -> (
+        BundleEngine<LocalBundleObjectStore>,
+        std::path::PathBuf,
+        BundleId,
+        Vec<PublishedBundle>,
+    ) {
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let mut request = CaptureRequest::for_project(&project);
+        request.include_project_content = true;
+        let id = bundle_id(31);
+        let store_root = temp.path().join("store");
+        let store = LocalBundleObjectStore::open(&store_root).unwrap();
+        let engine = BundleEngine::open(store, storage_id()).unwrap();
+        let mut outcomes = Vec::new();
+        for (index, body) in [
+            &b"generation one"[..],
+            &b"generation two"[..],
+            &b"generation three"[..],
+        ]
+        .iter()
+        .enumerate()
+        {
+            write(&project.join("CLAUDE.md"), body);
+            let inventory = discover_project(&request).unwrap();
+            let resource_id = inventory
+                .resources
+                .iter()
+                .find(|resource| resource.display_name == "CLAUDE.md")
+                .unwrap()
+                .resource_id
+                .clone();
+            let recipe = recipe_for([resource_id]);
+            let observed = outcomes.last().map(|previous: &PublishedBundle| {
+                (previous.snapshot.head.clone(), previous.head_token.clone())
+            });
+            let published = publish_capture(
+                &engine,
+                identity(id.clone(), "Chained"),
+                recipe.clone(),
+                capture_recipe(&request, &recipe).unwrap(),
+                observed,
+                10 + index as u64 * 10,
+            )
+            .unwrap();
+            assert!(published.published);
+            outcomes.push(published);
+        }
+        (engine, store_root, id, outcomes)
+    }
+
+    #[test]
+    fn generation_chain_lists_resolves_and_paginates_newest_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, _root, id, outcomes) = publish_three_generations(&temp);
+
+        let page = engine.list_reachable_generations(&id, None, 10).unwrap();
+        assert_eq!(
+            page.generations
+                .iter()
+                .map(|generation| generation.version.generation)
+                .collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+        assert_eq!(page.next_cursor, None);
+        assert_eq!(page.observed_head.latest.generation, 3);
+        assert_eq!(page.observed_head.latest, outcomes[2].snapshot.head.latest);
+        // The chain pins parents completely: each record names the previous
+        // version with all three digests.
+        assert_eq!(
+            page.generations[0].record.previous.as_ref().unwrap(),
+            &page.generations[1].version
+        );
+        assert_eq!(
+            page.generations[1].record.previous.as_ref().unwrap(),
+            &page.generations[2].version
+        );
+        assert!(page.generations[2].record.previous.is_none());
+
+        // Pagination without duplicates or gaps.
+        let first = engine.list_reachable_generations(&id, None, 2).unwrap();
+        assert_eq!(
+            first
+                .generations
+                .iter()
+                .map(|generation| generation.version.generation)
+                .collect::<Vec<_>>(),
+            vec![3, 2]
+        );
+        assert_eq!(first.next_cursor, Some(2));
+        let second = engine
+            .list_reachable_generations(&id, first.next_cursor, 2)
+            .unwrap();
+        assert_eq!(
+            second
+                .generations
+                .iter()
+                .map(|generation| generation.version.generation)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(second.next_cursor, None);
+
+        // Resolution by number returns the exact pinned version.
+        for generation in 1..=3_u64 {
+            let (verified, head) = engine
+                .resolve_reachable_generation(&id, generation)
+                .unwrap();
+            assert_eq!(verified.version.generation, generation);
+            assert_eq!(head.latest.generation, 3);
+            let manifest = engine.inspect_version(&id, &verified.version).unwrap();
+            assert_eq!(manifest.generation, generation);
+            assert_eq!(
+                domain::snapshot_content_sha256(&manifest).unwrap(),
+                verified.version.snapshot_content_sha256
+            );
+        }
+
+        // Invalid selectors are rejected without listing anything.
+        assert!(engine
+            .resolve_reachable_generation(&id, 0)
+            .unwrap_err()
+            .contains("not a valid selector"));
+        assert!(engine
+            .resolve_reachable_generation(&id, 4)
+            .unwrap_err()
+            .contains("not reachable"));
+    }
+
+    #[test]
+    fn generation_chain_fails_closed_on_tampered_or_missing_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, store_root, id, _outcomes) = publish_three_generations(&temp);
+        let two = engine.resolve_reachable_generation(&id, 2).unwrap().0;
+        let record_path = store_root.join(format!(
+            "{}/{}/_versions/2-{}.json",
+            REPOSITORY_PREFIX, id, two.version.commit_id
+        ));
+
+        // Tampered bytes: the digest pinned by generation 3 no longer
+        // matches, so listing and resolving both fail rather than truncate.
+        let original = fs::read(&record_path).unwrap();
+        let mut tampered_json: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        tampered_json["created_at"] = serde_json::json!(999);
+        fs::write(&record_path, serde_json::to_vec(&tampered_json).unwrap()).unwrap();
+        assert!(engine
+            .list_reachable_generations(&id, None, 10)
+            .unwrap_err()
+            .contains("hash verification"));
+        assert!(engine
+            .resolve_reachable_generation(&id, 1)
+            .unwrap_err()
+            .contains("hash verification"));
+
+        // Missing parent record: same failure mode, never a shortened chain.
+        fs::remove_file(&record_path).unwrap();
+        assert!(engine
+            .list_reachable_generations(&id, None, 10)
+            .unwrap_err()
+            .contains("is missing"));
+
+        fs::write(&record_path, original).unwrap();
+        assert_eq!(
+            engine
+                .list_reachable_generations(&id, None, 10)
+                .unwrap()
+                .generations
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn selected_generation_apply_writes_the_selected_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, _root, id, outcomes) = publish_three_generations(&temp);
+        let target = temp.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        let binding = active_binding(id.clone(), &target, None, None);
+
+        // The head stays at G3 while G1 is reviewed and applied.
+        let (verified, head) = engine.resolve_reachable_generation(&id, 1).unwrap();
+        assert_eq!(head.latest.generation, 3);
+        let manifest = engine.inspect_version(&id, &verified.version).unwrap();
+        let snapshot = domain::BundleVersionSnapshot {
+            storage_id: storage_id(),
+            version: verified.version.clone(),
+            manifest,
+            fetched_at: 50,
+        };
+        let mut plan_bytes = engine.byte_source(&snapshot, None, None);
+        let plan = engine
+            .build_restore_plan_lazy(
+                &snapshot,
+                &head.latest,
+                &mut plan_bytes,
+                &BTreeMap::new(),
+                &binding,
+                50,
+                0,
+            )
+            .unwrap();
+        assert_eq!(plan.source_version, verified.version);
+        assert_eq!(plan.observed_head, head.latest);
+        let write_action = plan
+            .actions
+            .iter()
+            .find(|action| {
+                action
+                    .target_path
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with("CLAUDE.md"))
+            })
+            .unwrap();
+        let approved = BTreeSet::from([write_action.action_id.clone()]);
+        let mut apply_bytes = engine.byte_source(&snapshot, None, None);
+        engine
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut apply_bytes,
+                &binding,
+                &plan,
+                &approved,
+                &temp.path().join("backups"),
+                51,
+            )
+            .unwrap();
+        // The selected generation's payload was written, not the head's.
+        assert_eq!(
+            fs::read(target.join("CLAUDE.md")).unwrap(),
+            b"generation one"
+        );
+
+        // A tampered plan whose source no longer matches the chain rejects
+        // apply even with the head unchanged.
+        let mut forged = plan.clone();
+        forged.source_version.generation = 2;
+        forged.source_version.commit_id = outcomes[1].snapshot.head.latest.commit_id.clone();
+        forged.source_version.manifest_sha256 =
+            outcomes[1].snapshot.head.latest.manifest_sha256.clone();
+        forged.source_version.snapshot_content_sha256 = "a".repeat(64);
+        forged.source_version.generation_record_sha256 = "b".repeat(64);
+        let mut forged_bytes = engine.byte_source(&snapshot, None, None);
+        let forged_error = engine
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut forged_bytes,
+                &binding,
+                &forged,
+                &approved,
+                &temp.path().join("backups"),
+                52,
+            )
+            .unwrap_err();
+        assert!(
+            forged_error.contains("no longer matches bundle/binding state")
+                || forged_error.contains("no longer reachable")
+                || forged_error.contains("hash verification"),
+            "{forged_error}"
+        );
+    }
+
+    #[test]
+    fn comparison_reads_only_metadata_and_classifies_every_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let mut request = CaptureRequest::for_project(&project);
+        request.include_project_content = true;
+        let id = bundle_id(41);
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+
+        let resource_named = |request: &CaptureRequest, name: &str| {
+            discover_project(request)
+                .unwrap()
+                .resources
+                .iter()
+                .find(|resource| resource.display_name == name)
+                .map(|resource| resource.resource_id.clone())
+        };
+
+        // G1: two resources. G2: one changed, one kept. G3: the kept one is
+        // deselected (removed) while the changed one stays identical.
+        write(&project.join("CLAUDE.md"), b"claude v1");
+        write(&project.join("AGENTS.md"), b"agents v1");
+        let claude = resource_named(&request, "CLAUDE.md").unwrap();
+        let agents = resource_named(&request, "AGENTS.md").unwrap();
+        let both = recipe_for([claude.clone(), agents.clone()]);
+        let first = publish_capture(
+            &engine,
+            identity(id.clone(), "Compared"),
+            both.clone(),
+            capture_recipe(&request, &both).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        write(&project.join("CLAUDE.md"), b"claude v2");
+        let second = publish_capture(
+            &engine,
+            identity(id.clone(), "Compared"),
+            both.clone(),
+            capture_recipe(&request, &both).unwrap(),
+            Some((first.snapshot.head.clone(), first.head_token.clone())),
+            20,
+        )
+        .unwrap();
+        let only_claude = recipe_for([claude.clone()]);
+        let third = publish_capture(
+            &engine,
+            identity(id.clone(), "Compared"),
+            only_claude.clone(),
+            capture_recipe(&request, &only_claude).unwrap(),
+            Some((second.snapshot.head.clone(), second.head_token.clone())),
+            30,
+        )
+        .unwrap();
+        assert_eq!(third.snapshot.head.latest.generation, 3);
+
+        store.reset();
+        let comparison = engine.compare_generations(&id, 1, 2, true).unwrap();
+        assert!(!comparison.same_snapshot);
+        assert_eq!(
+            (
+                comparison.added,
+                comparison.removed,
+                comparison.changed,
+                comparison.unchanged
+            ),
+            (0, 0, 1, 1)
+        );
+        let changed_row = comparison
+            .resource_changes
+            .iter()
+            .find(|row| row.state == BundleResourceChangeState::Changed)
+            .unwrap();
+        assert_eq!(changed_row.resource_id.as_str(), claude.as_str());
+        assert_ne!(
+            changed_row.left_content_sha256,
+            changed_row.right_content_sha256
+        );
+        assert!(comparison
+            .resource_changes
+            .iter()
+            .any(|row| row.state == BundleResourceChangeState::Unchanged));
+        assert!(!comparison.bundle_metadata_changed);
+        assert!(!comparison.recipe_changed);
+
+        // Removal direction and its reversal.
+        let removal = engine.compare_generations(&id, 2, 3, true).unwrap();
+        assert_eq!((removal.added, removal.removed), (0, 1));
+        assert!(removal.recipe_changed);
+        assert!(removal.tombstones_changed);
+        let reversed = engine.compare_generations(&id, 3, 2, true).unwrap();
+        assert_eq!((reversed.added, reversed.removed), (1, 0));
+
+        // include_unchanged = false keeps counts but omits unchanged rows.
+        let compact = engine.compare_generations(&id, 1, 2, false).unwrap();
+        assert_eq!(compact.unchanged, 1);
+        assert!(compact
+            .resource_changes
+            .iter()
+            .all(|row| row.state != BundleResourceChangeState::Unchanged));
+
+        // Every comparison above read heads, generation records, and at most
+        // two immutable manifests per call — never a payload object.
+        assert_eq!(store.payload_gets(), 0);
+
+        // One detailed comparison reads exactly one head, the records down
+        // to the lower requested generation, and both manifests.
+        store.reset();
+        engine.compare_generations(&id, 2, 3, true).unwrap();
+        let keys = store.keys.lock().unwrap().clone();
+        assert_eq!(
+            keys.iter()
+                .filter(|key| key.ends_with("_head.json"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            keys.iter()
+                .filter(|key| key.contains("/_versions/"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            keys.iter()
+                .filter(|key| key.contains("/_manifests/"))
+                .count(),
+            2
+        );
+        assert_eq!(store.payload_gets(), 0);
+    }
+
+    #[test]
+    fn cas_loser_orphans_are_invisible_to_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, store_root, id, outcomes) = publish_three_generations(&temp);
+        // A concurrent publisher that lost the head CAS left behind immutable
+        // generation-4 objects under a different commit id.
+        let orphan_commit = "commit-cas-loser";
+        let orphan = domain::BundleGenerationRecord {
+            schema_version: BUNDLE_SCHEMA,
+            bundle_id: id.clone(),
+            generation: 4,
+            commit_id: orphan_commit.to_string(),
+            manifest_sha256: "a".repeat(64),
+            snapshot_content_sha256: "b".repeat(64),
+            previous: Some(outcomes[2].snapshot.head.latest.clone()),
+            created_at: 99,
+            published_by_origin: test_publish_origin(),
+            delta: domain::GenerationDelta::default(),
+        };
+        let orphan_path = store_root.join(format!(
+            "{}/{}/_versions/4-{}.json",
+            REPOSITORY_PREFIX, id, orphan_commit
+        ));
+        fs::create_dir_all(orphan_path.parent().unwrap()).unwrap();
+        fs::write(&orphan_path, serde_json::to_vec(&orphan).unwrap()).unwrap();
+
+        // The orphan exists in storage but is unreachable from the head, so
+        // it cannot be listed or resolved.
+        let page = engine.list_reachable_generations(&id, None, 10).unwrap();
+        assert_eq!(
+            page.generations
+                .iter()
+                .map(|generation| generation.version.generation)
+                .collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+        assert!(engine
+            .resolve_reachable_generation(&id, 4)
+            .unwrap_err()
+            .contains("not reachable"));
     }
 
     #[test]
@@ -2960,35 +3700,37 @@ mod tests {
         let id = bundle_id(43);
         let store = CountingStore::open(&temp.path().join("store"));
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
-        let first = engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Noop"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        let first = publish_capture(
+            &engine,
+            identity(id.clone(), "Noop"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         assert!(first.published);
 
         store.reset();
-        let noop = engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Noop"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
-                updated_at: 20,
-            })
-            .unwrap();
+        let noop = publish_capture(
+            &engine,
+            identity(id.clone(), "Noop"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            Some((first.snapshot.head.clone(), first.head_token.clone())),
+            20,
+        )
+        .unwrap();
         assert!(!noop.published);
-        assert_eq!(noop.snapshot.head.generation, 1);
+        assert_eq!(noop.snapshot.head.latest.generation, 1);
         assert_eq!(noop.head_token, first.head_token);
         assert_eq!(store.put_count(), 0, "a semantic no-op writes no objects");
-        assert_eq!(store.cas_count(), 0, "a semantic no-op never touches the head");
-        assert_eq!(engine.inspect(&id).unwrap().head.generation, 1);
+        assert_eq!(
+            store.cas_count(),
+            0,
+            "a semantic no-op never touches the head"
+        );
+        assert_eq!(engine.inspect(&id).unwrap().head.latest.generation, 1);
     }
 
     #[test]
@@ -3011,19 +3753,16 @@ mod tests {
         let store = CountingStore::open(&temp.path().join("store"));
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
         let mut events: Vec<FetchProgress> = Vec::new();
-        let first = engine
-            .publish_with_progress(
-                PublishBundleRequest {
-                    identity: identity(id.clone(), "Progress"),
-                    recipe: recipe.clone(),
-                    captured_with: captured_with(),
-                    captured: capture_recipe(&request, &recipe).unwrap(),
-                    observed_head: None,
-                    updated_at: 10,
-                },
-                &mut |progress| events.push(progress),
-            )
-            .unwrap();
+        let first = publish_capture_with_progress(
+            &engine,
+            identity(id.clone(), "Progress"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            None,
+            10,
+            &mut |progress| events.push(progress),
+        )
+        .unwrap();
         let full_bytes = (b"tiny".len() + b"a considerably longer payload".len()) as u64;
         assert_eq!(events.len(), 2);
         assert_eq!(events.last().unwrap().index, 2);
@@ -3032,37 +3771,34 @@ mod tests {
         assert_eq!(events.last().unwrap().total_bytes, full_bytes);
 
         events.clear();
-        let noop = engine
-            .publish_with_progress(
-                PublishBundleRequest {
-                    identity: identity(id.clone(), "Progress"),
-                    recipe: recipe.clone(),
-                    captured_with: captured_with(),
-                    captured: capture_recipe(&request, &recipe).unwrap(),
-                    observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
-                    updated_at: 20,
-                },
-                &mut |progress| events.push(progress),
-            )
-            .unwrap();
+        let noop = publish_capture_with_progress(
+            &engine,
+            identity(id.clone(), "Progress"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            Some((first.snapshot.head.clone(), first.head_token.clone())),
+            20,
+            &mut |progress| events.push(progress),
+        )
+        .unwrap();
         assert!(!noop.published);
         assert!(events.is_empty(), "a no-op publish reports no transfer");
 
-        write(&source.join("large.md"), b"a different considerably longer payload");
+        write(
+            &source.join("large.md"),
+            b"a different considerably longer payload",
+        );
         events.clear();
-        engine
-            .publish_with_progress(
-                PublishBundleRequest {
-                    identity: identity(id.clone(), "Progress"),
-                    recipe: recipe.clone(),
-                    captured_with: captured_with(),
-                    captured: capture_recipe(&request, &recipe).unwrap(),
-                    observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
-                    updated_at: 30,
-                },
-                &mut |progress| events.push(progress),
-            )
-            .unwrap();
+        publish_capture_with_progress(
+            &engine,
+            identity(id.clone(), "Progress"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            Some((first.snapshot.head.clone(), first.head_token.clone())),
+            30,
+            &mut |progress| events.push(progress),
+        )
+        .unwrap();
         let changed_bytes = b"a different considerably longer payload".len() as u64;
         assert_eq!(events.len(), 1, "unchanged payloads never enter the totals");
         assert_eq!(events[0].total_objects, 1);
@@ -3094,23 +3830,32 @@ mod tests {
         let id = bundle_id(97);
         let store = CountingStore::open(&temp.path().join("store"));
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
-        engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Lazy project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        publish_capture(
+            &engine,
+            identity(id.clone(), "Lazy project"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         let binding = active_binding(id.clone(), &target, None, None);
 
         store.reset();
         let snapshot = engine.inspect(&id).unwrap();
+        let observed_head = snapshot.head.latest.clone();
+        let snapshot = snapshot.version_snapshot();
         let mut plan_bytes = engine.byte_source(&snapshot, None, None);
         let plan = engine
-            .build_restore_plan_lazy(&snapshot, &mut plan_bytes, &BTreeMap::new(), &binding, 100, 0)
+            .build_restore_plan_lazy(
+                &snapshot,
+                &observed_head,
+                &mut plan_bytes,
+                &BTreeMap::new(),
+                &binding,
+                100,
+                0,
+            )
             .unwrap();
         assert_eq!(
             store.payload_gets(),
@@ -3161,9 +3906,19 @@ mod tests {
         // A missing target is genuinely new work: exactly one object moves.
         fs::remove_file(target.join("CLAUDE.md")).unwrap();
         let snapshot = engine.inspect(&id).unwrap();
+        let observed_head = snapshot.head.latest.clone();
+        let snapshot = snapshot.version_snapshot();
         let mut plan_bytes = engine.byte_source(&snapshot, None, None);
         let plan = engine
-            .build_restore_plan_lazy(&snapshot, &mut plan_bytes, &BTreeMap::new(), &binding, 102, 0)
+            .build_restore_plan_lazy(
+                &snapshot,
+                &observed_head,
+                &mut plan_bytes,
+                &BTreeMap::new(),
+                &binding,
+                102,
+                0,
+            )
             .unwrap();
         let write_action = plan
             .actions
@@ -3246,16 +4001,15 @@ mod tests {
             storage_id(),
         )
         .unwrap();
-        engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Claude project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        publish_capture(
+            &engine,
+            identity(id.clone(), "Claude project"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         let fetched = engine.fetch(&id).unwrap();
         let binding = active_binding(id, &target, None, Some(&target_claude));
         let plan = engine
@@ -3354,16 +4108,15 @@ mod tests {
             storage_id(),
         )
         .unwrap();
-        engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Codex project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        publish_capture(
+            &engine,
+            identity(id.clone(), "Codex project"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         let fetched = engine.fetch(&id).unwrap();
         let binding = active_binding(id, &target, Some(&target_codex), None);
 
@@ -3477,16 +4230,15 @@ mod tests {
             storage_id(),
         )
         .unwrap();
-        engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Plugin intent"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        publish_capture(
+            &engine,
+            identity(id.clone(), "Plugin intent"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         let fetched = engine.fetch(&id).unwrap();
         assert_eq!(fetched.dependency_actions.len(), 1);
         assert!(matches!(
@@ -3548,16 +4300,15 @@ mod tests {
             storage_id(),
         )
         .unwrap();
-        engine
-            .publish(PublishBundleRequest {
-                identity: identity(id, "Global skill"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        publish_capture(
+            &engine,
+            identity(id, "Global skill"),
+            recipe.clone(),
+            capture_recipe(request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         engine
     }
 
@@ -3812,16 +4563,15 @@ mod tests {
             storage_id(),
         )
         .unwrap();
-        engine
-            .publish(PublishBundleRequest {
-                identity: identity(id.clone(), "Differently named skill"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        publish_capture(
+            &engine,
+            identity(id.clone(), "Differently named skill"),
+            recipe.clone(),
+            capture_recipe(&request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         let fetched = engine.fetch(&id).unwrap();
         let descriptor = fetched
             .snapshot
@@ -4958,7 +5708,7 @@ fn create_safe_directory_tree(base: &Path, target: &Path) -> Result<(), String> 
 
 fn validate_plan_pin(
     plan: &RestorePlan,
-    snapshot: &BundleSnapshot,
+    snapshot: &BundleVersionSnapshot,
     binding: &ProjectBinding,
     storage_id: &StorageId,
     now: u64,
@@ -4968,13 +5718,11 @@ fn validate_plan_pin(
     }
     if &plan.storage_id != storage_id
         || plan.storage_id != snapshot.storage_id
-        || plan.bundle_id != snapshot.head.bundle_id
+        || &plan.bundle_id != snapshot.bundle_id()
         || plan.host_id != binding.host_id
         || plan.replica_id != binding.replica_id
         || plan.bundle_id != binding.bundle_id
-        || plan.generation != snapshot.head.generation
-        || plan.commit_id != snapshot.head.commit_id
-        || plan.manifest_sha256 != snapshot.head.manifest_sha256
+        || plan.source_version != snapshot.version
         || plan.binding_revision != binding.revision
     {
         return Err("restore plan pin no longer matches bundle/binding state".to_string());
@@ -5171,9 +5919,8 @@ fn validate_bundle_relative_object_key(value: &str) -> Result<(), String> {
     if !(value == HEAD_FILE
         || value == TAG_FILE
         || value.starts_with("_manifests/")
-        || value.starts_with("_commits/")
-        || value.starts_with("_objects/")
-        || value.starts_with("_uploads/"))
+        || value.starts_with("_versions/")
+        || value.starts_with("_objects/"))
     {
         return Err(format!("unknown bundle object namespace '{}'", value));
     }
@@ -5262,6 +6009,342 @@ fn normalized_relative_path(root: &Path, path: &Path) -> Result<String, String> 
         }
     }
     Ok(parts.join("/"))
+}
+
+/// Build the fully reconciled candidate content for a production Push from
+/// one provider capture: previous content carries forward for selected but
+/// uncaptured resources, deselected resources gain tombstones, and every
+/// captured provider session with a recoverable identity publishes portable
+/// [`ConversationThread`] metadata (title, lineage, digests) so history
+/// listing and comparison never open payload objects.
+pub fn build_publish_content(
+    recipe: &BundleRecipe,
+    captured: &CapturedResources,
+    previous: Option<&BundleManifest>,
+    publisher: &PortableOrigin,
+    updated_at: u64,
+) -> Result<PublishContent, String> {
+    build_publish_content_with_thread_bindings(
+        recipe,
+        captured,
+        previous,
+        publisher,
+        updated_at,
+        &BTreeMap::new(),
+    )
+}
+
+/// Build publish content while preserving the portable thread identity of
+/// provider-native sessions already materialized on this replica. An initial
+/// Push has no bindings and falls back to the deterministic portable ID;
+/// subsequent Pushes must keep the bound ID even when Pull assigned a new
+/// provider-native session ID locally.
+pub fn build_publish_content_with_thread_bindings(
+    recipe: &BundleRecipe,
+    captured: &CapturedResources,
+    previous: Option<&BundleManifest>,
+    publisher: &PortableOrigin,
+    updated_at: u64,
+    bound_thread_ids: &BTreeMap<(Provider, String), ThreadId>,
+) -> Result<PublishContent, String> {
+    let captured_descriptors = provider_capture::domain_resources(captured)?;
+    // Only fetch materializes dependency actions, but invalid captured
+    // dependency intent must still fail the publish, not the next pull.
+    provider_capture::domain_dependency_actions(captured)?;
+    let (resources, retained, mut directories, mut tombstones) = reconcile_manifest_content(
+        recipe,
+        &captured_descriptors,
+        captured,
+        previous,
+        updated_at,
+    )?;
+
+    let mut files: BTreeMap<LogicalPath, PublishFile> = retained
+        .into_iter()
+        .map(|(path, entry)| (path, PublishFile::Retained(entry)))
+        .collect();
+    for (logical_path, file) in &captured.files {
+        let logical = LogicalPath::parse(logical_path.clone())?;
+        let resource_id = ResourceId::parse(file.resource_id.clone())?;
+        if !recipe.entries.contains_key(&resource_id) {
+            return Err(format!(
+                "captured file '{}' belongs to unselected resource '{}'",
+                logical, resource_id
+            ));
+        }
+        files.insert(
+            logical,
+            PublishFile::Captured {
+                resource_id,
+                bytes: file.bytes.clone(),
+                source_mtime: file.source_mtime,
+                mode: Some(file.mode & 0o777),
+            },
+        );
+    }
+    for (logical_path, directory) in &captured.directories {
+        let logical = LogicalPath::parse(logical_path.clone())?;
+        let resource_id = ResourceId::parse(directory.resource_id.clone())?;
+        if !recipe.entries.contains_key(&resource_id) {
+            return Err(format!(
+                "captured directory '{}' belongs to unselected resource '{}'",
+                logical, resource_id
+            ));
+        }
+        directories.insert(
+            logical,
+            BundleDirectoryEntry {
+                resource_id,
+                mode: Some(directory.mode & 0o777),
+                source_mtime: directory.source_mtime,
+            },
+        );
+    }
+
+    let conversations = reconcile_conversation_threads(
+        captured,
+        &resources,
+        &files,
+        previous,
+        publisher,
+        bound_thread_ids,
+    )?;
+
+    // A thread that left the live set (its resource was deselected) is an
+    // explicit deletion; one that returned sheds its old tombstone.
+    if let Some(previous) = previous {
+        for (thread_id, thread) in &previous.conversations {
+            if conversations.contains_key(thread_id) {
+                continue;
+            }
+            let last_sha256 = thread
+                .files
+                .iter()
+                .find(|file| file.role == ConversationFileRole::Transcript)
+                .and_then(|file| previous.files.get(&file.logical_path))
+                .map(|entry| entry.sha256.clone());
+            let tombstone = Tombstone {
+                target: TombstoneTarget::ConversationThread {
+                    thread_id: thread_id.clone(),
+                },
+                last_sha256,
+                deleted_at: updated_at,
+            };
+            tombstones.insert(tombstone.canonical_key(), tombstone);
+        }
+    }
+    tombstones.retain(|_, tombstone| {
+        !matches!(
+            &tombstone.target,
+            TombstoneTarget::ConversationThread { thread_id }
+                if conversations.contains_key(thread_id)
+        )
+    });
+
+    Ok(PublishContent {
+        conversations,
+        resources,
+        files,
+        directories,
+        tombstones,
+    })
+}
+
+/// The provider-native session identity for one captured conversation
+/// resource, from codec analysis when available and from the capture
+/// resource key otherwise. Derived resources such as the Codex session
+/// index have neither and publish as plain files.
+fn captured_conversation_source_id<'a>(
+    resource_key: &'a str,
+    conversation: &'a provider_capture::CapturedConversation,
+) -> Option<&'a str> {
+    if let Some(source) = conversation.source_thread_id.as_deref() {
+        return Some(source);
+    }
+    for prefix in ["codex:session:", "claude:session:"] {
+        if let Some(suffix) = resource_key.strip_prefix(prefix) {
+            if !suffix.is_empty() {
+                return Some(suffix);
+            }
+        }
+    }
+    None
+}
+
+/// Portable thread metadata for the candidate snapshot: fresh entries for
+/// captured sessions, carried-forward entries for live but uncaptured
+/// resources. Thread identity is stable across replicas, so continuity
+/// fields (creation, fork provenance) survive recapture.
+fn reconcile_conversation_threads(
+    captured: &CapturedResources,
+    resources: &BTreeMap<ResourceId, ResourceDescriptor>,
+    files: &BTreeMap<LogicalPath, PublishFile>,
+    previous: Option<&BundleManifest>,
+    publisher: &PortableOrigin,
+    bound_thread_ids: &BTreeMap<(Provider, String), ThreadId>,
+) -> Result<BTreeMap<ThreadId, ConversationThread>, String> {
+    let mut threads = BTreeMap::new();
+    // One pass over the candidate files: every payload is hashed exactly
+    // once, then grouped by owner. Anything per-conversation after this is
+    // a map lookup, so reconcile cost stays linear in captured bytes no
+    // matter how many sessions a project carries.
+    let mut files_by_owner: BTreeMap<&ResourceId, Vec<(&LogicalPath, String, u64)>> =
+        BTreeMap::new();
+    for (path, file) in files {
+        let (owner, sha256_value, mtime) = match file {
+            PublishFile::Retained(entry) => {
+                (&entry.resource_id, entry.sha256.clone(), entry.source_mtime)
+            }
+            PublishFile::Captured {
+                resource_id,
+                bytes,
+                source_mtime,
+                ..
+            } => (resource_id, sha256(bytes), *source_mtime),
+        };
+        files_by_owner
+            .entry(owner)
+            .or_default()
+            .push((path, sha256_value, mtime));
+    }
+    for (resource_key, conversation) in &captured.conversations {
+        let Some(source_thread_id) = captured_conversation_source_id(resource_key, conversation)
+        else {
+            continue;
+        };
+        let resource_id = ResourceId::parse(resource_key.clone())?;
+        if !resources.contains_key(&resource_id) {
+            continue;
+        }
+        let provider = provider_capture::domain_provider(conversation.provider);
+        let thread_id = bound_thread_ids
+            .get(&(provider, source_thread_id.to_string()))
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                domain::portable_conversation_thread_id(provider, source_thread_id)
+            })?;
+        let transcript_path = LogicalPath::parse(conversation.transcript_logical_path.clone())?;
+
+        let mut file_refs = Vec::new();
+        let mut transcript_sha256 = None;
+        let mut latest_mtime = 0_u64;
+        for (path, sha256_value, mtime) in files_by_owner.get(&resource_id).into_iter().flatten() {
+            let role = if *path == &transcript_path {
+                transcript_sha256 = Some(sha256_value.clone());
+                ConversationFileRole::Transcript
+            } else {
+                ConversationFileRole::Sidecar {
+                    sidecar_kind: "file".to_string(),
+                }
+            };
+            latest_mtime = latest_mtime.max(*mtime);
+            file_refs.push(ConversationFileRef {
+                logical_path: (*path).clone(),
+                role,
+            });
+        }
+        if transcript_sha256.is_none() {
+            return Err(format!(
+                "captured conversation '{}' lacks its transcript '{}'",
+                resource_key, transcript_path
+            ));
+        }
+
+        let (lineage_status, head_message_id, message_count, lineage_digest, semantic_digest) =
+            match &conversation.lineage {
+                CodecLineage::Complete {
+                    chain,
+                    lineage_digest,
+                    semantic_digest,
+                } => (
+                    ConversationLineageStatus::Complete,
+                    chain.last().map(|message| message.message_id.clone()),
+                    Some(chain.len() as u64),
+                    Some(lineage_digest.clone()),
+                    Some(semantic_digest.clone()),
+                ),
+                CodecLineage::Unknown { reason } => (
+                    ConversationLineageStatus::Unknown {
+                        reason_code: reason.as_str().to_string(),
+                    },
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            };
+
+        let previous_thread = previous.and_then(|manifest| manifest.conversations.get(&thread_id));
+        let previous_transcript_sha = previous_thread.and_then(|thread| {
+            thread
+                .files
+                .iter()
+                .find(|file| file.role == ConversationFileRole::Transcript)
+                .and_then(|file| previous.unwrap().files.get(&file.logical_path))
+                .map(|entry| entry.sha256.clone())
+        });
+        let content_changed = previous_transcript_sha != transcript_sha256;
+        let display_title = conversation
+            .title
+            .clone()
+            .or_else(|| previous_thread.and_then(|thread| thread.display_title.clone()));
+        let thread = ConversationThread {
+            thread_id: thread_id.clone(),
+            provider,
+            display_title,
+            resource_id,
+            files: file_refs,
+            lineage_status,
+            lineage_codec: conversation.lineage_codec.clone(),
+            head_message_id,
+            message_count,
+            lineage_digest,
+            semantic_digest,
+            forked_from: previous_thread.and_then(|thread| thread.forked_from.clone()),
+            source_thread_id: Some(source_thread_id.to_string()),
+            created_by_origin: previous_thread
+                .map(|thread| thread.created_by_origin.clone())
+                .unwrap_or_else(|| Some(publisher.clone())),
+            last_updated_by_origin: if content_changed {
+                Some(publisher.clone())
+            } else {
+                previous_thread
+                    .map(|thread| thread.last_updated_by_origin.clone())
+                    .unwrap_or_else(|| Some(publisher.clone()))
+            },
+            created_at: previous_thread
+                .map(|thread| thread.created_at)
+                .unwrap_or(latest_mtime),
+            updated_at: if content_changed {
+                latest_mtime
+            } else {
+                previous_thread
+                    .map(|thread| thread.updated_at)
+                    .unwrap_or(latest_mtime)
+            },
+        };
+        if threads.insert(thread_id.clone(), thread).is_some() {
+            return Err(format!(
+                "captured conversations resolve to duplicate portable thread '{}'",
+                thread_id
+            ));
+        }
+    }
+
+    // Live resources that were not recaptured keep their stored thread
+    // metadata exactly; their files carried forward byte-for-byte.
+    if let Some(previous) = previous {
+        for (thread_id, thread) in &previous.conversations {
+            if threads.contains_key(thread_id) {
+                continue;
+            }
+            if resources.contains_key(&thread.resource_id) {
+                threads.insert(thread_id.clone(), thread.clone());
+            }
+        }
+    }
+    Ok(threads)
 }
 
 fn reconcile_manifest_content(
@@ -5456,13 +6539,10 @@ pub(crate) fn dependencies_from_manifest(
     Ok(actions)
 }
 
-fn validate_schema6_conversation_retention(
+fn validate_conversation_retention(
     previous: &BundleManifest,
     next: &BundleManifest,
 ) -> Result<(), String> {
-    if previous.schema_version != BUNDLE_SCHEMA_V6 {
-        return Ok(());
-    }
     for thread_id in previous.conversations.keys() {
         if next.conversations.contains_key(thread_id) {
             continue;
@@ -5476,7 +6556,7 @@ fn validate_schema6_conversation_retention(
         });
         if !deleted {
             return Err(format!(
-                "schema-6 publication drops conversation thread '{}' without a reviewed tombstone",
+                "publication drops conversation thread '{}' without a reviewed tombstone",
                 thread_id
             ));
         }
@@ -5484,62 +6564,72 @@ fn validate_schema6_conversation_retention(
     Ok(())
 }
 
-/// Semantic manifest equality for both publication paths: `object_key` is
-/// deliberately excluded (content addressing and historical upload ids both
-/// let the key vary for identical content), as are generation/commit/time
-/// coordinates. Schema-4 manifests compare with empty conversation maps.
-fn manifest_is_semantic_noop(previous: &BundleManifest, candidate: &BundleManifest) -> bool {
-    previous.bundle == candidate.bundle
-        && previous.recipe == candidate.recipe
-        && previous.captured_with.codec_versions == candidate.captured_with.codec_versions
-        && previous.conversations == candidate.conversations
-        && previous.resources == candidate.resources
-        && files_are_semantically_equal(&previous.files, &candidate.files)
-        && previous.directories == candidate.directories
-        && previous.tombstones == candidate.tombstones
+/// The stored display title of the conversation owning `resource_id` in one
+/// manifest, straight from portable metadata.
+fn manifest_thread_title(manifest: &BundleManifest, resource_id: &ResourceId) -> Option<String> {
+    manifest
+        .conversations
+        .values()
+        .find(|thread| &thread.resource_id == resource_id)
+        .and_then(|thread| thread.display_title.clone())
 }
 
-fn files_are_semantically_equal(
-    previous: &BTreeMap<LogicalPath, BundleFileEntry>,
-    candidate: &BTreeMap<LogicalPath, BundleFileEntry>,
-) -> bool {
-    previous.len() == candidate.len()
-        && previous.iter().all(|(path, left)| {
-            candidate.get(path).is_some_and(|right| {
-                left.resource_id == right.resource_id
-                    && left.sha256 == right.sha256
-                    && left.size == right.size
-                    && left.source_mtime == right.source_mtime
-                    && left.mode == right.mode
-            })
-        })
-}
-
-fn file_delta(previous: Option<&BundleManifest>, current: &BundleManifest) -> (u64, u64, u64) {
+/// Summary counts against the direct parent. Resource changes compare the
+/// canonical per-resource content digests, so any restore-affecting change
+/// counts exactly once.
+fn generation_delta(
+    previous: Option<&BundleManifest>,
+    current: &BundleManifest,
+) -> domain::GenerationDelta {
     let Some(previous) = previous else {
-        return (current.files.len() as u64, 0, 0);
+        return domain::GenerationDelta {
+            added_resources: current.resources.len() as u64,
+            added_files: current.files.len() as u64,
+            ..domain::GenerationDelta::default()
+        };
     };
-    let added = current
-        .files
-        .keys()
-        .filter(|path| !previous.files.contains_key(*path))
-        .count() as u64;
-    let changed = current
-        .files
-        .iter()
-        .filter(|(path, entry)| {
-            previous
-                .files
-                .get(*path)
-                .is_some_and(|old| old.sha256 != entry.sha256)
-        })
-        .count() as u64;
-    let removed = previous
-        .files
-        .keys()
-        .filter(|path| !current.files.contains_key(*path))
-        .count() as u64;
-    (added, changed, removed)
+    domain::GenerationDelta {
+        added_resources: current
+            .resources
+            .keys()
+            .filter(|id| !previous.resources.contains_key(*id))
+            .count() as u64,
+        changed_resources: current
+            .resource_content_sha256
+            .iter()
+            .filter(|(id, digest)| {
+                previous
+                    .resource_content_sha256
+                    .get(*id)
+                    .is_some_and(|old| old != *digest)
+            })
+            .count() as u64,
+        removed_resources: previous
+            .resources
+            .keys()
+            .filter(|id| !current.resources.contains_key(*id))
+            .count() as u64,
+        added_files: current
+            .files
+            .keys()
+            .filter(|path| !previous.files.contains_key(*path))
+            .count() as u64,
+        changed_files: current
+            .files
+            .iter()
+            .filter(|(path, entry)| {
+                previous
+                    .files
+                    .get(*path)
+                    .is_some_and(|old| old.sha256 != entry.sha256)
+            })
+            .count() as u64,
+        removed_files: previous
+            .files
+            .keys()
+            .filter(|path| !current.files.contains_key(*path))
+            .count() as u64,
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -5562,7 +6652,7 @@ fn validate_bundle_snapshot_bytes(bundle: &FetchedBundle) -> Result<(), String> 
     }
     let bytes = serde_json::to_vec(&bundle.snapshot.manifest)
         .map_err(|e| format!("serialize fetched manifest: {}", e))?;
-    if sha256(&bytes) != bundle.snapshot.head.manifest_sha256 {
+    if sha256(&bytes) != bundle.snapshot.head.latest.manifest_sha256 {
         return Err("fetched manifest bytes differ from the pinned head hash".to_string());
     }
     Ok(())
@@ -5603,7 +6693,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         validate_bundle_snapshot_bytes(bundle)?;
         let mut bytes = PreloadedBytes::new(bundle);
         self.apply_restore_plan_lazy(
-            &bundle.snapshot,
+            &bundle.snapshot.version_snapshot(),
             &mut bytes,
             binding,
             plan,
@@ -5619,7 +6709,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     #[allow(clippy::too_many_arguments)]
     pub fn apply_restore_plan_lazy(
         &self,
-        snapshot: &BundleSnapshot,
+        snapshot: &BundleVersionSnapshot,
         bytes: &mut dyn BundleBytes,
         binding: &ProjectBinding,
         plan: &RestorePlan,
@@ -5692,11 +6782,22 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         let current = self
             .read_head(&plan.bundle_id)?
             .ok_or_else(|| "bundle head disappeared after planning".to_string())?;
-        if current.0.generation != plan.generation
-            || current.0.commit_id != plan.commit_id
-            || current.0.manifest_sha256 != plan.manifest_sha256
-        {
-            return Err("bundle head changed after restore planning".to_string());
+        if current.0.latest != plan.observed_head {
+            return Err(
+                "bundle head changed after restore planning; refresh and review a new plan"
+                    .to_string(),
+            );
+        }
+        // The selected source must still be reachable through the verified
+        // chain of that exact head — a tampered or orphaned source fails
+        // closed even when the head itself is unchanged.
+        let (reachable, _) =
+            self.resolve_reachable_generation(&plan.bundle_id, plan.source_version.generation)?;
+        if reachable.version != plan.source_version {
+            return Err("restore source is no longer reachable from the bundle head".to_string());
+        }
+        if snapshot.version != plan.source_version {
+            return Err("restore snapshot does not match the reviewed source".to_string());
         }
         if !backup_root.is_absolute() {
             return Err("backup root must be absolute".to_string());
@@ -6129,7 +7230,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     #[allow(clippy::too_many_arguments)]
     fn apply_file_action(
         &self,
-        snapshot: &BundleSnapshot,
+        snapshot: &BundleVersionSnapshot,
         bytes: &mut dyn BundleBytes,
         binding: &ProjectBinding,
         action: &RestoreAction,
@@ -6269,7 +7370,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     #[allow(clippy::too_many_arguments)]
     fn apply_custom_skill_action(
         &self,
-        snapshot: &BundleSnapshot,
+        snapshot: &BundleVersionSnapshot,
         bytes: &mut dyn BundleBytes,
         binding: &ProjectBinding,
         action: &RestoreAction,

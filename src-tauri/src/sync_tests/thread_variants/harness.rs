@@ -1,15 +1,16 @@
 use crate::project_sync_v3::bundle_engine::{
-    BundleEngine, BundleObjectStore, HeadToken, LocalBundleObjectStore, PublishExpectation,
-    PublishSchema6Request, Schema6CapturedFile, Schema6PublishOutcome,
+    BundleEngine, BundleObjectStore, HeadToken, LocalBundleObjectStore, PublishBundleRequest,
+    PublishContent, PublishFile, PublishedBundle,
 };
 use crate::project_sync_v3::conversation_codec::{
     analyze_codex_transcript, CodecLineage, CODEX_LINEAGE_CODEC_KEY,
 };
 use crate::project_sync_v3::domain::{
-    conversation_resource_id, ApplyPolicy, BundleId, BundleIdentity, BundleKind, BundleRecipe,
-    CapturedWith, ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
-    ConversationThread, LogicalPath, PortableOrigin, Provenance, Provider, RecipeEntry, ReplicaId,
-    ResourceDescriptor, ResourceKind, ResourceScope, StorageId, ThreadId,
+    conversation_resource_id, ApplyPolicy, BundleHead, BundleId, BundleIdentity, BundleKind,
+    BundleRecipe, CapturedWith, ConversationFileRef, ConversationFileRole,
+    ConversationLineageStatus, ConversationThread, LogicalPath, PortableOrigin, Provenance,
+    Provider, RecipeEntry, ReplicaId, ResourceDescriptor, ResourceKind, ResourceScope, StorageId,
+    ThreadId,
 };
 use crate::project_sync_v3::persistence::V3Repository;
 use serde_json::{json, Value};
@@ -70,11 +71,8 @@ impl VariantWorld {
         }
     }
 
-    pub fn current_head(&self) -> Option<HeadToken> {
-        self.engine()
-            .read_head(&self.bundle_id)
-            .unwrap()
-            .map(|(_, token)| token)
+    pub fn current_head(&self) -> Option<(BundleHead, HeadToken)> {
+        self.engine().read_head(&self.bundle_id).unwrap()
     }
 
     pub fn publish(
@@ -82,23 +80,21 @@ impl VariantWorld {
         threads: &[ThreadSpec],
         publisher: PortableOrigin,
         updated_at: u64,
-    ) -> Schema6PublishOutcome {
+    ) -> PublishedBundle {
         let engine = self.engine();
         let current = engine.read_head(&self.bundle_id).unwrap();
         let previous = current
             .as_ref()
             .map(|_| engine.inspect(&self.bundle_id).unwrap().manifest);
-        let request = schema6_request(
+        let request = publish_request(
             self.bundle_id.clone(),
             threads,
             publisher,
             updated_at,
             previous.as_ref(),
-            current
-                .map(|(_, token)| PublishExpectation::Match(token))
-                .unwrap_or(PublishExpectation::Absent),
+            current,
         );
-        engine.publish_schema6(request).unwrap()
+        engine.publish(request).unwrap()
     }
 }
 
@@ -137,18 +133,17 @@ impl ThreadSpec {
     }
 }
 
-pub fn schema6_request(
+pub fn publish_request(
     bundle_id: BundleId,
     threads: &[ThreadSpec],
     publisher: PortableOrigin,
     updated_at: u64,
     previous: Option<&crate::project_sync_v3::domain::BundleManifest>,
-    expected_head: PublishExpectation,
-) -> PublishSchema6Request {
+    observed_head: Option<(BundleHead, HeadToken)>,
+) -> PublishBundleRequest {
     let mut recipe = BundleRecipe::default();
     let mut resources = BTreeMap::new();
-    let mut retained_files = BTreeMap::new();
-    let mut captured_files = BTreeMap::new();
+    let mut files = BTreeMap::new();
     let mut conversations = BTreeMap::new();
     for spec in threads {
         let analysis = analyze_codex_transcript(&spec.transcript);
@@ -226,28 +221,30 @@ pub fn schema6_request(
                 required: false,
             },
         );
-        let captured = Schema6CapturedFile {
-            resource_id: resource_id.clone(),
-            bytes: spec.transcript.clone(),
-            source_mtime: spec.updated_at,
-            mode: Some(0o600),
-        };
-        let digest = sha256(&captured.bytes);
+        let digest = sha256(&spec.transcript);
         let retained = previous.and_then(|manifest| manifest.files.get(&logical_path));
         if let Some(entry) = retained.filter(|entry| {
             entry.resource_id == resource_id
                 && entry.sha256 == digest
-                && entry.size == captured.bytes.len() as u64
-                && entry.source_mtime == captured.source_mtime
-                && entry.mode == captured.mode
+                && entry.size == spec.transcript.len() as u64
+                && entry.source_mtime == spec.updated_at
+                && entry.mode == Some(0o600)
         }) {
-            retained_files.insert(logical_path, entry.clone());
+            files.insert(logical_path, PublishFile::Retained(entry.clone()));
         } else {
-            captured_files.insert(logical_path, captured);
+            files.insert(
+                logical_path,
+                PublishFile::Captured {
+                    resource_id: resource_id.clone(),
+                    bytes: spec.transcript.clone(),
+                    source_mtime: spec.updated_at,
+                    mode: Some(0o600),
+                },
+            );
         }
         conversations.insert(spec.thread_id.clone(), thread);
     }
-    PublishSchema6Request {
+    PublishBundleRequest {
         identity: BundleIdentity {
             bundle_id,
             display_name: "Thread test bundle".to_string(),
@@ -262,13 +259,14 @@ pub fn schema6_request(
             codec_versions: BTreeMap::from([(CODEX_LINEAGE_CODEC_KEY.to_string(), 1)]),
         },
         published_by_origin: publisher,
-        conversations,
-        resources,
-        retained_files,
-        captured_files,
-        directories: BTreeMap::new(),
-        tombstones: BTreeMap::new(),
-        expected_head,
+        content: PublishContent {
+            conversations,
+            resources,
+            files,
+            directories: BTreeMap::new(),
+            tombstones: BTreeMap::new(),
+        },
+        observed_head,
         updated_at,
     }
 }
@@ -405,4 +403,3 @@ pub fn assert_manifest_consistent(world: &VariantWorld) {
         );
     }
 }
-

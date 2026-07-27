@@ -6,6 +6,8 @@ import type {
   ActivityLogPolicy,
   ActivityLogQuery,
   ActivityLogStats,
+  BundleGenerationComparison,
+  BundleGenerationPage,
   BundlePage,
   BundleReadiness,
   BundleRecipe,
@@ -220,8 +222,46 @@ export const projectSyncApi = {
   saveBinding: (request: SaveProjectBindingRequest) =>
     invoke<ProjectBinding>("save_project_binding", { request }),
 
-  planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) =>
-    invoke<RestorePlan>("plan_bundle_restore", { storageId, bundleId, binding }),
+  planRestore: (
+    storageId: string,
+    bundleId: string,
+    binding: ProjectBinding,
+    sourceGeneration?: number | null,
+  ) =>
+    invoke<RestorePlan>("plan_bundle_restore", {
+      storageId,
+      bundleId,
+      binding,
+      sourceGeneration: sourceGeneration ?? null,
+    }),
+
+  listBundleGenerations: (
+    storageId: string,
+    bundleId: string,
+    cursor?: number | null,
+    limit?: number | null,
+  ) =>
+    invoke<BundleGenerationPage>("list_bundle_generations", {
+      storageId,
+      bundleId,
+      cursor: cursor ?? null,
+      limit: limit ?? null,
+    }),
+
+  compareBundleGenerations: (
+    storageId: string,
+    bundleId: string,
+    leftGeneration: number,
+    rightGeneration: number,
+    includeUnchanged: boolean,
+  ) =>
+    invoke<BundleGenerationComparison>("compare_bundle_generations", {
+      storageId,
+      bundleId,
+      leftGeneration,
+      rightGeneration,
+      includeUnchanged,
+    }),
 
   applyRestore: (planId: string, approvedActionIds: string[]) =>
     invoke<RestoreResult>("apply_bundle_restore", { planId, approvedActionIds }),

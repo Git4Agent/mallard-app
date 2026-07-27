@@ -1,6 +1,8 @@
 # Plan: Remove all remaining backward-compat and migration support
 
-Status: Tier 1 executed + schema versions reset (2026-07-24); Tier 2 pending
+Status: Tier 1 executed + schema versions reset (2026-07-24); Tier 2
+superseded and executed by PLAN_CLOUD_GENERATION_HISTORY.md (2026-07-26) —
+one strict `BUNDLE_SCHEMA = 1`, one publisher, no v4/v6 machinery remains
 its B0 prerequisite. See "Execution log" at the end of this document.
 
 Premise, confirmed by the user: **nobody uses this app today and there is no

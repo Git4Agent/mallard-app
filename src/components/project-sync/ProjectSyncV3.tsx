@@ -49,6 +49,7 @@ import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
   nextPushReviewStep,
   preserveSyncedPushRecipeEntries,
+  pushRequiresStorageUnlink,
   pushReviewBlockingCount,
   recommendedPushSelection,
   sanitizePushSelection,
@@ -2123,7 +2124,10 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       if (restoreRequest.current !== requestId) return;
       const support = await loadPullReviewSupport(projectSyncApi, nextRestore);
       if (restoreRequest.current !== requestId) return;
-      if (nextRestore.generation !== currentPlan.generation || nextRestore.manifest_sha256 !== currentPlan.manifest_sha256) {
+      if (
+        nextRestore.source_version.generation !== currentPlan.source_version.generation ||
+        nextRestore.source_version.manifest_sha256 !== currentPlan.source_version.manifest_sha256
+      ) {
         setRestoreResult(null);
         setDependencyResult(null);
         setPullApplyPhase("idle");
@@ -2261,6 +2265,9 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     )
     : 0;
   const pendingPushSteps = syncReviewSteps(pendingPush?.showProjectFiles ?? false);
+  const pendingPushRequiresStorageUnlink = pendingPush
+    ? pushRequiresStorageUnlink(pendingPush.threadComparison, pushError)
+    : false;
   const inlineStorageReview = pendingPush ? {
     kind: "push" as const,
     projectId: pendingPush.projectId,
@@ -2275,7 +2282,8 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     continueDisabled: pushReviewStep === "review"
       && ((safePushSelection.size === 0 && pushProjectContentRemovals.size === 0)
         || pendingPushBlockingCount > 0
-        || projectContentLoading),
+        || projectContentLoading
+        || pendingPushRequiresStorageUnlink),
     onClose: () => {
       if (busy) return;
       setPendingPush(null);
@@ -2361,6 +2369,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
           setPushWarningAcknowledgements(new Set());
           void beginProjectRestore(pendingPush.projectId, pendingPush.storageId);
         }}
+        onUnlinkStorage={() => void unlinkStorage(pendingPush.projectId, pendingPush.storageId)}
       />
     ),
   } : restorePlan && restoreBinding ? {

@@ -761,7 +761,7 @@ export default function RestorePlanView({
                 </section>
               )}
 
-              <div className="v3-sync-review-summary-meta"><Icon name="download" size={14} /><span>{embedded ? `Generation ${plan.generation}` : `${storageName || "Storage"} · Generation ${plan.generation}`}</span></div>
+              <div className="v3-sync-review-summary-meta"><Icon name="download" size={14} /><span>{embedded ? `Generation ${plan.source_version.generation}` : `${storageName || "Storage"} · Generation ${plan.source_version.generation}`}</span></div>
               <button type="button" onClick={() => setActiveStep("history")}>
                 <span><Icon name="git-branch" size={15} /><strong>Sessions</strong></span>
                 <span>{counts.history} selected<Icon name="chevron-right" size={13} /></span>

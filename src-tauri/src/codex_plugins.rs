@@ -2569,8 +2569,12 @@ mod tests {
             }],
             ..CodexPluginLock::default()
         };
-        let plan =
-            build_plan_for_intents(&lock, &lock.plugins, &Inventory::default(), &BTreeSet::new());
+        let plan = build_plan_for_intents(
+            &lock,
+            &lock.plugins,
+            &Inventory::default(),
+            &BTreeSet::new(),
+        );
         assert!(plan.missing_plugins.is_empty());
         assert_eq!(plan.missing_managed_marketplaces.len(), 1);
         assert_eq!(plan.missing_managed_marketplaces[0].id, "openai-bundled");
@@ -3744,5 +3748,4 @@ mod tests {
         let err = runner.run(&["5"]).unwrap_err();
         assert!(err.contains("timed out"), "{}", err);
     }
-
 }

@@ -29,6 +29,8 @@ const STEP_LABELS: Record<SyncReviewStep, string> = {
   review: "Review",
 };
 const STORAGE_BLOCKING_STATES = new Set(["storage_only", "storage_ahead", "diverged"]);
+const MISSING_STORAGE_REPOSITORY_ERROR =
+  "remote bundle head is missing but this project has a prior base";
 
 export interface PushReviewBlocker {
   kind: "storage" | "local";
@@ -71,6 +73,17 @@ interface Props {
   onClose: () => void;
   onPush: () => void;
   onPull?: () => void;
+  onUnlinkStorage?: () => void;
+}
+
+export function pushRequiresStorageUnlink(
+  comparison?: ThreadSyncComparison | null,
+  error?: string | null,
+): boolean {
+  return (
+    (comparison?.generation == null && comparison?.base_generation != null)
+    || !!error?.includes(MISSING_STORAGE_REPOSITORY_ERROR)
+  );
 }
 
 function countSelected(items: ProjectResourceDescriptor[], selected: ReadonlySet<string>): number {
@@ -354,6 +367,7 @@ export default function PushResourceWorkspace({
   onClose,
   onPush,
   onPull,
+  onUnlinkStorage,
 }: Props) {
   const steps = useMemo(() => syncReviewSteps(showProjectFiles), [showProjectFiles]);
   const [uncontrolledActiveStep, setUncontrolledActiveStep] = useState<SyncReviewStep>(initialStep);
@@ -597,6 +611,7 @@ export default function PushResourceWorkspace({
       effectiveSelected.has(resource.resource_id) === safeProjectDefaults.has(resource.resource_id)
     ));
   const recommendedCount = activeStep === "review" ? visibleSafeProjectDefaults.size : currentDefaults.length;
+  const storageUnlinkRequired = pushRequiresStorageUnlink(threadComparison, error);
 
   return (
     <section className="v3-inline-action-review v3-inline-push-review v3-sync-review-workspace" aria-labelledby="v3-push-resource-title">
@@ -769,7 +784,20 @@ export default function PushResourceWorkspace({
           )}
         </div>
 
-        {error && <div className="v3-callout error v3-pull-error"><Icon name="alert-triangle" size={15} /> {error}</div>}
+        {storageUnlinkRequired && onUnlinkStorage ? (
+          <div className="v3-callout error v3-pull-error v3-sync-review-blocker" role="alert">
+            <Icon name="alert-triangle" size={15} />
+            <span>Repository is missing from storage.</span>
+            <button type="button" className="btn btn-ghost" onClick={onUnlinkStorage} disabled={busy}>
+              Unlink storage
+            </button>
+          </div>
+        ) : error ? (
+          <div className="v3-callout error v3-pull-error" role="alert">
+            <Icon name="alert-triangle" size={15} />
+            <span>{error}</span>
+          </div>
+        ) : null}
       </div>
 
       <footer className="v3-inline-action-footer v3-push-resource-footer v3-sync-review-footer">
@@ -786,7 +814,7 @@ export default function PushResourceWorkspace({
             <Icon name="chevron-right" size={14} />
           </button>
         ) : (
-          <button type="button" className="btn btn-primary v3-pull-apply-button" onClick={onPush} disabled={busy || (selectedCount === 0 && projectContentRemovals.size === 0) || blockingCount > 0}>
+          <button type="button" className="btn btn-primary v3-pull-apply-button" onClick={onPush} disabled={busy || storageUnlinkRequired || (selectedCount === 0 && projectContentRemovals.size === 0) || blockingCount > 0}>
             <Icon name={busy ? "refresh" : "upload"} size={16} className={busy ? "icon-spin" : undefined} />
             {busy
               ? (fetchProgress && fetchProgress.phase === "push"

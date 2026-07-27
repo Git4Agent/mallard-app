@@ -6,6 +6,7 @@ import type {
   DependencyPlan,
   DependencyResult,
   ProjectBinding,
+  BundleVersionRef,
   RestorePlan,
   RestoreResult,
 } from "../../src/types";
@@ -44,6 +45,14 @@ const binding: ProjectBinding = {
   updated_at: 1,
 };
 
+const restoreVersion: BundleVersionRef = {
+  generation: 1,
+  commit_id: "commit-restore",
+  manifest_sha256: "a".repeat(64),
+  snapshot_content_sha256: "c".repeat(64),
+  generation_record_sha256: "d".repeat(64),
+};
+
 const restorePlan: RestorePlan = {
   schema_version: 1,
   plan_id: "plan-restore",
@@ -52,9 +61,8 @@ const restorePlan: RestorePlan = {
   host_id: binding.host_id,
   replica_id: binding.replica_id,
   expected_host_identity_revision: 0,
-  generation: 1,
-  commit_id: "commit-restore",
-  manifest_sha256: "a".repeat(64),
+  source_version: restoreVersion,
+  observed_head: restoreVersion,
   binding_revision: binding.revision,
   created_at: 1,
   expires_at: 2,
@@ -339,9 +347,8 @@ function dependencyPlan(actions: DependencyPlan["actions"]): DependencyPlan {
     host_id: restorePlan.host_id,
     replica_id: restorePlan.replica_id,
     expected_host_identity_revision: restorePlan.expected_host_identity_revision,
-    generation: restorePlan.generation,
-    commit_id: restorePlan.commit_id,
-    manifest_sha256: restorePlan.manifest_sha256,
+    source_version: restorePlan.source_version,
+    observed_head: restorePlan.observed_head,
     binding_revision: restorePlan.binding_revision,
     created_at: restorePlan.created_at,
     expires_at: restorePlan.expires_at,
@@ -736,7 +743,13 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
         getRestoreReadiness: async () => ready,
       },
       restorePlan,
-      { ...dependencies, generation: dependencies.generation + 1 },
+      {
+        ...dependencies,
+        source_version: {
+          ...dependencies.source_version,
+          generation: dependencies.source_version.generation + 1,
+        },
+      },
       {
         resourceIds: ["codex:plugin:computer-use"],
         restoreActionIds: [],
@@ -799,7 +812,13 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
         getRestoreReadiness: async () => ready,
       },
       restorePlan,
-      { ...dependencies, generation: dependencies.generation + 1 },
+      {
+        ...dependencies,
+        source_version: {
+          ...dependencies.source_version,
+          generation: dependencies.source_version.generation + 1,
+        },
+      },
       {
         resourceIds: ["codex:session:thread-a"],
         restoreActionIds: ["action-session"],

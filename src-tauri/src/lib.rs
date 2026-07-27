@@ -73,6 +73,8 @@ pub fn run() {
             project_sync_v3::commands::get_bundle_inventory,
             project_sync_v3::commands::inspect_project_files,
             project_sync_v3::commands::list_remote_bundles,
+            project_sync_v3::commands::list_bundle_generations,
+            project_sync_v3::commands::compare_bundle_generations,
             project_sync_v3::commands::list_remote_bundle_snapshots,
             project_sync_v3::commands::find_remote_bundle_matches,
             project_sync_v3::commands::get_bundle_status,

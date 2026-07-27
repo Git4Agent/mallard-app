@@ -727,7 +727,9 @@ fn verify_provider_payload(
         )
     })?;
     match &target.role {
-        ConversationFileRole::Transcript if operation.provider == super::domain::Provider::Claude => {
+        ConversationFileRole::Transcript
+            if operation.provider == super::domain::Provider::Claude =>
+        {
             // Claude transcripts have no lineage codec. Verify what can be
             // proven without one: bounded JSONL structure, and that the
             // staged file's authoritative session metadata names exactly the
@@ -737,7 +739,10 @@ fn verify_provider_payload(
                     "Claude conversations cannot pin lineage digests without a codec".to_string(),
                 );
             }
-            for line in bytes.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
+            for line in bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+            {
                 if line.len() > 1024 * 1024 {
                     return Err("Claude transcript row exceeds one MiB".to_string());
                 }

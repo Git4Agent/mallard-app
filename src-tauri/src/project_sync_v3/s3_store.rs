@@ -439,7 +439,10 @@ impl BundleObjectStore for S3BundleObjectStore {
     /// Bounded-concurrency bulk upload. Outcomes line up with `objects`; the
     /// first failure aborts the remaining transfers, like the sequential loop
     /// it replaces.
-    fn put_many(&self, objects: Vec<(ObjectKey, Bytes)>) -> Result<Vec<ImmutablePutOutcome>, String> {
+    fn put_many(
+        &self,
+        objects: Vec<(ObjectKey, Bytes)>,
+    ) -> Result<Vec<ImmutablePutOutcome>, String> {
         for (key, bytes) in &objects {
             if bytes.len() as u64 > MAX_FILE_BYTES {
                 return Err(format!("object '{}' exceeds the write limit", key));
@@ -448,7 +451,9 @@ impl BundleObjectStore for S3BundleObjectStore {
         if objects.len() <= 1 {
             return objects
                 .into_iter()
-                .map(|(key, bytes)| self.run("immutable put", self.put_immutable_async(&key, bytes)))
+                .map(|(key, bytes)| {
+                    self.run("immutable put", self.put_immutable_async(&key, bytes))
+                })
                 .collect();
         }
         let count = objects.len();

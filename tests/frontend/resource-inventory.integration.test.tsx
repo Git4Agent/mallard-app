@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import PushResourceWorkspace, {
   nextPushReviewStep,
   preserveSyncedPushRecipeEntries,
+  pushRequiresStorageUnlink,
   pushSelectableResourceIds,
   recommendedPushSelection,
   sanitizePushSelection,
@@ -256,6 +257,54 @@ test("the push chooser shows one concise selection summary", () => {
   assert.doesNotMatch(html, /Choose resources to push/);
   assert.doesNotMatch(html, /Selections are saved after Push succeeds/);
   assert.doesNotMatch(html, /last selection|selection will be remembered|resource selected/i);
+});
+
+test("a removed storage repository offers one concise Unlink action", () => {
+  const resource = standaloneSkill("review", "review");
+  const comparison: ThreadSyncComparison = {
+    project_id: "project-a",
+    storage_id: "storage-a",
+    storage_name: "Local storage 1",
+    generation: null,
+    base_generation: 1,
+    compared_at: 1,
+    counts: { synced: 0, local: 1, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
+    warnings: [],
+    entries: [],
+  };
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={[resource]}
+      selected={new Set([resource.resource_id])}
+      projectDefaults={new Set([resource.resource_id])}
+      busy={false}
+      error={null}
+      initialStep="review"
+      threadComparison={comparison}
+      onToggle={() => undefined}
+      onUseProjectDefaults={() => undefined}
+      onClear={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+      onUnlinkStorage={() => undefined}
+    />,
+  );
+  const pushButton = html.match(
+    /<button[^>]*v3-pull-apply-button[^>]*>.*?Push<\/button>/s,
+  )?.[0] ?? "";
+
+  assert.equal(pushRequiresStorageUnlink(comparison, null), true);
+  assert.equal(
+    pushRequiresStorageUnlink(
+      null,
+      "remote bundle head is missing but this project has a prior base; review before republishing",
+    ),
+    true,
+  );
+  assert.match(html, /Repository is missing from storage\./);
+  assert.match(html, />Unlink storage<\/button>/);
+  assert.match(pushButton, /disabled=""/);
+  assert.doesNotMatch(html, /prior base|review before republishing/i);
 });
 
 test("Push review counts only outstanding sessions and keeps synced sessions informational", () => {

@@ -1,6 +1,7 @@
 mod binding_and_tombstones;
 mod conflicts;
 mod continuation;
+mod generation_history;
 mod harness;
 mod provider_codec;
 mod provider_fork;

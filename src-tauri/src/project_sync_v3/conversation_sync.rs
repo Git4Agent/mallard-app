@@ -7,11 +7,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::domain::{
-    classify_conversation_relation, ActionId, CanonicalConversationMessage,
-    ConversationBindings, ConversationPlanAction, ConversationPlanActionType,
-    ConversationPlanDirection, ConversationReasonCode, ConversationRelation, HostId,
-    LocalConversationBinding, LocalProjectId, LocalProviderProfileId, Provider,
-    ProviderStateExpectation, ReplicaId, ResourceId, TargetExpectation, ThreadId,
+    classify_conversation_relation, ActionId, CanonicalConversationMessage, ConversationBindings,
+    ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
+    ConversationReasonCode, ConversationRelation, HostId, LocalConversationBinding, LocalProjectId,
+    LocalProviderProfileId, Provider, ProviderStateExpectation, ReplicaId, ResourceId,
+    TargetExpectation, ThreadId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -507,9 +507,11 @@ pub fn rekey_thread_binding(
     if old_thread_id == result_thread_id {
         return Err("thread fork must mint a distinct thread id".to_string());
     }
-    if document.bindings.iter().any(|binding| {
-        binding_in_scope(binding, scope) && binding.thread_id == *result_thread_id
-    }) {
+    if document
+        .bindings
+        .iter()
+        .any(|binding| binding_in_scope(binding, scope) && binding.thread_id == *result_thread_id)
+    {
         return Err("fork result thread is already bound".to_string());
     }
 

@@ -715,6 +715,71 @@ export interface RestoreAction {
   requires_explicit_approval: boolean;
 }
 
+export interface BundleVersionRef {
+  generation: number;
+  commit_id: string;
+  manifest_sha256: string;
+  snapshot_content_sha256: string;
+  generation_record_sha256: string;
+}
+
+export interface GenerationDelta {
+  added_resources: number;
+  changed_resources: number;
+  removed_resources: number;
+  added_files: number;
+  changed_files: number;
+  removed_files: number;
+}
+
+export interface PortableOrigin {
+  origin_host_token: string;
+  origin_replica_token: string;
+  shared_label?: string | null;
+}
+
+export interface BundleGenerationSummary {
+  version: BundleVersionRef;
+  created_at: number;
+  published_by_origin: PortableOrigin;
+  delta: GenerationDelta;
+}
+
+export interface BundleGenerationPage {
+  generations: BundleGenerationSummary[];
+  next_cursor?: number | null;
+  observed_head: BundleVersionRef;
+}
+
+export type BundleResourceChangeState = "added" | "removed" | "changed" | "unchanged";
+
+export interface BundleResourceChange {
+  resource_id: string;
+  kind: ProjectResourceKind;
+  display_name: string;
+  left_thread_title?: string | null;
+  right_thread_title?: string | null;
+  state: BundleResourceChangeState;
+  left_content_sha256?: string | null;
+  right_content_sha256?: string | null;
+}
+
+export interface BundleGenerationComparison {
+  left: BundleGenerationSummary;
+  right: BundleGenerationSummary;
+  /** Logical snapshot equality via content digests — distinct from manifest identity. */
+  same_snapshot: boolean;
+  added: number;
+  removed: number;
+  changed: number;
+  unchanged: number;
+  resource_changes: BundleResourceChange[];
+  bundle_metadata_changed: boolean;
+  recipe_changed: boolean;
+  codec_changed: boolean;
+  tombstones_changed: boolean;
+}
+
 export interface RestorePlan {
   schema_version: 1;
   plan_id: string;
@@ -723,9 +788,10 @@ export interface RestorePlan {
   host_id: string;
   replica_id: string;
   expected_host_identity_revision: number;
-  generation: number;
-  commit_id: string;
-  manifest_sha256: string;
+  /** The reviewed generation this plan restores from. */
+  source_version: BundleVersionRef;
+  /** The mutable head observed at review; apply requires it unchanged. */
+  observed_head: BundleVersionRef;
   binding_revision: number;
   created_at: number;
   expires_at: number;
@@ -749,9 +815,8 @@ export interface DependencyPlan {
   host_id: string;
   replica_id: string;
   expected_host_identity_revision: number;
-  generation: number;
-  commit_id: string;
-  manifest_sha256: string;
+  source_version: BundleVersionRef;
+  observed_head: BundleVersionRef;
   binding_revision: number;
   created_at: number;
   expires_at: number;

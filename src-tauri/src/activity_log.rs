@@ -185,7 +185,6 @@ impl ActivityLogEntry {
         }
         Ok(())
     }
-
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

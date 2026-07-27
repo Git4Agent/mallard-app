@@ -642,8 +642,10 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                     last_observed_head_message_id: Some("m-b".to_string()),
                     last_observed_lineage_digest: Some(lineage.clone()),
                     last_observed_semantic_digest: Some(semantic.clone()),
-                    source_generation: Some(initial.snapshot.head.generation),
-                    source_manifest_sha256: Some(initial.snapshot.head.manifest_sha256.clone()),
+                    source_generation: Some(initial.snapshot.head.latest.generation),
+                    source_manifest_sha256: Some(
+                        initial.snapshot.head.latest.manifest_sha256.clone(),
+                    ),
                     revision: 0,
                     created_at: 10,
                     updated_at: 10,
@@ -656,22 +658,22 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
         advanced_thread.transcript = advanced_transcript.clone();
         advanced_thread.updated_at = 20;
         advanced_thread.last_updated_by = Some(origin.clone());
-        let request = super::harness::schema6_request(
+        let request = super::harness::publish_request(
             world.bundle_id.clone(),
             &[advanced_thread],
             origin,
             20,
             Some(&initial.snapshot.manifest),
-            crate::project_sync_v3::bundle_engine::PublishExpectation::Match(initial.head_token),
+            Some((initial.snapshot.head.clone(), initial.head_token)),
         );
         let operation = push_operation(
             &world,
             &scope,
             "operation-cloud-checkpoint",
             "plan-cloud-checkpoint",
-            initial.snapshot.head.generation,
-            initial.snapshot.head.commit_id,
-            initial.snapshot.head.manifest_sha256,
+            initial.snapshot.head.latest.generation,
+            initial.snapshot.head.latest.commit_id,
+            initial.snapshot.head.latest.manifest_sha256,
             &thread_id,
             &thread_id,
             bindings.revision,
@@ -685,7 +687,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
         let result = apply_conversation_cloud_publication(
             &world.repo_a,
             operation,
-            || engine.publish_schema6(request).map(cloud_publication),
+            || engine.publish(request).map(cloud_publication),
             || Ok(None),
             &mut fail_once,
         );
@@ -697,14 +699,15 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
             .inspect(&world.bundle_id)
             .unwrap()
             .head
+            .latest
             .generation
             == 2
         {
             let snapshot = world.engine().inspect(&world.bundle_id).unwrap();
             Some(ConversationCloudPublication {
-                generation: snapshot.head.generation,
-                commit_id: snapshot.head.commit_id,
-                manifest_sha256: snapshot.head.manifest_sha256,
+                generation: snapshot.head.latest.generation,
+                commit_id: snapshot.head.latest.commit_id,
+                manifest_sha256: snapshot.head.latest.manifest_sha256,
             })
         } else {
             None
@@ -725,7 +728,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
         let final_bindings = reopened.load_conversation_bindings().unwrap();
         let final_receipts = reopened.load_materializations().unwrap();
         if publication_committed {
-            assert_eq!(final_snapshot.head.generation, 2, "{checkpoint:?}");
+            assert_eq!(final_snapshot.head.latest.generation, 2, "{checkpoint:?}");
             assert_eq!(final_bindings.bindings.len(), 1);
             assert_eq!(
                 final_bindings.bindings[0].source_generation,
@@ -739,7 +742,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                 usize::from(checkpoint != ConversationFailpoint::AfterCleanup),
             );
         } else {
-            assert_eq!(final_snapshot.head.generation, 1, "{checkpoint:?}");
+            assert_eq!(final_snapshot.head.latest.generation, 1, "{checkpoint:?}");
             assert_eq!(final_bindings.bindings[0].source_generation, Some(1));
             assert!(final_receipts.records.is_empty());
             if checkpoint != ConversationFailpoint::BeforePrepared {
@@ -993,8 +996,8 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
                 last_observed_head_message_id: Some("m-local".to_string()),
                 last_observed_lineage_digest: Some(lineage.clone()),
                 last_observed_semantic_digest: Some(semantic.clone()),
-                source_generation: Some(initial.snapshot.head.generation),
-                source_manifest_sha256: Some(initial.snapshot.head.manifest_sha256.clone()),
+                source_generation: Some(initial.snapshot.head.latest.generation),
+                source_manifest_sha256: Some(initial.snapshot.head.latest.manifest_sha256.clone()),
                 revision: 0,
                 created_at: 10,
                 updated_at: 10,
@@ -1012,13 +1015,13 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
     );
     forked_spec.forked_from = Some(cloud_id.clone());
     let old_token = world.current_head().unwrap();
-    let stale_request = super::harness::schema6_request(
+    let stale_request = super::harness::publish_request(
         world.bundle_id.clone(),
         &[cloud_initial.clone(), forked_spec.clone()],
         origin_a.clone(),
         20,
         Some(&initial.snapshot.manifest),
-        crate::project_sync_v3::bundle_engine::PublishExpectation::Match(old_token),
+        Some(old_token),
     );
     let mut cloud_advanced = cloud_initial.clone();
     cloud_advanced.transcript = super::harness::chain(
@@ -1039,9 +1042,9 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
         &scope,
         "operation-push-cas",
         "plan-push-cas",
-        initial.snapshot.head.generation,
-        initial.snapshot.head.commit_id.clone(),
-        initial.snapshot.head.manifest_sha256.clone(),
+        initial.snapshot.head.latest.generation,
+        initial.snapshot.head.latest.commit_id.clone(),
+        initial.snapshot.head.latest.manifest_sha256.clone(),
         &cloud_id,
         &forked_id,
         1,
@@ -1055,7 +1058,7 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
     let error = apply_conversation_cloud_publication(
         &world.repo_a,
         first_operation,
-        || engine.publish_schema6(stale_request).map(cloud_publication),
+        || engine.publish(stale_request).map(cloud_publication),
         || Ok(None),
         &mut no_failpoints,
     )
@@ -1083,13 +1086,13 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
     let current_token = world.current_head().unwrap();
     let mut retry_forked = forked_spec.clone();
     retry_forked.updated_at = 30;
-    let retry_request = super::harness::schema6_request(
+    let retry_request = super::harness::publish_request(
         world.bundle_id.clone(),
         &[cloud_advanced, retry_forked],
         origin_a,
         30,
         Some(&current.manifest),
-        crate::project_sync_v3::bundle_engine::PublishExpectation::Match(current_token),
+        Some(current_token),
     );
     let retry_state = world.repo_a.load_conversation_bindings().unwrap();
     let retry_operation = push_operation(
@@ -1097,9 +1100,9 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
         &scope,
         "operation-push-retry",
         "plan-push-retry",
-        current.head.generation,
-        current.head.commit_id,
-        current.head.manifest_sha256,
+        current.head.latest.generation,
+        current.head.latest.commit_id,
+        current.head.latest.manifest_sha256,
         &forked_id,
         &forked_id,
         retry_state.revision,
@@ -1113,7 +1116,7 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
     assert!(apply_conversation_cloud_publication(
         &world.repo_a,
         retry_operation,
-        || engine.publish_schema6(retry_request).map(cloud_publication),
+        || engine.publish(retry_request).map(cloud_publication),
         || Ok(None),
         &mut fail_after_cas,
     )
@@ -1125,9 +1128,9 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
         .conversations
         .contains_key(&forked_id));
     let discovered_publication = ConversationCloudPublication {
-        generation: published_snapshot.head.generation,
-        commit_id: published_snapshot.head.commit_id,
-        manifest_sha256: published_snapshot.head.manifest_sha256,
+        generation: published_snapshot.head.latest.generation,
+        commit_id: published_snapshot.head.latest.commit_id,
+        manifest_sha256: published_snapshot.head.latest.manifest_sha256,
     };
     let recovered = recover_conversation_cloud_publications(&world.repo_a, |_| {
         Ok(Some(discovered_publication.clone()))
@@ -1155,7 +1158,7 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
     assert_eq!(final_bindings.bindings[0].thread_id, forked_id);
     assert_eq!(
         final_bindings.bindings[0].source_generation,
-        Some(published_snapshot.head.generation)
+        Some(published_snapshot.head.latest.generation)
     );
 }
 
@@ -1344,12 +1347,12 @@ fn push_operation(
 }
 
 fn cloud_publication(
-    outcome: crate::project_sync_v3::bundle_engine::Schema6PublishOutcome,
+    outcome: crate::project_sync_v3::bundle_engine::PublishedBundle,
 ) -> ConversationCloudPublication {
     ConversationCloudPublication {
-        generation: outcome.snapshot.head.generation,
-        commit_id: outcome.snapshot.head.commit_id,
-        manifest_sha256: outcome.snapshot.head.manifest_sha256,
+        generation: outcome.snapshot.head.latest.generation,
+        commit_id: outcome.snapshot.head.latest.commit_id,
+        manifest_sha256: outcome.snapshot.head.latest.manifest_sha256,
     }
 }
 

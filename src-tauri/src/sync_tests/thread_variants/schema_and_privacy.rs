@@ -1,13 +1,14 @@
 use super::harness::{chain, ThreadSpec, VariantWorld};
-use crate::project_sync_v3::bundle_engine::{BundleObjectStore, PublishBundleRequest};
-use crate::project_sync_v3::domain::{
-    BundleId, BundleIdentity, BundleKind, CapturedWith,
-    ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
-    ConversationMaterializationState, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationRelation, LocalConversationBinding, LogicalPath, OriginHostAlias, Provider,
-    ReplicaId, ThreadId, Tombstone, TombstoneTarget, MAX_FILE_BYTES,
+use crate::project_sync_v3::bundle_engine::{
+    BundleObjectStore, PublishBundleRequest, PublishContent,
 };
-use crate::project_sync_v3::provider_capture::CapturedResources;
+use crate::project_sync_v3::domain::{
+    BundleId, BundleIdentity, BundleKind, BundleRecipe, CapturedWith, ConversationFileRef,
+    ConversationFileRole, ConversationLineageStatus, ConversationMaterializationState,
+    ConversationPlanActionType, ConversationPlanDirection, ConversationRelation,
+    LocalConversationBinding, LogicalPath, OriginHostAlias, Provider, ReplicaId, ThreadId,
+    Tombstone, TombstoneTarget, MAX_FILE_BYTES,
+};
 use std::collections::BTreeMap;
 use std::fs;
 
@@ -208,7 +209,11 @@ fn schema6_manifest_rejects_each_conversation_reference_corruption() {
             .lineage_codec = "codex.lineage.missing".to_string();
     }));
     mutations.push(Box::new(|manifest| {
-        manifest.conversations.get_mut(&thread_id()).unwrap().provider = Provider::Claude;
+        manifest
+            .conversations
+            .get_mut(&thread_id())
+            .unwrap()
+            .provider = Provider::Claude;
     }));
     mutations.push(Box::new(|manifest| {
         let thread = &manifest.conversations[&thread_id()];
@@ -250,10 +255,10 @@ fn schema6_manifest_rejects_each_conversation_reference_corruption() {
             entry,
         );
     }));
-    mutations.push(Box::new(|manifest| {
-        let v2 = ThreadId::parse("thread-v2").unwrap();
-        manifest.conversations.remove(&v2);
-    }));
+    // Removing a thread while keeping its resource is NOT static corruption:
+    // it is the legal shape of auxiliary conversation state (session index,
+    // unidentified rollouts). Silent thread loss is rejected at publish time
+    // by the conversation-retention check instead.
     mutations.push(Box::new(|manifest| {
         let resource = manifest.conversations[&thread_id()].resource_id.clone();
         manifest.recipe.entries.remove(&resource);
@@ -392,7 +397,7 @@ fn portable_objects_do_not_leak_machine_local_identity_or_paths() {
 }
 
 #[test]
-fn schema4_writer_is_rejected_on_a_schema6_head() {
+fn conversation_free_writer_is_rejected_on_a_threaded_head() {
     let world = VariantWorld::new();
     let origin = world.origin(&world.repo_a, "replica-a");
     let published = world.publish(
@@ -403,30 +408,33 @@ fn schema4_writer_is_rejected_on_a_schema6_head() {
             origin.clone(),
             10,
         )],
-        origin,
+        origin.clone(),
         10,
     );
-    let schema4_attempt = world.engine().publish(PublishBundleRequest {
+    // A writer that ignores stored conversation metadata cannot silently
+    // drop the threads a previous generation carried.
+    let ignores_threads = world.engine().publish(PublishBundleRequest {
         identity: BundleIdentity {
             bundle_id: world.bundle_id.clone(),
             display_name: "Thread test bundle".to_string(),
             kind: BundleKind::Project,
             repository_fingerprint: None,
         },
-        recipe: published.snapshot.manifest.recipe,
+        recipe: BundleRecipe::default(),
         captured_with: CapturedWith {
-            app_version: "old-writer".to_string(),
+            app_version: "thread-blind-writer".to_string(),
             codex_version: None,
             claude_version: None,
             codec_versions: BTreeMap::new(),
         },
-        captured: CapturedResources::default(),
+        published_by_origin: origin,
+        content: PublishContent::default(),
         observed_head: Some((published.snapshot.head.clone(), published.head_token)),
         updated_at: 20,
     });
-    assert!(schema4_attempt
+    assert!(ignores_threads
         .unwrap_err()
-        .contains("conversation-thread publication path"));
+        .contains("without a reviewed tombstone"));
 }
 
 fn thread_id() -> ThreadId {

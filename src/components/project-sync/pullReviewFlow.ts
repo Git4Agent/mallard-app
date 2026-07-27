@@ -88,9 +88,10 @@ export function assertPullPlansAligned(
       dependencyPlan.host_id === restorePlan.host_id &&
       dependencyPlan.replica_id === restorePlan.replica_id &&
       dependencyPlan.expected_host_identity_revision === restorePlan.expected_host_identity_revision &&
-      dependencyPlan.generation === restorePlan.generation &&
-      dependencyPlan.commit_id === restorePlan.commit_id &&
-      dependencyPlan.manifest_sha256 === restorePlan.manifest_sha256 &&
+      dependencyPlan.source_version.generation === restorePlan.source_version.generation &&
+      dependencyPlan.source_version.commit_id === restorePlan.source_version.commit_id &&
+      dependencyPlan.source_version.manifest_sha256 === restorePlan.source_version.manifest_sha256 &&
+      dependencyPlan.observed_head.manifest_sha256 === restorePlan.observed_head.manifest_sha256 &&
       dependencyPlan.binding_revision === restorePlan.binding_revision;
     if (!sameSnapshot) {
       throw new Error("The project and tool plans describe different bundle generations. Refresh the Pull review.");

@@ -389,10 +389,8 @@ fn fork_codex_via_cli(
         return Err("codex fork rollout kept the source thread id".to_string());
     }
     let source_analysis = analyze_codex_transcript(&request.source_transcript);
-    if classify_conversation_relation(
-        analysis.lineage.chain(),
-        source_analysis.lineage.chain(),
-    ) != ConversationRelation::Identical
+    if classify_conversation_relation(analysis.lineage.chain(), source_analysis.lineage.chain())
+        != ConversationRelation::Identical
     {
         return Err("codex fork rollout does not match the source chain".to_string());
     }
@@ -493,8 +491,8 @@ pub fn rewrite_claude_transcript(
         replace_exact_strings(&mut value, source_cwd, destination_cwd);
         let rewritten = serde_json::to_vec(&value)
             .map_err(|error| format!("serialize rewritten claude row: {error}"))?;
-        saw_destination = saw_destination
-            || contains_subslice(&rewritten, destination_session_id.as_bytes());
+        saw_destination =
+            saw_destination || contains_subslice(&rewritten, destination_session_id.as_bytes());
         output.extend_from_slice(&rewritten);
         output.push(b'\n');
     }
@@ -529,7 +527,10 @@ fn replace_exact_strings(value: &mut serde_json::Value, from: &str, to: &str) {
 }
 
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty() && haystack.windows(needle.len()).any(|window| window == needle)
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 /// Insert the forked thread into the newest `state_<N>.sqlite` thread index
@@ -736,7 +737,10 @@ fn sqlite_table_columns(
     table: &str,
 ) -> Result<Vec<SqliteColumn>, String> {
     let mut statement = connection
-        .prepare(&format!("PRAGMA table_info(\"{}\")", table.replace('"', "\"\"")))
+        .prepare(&format!(
+            "PRAGMA table_info(\"{}\")",
+            table.replace('"', "\"\"")
+        ))
         .map_err(|error| format!("inspect {} schema: {}", table, error))?;
     let rows = statement
         .query_map([], |row| {
@@ -764,8 +768,7 @@ fn list_rollout_files(sessions_root: &Path) -> Result<std::collections::BTreeSet
     }
     for entry in walkdir::WalkDir::new(sessions_root).follow_links(false) {
         let entry = entry.map_err(|error| format!("scan codex sessions: {}", error))?;
-        if entry.file_type().is_file()
-            && entry.path().extension().is_some_and(|ext| ext == "jsonl")
+        if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "jsonl")
         {
             rollouts.insert(entry.path().to_path_buf());
         }
@@ -942,8 +945,11 @@ mod tests {
             .join("projects")
             .join(claude_project_dir_name(&project_root));
         fs::create_dir_all(&project_dir).unwrap();
-        fs::write(project_dir.join("11111111-1111-4111-8111-111111111111.jsonl"), b"src\n")
-            .unwrap();
+        fs::write(
+            project_dir.join("11111111-1111-4111-8111-111111111111.jsonl"),
+            b"src\n",
+        )
+        .unwrap();
         let new_id = generated_uuid_v4().unwrap();
         let request = ClaudeForkRequest {
             claude_home: home.clone(),
@@ -1044,9 +1050,11 @@ mod tests {
             binary: PathBuf::from("codex"),
             timeout: Duration::from_secs(5),
             allow_cli,
-            now: DateTime::parse_from_rfc3339("2026-07-23T10-00-00+00:00".replace('-', ":").as_str())
-                .map(|value| value.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
+            now: DateTime::parse_from_rfc3339(
+                "2026-07-23T10-00-00+00:00".replace('-', ":").as_str(),
+            )
+            .map(|value| value.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now()),
         }
     }
 
@@ -1070,7 +1078,10 @@ mod tests {
             .into_bytes();
         let fork_target = sessions.join(format!("rollout-2026-07-22T01-00-00-{minted}.jsonl"));
         let runner = FakeRunner::new(move |invocation| {
-            assert_eq!(invocation.args, vec!["fork", "22222222-2222-4222-8222-222222222222"]);
+            assert_eq!(
+                invocation.args,
+                vec!["fork", "22222222-2222-4222-8222-222222222222"]
+            );
             assert!(invocation.envs.iter().any(|(key, _)| key == "CODEX_HOME"));
             fs::write(&fork_target, &forked_bytes).unwrap();
             Ok(ok_output())
@@ -1206,10 +1217,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().to_path_buf();
         for generation in [3_u32, 5] {
-            let connection = rusqlite::Connection::open(
-                home.join(format!("state_{generation}.sqlite")),
-            )
-            .unwrap();
+            let connection =
+                rusqlite::Connection::open(home.join(format!("state_{generation}.sqlite")))
+                    .unwrap();
             connection
                 .execute_batch(
                     "CREATE TABLE threads (
@@ -1242,8 +1252,7 @@ mod tests {
     }
 
     fn install_codex_state_fixture(codex_home: &Path) {
-        let connection =
-            rusqlite::Connection::open(codex_home.join("state_5.sqlite")).unwrap();
+        let connection = rusqlite::Connection::open(codex_home.join("state_5.sqlite")).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE threads (

@@ -16,7 +16,18 @@ use super::domain::{
 };
 
 pub const CODEX_LINEAGE_CODEC_KEY: &str = "codex.lineage.v1";
-pub const CODEX_CODEC_VERSION: u32 = 1;
+pub const CODEX_CODEC_VERSION: u32 = 2;
+
+/// The capture codec version a manifest declares for a lineage codec key.
+/// Codecs without a versioned parser declare 1: the key itself carries the
+/// semantic identity and strict manifest validation only requires presence.
+pub fn codec_version_for(lineage_codec: &str) -> u32 {
+    if lineage_codec == CODEX_LINEAGE_CODEC_KEY {
+        CODEX_CODEC_VERSION
+    } else {
+        1
+    }
+}
 
 const MAX_TRANSCRIPT_BYTES: usize = MAX_CONVERSATION_FILE_BYTES as usize;
 const MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -110,7 +121,7 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
 
     let mut source_thread_id = None;
     let mut source_cwd = None;
-    let mut chain = Vec::new();
+    let mut chain: Vec<CanonicalConversationMessage> = Vec::new();
     let mut record_count = 0_usize;
     for raw in bytes.split(|byte| *byte == b'\n') {
         if raw.is_empty() {
@@ -165,7 +176,9 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
             }
         }
 
-        let Some(identity) = message_identity(&value) else {
+        let Some(identity) =
+            message_identity(&value, chain.last().map(|message| &message.message_id))
+        else {
             if record_requires_message_id(&value) {
                 return unknown(
                     source_thread_id,
@@ -265,7 +278,13 @@ struct MessageIdentity {
     parent_message_id: Option<String>,
 }
 
-fn message_identity(value: &Value) -> Option<MessageIdentity> {
+fn message_identity(
+    value: &Value,
+    previous_message_id: Option<&MessageId>,
+) -> Option<MessageIdentity> {
+    if is_event_message_mirror(value) {
+        return None;
+    }
     let outer = value.as_object()?;
     let payload = payload_object(value).unwrap_or(outer);
     let message_id = string_field(payload, &["message_id"])
@@ -275,9 +294,19 @@ fn message_identity(value: &Value) -> Option<MessageIdentity> {
                 .then(|| string_field(payload, &["id"]))
                 .flatten()
         })?;
-    let parent_message_id = string_field(payload, &["parent_message_id", "parent_id"])
-        .or_else(|| string_field(outer, &["parent_message_id", "parent_id"]))
-        .map(str::to_string);
+    let parent_fields = ["parent_message_id", "parent_id"];
+    let has_explicit_parent = parent_fields
+        .iter()
+        .any(|key| payload.contains_key(*key) || outer.contains_key(*key));
+    let parent_message_id = string_field(payload, &parent_fields)
+        .or_else(|| string_field(outer, &parent_fields))
+        .map(str::to_string)
+        .or_else(|| {
+            (outer.get("type").and_then(Value::as_str) == Some("response_item")
+                && !has_explicit_parent)
+                .then(|| previous_message_id.map(|message_id| message_id.as_str().to_string()))
+                .flatten()
+        });
     Some(MessageIdentity {
         message_id: message_id.to_string(),
         parent_message_id,
@@ -285,27 +314,54 @@ fn message_identity(value: &Value) -> Option<MessageIdentity> {
 }
 
 fn record_requires_message_id(value: &Value) -> bool {
+    if is_event_message_mirror(value) {
+        return false;
+    }
+    if value.get("type").and_then(Value::as_str) == Some("response_item") {
+        return payload_object(value)
+            .and_then(|payload| string_field(payload, &["type"]))
+            .is_some();
+    }
     let Some(object) = payload_object(value).or_else(|| value.as_object()) else {
         return false;
     };
     let Some(kind) = string_field(object, &["type"]) else {
         return false;
     };
+    is_lineage_item_kind(kind)
+}
+
+fn is_event_message_mirror(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("event_msg")
+        && payload_object(value)
+            .and_then(|payload| string_field(payload, &["type"]))
+            .is_some_and(|kind| matches!(kind, "user_message" | "agent_message"))
+}
+
+fn is_lineage_item_kind(kind: &str) -> bool {
     matches!(
         kind,
         "message"
             | "user_message"
             | "agent_message"
+            | "reasoning"
             | "tool_call"
             | "tool_result"
             | "function_call"
             | "function_call_output"
             | "custom_tool_call"
             | "custom_tool_call_output"
+            | "web_search_call"
+            | "tool_search_call"
+            | "tool_search_output"
     )
 }
 
 fn semantic_record_fingerprint(mut value: Value) -> String {
+    let remove_payload_id = value.get("type").and_then(Value::as_str) == Some("response_item")
+        || payload_object(&value)
+            .and_then(|payload| string_field(payload, &["type"]))
+            .is_some_and(is_lineage_item_kind);
     if let Some(outer) = value.as_object_mut() {
         outer.remove("message_id");
         outer.remove("parent_message_id");
@@ -314,7 +370,7 @@ fn semantic_record_fingerprint(mut value: Value) -> String {
             payload.remove("message_id");
             payload.remove("parent_message_id");
             payload.remove("parent_id");
-            if record_kind_from_object(payload).is_some() {
+            if remove_payload_id {
                 payload.remove("id");
             }
         }
@@ -490,23 +546,6 @@ fn is_record_type(value: &Value, expected: &str) -> bool {
             == Some(expected)
 }
 
-fn record_kind_from_object(object: &Map<String, Value>) -> Option<&str> {
-    string_field(object, &["type"]).filter(|kind| {
-        matches!(
-            *kind,
-            "message"
-                | "user_message"
-                | "agent_message"
-                | "tool_call"
-                | "tool_result"
-                | "function_call"
-                | "function_call_output"
-                | "custom_tool_call"
-                | "custom_tool_call_output"
-        )
-    })
-}
-
 fn string_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| object.get(*key).and_then(Value::as_str))
@@ -589,6 +628,108 @@ mod tests {
         assert!(analysis.is_resumable());
         assert_eq!(analysis.source_thread_id.as_deref(), Some("thread-a"));
         assert_eq!(analysis.lineage.chain().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn codex_codec_accepts_current_ordered_items_and_ignores_event_mirrors() {
+        let records = [
+            json!({
+                "type": "session_meta",
+                "payload": {"id": "thread-current", "cwd": "/tmp/project-current"}
+            }),
+            json!({
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "mirrored prompt"}
+            }),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "id": "item-a",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "prompt"}]
+                }
+            }),
+            json!({
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "mirrored answer"}
+            }),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "id": "item-b",
+                    "summary": []
+                }
+            }),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "id": "item-c",
+                    "call_id": "call-a",
+                    "name": "example",
+                    "input": "{}"
+                }
+            }),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "id": "item-d",
+                    "call_id": "call-a",
+                    "output": "ok"
+                }
+            }),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "id": "item-e",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "answer"}]
+                }
+            }),
+        ];
+        let mut bytes = records
+            .into_iter()
+            .map(|record| serde_json::to_string(&record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes();
+        bytes.push(b'\n');
+
+        let analysis = analyze_codex_transcript(&bytes);
+        assert!(analysis.is_resumable());
+        let chain = analysis.lineage.chain().unwrap();
+        assert_eq!(
+            chain
+                .iter()
+                .map(|message| message.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["item-a", "item-b", "item-c", "item-d", "item-e"]
+        );
+        for (index, message) in chain.iter().enumerate() {
+            assert_eq!(
+                message.parent_message_id.as_ref(),
+                index
+                    .checked_sub(1)
+                    .and_then(|previous| chain.get(previous))
+                    .map(|previous| &previous.message_id)
+            );
+        }
+
+        let rewritten = rewrite_codex_transcript(
+            &bytes,
+            "thread-current",
+            "thread-rewritten",
+            "/tmp/project-current",
+            "/tmp/project-rewritten",
+        )
+        .unwrap();
+        let after = analyze_codex_transcript(&rewritten);
+        assert!(after.is_resumable());
+        assert_eq!(lineage_digests(&analysis), lineage_digests(&after));
     }
 
     #[test]

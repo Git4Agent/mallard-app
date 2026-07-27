@@ -1014,6 +1014,9 @@ fn parse_session_index_lines<'a>(
     result
 }
 
+/// Titles keyed by provider thread ID from raw session-index bytes, with
+/// the same alias, normalization, and truncation rules as the local chat
+/// sidebar. Capture uses this to label portable threads in one pass.
 pub(crate) fn parse_session_index_titles(bytes: &[u8]) -> BTreeMap<String, String> {
     parse_session_index_lines(
         bytes

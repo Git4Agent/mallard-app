@@ -130,6 +130,8 @@ pub struct ProjectInventory {
     pub blocked_count: usize,
 }
 
+pub const CODEX_SESSION_INDEX_LOGICAL_PATH: &str = "state/codex/session_index.jsonl";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedFile {
     pub logical_path: String,
@@ -175,6 +177,10 @@ pub struct CapturedConversation {
     pub lineage_codec: String,
     pub source_thread_id: Option<String>,
     pub source_cwd: Option<String>,
+    /// Bounded display title from the provider's own index, when it has one.
+    /// Captured so stored manifests can label threads without transcript
+    /// payloads ever being read back.
+    pub title: Option<String>,
     pub transcript_logical_path: String,
     pub record_count: usize,
     pub lineage: CodecLineage,
@@ -539,6 +545,7 @@ pub fn capture_from_discovery(
                         lineage_codec,
                         source_thread_id,
                         source_cwd,
+                        title: None,
                         transcript_logical_path: transcript.logical_path.clone(),
                         record_count,
                         lineage,
@@ -554,6 +561,7 @@ pub fn capture_from_discovery(
             },
         );
     }
+    apply_captured_index_titles(&mut result);
     result.unavailable_resource_ids.sort();
     result
         .dependency_actions
@@ -561,6 +569,22 @@ pub fn capture_from_discovery(
     result.warnings.sort();
     result.warnings.dedup();
     Ok(result)
+}
+
+/// Label captured sessions from the captured provider index in the same
+/// pass, so publication never re-opens local provider state for titles.
+fn apply_captured_index_titles(result: &mut CapturedResources) {
+    let Some(index) = result.files.get(CODEX_SESSION_INDEX_LOGICAL_PATH) else {
+        return;
+    };
+    let titles = super::chat_history::parse_session_index_titles(&index.bytes);
+    for conversation in result.conversations.values_mut() {
+        if let Some(source) = conversation.source_thread_id.as_deref() {
+            if let Some(title) = titles.get(source) {
+                conversation.title = Some(title.clone());
+            }
+        }
+    }
 }
 
 /// Domain-facing capture entry point. The recipe remains the sole selection
@@ -702,7 +726,7 @@ pub fn domain_dependency_actions(
         .collect()
 }
 
-fn domain_provider(provider: Provider) -> domain::Provider {
+pub fn domain_provider(provider: Provider) -> domain::Provider {
     match provider {
         Provider::Codex => domain::Provider::Codex,
         Provider::Claude => domain::Provider::Claude,
@@ -1467,12 +1491,12 @@ fn discover_codex(
                         apply_policy: CaptureApplyPolicy::Merge,
                         selected_by_default: true,
                         blocked_reason: None,
-                        logical_paths: vec!["state/codex/session_index.jsonl".to_string()],
+                        logical_paths: vec![CODEX_SESSION_INDEX_LOGICAL_PATH.to_string()],
                         dependency: None,
                     },
                     files: vec![SourceFile {
                         physical_path: index.clone(),
-                        logical_path: "state/codex/session_index.jsonl".to_string(),
+                        logical_path: CODEX_SESSION_INDEX_LOGICAL_PATH.to_string(),
                         opaque_content: true,
                         derived_bytes: Some(filtered),
                     }],
@@ -2767,20 +2791,26 @@ mod tests {
 
         let direct = capture_selected(&request, &all_ids).unwrap();
         let shared = capture_from_discovery(&request, &discovery, &all_ids).unwrap();
-        assert_eq!(direct, shared, "the wrapper and the seam capture identically");
+        assert_eq!(
+            direct, shared,
+            "the wrapper and the seam capture identically"
+        );
 
         let conversation_ids: BTreeSet<String> = all_ids
             .iter()
             .filter(|resource_id| resource_id.starts_with("codex:"))
             .cloned()
             .collect();
-        let other_ids: BTreeSet<String> =
-            all_ids.difference(&conversation_ids).cloned().collect();
+        let other_ids: BTreeSet<String> = all_ids.difference(&conversation_ids).cloned().collect();
         assert!(!conversation_ids.is_empty() && !other_ids.is_empty());
         let first = capture_from_discovery(&request, &discovery, &conversation_ids).unwrap();
         let second = capture_from_discovery(&request, &discovery, &other_ids).unwrap();
-        let union_files: BTreeSet<String> =
-            first.files.keys().chain(second.files.keys()).cloned().collect();
+        let union_files: BTreeSet<String> = first
+            .files
+            .keys()
+            .chain(second.files.keys())
+            .cloned()
+            .collect();
         assert_eq!(
             union_files,
             shared.files.keys().cloned().collect::<BTreeSet<String>>(),
@@ -3059,8 +3089,7 @@ mod tests {
         );
 
         let index = discovery.resources.get("codex:session-index").unwrap();
-        let filtered =
-            String::from_utf8(index.files[0].derived_bytes.clone().unwrap()).unwrap();
+        let filtered = String::from_utf8(index.files[0].derived_bytes.clone().unwrap()).unwrap();
         assert!(filtered.contains("root-thread"));
         assert!(!filtered.contains("spawn-child"));
 
@@ -3146,7 +3175,9 @@ mod tests {
             excluded_content_roots: Vec::new(),
         };
         let discovery = discover_full(&request).unwrap();
-        assert!(discovery.resources.contains_key("codex:session:flipped-thread"));
+        assert!(discovery
+            .resources
+            .contains_key("codex:session:flipped-thread"));
 
         // The rollout is rewritten as a subagent between discovery and
         // capture; the stale selection must be rejected fail-closed.
@@ -3159,7 +3190,10 @@ mod tests {
         );
         let selected = BTreeSet::from(["codex:session:flipped-thread".to_string()]);
         let error = capture_from_discovery(&request, &discovery, &selected).unwrap_err();
-        assert!(error.contains("subagent rollout"), "unexpected error: {error}");
+        assert!(
+            error.contains("subagent rollout"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

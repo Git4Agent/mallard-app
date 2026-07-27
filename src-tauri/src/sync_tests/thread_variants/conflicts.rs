@@ -169,8 +169,10 @@ fn fork_pull_rekeys_local_then_materializes_cloud_as_two_journaled_steps() {
                 last_observed_head_message_id: Some(local_head.clone()),
                 last_observed_lineage_digest: Some(local_lineage.clone()),
                 last_observed_semantic_digest: Some(local_semantic.clone()),
-                source_generation: Some(published.snapshot.head.generation),
-                source_manifest_sha256: Some(published.snapshot.head.manifest_sha256.clone()),
+                source_generation: Some(published.snapshot.head.latest.generation),
+                source_manifest_sha256: Some(
+                    published.snapshot.head.latest.manifest_sha256.clone(),
+                ),
                 revision: 0,
                 created_at: 10,
                 updated_at: 10,
@@ -190,9 +192,9 @@ fn fork_pull_rekeys_local_then_materializes_cloud_as_two_journaled_steps() {
         phase: ConversationSyncPhase::Prepared,
         storage_id: world.storage_id.clone(),
         bundle_id: world.bundle_id.clone(),
-        generation: published.snapshot.head.generation,
-        commit_id: published.snapshot.head.commit_id.clone(),
-        manifest_sha256: published.snapshot.head.manifest_sha256.clone(),
+        generation: published.snapshot.head.latest.generation,
+        commit_id: published.snapshot.head.latest.commit_id.clone(),
+        manifest_sha256: published.snapshot.head.latest.manifest_sha256.clone(),
         host_id: scope.host_id.clone(),
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
@@ -260,9 +262,9 @@ fn fork_pull_rekeys_local_then_materializes_cloud_as_two_journaled_steps() {
         phase: ConversationSyncPhase::Prepared,
         storage_id: world.storage_id.clone(),
         bundle_id: world.bundle_id.clone(),
-        generation: published.snapshot.head.generation,
-        commit_id: published.snapshot.head.commit_id.clone(),
-        manifest_sha256: published.snapshot.head.manifest_sha256.clone(),
+        generation: published.snapshot.head.latest.generation,
+        commit_id: published.snapshot.head.latest.commit_id.clone(),
+        manifest_sha256: published.snapshot.head.latest.manifest_sha256.clone(),
         host_id: scope.host_id.clone(),
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
@@ -339,6 +341,7 @@ fn fork_pull_rekeys_local_then_materializes_cloud_as_two_journaled_steps() {
             .inspect(&world.bundle_id)
             .unwrap()
             .head
+            .latest
             .generation,
         1,
         "Pull must not publish or rename the cloud thread",
@@ -393,7 +396,7 @@ fn diverge_once_sync_twice_forks_exactly_once_then_settles_identical() {
         origin_b,
         10,
     );
-    assert_eq!(published.snapshot.head.generation, 1);
+    assert_eq!(published.snapshot.head.latest.generation, 1);
     let local_chain = analyze_codex_transcript(&local_transcript)
         .lineage
         .chain()
@@ -432,19 +435,24 @@ fn diverge_once_sync_twice_forks_exactly_once_then_settles_identical() {
             10,
         )
     };
-    let after_fork = world.publish(&[cloud_spec.clone(), forked_spec.clone()], origin_a.clone(), 20);
+    let after_fork = world.publish(
+        &[cloud_spec.clone(), forked_spec.clone()],
+        origin_a.clone(),
+        20,
+    );
     assert_eq!(
         after_fork.snapshot.manifest.conversations.len(),
         2,
         "exactly one fork thread appears after round one",
     );
-    assert_eq!(after_fork.snapshot.head.generation, 2);
+    assert_eq!(after_fork.snapshot.head.latest.generation, 2);
 
     // Round two: identity converged — the local chain is Identical to its
     // rekeyed thread, the origin thread is untouched, and a republish of the
     // same reviewed state is a semantic no-op that mints nothing.
     let forked_cloud_chain = analyze_codex_transcript(
-        &world.engine().fetch(&world.bundle_id).unwrap().files[&after_fork.snapshot.manifest.conversations[&forked_id].files[0].logical_path],
+        &world.engine().fetch(&world.bundle_id).unwrap().files
+            [&after_fork.snapshot.manifest.conversations[&forked_id].files[0].logical_path],
     )
     .lineage
     .chain()
@@ -467,7 +475,7 @@ fn diverge_once_sync_twice_forks_exactly_once_then_settles_identical() {
     );
     let republish = world.publish(&[cloud_spec, forked_spec], origin_a, 30);
     assert!(!republish.published, "round two publishes nothing");
-    assert_eq!(republish.snapshot.head.generation, 2);
+    assert_eq!(republish.snapshot.head.latest.generation, 2);
     assert_eq!(republish.snapshot.manifest.conversations.len(), 2);
     assert_manifest_consistent(&world);
 }
