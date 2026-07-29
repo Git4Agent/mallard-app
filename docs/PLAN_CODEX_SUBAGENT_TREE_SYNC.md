@@ -98,6 +98,28 @@ resource**, not sibling threads:
 - No cross-action ordering or group-atomicity machinery is needed: child
   targets ride in the parent action's existing target batch.
 
+## Repeated Push and growing trees
+
+The common lifecycle — push `t` with `tt1, tt2, tt3`, keep chatting, push
+again with `tt4` — is a fast-forward, not a conflict:
+
+- Spawning `tt4` required a new parent turn, so the parent chain extends and
+  the relation is `CloudPrefixOfLocal` → ordinary fast-forward Push. The new
+  `sub_agent_activity` events are `event_msg` records and do not perturb
+  lineage digests.
+- `tt1–tt3` are unchanged → sha-deduped, no re-upload. `tt4` uploads. The new
+  generation's manifest lists parent + 4 children.
+- The destination Pull fast-forwards the parent, no-ops `tt1–tt3` (present,
+  same sha), and writes `tt4` under its original ID.
+
+No new conflict class exists: child IDs are unique UUIDs, and divergence
+detection stays entirely parent-lineage-driven.
+
+The one genuine edge is a child captured **mid-run**: a subagent still
+running at push time is captured at sha `s1` and later pushed at a longer
+`s1'`. Rollouts are append-only JSONL, so same-ID collisions resolve by
+byte-prefix, not by hard block (see Step 4).
+
 ## Implementation steps
 
 ### Step 0 — go/no-go viewer proof (~30 min, manual)
@@ -176,10 +198,12 @@ In `src-tauri/src/project_sync/commands.rs`
   (`conversation_codec.rs`) with a parent-ID map; the equality-guarded
   `rewrite_matching_string` pattern already fits. Round-trip validation must
   compare child ancestry under the map.
-- Collision rule per child: target ID already present locally with the same
-  sha → no-op (fork copies share children); present with a different sha →
-  block the action with a review error (children are immutable; a mismatch
-  is evidence of corruption or ID reuse).
+- Collision rule per child (append-only, prefix-aware): same sha → no-op
+  (fork copies share children); existing local bytes are a prefix of the
+  incoming file → fast-forward the child (it was captured mid-run and has
+  since grown); incoming is a prefix of existing → keep local, no-op; any
+  other mismatch → block the action with a review error (corruption or ID
+  reuse).
 - **No `session_index.jsonl` rows for children.** While touching
   `codex_index_payload`, align the parent's row with the native shape
   `{id, thread_name, updated_at}` (today Mallard writes `{id, cwd}`), so
@@ -208,6 +232,9 @@ In `src-tauri/src/sync_tests/thread_variants/`:
 - Pull: preserved child ID, cwd + parent-edge rewrite, event_msg bytes
   untouched, collision no-op vs mismatch block, fork copies sharing
   children, no child index rows.
+- Repeated Push: second push with a new child uploads only that child,
+  dedupes the rest; an in-flight child that grew fast-forwards on both Push
+  and Pull.
 - Round trip: pull → re-capture → no-op push.
 - Storage parity and relation matrix updates for the child sha-set rule.
 
@@ -219,7 +246,8 @@ In `src-tauri/src/sync_tests/thread_variants/`:
 3. Children never receive index rows, logical ThreadIds, or bindings.
 4. Guardian/`other` subagents never enter a bundle.
 5. A parent and its children materialize in one atomic operation.
-6. Child files are immutable: a same-ID different-sha collision blocks.
+6. Child files grow append-only: a same-ID collision must be sha-equal or a
+   byte-prefix extension in one direction; anything else blocks.
 
 ## Risks and open questions
 
