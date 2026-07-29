@@ -182,11 +182,11 @@ export default function ProjectFilesReviewPage({
 
   if (!scanned && mode === "push") {
     return (
-      <section className="v3-project-files-page v3-project-files-unscanned" aria-labelledby="v3-project-files-title">
-        <div className="v3-project-files-empty">
-          <span className="v3-project-files-empty-icon" aria-hidden="true"><Icon name="folder" size={17} /></span>
-          <div className="v3-project-files-empty-copy">
-            <h3 id="v3-project-files-title">Files outside Git</h3>
+      <section className="sync-project-files-page sync-project-files-unscanned" aria-labelledby="sync-project-files-title">
+        <div className="sync-project-files-empty">
+          <span className="sync-project-files-empty-icon" aria-hidden="true"><Icon name="folder" size={17} /></span>
+          <div className="sync-project-files-empty-copy">
+            <h3 id="sync-project-files-title">Files outside Git</h3>
           </div>
           <button type="button" className="btn btn-primary" onClick={onScan} disabled={disabled || loading || !eligible}>
             <Icon name={loading ? "refresh" : "folder"} size={14} className={loading ? "icon-spin" : undefined} />
@@ -194,20 +194,20 @@ export default function ProjectFilesReviewPage({
           </button>
         </div>
         {!eligible && (
-          <div className="v3-callout error" role="alert"><Icon name="lock" size={15} /> <span><strong>Project files are locked.</strong>{eligibility.reason}</span></div>
+          <div className="sync-callout error" role="alert"><Icon name="lock" size={15} /> <span><strong>Project files are locked.</strong>{eligibility.reason}</span></div>
         )}
       </section>
     );
   }
 
   return (
-    <section className="v3-project-files-page" aria-labelledby="v3-project-files-title">
-      <div className="v3-project-files-toolbar">
-        <div className="v3-project-files-heading">
-          <h3 id="v3-project-files-title">Project files</h3>
+    <section className="sync-project-files-page" aria-labelledby="sync-project-files-title">
+      <div className="sync-project-files-toolbar">
+        <div className="sync-project-files-heading">
+          <h3 id="sync-project-files-title">Project files</h3>
           {eligible && mode === "push" && (
             <span
-              className="v3-project-files-note"
+              className="sync-project-files-note"
               role="img"
               aria-label="Review paths and warnings before Push; scanning cannot detect every secret."
               title="Review paths and warnings before Push; scanning cannot detect every secret."
@@ -229,14 +229,14 @@ export default function ProjectFilesReviewPage({
       </div>
 
       {!eligible && (
-        <div className="v3-callout error v3-project-files-locked" role="alert">
+        <div className="sync-callout error sync-project-files-locked" role="alert">
           <Icon name="lock" size={15} />
           <span><strong>Project files are locked.</strong>{eligibility.reason}{eligibility.detected_root ? ` Git root: ${eligibility.detected_root}` : ""}</span>
         </div>
       )}
 
       {rows.length > 0 && (
-        <div className="v3-project-files-search">
+        <div className="sync-project-files-search">
           <input
             type="search"
             value={search}
@@ -249,9 +249,9 @@ export default function ProjectFilesReviewPage({
       )}
 
       {rows.length === 0 ? (
-        <div className="v3-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No changes</strong></span></div>
+        <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No changes</strong></span></div>
       ) : (
-        <div className="v3-project-file-tree" role="tree" aria-label="Project files">
+        <div className="sync-project-file-tree" role="tree" aria-label="Project files">
           {shownRows.map((row) => {
             const isDirectory = row.entryType === "directory";
             const expanded = expandedDirectories.has(row.relativePath) || Boolean(normalizedSearch);
@@ -265,27 +265,29 @@ export default function ProjectFilesReviewPage({
             return (
               <div
                 key={row.resourceId}
-                className={`v3-project-file-row${selected ? " selected" : ""}${required ? " required" : ""}${removed ? " removal" : ""}${row.blockedReason ? " blocked" : ""}`}
+                className={`sync-project-file-row${selected ? " selected" : ""}${required ? " required" : ""}${removed ? " removal" : ""}${row.blockedReason ? " blocked" : ""}`}
                 role="treeitem"
                 aria-level={depth(row.relativePath) + 1}
                 aria-expanded={isDirectory ? expanded : undefined}
                 style={{ "--project-file-indent": `${depth(row.relativePath) * 16}px` } as React.CSSProperties}
               >
-                <div className="v3-project-file-row-main">
+                <div className="sync-project-file-row-main">
                   {isDirectory ? (
-                    <button type="button" className="v3-project-file-expand" onClick={() => toggleDirectory(row)} aria-label={`${expanded ? "Collapse" : "Expand"} ${row.relativePath}`}>
+                    <button type="button" className="sync-project-file-expand" onClick={() => toggleDirectory(row)} aria-label={`${expanded ? "Collapse" : "Expand"} ${row.relativePath}`}>
                       <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
                     </button>
-                  ) : <span className="v3-project-file-expand" />}
-                  <input
-                    type="checkbox"
-                    aria-label={`${mode === "pull" ? "Apply" : "Include"} ${row.relativePath}`}
-                    checked={selected}
-                    disabled={disabled || !selectable || required}
-                    onChange={() => isDirectory ? toggleDirectorySelection(row) : onToggle(row.resourceId)}
-                  />
+                  ) : <span className="sync-project-file-expand" />}
+                  {selectable && !required ? (
+                    <input
+                      type="checkbox"
+                      aria-label={`${mode === "pull" ? "Apply" : "Include"} ${row.relativePath}`}
+                      checked={selected}
+                      disabled={disabled}
+                      onChange={() => isDirectory ? toggleDirectorySelection(row) : onToggle(row.resourceId)}
+                    />
+                  ) : null}
                   <Icon name={isDirectory ? "folder" : row.entryType === "blocked" ? "ban" : "file"} size={14} />
-                  <button type="button" className="v3-project-file-name" onClick={() => setDetails((current) => {
+                  <button type="button" className="sync-project-file-name" onClick={() => setDetails((current) => {
                     const next = new Set(current);
                     if (next.has(row.resourceId)) next.delete(row.resourceId);
                     else next.add(row.resourceId);
@@ -294,16 +296,16 @@ export default function ProjectFilesReviewPage({
                     <strong>{row.relativePath.split("/").slice(-1)[0]}</strong>
                     <small>{displayState(row, mode)}{required ? " · required directory" : ""}{childCount > 0 ? ` · ${childCount} descendant${childCount === 1 ? "" : "s"}` : ""}</small>
                   </button>
-                  {formatBytes(row.size) && <span className="v3-project-file-size">{formatBytes(row.size)}</span>}
-                  {row.warningCode && <span className="v3-project-file-warning"><Icon name="alert-triangle" size={13} /> Warning</span>}
+                  {formatBytes(row.size) && <span className="sync-project-file-size">{formatBytes(row.size)}</span>}
+                  {row.warningCode && <span className="sync-project-file-warning"><Icon name="alert-triangle" size={13} /> Warning</span>}
                   {mode === "push" && row.storagePresent && onToggleRemoval && (
-                    <button type="button" className={`btn btn-ghost v3-project-file-remove${removed ? " active" : ""}`} disabled={disabled || !eligible || required} onClick={() => onToggleRemoval(row.resourceId)}>
+                    <button type="button" className={`btn btn-ghost sync-project-file-remove${removed ? " active" : ""}`} disabled={disabled || !eligible || required} onClick={() => onToggleRemoval(row.resourceId)}>
                       {removed ? "Keep in storage" : "Remove from storage"}
                     </button>
                   )}
                 </div>
                 {detailsOpen && (
-                  <div className="v3-project-file-details">
+                  <div className="sync-project-file-details">
                     <span>Path</span><code>{row.relativePath}</code>
                     <span>Type</span><code>{isDirectory ? "Directory" : row.entryType === "blocked" ? "Blocked entry" : "Regular file"}</code>
                     {formatMode(row.mode) && <><span>Mode</span><code>{formatMode(row.mode)}</code></>}
@@ -312,32 +314,32 @@ export default function ProjectFilesReviewPage({
                   </div>
                 )}
                 {row.warningDigest && onToggleWarning && (
-                  <label className="v3-project-file-ack">
+                  <label className="sync-project-file-ack">
                     <input type="checkbox" checked={warningAcknowledged} disabled={disabled || !selected} onChange={() => onToggleWarning(row.warningDigest!)} />
                     Reviewed this warning.
                   </label>
                 )}
                 {mode === "push" && STORAGE_BLOCKING_STATES.has(row.state) && onReviewPull && (
-                  <div className="v3-project-file-conflict"><span>Pull required</span><button type="button" className="btn btn-ghost" onClick={onReviewPull}>Review Pull</button></div>
+                  <div className="sync-project-file-conflict"><span>Pull required</span><button type="button" className="btn btn-ghost" onClick={onReviewPull}>Review Pull</button></div>
                 )}
               </div>
             );
           })}
           {shownRows.length >= MAX_RENDERED_ROWS && rows.length > shownRows.length && (
-            <div className="v3-project-file-limit">First {MAX_RENDERED_ROWS} shown. Search or collapse folders.</div>
+            <div className="sync-project-file-limit">First {MAX_RENDERED_ROWS} shown. Search or collapse folders.</div>
           )}
         </div>
       )}
 
       {(ignoredCount > 0 || blockedCount > 0 || warnings.length > 0) && (
-        <details className="v3-project-files-scan-summary">
+        <details className="sync-project-files-scan-summary">
           <summary>{ignoredCount} ignored · {blockedCount} blocked · {warnings.length} scan warning{warnings.length === 1 ? "" : "s"}</summary>
           {warnings.map((warning) => <p key={warning}>{warning}</p>)}
         </details>
       )}
 
       {rows.length > 0 && (
-        <div className="v3-project-files-counts" aria-label={`${selectedRows.length} entries selected`}>
+        <div className="sync-project-files-counts" aria-label={`${selectedRows.length} entries selected`}>
           <strong>{selectedRows.length} selected</strong>
           {mode === "pull" && keptLocal > 0 && <small>{keptLocal} local</small>}
           {mode === "push" && removalIds.size > 0 && <small>{removalIds.size} removal{removalIds.size === 1 ? "" : "s"}</small>}

@@ -7,6 +7,7 @@ import {
   SkillsPluginStatusContent,
 } from "../../src/components/project-sync/SkillsPluginStatusPage";
 import PushResourceWorkspace, {
+  pushSelectableResourceIds,
   pushReviewBlockers,
   pushReviewBlockingCount,
   sanitizePushSelection,
@@ -117,6 +118,7 @@ test("Push rejects blocked selections while preserving storage conflict review",
     blocked_reason: "SKILL.md is unreadable",
   };
   const storageSkill = capability("standalone_skill", "remote-skill", "storage_only");
+  const localSkill = capability("standalone_skill", "local-skill", "local_ahead");
 
   assert.deepEqual(
     pushReviewBlockers(new Set([blockedSkill.resource_id]), null, report([blockedSkill])),
@@ -146,11 +148,21 @@ test("Push rejects blocked selections while preserving storage conflict review",
     )],
     [],
   );
+  assert.deepEqual(
+    [...sanitizePushSelection(
+      new Set([storageSkill.resource_id]),
+      [storageSkill],
+      null,
+      report([storageSkill]),
+    )],
+    [],
+  );
 
+  const statusItems = [localSkill, blockedSkill, storageSkill];
   const statusHtml = renderToStaticMarkup(
     <SkillsPluginStatusContent
       view="skills"
-      report={report([blockedSkill])}
+      report={report(statusItems)}
       loading={false}
       error={null}
       missingProfile={false}
@@ -158,19 +170,22 @@ test("Push rejects blocked selections while preserving storage conflict review",
       onRefresh={() => undefined}
       onOpenProjectSettings={() => undefined}
       selectionMode="push"
-      selectedResourceIds={new Set([blockedSkill.resource_id])}
-      selectableResourceIds={new Set([blockedSkill.resource_id])}
+      selectedResourceIds={new Set([localSkill.resource_id])}
+      selectableResourceIds={pushSelectableResourceIds(statusItems, null, report(statusItems))}
       onToggleResource={() => undefined}
     />,
   );
-  const blockedCheckbox = inputTagFor(statusHtml, "Include broken-skill");
-  assert.match(blockedCheckbox, /disabled=""/);
-  assert.doesNotMatch(blockedCheckbox, /checked=""/);
-  assert.match(statusHtml, /v3-history-selection-review/);
+  assert.doesNotMatch(statusHtml, /aria-label="Include broken-skill"/);
+  assert.doesNotMatch(statusHtml, /aria-label="Include remote-skill"/);
+  assert.match(inputTagFor(statusHtml, "Exclude local-skill"), /checked=""/);
+  assert.equal((statusHtml.match(/sync-capability-selectable/g) ?? []).length, 1);
+  assert.doesNotMatch(statusHtml, /sync-selection-placeholder/);
+  assert.equal((statusHtml.match(/type="checkbox"/g) ?? []).length, 1);
+  assert.match(statusHtml, /sync-history-selection-review/);
   assert.match(statusHtml, /aria-label="Skill status"/);
-  assert.doesNotMatch(statusHtml, /v3-history-header/);
-  assert.doesNotMatch(statusHtml, /v3-history-storage-lens/);
-  assert.doesNotMatch(statusHtml, /v3-history-toolbar-count/);
+  assert.doesNotMatch(statusHtml, /sync-history-header/);
+  assert.doesNotMatch(statusHtml, /sync-history-storage-lens/);
+  assert.doesNotMatch(statusHtml, /sync-history-toolbar-count/);
 
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
@@ -280,8 +295,8 @@ test("the Skills status view excludes plugins", () => {
   assert.match(html, /Skill status/);
   assert.match(html, /title="1 skills"/);
   assert.match(html, /1 warning/);
-  assert.ok(html.indexOf("v3-history-toolbar") < html.indexOf("v3-capability-warnings"));
-  assert.ok(html.indexOf("v3-capability-warnings") < html.indexOf("</header>"));
+  assert.ok(html.indexOf("sync-history-toolbar") < html.indexOf("sync-capability-warnings"));
+  assert.ok(html.indexOf("sync-capability-warnings") < html.indexOf("</header>"));
   assert.match(html, /Local changes/);
   assert.doesNotMatch(html, /tools@team/);
   assert.doesNotMatch(html, /Project and global custom skills/);
@@ -319,8 +334,8 @@ test("the Plugins status view excludes standalone skills and nests provided skil
   assert.match(html, /Plugin status/);
   assert.match(html, /title="1 plugins"/);
   assert.match(html, /1 warning/);
-  assert.ok(html.indexOf("v3-history-toolbar") < html.indexOf("v3-capability-warnings"));
-  assert.ok(html.indexOf("v3-capability-warnings") < html.indexOf("</header>"));
+  assert.ok(html.indexOf("sync-history-toolbar") < html.indexOf("sync-capability-warnings"));
+  assert.ok(html.indexOf("sync-capability-warnings") < html.indexOf("</header>"));
   assert.match(html, /Backup intent matches/);
   assert.match(html, /Provides security-review · release-notes/);
   assert.match(html, /In backup selection/);

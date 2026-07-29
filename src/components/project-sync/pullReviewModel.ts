@@ -1,4 +1,5 @@
 import type {
+  ConversationPlanAction,
   DependencyAction,
   DependencyPlan,
   ProjectProvider,
@@ -18,6 +19,7 @@ export interface PullReviewItem {
   provider: ProjectProvider | null;
   toolKind: GlobalToolKind | null;
   restoreActions: RestoreAction[];
+  conversationActions: ConversationPlanAction[];
   dependencyActions: DependencyAction[];
   projectContentPath: string | null;
   projectContentEntryType: "file" | "directory" | null;
@@ -179,6 +181,7 @@ export function buildPullReviewItems(
       provider,
       toolKind,
       restoreActions: [],
+      conversationActions: [],
       dependencyActions: [],
       projectContentPath: null,
       projectContentEntryType: null,
@@ -206,6 +209,36 @@ export function buildPullReviewItems(
       item.title = copy.title;
       item.detail = copy.detail;
     }
+  }
+
+  for (const action of plan.conversation_actions ?? []) {
+    const resourceId = action.source_resource_id
+      ?? `${action.provider}:conversation:${action.thread_id}`;
+    const detail = action.action === "fork"
+      ? "Keeps the local branch and restores the cloud branch as a separate conversation."
+      : action.action === "create_local"
+        ? "Restores this cloud thread as a new local conversation."
+        : action.action === "fast_forward_local"
+          ? "Updates the local conversation to the reviewed cloud continuation."
+          : action.action === "store_only"
+            ? "Stores the cloud transcript without offering unsafe resume behavior."
+            : action.action === "keep_local"
+              ? "The local branch is ahead and will remain unchanged."
+              : action.action === "no_op"
+                ? "This conversation is already up to date."
+                : action.action === "blocked"
+                  ? "This conversation cannot be changed safely."
+                  : humanize(action.action);
+    const item = ensure(
+      resourceId,
+      "project_data",
+      "Conversation",
+      detail,
+      action.provider,
+      null,
+    );
+    item.conversationActions.push(action);
+    item.detail = detail;
   }
 
   for (const action of dependencyPlan?.actions ?? []) {
@@ -270,9 +303,13 @@ export function includeRequiredPullProjectDirectories(
 }
 
 export function restoreActionIds(item: PullReviewItem): string[] {
-  return item.restoreActions
+  const fileActions = item.restoreActions
     .filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind))
     .map((action) => action.action_id);
+  const conversationActions = item.conversationActions
+    .filter((action) => conversationActionSelectable(action))
+    .map((action) => action.action_id);
+  return [...fileActions, ...conversationActions];
 }
 
 export function dependencyActionIds(item: PullReviewItem): string[] {
@@ -289,22 +326,26 @@ export function pendingIds(item: PullReviewItem, completedActionIds: ReadonlySet
 
 export function requiresApproval(item: PullReviewItem): boolean {
   const restore = item.restoreActions.filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind));
-  return [...restore, ...item.dependencyActions].some((action) => action.requires_explicit_approval);
+  return [...restore, ...item.dependencyActions].some((action) => action.requires_explicit_approval)
+    || item.conversationActions.some((action) => conversationActionRequiresApproval(action));
 }
 
 export function keepsLocalConversation(item: PullReviewItem): boolean {
-  return /^(codex|claude):session:/.test(item.resourceId)
+  return item.conversationActions.some((action) => (
+    action.action === "keep_local" || action.action === "require_pull"
+  )) || (/^(codex|claude):session:/.test(item.resourceId)
     && item.restoreActions.some((action) => (
       action.kind.kind === "manual"
       && Boolean(action.target_path)
       && Boolean(action.source_sha256)
       && Boolean(action.expected_target_sha256)
-    ));
+    )));
 }
 
 export function requiresManualResolution(item: PullReviewItem): boolean {
-  return item.restoreActions.some((action) => action.kind.kind === "manual")
-    && !keepsLocalConversation(item);
+  return item.conversationActions.some((action) => action.action === "blocked")
+    || (item.restoreActions.some((action) => action.kind.kind === "manual")
+      && !keepsLocalConversation(item));
 }
 
 export function defaultSelected(item: PullReviewItem): boolean {
@@ -313,28 +354,38 @@ export function defaultSelected(item: PullReviewItem): boolean {
     ...item.restoreActions.filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind)),
     ...item.dependencyActions,
   ];
-  return actions.length > 0 && actions.every((action) => !action.requires_explicit_approval);
+  const selectedConversationActions = item.conversationActions.filter(conversationActionSelectable);
+  return (actions.length > 0 || selectedConversationActions.length > 0)
+    && actions.every((action) => !action.requires_explicit_approval)
+    && selectedConversationActions.every((action) => !conversationActionRequiresApproval(action));
 }
 
 export function itemKindLabel(item: PullReviewItem): string {
   if (item.toolKind === "plugin") return "Plugin";
   if (item.toolKind === "custom_skill") return "Custom skill";
   if (item.toolKind === "setup_item") return "Setup item";
-  if (/^(codex|claude):session:/.test(item.resourceId) || item.restoreActions.some((action) => action.kind.kind === "materialize_conversation")) return "Conversation";
+  if (
+    item.conversationActions.length > 0
+    || /^(codex|claude):session:/.test(item.resourceId)
+    || item.restoreActions.some((action) => action.kind.kind === "materialize_conversation")
+  ) return "Conversation";
   if (item.projectContentEntryType === "directory") return "Project folder";
   if (item.projectContentEntryType === "file") return "Project file";
   if (item.restoreActions.some((action) => action.kind.kind === "write_file" || action.kind.kind === "merge_file")) return "File";
   return "Definition";
 }
 
-export function isPinnedNoopConversation(item: PullReviewItem): boolean {
-  if (itemKindLabel(item) !== "Conversation" || item.dependencyActions.length > 0) return false;
-  const actions = item.restoreActions.filter((action) => action.kind.kind !== "manual");
-  return actions.length > 0 && actions.every((action) => (
-    action.kind.kind === "materialize_conversation"
-    && action.materialized_sha256 != null
-    && action.materialized_sha256 === action.expected_target_sha256
-  ));
+function conversationActionSelectable(action: ConversationPlanAction): boolean {
+  return [
+    "fast_forward_local",
+    "fork",
+    "create_local",
+    "replace_local",
+  ].includes(action.action);
+}
+
+function conversationActionRequiresApproval(action: ConversationPlanAction): boolean {
+  return action.action === "replace_local";
 }
 
 export function buildPullReviewSelection(

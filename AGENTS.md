@@ -13,18 +13,18 @@ frontend.
 
 The current implementation has one supported product path:
 
-- machine-local state uses schema 3 under `~/.mallard`;
-- portable bundle manifests use schema 4;
-- `ProjectSyncV3` is the only application interface; and
+- machine-local state uses schema 1 under `~/.mallard`;
+- portable bundle manifests use schema 1;
+- `ProjectSync` is the only application interface; and
 - local-folder storage and S3-compatible/R2 storage share the same bundle
   model.
 
-Do not reintroduce removed legacy UI, schema-2 commands, or compatibility paths.
+Do not reintroduce removed legacy UI, pre-cutover commands, or compatibility paths.
 The integration tests intentionally enforce this cutover.
 
 ## Source map
 
-- `src/main.tsx` boots React; `src/App.tsx` mounts the V3 workspace.
+- `src/main.tsx` boots React; `src/App.tsx` mounts the project-sync workspace.
 - `src/components/project-sync/` contains setup, history, inventory,
   Push/Pull review, storage, project-file, and status UI.
 - `src/components/project-sync/api.ts` is the typed Tauri `invoke` boundary.
@@ -34,7 +34,7 @@ The integration tests intentionally enforce this cutover.
   response and request shapes.
 - `src/App.css` contains the shared desktop-shell and project-sync styling.
 - `src-tauri/src/lib.rs` registers the production Tauri command surface.
-- `src-tauri/src/project_sync_v3/domain.rs` owns IDs, schemas, validation,
+- `src-tauri/src/project_sync/domain.rs` owns IDs, schemas, validation,
   manifests, plans, actions, and receipts. Keep it free of Tauri and filesystem
   concerns.
 - `provider_capture.rs` owns provider discovery, filters, stable resource

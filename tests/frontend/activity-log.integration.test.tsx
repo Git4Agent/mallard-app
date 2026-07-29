@@ -58,7 +58,7 @@ test("log exposes retained-history pagination", () => {
 
 test("Push and Pull open the activity log at its live tail", () => {
   const logSource = readFileSync("src/components/LogPanel.tsx", "utf8");
-  const syncSource = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
+  const syncSource = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const pushHandler = syncSource.slice(
     syncSource.indexOf("const publishProject = async"),
     syncSource.indexOf("const publishPendingPush = async"),

@@ -1,11 +1,11 @@
 use super::harness::TranscriptBuilder;
-use crate::project_sync_v3::conversation_codec::{
+use crate::project_sync::conversation_codec::{
     analyze_codex_transcript, rewrite_codex_transcript, CodecLineage, CodecUnknownReason,
 };
-use crate::project_sync_v3::conversation_sync::{
+use crate::project_sync::conversation_sync::{
     default_conversation_decision, ConversationCapabilities,
 };
-use crate::project_sync_v3::domain::{
+use crate::project_sync::domain::{
     ConversationPlanActionType, ConversationPlanDirection, ConversationRelation,
     MAX_CONVERSATION_FILE_BYTES,
 };
@@ -75,7 +75,7 @@ fn committed_codex_fixture_proves_structural_rewrite_and_semantic_continuation()
     assert!(continued.is_resumable());
     assert_eq!(continued.lineage.chain().unwrap().len(), 6);
     assert_eq!(
-        crate::project_sync_v3::domain::classify_conversation_relation(
+        crate::project_sync::domain::classify_conversation_relation(
             continued.lineage.chain(),
             after.lineage.chain(),
         ),
@@ -122,11 +122,6 @@ fn every_codex_unknown_reason_is_bounded_and_never_resumable() {
             CodecUnknownReason::OversizedFile,
         ),
         (
-            "oversized_line",
-            vec![b'x'; 1024 * 1024 + 1],
-            CodecUnknownReason::OversizedLine,
-        ),
-        (
             "too_many_records",
             too_many_records,
             CodecUnknownReason::TooManyRecords,
@@ -156,7 +151,7 @@ fn every_codex_unknown_reason_is_bounded_and_never_resumable() {
             lines(vec![
                 session("thread-a", "/a"),
                 message(Some("msg-a"), None),
-                message(Some("msg-a"), Some("msg-a")),
+                message(Some("msg-a"), Some("msg-a")).replace("fixture", "conflicting"),
             ]),
             CodecUnknownReason::DuplicateMessageId,
         ),
@@ -233,7 +228,7 @@ fn every_codex_unknown_reason_is_bounded_and_never_resumable() {
 }
 
 fn lineage_digests(
-    analysis: &crate::project_sync_v3::conversation_codec::CodexTranscriptAnalysis,
+    analysis: &crate::project_sync::conversation_codec::CodexTranscriptAnalysis,
 ) -> (&str, &str) {
     match &analysis.lineage {
         CodecLineage::Complete {

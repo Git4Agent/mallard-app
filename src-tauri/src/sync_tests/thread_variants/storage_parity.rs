@@ -1,12 +1,12 @@
 use super::harness::{chain, publish_request, ThreadSpec, VariantWorld};
-use crate::project_sync_v3::bundle_engine::{
+use crate::project_sync::bundle_engine::{
     BundleEngine, BundleObjectStore, CasExpectation, CasOutcome, ImmutablePutOutcome, ObjectKey,
-    ObjectPrefix, PublishBundleRequest, PublishContent, StoreListPage, StoredObject,
+    ObjectPrefix, PublishBundleRequest, PublishExpectation, StoreListPage, StoredObject,
 };
-use crate::project_sync_v3::domain::{
-    BundleRecipe, StorageConfigV3, StorageKind, ThreadId, Tombstone, TombstoneTarget,
+use crate::project_sync::domain::{
+    BundleRecipe, StorageConfig, StorageKind, ThreadId, Tombstone, TombstoneTarget,
 };
-use crate::project_sync_v3::s3_store::S3BundleObjectStore;
+use crate::project_sync::s3_store::S3BundleObjectStore;
 use crate::sync_tests::stub_s3::StubS3;
 use std::collections::BTreeMap;
 use std::fs;
@@ -25,7 +25,7 @@ fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
         origin.clone(),
         10,
     );
-    let t2 = thread_v2(&origin);
+    let t2 = second_thread(&origin);
     let initial = world.publish(&[t1.clone(), t2], origin.clone(), 10);
     let dropping = publish_request(
         world.bundle_id.clone(),
@@ -33,7 +33,7 @@ fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
         origin.clone(),
         20,
         Some(&initial.snapshot.manifest),
-        Some((initial.snapshot.head.clone(), initial.head_token.clone())),
+        PublishExpectation::Match(initial.head_token.clone()),
     );
     let error = world.engine().publish(dropping).unwrap_err();
     assert!(error.contains("drops conversation thread"));
@@ -43,7 +43,6 @@ fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
             .inspect(&world.bundle_id)
             .unwrap()
             .head
-            .latest
             .generation,
         1
     );
@@ -56,37 +55,36 @@ fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
     advanced.updated_at = 20;
     let first_request = publish_request(
         world.bundle_id.clone(),
-        &[advanced.clone(), thread_v2(&origin)],
+        &[advanced.clone(), second_thread(&origin)],
         origin.clone(),
         20,
         Some(&initial.snapshot.manifest),
-        Some((initial.snapshot.head.clone(), initial.head_token.clone())),
+        PublishExpectation::Match(initial.head_token.clone()),
     );
     let stale_request = publish_request(
         world.bundle_id.clone(),
-        &[advanced, thread_v2(&origin)],
+        &[advanced, second_thread(&origin)],
         origin,
         21,
         Some(&initial.snapshot.manifest),
-        Some((initial.snapshot.head.clone(), initial.head_token)),
+        PublishExpectation::Match(initial.head_token),
     );
     world.engine().publish(first_request).unwrap();
     assert!(world
         .engine()
         .publish(stale_request)
         .unwrap_err()
-        .contains("CAS conflict"));
+        .contains("head changed"));
 }
 
 #[test]
 fn local_store_immutable_and_head_failures_leave_a_retryable_fixed_point() {
     let temp = tempfile::tempdir().unwrap();
-    let inner = crate::project_sync_v3::bundle_engine::LocalBundleObjectStore::open(
-        temp.path().join("store"),
-    )
-    .unwrap();
+    let inner =
+        crate::project_sync::bundle_engine::LocalBundleObjectStore::open(temp.path().join("store"))
+            .unwrap();
     let store = FailingStore::new(inner);
-    let storage_id = crate::project_sync_v3::domain::StorageId::parse("failure-store").unwrap();
+    let storage_id = crate::project_sync::domain::StorageId::parse("failure-store").unwrap();
     let engine = BundleEngine::open(store.clone(), storage_id.clone()).unwrap();
     let world = VariantWorld::new();
     let origin = world.origin(&world.repo_a, "replica-a");
@@ -103,14 +101,14 @@ fn local_store_immutable_and_head_failures_leave_a_retryable_fixed_point() {
         origin.clone(),
         10,
         None,
-        None,
+        PublishExpectation::Absent,
     );
     store.fail_next(StoreFailure::Immutable);
     assert!(engine.publish(initial_request.clone()).is_err());
     assert!(engine.read_head(&world.bundle_id).unwrap().is_none());
 
     let initial = engine.publish(initial_request).unwrap();
-    assert_eq!(initial.snapshot.head.latest.generation, 1);
+    assert_eq!(initial.snapshot.head.generation, 1);
     let mut advanced = thread;
     advanced.transcript = chain("source-thread", &[("m-a", "one"), ("m-b", "continued")]);
     advanced.updated_at = 20;
@@ -120,19 +118,16 @@ fn local_store_immutable_and_head_failures_leave_a_retryable_fixed_point() {
         origin,
         20,
         Some(&initial.snapshot.manifest),
-        Some((initial.snapshot.head.clone(), initial.head_token.clone())),
+        PublishExpectation::Match(initial.head_token.clone()),
     );
     store.fail_next(StoreFailure::HeadCas);
     assert!(engine.publish(advanced_request.clone()).is_err());
     let unchanged = engine.inspect(&world.bundle_id).unwrap();
-    assert_eq!(unchanged.head.latest.generation, 1);
-    assert_eq!(
-        unchanged.head.latest.commit_id,
-        initial.snapshot.head.latest.commit_id
-    );
+    assert_eq!(unchanged.head.generation, 1);
+    assert_eq!(unchanged.head.commit_id, initial.snapshot.head.commit_id);
 
     let retried = engine.publish(advanced_request).unwrap();
-    assert_eq!(retried.snapshot.head.latest.generation, 2);
+    assert_eq!(retried.snapshot.head.generation, 2);
     let fetched = engine.fetch(&world.bundle_id).unwrap();
     fetched.snapshot.validate().unwrap();
     for (path, entry) in &fetched.snapshot.manifest.files {
@@ -141,7 +136,7 @@ fn local_store_immutable_and_head_failures_leave_a_retryable_fixed_point() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stub_s3_thread_noop_fast_forward_and_chain_match_local_protocol() {
+async fn stub_s3_current_schema_noop_and_fast_forward_match_local_protocol() {
     let temp = tempfile::tempdir().unwrap();
     let cloud = temp.path().join("cloud");
     fs::create_dir_all(cloud.join("variant-bucket")).unwrap();
@@ -155,8 +150,8 @@ async fn stub_s3_thread_noop_fast_forward_and_chain_match_local_protocol() {
         origin.clone(),
         10,
     );
-    let storage_id = crate::project_sync_v3::domain::StorageId::parse("s3-variant-store").unwrap();
-    let config = StorageConfigV3 {
+    let storage_id = crate::project_sync::domain::StorageId::parse("s3-variant-store").unwrap();
+    let config = StorageConfig {
         id: storage_id.clone(),
         name: "Thread stub S3".to_string(),
         kind: StorageKind::S3,
@@ -178,7 +173,7 @@ async fn stub_s3_thread_noop_fast_forward_and_chain_match_local_protocol() {
         origin.clone(),
         10,
         None,
-        None,
+        PublishExpectation::Absent,
     );
     let initial_store = store.clone();
     let initial_storage = storage_id.clone();
@@ -198,7 +193,7 @@ async fn stub_s3_thread_noop_fast_forward_and_chain_match_local_protocol() {
         world.origin(&world.repo_b, "replica-b"),
         20,
         Some(&initial.snapshot.manifest),
-        Some((initial.snapshot.head.clone(), initial.head_token.clone())),
+        PublishExpectation::Match(initial.head_token.clone()),
     );
     let noop_store = store.clone();
     let noop_storage = storage_id.clone();
@@ -211,7 +206,7 @@ async fn stub_s3_thread_noop_fast_forward_and_chain_match_local_protocol() {
     .await
     .unwrap();
     assert!(!noop.published);
-    assert_eq!(noop.snapshot.head.latest.generation, 1);
+    assert_eq!(noop.snapshot.head.generation, 1);
 
     let mut advanced = thread;
     advanced.transcript = chain("source-thread", &[("m-a", "one"), ("m-b", "continued")]);
@@ -222,7 +217,7 @@ async fn stub_s3_thread_noop_fast_forward_and_chain_match_local_protocol() {
         origin,
         30,
         Some(&noop.snapshot.manifest),
-        Some((noop.snapshot.head.clone(), noop.head_token)),
+        PublishExpectation::Match(noop.head_token),
     );
     let advance_store = store.clone();
     let advance_storage = storage_id.clone();
@@ -235,13 +230,11 @@ async fn stub_s3_thread_noop_fast_forward_and_chain_match_local_protocol() {
     .await
     .unwrap();
     assert!(advanced.published);
-    assert_eq!(advanced.snapshot.head.latest.generation, 2);
+    assert_eq!(advanced.snapshot.head.generation, 2);
 
-    let chain_bundle = world.bundle_id.clone();
-    let fetch_store = store.clone();
-    let fetch_storage = storage_id.clone();
+    let fetch_store = store;
     let fetched = tokio::task::spawn_blocking(move || {
-        BundleEngine::open(fetch_store, fetch_storage)
+        BundleEngine::open(fetch_store, storage_id)
             .unwrap()
             .fetch(&world.bundle_id)
             .unwrap()
@@ -252,36 +245,6 @@ async fn stub_s3_thread_noop_fast_forward_and_chain_match_local_protocol() {
     assert!(server.requests().iter().any(|request| {
         request.method == "PUT" && request.key.ends_with("/_head.json") && request.conditional
     }));
-
-    // The verified reachable chain reads identically through S3: same
-    // generations, same pinned refs, no listing of `_versions/`.
-    let chain_store = store;
-    let page = tokio::task::spawn_blocking(move || {
-        BundleEngine::open(chain_store, storage_id)
-            .unwrap()
-            .list_reachable_generations(&chain_bundle, None, 10)
-            .unwrap()
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        page.generations
-            .iter()
-            .map(|generation| generation.version.generation)
-            .collect::<Vec<_>>(),
-        vec![2, 1]
-    );
-    assert_eq!(page.observed_head.latest, advanced.snapshot.head.latest);
-    assert_eq!(
-        page.generations[0].record.previous.as_ref().unwrap(),
-        &page.generations[1].version
-    );
-    assert!(!server
-        .requests()
-        .iter()
-        .any(|request| request.method == "GET"
-            && request.key.contains("/_versions/")
-            && request.key.ends_with('/')));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -315,8 +278,8 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
         origin_b.clone(),
         10,
     );
-    let storage_id = crate::project_sync_v3::domain::StorageId::parse("s3-cas-store").unwrap();
-    let config = StorageConfigV3 {
+    let storage_id = crate::project_sync::domain::StorageId::parse("s3-cas-store").unwrap();
+    let config = StorageConfig {
         id: storage_id.clone(),
         name: "Thread CAS stub S3".to_string(),
         kind: StorageKind::S3,
@@ -338,7 +301,7 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
         origin_a.clone(),
         10,
         None,
-        None,
+        PublishExpectation::Absent,
     );
     let initial_store = store.clone();
     let initial_storage = storage_id.clone();
@@ -368,7 +331,7 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
         origin_a,
         20,
         Some(&initial.snapshot.manifest),
-        Some((initial.snapshot.head.clone(), initial.head_token.clone())),
+        PublishExpectation::Match(initial.head_token.clone()),
     );
     let mut advanced_t2 = t2.clone();
     advanced_t2.transcript = chain(
@@ -387,7 +350,7 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
         origin_b.clone(),
         21,
         Some(&initial.snapshot.manifest),
-        Some((initial.snapshot.head.clone(), initial.head_token)),
+        PublishExpectation::Match(initial.head_token),
     );
     let writer_a_store = store.clone();
     let writer_a_storage = storage_id.clone();
@@ -421,7 +384,7 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
         origin_b,
         30,
         Some(&after_a.snapshot.manifest),
-        Some((after_a.snapshot.head.clone(), after_a.head_token)),
+        PublishExpectation::Match(after_a.head_token),
     );
     let retry_store = store.clone();
     let retry_storage = storage_id.clone();
@@ -433,7 +396,7 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
     })
     .await
     .unwrap();
-    assert_eq!(after_b.snapshot.head.latest.generation, 3);
+    assert_eq!(after_b.snapshot.head.generation, 3);
     assert_eq!(after_b.snapshot.manifest.conversations.len(), 2);
     assert!(after_b.snapshot.manifest.conversations.contains_key(&t2_id));
     assert_eq!(
@@ -501,9 +464,8 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         20,
     );
     forked_thread.forked_from = Some(cloud_id.clone());
-    let storage_id =
-        crate::project_sync_v3::domain::StorageId::parse("s3-divergence-store").unwrap();
-    let config = StorageConfigV3 {
+    let storage_id = crate::project_sync::domain::StorageId::parse("s3-divergence-store").unwrap();
+    let config = StorageConfig {
         id: storage_id.clone(),
         name: "Thread divergence stub S3".to_string(),
         kind: StorageKind::S3,
@@ -525,7 +487,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         origin_b,
         10,
         None,
-        None,
+        PublishExpectation::Absent,
     );
     let initial_store = store.clone();
     let initial_storage = storage_id.clone();
@@ -550,7 +512,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         origin_a.clone(),
         20,
         Some(&initial.snapshot.manifest),
-        Some((initial.snapshot.head.clone(), initial.head_token)),
+        PublishExpectation::Match(initial.head_token),
     );
     let fork_store = store.clone();
     let fork_storage = storage_id.clone();
@@ -562,7 +524,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
     })
     .await
     .unwrap();
-    assert_eq!(forked.snapshot.head.latest.generation, 2);
+    assert_eq!(forked.snapshot.head.generation, 2);
     assert_eq!(forked.snapshot.manifest.conversations.len(), 2);
     assert_eq!(
         forked.snapshot.manifest.conversations[&forked_id].forked_from,
@@ -579,7 +541,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         origin_a.clone(),
         25,
         Some(&forked.snapshot.manifest),
-        Some((forked.snapshot.head.clone(), forked.head_token)),
+        PublishExpectation::Match(forked.head_token),
     );
     let no_op_store = store.clone();
     let no_op_storage = storage_id.clone();
@@ -592,7 +554,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
     .await
     .unwrap();
     assert!(!no_op.published);
-    assert_eq!(no_op.snapshot.head.latest.generation, 2);
+    assert_eq!(no_op.snapshot.head.generation, 2);
 
     let cloud_tombstone = Tombstone {
         target: TombstoneTarget::ConversationThread {
@@ -613,14 +575,16 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         recipe: BundleRecipe::default(),
         captured_with: no_op.snapshot.manifest.captured_with.clone(),
         published_by_origin: origin_a.clone(),
-        content: PublishContent {
-            tombstones: BTreeMap::from([
-                (cloud_tombstone.canonical_key(), cloud_tombstone),
-                (forked_tombstone.canonical_key(), forked_tombstone),
-            ]),
-            ..PublishContent::default()
-        },
-        observed_head: Some((no_op.snapshot.head.clone(), no_op.head_token)),
+        conversations: BTreeMap::new(),
+        resources: BTreeMap::new(),
+        retained_files: BTreeMap::new(),
+        captured_files: BTreeMap::new(),
+        directories: BTreeMap::new(),
+        tombstones: BTreeMap::from([
+            (cloud_tombstone.canonical_key(), cloud_tombstone),
+            (forked_tombstone.canonical_key(), forked_tombstone),
+        ]),
+        expected_head: PublishExpectation::Match(no_op.head_token),
         updated_at: 30,
     };
     let delete_store = store.clone();
@@ -633,7 +597,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
     })
     .await
     .unwrap();
-    assert_eq!(deleted.snapshot.head.latest.generation, 3);
+    assert_eq!(deleted.snapshot.head.generation, 3);
     assert!(deleted.snapshot.manifest.conversations.is_empty());
 
     let mut modified = forked_thread;
@@ -653,7 +617,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         origin_a.clone(),
         40,
         Some(&deleted.snapshot.manifest),
-        Some((deleted.snapshot.head.clone(), deleted.head_token)),
+        PublishExpectation::Match(deleted.head_token),
     );
     let resurrect_store = store.clone();
     let resurrect_storage = storage_id.clone();
@@ -665,7 +629,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
     })
     .await
     .unwrap();
-    assert_eq!(resurrected.snapshot.head.latest.generation, 4);
+    assert_eq!(resurrected.snapshot.head.generation, 4);
     assert!(resurrected
         .snapshot
         .manifest
@@ -688,7 +652,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         origin_a,
         50,
         Some(&resurrected.snapshot.manifest),
-        Some((resurrected.snapshot.head.clone(), resurrected.head_token)),
+        PublishExpectation::Match(resurrected.head_token),
     );
     let retry_store = store.clone();
     let retried = tokio::task::spawn_blocking(move || {
@@ -724,7 +688,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         .all(|request| request.conditional));
 }
 
-fn thread_v2(origin: &crate::project_sync_v3::domain::PortableOrigin) -> ThreadSpec {
+fn second_thread(origin: &crate::project_sync::domain::PortableOrigin) -> ThreadSpec {
     ThreadSpec::new(
         "thread-v2",
         "source-thread-v2",
@@ -742,12 +706,12 @@ enum StoreFailure {
 
 #[derive(Clone)]
 struct FailingStore {
-    inner: crate::project_sync_v3::bundle_engine::LocalBundleObjectStore,
+    inner: crate::project_sync::bundle_engine::LocalBundleObjectStore,
     next_failure: Arc<Mutex<Option<StoreFailure>>>,
 }
 
 impl FailingStore {
-    fn new(inner: crate::project_sync_v3::bundle_engine::LocalBundleObjectStore) -> Self {
+    fn new(inner: crate::project_sync::bundle_engine::LocalBundleObjectStore) -> Self {
         Self {
             inner,
             next_failure: Arc::new(Mutex::new(None)),

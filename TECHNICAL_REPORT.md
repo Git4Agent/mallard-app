@@ -1,7 +1,7 @@
 # Mallard Current Technical Report
 
-**Implementation date:** 2026-07-20
-**Application version:** 0.1.0
+**Implementation date:** 2026-07-28
+**Application version:** 0.1.2
 **Scope:** the active implementation only. This report does not describe
 superseded formats, migrations, or compatibility behavior.
 
@@ -9,21 +9,23 @@ superseded formats, migrations, or compatibility behavior.
 
 | Contract | Current version |
 | --- | ---: |
-| Desktop application | 0.1.0 |
-| Machine-local sync configuration | Schema 3 |
-| Portable bundle head and manifest | Schema 4 |
+| Desktop application | 0.1.2 |
+| Machine-local sync configuration | Schema 1 |
+| Portable bundle head and manifest | Schema 1 |
 | Portable storage layout | Version 1 |
 | Machine project/profile catalog | Schema 1 |
+| Host identity and conversation state | Schema 1 |
 | Bundle recipe | Schema 1 |
 | Per-link project-content preferences | Schema 1 |
 | Restore and dependency plans | Schema 1 |
 | Setup drafts and transactions | Schema 1 |
 | Activity entries and policy | Schema 1 |
 
-The implementation requires these exact contracts and fails closed on an
-unsupported version. Local schema 3 and remote schema 4 version different
-documents: schema 3 stores machine configuration; schema 4 defines the
-portable bundle exchanged through storage.
+The implementation requires these exact contracts and fails closed on any
+other schema. Local documents and portable bundles are independently
+versioned, but both current formats were reset to schema 1. There is no
+migration or compatibility reader; testing this build requires fresh
+`~/.mallard` state and empty storage.
 
 The application stack is Tauri 2 with a Rust 2021 backend and a React 19,
 TypeScript 5.8, and Vite 7 frontend. Rust performs all filesystem, validation,
@@ -51,12 +53,12 @@ The main implementation boundaries are:
 | --- | --- |
 | `src/types.ts` | Frontend DTOs mirroring serialized Rust types. |
 | `src/components/project-sync/` | Setup, inventory, Push/Pull review, project-file tree, readiness, and storage UI. |
-| `project_sync_v3/domain.rs` | Current IDs, schemas, validation rules, manifests, actions, plans, and receipts. |
-| `project_sync_v3/provider_capture.rs` | Provider adapters, generic project scanner, filters, stable identities, and capture. |
-| `project_sync_v3/bundle_engine.rs` | Object-key validation, immutable publication, head CAS, verified fetch, restore planning, backups, and apply. |
-| `project_sync_v3/commands.rs` | Tauri command boundary and cross-document transactions. |
-| `project_sync_v3/persistence.rs` | Bounded, atomic machine-local JSON persistence. |
-| `project_sync_v3/s3_store.rs` | S3/R2 transport with conditional writes and bounded pagination. |
+| `project_sync/domain.rs` | Current IDs, schemas, validation rules, manifests, actions, plans, and receipts. |
+| `project_sync/provider_capture.rs` | Provider adapters, generic project scanner, filters, stable identities, and capture. |
+| `project_sync/bundle_engine.rs` | Object-key validation, immutable publication, head CAS, verified fetch, restore planning, backups, and apply. |
+| `project_sync/commands.rs` | Tauri command boundary and cross-document transactions. |
+| `project_sync/persistence.rs` | Bounded, atomic machine-local JSON persistence. |
+| `project_sync/s3_store.rs` | S3/R2 transport with conditional writes and bounded pagination. |
 | `activity_log.rs` | Sanitized local JSONL activity history and retention. |
 
 ## 3. Core domain model
@@ -91,18 +93,23 @@ Machine state is stored directly under `~/.mallard`:
 ~/.mallard/
 |-- sync_config.json
 |-- machine_projects.json
+|-- host_identity.json
+|-- host_rotation.json
+|-- conversation_bindings.json
+|-- conversation_sync_journal.json
 |-- materializations.json
 |-- dependency_applications.json
 |-- chat_history_cache.json
 |-- project_drafts/<draft-id>.json
 |-- setup_transactions/<draft-id>.json
+|-- conversation_push_plans/<plan-id>.json
 |-- restore_plans/<plan-id>.json
 |-- dependency_plans/<plan-id>.json
 |-- backups/<plan-id>/...
 `-- logs/
 ```
 
-`sync_config.json` contains schema-3 storage definitions, including S3
+`sync_config.json` contains schema-1 storage definitions, including S3
 credentials, project registrations, project/storage links, recipes,
 project-content exclusions, and reviewed remote bases. A `RecipeBase` pins the
 generation, commit ID, manifest SHA-256, recipe revision, binding revision,
@@ -139,7 +146,7 @@ They are stored on the project/storage link and never uploaded. They record
 exact entries intentionally left unchecked after a successful Push so later
 scans do not select them again automatically.
 
-## 5. Portable storage and schema-4 metadata
+## 5. Portable storage and schema-1 metadata
 
 Local-folder and S3/R2 storage share one key layout:
 
@@ -157,15 +164,16 @@ Local-folder and S3/R2 storage share one key layout:
 
 `_storage.json` identifies the root as
 `{"format":"mallard-storage","layout_version":1}`. `_head.json` is the
-only authoritative mutable bundle pointer. It stores schema version 4, bundle
+only authoritative mutable bundle pointer. It stores schema version 1, bundle
 identity, generation, commit ID, manifest key, manifest SHA-256, and update
 time.
 
-Each immutable schema-4 manifest is a complete live snapshot containing:
+Each immutable schema-1 manifest is a complete live snapshot containing:
 
 - portable bundle identity and optional repository fingerprint;
 - the destination recipe;
 - capture application/tool/codec versions;
+- publishing-origin tokens and typed, fork-aware conversation entries;
 - the selected resource descriptors;
 - file entries keyed by validated logical path;
 - directory entries keyed by validated logical path; and
@@ -276,7 +284,7 @@ portable. Modes are restricted to `0o777`.
 The Push inventory compares:
 
 - `local`: the explicit scan result;
-- `storage`: the current schema-4 head manifest; and
+- `storage`: the current schema-1 head manifest; and
 - `base`: the exact generation last reviewed by this binding/link.
 
 Entries are classified as `synced`, `local_only`, `local_ahead`,
@@ -513,13 +521,9 @@ cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 
-Verification on 2026-07-20 completed successfully: the production frontend
-build and Rust check passed, all 56 frontend integration tests passed, and all
-415 Rust library tests passed. Vite reported only its advisory large-chunk
-warning for the current frontend bundle.
-
-These counts predate the removal of typed project-config capture; suite sizes
-change with that refactor and will be re-verified after the test runs.
+Verification on 2026-07-28 completed successfully: the production frontend
+build and Rust check passed, all 99 frontend integration tests passed, and all
+290 Rust library tests passed.
 
 Project-content end-to-end command coverage currently uses local-folder
 storage. The S3 adapter and bundle protocol have automated transport coverage,

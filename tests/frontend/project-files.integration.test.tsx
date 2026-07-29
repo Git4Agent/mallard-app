@@ -158,6 +158,7 @@ test("an explicit Push scan presents new entries selected and locks both directo
   assert.match(html, /required directory/);
   assert.match(html, /3 entr(?:y|ies)/);
   assert.match(html, /2 ignored · 1 blocked/);
+  assert.doesNotMatch(html, /sync-project-file-selection-placeholder|type="checkbox"/);
   assert.doesNotMatch(html, /Exact entries selected|Scanning cannot prove/);
 });
 
@@ -251,24 +252,14 @@ const pullPlan: RestorePlan = {
   host_id: binding.host_id,
   replica_id: binding.replica_id,
   expected_host_identity_revision: 0,
-  source_version: {
-    generation: 1,
-    commit_id: "commit-a",
-    manifest_sha256: "b".repeat(64),
-    snapshot_content_sha256: "c".repeat(64),
-    generation_record_sha256: "d".repeat(64),
-  },
-  observed_head: {
-    generation: 1,
-    commit_id: "commit-a",
-    manifest_sha256: "b".repeat(64),
-    snapshot_content_sha256: "c".repeat(64),
-    generation_record_sha256: "d".repeat(64),
-  },
+  generation: 1,
+  commit_id: "commit-a",
+  manifest_sha256: "b".repeat(64),
   binding_revision: 0,
   created_at: 1,
   expires_at: 2,
   project_content_eligibility: { state: "eligible", reason: "Not inside a Git work tree." },
+  conversation_actions: [],
   actions: [
     {
       action_id: "ensure-docs",
@@ -376,5 +367,6 @@ test("stored project files stay visible but locked when the binding is Git-manag
   assert.match(html, /Project files are locked/);
   assert.match(html, /Git manages this folder/);
   assert.match(html, /a\.md/);
-  assert.match(html, /disabled/);
+  assert.doesNotMatch(html, /aria-label="Apply a\.md"/);
+  assert.doesNotMatch(html, /sync-project-file-selection-placeholder|type="checkbox"/);
 });

@@ -23,7 +23,6 @@ import {
   buildPullReviewSelection,
   defaultSelected,
   dependencyActionIds,
-  isPinnedNoopConversation,
   itemKindLabel,
   includeRequiredPullProjectDirectories,
   pendingIds,
@@ -94,7 +93,7 @@ function PhaseProgress({
     { label: "Verify project readiness", icon: "refresh" as const },
   ];
   return (
-    <section className="v3-pull-progress" aria-label="Pull progress" aria-live="polite">
+    <section className="sync-pull-progress" aria-label="Pull progress" aria-live="polite">
       {steps.map((step, index) => {
         const current = activeIndex === index;
         const warning = phase === "complete" && (
@@ -131,7 +130,7 @@ function ResultDetails({
   const results = [restoreResult, dependencyResult].filter((result): result is RestoreResult | DependencyResult => result !== null);
   if (results.length === 0) return null;
   return (
-    <details className="v3-pull-result-details">
+    <details className="sync-pull-result-details">
       <summary>Technical results</summary>
       {results.map((result, index) => (
         <div key={`${result.message}-${index}`}>
@@ -143,6 +142,21 @@ function ResultDetails({
       ))}
     </details>
   );
+}
+
+export function pullSelectableResourceIds(
+  items: PullReviewItem[],
+  completedActionIds: ReadonlySet<string>,
+  completedResourceIds: ReadonlySet<string>,
+): Set<string> {
+  return new Set(items
+    .filter((item) => (
+      pendingIds(item, completedActionIds).length > 0
+      && !completedResourceIds.has(item.resourceId)
+      && !keepsLocalConversation(item)
+      && !requiresManualResolution(item)
+    ))
+    .map((item) => item.resourceId));
 }
 
 function ItemList({
@@ -175,7 +189,7 @@ function ItemList({
   });
 
   return (
-    <div className="v3-pull-items" role="list">
+    <div className="sync-pull-items" role="list">
       {items.map((item) => {
         const pending = pendingIds(item, completedActionIds);
         const completed = completedResourceIds.has(item.resourceId);
@@ -189,11 +203,21 @@ function ItemList({
         const keepLocalConversation = keepsLocalConversation(item);
         const manualResolution = requiresManualResolution(item);
         const blocked = keepLocalConversation || manualResolution || pending.length === 0 || completed || waitingForInstaller;
+        const selectable = !blocked;
         const checked = selected.has(item.resourceId) && !completed;
         const expanded = expandedItems.has(item.resourceId);
         const activeRestore = phase === "restoring" && checked && restoreActionIds(item).some((id) => !completedActionIds.has(id));
         const activeInstall = phase === "installing" && checked && dependencyActionIds(item).some((id) => !completedActionIds.has(id));
-        const status: string | null = keepLocalConversation
+        const conversationAction = item.conversationActions[0]?.action;
+        const status: string | null = conversationAction === "no_op"
+          ? "Already up to date"
+          : conversationAction === "require_pull"
+            ? "Pull required"
+            : conversationAction === "blocked"
+              ? "Can't sync"
+              : conversationAction === "store_only" && !selectable
+                ? "Backup only"
+                : keepLocalConversation
           ? "Keep local"
           : manualResolution
           ? "Resolve manually"
@@ -221,48 +245,53 @@ function ItemList({
         return (
           <div
             key={item.resourceId}
-            className={`v3-pull-item${checked ? " selected" : ""}${completed ? " completed" : ""}${failed ? " failed" : ""}`}
+            className={`sync-pull-item${selectable ? " sync-pull-item-selectable" : ""}${checked ? " selected" : ""}${completed ? " completed" : ""}${failed ? " failed" : ""}`}
             role="listitem"
           >
-            <label className="v3-pull-item-select">
-              <input
-                type="checkbox"
-                aria-label={`Select ${item.title}`}
-                checked={checked}
-                disabled={disabled || blocked}
-                onChange={() => onToggle(item.resourceId)}
-              />
-            </label>
+            {selectable && (
+              <label className="sync-pull-item-select">
+                <input
+                  type="checkbox"
+                  aria-label={`Select ${item.title}`}
+                  checked={checked}
+                  disabled={disabled}
+                  onChange={() => onToggle(item.resourceId)}
+                />
+              </label>
+            )}
             <button
               type="button"
-              className="v3-pull-item-main"
+              className="sync-pull-item-main"
               onClick={() => toggleDetails(item.resourceId)}
               aria-expanded={expanded}
               aria-label={`${expanded ? "Hide" : "Show"} details for ${item.title}`}
             >
-              <span className="v3-pull-item-toggle">
+              <span className="sync-pull-item-toggle">
                 <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
               </span>
-              <span className="v3-pull-item-icon">
+              <span className="sync-pull-item-icon">
                 <Icon
                   name={failed || manualResolution || keepLocalConversation ? "alert-triangle" : completed ? "check-circle" : item.toolKind === "plugin" ? "download" : item.toolKind === "custom_skill" ? "folder" : "file"}
                   size={14}
                 />
               </span>
-              <span className="v3-pull-item-copy">
+              <span className="sync-pull-item-copy">
                 <strong>{item.title}</strong>
                 <span>{itemKindLabel(item)}{item.provider ? ` · ${providerLabel(item.provider)}` : ""}</span>
               </span>
-              {status && <span className={`v3-pull-item-status ${status.toLowerCase().replace(/\s+/g, "-")}`}>{status}</span>}
+              {status && <span className={`sync-pull-item-status ${status.toLowerCase().replace(/\s+/g, "-")}`}>{status}</span>}
             </button>
             {expanded && (
-              <div className="v3-pull-item-detail">
+              <div className="sync-pull-item-detail">
                 <p>{item.detail}</p>
-                <div className="v3-pull-item-detail-grid">
+                <div className="sync-pull-item-detail-grid">
                   <span>Type</span><code>{itemKindLabel(item)}{item.provider ? ` · ${providerLabel(item.provider)}` : ""}</code>
                   <span>Resource</span><code>{item.resourceId}</code>
                   {item.restoreActions.map((action) => (
                     <Fragment key={action.action_id}><span>Restore</span><code>{action.action_id}</code></Fragment>
+                  ))}
+                  {item.conversationActions.map((action) => (
+                    <Fragment key={action.action_id}><span>Conversation</span><code>{action.action}</code></Fragment>
                   ))}
                   {item.dependencyActions.map((action) => (
                     <Fragment key={action.action_id}><span>Installer</span><code>{action.action_id}</code></Fragment>
@@ -305,47 +334,20 @@ export default function RestorePlanView({
     () => items.filter((item) => itemKindLabel(item) === "Conversation"),
     [items],
   );
-  const upToDateConversationItems = useMemo(
-    () => conversationItems.filter(isPinnedNoopConversation),
-    [conversationItems],
-  );
-  const upToDateConversationIds = useMemo(
-    () => new Set(upToDateConversationItems.map((item) => item.resourceId)),
-    [upToDateConversationItems],
-  );
-  const internalResourceIds = useMemo(() => {
-    const resourceIds = new Set(upToDateConversationIds);
-    if (items.some((item) => item.resourceId === "codex:session-index")) {
-      resourceIds.add("codex:session-index");
-    }
-    return resourceIds;
-  }, [items, upToDateConversationIds]);
-  const visibleItems = useMemo(
-    () => items.filter((item) => !internalResourceIds.has(item.resourceId)),
-    [items, internalResourceIds],
-  );
-  const visibleConversationItems = useMemo(
-    () => conversationItems.filter((item) => !upToDateConversationIds.has(item.resourceId)),
-    [conversationItems, upToDateConversationIds],
-  );
-  const conversationReviewIds = useMemo(
-    () => new Set(conversationItems.map((item) => item.resourceId)),
-    [conversationItems],
-  );
   const skillItems = useMemo(() => items.filter((item) => item.toolKind === "custom_skill"), [items]);
   const pluginItems = useMemo(() => items.filter((item) => item.toolKind === "plugin"), [items]);
   const projectContentItems = useMemo(
     () => items.filter((item) => item.category === "project_content"),
     [items],
   );
-  const otherItems = useMemo(() => visibleItems.filter((item) => (
+  const otherItems = useMemo(() => items.filter((item) => (
     itemKindLabel(item) !== "Conversation"
     && item.toolKind !== "custom_skill"
     && item.toolKind !== "plugin"
     && item.category !== "project_content"
-  )), [visibleItems]);
-  const projectItems = useMemo(() => visibleItems.filter((item) => item.category === "project_data"), [visibleItems]);
-  const globalItems = useMemo(() => visibleItems.filter((item) => item.category === "global_tool"), [visibleItems]);
+  )), [items]);
+  const projectItems = useMemo(() => items.filter((item) => item.category === "project_data"), [items]);
+  const globalItems = useMemo(() => items.filter((item) => item.category === "global_tool"), [items]);
   const showProjectFiles = plan.project_content_eligibility?.state === "eligible" || projectContentItems.length > 0;
   const reviewSteps = useMemo(() => syncReviewSteps(showProjectFiles), [showProjectFiles]);
   const knownItems = useRef(new Set<string>());
@@ -375,21 +377,21 @@ export default function RestorePlanView({
     () => buildPullReviewSelection(items, selected, completedActionIds, completedResourceIds),
     [items, selected, completedActionIds, completedResourceIds],
   );
-  const selectedCount = selection.resourceIds.filter((resourceId) => !internalResourceIds.has(resourceId)).length;
+  const selectedCount = selection.resourceIds.length;
   const pendingProjectContentDecisionCount = projectContentItems.filter((item) => (
     pendingIds(item, completedActionIds).length > 0 && !completedResourceIds.has(item.resourceId)
   )).length;
   const hasResult = phase === "complete" || restoreResult !== null || dependencyResult !== null;
-  const approvalItems = visibleItems.filter((item) => (
+  const approvalItems = items.filter((item) => (
     item.category !== "project_content"
     && requiresApproval(item)
     && !selected.has(item.resourceId)
     && !completedResourceIds.has(item.resourceId)
   ));
-  const manualItems = visibleItems.filter((item) => (
+  const manualItems = items.filter((item) => (
     requiresManualResolution(item) && !completedResourceIds.has(item.resourceId)
   ));
-  const keptLocalConversationItems = visibleItems.filter((item) => (
+  const keptLocalConversationItems = items.filter((item) => (
     keepsLocalConversation(item) && !completedResourceIds.has(item.resourceId)
   ));
 
@@ -407,13 +409,9 @@ export default function RestorePlanView({
   )).length;
   const unchangedCount = skippedTools + manualItems.length;
   const finalReady = hasResult && !error && failureCount === 0 && skippedTools === 0 && readiness?.state === "ready";
-  const reviewCanClose = (hasResult && (
+  const reviewCanClose = hasResult && (
     finalReady || (selectedCount === 0 && pendingProjectContentDecisionCount === 0)
-  )) || (!hasResult
-    && !supportLoading
-    && visibleItems.length === 0
-    && pendingProjectContentDecisionCount === 0
-    && keptLocalConversationItems.length === 0);
+  );
   const completedProjectItems = projectItems.filter((item) => completedResourceIds.has(item.resourceId));
   const completedSkills = globalItems.filter((item) => (
     item.toolKind === "custom_skill" && completedResourceIds.has(item.resourceId)
@@ -469,14 +467,14 @@ export default function RestorePlanView({
   const dependencyMessages = (dependencyPlan?.blockers?.length ?? 0) + (dependencyPlan?.warnings?.length ?? 0);
   const recommendedIds = new Set(items.filter(defaultSelected).map((item) => item.resourceId));
   const stepItems = activeStep === "history"
-    ? visibleConversationItems
+    ? conversationItems
     : activeStep === "skills"
       ? skillItems
       : activeStep === "plugins"
         ? pluginItems
         : activeStep === "project_files"
           ? projectContentItems
-        : visibleItems;
+        : items;
   const pendingStepItems = stepItems.filter((item) => (
     pendingIds(item, completedActionIds).length > 0 && !completedResourceIds.has(item.resourceId)
   ));
@@ -494,14 +492,14 @@ export default function RestorePlanView({
     return includeRequiredPullProjectDirectories(items, next);
   });
   const clearStep = () => setSelected((current) => {
-    if (activeStep === "review") return new Set(internalResourceIds);
+    if (activeStep === "review") return new Set();
     const next = new Set(current);
     for (const item of stepItems) next.delete(item.resourceId);
     return next;
   });
   const selectedIn = (chosen: PullReviewItem[]) => chosen.filter((item) => selected.has(item.resourceId)).length;
   const counts = {
-    history: selectedIn(visibleConversationItems),
+    history: selectedIn(conversationItems),
     skills: selectedIn(skillItems),
     plugins: selectedIn(pluginItems),
     project_files: selectedIn(projectContentItems),
@@ -527,12 +525,13 @@ export default function RestorePlanView({
     warningSteps.add("project_files");
     warningSteps.add("review");
   }
-  const selectableIds = (chosen: PullReviewItem[]) => new Set(chosen
-    .filter((item) => pendingIds(item, completedActionIds).length > 0 && !completedResourceIds.has(item.resourceId))
-    .map((item) => item.resourceId));
-  const conversationIds = selectableIds(conversationItems);
-  const skillIds = selectableIds(skillItems);
-  const pluginIds = selectableIds(pluginItems);
+  const conversationIds = pullSelectableResourceIds(
+    conversationItems,
+    completedActionIds,
+    completedResourceIds,
+  );
+  const skillIds = pullSelectableResourceIds(skillItems, completedActionIds, completedResourceIds);
+  const pluginIds = pullSelectableResourceIds(pluginItems, completedActionIds, completedResourceIds);
   const stepIndex = reviewSteps.indexOf(activeStep);
   const goBack = () => setActiveStep(reviewSteps[Math.max(0, stepIndex - 1)]);
   const goNext = () => setActiveStep(reviewSteps[Math.min(reviewSteps.length - 1, stepIndex + 1)]);
@@ -556,31 +555,31 @@ export default function RestorePlanView({
 
   return (
     <ReviewContainer
-      className={embedded ? "v3-inline-action-review v3-inline-pull-review v3-sync-review-workspace" : "v3-main v3-pull-review-workspace v3-sync-review-workspace"}
-      aria-labelledby="v3-pull-review-title"
+      className={embedded ? "sync-inline-action-review sync-inline-pull-review sync-sync-review-workspace" : "sync-main sync-pull-review-workspace sync-sync-review-workspace"}
+      aria-labelledby="sync-pull-review-title"
     >
-      <header className={embedded ? "v3-inline-action-header v3-inline-pull-header v3-sync-review-header" : "v3-pull-review-header v3-sync-review-header"}>
+      <header className={embedded ? "sync-inline-action-header sync-inline-pull-header sync-sync-review-header" : "sync-pull-review-header sync-sync-review-header"}>
         {!embedded && (
-          <button type="button" className="btn btn-ghost v3-pull-back" onClick={onBack} disabled={busy}>
+          <button type="button" className="btn btn-ghost sync-pull-back" onClick={onBack} disabled={busy}>
             <Icon name="chevron-left" size={15} /> Back to {projectName}
           </button>
         )}
-        <div className={embedded ? "v3-inline-action-heading" : "v3-pull-review-heading"}>
-          <div className={embedded ? "v3-sync-review-title" : undefined}>
+        <div className={embedded ? "sync-inline-action-heading" : "sync-pull-review-heading"}>
+          <div className={embedded ? "sync-sync-review-title" : undefined}>
             {embedded
-              ? <h2 id="v3-pull-review-title">Pull review</h2>
-              : <h1 id="v3-pull-review-title">Restore {projectName}</h1>}
+              ? <h2 id="sync-pull-review-title">Pull review</h2>
+              : <h1 id="sync-pull-review-title">Restore {projectName}</h1>}
             {!embedded && (
-                <p className="v3-pull-review-meta">
+                <p className="sync-pull-review-meta">
                   <span>{`Choose changes from ${storageName || "storage"} to apply to this machine.`}</span>
                 </p>
               )}
           </div>
         </div>
-        <div className="v3-push-resource-actions">
+        <div className="sync-push-resource-actions">
           <button
             type="button"
-            className="btn btn-ghost v3-sync-review-icon-action has-count"
+            className="btn btn-ghost sync-sync-review-icon-action has-count"
             onClick={useRecommended}
             disabled={busy || finalReady || pendingStepItems.length === 0 || stepMatchesRecommended}
             title="Restore the recommended safe selection"
@@ -591,7 +590,7 @@ export default function RestorePlanView({
           </button>
           <button
             type="button"
-            className="btn btn-ghost v3-sync-review-icon-action"
+            className="btn btn-ghost sync-sync-review-icon-action"
             onClick={clearStep}
             disabled={busy || finalReady || selectedIn(stepItems) === 0}
             title="Clear current selection"
@@ -602,7 +601,7 @@ export default function RestorePlanView({
           {embedded && (
             <button
               type="button"
-              className="btn btn-ghost v3-inline-action-close"
+              className="btn btn-ghost sync-inline-action-close"
               onClick={onBack}
               disabled={busy}
               aria-label={`Close pull review for ${projectName}`}
@@ -624,12 +623,12 @@ export default function RestorePlanView({
 
       <div
         id={`sync-review-${activeStep}-panel`}
-        className={embedded ? "v3-pull-review-content v3-inline-action-content v3-sync-review-content" : "v3-pull-review-content v3-sync-review-content"}
+        className={embedded ? "sync-pull-review-content sync-inline-action-content sync-sync-review-content" : "sync-pull-review-content sync-sync-review-content"}
         role="tabpanel"
         aria-labelledby={`sync-review-${activeStep}-tab`}
       >
         <div
-          className="v3-inline-action-scroll v3-sync-review-scroll"
+          className="sync-inline-action-scroll sync-sync-review-scroll"
         >
           {activeStep === "history" && conversationItems.length > 0 && project && binding.profile_ids.codex ? (
             <ProjectChatHistoryPage
@@ -642,14 +641,12 @@ export default function RestorePlanView({
               selectionMode="pull"
               selectedResourceIds={selected}
               selectableResourceIds={conversationIds}
-              reviewResourceIds={conversationReviewIds}
-              upToDateResourceIds={upToDateConversationIds}
               selectionDisabled={busy || finalReady}
               onToggleResource={toggle}
             />
-          ) : activeStep === "history" && visibleConversationItems.length > 0 ? (
+          ) : activeStep === "history" && conversationItems.length > 0 ? (
             <ItemList
-              items={visibleConversationItems}
+              items={conversationItems}
               selected={selected}
               completedActionIds={completedActionIds}
               completedResourceIds={completedResourceIds}
@@ -660,7 +657,7 @@ export default function RestorePlanView({
               onToggle={toggle}
             />
           ) : activeStep === "history" ? (
-            <div className="v3-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No session changes</strong><small>Sessions already match this storage.</small></span></div>
+            <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No session changes</strong><small>Sessions already match this storage.</small></span></div>
           ) : null}
 
           {activeStep === "skills" && skillItems.length > 0 && project ? (
@@ -681,7 +678,7 @@ export default function RestorePlanView({
           ) : activeStep === "skills" && skillItems.length > 0 ? (
             <ItemList items={skillItems} selected={selected} completedActionIds={completedActionIds} completedResourceIds={completedResourceIds} failedResourceIds={failedResourceIds} phase={phase} supportLoading={supportLoading} disabled={busy || finalReady} onToggle={toggle} />
           ) : activeStep === "skills" ? (
-            <div className="v3-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No skill changes</strong><small>Skills already match this storage.</small></span></div>
+            <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No skill changes</strong><small>Skills already match this storage.</small></span></div>
           ) : null}
 
           {activeStep === "plugins" && pluginItems.length > 0 && project ? (
@@ -702,7 +699,7 @@ export default function RestorePlanView({
           ) : activeStep === "plugins" && pluginItems.length > 0 ? (
             <ItemList items={pluginItems} selected={selected} completedActionIds={completedActionIds} completedResourceIds={completedResourceIds} failedResourceIds={failedResourceIds} phase={phase} supportLoading={supportLoading} disabled={busy || finalReady} onToggle={toggle} />
           ) : activeStep === "plugins" ? (
-            <div className="v3-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No plugin changes</strong><small>Plugins already match this storage.</small></span></div>
+            <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No plugin changes</strong><small>Plugins already match this storage.</small></span></div>
           ) : null}
 
           {activeStep === "project_files" && (
@@ -739,12 +736,12 @@ export default function RestorePlanView({
           )}
 
           {activeStep === "review" && (
-            <div className="v3-sync-review-summary">
+            <div className="sync-sync-review-summary">
               {phase !== "idle" && (
                 <PhaseProgress phase={phase} ready={finalReady} restoreFailed={failedProjectItems.length > 0} installFailed={failedTools.length > 0} />
               )}
               {hasResult && (
-                <section className={`v3-pull-outcome${finalReady ? " success" : " warning"}`} aria-live="polite">
+                <section className={`sync-pull-outcome${finalReady ? " success" : " warning"}`} aria-live="polite">
                   <Icon name={finalReady ? "check-circle" : "alert-triangle"} size={20} />
                   <div>
                     <h2>{outcomeTitle}</h2>
@@ -761,7 +758,7 @@ export default function RestorePlanView({
                 </section>
               )}
 
-              <div className="v3-sync-review-summary-meta"><Icon name="download" size={14} /><span>{embedded ? `Generation ${plan.source_version.generation}` : `${storageName || "Storage"} · Generation ${plan.source_version.generation}`}</span></div>
+              <div className="sync-sync-review-summary-meta"><Icon name="download" size={14} /><span>{embedded ? `Generation ${plan.generation}` : `${storageName || "Storage"} · Generation ${plan.generation}`}</span></div>
               <button type="button" onClick={() => setActiveStep("history")}>
                 <span><Icon name="git-branch" size={15} /><strong>Sessions</strong></span>
                 <span>{counts.history} selected<Icon name="chevron-right" size={13} /></span>
@@ -775,20 +772,20 @@ export default function RestorePlanView({
                 <span>{counts.plugins} selected<Icon name="chevron-right" size={13} /></span>
               </button>
               {(otherItems.length > 0 || supportLoading) && (
-                <details className="v3-sync-review-other">
+                <details className="sync-sync-review-other">
                   <summary>
                     <span><Icon name="settings" size={15} /><strong>Agent setup & tools</strong></span>
                     <span>{selectedIn(otherItems)} selected<Icon name="chevron-right" size={13} /></span>
                   </summary>
                   <ItemList items={otherItems} selected={selected} completedActionIds={completedActionIds} completedResourceIds={completedResourceIds} failedResourceIds={failedResourceIds} phase={phase} supportLoading={supportLoading} disabled={busy || finalReady} onToggle={toggle} />
-                  {supportLoading && <div className="v3-pull-support-loading"><Icon name="refresh" className="icon-spin" size={14} /> Checking installers…</div>}
+                  {supportLoading && <div className="sync-pull-support-loading"><Icon name="refresh" className="icon-spin" size={14} /> Checking installers…</div>}
                 </details>
               )}
 
-              {(dependencyPlan?.blockers ?? []).map((blocker) => <div key={blocker} className="v3-callout error"><Icon name="alert-triangle" size={15} /> {blocker}</div>)}
-              {(dependencyPlan?.warnings ?? []).map((warning) => <div key={warning} className="v3-callout"><Icon name="alert-triangle" size={15} /> {warning}</div>)}
+              {(dependencyPlan?.blockers ?? []).map((blocker) => <div key={blocker} className="sync-callout error"><Icon name="alert-triangle" size={15} /> {blocker}</div>)}
+              {(dependencyPlan?.warnings ?? []).map((warning) => <div key={warning} className="sync-callout"><Icon name="alert-triangle" size={15} /> {warning}</div>)}
               {!hasResult && keptLocalConversationItems.length > 0 && (
-                <div className="v3-callout warning v3-sync-review-blocker">
+                <div className="sync-callout warning sync-sync-review-blocker">
                   <Icon name="alert-triangle" size={15} />
                   <span>
                     <strong>{keptLocalConversationItems.length === 1 ? "1 conversation differs" : `${keptLocalConversationItems.length} conversations differ`}</strong>
@@ -798,7 +795,7 @@ export default function RestorePlanView({
                 </div>
               )}
               {!hasResult && manualItems.length > 0 && (
-                <div className="v3-callout warning v3-sync-review-blocker">
+                <div className="sync-callout warning sync-sync-review-blocker">
                   <Icon name="alert-triangle" size={15} />
                   <span>
                     <strong>{manualItems.length === 1 && itemKindLabel(manualItems[0]) === "Conversation" ? "1 conflicted conversation will stay unchanged" : `${manualItems.length} changes need manual resolution`}</strong>
@@ -810,7 +807,7 @@ export default function RestorePlanView({
                 </div>
               )}
               {!hasResult && approvalItems.length > 0 && (
-                <div className="v3-callout v3-sync-review-blocker">
+                <div className="sync-callout sync-sync-review-blocker">
                   <Icon name="help-circle" size={15} />
                   <span>
                     <strong>{hasResult ? `Optional change${approvalItems.length === 1 ? "" : "s"} skipped` : `Optional change${approvalItems.length === 1 ? "" : "s"} not selected`}</strong>
@@ -823,17 +820,17 @@ export default function RestorePlanView({
               )}
 
               {!supportLoading && items.length === 0 && (
-                <div className="v3-pull-empty"><Icon name="check-circle" size={16} /><span><strong>Nothing to pull</strong><small>This project already matches the selected generation.</small></span></div>
+                <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>Nothing to pull</strong><small>This project already matches the selected generation.</small></span></div>
               )}
 
               {(hasResult && ((readiness?.issues.length ?? 0) > 0 || !finalReady)) && (
-                <section className="v3-pull-section" aria-labelledby="v3-pull-readiness">
-                  <div className="v3-pull-section-heading">
-                    <span className="v3-pull-section-icon"><Icon name="check-circle" size={16} /></span>
-                    <div><h2 id="v3-pull-readiness">Remaining items</h2><p>{readiness?.issues.length ?? 0} item{readiness?.issues.length === 1 ? "" : "s"} still need attention after Pull.</p></div>
+                <section className="sync-pull-section" aria-labelledby="sync-pull-readiness">
+                  <div className="sync-pull-section-heading">
+                    <span className="sync-pull-section-icon"><Icon name="check-circle" size={16} /></span>
+                    <div><h2 id="sync-pull-readiness">Remaining items</h2><p>{readiness?.issues.length ?? 0} item{readiness?.issues.length === 1 ? "" : "s"} still need attention after Pull.</p></div>
                     <button type="button" className="btn btn-ghost" onClick={onRefresh} disabled={busy}><Icon name="refresh" size={13} /> Recheck</button>
                   </div>
-                  <div className="v3-readiness-list">
+                  <div className="sync-readiness-list">
                     {(readiness?.issues ?? []).map((issue) => (
                       <div key={issue.issue_id} className={`severity-${issue.severity ?? "info"}`}>
                         <Icon name={issue.severity === "error" ? "alert-triangle" : "check-circle"} size={14} />
@@ -848,14 +845,14 @@ export default function RestorePlanView({
                 </section>
               )}
 
-              {error && <div className="v3-callout error v3-pull-error" role="alert"><Icon name="alert-triangle" size={15} /> {error}</div>}
+              {error && <div className="sync-callout error sync-pull-error" role="alert"><Icon name="alert-triangle" size={15} /> {error}</div>}
               <ResultDetails restoreResult={restoreResult} dependencyResult={dependencyResult} />
             </div>
           )}
         </div>
       </div>
 
-      <footer className={embedded ? "v3-pull-apply-bar v3-inline-action-footer v3-sync-review-footer" : "v3-pull-apply-bar v3-sync-review-footer"}>
+      <footer className={embedded ? "sync-pull-apply-bar sync-inline-action-footer sync-sync-review-footer" : "sync-pull-apply-bar sync-sync-review-footer"}>
         {(hasResult || !embedded) && (
           <span>
             {hasResult && <strong>{outcomeTitle}</strong>}
@@ -873,7 +870,7 @@ export default function RestorePlanView({
             {stepIndex > 0 && <button type="button" className="btn btn-ghost" onClick={goBack} disabled={busy}>Back</button>}
             <button
               type="button"
-              className="btn btn-primary v3-pull-apply-button"
+              className="btn btn-primary sync-pull-apply-button"
               disabled={busy || (!reviewCanClose
                 && selectedCount === 0
                 && pendingProjectContentDecisionCount === 0

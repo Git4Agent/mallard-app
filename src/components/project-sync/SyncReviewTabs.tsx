@@ -67,7 +67,7 @@ export default function SyncReviewTabs({
   };
 
   return (
-    <div className="v3-project-tabs v3-sync-review-tabs" role="tablist" aria-label="Sync review steps">
+    <div className="sync-project-tabs sync-sync-review-tabs" role="tablist" aria-label="Sync review steps">
       {steps.map((stepId) => {
         const step = STEP_DEFINITIONS[stepId];
         const active = activeStep === stepId;
@@ -92,7 +92,7 @@ export default function SyncReviewTabs({
             <Icon name={step.icon} size={14} />
             <span>{step.label}</span>
             {step.id !== "review" && <small>{count}</small>}
-            {warning && <span className="v3-sync-review-warning-dot" aria-hidden="true" />}
+            {warning && <span className="sync-sync-review-warning-dot" aria-hidden="true" />}
           </button>
         );
       })}

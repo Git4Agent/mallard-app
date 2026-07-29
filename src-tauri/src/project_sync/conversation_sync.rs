@@ -4,7 +4,7 @@
 //! reimplementing relation-to-action policy. This keeps Push, Pull, recovery,
 //! and the integration harness on one state machine.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use super::domain::{
     classify_conversation_relation, ActionId, CanonicalConversationMessage, ConversationBindings,
@@ -47,10 +47,14 @@ impl Default for ConversationCapabilities {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConversationDecision {
     pub action: ConversationPlanActionType,
     pub reason_code: ConversationReasonCode,
+    pub selectable: bool,
+    pub selected_by_default: bool,
+    pub requires_explicit_approval: bool,
+    pub blocked_reason: Option<String>,
 }
 
 /// Map a proven relation to one typed default action. Fork is always the
@@ -67,10 +71,7 @@ pub fn default_conversation_decision(
     use ConversationRelation as Relation;
 
     if relation == Relation::Identical && capabilities.structural_rewrite_only {
-        return ConversationDecision {
-            action: Action::NoOp,
-            reason_code: Reason::StructuralRewriteOnly,
-        };
+        return decision(Action::NoOp, Reason::StructuralRewriteOnly);
     }
 
     match direction {
@@ -139,7 +140,9 @@ pub fn default_conversation_decision(
             }
             Relation::LocalMissing => decision(Action::NoOp, Reason::LocalMissing),
             Relation::CloudMissing => {
-                if capabilities.local_safely_capturable {
+                if capabilities.binding == BindingResolution::Ambiguous {
+                    decision(Action::Blocked, Reason::AmbiguousBinding)
+                } else if capabilities.local_safely_capturable {
                     decision(Action::CreateCloud, Reason::CloudMissing)
                 } else {
                     decision(Action::Blocked, Reason::CodecUnsupported)
@@ -156,15 +159,40 @@ pub fn default_conversation_decision(
                     decision(Action::StoreOnly, Reason::CodecUnsupported)
                 } else if !capabilities.provider_quiescent {
                     decision(Action::StoreOnly, Reason::ProviderNotQuiescent)
+                } else if matches!(
+                    capabilities.binding,
+                    BindingResolution::Missing | BindingResolution::Ambiguous
+                ) {
+                    decision(
+                        Action::Blocked,
+                        if capabilities.binding == BindingResolution::Ambiguous {
+                            Reason::AmbiguousBinding
+                        } else {
+                            Reason::MissingBinding
+                        },
+                    )
                 } else {
                     decision(Action::FastForwardLocal, Reason::LocalPrefixOfCloud)
                 }
             }
             Relation::Diverged => {
-                if capabilities.cloud_safely_readable && capabilities.destination_codec_resumable {
+                if !capabilities.cloud_safely_readable || !capabilities.destination_codec_resumable
+                {
+                    decision(Action::StoreOnly, Reason::CodecUnsupported)
+                } else if matches!(
+                    capabilities.binding,
+                    BindingResolution::Bound | BindingResolution::UniqueCompatibleAncestor
+                ) {
                     decision(Action::Fork, Reason::Diverged)
                 } else {
-                    decision(Action::StoreOnly, Reason::CodecUnsupported)
+                    decision(
+                        Action::Blocked,
+                        if capabilities.binding == BindingResolution::Ambiguous {
+                            Reason::AmbiguousBinding
+                        } else {
+                            Reason::MissingBinding
+                        },
+                    )
                 }
             }
             Relation::Unknown => decision(Action::StoreOnly, Reason::UnknownLineage),
@@ -185,9 +213,53 @@ fn decision(
     action: ConversationPlanActionType,
     reason_code: ConversationReasonCode,
 ) -> ConversationDecision {
+    let requires_explicit_approval = matches!(
+        action,
+        ConversationPlanActionType::ReplaceLocal
+            | ConversationPlanActionType::ReplaceCloud
+            | ConversationPlanActionType::TombstoneThread
+    );
+    let selectable = matches!(
+        action,
+        ConversationPlanActionType::FastForwardLocal
+            | ConversationPlanActionType::FastForwardCloud
+            | ConversationPlanActionType::Fork
+            | ConversationPlanActionType::CreateCloud
+            | ConversationPlanActionType::CreateLocal
+            | ConversationPlanActionType::ReplaceLocal
+            | ConversationPlanActionType::ReplaceCloud
+            | ConversationPlanActionType::TombstoneThread
+    );
+    let selected_by_default = selectable && !requires_explicit_approval;
     ConversationDecision {
         action,
         reason_code,
+        selectable,
+        selected_by_default,
+        requires_explicit_approval,
+        blocked_reason: (action == ConversationPlanActionType::Blocked)
+            .then(|| blocked_reason(reason_code).to_string()),
+    }
+}
+
+fn blocked_reason(reason: ConversationReasonCode) -> &'static str {
+    match reason {
+        ConversationReasonCode::ProviderNotQuiescent => {
+            "The provider may still be writing this conversation."
+        }
+        ConversationReasonCode::CodecUnsupported => {
+            "This conversation cannot be transformed safely by the active codec."
+        }
+        ConversationReasonCode::AmbiguousBinding => {
+            "More than one local-to-cloud conversation binding is compatible."
+        }
+        ConversationReasonCode::MissingBinding => {
+            "No verified local-to-cloud conversation binding exists."
+        }
+        ConversationReasonCode::StalePlan => {
+            "The reviewed conversation state changed. Refresh before applying."
+        }
+        _ => "This conversation cannot be changed safely.",
     }
 }
 
@@ -327,35 +399,6 @@ pub fn recover_unique_compatible_binding(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TombstoneDecision {
-    RejectUnapproved,
-    RejectStaleDigest,
-    PreserveModified,
-    TombstoneThread,
-}
-
-/// Decide a reviewed deletion without treating absence as intent. A modified
-/// copy always survives a tombstone race, and a tombstone that no longer
-/// matches a live thread is stale rather than silently re-applied.
-pub fn review_conversation_tombstone(
-    thread_is_live: bool,
-    reviewed_tree_digest: &str,
-    current_tree_digest: &str,
-    approved: bool,
-) -> TombstoneDecision {
-    if !approved {
-        return TombstoneDecision::RejectUnapproved;
-    }
-    if reviewed_tree_digest != current_tree_digest {
-        return TombstoneDecision::PreserveModified;
-    }
-    if !thread_is_live {
-        return TombstoneDecision::RejectStaleDigest;
-    }
-    TombstoneDecision::TombstoneThread
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConversationStalePin {
     Expired,
     Host,
@@ -487,7 +530,7 @@ pub struct ConversationBindingScope {
 
 /// Move one local conversation binding to a freshly minted thread. This is
 /// the core fork primitive: identity converges while content never does.
-/// Callers invoke it inside `V3Repository::mutate_conversation_bindings`, so
+/// Callers invoke it inside `LocalStateRepository::mutate_conversation_bindings`, so
 /// the rekey is one atomic document replacement. The provider thread ID and
 /// transcript are deliberately untouched, and the cloud source pins are
 /// cleared because the minted thread has no published counterpart yet — the
@@ -526,6 +569,7 @@ pub fn rekey_thread_binding(
 
     let binding = &mut document.bindings[binding_index];
     binding.thread_id = result_thread_id.clone();
+    binding.forked_from = Some(old_thread_id.clone());
     binding.source_generation = None;
     binding.source_manifest_sha256 = None;
     binding.revision = binding.revision.saturating_add(1);
@@ -538,48 +582,6 @@ fn binding_in_scope(binding: &LocalConversationBinding, scope: &ConversationBind
         && binding.replica_id == scope.replica_id
         && binding.local_project_id == scope.local_project_id
         && binding.provider_profile_id == scope.provider_profile_id
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProviderIdRequest {
-    pub thread_id: ThreadId,
-    pub source_hint: Option<String>,
-}
-
-/// Reserve provider IDs in deterministic plan order: sorted thread ID.
-/// Existing IDs always win collisions. Generated values come from an
-/// injected allocator so plans persist one chosen value and do not depend on
-/// recalculation during retries.
-pub fn reserve_provider_thread_ids(
-    requests: impl IntoIterator<Item = ProviderIdRequest>,
-    occupied: &BTreeSet<String>,
-    mut allocate: impl FnMut() -> Result<String, String>,
-) -> Result<BTreeMap<ThreadId, String>, String> {
-    let mut requests = requests.into_iter().collect::<Vec<_>>();
-    requests.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
-    let mut reserved = occupied.clone();
-    let mut result = BTreeMap::new();
-    for request in requests {
-        let chosen = match request.source_hint {
-            Some(hint) if valid_provider_thread_id(&hint) && !reserved.contains(&hint) => hint,
-            _ => loop {
-                let candidate = allocate()?;
-                if !valid_provider_thread_id(&candidate) {
-                    return Err("provider ID allocator returned an invalid value".to_string());
-                }
-                if !reserved.contains(&candidate) {
-                    break candidate;
-                }
-            },
-        };
-        reserved.insert(chosen.clone());
-        result.insert(request.thread_id, chosen);
-    }
-    Ok(result)
-}
-
-fn valid_provider_thread_id(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
 }
 
 #[cfg(test)]
@@ -666,29 +668,81 @@ mod tests {
     }
 
     #[test]
-    fn provider_id_reservation_is_ordered_and_injective() {
-        let requests = vec![
-            ProviderIdRequest {
-                thread_id: ThreadId::parse("thread-z").unwrap(),
-                source_hint: Some("shared-source".to_string()),
+    fn pull_mutations_require_one_verified_binding() {
+        for relation in [
+            ConversationRelation::LocalPrefixOfCloud,
+            ConversationRelation::Diverged,
+        ] {
+            for (binding, reason) in [
+                (
+                    BindingResolution::Missing,
+                    ConversationReasonCode::MissingBinding,
+                ),
+                (
+                    BindingResolution::Ambiguous,
+                    ConversationReasonCode::AmbiguousBinding,
+                ),
+            ] {
+                let blocked = default_conversation_decision(
+                    ConversationPlanDirection::Pull,
+                    relation,
+                    ConversationCapabilities {
+                        binding,
+                        ..ConversationCapabilities::default()
+                    },
+                );
+                assert_eq!(blocked.action, ConversationPlanActionType::Blocked);
+                assert_eq!(blocked.reason_code, reason);
+                assert!(!blocked.selectable);
+                assert!(!blocked.selected_by_default);
+            }
+        }
+
+        for binding in [
+            BindingResolution::Bound,
+            BindingResolution::UniqueCompatibleAncestor,
+        ] {
+            let fast_forward = default_conversation_decision(
+                ConversationPlanDirection::Pull,
+                ConversationRelation::LocalPrefixOfCloud,
+                ConversationCapabilities {
+                    binding,
+                    ..ConversationCapabilities::default()
+                },
+            );
+            assert_eq!(
+                fast_forward.action,
+                ConversationPlanActionType::FastForwardLocal
+            );
+            assert!(fast_forward.selected_by_default);
+
+            let fork = default_conversation_decision(
+                ConversationPlanDirection::Pull,
+                ConversationRelation::Diverged,
+                ConversationCapabilities {
+                    binding,
+                    ..ConversationCapabilities::default()
+                },
+            );
+            assert_eq!(fork.action, ConversationPlanActionType::Fork);
+            assert!(fork.selected_by_default);
+        }
+
+        let ambiguous_new_thread = default_conversation_decision(
+            ConversationPlanDirection::Push,
+            ConversationRelation::CloudMissing,
+            ConversationCapabilities {
+                binding: BindingResolution::Ambiguous,
+                ..ConversationCapabilities::default()
             },
-            ProviderIdRequest {
-                thread_id: ThreadId::parse("thread-a").unwrap(),
-                source_hint: Some("shared-source".to_string()),
-            },
-        ];
-        let mut sequence = ["generated-1", "generated-2"].into_iter();
-        let reserved = reserve_provider_thread_ids(requests, &BTreeSet::new(), || {
-            Ok(sequence.next().unwrap().to_string())
-        })
-        .unwrap();
-        assert_eq!(
-            reserved[&ThreadId::parse("thread-a").unwrap()],
-            "shared-source"
         );
         assert_eq!(
-            reserved[&ThreadId::parse("thread-z").unwrap()],
-            "generated-1"
+            ambiguous_new_thread.action,
+            ConversationPlanActionType::Blocked
+        );
+        assert_eq!(
+            ambiguous_new_thread.reason_code,
+            ConversationReasonCode::AmbiguousBinding
         );
     }
 }

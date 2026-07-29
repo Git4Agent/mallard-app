@@ -82,7 +82,7 @@ export default function ProjectBindingEditor({
     return (
       <label>
         <span>{label} profile <small>{requiredProviders.includes(provider) ? "required" : "this machine"}</small></span>
-        <div className="v3-profile-select-row">
+        <div className="sync-profile-select-row">
           <select
             value={selected}
             disabled={busy}
@@ -112,24 +112,24 @@ export default function ProjectBindingEditor({
   };
 
   return (
-    <div className="v3-modal-backdrop" role="presentation">
-      <section className="v3-modal v3-binding-dialog" role="dialog" aria-modal="true" aria-labelledby="v3-binding-title">
-        <header className="v3-modal-header">
+    <div className="sync-modal-backdrop" role="presentation">
+      <section className="sync-modal sync-binding-dialog" role="dialog" aria-modal="true" aria-labelledby="sync-binding-title">
+        <header className="sync-modal-header">
           <div>
-            <span className="v3-eyebrow">Machine-local binding</span>
-            <h1 id="v3-binding-title">{title}</h1>
+            <span className="sync-eyebrow">Machine-local binding</span>
+            <h1 id="sync-binding-title">{title}</h1>
             <p>{description}</p>
           </div>
           <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy} aria-label="Close binding editor">
             <Icon name="x" size={17} />
           </button>
         </header>
-        <div className="v3-modal-body">
-          <div className="v3-binding-safety">
+        <div className="sync-modal-body">
+          <div className="sync-binding-safety">
             <Icon name="check-circle" size={17} />
             <span>Only this machine changes. Repo identity and cloud logical paths stay the same.</span>
           </div>
-          <label className="v3-folder-field">
+          <label className="sync-folder-field">
             <span>Project checkout</span>
             <div>
               <input value={projectRoot} onChange={(event) => setProjectRoot(event.target.value)} placeholder="/path/to/project" />
@@ -137,8 +137,8 @@ export default function ProjectBindingEditor({
             </div>
             <small>{compactProjectPath(projectRoot)} becomes the root for every project-relative task and setting.</small>
           </label>
-          <div className="v3-single-provider-binding">
-            <div className="v3-agent-choice" role="radiogroup" aria-label="Agent used by this project">
+          <div className="sync-single-provider-binding">
+            <div className="sync-agent-choice" role="radiogroup" aria-label="Agent used by this project">
               {PROJECT_PROVIDERS.map((provider) => (
                 <button
                   key={provider}
@@ -154,17 +154,17 @@ export default function ProjectBindingEditor({
                 </button>
               ))}
             </div>
-            <div className="v3-provider-home-grid single">
+            <div className="sync-provider-home-grid single">
               {profileField(selectedProvider, providerLabel(selectedProvider))}
             </div>
           </div>
-          <dl className="v3-fact-grid compact">
+          <dl className="sync-fact-grid compact">
             <div><dt>Local project</dt><dd><code>{binding.local_project_id ?? "created after confirmation"}</code></dd></div>
             <div><dt>Repo</dt><dd><code>{binding.bundle_id}</code></dd></div>
           </dl>
-          {error && <div className="v3-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>}
+          {error && <div className="sync-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>}
         </div>
-        <footer className="v3-modal-footer">
+        <footer className="sync-modal-footer">
           <span>Absolute paths are never uploaded.</span>
           <div>
             <button type="button" className="btn" onClick={onCancel} disabled={busy}>Cancel</button>

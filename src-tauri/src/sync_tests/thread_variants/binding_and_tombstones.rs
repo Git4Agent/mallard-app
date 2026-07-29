@@ -1,10 +1,10 @@
 use super::harness::{analyzed_chain, chain, publish_request, sha256, ThreadSpec, VariantWorld};
-use crate::project_sync_v3::bundle_engine::{PublishBundleRequest, PublishContent};
-use crate::project_sync_v3::conversation_sync::{
-    recover_unique_compatible_binding, review_conversation_tombstone, BindingRecoveryCandidate,
-    BindingRecoveryResult, TombstoneDecision,
+use crate::project_sync::bundle_engine::{PublishBundleRequest, PublishExpectation};
+use crate::project_sync::conversation_sync::{
+    recover_unique_compatible_binding, BindingRecoveryCandidate, BindingRecoveryResult,
 };
-use crate::project_sync_v3::domain::{BundleRecipe, ThreadId, Tombstone, TombstoneTarget};
+use crate::project_sync::domain::{BundleRecipe, ThreadId, Tombstone, TombstoneTarget};
+use std::collections::BTreeMap;
 
 #[test]
 fn missing_binding_recovers_only_one_unique_longest_compatible_ancestor() {
@@ -84,27 +84,6 @@ fn missing_binding_recovers_only_one_unique_longest_compatible_ancestor() {
 }
 
 #[test]
-fn tombstone_review_covers_unapproved_stale_and_modified_cases() {
-    assert_eq!(
-        review_conversation_tombstone(true, "reviewed", "reviewed", false),
-        TombstoneDecision::RejectUnapproved
-    );
-    assert_eq!(
-        review_conversation_tombstone(true, "reviewed", "modified", true),
-        TombstoneDecision::PreserveModified,
-        "a modified copy always survives a tombstone race",
-    );
-    assert_eq!(
-        review_conversation_tombstone(false, "reviewed", "reviewed", true),
-        TombstoneDecision::RejectStaleDigest
-    );
-    assert_eq!(
-        review_conversation_tombstone(true, "reviewed", "reviewed", true),
-        TombstoneDecision::TombstoneThread
-    );
-}
-
-#[test]
 fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
     let world = VariantWorld::new();
     let origin = world.origin(&world.repo_a, "replica-a");
@@ -138,10 +117,9 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         origin.clone(),
         20,
         Some(&initial.snapshot.manifest),
-        Some((initial.snapshot.head.clone(), initial.head_token)),
+        PublishExpectation::Match(initial.head_token),
     );
     delete_thread
-        .content
         .tombstones
         .insert(tombstone.canonical_key(), tombstone.clone());
     let deleted = world.engine().publish(delete_thread).unwrap();
@@ -162,15 +140,14 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         origin.clone(),
         30,
         Some(&deleted.snapshot.manifest),
-        Some((deleted.snapshot.head.clone(), deleted.head_token)),
+        PublishExpectation::Match(deleted.head_token),
     );
     repeated
-        .content
         .tombstones
         .insert(tombstone.canonical_key(), tombstone.clone());
     let repeated = world.engine().publish(repeated).unwrap();
     assert!(!repeated.published);
-    assert_eq!(repeated.snapshot.head.latest.generation, 2);
+    assert_eq!(repeated.snapshot.head.generation, 2);
 
     let final_tombstone = Tombstone {
         target: TombstoneTarget::ConversationThread {
@@ -186,11 +163,13 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         recipe: BundleRecipe::default(),
         captured_with: repeated.snapshot.manifest.captured_with.clone(),
         published_by_origin: origin,
-        content: PublishContent {
-            tombstones,
-            ..PublishContent::default()
-        },
-        observed_head: Some((repeated.snapshot.head.clone(), repeated.head_token)),
+        conversations: BTreeMap::new(),
+        resources: BTreeMap::new(),
+        retained_files: BTreeMap::new(),
+        captured_files: BTreeMap::new(),
+        directories: BTreeMap::new(),
+        tombstones,
+        expected_head: PublishExpectation::Match(repeated.head_token),
         updated_at: 40,
     };
     let deleted_all = world.engine().publish(delete_all).unwrap();
@@ -219,11 +198,11 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         world.origin(&world.repo_b, "replica-b"),
         50,
         Some(&deleted_all.snapshot.manifest),
-        Some((deleted_all.snapshot.head.clone(), deleted_all.head_token)),
+        PublishExpectation::Match(deleted_all.head_token),
     );
     let resurrected = world.engine().publish(resurrect).unwrap();
     assert!(resurrected.published);
-    assert_eq!(resurrected.snapshot.head.latest.generation, 4);
+    assert_eq!(resurrected.snapshot.head.generation, 4);
     assert!(resurrected
         .snapshot
         .manifest
@@ -247,7 +226,7 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         world.origin(&world.repo_b, "replica-b"),
         60,
         Some(&resurrected.snapshot.manifest),
-        Some((resurrected.snapshot.head.clone(), resurrected.head_token)),
+        PublishExpectation::Match(resurrected.head_token),
     );
     assert!(!world.engine().publish(fixed_point).unwrap().published);
 }

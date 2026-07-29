@@ -9,15 +9,15 @@ import {
   storageConfigReady,
   storageNameForKind,
   StorageEditor,
-} from "../../src/components/project-sync/StorageSettingsV3";
+} from "../../src/components/project-sync/StorageSettings";
 import {
   StorageRepositoryRow,
   StorageSettingsMeta,
 } from "../../src/components/project-sync/ProjectLinksWorkspace";
 import { storageAccessErrorMessage } from "../../src/components/project-sync/model";
-import type { RemoteBundleSummary, StorageConfigV3 } from "../../src/types";
+import type { RemoteBundleSummary, StorageConfig } from "../../src/types";
 
-function r2Storage(patch: Partial<StorageConfigV3> = {}): StorageConfigV3 {
+function r2Storage(patch: Partial<StorageConfig> = {}): StorageConfig {
   return {
     id: "storage-r2",
     name: "R2 storage",
@@ -98,7 +98,7 @@ test("cloud storage editor exposes the guided R2 form instead of generic S3 fiel
 
   assert.match(html, /Cloudflare R2/);
   assert.match(html, /Connect a Cloudflare R2 bucket/);
-  assert.doesNotMatch(html, /v3-r2-guide-icon/);
+  assert.doesNotMatch(html, /sync-r2-guide-icon/);
   assert.match(html, /Create an R2 bucket/);
   assert.match(html, /Create R2 credentials/);
   assert.match(html, /Find your Account ID/);
@@ -126,7 +126,7 @@ test("local storage keeps browse and save actions in the path row", () => {
   );
 
   assert.match(html, /<div><input[^>]*\/tmp\/storage[^>]*><button[^>]*>.*Browse…<\/button><button[^>]*>Save storage<\/button><\/div>/);
-  assert.doesNotMatch(html, /v3-storage-primary-action/);
+  assert.doesNotMatch(html, /sync-storage-primary-action/);
 });
 
 test("configured storage can move name editing into its page heading", () => {
@@ -153,9 +153,9 @@ test("repository rows keep metadata behind an icon disclosure", () => {
   };
   const html = renderToStaticMarkup(<StorageRepositoryRow bundle={bundle} />);
 
-  assert.match(html, /<details[^>]*v3-storage-repository-row/);
+  assert.match(html, /<details[^>]*sync-storage-repository-row/);
   assert.match(html, /Show details for mallardInternal/);
-  assert.match(html, /v3-storage-repository-details-icon/);
+  assert.match(html, /sync-storage-repository-details-icon/);
   assert.match(html, />Repository ID</);
   assert.match(html, />Generation</);
   assert.match(html, />Resources</);
@@ -179,7 +179,7 @@ test("storage settings identify the destination with its storage icon", () => {
     <StorageSettingsMeta storage={r2Storage()} />,
   );
 
-  assert.match(localHtml, /v3-storage-settings-meta/);
+  assert.match(localHtml, /sync-storage-settings-meta/);
   assert.match(localHtml, /title="Local folder: Local storage 1"/);
   assert.match(localHtml, />Local storage 1</);
   assert.match(cloudHtml, /title="Cloudflare R2: R2 storage"/);
@@ -187,7 +187,7 @@ test("storage settings identify the destination with its storage icon", () => {
 
 test("the storage sidebar opens the overview folded and the gear opens settings", () => {
   const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
-  const shell = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
 
   assert.match(sidebar, /onClick=\{\(\) => onOpenStorage\(storage\.id, false\)\}/);
@@ -206,7 +206,7 @@ test("the storage sidebar opens the overview folded and the gear opens settings"
   assert.match(workspace, /hidden=\{!showStorageDetails\}/);
   assert.match(workspace, /\{showStorageDetails && \(/);
   assert.match(workspace, /setStorageDetailsExpanded\(false\);\s*await loadStorageBundles/);
-  assert.match(workspace, /className="v3-project-heading-name"/);
+  assert.match(workspace, /className="sync-project-heading-name"/);
   assert.match(workspace, />\s*Rename\s*<\/button>/);
   assert.match(workspace, /`rename-storage:\$\{storageDraft\.id\}`/);
   assert.match(workspace, /const renamedStorage = \{ \.\.\.editedStorageConfig, name \}/);

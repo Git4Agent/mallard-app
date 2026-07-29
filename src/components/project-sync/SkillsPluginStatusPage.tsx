@@ -191,62 +191,60 @@ function CapabilityRow({
     : null;
 
   return (
-    <article className={`v3-capability-row${expanded ? " expanded" : ""}${selectionMode ? " v3-capability-selectable" : ""}${included ? " selected" : ""}`}>
-      {selectionMode && (
+    <article className={`sync-capability-row${expanded ? " expanded" : ""}${selectionMode && canSelect ? " sync-capability-selectable" : ""}${included ? " selected" : ""}`}>
+      {selectionMode && canSelect && (
         <label
-          className="v3-sync-row-choice v3-capability-choice"
-          title={canSelect ? `${included ? "Exclude" : "Include"} ${item.display_name}` : presentation.detail}
+          className="sync-sync-row-choice sync-capability-choice"
+          title={`${included ? "Exclude" : "Include"} ${item.display_name}`}
         >
           <input
             type="checkbox"
             checked={included}
-            disabled={selectionDisabled || !canSelect}
+            disabled={selectionDisabled}
             aria-label={`${included ? "Exclude" : "Include"} ${item.display_name}`}
-            onChange={() => {
-              if (canSelect) onToggleResource?.(item.resource_id);
-            }}
+            onChange={() => onToggleResource?.(item.resource_id)}
           />
         </label>
       )}
       <button
         type="button"
-        className="v3-capability-row-main"
+        className="sync-capability-row-main"
         onClick={() => setExpanded((current) => !current)}
         aria-expanded={expanded}
         aria-controls={detailsId}
       >
         <span
-          className={`v3-capability-state ${presentation.className}`}
+          className={`sync-capability-state ${presentation.className}`}
           title={presentation.detail}
           aria-label={presentation.detail}
         >
           <Icon name={presentation.icon} size={14} />
         </span>
-        <span className="v3-capability-kind">
+        <span className="sync-capability-kind">
           <Icon name={item.kind === "plugin" ? "link" : "folder"} size={15} />
         </span>
-        <span className="v3-capability-copy">
+        <span className="sync-capability-copy">
           <strong>{item.display_name}</strong>
           <span>
             {providerLabel(item.provider)} · {capabilityScope(item)}
             {installDirectory && item.kind === "standalone_skill" ? ` · folder ${installDirectory}` : ""}
           </span>
           {providedSummary && (
-            <span className="v3-capability-provides" title={`Provides ${providedSummary}`}>
+            <span className="sync-capability-provides" title={`Provides ${providedSummary}`}>
               Provides {providedSummary}
             </span>
           )}
         </span>
-        <span className="v3-capability-row-status">
+        <span className="sync-capability-row-status">
           <strong>{presentation.label}</strong>
           <span>{item.selected_in_recipe ? "In backup selection" : "Not selected for backup"}</span>
         </span>
-        <Icon name={expanded ? "chevron-down" : "chevron-right"} size={13} className="v3-capability-chevron" />
+        <Icon name={expanded ? "chevron-down" : "chevron-right"} size={13} className="sync-capability-chevron" />
       </button>
 
       {expanded && (
-        <div id={detailsId} className="v3-capability-details">
-          <p className={`v3-capability-detail-message ${presentation.className}`}>{item.message || presentation.detail}</p>
+        <div id={detailsId} className="sync-capability-details">
+          <p className={`sync-capability-detail-message ${presentation.className}`}>{item.message || presentation.detail}</p>
           <dl>
             <div>
               <dt>Local</dt>
@@ -270,7 +268,7 @@ function CapabilityRow({
             {source && <div><dt>Source</dt><dd><code>{source}</code></dd></div>}
           </dl>
           {item.logical_paths.length > 0 && (
-            <div className="v3-capability-paths">
+            <div className="sync-capability-paths">
               <span>Portable paths</span>
               <code>{item.logical_paths.join("\n")}</code>
             </div>
@@ -312,36 +310,36 @@ export function SkillsPluginStatusContent({
 
   return (
     <div
-      className={`v3-capability-page v3-history-embedded${compactSelectionReview ? " v3-history-selection-review" : ""}`}
+      className={`sync-capability-page sync-history-embedded${compactSelectionReview ? " sync-history-selection-review" : ""}`}
       aria-labelledby={compactSelectionReview ? undefined : headingId}
       aria-label={compactSelectionReview ? title : undefined}
     >
-      {!compactSelectionReview && <header className="profile-links-heading v3-history-header">
+      {!compactSelectionReview && <header className="profile-links-heading sync-history-header">
         <div className="profile-links-copy">
-          <h2 id={headingId} className="v3-history-embedded-title"><Icon name={icon} size={15} />{title}</h2>
+          <h2 id={headingId} className="sync-history-embedded-title"><Icon name={icon} size={15} />{title}</h2>
         </div>
-        <div className="v3-history-toolbar">
+        <div className="sync-history-toolbar">
           {(report?.storage_name || activeStorageName) && (
-            <span className="v3-history-storage-lens" title={`Comparing with ${storageName}`}>
+            <span className="sync-history-storage-lens" title={`Comparing with ${storageName}`}>
               <Icon name="link" size={12} /><span>{storageName}</span>
             </span>
           )}
           {report && (
-            <span className="v3-history-toolbar-stats">
-              <span className="v3-history-heading-count v3-history-toolbar-count" title={`${items.length} ${itemLabel}`} aria-label={`${items.length} ${itemLabel}`}>
+            <span className="sync-history-toolbar-stats">
+              <span className="sync-history-heading-count sync-history-toolbar-count" title={`${items.length} ${itemLabel}`} aria-label={`${items.length} ${itemLabel}`}>
                 <Icon name={icon} size={12} />{items.length}
               </span>
             </span>
           )}
           {report && report.warnings.length > 0 && (
-            <details className="v3-capability-warnings">
+            <details className="sync-capability-warnings">
               <summary><Icon name="alert-triangle" size={13} />{report.warnings.length} warning{report.warnings.length === 1 ? "" : "s"}</summary>
               <ul>{report.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
             </details>
           )}
           <button
             type="button"
-            className="v3-history-icon-action"
+            className="sync-history-icon-action"
             onClick={onRefresh}
             disabled={loading || missingProfile}
             title={`Refresh ${itemLabel}`}
@@ -353,24 +351,24 @@ export function SkillsPluginStatusContent({
       </header>}
 
       {missingProfile ? (
-        <div className="v3-history-state v3-history-profile-state">
+        <div className="sync-history-state sync-history-profile-state">
           <Icon name="alert-triangle" size={18} />
           <div><strong>Choose an agent profile to inventory {itemLabel}.</strong><span>The status view reads only the profile assigned to this project.</span></div>
           <button type="button" className="btn btn-primary" onClick={onOpenProjectSettings}>Open Project Settings</button>
         </div>
       ) : loading && !report ? (
-        <div className="v3-history-state" role="status" aria-live="polite"><span className="status-loader" /> Scanning {itemLabel}…</div>
+        <div className="sync-history-state" role="status" aria-live="polite"><span className="status-loader" /> Scanning {itemLabel}…</div>
       ) : error && !report ? (
-        <div className="v3-history-state v3-capability-error" role="alert">
+        <div className="sync-history-state sync-capability-error" role="alert">
           <Icon name="alert-triangle" size={18} /><span>{error}</span><button type="button" className="btn" onClick={onRefresh}>Retry</button>
         </div>
       ) : report ? (
         <>
-          {error && <div className="v3-callout error v3-capability-inline-error" role="alert"><Icon name="alert-triangle" size={14} />{error}</div>}
+          {error && <div className="sync-callout error sync-capability-inline-error" role="alert"><Icon name="alert-triangle" size={14} />{error}</div>}
           {items.length === 0 ? (
-            <div className="v3-history-state"><Icon name={icon} size={20} /> No {itemLabel} were found for this project and profile.</div>
+            <div className="sync-history-state"><Icon name={icon} size={20} /> No {itemLabel} were found for this project and profile.</div>
           ) : (
-            <div className="v3-capability-list v3-capability-primary-list">
+            <div className="sync-capability-list sync-capability-primary-list">
               {items.map((item) => <CapabilityRow key={item.resource_id} item={item} storageName={storageName}
                 selectionMode={selectionMode} selected={selectedResourceIds.has(item.resource_id)}
                 selectable={selectableResourceIds?.has(item.resource_id) ?? !!selectionMode}

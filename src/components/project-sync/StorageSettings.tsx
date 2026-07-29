@@ -1,7 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { StorageConfigV3 } from "../../types";
+import type { StorageConfig } from "../../types";
 import Icon from "../Icons";
 
 const R2_SETUP_DOC = "https://developers.cloudflare.com/r2/get-started/s3/";
@@ -74,7 +74,7 @@ export function parseR2S3ApiUrl(value: string): { accountId: string; bucket: str
   }
 }
 
-export function storageConfigReady(storage: StorageConfigV3): boolean {
+export function storageConfigReady(storage: StorageConfig): boolean {
   if (storage.kind === "local") return !!storage.local_dir?.trim();
   return !!storage.bucket?.trim()
     && !!storage.account_id?.trim()
@@ -82,7 +82,7 @@ export function storageConfigReady(storage: StorageConfigV3): boolean {
     && !!storage.secret_access_key?.trim();
 }
 
-export function newStorage(kind: "s3" | "local", index: number): StorageConfigV3 {
+export function newStorage(kind: "s3" | "local", index: number): StorageConfig {
   return {
     id: `storage-${crypto.randomUUID()}`,
     name: kind === "local" ? `Local storage ${index}` : `R2 storage ${index}`,
@@ -112,14 +112,14 @@ export function StorageEditor({
   primaryAction,
   showNameField = true,
 }: {
-  storage: StorageConfigV3;
+  storage: StorageConfig;
   disabled: boolean;
-  onChange: (storage: StorageConfigV3) => void;
+  onChange: (storage: StorageConfig) => void;
   onRemove?: () => void;
   primaryAction?: ReactNode;
   showNameField?: boolean;
 }) {
-  const set = (patch: Partial<StorageConfigV3>) => onChange({ ...storage, ...patch });
+  const set = (patch: Partial<StorageConfig>) => onChange({ ...storage, ...patch });
   const derivedS3ApiUrl = r2S3ApiUrl(storage.account_id ?? "", storage.bucket ?? "");
   const [s3ApiUrlDraft, setS3ApiUrlDraft] = useState(derivedS3ApiUrl);
   const editingS3ApiUrl = useRef(false);
@@ -153,13 +153,13 @@ export function StorageEditor({
   };
 
   return (
-    <article className="v3-storage-card">
+    <article className="sync-storage-card">
       <header>
-        <span className="v3-storage-icon"><Icon name={storage.kind === "local" ? "drive" : "cloud"} size={18} /></span>
+        <span className="sync-storage-icon"><Icon name={storage.kind === "local" ? "drive" : "cloud"} size={18} /></span>
         {showNameField && (
           <input value={storage.name} onChange={(event) => set({ name: event.target.value })} disabled={disabled} aria-label="Storage name" />
         )}
-        <div className="v3-segmented" role="radiogroup" aria-label="Storage type">
+        <div className="sync-segmented" role="radiogroup" aria-label="Storage type">
           <button
             type="button"
             role="radio"
@@ -194,7 +194,7 @@ export function StorageEditor({
         )}
       </header>
       {storage.kind === "local" ? (
-        <label className="v3-folder-field compact">
+        <label className="sync-folder-field compact">
           <span>Location path</span>
           <div>
             <input
@@ -216,10 +216,10 @@ export function StorageEditor({
         </label>
       ) : (
         <>
-          <div className="v3-r2-setup">
-            <section className="v3-r2-guide" aria-labelledby={`storage-${storage.id}-r2-guide`}>
+          <div className="sync-r2-setup">
+            <section className="sync-r2-guide" aria-labelledby={`storage-${storage.id}-r2-guide`}>
               <div>
-                <div className="v3-r2-guide-heading">
+                <div className="sync-r2-guide-heading">
                   <strong id={`storage-${storage.id}-r2-guide`}>Connect a Cloudflare R2 bucket</strong>
                   <button type="button" className="btn-link" onClick={() => void openHelp(R2_SETUP_DOC)}>Setup guide</button>
                 </div>
@@ -233,8 +233,8 @@ export function StorageEditor({
               </div>
             </section>
 
-            <div className="v3-storage-fields v3-r2-fields">
-            <label className="v3-r2-url-field">
+            <div className="sync-storage-fields sync-r2-fields">
+            <label className="sync-r2-url-field">
               <span className="form-label-row">
                 <span>S3 API URL</span>
                 <HelpButton url={R2_SETUP_DOC} label="How to find the Cloudflare R2 S3 API URL" />
@@ -341,7 +341,7 @@ export function StorageEditor({
             </label>
             </div>
           </div>
-          {primaryAction && <div className="v3-storage-primary-action">{primaryAction}</div>}
+          {primaryAction && <div className="sync-storage-primary-action">{primaryAction}</div>}
         </>
       )}
     </article>

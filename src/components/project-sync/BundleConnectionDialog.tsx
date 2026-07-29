@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { BundleSnapshotSummary, StorageConfigV3 } from "../../types";
+import type { BundleSnapshotSummary, StorageConfig } from "../../types";
 import Icon from "../Icons";
 import { formatRelativeTime } from "./model";
 
@@ -7,7 +7,7 @@ interface Props {
   projectName: string;
   currentBundleId: string;
   projectFingerprint?: string | null;
-  storage: StorageConfigV3;
+  storage: StorageConfig;
   matches: BundleSnapshotSummary[];
   reason: "link" | "missing";
   busy: boolean;
@@ -44,17 +44,17 @@ export default function BundleConnectionDialog({
     && !selected.repository_fingerprint;
 
   return (
-    <div className="v3-modal-backdrop" role="presentation">
+    <div className="sync-modal-backdrop" role="presentation">
       <section
-        className="v3-modal v3-bundle-connection-dialog"
+        className="sync-modal sync-bundle-connection-dialog"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="v3-bundle-connection-title"
+        aria-labelledby="sync-bundle-connection-title"
       >
-        <header className="v3-modal-header">
+        <header className="sync-modal-header">
           <div>
-            <span className="v3-eyebrow">Repo identity</span>
-            <h1 id="v3-bundle-connection-title">
+            <span className="sync-eyebrow">Repo identity</span>
+            <h1 id="sync-bundle-connection-title">
               {missing ? "Choose the remote repo" : "Choose a repo from this storage"}
             </h1>
             <p>
@@ -68,13 +68,13 @@ export default function BundleConnectionDialog({
           </button>
         </header>
 
-        <div className="v3-modal-body">
-          <div className="v3-bundle-context">
+        <div className="sync-modal-body">
+          <div className="sync-bundle-context">
             <Icon name={storage.kind === "local" ? "drive" : "cloud"} size={17} />
             <span><strong>{storage.name}</strong><small>Current local repo {currentBundleId.slice(0, 12)}…</small></span>
           </div>
 
-          <div className="v3-bundle-choice-list" role="radiogroup" aria-label="Available remote repos">
+          <div className="sync-bundle-choice-list" role="radiogroup" aria-label="Available remote repos">
             {matches.map((match) => {
               const active = selectedId === match.bundle_id;
               const recommended = !!projectFingerprint
@@ -85,16 +85,16 @@ export default function BundleConnectionDialog({
                   type="button"
                   role="radio"
                   aria-checked={active}
-                  className={`v3-bundle-choice${active ? " active" : ""}`}
+                  className={`sync-bundle-choice${active ? " active" : ""}`}
                   onClick={() => setSelectedId(match.bundle_id)}
                   disabled={busy}
                 >
-                  <span className="v3-bundle-radio"><span /></span>
-                  <span className="v3-bundle-choice-copy">
-                    <strong>{match.display_name}{recommended && <small className="v3-bundle-recommended">Recommended</small>}</strong>
+                  <span className="sync-bundle-radio"><span /></span>
+                  <span className="sync-bundle-choice-copy">
+                    <strong>{match.display_name}{recommended && <small className="sync-bundle-recommended">Recommended</small>}</strong>
                     <span>{match.bundle_id}</span>
                   </span>
-                  <span className="v3-bundle-choice-meta">
+                  <span className="sync-bundle-choice-meta">
                     <strong>gen {match.generation ?? "—"}</strong>
                     <span>{match.resource_count ?? match.resources?.length ?? 0} resources</span>
                     <small>{formatRelativeTime(match.updated_at)}</small>
@@ -105,26 +105,26 @@ export default function BundleConnectionDialog({
           </div>
 
           {selectedFingerprintDiffers && (
-            <div className="v3-callout warning">
+            <div className="sync-callout warning">
               <Icon name="alert-triangle" size={15} />
               <span>This repo has a different Git fingerprint. Connecting will adopt its repository identity.</span>
             </div>
           )}
           {selectedFingerprintUnknown && (
-            <div className="v3-callout warning">
+            <div className="sync-callout warning">
               <Icon name="alert-triangle" size={15} />
               <span>This repo has no Git fingerprint, so Mallard cannot verify that it belongs to this checkout.</span>
             </div>
           )}
 
-          <div className="v3-callout warning">
+          <div className="sync-callout warning">
             <Icon name="alert-triangle" size={15} />
             <span>Connecting changes only Mallard metadata. It does not move or delete the checkout or provider profile.</span>
           </div>
-          {error && <div className="v3-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>}
+          {error && <div className="sync-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>}
         </div>
 
-        <footer className="v3-modal-footer">
+        <footer className="sync-modal-footer">
           <button type="button" className="btn btn-ghost" onClick={onKeepCurrent} disabled={busy}>
             {missing ? "Review separate Push" : "Create separate repo"}
           </button>

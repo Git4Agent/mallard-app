@@ -1,9 +1,9 @@
 # Plan: Remove all remaining backward-compat and migration support
 
-Status: Tier 1 executed + schema versions reset (2026-07-24); Tier 2
-superseded and executed by PLAN_CLOUD_GENERATION_HISTORY.md (2026-07-26) —
-one strict `BUNDLE_SCHEMA = 1`, one publisher, no v4/v6 machinery remains
-its B0 prerequisite. See "Execution log" at the end of this document.
+Status: Executed (2026-07-28). The current implementation has one schema-1
+local format, one schema-1 bundle format, one publisher, and no migration or
+compatibility reader. The detailed audit below is retained as implementation
+history; see "Execution log" for the final state.
 
 Premise, confirmed by the user: **nobody uses this app today and there is no
 data on any cloud storage.** Therefore every read-old-write-new shim, tolerant
@@ -77,7 +77,9 @@ formats we don't control** or **live semantics**:
   rename the test (A10).
 - `ProjectStorageLink.recipe: Option<BundleRecipe>` — a link that has never
   pushed has no destination recipe. Keep; reword the stale doc comment (A10).
-- `provider_fork.rs` "codec fallback" — a live fork strategy, not compat.
+- Codex structural rewrite and journaled conversation materialization — these
+  are the live provider operations. The unused standalone `provider_fork.rs`
+  experiment was removed after the typed Push/Pull path subsumed it.
 - `conversation_sync.rs` `UniqueCompatibleAncestor` — "compatible" describes
   chain ancestry, not version compat.
 - The frontend cutover guard tests asserting legacy UI stays deleted
@@ -341,7 +343,7 @@ domain action kinds), A6 → A7 (schema-4 dead code + fixture), A9 → A10
   `cargo test`, `cargo clippy`, `tsc --noEmit`,
   `npm run test:frontend-integration`.
 - Manual round trip after Tier 2: fresh project → push (inspect the bundle:
-  `schema_version: 6`, `published_by_origin` present, conversations in the
+  `schema_version: 1`, `published_by_origin` present, conversations in the
   `conversations` map) → pull on a second profile → thread entries appear in
   pull review; then corrupt a local record's `host_id` and confirm the
   damaged-state path reports it instead of silently migrating.
@@ -397,3 +399,34 @@ Verification: `cargo test` 291 passed, `cargo clippy --all-targets` 0 errors,
 `tsc --noEmit` clean, `npm run test:frontend-integration` 86 passed. The grep
 gate returns only the documented external-tolerance sites and the mandated
 anti-reintroduction guard tests.
+
+## Execution log (2026-07-28)
+
+Tier 2 is complete:
+
+- Production Push, Pull comparison, conflict planning, and restore execution
+  use the flat typed conversation model.
+- The second publisher and schema-conditioned command branches are deleted.
+  `BundleEngine::publish` is the only production writer.
+- `BundleHead` and `BundleManifest` accept only `BUNDLE_SCHEMA = 1`.
+- Conversation bindings remain schema 1. There is no migration or
+  compatibility read path; old local state and old bucket contents must be
+  removed before testing this build.
+- Fresh Push uses the same reviewed `CreateCloud` action path as later
+  fast-forward and fork publications.
+- Current-schema fixtures cover strict referential integrity, nested
+  fork-of-fork conflict resolution, retry fixed points, and local/S3 CAS
+  parity.
+- The disconnected `provider_fork` CLI/SQLite reconstruction experiment and
+  its parallel test suite are deleted. Production Push and Pull now have one
+  typed relation/action planner and one journaled materialization path.
+- Codex `session_index.jsonl` is no longer exposed as a second portable
+  conversation resource. Discovery reads it only to enrich titles; the typed
+  Pull materializer updates the local provider index transactionally.
+- Pre-canonicalization Git fingerprint aliases and the corresponding frontend
+  candidate list are deleted. Fresh bundles and setup drafts compare only the
+  current canonical fingerprint.
+- Version-branded names for the only remaining implementation are removed:
+  `project_sync`, `ProjectSync`, `SyncConfig`, `StorageConfig`, and
+  `LocalStateRepository` now describe the current path without implying a
+  supported V3 predecessor. The active technical report records schema 1.

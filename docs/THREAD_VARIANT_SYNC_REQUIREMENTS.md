@@ -79,6 +79,11 @@ Let $L$ be the reviewed local version and $C$ the corresponding cloud version.
 A later Push from an alternate MUST update its existing **variant_id**, not
 create a duplicate.
 
+A local version whose lineage the active codec cannot prove (for example,
+id-less legacy Codex rollouts written before CLI 0.146) MUST remain Blocked
+for Push — decision of record, 2026-07-28. Store-only archival of such
+transcripts is deferred future work (PLAN_LEGACY_ROLLOUT_ARCHIVAL.md).
+
 ## Divergence and provider IDs
 
 If local and cloud diverge under the same variant ID $v$:

@@ -1,4 +1,4 @@
-//! S3/R2 transport for the schema-3 bundle object-store contract.
+//! S3/R2 transport for the current bundle object-store contract.
 //!
 //! [`BundleObjectStore`] is deliberately synchronous because the bundle
 //! engine also supports a filesystem implementation.  Consequently, command
@@ -26,7 +26,7 @@ use super::bundle_engine::{
     BundleObjectStore, CasExpectation, CasOutcome, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
     StoreListPage, StoredObject,
 };
-use super::domain::{StorageConfigV3, StorageKind, MAX_FILE_BYTES};
+use super::domain::{StorageConfig, StorageKind, MAX_FILE_BYTES};
 
 const MAX_LIST_PAGE: usize = 10_000;
 const S3_MAX_KEYS: usize = 1_000;
@@ -44,10 +44,10 @@ pub struct S3BundleObjectStore {
 }
 
 impl S3BundleObjectStore {
-    /// Build a schema-3 store using the application's existing S3/R2 client
+    /// Build a store using the application's existing S3/R2 client
     /// configuration path.  An explicitly unsupported conditional-write
-    /// capability is rejected: schema 4 publishes mutable heads only by CAS.
-    pub fn from_config(config: &StorageConfigV3, runtime: Handle) -> Result<Self, String> {
+    /// capability is rejected: project bundles publish mutable heads only by CAS.
+    pub fn from_config(config: &StorageConfig, runtime: Handle) -> Result<Self, String> {
         config.validate()?;
         if config.kind != StorageKind::S3 {
             return Err(format!(
@@ -69,7 +69,7 @@ impl S3BundleObjectStore {
     /// Convenience constructor for callers already running in a Tokio
     /// context.  Capture the handle before moving the engine operation into
     /// `spawn_blocking`.
-    pub fn from_current_runtime(config: &StorageConfigV3) -> Result<Self, String> {
+    pub fn from_current_runtime(config: &StorageConfig) -> Result<Self, String> {
         let runtime = Handle::try_current()
             .map_err(|_| "creating an S3 bundle store requires a Tokio runtime".to_string())?;
         Self::from_config(config, runtime)
@@ -561,7 +561,7 @@ fn raw_key_is_under_prefix(key: &str, prefix: &ObjectPrefix) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-fn make_s3_client(config: &StorageConfigV3) -> Result<S3Client, String> {
+fn make_s3_client(config: &StorageConfig) -> Result<S3Client, String> {
     if config.bucket.is_empty() {
         return Err("Bucket is not configured".to_string());
     }
@@ -672,8 +672,8 @@ fn ambiguous_sdk_error<E>(error: &SdkError<E>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_sync_v3::bundle_engine::BundleEngine;
-    use crate::project_sync_v3::domain::StorageId;
+    use crate::project_sync::bundle_engine::BundleEngine;
+    use crate::project_sync::domain::StorageId;
     use aws_sdk_s3::config::{Credentials, Region};
     use aws_sdk_s3::Config as S3Config;
     use aws_smithy_http_client::{tls, Builder as HttpClientBuilder};

@@ -135,22 +135,22 @@ export default function LogManagerDialog({ onClose, onLogsChanged }: Props) {
 
   return (
     <div
-      className="v3-modal-backdrop"
+      className="sync-modal-backdrop"
       role="presentation"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
       <section
-        className="v3-modal v3-log-manager-dialog"
+        className="sync-modal sync-log-manager-dialog"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="v3-log-manager-title"
+        aria-labelledby="sync-log-manager-title"
       >
-        <header className="v3-modal-header">
+        <header className="sync-modal-header">
           <div>
-            <span className="v3-eyebrow">Local activity</span>
-            <h1 id="v3-log-manager-title">Manage logs</h1>
+            <span className="sync-eyebrow">Local activity</span>
+            <h1 id="sync-log-manager-title">Manage logs</h1>
             <p>Logs stay on this machine in ~/.mallard/logs.</p>
           </div>
           <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy} aria-label="Close log manager">
@@ -158,18 +158,18 @@ export default function LogManagerDialog({ onClose, onLogsChanged }: Props) {
           </button>
         </header>
 
-        <div className="v3-modal-body v3-log-manager-body">
+        <div className="sync-modal-body sync-log-manager-body">
           {loading ? (
-            <div className="v3-log-manager-loading"><span className="status-loader" /> Loading log storage…</div>
+            <div className="sync-log-manager-loading"><span className="status-loader" /> Loading log storage…</div>
           ) : policy && stats ? (
             <>
-              <dl className="v3-log-storage-summary">
+              <dl className="sync-log-storage-summary">
                 <div><dt>Storage used</dt><dd>{formatBytes(stats.total_bytes)}</dd></div>
                 <div><dt>Log files</dt><dd>{stats.file_count}</dd></div>
                 <div><dt>Oldest entry</dt><dd>{formatOldest(stats.oldest_ts)}</dd></div>
               </dl>
 
-              <div className="v3-log-policy-fields">
+              <div className="sync-log-policy-fields">
                 <label>
                   <span>Keep logs for</span>
                   <select
@@ -203,7 +203,7 @@ export default function LogManagerDialog({ onClose, onLogsChanged }: Props) {
                 </label>
               </div>
 
-              <div className="v3-log-cleanup-actions">
+              <div className="sync-log-cleanup-actions">
                 <button type="button" className="btn" onClick={() => void handleOpenFolder()} disabled={busy}>
                   <Icon name="folder" size={14} /> Open logs folder
                 </button>
@@ -215,15 +215,15 @@ export default function LogManagerDialog({ onClose, onLogsChanged }: Props) {
                 </button>
               </div>
 
-              {error && <div className="v3-callout error" role="alert"><Icon name="alert-triangle" size={15} /> {error}</div>}
-              {notice && <div className="v3-log-manager-notice" role="status"><Icon name="check-circle" size={14} /> {notice}</div>}
+              {error && <div className="sync-callout error" role="alert"><Icon name="alert-triangle" size={15} /> {error}</div>}
+              {notice && <div className="sync-log-manager-notice" role="status"><Icon name="check-circle" size={14} /> {notice}</div>}
             </>
           ) : error ? (
-            <div className="v3-callout error" role="alert"><Icon name="alert-triangle" size={15} /> {error}</div>
+            <div className="sync-callout error" role="alert"><Icon name="alert-triangle" size={15} /> {error}</div>
           ) : null}
         </div>
 
-        <footer className="v3-modal-footer">
+        <footer className="sync-modal-footer">
           <span>Cleanup never removes sync state, backups, or cloud data.</span>
           <div>
             <button type="button" className="btn" onClick={onClose} disabled={busy}>Close</button>

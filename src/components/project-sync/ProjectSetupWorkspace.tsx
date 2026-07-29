@@ -10,7 +10,7 @@ import type {
   ProviderProfileSummary,
   SetupDraftInspection,
   SetupSectionStatus,
-  StorageConfigV3,
+  StorageConfig,
 } from "../../types";
 import Icon from "../Icons";
 import ResourceInventory from "./ResourceInventory";
@@ -37,7 +37,7 @@ interface Props {
   isWorkflowCurrent: (workflowGeneration: number) => boolean;
   profiles: ProviderProfileSummary[];
   projects: LocalProjectSummary[];
-  storages: StorageConfigV3[];
+  storages: StorageConfig[];
   busy: boolean;
   onClose: () => void;
   onDiscard: (draftId: string) => void;
@@ -60,14 +60,14 @@ function sectionState(sections: SetupSectionStatus[], id: string): SetupSectionS
 function sectionBadge(section: SetupSectionStatus | null) {
   if (section?.state === "attention") {
     return (
-      <span className="v3-setup-state attention" aria-label="Needs review" title="Needs review">
+      <span className="sync-setup-state attention" aria-label="Needs review" title="Needs review">
         <Icon name="alert-triangle" size={14} />
       </span>
     );
   }
   if (section?.state === "blocked") {
     return (
-      <span className="v3-setup-state blocked" aria-label="Action required" title="Action required">
+      <span className="sync-setup-state blocked" aria-label="Action required" title="Action required">
         <Icon name="alert-triangle" size={14} />
       </span>
     );
@@ -206,7 +206,7 @@ export default function ProjectSetupWorkspace({
     setDraft((current) => (current ? mutate(current) : current));
   };
 
-  const selectedStorage: StorageConfigV3 | null = useMemo(() => {
+  const selectedStorage: StorageConfig | null = useMemo(() => {
     if (!draft?.storage) return null;
     if (draft.storage.kind === "existing") {
       const id = draft.storage.storage_id;
@@ -247,21 +247,19 @@ export default function ProjectSetupWorkspace({
     return () => { cancelled = true; };
   }, [listableStorageId]);
 
-  const repositoryFingerprintCandidates = useMemo(() => {
-    const candidates = inspection?.repository_fingerprint_candidates ?? [];
-    if (candidates.length > 0) return new Set(candidates);
-    return new Set(draft?.repository_fingerprint ? [draft.repository_fingerprint] : []);
-  }, [draft?.repository_fingerprint, inspection?.repository_fingerprint_candidates]);
+  const repositoryFingerprint = inspection?.draft.repository_fingerprint
+    ?? draft?.repository_fingerprint
+    ?? null;
 
   // Auto-select a single exact Git match once, without overriding an
   // explicit user choice; otherwise the default stays "create new repo".
   useEffect(() => {
     if (!draft || repoAutoSelected.current || bundlesLoading) return;
-    if (draft.repository.kind !== "new" || repositoryFingerprintCandidates.size === 0) return;
+    if (draft.repository.kind !== "new" || !repositoryFingerprint) return;
     const matches = remoteBundles.filter((bundle) => (
       repositoryFingerprintMatches(
         bundle.repository_fingerprint,
-        repositoryFingerprintCandidates,
+        repositoryFingerprint,
       )
     ));
     if (matches.length === 1 && listableStorageId) {
@@ -283,7 +281,7 @@ export default function ProjectSetupWorkspace({
     draft,
     listableStorageId,
     remoteBundles,
-    repositoryFingerprintCandidates,
+    repositoryFingerprint,
   ]);
 
   // Adopt the discovered default selection the first time discovery runs.
@@ -306,10 +304,10 @@ export default function ProjectSetupWorkspace({
     remoteBundles.filter((bundle) => (
       repositoryFingerprintMatches(
         bundle.repository_fingerprint,
-        repositoryFingerprintCandidates,
+        repositoryFingerprint,
       )
     ))
-  ), [remoteBundles, repositoryFingerprintCandidates]);
+  ), [remoteBundles, repositoryFingerprint]);
 
   const chooseProfileFolder = async (provider: ProjectProvider) => {
     const picked = await open({ directory: true, multiple: false });
@@ -380,10 +378,10 @@ export default function ProjectSetupWorkspace({
 
   if (!draft) {
     return (
-      <section className="v3-inline-new-project v3-setup-workspace" role="region" aria-label="Project setup">
+      <section className="sync-inline-new-project sync-setup-workspace" role="region" aria-label="Project setup">
         {error
-          ? <div className="v3-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>
-          : <div className="v3-storage-repository-state"><span className="status-loader" /> Loading setup draft…</div>}
+          ? <div className="sync-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>
+          : <div className="sync-storage-repository-state"><span className="status-loader" /> Loading setup draft…</div>}
       </section>
     );
   }
@@ -431,7 +429,7 @@ export default function ProjectSetupWorkspace({
     const path = selection?.kind === "pending" ? selection.path : "";
     return (
       <div
-        className={`v3-agent-profile-row${selection?.kind === "pending" ? " has-custom-path" : ""}${profileBlocked ? " has-error" : ""}`}
+        className={`sync-agent-profile-row${selection?.kind === "pending" ? " has-custom-path" : ""}${profileBlocked ? " has-error" : ""}`}
         key={provider}
       >
         <select
@@ -494,31 +492,31 @@ export default function ProjectSetupWorkspace({
   };
 
   return (
-    <section className="v3-inline-new-project v3-setup-workspace" role="region" aria-labelledby="v3-setup-title">
-      <header className="v3-modal-header">
+    <section className="sync-inline-new-project sync-setup-workspace" role="region" aria-labelledby="sync-setup-title">
+      <header className="sync-modal-header">
         <div>
-          <h1 id="v3-setup-title">Set up {draft.display_name || "project"}</h1>
+          <h1 id="sync-setup-title">Set up {draft.display_name || "project"}</h1>
         </div>
         <button type="button" className="btn btn-ghost" onClick={onClose} disabled={finalizing} aria-label="Close setup; the draft is kept">
           <Icon name="x" size={17} />
         </button>
       </header>
 
-      <div className="v3-modal-body">
+      <div className="sync-modal-body">
         {draft.last_error && (
-          <div className="v3-callout warning">
+          <div className="sync-callout warning">
             <Icon name="alert-triangle" size={15} />
             <span>The last finish attempt failed: {draft.last_error}</span>
           </div>
         )}
 
         {/* Project */}
-        <section className="v3-form-card v3-setup-section">
-          <div className="v3-card-heading">
+        <section className="sync-form-card sync-setup-section">
+          <div className="sync-card-heading">
             <div><strong>Project</strong></div>
             {sectionBadge(projectSection)}
           </div>
-          <div className="v3-field-grid v3-setup-project-fields">
+          <div className="sync-field-grid sync-setup-project-fields">
             <label>
               <span>Name</span>
               <input
@@ -529,28 +527,28 @@ export default function ProjectSetupWorkspace({
             </label>
             <label>
               <span>Folder</span>
-              <div className="v3-profile-select-row">
+              <div className="sync-profile-select-row">
                 <input value={compactProjectPath(draft.project_root)} readOnly title={draft.project_root} />
                 <button type="button" className="btn" onClick={() => void changeProjectFolder()} disabled={working}>Change…</button>
               </div>
             </label>
           </div>
           {projectSection?.message && projectSection.state === "blocked" && (
-            <div className="v3-setup-field-error"><Icon name="alert-triangle" size={13} /> {projectSection.message}</div>
+            <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {projectSection.message}</div>
           )}
           {usesExistingRepo && (
-            <small className="v3-setup-hint">The project name follows the connected remote repo.</small>
+            <small className="sync-setup-hint">The project name follows the connected remote repo.</small>
           )}
         </section>
 
         {/* Agent profile */}
-        <section className="v3-form-card v3-setup-section">
-          <div className="v3-card-heading">
+        <section className="sync-form-card sync-setup-section">
+          <div className="sync-card-heading">
             <div><strong>Agent</strong></div>
             {sectionBadge(profilesSection)}
           </div>
-          <div className="v3-single-agent-setup">
-            <div className="v3-agent-choice" role="radiogroup" aria-label="Agent used by this project">
+          <div className="sync-single-agent-setup">
+            <div className="sync-agent-choice" role="radiogroup" aria-label="Agent used by this project">
               {PROJECT_PROVIDERS.map((provider) => (
                 <button
                   key={provider}
@@ -565,22 +563,22 @@ export default function ProjectSetupWorkspace({
                 </button>
               ))}
             </div>
-            <div className="v3-agent-profile-list">
+            <div className="sync-agent-profile-list">
               {profileRow(setupProvider, providerLabel(setupProvider))}
             </div>
           </div>
           {profileErrorMessage && (
-            <div className="v3-setup-field-error"><Icon name="alert-triangle" size={13} /> {profileErrorMessage}</div>
+            <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {profileErrorMessage}</div>
           )}
         </section>
 
         {/* Storage */}
-        <section className="v3-form-card v3-setup-section">
-          <div className="v3-card-heading">
+        <section className="sync-form-card sync-setup-section">
+          <div className="sync-card-heading">
             <div><strong>Storage</strong></div>
             {sectionBadge(storageSection)}
           </div>
-          <div className="v3-profile-select-row">
+          <div className="sync-profile-select-row">
             <select
               value={draft.storage?.kind === "existing" ? draft.storage.storage_id : draft.storage?.kind === "pending" ? "__pending" : ""}
               disabled={working}
@@ -616,40 +614,40 @@ export default function ProjectSetupWorkspace({
             </button>
           </div>
           {storageSection?.message && storageSection.state === "blocked" && (
-            <div className="v3-setup-field-error"><Icon name="alert-triangle" size={13} /> {storageSection.message}</div>
+            <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {storageSection.message}</div>
           )}
           {storageIsPending && selectedStorage && (
-            <small className="v3-setup-hint">{selectedStorage.local_dir}</small>
+            <small className="sync-setup-hint">{selectedStorage.local_dir}</small>
           )}
           {bundlesLoading && (
-            <small className="v3-setup-inline-status"><span className="status-loader" /> Checking repositories…</small>
+            <small className="sync-setup-inline-status"><span className="status-loader" /> Checking repositories…</small>
           )}
         </section>
 
         {/* Repository */}
         {showRepositoryChoice && (
-          <section className="v3-form-card v3-setup-section">
-            <div className="v3-card-heading">
+          <section className="sync-form-card sync-setup-section">
+            <div className="sync-card-heading">
               <div><strong>Repository</strong></div>
               {sectionBadge(repositorySection)}
             </div>
             {repositorySection?.message && repositorySection.state === "blocked" && (
-              <div className="v3-setup-field-error"><Icon name="alert-triangle" size={13} /> {repositorySection.message}</div>
+              <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {repositorySection.message}</div>
             )}
             {bundlesError ? (
-              <div className="v3-setup-field-error"><Icon name="alert-triangle" size={13} /> {bundlesError}</div>
+              <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {bundlesError}</div>
             ) : !listableStorageId ? null : (
-              <div className="v3-bundle-match-options" role="radiogroup" aria-label="Repo identity for this project">
+              <div className="sync-bundle-match-options" role="radiogroup" aria-label="Repo identity for this project">
                 <button
                   type="button"
                   role="radio"
                   aria-checked={!usesExistingRepo}
-                  className={`v3-bundle-match-option separate${!usesExistingRepo ? " active" : ""}`}
+                  className={`sync-bundle-match-option separate${!usesExistingRepo ? " active" : ""}`}
                   onClick={() => edit((current) => ({ ...current, repository: { kind: "new" } }))}
                   disabled={working}
                 >
-                  <span className="v3-bundle-radio"><span /></span>
-                  <span className="v3-bundle-match-copy">
+                  <span className="sync-bundle-radio"><span /></span>
+                  <span className="sync-bundle-match-copy">
                     <strong>New repository</strong>
                     <span>Keep this project separate</span>
                   </span>
@@ -660,7 +658,7 @@ export default function ProjectSetupWorkspace({
                     && draft.repository.bundle_id === bundle.bundle_id;
                   const recommended = repositoryFingerprintMatches(
                     bundle.repository_fingerprint,
-                    repositoryFingerprintCandidates,
+                    repositoryFingerprint,
                   )
                     && exactMatches.length === 1;
                   return (
@@ -669,7 +667,7 @@ export default function ProjectSetupWorkspace({
                       type="button"
                       role="radio"
                       aria-checked={active}
-                      className={`v3-bundle-match-option${active ? " active" : ""}`}
+                      className={`sync-bundle-match-option${active ? " active" : ""}`}
                       onClick={() => edit((current) => ({
                         ...current,
                         repository: {
@@ -683,12 +681,12 @@ export default function ProjectSetupWorkspace({
                       }))}
                       disabled={working}
                     >
-                      <span className="v3-bundle-radio"><span /></span>
-                      <span className="v3-bundle-match-copy">
-                        <strong>{bundle.display_name}{recommended && <small className="v3-bundle-recommended">Git match</small>}</strong>
+                      <span className="sync-bundle-radio"><span /></span>
+                      <span className="sync-bundle-match-copy">
+                        <strong>{bundle.display_name}{recommended && <small className="sync-bundle-recommended">Git match</small>}</strong>
                         <span>{bundle.bundle_id}</span>
                       </span>
-                      <span className="v3-bundle-match-meta">{formatRelativeTime(bundle.updated_at)}</span>
+                      <span className="sync-bundle-match-meta">{formatRelativeTime(bundle.updated_at)}</span>
                     </button>
                   );
                 })}
@@ -697,9 +695,9 @@ export default function ProjectSetupWorkspace({
             {usesExistingRepo && draft.repository.kind === "existing"
               && !repositoryFingerprintMatches(
                 draft.repository.repository_fingerprint,
-                repositoryFingerprintCandidates,
+                repositoryFingerprint,
               ) && (
-              <label className="v3-setup-acknowledge">
+              <label className="sync-setup-acknowledge">
                 <input
                   type="checkbox"
                   checked={draft.repository.mismatch_acknowledged}
@@ -717,17 +715,17 @@ export default function ProjectSetupWorkspace({
         )}
 
         {/* Sync contents */}
-        <section className="v3-form-card v3-setup-section">
-          <div className="v3-card-heading">
-            <div className="v3-setup-sync-copy">
-              <div className="v3-setup-sync-title">
+        <section className="sync-form-card sync-setup-section">
+          <div className="sync-card-heading">
+            <div className="sync-setup-sync-copy">
+              <div className="sync-setup-sync-title">
                 <strong>Sync contents</strong>
                 {(inspection?.warnings?.length ?? 0) > 0 && (
-                  <details className="v3-setup-warning-disclosure">
+                  <details className="sync-setup-warning-disclosure">
                     <summary aria-label="Show sync warning details" title="Sync warning details">
                       <Icon name="alert-triangle" size={14} />
                     </summary>
-                    <ul className="v3-setup-warning-list">
+                    <ul className="sync-setup-warning-list">
                       {inspection?.warnings?.map((warning) => <li key={warning}>{warning}</li>)}
                     </ul>
                   </details>
@@ -741,17 +739,17 @@ export default function ProjectSetupWorkspace({
                   : `${selectedResources.size} of ${resources.length} selected`}
               </span>
             </div>
-            <div className="v3-setup-heading-actions">
+            <div className="sync-setup-heading-actions">
               {!resourcesWaitingForProfile && sectionBadge(resourcesSection)}
               {!usesExistingRepo && resources.length > 0 && (
-                <button type="button" className="btn btn-ghost v3-setup-resource-toggle" onClick={() => setResourcesOpen((current) => !current)}>
+                <button type="button" className="btn btn-ghost sync-setup-resource-toggle" onClick={() => setResourcesOpen((current) => !current)}>
                   {resourcesOpen ? "Collapse" : "Customize"}
                 </button>
               )}
             </div>
           </div>
           {inspection?.selection_stale && (
-            <div className="v3-callout warning">
+            <div className="sync-callout warning">
               <Icon name="alert-triangle" size={15} />
               <span>Resources changed. Review or accept the current list.</span>
               <button
@@ -768,10 +766,10 @@ export default function ProjectSetupWorkspace({
             </div>
           )}
           {!resourcesWaitingForProfile && resourcesSection?.message && resourcesSection.state === "blocked" && (
-            <div className="v3-setup-field-error"><Icon name="alert-triangle" size={13} /> {resourcesSection.message}</div>
+            <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {resourcesSection.message}</div>
           )}
           {inspecting && !inspection?.inventory && (
-            <div className="v3-storage-repository-state"><span className="status-loader" /> Discovering resources…</div>
+            <div className="sync-storage-repository-state"><span className="status-loader" /> Discovering resources…</div>
           )}
           {!usesExistingRepo && resourcesOpen && resources.length > 0 && (
             <ResourceInventory
@@ -793,15 +791,15 @@ export default function ProjectSetupWorkspace({
           )}
         </section>
         {error && (
-          <div className="v3-setup-field-error v3-setup-system-error" role="alert">
+          <div className="sync-setup-field-error sync-setup-system-error" role="alert">
             <Icon name="alert-triangle" size={13} /> {error}
           </div>
         )}
       </div>
 
-      <footer className="v3-modal-footer v3-setup-footer">
+      <footer className="sync-modal-footer sync-setup-footer">
         {(saveState === "saving" || saveState === "error") && (
-          <span className="v3-setup-save-state" aria-live="polite">
+          <span className="sync-setup-save-state" aria-live="polite">
             {saveState === "saving" ? "Saving…" : "Not saved"}
           </span>
         )}

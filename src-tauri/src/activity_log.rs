@@ -4,8 +4,8 @@
 //! `~/.mallard/logs`. The same entry is emitted to the frontend, so the live
 //! drawer and the retained history always share one schema.
 
-use crate::project_sync_v3::domain::generated_named_id;
-use crate::project_sync_v3::persistence::{write_json_atomic, V3Repository};
+use crate::project_sync::domain::generated_named_id;
+use crate::project_sync::persistence::{write_json_atomic, LocalStateRepository};
 use chrono::{DateTime, Days, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 #[cfg(not(test))]
@@ -273,17 +273,17 @@ pub struct ActivityLogStore {
 
 impl ActivityLogStore {
     pub fn from_app<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Self, String> {
-        let repository = V3Repository::from_app(app)?;
+        let repository = LocalStateRepository::from_app(app)?;
         Self::from_repository(&repository)
     }
 
     #[cfg(test)]
     pub fn from_home_dir(home: impl Into<PathBuf>) -> Result<Self, String> {
-        let repository = V3Repository::from_home_dir(home)?;
+        let repository = LocalStateRepository::from_home_dir(home)?;
         Self::from_repository(&repository)
     }
 
-    fn from_repository(repository: &V3Repository) -> Result<Self, String> {
+    fn from_repository(repository: &LocalStateRepository) -> Result<Self, String> {
         let store = Self {
             root: repository.root().join("logs"),
         };

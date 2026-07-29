@@ -4,14 +4,16 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import StartupLoadingScreen from "../../src/components/project-sync/StartupLoadingScreen";
 import { repositoryFingerprintMatches } from "../../src/components/project-sync/model";
+import { PROJECT_SYNC_SCHEMA } from "../../src/types";
 
-test("ProjectSyncV3 is the only application interface", () => {
+test("ProjectSync is the only application interface", () => {
   const app = readFileSync("src/App.tsx", "utf8");
-  assert.match(app, /<ProjectSyncV3/);
+  assert.match(app, /<ProjectSync/);
+  assert.doesNotMatch(app, /ProjectSyncV\d/);
   assert.doesNotMatch(app, /LegacyApp|onOpenLegacy|mode.*legacy|SyncPanel|FilesWorkspace|FinishSetup/);
 
   const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
-  const workspace = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   assert.doesNotMatch(`${sidebar}\n${workspace}`, /Legacy profiles|Open legacy|onOpenLegacy/);
 
   for (const removed of [
@@ -25,24 +27,29 @@ test("ProjectSyncV3 is the only application interface", () => {
   }
 });
 
+test("the current frontend contract is schema 1 without version-branded DTOs", () => {
+  assert.equal(PROJECT_SYNC_SCHEMA, 1);
+  const types = readFileSync("src/types.ts", "utf8");
+  assert.doesNotMatch(types, /SyncConfigV\d|StorageConfigV\d/);
+});
+
 test("project setup does not offer an immediate push", () => {
   const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
 
   assert.doesNotMatch(setupWorkspace, /Finish & push|finalize\("push"\)/);
 });
 
-test("project setup recognizes canonical and legacy repository fingerprints", () => {
-  const candidates = new Set(["canonical", "legacy-dot-git"]);
-
-  assert.equal(repositoryFingerprintMatches("canonical", candidates), true);
-  assert.equal(repositoryFingerprintMatches("legacy-dot-git", candidates), true);
-  assert.equal(repositoryFingerprintMatches("different-repository", candidates), false);
-  assert.equal(repositoryFingerprintMatches(null, candidates), false);
+test("project setup accepts only the current canonical repository fingerprint", () => {
+  assert.equal(repositoryFingerprintMatches("canonical", "canonical"), true);
+  assert.equal(repositoryFingerprintMatches("legacy-dot-git", "canonical"), false);
+  assert.equal(repositoryFingerprintMatches("different-repository", "canonical"), false);
+  assert.equal(repositoryFingerprintMatches(null, "canonical"), false);
 });
 
-test("the production Tauri handler exposes only V3 sync and shared log commands", () => {
+test("the production Tauri handler exposes only current sync and shared log commands", () => {
   const backend = readFileSync("src-tauri/src/lib.rs", "utf8");
-  assert.match(backend, /project_sync_v3::commands::get_project_sync_config/);
+  assert.match(backend, /project_sync::commands::get_project_sync_config/);
+  assert.doesNotMatch(backend, /project_sync_v\d/);
   assert.match(backend, /activity_log::query_activity_logs/);
   assert.doesNotMatch(
     backend,
@@ -51,7 +58,7 @@ test("the production Tauri handler exposes only V3 sync and shared log commands"
 });
 
 test("the desktop shell supports a persistent sidebar toggle and keyboard shortcut", () => {
-  const workspace = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
   const icons = readFileSync("src/components/Icons.tsx", "utf8");
   const css = readFileSync("src/App.css", "utf8");
@@ -61,24 +68,24 @@ test("the desktop shell supports a persistent sidebar toggle and keyboard shortc
   assert.match(workspace, /aria-keyshortcuts="Meta\+B Control\+B"/);
   assert.match(workspace, /event\.metaKey/);
   assert.match(workspace, /event\.ctrlKey/);
-  assert.match(workspace, /className="v3-sidebar-toggle"/);
+  assert.match(workspace, /className="sync-sidebar-toggle"/);
   assert.match(workspace, /sidebarVisible \? "sidebar-collapse" : "sidebar-expand"/);
   assert.match(sidebar, /id="project-sidebar"/);
   assert.match(icons, /\| "sidebar-collapse"/);
   assert.match(icons, /\| "sidebar-expand"/);
-  assert.match(css, /\.v3-app\.sidebar-hidden \.v3-sidebar/);
-  assert.match(css, /\.v3-app\.sidebar-hidden \.v3-titlebar/);
-  assert.match(css, /\.v3-sidebar-toggle \{[^}]*top: 14px;[^}]*left: 87px;/);
-  assert.match(css, /\.v3-app\.sidebar-hidden \.v3-titlebar \{[^}]*padding-left: 140px;/);
-  assert.match(css, /\.v3-app\.sidebar-hidden \.v3-titlebar::before \{[^}]*left: 123px;/);
-  assert.match(css, /\.v3-titlebar \{[^}]*height: 52px;[^}]*min-height: 52px;[^}]*flex: 0 0 52px;/);
-  assert.match(css, /\.v3-sidebar-drag \{[^}]*height: 38px;/);
-  assert.match(css, /\.v3-sidebar-brand \{[^}]*height: 52px;/);
+  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-sidebar/);
+  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar/);
+  assert.match(css, /\.sync-sidebar-toggle \{[^}]*top: 14px;[^}]*left: 87px;/);
+  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar \{[^}]*padding-left: 140px;/);
+  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar::before \{[^}]*left: 123px;/);
+  assert.match(css, /\.sync-titlebar \{[^}]*height: 52px;[^}]*min-height: 52px;[^}]*flex: 0 0 52px;/);
+  assert.match(css, /\.sync-sidebar-drag \{[^}]*height: 38px;/);
+  assert.match(css, /\.sync-sidebar-brand \{[^}]*height: 52px;/);
   assert.deepEqual(tauriConfig.app.windows[0].trafficLightPosition, { x: 8, y: 29 });
 });
 
 test("the titlebar marks active Git projects with the Git folder icon", () => {
-  const workspace = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
 
   assert.match(
     workspace,
@@ -88,7 +95,7 @@ test("the titlebar marks active Git projects with the Git folder icon", () => {
 });
 
 test("the shell verifies host identity and relies on backend auto-registration", () => {
-  const workspace = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const startupScreen = readFileSync("src/components/project-sync/StartupLoadingScreen.tsx", "utf8");
   const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
   const linksWorkspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
@@ -137,7 +144,7 @@ test("the shell verifies host identity and relies on backend auto-registration",
   assert.doesNotMatch(workspace, /registerAsNewHost/);
   assert.doesNotMatch(workspace, /"Register as new host"/);
   assert.ok(
-    workspace.indexOf("if (!hostIdentityShellReady)") < workspace.indexOf("className={`v3-app"),
+    workspace.indexOf("if (!hostIdentityShellReady)") < workspace.indexOf("className={`sync-app"),
     "the ordinary shell must remain behind the completed identity refresh gate",
   );
   assert.match(linksWorkspace, /const bindingActive = projectBinding\?\.state === "active"/);
@@ -152,19 +159,19 @@ test("the startup screen communicates minimal, staged loading progress", () => {
   const html = renderToStaticMarkup(<StartupLoadingScreen stage="projects" />);
   const css = readFileSync("src/App.css", "utf8");
 
-  assert.match(html, /<h1 id="v3-startup-title">Mallard<\/h1>/);
+  assert.match(html, /<h1 id="sync-startup-title">Mallard<\/h1>/);
   assert.match(html, /Finding projects…/);
   assert.doesNotMatch(html, /Preparing your workspace/);
   assert.match(html, /role="progressbar"/);
   assert.match(html, /aria-valuenow="3"/);
   assert.match(html, /aria-valuemax="5"/);
-  assert.match(css, /\.v3-startup-screen \{/);
-  assert.match(css, /@keyframes v3-startup-pulse/);
-  assert.match(css, /@keyframes v3-startup-progress-glint/);
+  assert.match(css, /\.sync-startup-screen \{/);
+  assert.match(css, /@keyframes sync-startup-pulse/);
+  assert.match(css, /@keyframes sync-startup-progress-glint/);
 });
 
 test("host-scoped workflows keep their originating generation across async continuations", () => {
-  const workspace = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
   const section = (source: string, name: string, nextName: string | null) => {
     const start = source.indexOf(`  const ${name} =`);
@@ -239,14 +246,14 @@ test("host-scoped workflows keep their originating generation across async conti
 });
 
 test("refocus reconciles external changes narrowly and the full reload lives in the titlebar menu", () => {
-  const workspace = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
 
   // The sidebar no longer carries an always-visible refresh icon; full reload is a
   // labeled recovery action in the titlebar overflow menu.
   assert.doesNotMatch(sidebar, /onRefresh|Refresh projects/);
   assert.match(workspace, /Reload app data/);
-  assert.match(workspace, /className="v3-titlebar-actions"/);
+  assert.match(workspace, /className="sync-titlebar-actions"/);
 
   // Refocus reconcile only fires after the window was away, and stays narrower than
   // refresh(): project list, repository kinds, and active detail — no audits, profiles,

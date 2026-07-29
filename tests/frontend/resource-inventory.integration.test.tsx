@@ -4,15 +4,34 @@ import { renderToStaticMarkup } from "react-dom/server";
 import PushResourceWorkspace, {
   nextPushReviewStep,
   preserveSyncedPushRecipeEntries,
-  pushRequiresStorageUnlink,
-  pushSelectableResourceIds,
+  pushReviewBlockers,
   recommendedPushSelection,
   sanitizePushSelection,
 } from "../../src/components/project-sync/PushResourceWorkspace";
 import ResourceInventory from "../../src/components/project-sync/ResourceInventory";
 import { recipeWithSelection } from "../../src/components/project-sync/model";
-import type { BundleRecipe, ProjectResourceDescriptor } from "../../src/types";
-import type { ThreadSyncComparison } from "../../src/types";
+import type {
+  BundleRecipe,
+  ConversationPlanActionType,
+  ConversationReasonCode,
+  ProjectResourceDescriptor,
+  ThreadSyncComparison,
+  ThreadSyncDecision,
+} from "../../src/types";
+
+function decision(
+  action: ConversationPlanActionType,
+  reasonCode: ConversationReasonCode,
+  selectable = false,
+): ThreadSyncDecision {
+  return {
+    action,
+    reason_code: reasonCode,
+    selectable,
+    selected_by_default: selectable,
+    requires_explicit_approval: false,
+  };
+}
 
 function standaloneSkill(
   effectiveName: string,
@@ -80,6 +99,8 @@ test("recommended Push selection includes only locally changed sessions", () => 
         state: "local_ahead",
         local_present: true,
         storage_present: true,
+        push_decision: decision("fast_forward_cloud", "cloud_prefix_of_local", true),
+        pull_decision: decision("keep_local", "cloud_prefix_of_local"),
       },
       {
         thread_id: "synced",
@@ -88,6 +109,8 @@ test("recommended Push selection includes only locally changed sessions", () => 
         state: "synced",
         local_present: true,
         storage_present: true,
+        push_decision: decision("no_op", "identical"),
+        pull_decision: decision("no_op", "identical"),
       },
       {
         thread_id: "storage-ahead",
@@ -96,6 +119,8 @@ test("recommended Push selection includes only locally changed sessions", () => 
         state: "storage_ahead",
         local_present: true,
         storage_present: true,
+        push_decision: decision("require_pull", "local_prefix_of_cloud"),
+        pull_decision: decision("fast_forward_local", "local_prefix_of_cloud", true),
       },
     ],
   };
@@ -109,23 +134,6 @@ test("recommended Push selection includes only locally changed sessions", () => 
   assert.deepEqual(
     [...recommended].sort(),
     [localAhead.resource_id, sessionIndex.resource_id, skill.resource_id].sort(),
-  );
-  assert.equal(
-    pushSelectableResourceIds(
-      [localAhead, synced, storageAhead, sessionIndex, skill],
-      comparison,
-    ).has(synced.resource_id),
-    false,
-    "an up-to-date session is informational, not a Push action",
-  );
-  assert.deepEqual(
-    [...sanitizePushSelection(
-      new Set([synced.resource_id, sessionIndex.resource_id]),
-      [localAhead, synced, storageAhead, sessionIndex, skill],
-      comparison,
-    )],
-    [],
-    "the internal session index cannot keep an otherwise empty Push selected",
   );
 
   const sourceRecipe: BundleRecipe = {
@@ -146,6 +154,103 @@ test("recommended Push selection includes only locally changed sessions", () => 
     Object.keys(publishedRecipe.entries).sort(),
     [synced.resource_id, sessionIndex.resource_id, skill.resource_id].sort(),
     "unchecked synced sessions stay stored without appearing in the recommended action set",
+  );
+});
+
+test("non-uploadable sessions cannot remain in the active Push selection", () => {
+  const localAhead = conversation("codex:session:local-ahead");
+  const synced = conversation("codex:session:synced");
+  const storageAhead = conversation("codex:session:storage-ahead");
+  const comparison: ThreadSyncComparison = {
+    project_id: "project-a",
+    storage_id: "storage-a",
+    storage_name: "Local storage 1",
+    compared_at: 1,
+    counts: { synced: 1, local: 1, storage: 1, diverged: 0, unavailable: 0, unknown: 0 },
+    warnings: [],
+    entries: [
+      {
+        thread_id: "local-ahead",
+        resource_id: localAhead.resource_id,
+        display_name: "Local ahead",
+        state: "local_ahead",
+        local_present: true,
+        storage_present: true,
+        push_decision: decision("fast_forward_cloud", "cloud_prefix_of_local", true),
+        pull_decision: decision("keep_local", "cloud_prefix_of_local"),
+      },
+      {
+        thread_id: "synced",
+        resource_id: synced.resource_id,
+        display_name: "Synced",
+        state: "synced",
+        local_present: true,
+        storage_present: true,
+        push_decision: decision("no_op", "identical"),
+        pull_decision: decision("no_op", "identical"),
+      },
+      {
+        thread_id: "storage-ahead",
+        resource_id: storageAhead.resource_id,
+        display_name: "Storage ahead",
+        state: "storage_ahead",
+        local_present: true,
+        storage_present: true,
+        push_decision: decision("require_pull", "local_prefix_of_cloud"),
+        pull_decision: decision("fast_forward_local", "local_prefix_of_cloud", true),
+      },
+    ],
+  };
+
+  assert.deepEqual(
+    [...sanitizePushSelection(
+      new Set([localAhead.resource_id, synced.resource_id, storageAhead.resource_id]),
+      [localAhead, synced, storageAhead],
+      comparison,
+    )],
+    [localAhead.resource_id],
+  );
+});
+
+test("fork-aware divergence requires a portable cloud thread identity", () => {
+  const resource = conversation("codex:session:diverged");
+  const entry = {
+    thread_id: "provider-diverged",
+    resource_id: resource.resource_id,
+    display_name: "Diverged",
+    state: "diverged" as const,
+    local_present: true,
+    storage_present: true,
+    push_decision: decision("fork", "diverged", true),
+    pull_decision: decision("fork", "diverged", true),
+  };
+  const comparison = (typed: boolean): ThreadSyncComparison => ({
+    project_id: "project-a",
+    storage_id: "storage-a",
+    storage_name: "Local storage 1",
+    compared_at: 1,
+    counts: { synced: 0, local: 0, storage: 0, diverged: 1, unavailable: 0, unknown: 0 },
+    warnings: [],
+    entries: [{
+      ...entry,
+      cloud_thread_id: typed ? "thread-diverged" : null,
+    }],
+  });
+
+  assert.deepEqual(
+    pushReviewBlockers(new Set([resource.resource_id]), comparison(true)),
+    [],
+    "a typed Fork can publish without treating the preserved cloud branch as a blocker",
+  );
+  assert.deepEqual(
+    pushReviewBlockers(new Set([resource.resource_id]), comparison(false)),
+    [{
+      kind: "storage",
+      step: "history",
+      resourceId: resource.resource_id,
+      state: "diverged",
+    }],
+    "a Fork row without a portable cloud identity has no executable typed plan",
   );
 });
 
@@ -203,9 +308,9 @@ test("duplicate effective-name claims remain unselectable", () => {
 
   assert.match(html, /folder review-one/);
   assert.match(html, /folder review-two/);
-  assert.equal((html.match(/v3-resource-row blocked/g) ?? []).length, 2);
-  const disabledInputs = html.match(/<input[^>]*disabled=""[^>]*>/g) ?? [];
-  assert.equal(disabledInputs.length, 2);
+  assert.equal((html.match(/sync-resource-row blocked/g) ?? []).length, 2);
+  assert.doesNotMatch(html, /sync-resource-row-selectable|sync-selection-placeholder/);
+  assert.doesNotMatch(html, /type="checkbox"/);
 });
 
 test("blocked resources cannot enter a published recipe", () => {
@@ -239,7 +344,7 @@ test("the push chooser shows one concise selection summary", () => {
   );
 
   assert.match(html, />Push review</);
-  assert.match(html, /v3-sync-review-title/);
+  assert.match(html, /sync-sync-review-title/);
   assert.doesNotMatch(html, /Choose what to include/);
   assert.match(html, /aria-label="Use recommended selection \(1\)"/);
   assert.match(html, /aria-label="Clear current selection"/);
@@ -250,28 +355,18 @@ test("the push chooser shows one concise selection summary", () => {
   assert.ok(recommendedAction < clearAction && clearAction < closeAction);
   assert.match(html, />Review</);
   assert.match(html, /Back: Plugins/);
-  assert.match(html, /btn btn-secondary v3-sync-review-back/);
+  assert.match(html, /btn btn-secondary sync-sync-review-back/);
   assert.match(html, />Push<\/button>/);
-  const footer = html.slice(html.indexOf('<footer class="v3-inline-action-footer v3-push-resource-footer'));
+  const footer = html.slice(html.indexOf('<footer class="sync-inline-action-footer sync-push-resource-footer'));
   assert.doesNotMatch(footer, /\d+ included|Push \d+ resources?/);
   assert.doesNotMatch(html, /Choose resources to push/);
   assert.doesNotMatch(html, /Selections are saved after Push succeeds/);
   assert.doesNotMatch(html, /last selection|selection will be remembered|resource selected/i);
+  assert.doesNotMatch(html, /Remote history is missing/);
 });
 
-test("a removed storage repository offers one concise Unlink action", () => {
+test("the push chooser gives a minimal recovery path when remote history is missing", () => {
   const resource = standaloneSkill("review", "review");
-  const comparison: ThreadSyncComparison = {
-    project_id: "project-a",
-    storage_id: "storage-a",
-    storage_name: "Local storage 1",
-    generation: null,
-    base_generation: 1,
-    compared_at: 1,
-    counts: { synced: 0, local: 1, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
-    warnings: [],
-    entries: [],
-  };
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
       resources={[resource]}
@@ -279,116 +374,31 @@ test("a removed storage repository offers one concise Unlink action", () => {
       projectDefaults={new Set([resource.resource_id])}
       busy={false}
       error={null}
+      storageName="R2 storage 1"
+      destinationStatus={{
+        state: "remote_history_missing",
+        base_generation: 3,
+      }}
       initialStep="review"
-      threadComparison={comparison}
       onToggle={() => undefined}
       onUseProjectDefaults={() => undefined}
       onClear={() => undefined}
       onClose={() => undefined}
       onPush={() => undefined}
+      onOpenStorageSettings={() => undefined}
       onUnlinkStorage={() => undefined}
     />,
   );
-  const pushButton = html.match(
-    /<button[^>]*v3-pull-apply-button[^>]*>.*?Push<\/button>/s,
-  )?.[0] ?? "";
 
-  assert.equal(pushRequiresStorageUnlink(comparison, null), true);
-  assert.equal(
-    pushRequiresStorageUnlink(
-      null,
-      "remote bundle head is missing but this project has a prior base; review before republishing",
-    ),
-    true,
-  );
-  assert.match(html, /Repository is missing from storage\./);
-  assert.match(html, />Unlink storage<\/button>/);
-  assert.match(pushButton, /disabled=""/);
-  assert.doesNotMatch(html, /prior base|review before republishing/i);
-});
-
-test("Push review counts only outstanding sessions and keeps synced sessions informational", () => {
-  const localAhead = conversation("codex:session:local-ahead");
-  const synced = conversation("codex:session:synced");
-  const sessionIndex = conversation("codex:session-index");
-  const resources = [localAhead, synced, sessionIndex];
-  const comparison: ThreadSyncComparison = {
-    project_id: "project-a",
-    storage_id: "storage-a",
-    storage_name: "R2 storage 1",
-    compared_at: 1,
-    counts: { synced: 1, local: 1, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
-    warnings: [],
-    entries: [
-      {
-        thread_id: "local-ahead",
-        resource_id: localAhead.resource_id,
-        display_name: "Local ahead",
-        state: "local_ahead",
-        local_present: true,
-        storage_present: true,
-      },
-      {
-        thread_id: "synced",
-        resource_id: synced.resource_id,
-        display_name: "Synced",
-        state: "synced",
-        local_present: true,
-        storage_present: true,
-      },
-    ],
-  };
-  const mixedHtml = renderToStaticMarkup(
-    <PushResourceWorkspace
-      resources={resources}
-      selected={new Set(resources.map((resource) => resource.resource_id))}
-      projectDefaults={new Set(resources.map((resource) => resource.resource_id))}
-      busy={false}
-      error={null}
-      initialStep="review"
-      threadComparison={comparison}
-      onToggle={() => undefined}
-      onUseProjectDefaults={() => undefined}
-      onClear={() => undefined}
-      onClose={() => undefined}
-      onPush={() => undefined}
-    />,
-  );
-
-  assert.match(mixedHtml, /aria-label="Git &amp; sessions, 1 selected"/);
-  assert.match(mixedHtml, /aria-label="Use recommended selection \(1\)"/);
-  assert.match(mixedHtml, />1 included/);
-  assert.doesNotMatch(mixedHtml, /project session index|codex:session-index/i);
-
-  const syncedOnlyHtml = renderToStaticMarkup(
-    <PushResourceWorkspace
-      resources={[synced, sessionIndex]}
-      selected={new Set([synced.resource_id, sessionIndex.resource_id])}
-      projectDefaults={new Set([synced.resource_id, sessionIndex.resource_id])}
-      busy={false}
-      error={null}
-      initialStep="review"
-      threadComparison={{
-        ...comparison,
-        counts: { ...comparison.counts, local: 0 },
-        entries: comparison.entries.filter((entry) => entry.state === "synced"),
-      }}
-      onToggle={() => undefined}
-      onUseProjectDefaults={() => undefined}
-      onClear={() => undefined}
-      onClose={() => undefined}
-      onPush={() => undefined}
-    />,
-  );
-  const pushButton = syncedOnlyHtml.match(
-    /<button[^>]*v3-pull-apply-button[^>]*>.*?Push<\/button>/s,
-  )?.[0] ?? "";
-
-  assert.match(syncedOnlyHtml, /aria-label="Git &amp; sessions, 0 selected"/);
-  assert.match(syncedOnlyHtml, /aria-label="Use recommended selection \(0\)"/);
-  assert.match(syncedOnlyHtml, />0 included/);
-  assert.match(pushButton, /disabled=""/);
-  assert.doesNotMatch(syncedOnlyHtml, /project session index|codex:session-index/i);
+  assert.match(html, /role="alert"/);
+  assert.match(html, />Remote history is missing</);
+  assert.match(html, /previously synced generation 3 to R2 storage 1/);
+  assert.match(html, /Mallard cannot determine why/);
+  assert.match(html, />Storage settings<\/button>/);
+  assert.match(html, />Unlink storage…<\/button>/);
+  assert.doesNotMatch(html, /was deleted|expired|lifecycle/i);
+  const pushButton = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[^>]*>/)?.[0];
+  assert.match(pushButton ?? "", /disabled=""/);
 });
 
 test("the push chooser provides contextual back and next actions", () => {

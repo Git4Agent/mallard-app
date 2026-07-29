@@ -14,7 +14,7 @@ const entries = [
   "tests/frontend/pull-review.integration.test.tsx",
   "tests/frontend/project-chat-history.integration.test.tsx",
   "tests/frontend/project-files.integration.test.tsx",
-  "tests/frontend/project-v3-cutover.integration.test.tsx",
+  "tests/frontend/project-sync-cutover.integration.test.tsx",
   "tests/frontend/resource-inventory.integration.test.tsx",
   "tests/frontend/single-provider.integration.test.tsx",
   "tests/frontend/storage-settings.integration.test.tsx",

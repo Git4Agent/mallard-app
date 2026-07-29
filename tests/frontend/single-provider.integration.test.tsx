@@ -285,11 +285,11 @@ test("the configured profile keeps storage identity first and moves utility acti
   assert.match(html, /role="group" aria-label="Sync actions"/);
   assert.ok(storageMoreIndex < syncActionsIndex);
   const css = readFileSync("src/App.css", "utf8");
-  const selectedStorageRule = css.match(/\.v3-project-combined-page \.project-profile-storage-list \.storage-link-block\.selected\s*\{[^}]+\}/s)?.[0] ?? "";
+  const selectedStorageRule = css.match(/\.sync-project-combined-page \.project-profile-storage-list \.storage-link-block\.selected\s*\{[^}]+\}/s)?.[0] ?? "";
   const storageMoreRule = css.match(/^\.storage-link-more\s*\{[^}]+\}/ms)?.[0] ?? "";
   const storageActionsMenuRule = css.match(/\.storage-link-actions-menu\s*\{[^}]+\}/s)?.[0] ?? "";
-  const syncActionsRule = css.match(/\.v3-project-combined-page \.storage-link-action-group\s*\{[^}]+\}/s)?.[0] ?? "";
-  const pushActionRule = css.match(/\.v3-project-combined-page \.storage-link-sync-commit\s*\{[^}]+\}/s)?.[0] ?? "";
+  const syncActionsRule = css.match(/\.sync-project-combined-page \.storage-link-action-group\s*\{[^}]+\}/s)?.[0] ?? "";
+  const pushActionRule = css.match(/\.sync-project-combined-page \.storage-link-sync-commit\s*\{[^}]+\}/s)?.[0] ?? "";
   const storageMenuRule = css.match(/\.storage-link-menu\s*\{[^}]+\}/s)?.[0] ?? "";
   assert.match(selectedStorageRule, /inset 2px 0 0/);
   assert.match(storageMoreRule, /border:\s*1px/);
@@ -313,7 +313,7 @@ test("the configured profile keeps storage identity first and moves utility acti
   assert.doesNotMatch(html, /project-profile-group-footer/);
   assert.equal(html.match(/Default Codex/g)?.length, 1);
   assert.match(html, /title="Codex agent home: \/Users\/test\/\.codex"/);
-  assert.match(html, /v3-project-heading-agent/);
+  assert.match(html, /sync-project-heading-agent/);
   assert.doesNotMatch(html, /Codex ·/);
   assert.doesNotMatch(html, /project-profile-group-header|project-profile-group-icon|project-profile-group-path/);
   assert.doesNotMatch(html, /Agent home is fixed after project setup/);

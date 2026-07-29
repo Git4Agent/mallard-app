@@ -9,9 +9,8 @@ use super::domain::{
     generated_named_id, BundleId, ConversationBindings, ConversationPushPlan,
     ConversationSyncJournal, DependencyApplications, DependencyPlan, HostId, HostIdentity,
     LocalProjectId, MachineProjectState, Materializations, OriginHostToken, OriginReplicaToken,
-    PlanId, ProjectSetupDraft, ReplicaId, RestorePlan, SetupDraftId, SetupTransaction,
-    SyncConfigV3, CONVERSATION_BINDINGS_SCHEMA, HOST_IDENTITY_SCHEMA, MACHINE_PROJECT_SCHEMA,
-    MAX_SETUP_DRAFTS,
+    PlanId, ProjectSetupDraft, ReplicaId, RestorePlan, SetupDraftId, SetupTransaction, SyncConfig,
+    CONVERSATION_BINDINGS_SCHEMA, HOST_IDENTITY_SCHEMA, MACHINE_PROJECT_SCHEMA, MAX_SETUP_DRAFTS,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -39,6 +38,7 @@ const MAX_HOST_ROTATION_BYTES: u64 = 192 * 1024 * 1024;
 const MAX_CONVERSATION_BINDINGS_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CONVERSATION_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CONVERSATION_PUSH_PLAN_BYTES: u64 = 64 * 1024 * 1024;
+const HOST_ROTATION_SCHEMA: u32 = 1;
 
 static PERSISTENCE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -94,11 +94,11 @@ pub(crate) struct HostOperationGuard {
 }
 
 #[derive(Clone, Debug)]
-pub struct V3Repository {
+pub struct LocalStateRepository {
     root: PathBuf,
 }
 
-impl V3Repository {
+impl LocalStateRepository {
     /// Resolve the machine-global metadata directory for any Tauri runtime.
     pub fn from_app<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) -> Result<Self, String> {
         let home = dirs::home_dir().ok_or_else(|| "cannot find home directory".to_string())?;
@@ -396,7 +396,7 @@ impl V3Repository {
         materializations.validate(&config)?;
 
         let transaction = HostRotationTransaction {
-            schema: 1,
+            schema: HOST_ROTATION_SCHEMA,
             next_identity: next.clone(),
             machine_projects: machine,
             conversation_bindings: conversations,
@@ -453,6 +453,7 @@ impl V3Repository {
         ))
     }
 
+    #[cfg(test)]
     pub fn derive_origin_host_token(
         &self,
         bundle_id: &BundleId,
@@ -585,7 +586,7 @@ impl V3Repository {
         Ok(result)
     }
 
-    pub fn load_config(&self) -> Result<SyncConfigV3, String> {
+    pub fn load_config(&self) -> Result<SyncConfig, String> {
         let _guard = persistence_guard(&self.root)?;
         self.load_config_unlocked()
     }
@@ -593,7 +594,7 @@ impl V3Repository {
     /// Full-document optimistic save used by storage/settings UI.  The
     /// caller must submit the revision it read; the returned value carries
     /// the next revision.
-    pub fn save_config(&self, mut config: SyncConfigV3) -> Result<SyncConfigV3, String> {
+    pub fn save_config(&self, mut config: SyncConfig) -> Result<SyncConfig, String> {
         let _guard = persistence_guard(&self.root)?;
         let current = self.load_config_unlocked()?;
         if config.revision != current.revision {
@@ -613,7 +614,7 @@ impl V3Repository {
     /// commands.  The closure runs while the process persistence lock is held.
     pub fn mutate_config<T>(
         &self,
-        mutate: impl FnOnce(&mut SyncConfigV3) -> Result<T, String>,
+        mutate: impl FnOnce(&mut SyncConfig) -> Result<T, String>,
     ) -> Result<T, String> {
         let _guard = persistence_guard(&self.root)?;
         let mut config = self.load_config_unlocked()?;
@@ -634,7 +635,7 @@ impl V3Repository {
 
     pub fn mutate_bindings<T>(
         &self,
-        mutate: impl FnOnce(&SyncConfigV3, &mut MachineProjectState) -> Result<T, String>,
+        mutate: impl FnOnce(&SyncConfig, &mut MachineProjectState) -> Result<T, String>,
     ) -> Result<T, String> {
         let _guard = persistence_guard(&self.root)?;
         let identity = self.load_or_create_host_identity_unlocked()?;
@@ -675,7 +676,7 @@ impl V3Repository {
 
     pub fn mutate_materializations<T>(
         &self,
-        mutate: impl FnOnce(&SyncConfigV3, &mut Materializations) -> Result<T, String>,
+        mutate: impl FnOnce(&SyncConfig, &mut Materializations) -> Result<T, String>,
     ) -> Result<T, String> {
         let _guard = persistence_guard(&self.root)?;
         self.load_or_create_host_identity_unlocked()?;
@@ -703,7 +704,7 @@ impl V3Repository {
 
     pub fn mutate_dependency_applications<T>(
         &self,
-        mutate: impl FnOnce(&SyncConfigV3, &mut DependencyApplications) -> Result<T, String>,
+        mutate: impl FnOnce(&SyncConfig, &mut DependencyApplications) -> Result<T, String>,
     ) -> Result<T, String> {
         let _guard = persistence_guard(&self.root)?;
         self.load_or_create_host_identity_unlocked()?;
@@ -1027,8 +1028,8 @@ impl V3Repository {
     }
 
     /// Reviewed Push plans are immutable and host-pinned, just like Pull
-    /// plans. Keeping them in a separate directory prevents an old schema
-    /// reader from mistaking one plan shape for the other.
+    /// plans. Keeping them in a separate directory prevents one plan type
+    /// from being read as the other.
     pub fn save_conversation_push_plan(&self, plan: &ConversationPushPlan) -> Result<(), String> {
         let _guard = persistence_guard(&self.root)?;
         plan.validate()?;
@@ -1093,8 +1094,8 @@ impl V3Repository {
         Ok(plan)
     }
 
-    fn load_config_unlocked(&self) -> Result<SyncConfigV3, String> {
-        let config: SyncConfigV3 =
+    fn load_config_unlocked(&self) -> Result<SyncConfig, String> {
+        let config: SyncConfig =
             read_json_bounded(&self.root, &self.config_path(), MAX_CONFIG_BYTES)?
                 .unwrap_or_default();
         config.validate()?;
@@ -1141,6 +1142,7 @@ impl V3Repository {
         self.replace_host_identity_unlocked(None, None)
     }
 
+    #[cfg(test)]
     fn load_host_identity_document_unlocked(&self) -> Result<Option<HostIdentity>, String> {
         self.load_host_identity_document_classified_unlocked()
             .map_err(BoundedJsonReadError::into_message)
@@ -1549,9 +1551,9 @@ impl V3Repository {
     fn validate_host_rotation_payload_unlocked(
         &self,
         transaction: &HostRotationTransaction,
-        config: &SyncConfigV3,
+        config: &SyncConfig,
     ) -> Result<(), String> {
-        if transaction.schema != 1 {
+        if transaction.schema != HOST_ROTATION_SCHEMA {
             return Err("invalid host rotation transaction".to_string());
         }
         transaction.next_identity.validate()?;
@@ -1709,7 +1711,7 @@ impl V3Repository {
 
     fn load_bindings_unlocked(
         &self,
-        config: &SyncConfigV3,
+        config: &SyncConfig,
         identity: &HostIdentity,
     ) -> Result<MachineProjectState, String> {
         let bindings = self.load_bindings_document_unlocked(config)?;
@@ -1727,7 +1729,7 @@ impl V3Repository {
 
     fn load_bindings_document_unlocked(
         &self,
-        config: &SyncConfigV3,
+        config: &SyncConfig,
     ) -> Result<MachineProjectState, String> {
         let path = self.machine_projects_path();
         let Some(value) = read_json_bounded::<Value>(&self.root, &path, MAX_BINDINGS_BYTES)? else {
@@ -1743,7 +1745,7 @@ impl V3Repository {
 
     fn load_materializations_unlocked(
         &self,
-        config: &SyncConfigV3,
+        config: &SyncConfig,
     ) -> Result<Materializations, String> {
         let path = self.materializations_path();
         let Some(value) =
@@ -1759,7 +1761,7 @@ impl V3Repository {
 
     fn load_dependency_applications_unlocked(
         &self,
-        config: &SyncConfigV3,
+        config: &SyncConfig,
     ) -> Result<DependencyApplications, String> {
         let path = self.dependency_applications_path();
         let Some(value) =
@@ -1783,7 +1785,7 @@ impl V3Repository {
 
     fn load_conversation_bindings_document_unlocked(
         &self,
-        config: &SyncConfigV3,
+        config: &SyncConfig,
         machine: &MachineProjectState,
         identity: &HostIdentity,
     ) -> Result<ConversationBindings, String> {
@@ -1882,7 +1884,7 @@ impl V3Repository {
     fn ensure_directory(&self, directory: &Path) -> Result<(), String> {
         let relative = directory.strip_prefix(&self.root).map_err(|_| {
             format!(
-                "schema-3 path '{}' escapes '{}'",
+                "Mallard state path '{}' escapes '{}'",
                 directory.display(),
                 self.root.display()
             )
@@ -1896,7 +1898,7 @@ impl V3Repository {
                     if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {}
                 Ok(_) => {
                     return Err(format!(
-                        "schema-3 directory '{}' is not a real directory",
+                        "Mallard state directory '{}' is not a real directory",
                         current.display()
                     ))
                 }
@@ -1904,20 +1906,26 @@ impl V3Repository {
                     match fs::create_dir(&current) {
                         Ok(()) => {
                             let parent = current.parent().ok_or_else(|| {
-                                format!("schema-3 directory '{}' has no parent", current.display())
+                                format!(
+                                    "Mallard state directory '{}' has no parent",
+                                    current.display()
+                                )
                             })?;
                             sync_directory(parent)?;
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                             ensure_real_directory(&current)?;
                             let parent = current.parent().ok_or_else(|| {
-                                format!("schema-3 directory '{}' has no parent", current.display())
+                                format!(
+                                    "Mallard state directory '{}' has no parent",
+                                    current.display()
+                                )
                             })?;
                             sync_directory(parent)?;
                         }
                         Err(error) => {
                             return Err(format!(
-                                "create schema-3 directory '{}': {}",
+                                "create Mallard state directory '{}': {}",
                                 current.display(),
                                 error
                             ));
@@ -2054,7 +2062,7 @@ fn ensure_real_directory(path: &Path) -> Result<(), String> {
 fn ensure_no_symlinks(root: &Path, destination: &Path) -> Result<(), String> {
     let relative = destination.strip_prefix(root).map_err(|_| {
         format!(
-            "schema-3 path '{}' escapes '{}'",
+            "Mallard state path '{}' escapes '{}'",
             destination.display(),
             root.display()
         )
@@ -2067,7 +2075,7 @@ fn ensure_no_symlinks(root: &Path, destination: &Path) -> Result<(), String> {
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(format!(
-                    "schema-3 path traverses symlink '{}'",
+                    "Mallard state path traverses symlink '{}'",
                     current.display()
                 ))
             }
@@ -2211,15 +2219,15 @@ fn write_bytes_atomic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_sync_v3::domain::{
+    use crate::project_sync::domain::{
         generated_named_id, BindingState, BundleId, BundleRecipe, ConversationMaterializationState,
         LocalConversationBinding, LocalProjectRegistration, LocalProviderProfileId,
         OriginHostAlias, ProjectBinding, Provider, ProviderProfile, ThreadId, LOCAL_SCHEMA,
     };
     use std::collections::BTreeMap;
 
-    fn repository(temp: &tempfile::TempDir) -> V3Repository {
-        V3Repository::from_home_dir(temp.path()).unwrap()
+    fn repository(temp: &tempfile::TempDir) -> LocalStateRepository {
+        LocalStateRepository::from_home_dir(temp.path()).unwrap()
     }
 
     fn project() -> LocalProjectRegistration {
@@ -2238,7 +2246,7 @@ mod tests {
     }
 
     fn install_bound_project(
-        repo: &V3Repository,
+        repo: &LocalStateRepository,
         temp: &tempfile::TempDir,
         identity: &HostIdentity,
     ) -> ReplicaId {
@@ -2287,17 +2295,36 @@ mod tests {
     }
 
     #[test]
-    fn mallard_persistence_never_touches_schema2_files() {
+    fn persistence_stays_within_the_mallard_root() {
         let temp = tempfile::tempdir().unwrap();
-        let old = temp.path().join("sync_config.json");
-        fs::write(&old, b"{\"schema\":2,\"keep\":true}\n").unwrap();
+        let outside = temp.path().join("sync_config.json");
+        fs::write(&outside, b"{\"keep\":true}\n").unwrap();
         let repo = repository(&temp);
-        let saved = repo.save_config(SyncConfigV3::default()).unwrap();
+        let saved = repo.save_config(SyncConfig::default()).unwrap();
 
         assert_eq!(saved.schema, LOCAL_SCHEMA);
         assert_eq!(saved.revision, 1);
-        assert_eq!(fs::read(&old).unwrap(), b"{\"schema\":2,\"keep\":true}\n");
+        assert_eq!(fs::read(&outside).unwrap(), b"{\"keep\":true}\n");
         assert!(repo.config_path().starts_with(temp.path().join(".mallard")));
+    }
+
+    #[test]
+    fn config_loader_rejects_pre_reset_schemas_without_rewriting_them() {
+        for unsupported_schema in [2, 3] {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = repository(&temp);
+            let mut document = serde_json::to_value(SyncConfig::default()).unwrap();
+            document["schema"] = serde_json::Value::from(unsupported_schema);
+            let bytes = serde_json::to_vec_pretty(&document).unwrap();
+            fs::write(repo.config_path(), &bytes).unwrap();
+
+            let error = repo.load_config().unwrap_err();
+            assert!(
+                error.contains("unsupported project-sync schema"),
+                "{unsupported_schema}: {error}"
+            );
+            assert_eq!(fs::read(repo.config_path()).unwrap(), bytes);
+        }
     }
 
     #[test]
@@ -2360,6 +2387,7 @@ mod tests {
                 local_project_id: LocalProjectId::parse("project-a").unwrap(),
                 provider_profile_id: first_profile_id.clone(),
                 thread_id: ThreadId::parse("group-a.variant-a").unwrap(),
+                forked_from: None,
                 provider_thread_id: None,
                 materialization_state: ConversationMaterializationState::StoredOnly,
                 last_observed_file_sha256: None,
@@ -2458,7 +2486,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         symlink(outside.path(), temp.path().join(".mallard")).unwrap();
-        let error = V3Repository::from_home_dir(temp.path()).unwrap_err();
+        let error = LocalStateRepository::from_home_dir(temp.path()).unwrap_err();
         assert!(error.contains("not a real directory"));
     }
 

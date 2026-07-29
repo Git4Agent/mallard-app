@@ -1,18 +1,17 @@
-use crate::project_sync_v3::bundle_engine::{
-    BundleEngine, BundleObjectStore, HeadToken, LocalBundleObjectStore, PublishBundleRequest,
-    PublishContent, PublishFile, PublishedBundle,
+use crate::project_sync::bundle_engine::{
+    BundleEngine, BundleObjectStore, CapturedBundleFile, HeadToken, LocalBundleObjectStore,
+    PublishBundleRequest, PublishExpectation, PublishedBundle,
 };
-use crate::project_sync_v3::conversation_codec::{
+use crate::project_sync::conversation_codec::{
     analyze_codex_transcript, CodecLineage, CODEX_LINEAGE_CODEC_KEY,
 };
-use crate::project_sync_v3::domain::{
-    conversation_resource_id, ApplyPolicy, BundleHead, BundleId, BundleIdentity, BundleKind,
-    BundleRecipe, CapturedWith, ConversationFileRef, ConversationFileRole,
-    ConversationLineageStatus, ConversationThread, LogicalPath, PortableOrigin, Provenance,
-    Provider, RecipeEntry, ReplicaId, ResourceDescriptor, ResourceKind, ResourceScope, StorageId,
-    ThreadId,
+use crate::project_sync::domain::{
+    conversation_resource_id, conversation_transcript_path, ApplyPolicy, BundleId, BundleIdentity,
+    BundleKind, BundleRecipe, CapturedWith, ConversationFileRef, ConversationFileRole,
+    ConversationLineageStatus, ConversationThread, PortableOrigin, Provenance, Provider,
+    RecipeEntry, ReplicaId, ResourceDescriptor, ResourceKind, ResourceScope, StorageId, ThreadId,
 };
-use crate::project_sync_v3::persistence::V3Repository;
+use crate::project_sync::persistence::LocalStateRepository;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -22,9 +21,9 @@ pub struct VariantWorld {
     pub store: LocalBundleObjectStore,
     pub storage_id: StorageId,
     pub bundle_id: BundleId,
-    pub repo_a: V3Repository,
-    pub repo_b: V3Repository,
-    pub repo_fresh: V3Repository,
+    pub repo_a: LocalStateRepository,
+    pub repo_b: LocalStateRepository,
+    pub repo_fresh: LocalStateRepository,
 }
 
 impl VariantWorld {
@@ -38,9 +37,9 @@ impl VariantWorld {
             fs::create_dir_all(path).unwrap();
         }
         let store = LocalBundleObjectStore::open(&store_root).unwrap();
-        let repo_a = V3Repository::from_home_dir(&home_a).unwrap();
-        let repo_b = V3Repository::from_home_dir(&home_b).unwrap();
-        let repo_fresh = V3Repository::from_home_dir(&home_fresh).unwrap();
+        let repo_a = LocalStateRepository::from_home_dir(&home_a).unwrap();
+        let repo_b = LocalStateRepository::from_home_dir(&home_b).unwrap();
+        let repo_fresh = LocalStateRepository::from_home_dir(&home_fresh).unwrap();
         repo_a.load_or_create_host_identity().unwrap();
         repo_b.load_or_create_host_identity().unwrap();
         repo_fresh.load_or_create_host_identity().unwrap();
@@ -59,7 +58,7 @@ impl VariantWorld {
         BundleEngine::open(self.store.clone(), self.storage_id.clone()).unwrap()
     }
 
-    pub fn origin(&self, repo: &V3Repository, replica: &str) -> PortableOrigin {
+    pub fn origin(&self, repo: &LocalStateRepository, replica: &str) -> PortableOrigin {
         let replica_id = ReplicaId::parse(replica).unwrap();
         let (host, replica) = repo
             .derive_origin_tokens(&self.bundle_id, &replica_id)
@@ -71,8 +70,11 @@ impl VariantWorld {
         }
     }
 
-    pub fn current_head(&self) -> Option<(BundleHead, HeadToken)> {
-        self.engine().read_head(&self.bundle_id).unwrap()
+    pub fn current_head(&self) -> Option<HeadToken> {
+        self.engine()
+            .read_head(&self.bundle_id)
+            .unwrap()
+            .map(|(_, token)| token)
     }
 
     pub fn publish(
@@ -92,7 +94,9 @@ impl VariantWorld {
             publisher,
             updated_at,
             previous.as_ref(),
-            current,
+            current
+                .map(|(_, token)| PublishExpectation::Match(token))
+                .unwrap_or(PublishExpectation::Absent),
         );
         engine.publish(request).unwrap()
     }
@@ -138,21 +142,18 @@ pub fn publish_request(
     threads: &[ThreadSpec],
     publisher: PortableOrigin,
     updated_at: u64,
-    previous: Option<&crate::project_sync_v3::domain::BundleManifest>,
-    observed_head: Option<(BundleHead, HeadToken)>,
+    previous: Option<&crate::project_sync::domain::BundleManifest>,
+    expected_head: PublishExpectation,
 ) -> PublishBundleRequest {
     let mut recipe = BundleRecipe::default();
     let mut resources = BTreeMap::new();
-    let mut files = BTreeMap::new();
+    let mut retained_files = BTreeMap::new();
+    let mut captured_files = BTreeMap::new();
     let mut conversations = BTreeMap::new();
     for spec in threads {
         let analysis = analyze_codex_transcript(&spec.transcript);
         let resource_id = conversation_resource_id(Provider::Codex, &spec.thread_id).unwrap();
-        let logical_path = LogicalPath::parse(format!(
-            "state/conversations/codex/{}/transcript.jsonl",
-            spec.thread_id
-        ))
-        .unwrap();
+        let logical_path = conversation_transcript_path(Provider::Codex, &spec.thread_id).unwrap();
         let (lineage_status, head_message_id, message_count, lineage_digest, semantic_digest) =
             match analysis.lineage {
                 CodecLineage::Complete {
@@ -221,26 +222,24 @@ pub fn publish_request(
                 required: false,
             },
         );
-        let digest = sha256(&spec.transcript);
+        let captured = CapturedBundleFile {
+            resource_id: resource_id.clone(),
+            bytes: spec.transcript.clone(),
+            source_mtime: spec.updated_at,
+            mode: Some(0o600),
+        };
+        let digest = sha256(&captured.bytes);
         let retained = previous.and_then(|manifest| manifest.files.get(&logical_path));
         if let Some(entry) = retained.filter(|entry| {
             entry.resource_id == resource_id
                 && entry.sha256 == digest
-                && entry.size == spec.transcript.len() as u64
-                && entry.source_mtime == spec.updated_at
-                && entry.mode == Some(0o600)
+                && entry.size == captured.bytes.len() as u64
+                && entry.source_mtime == captured.source_mtime
+                && entry.mode == captured.mode
         }) {
-            files.insert(logical_path, PublishFile::Retained(entry.clone()));
+            retained_files.insert(logical_path, entry.clone());
         } else {
-            files.insert(
-                logical_path,
-                PublishFile::Captured {
-                    resource_id: resource_id.clone(),
-                    bytes: spec.transcript.clone(),
-                    source_mtime: spec.updated_at,
-                    mode: Some(0o600),
-                },
-            );
+            captured_files.insert(logical_path, captured);
         }
         conversations.insert(spec.thread_id.clone(), thread);
     }
@@ -259,14 +258,13 @@ pub fn publish_request(
             codec_versions: BTreeMap::from([(CODEX_LINEAGE_CODEC_KEY.to_string(), 1)]),
         },
         published_by_origin: publisher,
-        content: PublishContent {
-            conversations,
-            resources,
-            files,
-            directories: BTreeMap::new(),
-            tombstones: BTreeMap::new(),
-        },
-        observed_head,
+        conversations,
+        resources,
+        retained_files,
+        captured_files,
+        directories: BTreeMap::new(),
+        tombstones: BTreeMap::new(),
+        expected_head,
         updated_at,
     }
 }
@@ -356,7 +354,7 @@ pub fn chain(thread_id: &str, suffix: &[(&str, &str)]) -> Vec<u8> {
 
 pub fn analyzed_chain(
     bytes: &[u8],
-) -> Vec<crate::project_sync_v3::domain::CanonicalConversationMessage> {
+) -> Vec<crate::project_sync::domain::CanonicalConversationMessage> {
     analyze_codex_transcript(bytes)
         .lineage
         .chain()

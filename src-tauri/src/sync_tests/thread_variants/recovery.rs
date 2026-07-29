@@ -1,18 +1,18 @@
 use super::harness::{sha256, TranscriptBuilder, VariantWorld};
 use super::relation_matrix::reviewed_action;
-use crate::project_sync_v3::conversation_codec::{
+use crate::project_sync::conversation_codec::{
     analyze_codex_transcript, rewrite_codex_transcript, CodecLineage,
 };
-use crate::project_sync_v3::conversation_materialization::{
+use crate::project_sync::conversation_materialization::{
     apply_conversation_cloud_publication, apply_conversation_materialization,
     recover_conversation_cloud_publications, recover_conversation_materializations,
     ConversationCloudPublication, ConversationFailpoint, ConversationFailpoints,
     ConversationMaterializationRequest, ConversationTargetPayload, NoConversationFailpoints,
 };
-use crate::project_sync_v3::conversation_sync::{
+use crate::project_sync::conversation_sync::{
     validate_conversation_action_pins, ConversationStalePin,
 };
-use crate::project_sync_v3::domain::{
+use crate::project_sync::domain::{
     BindingState, BundleId, BundleRecipe, ConversationFileRole, ConversationJournalTarget,
     ConversationMaterializationState, ConversationOperationId, ConversationPlanActionType,
     ConversationPlanDirection, ConversationPushPlan, ConversationReasonCode, ConversationRelation,
@@ -20,10 +20,8 @@ use crate::project_sync_v3::domain::{
     LocalProjectRegistration, LocalProviderProfileId, PlanId, ProjectBinding, Provider,
     ProviderProfile, ReplicaId, StorageId, TargetExpectation, ThreadId, PUSH_PLAN_SCHEMA,
 };
-use crate::project_sync_v3::persistence::V3Repository;
-use crate::project_sync_v3::provider_capture::{
-    capture_selected, discover_project, CaptureRequest,
-};
+use crate::project_sync::persistence::LocalStateRepository;
+use crate::project_sync::provider_capture::{capture_selected, discover_project, CaptureRequest};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
@@ -39,7 +37,7 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
     );
     let cases: Vec<(
         ConversationStalePin,
-        Box<dyn Fn(&mut crate::project_sync_v3::conversation_sync::ConversationApplyContext)>,
+        Box<dyn Fn(&mut crate::project_sync::conversation_sync::ConversationApplyContext)>,
     )> = vec![
         (
             ConversationStalePin::Expired,
@@ -48,17 +46,16 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
         (
             ConversationStalePin::Host,
             Box::new(|value| {
-                value.host_id = crate::project_sync_v3::domain::HostId::parse(
-                    "22222222222222222222222222222222",
-                )
-                .unwrap()
+                value.host_id =
+                    crate::project_sync::domain::HostId::parse("22222222222222222222222222222222")
+                        .unwrap()
             }),
         ),
         (
             ConversationStalePin::Replica,
             Box::new(|value| {
                 value.replica_id =
-                    crate::project_sync_v3::domain::ReplicaId::parse("replica-other").unwrap()
+                    crate::project_sync::domain::ReplicaId::parse("replica-other").unwrap()
             }),
         ),
         (
@@ -228,7 +225,7 @@ fn every_typed_action_rejects_a_stale_plan_before_apply() {
 #[test]
 fn reviewed_push_plan_is_immutable_restart_readable_and_scope_pinned() {
     let temp = tempfile::tempdir().unwrap();
-    let repository = V3Repository::from_home_dir(temp.path()).unwrap();
+    let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
     let (action, _) = reviewed_action(
         ConversationPlanDirection::Push,
         ConversationPlanActionType::FastForwardCloud,
@@ -257,7 +254,7 @@ fn reviewed_push_plan_is_immutable_restart_readable_and_scope_pinned() {
     };
     repository.save_conversation_push_plan(&plan).unwrap();
     assert!(repository.save_conversation_push_plan(&plan).is_err());
-    let reopened = V3Repository::from_home_dir(temp.path()).unwrap();
+    let reopened = LocalStateRepository::from_home_dir(temp.path()).unwrap();
     assert_eq!(
         reopened.load_conversation_push_plan(&plan.plan_id).unwrap(),
         plan
@@ -284,6 +281,7 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
     let operation = ConversationSyncOperation {
         operation_id: ConversationOperationId::parse("operation-a").unwrap(),
         plan_id: Some(PlanId::parse("plan-a").unwrap()),
+        plan_action_id: None,
         direction: ConversationPlanDirection::Pull,
         phase: ConversationSyncPhase::Prepared,
         storage_id: world.storage_id.clone(),
@@ -292,10 +290,9 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
         commit_id: "commit-a".to_string(),
         manifest_sha256: "a".repeat(64),
         host_id: identity.host_id,
-        replica_id: crate::project_sync_v3::domain::ReplicaId::parse("replica-a").unwrap(),
-        local_project_id: crate::project_sync_v3::domain::LocalProjectId::parse("project-a")
-            .unwrap(),
-        provider_profile_id: crate::project_sync_v3::domain::LocalProviderProfileId::parse(
+        replica_id: crate::project_sync::domain::ReplicaId::parse("replica-a").unwrap(),
+        local_project_id: crate::project_sync::domain::LocalProjectId::parse("project-a").unwrap(),
+        provider_profile_id: crate::project_sync::domain::LocalProviderProfileId::parse(
             "profile-a",
         )
         .unwrap(),
@@ -304,7 +301,8 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
         old_thread_id: None,
         rekey_committed: false,
         result_thread_id: ThreadId::parse("thread-journal").unwrap(),
-        forked_from_provider_thread_id: None,
+        materialized_thread_id: None,
+        binding_forked_from: None,
         provider_thread_id: Some("thread-a".to_string()),
         materialization_state: ConversationMaterializationState::Pending,
         lineage_digest: Some("b".repeat(64)),
@@ -317,7 +315,7 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
         expected_local_digest: None,
         targets: vec![ConversationJournalTarget {
             target_path: "/tmp/provider/thread-a.jsonl".to_string(),
-            role: crate::project_sync_v3::domain::ConversationFileRole::Transcript,
+            role: crate::project_sync::domain::ConversationFileRole::Transcript,
             expected: TargetExpectation::Absent,
             staged_path: Some("/tmp/staging/thread-a.jsonl".to_string()),
             backup_path: None,
@@ -336,7 +334,7 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
             Ok(())
         })
         .unwrap();
-    let reopened = crate::project_sync_v3::persistence::V3Repository::from_home_dir(
+    let reopened = crate::project_sync::persistence::LocalStateRepository::from_home_dir(
         world.repo_a.root().parent().unwrap(),
     )
     .unwrap();
@@ -355,6 +353,7 @@ fn journal_rejects_duplicate_operation_ids() {
     let base = ConversationSyncOperation {
         operation_id: ConversationOperationId::parse("operation-a").unwrap(),
         plan_id: None,
+        plan_action_id: None,
         direction: ConversationPlanDirection::Push,
         phase: ConversationSyncPhase::CloudPublished,
         storage_id: world.storage_id.clone(),
@@ -363,10 +362,9 @@ fn journal_rejects_duplicate_operation_ids() {
         commit_id: "commit-a".to_string(),
         manifest_sha256: "a".repeat(64),
         host_id: identity.host_id,
-        replica_id: crate::project_sync_v3::domain::ReplicaId::parse("replica-a").unwrap(),
-        local_project_id: crate::project_sync_v3::domain::LocalProjectId::parse("project-a")
-            .unwrap(),
-        provider_profile_id: crate::project_sync_v3::domain::LocalProviderProfileId::parse(
+        replica_id: crate::project_sync::domain::ReplicaId::parse("replica-a").unwrap(),
+        local_project_id: crate::project_sync::domain::LocalProjectId::parse("project-a").unwrap(),
+        provider_profile_id: crate::project_sync::domain::LocalProviderProfileId::parse(
             "profile-a",
         )
         .unwrap(),
@@ -375,7 +373,8 @@ fn journal_rejects_duplicate_operation_ids() {
         old_thread_id: None,
         rekey_committed: false,
         result_thread_id: ThreadId::parse("thread-journal").unwrap(),
-        forked_from_provider_thread_id: None,
+        materialized_thread_id: None,
+        binding_forked_from: None,
         provider_thread_id: None,
         materialization_state: ConversationMaterializationState::StoredOnly,
         lineage_digest: None,
@@ -549,7 +548,7 @@ fn every_local_commit_checkpoint_recovers_to_one_valid_fixed_point() {
         );
         assert!(result.is_err(), "checkpoint {checkpoint:?} did not fire");
 
-        let reopened = V3Repository::from_home_dir(&fixture.home).unwrap();
+        let reopened = LocalStateRepository::from_home_dir(&fixture.home).unwrap();
         let first = recover_conversation_materializations(&reopened).unwrap();
         let second = recover_conversation_materializations(&reopened).unwrap();
         assert!(second.completed.is_empty());
@@ -561,6 +560,55 @@ fn every_local_commit_checkpoint_recovers_to_one_valid_fixed_point() {
             .operations
             .is_empty());
         assert_materialization_fixed_point(&fixture, &reopened, should_complete);
+        if should_complete {
+            assert_eq!(
+                first.completed.len(),
+                usize::from(checkpoint != ConversationFailpoint::AfterCleanup)
+            );
+        } else if checkpoint != ConversationFailpoint::BeforePrepared {
+            assert_eq!(first.rolled_back.len(), 1);
+        }
+    }
+}
+
+#[test]
+fn every_composite_pull_fork_phase_recovers_with_the_same_reserved_ids() {
+    let checkpoints = [
+        (ConversationFailpoint::BeforePrepared, false),
+        (ConversationFailpoint::AfterPrepared, false),
+        (ConversationFailpoint::AfterStaged, true),
+        (ConversationFailpoint::BeforeLocalRekey, true),
+        (ConversationFailpoint::AfterLocalRekey, true),
+        (ConversationFailpoint::BeforeProviderCommitted, true),
+        (ConversationFailpoint::AfterProviderCommitted, true),
+        (ConversationFailpoint::AfterBindingCommit, true),
+        (ConversationFailpoint::AfterReceipt, true),
+        (ConversationFailpoint::AfterLocalCommitted, true),
+        (ConversationFailpoint::AfterCleanup, true),
+    ];
+
+    for (checkpoint, should_complete) in checkpoints {
+        let fixture = MaterializationFixture::new_composite_pull_fork();
+        let mut fail_once = FailOnce::new(checkpoint.clone());
+        let result = apply_conversation_materialization(
+            &fixture.repository,
+            fixture.request(),
+            &mut fail_once,
+        );
+        assert!(result.is_err(), "checkpoint {checkpoint:?} did not fire");
+
+        let reopened = LocalStateRepository::from_home_dir(&fixture.home).unwrap();
+        let first = recover_conversation_materializations(&reopened).unwrap();
+        let second = recover_conversation_materializations(&reopened).unwrap();
+        assert!(second.completed.is_empty());
+        assert!(second.rolled_back.is_empty());
+        assert!(second.recovery_required.is_empty());
+        assert!(reopened
+            .load_conversation_sync_journal()
+            .unwrap()
+            .operations
+            .is_empty());
+        assert_composite_pull_fork_fixed_point(&fixture, &reopened, should_complete);
         if should_complete {
             assert_eq!(
                 first.completed.len(),
@@ -636,16 +684,15 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                     local_project_id: scope.project_id.clone(),
                     provider_profile_id: scope.profile_id.clone(),
                     thread_id: thread_id.clone(),
+                    forked_from: None,
                     provider_thread_id: Some("source-thread".to_string()),
                     materialization_state: ConversationMaterializationState::Resumable,
                     last_observed_file_sha256: Some(sha256(&advanced_transcript)),
                     last_observed_head_message_id: Some("m-b".to_string()),
                     last_observed_lineage_digest: Some(lineage.clone()),
                     last_observed_semantic_digest: Some(semantic.clone()),
-                    source_generation: Some(initial.snapshot.head.latest.generation),
-                    source_manifest_sha256: Some(
-                        initial.snapshot.head.latest.manifest_sha256.clone(),
-                    ),
+                    source_generation: Some(initial.snapshot.head.generation),
+                    source_manifest_sha256: Some(initial.snapshot.head.manifest_sha256.clone()),
                     revision: 0,
                     created_at: 10,
                     updated_at: 10,
@@ -664,16 +711,16 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
             origin,
             20,
             Some(&initial.snapshot.manifest),
-            Some((initial.snapshot.head.clone(), initial.head_token)),
+            crate::project_sync::bundle_engine::PublishExpectation::Match(initial.head_token),
         );
         let operation = push_operation(
             &world,
             &scope,
             "operation-cloud-checkpoint",
             "plan-cloud-checkpoint",
-            initial.snapshot.head.latest.generation,
-            initial.snapshot.head.latest.commit_id,
-            initial.snapshot.head.latest.manifest_sha256,
+            initial.snapshot.head.generation,
+            initial.snapshot.head.commit_id,
+            initial.snapshot.head.manifest_sha256,
             &thread_id,
             &thread_id,
             bindings.revision,
@@ -693,21 +740,21 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
         );
         assert!(result.is_err(), "checkpoint {checkpoint:?} did not fire");
 
-        let reopened = V3Repository::from_home_dir(world.repo_a.root().parent().unwrap()).unwrap();
+        let reopened =
+            LocalStateRepository::from_home_dir(world.repo_a.root().parent().unwrap()).unwrap();
         let publication = if world
             .engine()
             .inspect(&world.bundle_id)
             .unwrap()
             .head
-            .latest
             .generation
             == 2
         {
             let snapshot = world.engine().inspect(&world.bundle_id).unwrap();
             Some(ConversationCloudPublication {
-                generation: snapshot.head.latest.generation,
-                commit_id: snapshot.head.latest.commit_id,
-                manifest_sha256: snapshot.head.latest.manifest_sha256,
+                generation: snapshot.head.generation,
+                commit_id: snapshot.head.commit_id,
+                manifest_sha256: snapshot.head.manifest_sha256,
             })
         } else {
             None
@@ -728,7 +775,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
         let final_bindings = reopened.load_conversation_bindings().unwrap();
         let final_receipts = reopened.load_materializations().unwrap();
         if publication_committed {
-            assert_eq!(final_snapshot.head.latest.generation, 2, "{checkpoint:?}");
+            assert_eq!(final_snapshot.head.generation, 2, "{checkpoint:?}");
             assert_eq!(final_bindings.bindings.len(), 1);
             assert_eq!(
                 final_bindings.bindings[0].source_generation,
@@ -742,7 +789,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                 usize::from(checkpoint != ConversationFailpoint::AfterCleanup),
             );
         } else {
-            assert_eq!(final_snapshot.head.latest.generation, 1, "{checkpoint:?}");
+            assert_eq!(final_snapshot.head.generation, 1, "{checkpoint:?}");
             assert_eq!(final_bindings.bindings[0].source_generation, Some(1));
             assert!(final_receipts.records.is_empty());
             if checkpoint != ConversationFailpoint::BeforePrepared {
@@ -891,7 +938,7 @@ fn committed_codex_provider_files_materialize_resume_and_rebind_one_variant() {
         .get("codex:session:destination-thread")
         .unwrap();
     assert_eq!(
-        crate::project_sync_v3::domain::classify_conversation_relation(
+        crate::project_sync::domain::classify_conversation_relation(
             recaptured_conversation.lineage.chain(),
             captured_conversation.lineage.chain(),
         ),
@@ -925,7 +972,7 @@ fn replacement_is_digest_pinned_backed_up_and_restart_idempotent() {
         &mut fail_once,
     )
     .is_err());
-    let reopened = V3Repository::from_home_dir(&fixture.home).unwrap();
+    let reopened = LocalStateRepository::from_home_dir(&fixture.home).unwrap();
     recover_conversation_materializations(&reopened).unwrap();
     recover_conversation_materializations(&reopened).unwrap();
     assert_eq!(
@@ -990,14 +1037,15 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
                 local_project_id: scope.project_id.clone(),
                 provider_profile_id: scope.profile_id.clone(),
                 thread_id: cloud_id.clone(),
+                forked_from: None,
                 provider_thread_id: Some("source-thread".to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
                 last_observed_file_sha256: Some(sha256(&local_transcript)),
                 last_observed_head_message_id: Some("m-local".to_string()),
                 last_observed_lineage_digest: Some(lineage.clone()),
                 last_observed_semantic_digest: Some(semantic.clone()),
-                source_generation: Some(initial.snapshot.head.latest.generation),
-                source_manifest_sha256: Some(initial.snapshot.head.latest.manifest_sha256.clone()),
+                source_generation: Some(initial.snapshot.head.generation),
+                source_manifest_sha256: Some(initial.snapshot.head.manifest_sha256.clone()),
                 revision: 0,
                 created_at: 10,
                 updated_at: 10,
@@ -1021,7 +1069,7 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
         origin_a.clone(),
         20,
         Some(&initial.snapshot.manifest),
-        Some(old_token),
+        crate::project_sync::bundle_engine::PublishExpectation::Match(old_token),
     );
     let mut cloud_advanced = cloud_initial.clone();
     cloud_advanced.transcript = super::harness::chain(
@@ -1042,9 +1090,9 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
         &scope,
         "operation-push-cas",
         "plan-push-cas",
-        initial.snapshot.head.latest.generation,
-        initial.snapshot.head.latest.commit_id.clone(),
-        initial.snapshot.head.latest.manifest_sha256.clone(),
+        initial.snapshot.head.generation,
+        initial.snapshot.head.commit_id.clone(),
+        initial.snapshot.head.manifest_sha256.clone(),
         &cloud_id,
         &forked_id,
         1,
@@ -1064,17 +1112,19 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
     )
     .unwrap_err();
     assert!(error.contains("changed") || error.contains("conflict"));
-    // The reviewed rekey survives the failed publication: the conversation is
-    // now bound to the minted fork thread and simply classifies CloudMissing
-    // until the next push publishes it under the already-minted ID.
+    // The cloud CAS precedes local rekeying. A failed publication therefore
+    // leaves the reviewed binding untouched and safe to retry.
     let after_failure = world.repo_a.load_conversation_bindings().unwrap();
     assert_eq!(after_failure.bindings.len(), 1);
-    assert_eq!(after_failure.bindings[0].thread_id, forked_id);
+    assert_eq!(after_failure.bindings[0].thread_id, cloud_id);
     assert_eq!(
         after_failure.bindings[0].provider_thread_id.as_deref(),
         Some("source-thread")
     );
-    assert_eq!(after_failure.bindings[0].source_generation, None);
+    assert_eq!(
+        after_failure.bindings[0].source_generation,
+        Some(initial.snapshot.head.generation)
+    );
     assert!(world
         .repo_a
         .load_conversation_sync_journal()
@@ -1092,7 +1142,7 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
         origin_a,
         30,
         Some(&current.manifest),
-        Some(current_token),
+        crate::project_sync::bundle_engine::PublishExpectation::Match(current_token),
     );
     let retry_state = world.repo_a.load_conversation_bindings().unwrap();
     let retry_operation = push_operation(
@@ -1100,10 +1150,10 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
         &scope,
         "operation-push-retry",
         "plan-push-retry",
-        current.head.latest.generation,
-        current.head.latest.commit_id,
-        current.head.latest.manifest_sha256,
-        &forked_id,
+        current.head.generation,
+        current.head.commit_id,
+        current.head.manifest_sha256,
+        &cloud_id,
         &forked_id,
         retry_state.revision,
         Some(retry_state.bindings[0].revision),
@@ -1128,9 +1178,9 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
         .conversations
         .contains_key(&forked_id));
     let discovered_publication = ConversationCloudPublication {
-        generation: published_snapshot.head.latest.generation,
-        commit_id: published_snapshot.head.latest.commit_id,
-        manifest_sha256: published_snapshot.head.latest.manifest_sha256,
+        generation: published_snapshot.head.generation,
+        commit_id: published_snapshot.head.commit_id,
+        manifest_sha256: published_snapshot.head.manifest_sha256,
     };
     let recovered = recover_conversation_cloud_publications(&world.repo_a, |_| {
         Ok(Some(discovered_publication.clone()))
@@ -1158,7 +1208,7 @@ fn fork_push_reuses_rekey_after_cas_failure_and_post_cas_restart() {
     assert_eq!(final_bindings.bindings[0].thread_id, forked_id);
     assert_eq!(
         final_bindings.bindings[0].source_generation,
-        Some(published_snapshot.head.latest.generation)
+        Some(published_snapshot.head.generation)
     );
 }
 
@@ -1191,13 +1241,13 @@ impl ConversationFailpoints for FailOnce {
 struct MaterializationFixture {
     _temp: tempfile::TempDir,
     home: PathBuf,
-    repository: V3Repository,
+    repository: LocalStateRepository,
     operation: ConversationSyncOperation,
     targets: Vec<ConversationTargetPayload>,
 }
 
 pub(super) struct InstalledScope {
-    pub(super) host_id: crate::project_sync_v3::domain::HostId,
+    pub(super) host_id: crate::project_sync::domain::HostId,
     pub(super) host_identity_revision: u64,
     pub(super) replica_id: ReplicaId,
     pub(super) project_id: LocalProjectId,
@@ -1207,7 +1257,7 @@ pub(super) struct InstalledScope {
 }
 
 pub(super) fn install_scope(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     bundle_id: &BundleId,
     suffix: &str,
     replica: &str,
@@ -1216,7 +1266,7 @@ pub(super) fn install_scope(
 }
 
 pub(super) fn install_scope_for_provider(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     bundle_id: &BundleId,
     suffix: &str,
     replica: &str,
@@ -1313,6 +1363,7 @@ fn push_operation(
     ConversationSyncOperation {
         operation_id: ConversationOperationId::parse(operation_id).unwrap(),
         plan_id: Some(PlanId::parse(plan_id).unwrap()),
+        plan_action_id: None,
         direction: ConversationPlanDirection::Push,
         phase: ConversationSyncPhase::Prepared,
         storage_id: world.storage_id.clone(),
@@ -1329,7 +1380,8 @@ fn push_operation(
         old_thread_id,
         rekey_committed: false,
         result_thread_id: result_thread_id.clone(),
-        forked_from_provider_thread_id: None,
+        materialized_thread_id: None,
+        binding_forked_from: None,
         provider_thread_id: Some("source-thread".to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
         lineage_digest: Some(lineage_digest.to_string()),
@@ -1347,12 +1399,12 @@ fn push_operation(
 }
 
 fn cloud_publication(
-    outcome: crate::project_sync_v3::bundle_engine::PublishedBundle,
+    outcome: crate::project_sync::bundle_engine::PublishedBundle,
 ) -> ConversationCloudPublication {
     ConversationCloudPublication {
-        generation: outcome.snapshot.head.latest.generation,
-        commit_id: outcome.snapshot.head.latest.commit_id,
-        manifest_sha256: outcome.snapshot.head.latest.manifest_sha256,
+        generation: outcome.snapshot.head.generation,
+        commit_id: outcome.snapshot.head.commit_id,
+        manifest_sha256: outcome.snapshot.head.manifest_sha256,
     }
 }
 
@@ -1362,7 +1414,7 @@ impl MaterializationFixture {
         let home_unresolved = temp.path().join("home");
         fs::create_dir(&home_unresolved).unwrap();
         let home = fs::canonicalize(&home_unresolved).unwrap();
-        let repository = V3Repository::from_home_dir(&home).unwrap();
+        let repository = LocalStateRepository::from_home_dir(&home).unwrap();
         let identity = repository.load_or_create_host_identity().unwrap();
         let project_root = home.join("project");
         let provider_root = home.join("codex");
@@ -1463,9 +1515,10 @@ impl MaterializationFixture {
         let operation = ConversationSyncOperation {
             operation_id: ConversationOperationId::parse("operation-materialize").unwrap(),
             plan_id: Some(PlanId::parse("plan-materialize").unwrap()),
+            plan_action_id: None,
             direction: ConversationPlanDirection::Pull,
             phase: ConversationSyncPhase::Prepared,
-            storage_id: crate::project_sync_v3::domain::StorageId::parse("storage-materialize")
+            storage_id: crate::project_sync::domain::StorageId::parse("storage-materialize")
                 .unwrap(),
             bundle_id,
             generation: 7,
@@ -1480,7 +1533,8 @@ impl MaterializationFixture {
             old_thread_id: None,
             rekey_committed: false,
             result_thread_id: ThreadId::parse("thread-materialize").unwrap(),
-            forked_from_provider_thread_id: None,
+            materialized_thread_id: None,
+            binding_forked_from: None,
             provider_thread_id: Some(thread_id.to_string()),
             materialization_state: ConversationMaterializationState::Resumable,
             lineage_digest: Some(lineage_digest),
@@ -1510,11 +1564,161 @@ impl MaterializationFixture {
             targets: self.targets.clone(),
         }
     }
+
+    fn new_composite_pull_fork() -> Self {
+        let mut fixture = Self::new();
+        let source_thread_id = "local-divergent-thread";
+        let source_transcript = TranscriptBuilder::new(
+            source_thread_id,
+            fixture.repository.load_bindings().unwrap().bindings[0]
+                .project_root
+                .as_str(),
+        )
+        .message("m-a", "user", "question")
+        .message("m-local", "assistant", "local branch")
+        .build();
+        let source_analysis = analyze_codex_transcript(&source_transcript);
+        let (source_lineage, source_semantic) = match source_analysis.lineage {
+            CodecLineage::Complete {
+                lineage_digest,
+                semantic_digest,
+                ..
+            } => (lineage_digest, semantic_digest),
+            other => panic!("composite source transcript is not resumable: {other:?}"),
+        };
+        let source_path = fixture
+            .targets
+            .first()
+            .unwrap()
+            .target_path
+            .parent()
+            .unwrap()
+            .join(format!("{source_thread_id}.jsonl"));
+        fs::write(&source_path, &source_transcript).unwrap();
+        let old_thread_id = fixture.operation.thread_id.clone();
+        fixture
+            .repository
+            .mutate_conversation_bindings(|document| {
+                document.bindings.push(LocalConversationBinding {
+                    host_id: fixture.operation.host_id.clone(),
+                    replica_id: fixture.operation.replica_id.clone(),
+                    local_project_id: fixture.operation.local_project_id.clone(),
+                    provider_profile_id: fixture.operation.provider_profile_id.clone(),
+                    thread_id: old_thread_id.clone(),
+                    forked_from: None,
+                    provider_thread_id: Some(source_thread_id.to_string()),
+                    materialization_state: ConversationMaterializationState::Resumable,
+                    last_observed_file_sha256: Some(sha256(&source_transcript)),
+                    last_observed_head_message_id: Some("m-local".to_string()),
+                    last_observed_lineage_digest: Some(source_lineage),
+                    last_observed_semantic_digest: Some(source_semantic),
+                    source_generation: Some(6),
+                    source_manifest_sha256: Some("b".repeat(64)),
+                    revision: 0,
+                    created_at: 9,
+                    updated_at: 9,
+                });
+                Ok(())
+            })
+            .unwrap();
+        let bindings = fixture.repository.load_conversation_bindings().unwrap();
+        fixture.operation.operation_id =
+            ConversationOperationId::parse("operation-composite-pull-fork").unwrap();
+        fixture.operation.plan_id = Some(PlanId::parse("plan-composite-pull-fork").unwrap());
+        fixture.operation.old_thread_id = Some(old_thread_id.clone());
+        fixture.operation.result_thread_id =
+            ThreadId::parse("thread-materialize-local-fork").unwrap();
+        fixture.operation.materialized_thread_id = Some(old_thread_id);
+        fixture.operation.expected_bindings_document_revision = bindings.revision;
+        fixture.operation.expected_binding_revision = Some(0);
+        fixture.operation.expected_local_digest = Some(sha256(&source_transcript));
+        fixture
+    }
+}
+
+fn assert_composite_pull_fork_fixed_point(
+    fixture: &MaterializationFixture,
+    repository: &LocalStateRepository,
+    complete: bool,
+) {
+    let source_path = fixture
+        .targets
+        .first()
+        .unwrap()
+        .target_path
+        .parent()
+        .unwrap()
+        .join("local-divergent-thread.jsonl");
+    let source_bytes = fs::read(&source_path).unwrap();
+    assert_eq!(
+        sha256(&source_bytes),
+        fixture.operation.expected_local_digest.clone().unwrap()
+    );
+    let bindings = repository.load_conversation_bindings().unwrap();
+    let old_thread_id = fixture.operation.thread_id.clone();
+    let result_thread_id = fixture.operation.result_thread_id.clone();
+    if complete {
+        assert_eq!(bindings.bindings.len(), 2);
+        let preserved = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.thread_id == result_thread_id)
+            .unwrap();
+        assert_eq!(
+            preserved.provider_thread_id.as_deref(),
+            Some("local-divergent-thread")
+        );
+        assert_eq!(preserved.forked_from.as_ref(), Some(&old_thread_id));
+        assert_eq!(preserved.source_generation, None);
+        let materialized = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.thread_id == old_thread_id)
+            .unwrap();
+        assert_eq!(
+            materialized.provider_thread_id.as_deref(),
+            Some("destination-thread")
+        );
+        assert_eq!(materialized.source_generation, Some(7));
+        for target in &fixture.targets {
+            assert_eq!(fs::read(&target.target_path).unwrap(), target.bytes);
+        }
+        let receipts = repository.load_materializations().unwrap();
+        assert_eq!(receipts.records.len(), 1);
+        assert_eq!(receipts.records[0].receipts.len(), 1);
+        assert_eq!(
+            receipts.records[0].receipts[0]
+                .conversation
+                .as_ref()
+                .unwrap()
+                .result_thread_id,
+            fixture.operation.result_thread_id
+        );
+    } else {
+        assert_eq!(bindings.bindings.len(), 1);
+        assert_eq!(bindings.bindings[0].thread_id, old_thread_id);
+        assert_eq!(
+            bindings.bindings[0].provider_thread_id.as_deref(),
+            Some("local-divergent-thread")
+        );
+        for target in &fixture.targets {
+            assert!(!target.target_path.exists());
+        }
+        assert!(repository
+            .load_materializations()
+            .unwrap()
+            .records
+            .is_empty());
+    }
+    assert!(!repository
+        .root()
+        .join("conversation_operations/operation-composite-pull-fork")
+        .exists());
 }
 
 fn assert_materialization_fixed_point(
     fixture: &MaterializationFixture,
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     complete: bool,
 ) {
     for target in &fixture.targets {

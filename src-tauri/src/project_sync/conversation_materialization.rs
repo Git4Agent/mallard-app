@@ -20,7 +20,7 @@ use super::domain::{
     ConversationSyncPhase, LocalConversationBinding, MaterializationId, MaterializationRecord,
     MaterializationStatus, RestoreActionType, TargetExpectation, LOCAL_SCHEMA,
 };
-use super::persistence::V3Repository;
+use super::persistence::LocalStateRepository;
 
 const MAX_PROVIDER_TARGET_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -52,6 +52,8 @@ pub enum ConversationFailpoint {
     },
     BeforeStaged,
     AfterStaged,
+    BeforeLocalRekey,
+    AfterLocalRekey,
     BeforeCloudPublication,
     AfterCloudHeadCas,
     BeforeCloudPublished,
@@ -111,8 +113,9 @@ pub struct ConversationCloudPublication {
 /// publish through the caller's production bundle engine, and finalize the
 /// local receipt. `inspect_after_error` closes the important CAS ambiguity:
 /// an object store may commit the head and then return an I/O error.
+#[cfg(test)]
 pub fn apply_conversation_cloud_publication(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     mut operation: ConversationSyncOperation,
     publish: impl FnOnce() -> Result<ConversationCloudPublication, String>,
     inspect_after_error: impl FnOnce() -> Result<Option<ConversationCloudPublication>, String>,
@@ -130,7 +133,6 @@ pub fn apply_conversation_cloud_publication(
     failpoints.hit(&ConversationFailpoint::BeforePrepared)?;
     insert_operation(repository, &operation)?;
     failpoints.hit(&ConversationFailpoint::AfterPrepared)?;
-    operation = commit_push_rekey(repository, &operation)?;
 
     failpoints.hit(&ConversationFailpoint::BeforeCloudPublication)?;
     let publication = match publish() {
@@ -155,6 +157,10 @@ pub fn apply_conversation_cloud_publication(
     operation = updated;
     failpoints.hit(&ConversationFailpoint::AfterCloudPublished)?;
 
+    // Preserve the existing binding until immutable publication and the head
+    // CAS are proven complete. Recovery can safely finish this exact rekey
+    // from the journaled result ID after a post-CAS crash.
+    operation = commit_rekey(repository, &operation)?;
     failpoints.hit(&ConversationFailpoint::BeforeBindingCommit)?;
     commit_binding(repository, &operation)?;
     failpoints.hit(&ConversationFailpoint::AfterBindingCommit)?;
@@ -175,11 +181,130 @@ pub fn apply_conversation_cloud_publication(
     Ok(receipt)
 }
 
+/// Publish a reviewed set of Push conversation actions while the command
+/// orchestrator holds the host-operation guard across generic and
+/// conversation publication.
+pub(crate) fn apply_conversation_cloud_publications_locked(
+    repository: &LocalStateRepository,
+    operations: Vec<ConversationSyncOperation>,
+    publish: impl FnOnce() -> Result<ConversationCloudPublication, String>,
+    inspect_after_error: impl FnOnce() -> Result<Option<ConversationCloudPublication>, String>,
+    failpoints: &mut impl ConversationFailpoints,
+) -> Result<Vec<ConversationApplyReceipt>, String> {
+    if operations.is_empty() {
+        return Err("cloud publication requires at least one conversation action".to_string());
+    }
+    let mut operation_ids = std::collections::BTreeSet::new();
+    let mut result_threads = std::collections::BTreeSet::new();
+    let first = &operations[0];
+    for operation in &operations {
+        if operation.direction != ConversationPlanDirection::Push
+            || operation.phase != ConversationSyncPhase::Prepared
+            || !operation.targets.is_empty()
+        {
+            return Err("cloud publication requires Prepared Push operations".to_string());
+        }
+        operation.validate()?;
+        validate_operation_scope(repository, operation)?;
+        if operation.plan_id != first.plan_id
+            || operation.storage_id != first.storage_id
+            || operation.bundle_id != first.bundle_id
+            || operation.generation != first.generation
+            || operation.commit_id != first.commit_id
+            || operation.manifest_sha256 != first.manifest_sha256
+            || operation.host_id != first.host_id
+            || operation.replica_id != first.replica_id
+            || operation.local_project_id != first.local_project_id
+        {
+            return Err("conversation publication batch has inconsistent plan pins".to_string());
+        }
+        if !operation_ids.insert(operation.operation_id.clone())
+            || !result_threads.insert(operation.result_thread_id.clone())
+        {
+            return Err(
+                "conversation publication batch repeats an operation or result".to_string(),
+            );
+        }
+    }
+
+    failpoints.hit(&ConversationFailpoint::BeforePrepared)?;
+    insert_operations(repository, &operations)?;
+    failpoints.hit(&ConversationFailpoint::AfterPrepared)?;
+    failpoints.hit(&ConversationFailpoint::BeforeCloudPublication)?;
+    let publication = match publish() {
+        Ok(publication) => publication,
+        Err(error) => match inspect_after_error()? {
+            Some(publication) => publication,
+            None => {
+                for operation in &operations {
+                    cleanup_and_retire(repository, &operation.operation_id)?;
+                }
+                return Err(error);
+            }
+        },
+    };
+    failpoints.hit(&ConversationFailpoint::AfterCloudHeadCas)?;
+    failpoints.hit(&ConversationFailpoint::BeforeCloudPublished)?;
+    let journal = repository.load_conversation_sync_journal()?;
+    repository.mutate_conversation_sync_journal(journal.revision, |journal| {
+        for operation_id in &operation_ids {
+            let operation = journal
+                .operations
+                .iter_mut()
+                .find(|operation| &operation.operation_id == operation_id)
+                .ok_or_else(|| format!("conversation operation '{}' disappeared", operation_id))?;
+            operation.generation = publication.generation;
+            operation.commit_id = publication.commit_id.clone();
+            operation.manifest_sha256 = publication.manifest_sha256.clone();
+            operation.phase = ConversationSyncPhase::CloudPublished;
+        }
+        Ok(())
+    })?;
+    failpoints.hit(&ConversationFailpoint::AfterCloudPublished)?;
+
+    let mut receipts = Vec::with_capacity(operation_ids.len());
+    for operation_id in operation_ids {
+        let operation = repository
+            .load_conversation_sync_journal()?
+            .operations
+            .into_iter()
+            .find(|operation| operation.operation_id == operation_id)
+            .ok_or_else(|| format!("conversation operation '{}' disappeared", operation_id))?;
+        let operation = rebase_operation_after_batch_progress(repository, &operation)?;
+        let operation = commit_rekey(repository, &operation)?;
+        failpoints.hit(&ConversationFailpoint::BeforeBindingCommit)?;
+        commit_binding(repository, &operation)?;
+        failpoints.hit(&ConversationFailpoint::AfterBindingCommit)?;
+        set_phase(
+            repository,
+            &operation.operation_id,
+            ConversationSyncPhase::BindingsCommitted,
+            operation.updated_at,
+        )?;
+        failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
+        receipts.push(commit_receipt(repository, &operation)?);
+        failpoints.hit(&ConversationFailpoint::AfterReceipt)?;
+        failpoints.hit(&ConversationFailpoint::BeforeLocalCommitted)?;
+        set_phase(
+            repository,
+            &operation.operation_id,
+            ConversationSyncPhase::LocalCommitted,
+            operation.updated_at,
+        )?;
+        failpoints.hit(&ConversationFailpoint::AfterLocalCommitted)?;
+        failpoints.hit(&ConversationFailpoint::BeforeCleanup)?;
+        cleanup_and_retire(repository, &operation.operation_id)?;
+        failpoints.hit(&ConversationFailpoint::AfterCleanup)?;
+    }
+    Ok(receipts)
+}
+
 /// Recover Push operations with a caller-supplied immutable-head inspector.
 /// The inspector must return a publication only after validating that the
 /// reviewed result variant and digests are present in that exact manifest.
+#[cfg(test)]
 pub fn recover_conversation_cloud_publications(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     mut inspect: impl FnMut(
         &ConversationSyncOperation,
     ) -> Result<Option<ConversationCloudPublication>, String>,
@@ -227,7 +352,17 @@ pub fn recover_conversation_cloud_publications(
             }
         }
         if operation.phase == ConversationSyncPhase::CloudPublished {
+            operation = rebase_operation_after_batch_progress(repository, &operation)?;
+            operation = commit_rekey(repository, &operation)?;
             commit_binding(repository, &operation)?;
+            operation = set_phase(
+                repository,
+                &operation_id,
+                ConversationSyncPhase::BindingsCommitted,
+                operation.updated_at,
+            )?;
+        }
+        if operation.phase == ConversationSyncPhase::BindingsCommitted {
             commit_receipt(repository, &operation)?;
             operation = set_phase(
                 repository,
@@ -246,14 +381,25 @@ pub fn recover_conversation_cloud_publications(
 
 /// Apply one reviewed Pull materialization. All target expectations and local
 /// scope revisions are checked before the Prepared record is written.
+#[cfg(test)]
 pub fn apply_conversation_materialization(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     request: ConversationMaterializationRequest,
     failpoints: &mut impl ConversationFailpoints,
 ) -> Result<ConversationApplyReceipt, String> {
     let _host_guard = repository.acquire_host_operation()?;
+    apply_conversation_materialization_locked(repository, request, failpoints)
+}
+
+pub(crate) fn apply_conversation_materialization_locked(
+    repository: &LocalStateRepository,
+    request: ConversationMaterializationRequest,
+    failpoints: &mut impl ConversationFailpoints,
+) -> Result<ConversationApplyReceipt, String> {
+    request.operation.validate()?;
+    validate_operation_scope(repository, &request.operation)?;
+    ensure_provider_target_parents(repository, &request.operation, &request.targets)?;
     let (mut operation, payloads) = prepare_operation(repository, request)?;
-    validate_operation_scope(repository, &operation)?;
     validate_target_expectations(&operation.targets)?;
 
     failpoints.hit(&ConversationFailpoint::BeforePrepared)?;
@@ -274,6 +420,18 @@ pub fn apply_conversation_materialization(
     )?;
     failpoints.hit(&ConversationFailpoint::AfterStaged)?;
 
+    if operation.is_composite_pull_fork() {
+        failpoints.hit(&ConversationFailpoint::BeforeLocalRekey)?;
+        operation = commit_rekey(repository, &operation)?;
+        failpoints.hit(&ConversationFailpoint::AfterLocalRekey)?;
+        operation = set_phase(
+            repository,
+            &operation.operation_id,
+            ConversationSyncPhase::LocalRekeyed,
+            operation.updated_at,
+        )?;
+    }
+
     commit_provider_targets(repository, &operation.operation_id, failpoints)?;
     failpoints.hit(&ConversationFailpoint::BeforeProviderCommitted)?;
     operation = set_phase(
@@ -287,6 +445,12 @@ pub fn apply_conversation_materialization(
     failpoints.hit(&ConversationFailpoint::BeforeBindingCommit)?;
     commit_binding(repository, &operation)?;
     failpoints.hit(&ConversationFailpoint::AfterBindingCommit)?;
+    operation = set_phase(
+        repository,
+        &operation.operation_id,
+        ConversationSyncPhase::BindingsCommitted,
+        operation.updated_at,
+    )?;
 
     failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
     let receipt = commit_receipt(repository, &operation)?;
@@ -310,7 +474,7 @@ pub fn apply_conversation_materialization(
 /// Recover every local operation after reopening the repository. Calling this
 /// twice is intentionally a supported fixed-point check.
 pub fn recover_conversation_materializations(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
 ) -> Result<ConversationRecoveryReport, String> {
     let _host_guard = repository.acquire_host_operation()?;
     let mut report = ConversationRecoveryReport::default();
@@ -346,6 +510,27 @@ pub fn recover_conversation_materializations(
             }
 
             if operation.phase == ConversationSyncPhase::Staged {
+                if operation.is_composite_pull_fork() {
+                    operation = commit_rekey(repository, &operation)?;
+                    operation = set_phase(
+                        repository,
+                        &operation_id,
+                        ConversationSyncPhase::LocalRekeyed,
+                        operation.updated_at,
+                    )?;
+                }
+            }
+            if operation.phase == ConversationSyncPhase::Staged {
+                let mut no_failpoints = NoConversationFailpoints;
+                commit_provider_targets(repository, &operation_id, &mut no_failpoints)?;
+                operation = set_phase(
+                    repository,
+                    &operation_id,
+                    ConversationSyncPhase::ProviderCommitted,
+                    operation.updated_at,
+                )?;
+            }
+            if operation.phase == ConversationSyncPhase::LocalRekeyed {
                 let mut no_failpoints = NoConversationFailpoints;
                 commit_provider_targets(repository, &operation_id, &mut no_failpoints)?;
                 operation = set_phase(
@@ -360,6 +545,14 @@ pub fn recover_conversation_materializations(
                 ConversationSyncPhase::ProviderCommitted | ConversationSyncPhase::CloudPublished
             ) {
                 commit_binding(repository, &operation)?;
+                operation = set_phase(
+                    repository,
+                    &operation_id,
+                    ConversationSyncPhase::BindingsCommitted,
+                    operation.updated_at,
+                )?;
+            }
+            if operation.phase == ConversationSyncPhase::BindingsCommitted {
                 commit_receipt(repository, &operation)?;
                 operation = set_phase(
                     repository,
@@ -396,7 +589,7 @@ enum RecoveryOutcome {
 }
 
 fn prepare_operation(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     request: ConversationMaterializationRequest,
 ) -> Result<(ConversationSyncOperation, Vec<Vec<u8>>), String> {
     let mut operation = request.operation;
@@ -467,7 +660,7 @@ fn prepare_operation(
 /// process exits before creating its provider-parent staging files. It stays
 /// below Mallard's private root and is removed with the journal operation.
 fn write_intent_payload(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
     index: usize,
     bytes: &[u8],
@@ -478,7 +671,10 @@ fn write_intent_payload(
     write_new_file(&path, bytes)
 }
 
-fn intent_directory(repository: &V3Repository, operation_id: &ConversationOperationId) -> PathBuf {
+fn intent_directory(
+    repository: &LocalStateRepository,
+    operation_id: &ConversationOperationId,
+) -> PathBuf {
     repository
         .root()
         .join("conversation_operations")
@@ -486,7 +682,7 @@ fn intent_directory(repository: &V3Repository, operation_id: &ConversationOperat
 }
 
 fn intent_payload_path(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
     index: usize,
 ) -> PathBuf {
@@ -494,7 +690,7 @@ fn intent_payload_path(
 }
 
 fn validate_operation_scope(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
 ) -> Result<(), String> {
     let identity = repository.load_or_create_host_identity()?;
@@ -538,6 +734,91 @@ fn validate_operation_scope(
     Ok(())
 }
 
+fn ensure_provider_target_parents(
+    repository: &LocalStateRepository,
+    operation: &ConversationSyncOperation,
+    targets: &[ConversationTargetPayload],
+) -> Result<(), String> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let machine = repository.load_bindings()?;
+    let profile = machine
+        .profiles
+        .iter()
+        .find(|profile| profile.profile_id == operation.provider_profile_id)
+        .ok_or_else(|| {
+            "conversation operation references a missing provider profile".to_string()
+        })?;
+    let root = PathBuf::from(&profile.canonical_path);
+    let root_metadata = fs::symlink_metadata(&root)
+        .map_err(|error| format!("inspect provider root '{}': {error}", root.display()))?;
+    if !root_metadata.file_type().is_dir() || root_metadata.file_type().is_symlink() {
+        return Err("conversation provider root is not a real directory".to_string());
+    }
+    let canonical_root = fs::canonicalize(&root)
+        .map_err(|error| format!("resolve provider root '{}': {error}", root.display()))?;
+    if canonical_root != root {
+        return Err("conversation provider root is not canonical".to_string());
+    }
+    for target in targets {
+        let parent = target
+            .target_path
+            .parent()
+            .ok_or_else(|| "conversation provider target has no parent".to_string())?;
+        let relative = parent.strip_prefix(&root).map_err(|_| {
+            format!(
+                "conversation provider target '{}' escapes its profile",
+                target.target_path.display()
+            )
+        })?;
+        let mut current = root.clone();
+        for component in relative.components() {
+            current.push(component.as_os_str());
+            match fs::symlink_metadata(&current) {
+                Ok(metadata)
+                    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {}
+                Ok(_) => {
+                    return Err(format!(
+                        "conversation provider directory '{}' is not a real directory",
+                        current.display()
+                    ))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    fs::create_dir(&current).map_err(|error| {
+                        format!(
+                            "create conversation provider directory '{}': {error}",
+                            current.display()
+                        )
+                    })?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&current, fs::Permissions::from_mode(0o700)).map_err(
+                            |error| {
+                                format!(
+                                    "secure conversation provider directory '{}': {error}",
+                                    current.display()
+                                )
+                            },
+                        )?;
+                    }
+                    sync_directory(current.parent().ok_or_else(|| {
+                        "conversation provider directory has no parent".to_string()
+                    })?)?;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "inspect conversation provider directory '{}': {error}",
+                        current.display()
+                    ))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_target_expectations(targets: &[ConversationJournalTarget]) -> Result<(), String> {
     for target in targets {
         let path = Path::new(&target.target_path);
@@ -551,28 +832,39 @@ fn validate_target_expectations(targets: &[ConversationJournalTarget]) -> Result
 }
 
 fn insert_operation(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
+) -> Result<(), String> {
+    insert_operations(repository, std::slice::from_ref(operation))
+}
+
+fn insert_operations(
+    repository: &LocalStateRepository,
+    operations: &[ConversationSyncOperation],
 ) -> Result<(), String> {
     let journal = repository.load_conversation_sync_journal()?;
     repository.mutate_conversation_sync_journal(journal.revision, |journal| {
-        if journal
-            .operations
-            .iter()
-            .any(|existing| existing.operation_id == operation.operation_id)
-        {
-            return Err(format!(
-                "conversation operation '{}' already exists",
-                operation.operation_id
-            ));
+        for operation in operations {
+            if journal
+                .operations
+                .iter()
+                .any(|existing| existing.operation_id == operation.operation_id)
+            {
+                return Err(format!(
+                    "conversation operation '{}' already exists",
+                    operation.operation_id
+                ));
+            }
         }
-        journal.operations.push(operation.clone());
+        for operation in operations {
+            journal.operations.push(operation.clone());
+        }
         Ok(())
     })
 }
 
 fn mutate_operation<T>(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
     mutate: impl FnOnce(&mut ConversationSyncOperation) -> Result<T, String>,
 ) -> Result<(T, ConversationSyncOperation), String> {
@@ -595,7 +887,7 @@ fn mutate_operation<T>(
 }
 
 fn set_phase(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
     phase: ConversationSyncPhase,
     updated_at: u64,
@@ -608,8 +900,40 @@ fn set_phase(
     Ok(operation)
 }
 
+/// A reviewed batch pins one bindings-document revision for every action.
+/// Earlier actions in the same journal batch legitimately advance that
+/// document. Rebase only the global revision, and only while this action's
+/// own binding pin still matches exactly.
+fn rebase_operation_after_batch_progress(
+    repository: &LocalStateRepository,
+    operation: &ConversationSyncOperation,
+) -> Result<ConversationSyncOperation, String> {
+    let document = repository.load_conversation_bindings()?;
+    if document.revision == operation.expected_bindings_document_revision {
+        return Ok(operation.clone());
+    }
+    let current_binding = document.bindings.iter().find(|binding| {
+        binding.host_id == operation.host_id
+            && binding.replica_id == operation.replica_id
+            && binding.local_project_id == operation.local_project_id
+            && binding.provider_profile_id == operation.provider_profile_id
+            && binding.thread_id == operation.thread_id
+    });
+    match (operation.expected_binding_revision, current_binding) {
+        (Some(expected), Some(binding)) if binding.revision == expected => {}
+        (None, None) => {}
+        _ if binding_commit_is_complete(&document, operation) => return Ok(operation.clone()),
+        _ => return Err("conversation binding changed after review".to_string()),
+    }
+    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
+        journaled.expected_bindings_document_revision = document.revision;
+        Ok(())
+    })?;
+    Ok(updated)
+}
+
 fn stage_targets(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
     failpoints: &mut impl ConversationFailpoints,
 ) -> Result<(), String> {
@@ -702,8 +1026,17 @@ fn verify_target_role_set(
     if transcripts != 1 {
         return Err("resumable conversation requires exactly one transcript".to_string());
     }
-    if operation.provider == super::domain::Provider::Codex && indexes != 1 {
-        return Err("resumable Codex conversation requires one index fragment".to_string());
+    let creates_transcript = targets
+        .iter()
+        .find(|target| target.role == ConversationFileRole::Transcript)
+        .is_some_and(|target| target.expected == TargetExpectation::Absent);
+    if operation.provider == super::domain::Provider::Codex
+        && ((creates_transcript && indexes != 1) || (!creates_transcript && indexes > 1))
+    {
+        return Err(
+            "new Codex conversations require one index fragment; replacements allow at most one"
+                .to_string(),
+        );
     }
     // Claude has no provider index: the projects directory listing is the
     // index, so a resumable Claude materialization is exactly one transcript.
@@ -714,7 +1047,7 @@ fn verify_target_role_set(
 }
 
 fn verify_provider_payload(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
     target: &ConversationJournalTarget,
     path: &Path,
@@ -862,7 +1195,7 @@ fn validate_codex_index_fragment(bytes: &[u8], thread_id: &str) -> Result<(), St
 }
 
 fn commit_provider_targets(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
     failpoints: &mut impl ConversationFailpoints,
 ) -> Result<(), String> {
@@ -984,7 +1317,7 @@ fn commit_one_target(target: &ConversationJournalTarget) -> Result<(), String> {
 }
 
 fn commit_binding(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
 ) -> Result<(), String> {
     let current = repository.load_conversation_bindings()?;
@@ -1019,12 +1352,13 @@ fn commit_binding(
             return Ok(());
         }
 
+        let binding_target_thread_id = operation.binding_target_thread_id();
         if let Some(binding) = document.bindings.iter_mut().find(|binding| {
             binding.host_id == operation.host_id
                 && binding.replica_id == operation.replica_id
                 && binding.local_project_id == operation.local_project_id
                 && binding.provider_profile_id == operation.provider_profile_id
-                && binding.thread_id == operation.result_thread_id
+                && binding.thread_id == *binding_target_thread_id
         }) {
             if operation.old_thread_id.is_none()
                 && operation.expected_binding_revision.is_some()
@@ -1033,6 +1367,7 @@ fn commit_binding(
                 return Err("conversation binding changed after review".to_string());
             }
             binding.provider_thread_id = operation.provider_thread_id.clone();
+            binding.forked_from = operation.binding_forked_from.clone();
             binding.materialization_state = operation.materialization_state;
             binding.last_observed_file_sha256 = transcript_target_digest(operation);
             binding.last_observed_lineage_digest = operation.lineage_digest.clone();
@@ -1047,7 +1382,8 @@ fn commit_binding(
                 replica_id: operation.replica_id.clone(),
                 local_project_id: operation.local_project_id.clone(),
                 provider_profile_id: operation.provider_profile_id.clone(),
-                thread_id: operation.result_thread_id.clone(),
+                thread_id: binding_target_thread_id.clone(),
+                forked_from: operation.binding_forked_from.clone(),
                 provider_thread_id: operation.provider_thread_id.clone(),
                 materialization_state: operation.materialization_state,
                 last_observed_file_sha256: transcript_target_digest(operation),
@@ -1078,12 +1414,12 @@ fn binding_commit_is_complete(
     document: &super::domain::ConversationBindings,
     operation: &ConversationSyncOperation,
 ) -> bool {
-    let result_exists = document.bindings.iter().any(|binding| {
+    let materialized_exists = document.bindings.iter().any(|binding| {
         let in_scope = binding.host_id == operation.host_id
             && binding.replica_id == operation.replica_id
             && binding.local_project_id == operation.local_project_id
             && binding.provider_profile_id == operation.provider_profile_id
-            && binding.thread_id == operation.result_thread_id;
+            && binding.thread_id == *operation.binding_target_thread_id();
         if !in_scope {
             return false;
         }
@@ -1092,6 +1428,7 @@ fn binding_commit_is_complete(
             return binding.source_generation.is_none();
         }
         binding.provider_thread_id == operation.provider_thread_id
+            && binding.forked_from == operation.binding_forked_from
             && binding.materialization_state == operation.materialization_state
             && binding.last_observed_file_sha256 == transcript_target_digest(operation)
             && binding.last_observed_lineage_digest == operation.lineage_digest
@@ -1100,15 +1437,16 @@ fn binding_commit_is_complete(
             && binding.source_manifest_sha256.as_deref() == Some(&operation.manifest_sha256)
     });
     let rekey_complete = operation.old_thread_id.as_ref().is_none_or(|old| {
-        !document.bindings.iter().any(|binding| {
+        document.bindings.iter().any(|binding| {
             binding.host_id == operation.host_id
                 && binding.replica_id == operation.replica_id
                 && binding.local_project_id == operation.local_project_id
                 && binding.provider_profile_id == operation.provider_profile_id
-                && binding.thread_id == *old
+                && binding.thread_id == operation.result_thread_id
+                && binding.forked_from.as_ref() == Some(old)
         })
     });
-    result_exists && rekey_complete
+    materialized_exists && rekey_complete
 }
 
 fn transcript_target_digest(operation: &ConversationSyncOperation) -> Option<String> {
@@ -1120,8 +1458,8 @@ fn transcript_target_digest(operation: &ConversationSyncOperation) -> Option<Str
         .or_else(|| operation.expected_local_digest.clone())
 }
 
-fn commit_push_rekey(
-    repository: &V3Repository,
+fn commit_rekey(
+    repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
 ) -> Result<ConversationSyncOperation, String> {
     let Some(old) = operation.old_thread_id.as_ref() else {
@@ -1131,20 +1469,31 @@ fn commit_push_rekey(
         return Ok(operation.clone());
     }
     let scope = operation_scope(operation);
-    repository.mutate_conversation_bindings(|document| {
-        rekey_thread_binding(
-            document,
-            &scope,
-            old,
-            &operation.result_thread_id,
-            operation.expected_bindings_document_revision,
-            operation
-                .expected_binding_revision
-                .ok_or_else(|| "conversation rekey lacks a binding revision".to_string())?,
-            operation.updated_at,
-        )?;
-        Ok(())
-    })?;
+    let current = repository.load_conversation_bindings()?;
+    let rekey_already_persisted = current.bindings.iter().any(|binding| {
+        binding.host_id == operation.host_id
+            && binding.replica_id == operation.replica_id
+            && binding.local_project_id == operation.local_project_id
+            && binding.provider_profile_id == operation.provider_profile_id
+            && binding.thread_id == operation.result_thread_id
+            && binding.forked_from.as_ref() == Some(old)
+    });
+    if !rekey_already_persisted {
+        repository.mutate_conversation_bindings(|document| {
+            rekey_thread_binding(
+                document,
+                &scope,
+                old,
+                &operation.result_thread_id,
+                operation.expected_bindings_document_revision,
+                operation
+                    .expected_binding_revision
+                    .ok_or_else(|| "conversation rekey lacks a binding revision".to_string())?,
+                operation.updated_at,
+            )?;
+            Ok(())
+        })?;
+    }
     let bindings = repository.load_conversation_bindings()?;
     let rekeyed_binding = bindings
         .bindings
@@ -1156,7 +1505,8 @@ fn commit_push_rekey(
                 && binding.provider_profile_id == operation.provider_profile_id
                 && binding.thread_id == operation.result_thread_id
         })
-        .ok_or_else(|| "conversation Push rekey was not persisted".to_string())?;
+        .filter(|binding| binding.forked_from.as_ref() == Some(old))
+        .ok_or_else(|| "conversation rekey was not persisted".to_string())?;
     let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
         journaled.rekey_committed = true;
         journaled.expected_bindings_document_revision = bindings.revision;
@@ -1167,7 +1517,7 @@ fn commit_push_rekey(
 }
 
 fn commit_receipt(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
 ) -> Result<ConversationApplyReceipt, String> {
     let receipt = conversation_receipt(operation);
@@ -1186,9 +1536,13 @@ fn commit_receipt(
         }) {
             return Ok(());
         }
-        let action_id = stable_action_id(&operation.operation_id)?;
+        let action_id = operation
+            .plan_action_id
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| stable_action_id(&operation.operation_id))?;
         let resource_id =
-            conversation_resource_id(operation.provider, &operation.result_thread_id)?;
+            conversation_resource_id(operation.provider, operation.binding_target_thread_id())?;
         let apply_receipt = ApplyReceipt {
             action_id,
             resource_id,
@@ -1272,7 +1626,7 @@ fn conversation_receipt(operation: &ConversationSyncOperation) -> ConversationAp
 }
 
 fn cleanup_and_retire(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
 ) -> Result<(), String> {
     let operation = repository
@@ -1300,7 +1654,7 @@ fn cleanup_and_retire(
 }
 
 fn rollback_prepared(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
 ) -> Result<(), String> {
     for target in &operation.targets {
@@ -1312,7 +1666,7 @@ fn rollback_prepared(
 }
 
 fn mark_recovery_required(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
 ) -> Result<(), String> {
     set_phase(

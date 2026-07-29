@@ -282,7 +282,7 @@ export interface MaterializationRecord {
   receipts: ApplyReceipt[];
 }
 
-/** Exact response from the schema-3 `get_project` command. */
+/** Exact response from the current `get_project` command. */
 export interface ProjectDetail {
   project: LocalProjectRegistration;
   links: ProjectStorageLink[];
@@ -306,7 +306,7 @@ export type DraftProfileSelection =
 
 export type DraftStorageSelection =
   | { kind: "existing"; storage_id: string }
-  | { kind: "pending"; storage: StorageConfigV3 };
+  | { kind: "pending"; storage: StorageConfig };
 
 export type DraftRepositoryChoice =
   | { kind: "new" }
@@ -319,7 +319,7 @@ export type DraftRepositoryChoice =
     mismatch_acknowledged: boolean;
   };
 
-/** Machine-local, resumable project setup draft (schema-3 `project_drafts`). */
+/** Machine-local, resumable project setup draft. */
 export interface ProjectSetupDraft {
   schema: number;
   draft_id: string;
@@ -369,7 +369,6 @@ export interface SetupSectionStatus {
 export interface SetupDraftInspection {
   draft: ProjectSetupDraft;
   sections: SetupSectionStatus[];
-  repository_fingerprint_candidates: string[];
   inventory?: ResourceInventory | null;
   fresh_discovery_signature?: string | null;
   selection_stale: boolean;
@@ -483,18 +482,18 @@ export interface ProjectOriginTokens {
   origin_replica_token: string;
 }
 
-/** Schema of `~/.mallard/config.json`; must match the backend's LOCAL_SCHEMA. */
+/** Schema of `~/.mallard/sync_config.json`; must match the backend's LOCAL_SCHEMA. */
 export const PROJECT_SYNC_SCHEMA = 1;
 
-export interface SyncConfigV3 {
+export interface SyncConfig {
   schema: typeof PROJECT_SYNC_SCHEMA;
   revision: number;
-  storages: StorageConfigV3[];
+  storages: StorageConfig[];
   projects: LocalProjectRegistration[];
   links: ProjectStorageLink[];
 }
 
-export interface StorageConfigV3 {
+export interface StorageConfig {
   id: string;
   name: string;
   kind: "s3" | "local";
@@ -662,6 +661,26 @@ export interface BundleSnapshotSummary extends RemoteBundleSummary {
   warnings?: string[];
 }
 
+export type PushDestinationStatus =
+  | {
+    state: "ready";
+    generation?: number;
+  }
+  | {
+    state: "remote_history_missing";
+    base_generation: number;
+  }
+  | {
+    state: "requires_pull";
+    reason: "remote_without_base" | "binding_changed" | "remote_advanced";
+    remote_generation: number;
+    base_generation?: number;
+  }
+  | {
+    state: "unavailable";
+    message: string;
+  };
+
 /**
  * Composite payload of `prepare_push_review`: one discovery pass and one
  * remote snapshot feed every push-dialog section. Degradable sections carry
@@ -670,12 +689,15 @@ export interface BundleSnapshotSummary extends RemoteBundleSummary {
 export interface PushReviewContext {
   project: ProjectDetail;
   inventory: ResourceInventory;
+  destination_status: PushDestinationStatus;
   thread_comparison: ThreadSyncComparison | null;
   thread_comparison_error: string | null;
   capability_report: CapabilityStatusReport | null;
   capability_report_error: string | null;
   project_files: ProjectContentInventory | null;
   project_files_error: string | null;
+  conversation_push_plan_id?: string | null;
+  conversation_action_ids?: Record<string, string>;
   prepared_at: number;
 }
 
@@ -715,69 +737,45 @@ export interface RestoreAction {
   requires_explicit_approval: boolean;
 }
 
-export interface BundleVersionRef {
-  generation: number;
-  commit_id: string;
-  manifest_sha256: string;
-  snapshot_content_sha256: string;
-  generation_record_sha256: string;
+export type ConversationPlanDirection = "push" | "pull";
+export type ConversationTargetExpectation =
+  | { state: "absent" }
+  | { state: "sha256"; sha256: string };
+
+export interface ConversationProviderStateExpectation {
+  target_path: string;
+  expectation: ConversationTargetExpectation;
 }
 
-export interface GenerationDelta {
-  added_resources: number;
-  changed_resources: number;
-  removed_resources: number;
-  added_files: number;
-  changed_files: number;
-  removed_files: number;
-}
-
-export interface PortableOrigin {
-  origin_host_token: string;
-  origin_replica_token: string;
-  shared_label?: string | null;
-}
-
-export interface BundleGenerationSummary {
-  version: BundleVersionRef;
-  created_at: number;
-  published_by_origin: PortableOrigin;
-  delta: GenerationDelta;
-}
-
-export interface BundleGenerationPage {
-  generations: BundleGenerationSummary[];
-  next_cursor?: number | null;
-  observed_head: BundleVersionRef;
-}
-
-export type BundleResourceChangeState = "added" | "removed" | "changed" | "unchanged";
-
-export interface BundleResourceChange {
-  resource_id: string;
-  kind: ProjectResourceKind;
-  display_name: string;
-  left_thread_title?: string | null;
-  right_thread_title?: string | null;
-  state: BundleResourceChangeState;
-  left_content_sha256?: string | null;
-  right_content_sha256?: string | null;
-}
-
-export interface BundleGenerationComparison {
-  left: BundleGenerationSummary;
-  right: BundleGenerationSummary;
-  /** Logical snapshot equality via content digests — distinct from manifest identity. */
-  same_snapshot: boolean;
-  added: number;
-  removed: number;
-  changed: number;
-  unchanged: number;
-  resource_changes: BundleResourceChange[];
-  bundle_metadata_changed: boolean;
-  recipe_changed: boolean;
-  codec_changed: boolean;
-  tombstones_changed: boolean;
+export interface ConversationPlanAction {
+  action_id: string;
+  direction: ConversationPlanDirection;
+  action: ConversationPlanActionType;
+  reason_code: ConversationReasonCode;
+  relation: ConversationRelation;
+  provider: ProjectProvider;
+  host_id: string;
+  replica_id: string;
+  local_project_id: string;
+  provider_profile_id: string;
+  thread_id: string;
+  result_thread_id?: string | null;
+  source_resource_id?: string | null;
+  proposed_provider_thread_id?: string | null;
+  required_codec: string;
+  pinned_generation: number;
+  pinned_commit_id: string;
+  pinned_manifest_sha256: string;
+  pinned_lineage_digest?: string | null;
+  pinned_semantic_digest?: string | null;
+  expected_local_target: ConversationTargetExpectation;
+  expected_provider_state: ConversationProviderStateExpectation[];
+  expected_profile_revision: number;
+  expected_project_binding_revision: number;
+  expected_host_identity_revision: number;
+  expected_bindings_document_revision: number;
+  expected_binding_revision?: number | null;
+  expires_at: number;
 }
 
 export interface RestorePlan {
@@ -788,14 +786,14 @@ export interface RestorePlan {
   host_id: string;
   replica_id: string;
   expected_host_identity_revision: number;
-  /** The reviewed generation this plan restores from. */
-  source_version: BundleVersionRef;
-  /** The mutable head observed at review; apply requires it unchanged. */
-  observed_head: BundleVersionRef;
+  generation: number;
+  commit_id: string;
+  manifest_sha256: string;
   binding_revision: number;
   created_at: number;
   expires_at: number;
   actions: RestoreAction[];
+  conversation_actions: ConversationPlanAction[];
   project_content_eligibility?: ProjectFileSyncEligibility | null;
 }
 
@@ -815,8 +813,9 @@ export interface DependencyPlan {
   host_id: string;
   replica_id: string;
   expected_host_identity_revision: number;
-  source_version: BundleVersionRef;
-  observed_head: BundleVersionRef;
+  generation: number;
+  commit_id: string;
+  manifest_sha256: string;
   binding_revision: number;
   created_at: number;
   expires_at: number;
@@ -956,7 +955,14 @@ export type ConversationReasonCode =
   | "tombstone_modified"
   | "stale_plan";
 
-export type ConversationMaterializationState = "pending" | "resumable" | "stored_only";
+export interface ThreadSyncDecision {
+  action: ConversationPlanActionType;
+  reason_code: ConversationReasonCode;
+  selectable: boolean;
+  selected_by_default: boolean;
+  requires_explicit_approval: boolean;
+  blocked_reason?: string | null;
+}
 
 export interface ThreadSyncEntry {
   thread_id: string;
@@ -972,13 +978,9 @@ export interface ThreadSyncEntry {
   forked_from?: string | null;
   provider_thread_id?: string | null;
   relation?: ConversationRelation | null;
-  proposed_action?: ConversationPlanActionType | null;
-  reason_code?: ConversationReasonCode | null;
-  materialization_state?: ConversationMaterializationState | null;
-  resumable?: boolean;
+  push_decision: ThreadSyncDecision;
+  pull_decision: ThreadSyncDecision;
   origin_label?: string | null;
-  available_actions?: ConversationPlanActionType[];
-  requires_explicit_approval?: boolean;
 }
 
 export interface ThreadSyncCounts {

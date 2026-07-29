@@ -1,15 +1,11 @@
 use super::harness::{chain, ThreadSpec, VariantWorld};
-use crate::project_sync_v3::bundle_engine::{
-    BundleObjectStore, PublishBundleRequest, PublishContent,
+use crate::project_sync::bundle_engine::BundleObjectStore;
+use crate::project_sync::domain::{
+    BundleId, ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
+    ConversationMaterializationState, ConversationPlanActionType, ConversationPlanDirection,
+    ConversationRelation, LocalConversationBinding, LogicalPath, OriginHostAlias, Provider,
+    ReplicaId, ThreadId, Tombstone, TombstoneTarget, MAX_FILE_BYTES,
 };
-use crate::project_sync_v3::domain::{
-    BundleId, BundleIdentity, BundleKind, BundleRecipe, CapturedWith, ConversationFileRef,
-    ConversationFileRole, ConversationLineageStatus, ConversationMaterializationState,
-    ConversationPlanActionType, ConversationPlanDirection, ConversationRelation,
-    LocalConversationBinding, LogicalPath, OriginHostAlias, Provider, ReplicaId, ThreadId,
-    Tombstone, TombstoneTarget, MAX_FILE_BYTES,
-};
-use std::collections::BTreeMap;
 use std::fs;
 
 #[test]
@@ -90,14 +86,14 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
     let (mut action, mut current) = super::relation_matrix::reviewed_action(
         ConversationPlanDirection::Push,
         ConversationPlanActionType::NoOp,
-        crate::project_sync_v3::domain::ConversationReasonCode::Identical,
+        crate::project_sync::domain::ConversationReasonCode::Identical,
         ConversationRelation::Identical,
     );
     action.host_id = identity_a.host_id.clone();
     action.expected_host_identity_revision = identity_a.revision;
     current.host_id = identity_a.host_id.clone();
     current.host_identity_revision = identity_a.revision;
-    crate::project_sync_v3::conversation_sync::validate_conversation_action_pins(&action, &current)
+    crate::project_sync::conversation_sync::validate_conversation_action_pins(&action, &current)
         .unwrap();
     let rotated = world
         .repo_a
@@ -118,10 +114,10 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
     current.host_id = rotated.host_id;
     current.host_identity_revision = rotated.revision;
     assert_eq!(
-        crate::project_sync_v3::conversation_sync::validate_conversation_action_pins(
+        crate::project_sync::conversation_sync::validate_conversation_action_pins(
             &action, &current,
         ),
-        Err(crate::project_sync_v3::conversation_sync::ConversationStalePin::Host)
+        Err(crate::project_sync::conversation_sync::ConversationStalePin::Host)
     );
 
     let origin = world.origin(&world.repo_b, "replica-b");
@@ -146,7 +142,7 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
 }
 
 #[test]
-fn schema6_manifest_rejects_each_conversation_reference_corruption() {
+fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
     let world = VariantWorld::new();
     let origin = world.origin(&world.repo_a, "replica-a");
     let published = world.publish(
@@ -171,7 +167,7 @@ fn schema6_manifest_rejects_each_conversation_reference_corruption() {
     );
     let baseline = published.snapshot.manifest;
     baseline.validate().unwrap();
-    let mut mutations: Vec<Box<dyn Fn(&mut crate::project_sync_v3::domain::BundleManifest)>> =
+    let mut mutations: Vec<Box<dyn Fn(&mut crate::project_sync::domain::BundleManifest)>> =
         Vec::new();
     mutations.push(Box::new(|manifest| {
         let thread = manifest.conversations.remove(&thread_id()).unwrap();
@@ -255,10 +251,10 @@ fn schema6_manifest_rejects_each_conversation_reference_corruption() {
             entry,
         );
     }));
-    // Removing a thread while keeping its resource is NOT static corruption:
-    // it is the legal shape of auxiliary conversation state (session index,
-    // unidentified rollouts). Silent thread loss is rejected at publish time
-    // by the conversation-retention check instead.
+    mutations.push(Box::new(|manifest| {
+        let v2 = ThreadId::parse("thread-v2").unwrap();
+        manifest.conversations.remove(&v2);
+    }));
     mutations.push(Box::new(|manifest| {
         let resource = manifest.conversations[&thread_id()].resource_id.clone();
         manifest.recipe.entries.remove(&resource);
@@ -304,8 +300,7 @@ fn schema6_manifest_rejects_each_conversation_reference_corruption() {
     serialized["conversations"][thread_id().as_str()]["files"][0]["role"] =
         serde_json::json!({"kind": "unrecognized_provider_role"});
     assert!(
-        serde_json::from_value::<crate::project_sync_v3::domain::BundleManifest>(serialized)
-            .is_err()
+        serde_json::from_value::<crate::project_sync::domain::BundleManifest>(serialized).is_err()
     );
 }
 
@@ -324,6 +319,7 @@ fn local_bindings_reject_duplicate_provider_thread_ownership_profile_wide() {
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
         thread_id: ThreadId::parse(thread).unwrap(),
+        forked_from: None,
         provider_thread_id: Some("same-provider-thread".to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
         last_observed_file_sha256: None,
@@ -394,47 +390,6 @@ fn portable_objects_do_not_leak_machine_local_identity_or_paths() {
             );
         }
     }
-}
-
-#[test]
-fn conversation_free_writer_is_rejected_on_a_threaded_head() {
-    let world = VariantWorld::new();
-    let origin = world.origin(&world.repo_a, "replica-a");
-    let published = world.publish(
-        &[ThreadSpec::new(
-            "thread-v1",
-            "source-thread",
-            chain("source-thread", &[("m-a", "one")]),
-            origin.clone(),
-            10,
-        )],
-        origin.clone(),
-        10,
-    );
-    // A writer that ignores stored conversation metadata cannot silently
-    // drop the threads a previous generation carried.
-    let ignores_threads = world.engine().publish(PublishBundleRequest {
-        identity: BundleIdentity {
-            bundle_id: world.bundle_id.clone(),
-            display_name: "Thread test bundle".to_string(),
-            kind: BundleKind::Project,
-            repository_fingerprint: None,
-        },
-        recipe: BundleRecipe::default(),
-        captured_with: CapturedWith {
-            app_version: "thread-blind-writer".to_string(),
-            codex_version: None,
-            claude_version: None,
-            codec_versions: BTreeMap::new(),
-        },
-        published_by_origin: origin,
-        content: PublishContent::default(),
-        observed_head: Some((published.snapshot.head.clone(), published.head_token)),
-        updated_at: 20,
-    });
-    assert!(ignores_threads
-        .unwrap_err()
-        .contains("without a reviewed tombstone"));
 }
 
 fn thread_id() -> ThreadId {

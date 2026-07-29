@@ -14,7 +14,7 @@ use std::path::{Component, Path};
 
 pub const LOCAL_SCHEMA: u32 = 1;
 pub const MACHINE_PROJECT_SCHEMA: u32 = 1;
-pub const HOST_IDENTITY_SCHEMA: u32 = 2;
+pub const HOST_IDENTITY_SCHEMA: u32 = 1;
 pub const CONVERSATION_BINDINGS_SCHEMA: u32 = 1;
 pub const CONVERSATION_SYNC_JOURNAL_SCHEMA: u32 = 1;
 pub const PUSH_PLAN_SCHEMA: u32 = 1;
@@ -42,6 +42,7 @@ pub const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_CONVERSATION_FILE_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_PROJECT_CONTENT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_PROJECT_CONTENT_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+const ABSENT_BUNDLE_COMMIT_ID: &str = "absent";
 
 const WINDOWS_RESERVED_NAMES: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
@@ -71,6 +72,26 @@ fn validate_named_id(label: &str, value: &str) -> Result<(), String> {
             value.escape_debug()
         ))
     }
+}
+
+pub fn absent_bundle_head_pin() -> (u64, String, String) {
+    (0, ABSENT_BUNDLE_COMMIT_ID.to_string(), "0".repeat(64))
+}
+
+fn validate_bundle_head_pin(
+    generation: u64,
+    commit_id: &str,
+    manifest_sha256: &str,
+) -> Result<(), String> {
+    validate_named_id("bundle head pin commit", commit_id)?;
+    validate_sha256("bundle head pin manifest", manifest_sha256)?;
+    let is_absent = generation == 0;
+    let uses_absent_values =
+        commit_id == ABSENT_BUNDLE_COMMIT_ID && manifest_sha256.bytes().all(|byte| byte == b'0');
+    if is_absent != uses_absent_values {
+        return Err("bundle head pin has inconsistent absent coordinates".to_string());
+    }
+    Ok(())
 }
 
 macro_rules! named_id {
@@ -541,7 +562,7 @@ pub enum StorageKind {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StorageConfigV3 {
+pub struct StorageConfig {
     pub id: StorageId,
     pub name: String,
     pub kind: StorageKind,
@@ -565,7 +586,7 @@ pub struct StorageConfigV3 {
     pub supports_conditional_writes: Option<bool>,
 }
 
-impl StorageConfigV3 {
+impl StorageConfig {
     pub fn validate(&self) -> Result<(), String> {
         validate_display_text("storage name", &self.name, true)?;
         match self.kind {
@@ -1003,18 +1024,18 @@ fn validate_project_content_descriptor_identity(
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct SyncConfigV3 {
+pub struct SyncConfig {
     pub schema: u32,
     pub revision: u64,
     #[serde(default)]
-    pub storages: Vec<StorageConfigV3>,
+    pub storages: Vec<StorageConfig>,
     #[serde(default)]
     pub projects: Vec<LocalProjectRegistration>,
     #[serde(default)]
     pub links: Vec<ProjectStorageLink>,
 }
 
-impl Default for SyncConfigV3 {
+impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             schema: LOCAL_SCHEMA,
@@ -1026,7 +1047,7 @@ impl Default for SyncConfigV3 {
     }
 }
 
-impl SyncConfigV3 {
+impl SyncConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.schema != LOCAL_SCHEMA {
             return Err(format!(
@@ -1259,7 +1280,7 @@ impl Default for MachineProjectState {
 }
 
 impl MachineProjectState {
-    pub fn validate(&self, config: &SyncConfigV3) -> Result<(), String> {
+    pub fn validate(&self, config: &SyncConfig) -> Result<(), String> {
         if self.schema != MACHINE_PROJECT_SCHEMA
             || self.bindings.len() > MAX_BINDINGS
             || self.profiles.len() > MAX_PROVIDER_PROFILES
@@ -1399,6 +1420,10 @@ pub struct LocalConversationBinding {
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
     pub thread_id: ThreadId,
+    /// Immediate portable parent for a locally preserved conflict branch.
+    /// This survives a Pull fork until a later Push publishes the branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
     pub materialization_state: ConversationMaterializationState,
@@ -1421,6 +1446,12 @@ pub struct LocalConversationBinding {
 
 impl LocalConversationBinding {
     pub fn validate(&self) -> Result<(), String> {
+        if self.forked_from.as_ref() == Some(&self.thread_id) {
+            return Err(format!(
+                "local conversation thread '{}' cannot fork from itself",
+                self.thread_id
+            ));
+        }
         let requires_provider_id = matches!(
             self.materialization_state,
             ConversationMaterializationState::Pending | ConversationMaterializationState::Resumable
@@ -1523,7 +1554,7 @@ impl ConversationBindings {
         &self,
         identity: &HostIdentity,
         machine: &MachineProjectState,
-        config: &SyncConfigV3,
+        config: &SyncConfig,
     ) -> Result<(), String> {
         if self.schema != CONVERSATION_BINDINGS_SCHEMA
             || self.bindings.len() > MAX_CONVERSATION_BINDINGS
@@ -1609,7 +1640,9 @@ pub fn fallback_origin_host_label(token: &OriginHostToken) -> String {
 pub enum ConversationSyncPhase {
     Prepared,
     Staged,
+    LocalRekeyed,
     ProviderCommitted,
+    BindingsCommitted,
     CloudPublished,
     LocalCommitted,
     RecoveryRequired,
@@ -1663,6 +1696,8 @@ pub struct ConversationSyncOperation {
     pub operation_id: ConversationOperationId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<PlanId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_action_id: Option<ActionId>,
     pub direction: ConversationPlanDirection,
     pub phase: ConversationSyncPhase,
     pub storage_id: StorageId,
@@ -1683,13 +1718,17 @@ pub struct ConversationSyncOperation {
     #[serde(default)]
     pub rekey_committed: bool,
     pub result_thread_id: ThreadId,
+    /// For a composite Pull fork, the divergent local branch is rekeyed to
+    /// `result_thread_id` while the reviewed cloud branch is materialized
+    /// back under this logical thread. Other operations leave it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialized_thread_id: Option<ThreadId>,
+    /// Portable ancestry to persist on the binding that this operation
+    /// commits. This is distinct from provider-native fork provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_forked_from: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
-    /// When the provider session behind this operation was created by a
-    /// provider-native fork (CLI or codec fallback), the session it was
-    /// forked from. Provenance for receipts and recovery only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forked_from_provider_thread_id: Option<String>,
     pub materialization_state: ConversationMaterializationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_digest: Option<String>,
@@ -1714,7 +1753,24 @@ impl ConversationSyncOperation {
     /// thread while transcripts, provider files, and the cloud stay untouched.
     /// Push forks rekey too, but publish the result in the same operation.
     pub fn is_pure_rekey(&self) -> bool {
-        self.direction == ConversationPlanDirection::Pull && self.old_thread_id.is_some()
+        self.direction == ConversationPlanDirection::Pull
+            && self.old_thread_id.is_some()
+            && self.materialized_thread_id.is_none()
+    }
+
+    /// One reviewed Pull conflict action: preserve the existing local branch
+    /// under `result_thread_id`, then materialize the cloud source under its
+    /// original logical ID.
+    pub fn is_composite_pull_fork(&self) -> bool {
+        self.direction == ConversationPlanDirection::Pull
+            && self.old_thread_id.is_some()
+            && self.materialized_thread_id.is_some()
+    }
+
+    pub fn binding_target_thread_id(&self) -> &ThreadId {
+        self.materialized_thread_id
+            .as_ref()
+            .unwrap_or(&self.result_thread_id)
     }
 }
 
@@ -1722,6 +1778,9 @@ impl ConversationSyncOperation {
     pub fn validate(&self) -> Result<(), String> {
         validate_named_id("conversation journal commit", &self.commit_id)?;
         validate_sha256("conversation journal manifest", &self.manifest_sha256)?;
+        if self.plan_action_id.is_some() && self.plan_id.is_none() {
+            return Err("conversation journal action provenance requires a plan id".to_string());
+        }
         if let Some(digest) = &self.expected_local_digest {
             validate_sha256("conversation journal local target", digest)?;
         }
@@ -1757,6 +1816,16 @@ impl ConversationSyncOperation {
                         "conversation fork rekey must not touch provider targets".to_string()
                     );
                 }
+                if let Some(materialized) = &self.materialized_thread_id {
+                    if self.direction != ConversationPlanDirection::Pull
+                        || materialized != &self.thread_id
+                    {
+                        return Err(
+                            "composite Pull fork must materialize the planned source thread"
+                                .to_string(),
+                        );
+                    }
+                }
             }
             None => {
                 if self.thread_id != self.result_thread_id {
@@ -1764,10 +1833,18 @@ impl ConversationSyncOperation {
                         "conversation journal without a rekey must keep one thread id".to_string(),
                     );
                 }
+                if self.materialized_thread_id.is_some() {
+                    return Err(
+                        "conversation journal materialization target requires a rekey".to_string(),
+                    );
+                }
             }
         }
         if self.rekey_committed && self.old_thread_id.is_none() {
             return Err("conversation journal marks a missing rekey as committed".to_string());
+        }
+        if self.binding_forked_from.as_ref() == Some(self.binding_target_thread_id()) {
+            return Err("conversation journal binding cannot parent itself".to_string());
         }
         if self.created_at > self.updated_at || self.targets.len() > 64 {
             return Err("invalid conversation journal timestamps or target count".to_string());
@@ -1776,30 +1853,6 @@ impl ConversationSyncOperation {
             thread_id.is_empty() || thread_id.len() > 128 || thread_id.chars().any(char::is_control)
         }) {
             return Err("conversation journal has an invalid provider thread id".to_string());
-        }
-        if let Some(forked_from) = &self.forked_from_provider_thread_id {
-            if forked_from.is_empty()
-                || forked_from.len() > 128
-                || forked_from.chars().any(char::is_control)
-            {
-                return Err(
-                    "conversation journal has an invalid forked-from provider id".to_string(),
-                );
-            }
-            match &self.provider_thread_id {
-                None => {
-                    return Err(
-                        "conversation journal fork provenance requires a provider thread id"
-                            .to_string(),
-                    );
-                }
-                Some(provider_thread_id) if provider_thread_id == forked_from => {
-                    return Err(
-                        "conversation journal fork must change the provider thread id".to_string(),
-                    );
-                }
-                Some(_) => {}
-            }
         }
         let requires_provider = matches!(
             self.materialization_state,
@@ -1879,7 +1932,7 @@ pub enum DraftProfileSelection {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DraftStorageSelection {
     Existing { storage_id: StorageId },
-    Pending { storage: StorageConfigV3 },
+    Pending { storage: StorageConfig },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -2016,7 +2069,7 @@ pub struct SetupTransaction {
     #[serde(default)]
     pub profiles: Vec<ProviderProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage: Option<StorageConfigV3>,
+    pub storage: Option<StorageConfig>,
     pub project: LocalProjectRegistration,
     #[serde(default)]
     pub links: Vec<ProjectStorageLink>,
@@ -2166,6 +2219,13 @@ impl ConversationThread {
             validate_display_text("conversation title", title, false)?;
         }
         validate_display_text("conversation lineage codec", &self.lineage_codec, false)?;
+        let expected_resource_id = conversation_resource_id(self.provider, &self.thread_id)?;
+        if self.resource_id != expected_resource_id {
+            return Err(format!(
+                "conversation thread '{}' has non-canonical resource id '{}'",
+                self.thread_id, self.resource_id
+            ));
+        }
         if self.files.is_empty() || self.files.len() > MAX_FILES {
             return Err(format!(
                 "conversation thread '{}' has an invalid file inventory",
@@ -2174,16 +2234,34 @@ impl ConversationThread {
         }
         let mut paths = BTreeSet::new();
         let mut transcript_count = 0_usize;
+        let canonical_transcript = conversation_transcript_path(self.provider, &self.thread_id)?;
+        let canonical_prefix = format!(
+            "state/conversations/{}/{}/",
+            self.provider.as_str(),
+            self.thread_id
+        );
         for file in &self.files {
             file.role.validate()?;
+            if file.role == ConversationFileRole::Transcript {
+                transcript_count += 1;
+                if file.logical_path != canonical_transcript {
+                    return Err(format!(
+                        "conversation thread '{}' has non-canonical transcript path '{}'",
+                        self.thread_id, file.logical_path
+                    ));
+                }
+            }
+            if !file.logical_path.as_str().starts_with(&canonical_prefix) {
+                return Err(format!(
+                    "conversation thread '{}' has file outside its canonical namespace: '{}'",
+                    self.thread_id, file.logical_path
+                ));
+            }
             if !paths.insert(file.logical_path.clone()) {
                 return Err(format!(
                     "conversation thread '{}' repeats file '{}'",
                     self.thread_id, file.logical_path
                 ));
-            }
-            if file.role == ConversationFileRole::Transcript {
-                transcript_count += 1;
             }
         }
         if transcript_count != 1 {
@@ -2411,8 +2489,11 @@ pub struct ConversationPlanAction {
 
 impl ConversationPlanAction {
     pub fn validate(&self) -> Result<(), String> {
-        validate_named_id("conversation plan commit", &self.pinned_commit_id)?;
-        validate_sha256("conversation plan manifest", &self.pinned_manifest_sha256)?;
+        validate_bundle_head_pin(
+            self.pinned_generation,
+            &self.pinned_commit_id,
+            &self.pinned_manifest_sha256,
+        )?;
         validate_display_text("conversation plan codec", &self.required_codec, false)?;
         for (label, digest) in [
             (
@@ -2509,6 +2590,17 @@ impl ConversationPlanAction {
         {
             return Err("conversation no-op reserves mutation targets".to_string());
         }
+        if matches!(
+            self.action,
+            ConversationPlanActionType::KeepLocal
+                | ConversationPlanActionType::RequirePull
+                | ConversationPlanActionType::Blocked
+        ) && (self.result_thread_id.is_some()
+            || self.proposed_provider_thread_id.is_some()
+            || !self.expected_provider_state.is_empty())
+        {
+            return Err("informational conversation action reserves mutation targets".to_string());
+        }
         Ok(())
     }
 }
@@ -2544,8 +2636,7 @@ impl ConversationPushPlan {
                 self.schema_version
             ));
         }
-        validate_named_id("conversation push-plan commit", &self.commit_id)?;
-        validate_sha256("conversation push-plan manifest", &self.manifest_sha256)?;
+        validate_bundle_head_pin(self.generation, &self.commit_id, &self.manifest_sha256)?;
         if self.created_at > self.expires_at || self.actions.len() > MAX_ACTIONS {
             return Err("invalid conversation push-plan lifetime or action count".to_string());
         }
@@ -2678,160 +2769,6 @@ fn update_optional_length_prefixed(hasher: &mut Sha256, value: Option<&str>) {
     }
 }
 
-/// Domain separator for the canonical per-resource content digest.
-const RESOURCE_CONTENT_DOMAIN: &[u8] = b"mallard-resource-content-v1\0";
-/// Domain separator for the canonical whole-snapshot content digest.
-const SNAPSHOT_CONTENT_DOMAIN: &[u8] = b"mallard-snapshot-content-v1\0";
-
-/// Semantic view of one stored file: everything that affects a restore,
-/// nothing about transport placement. `object_key` is deliberately absent —
-/// content addressing lets the key vary for identical content.
-#[derive(Serialize)]
-struct FileContentProjection<'a> {
-    resource_id: &'a ResourceId,
-    sha256: &'a str,
-    size: u64,
-    source_mtime: u64,
-    mode: Option<u32>,
-}
-
-fn file_content_projection(entry: &BundleFileEntry) -> FileContentProjection<'_> {
-    FileContentProjection {
-        resource_id: &entry.resource_id,
-        sha256: &entry.sha256,
-        size: entry.size,
-        source_mtime: entry.source_mtime,
-        mode: entry.mode,
-    }
-}
-
-/// Canonical projection hashed into one live resource's content digest.
-#[derive(Serialize)]
-struct ResourceContentProjection<'a> {
-    descriptor: &'a ResourceDescriptor,
-    conversation: Option<&'a ConversationThread>,
-    files: BTreeMap<&'a LogicalPath, FileContentProjection<'a>>,
-    directories: BTreeMap<&'a LogicalPath, &'a BundleDirectoryEntry>,
-    /// Live tombstones that still constrain this resource: per-file deletion
-    /// markers whose owner is this live resource.
-    tombstones: BTreeMap<&'a str, &'a Tombstone>,
-}
-
-fn hash_canonical_projection<T: Serialize>(
-    domain_separator: &[u8],
-    projection: &T,
-    what: &str,
-) -> Result<String, String> {
-    let bytes = serde_json::to_vec(projection)
-        .map_err(|error| format!("serialize {} projection: {}", what, error))?;
-    let mut hasher = Sha256::new();
-    hasher.update(domain_separator);
-    hasher.update(&bytes);
-    Ok(hex_lower(&hasher.finalize()))
-}
-
-/// Canonical content digest for every live resource of a candidate snapshot,
-/// computed in one pass over the portable maps. This is the single
-/// definition backing `BundleManifest.resource_content_sha256`.
-pub fn compute_resource_content_digests(
-    resources: &BTreeMap<ResourceId, ResourceDescriptor>,
-    conversations: &BTreeMap<ThreadId, ConversationThread>,
-    files: &BTreeMap<LogicalPath, BundleFileEntry>,
-    directories: &BTreeMap<LogicalPath, BundleDirectoryEntry>,
-    tombstones: &BTreeMap<String, Tombstone>,
-) -> Result<BTreeMap<ResourceId, String>, String> {
-    let mut projections: BTreeMap<&ResourceId, ResourceContentProjection> = resources
-        .iter()
-        .map(|(resource_id, descriptor)| {
-            (
-                resource_id,
-                ResourceContentProjection {
-                    descriptor,
-                    conversation: None,
-                    files: BTreeMap::new(),
-                    directories: BTreeMap::new(),
-                    tombstones: BTreeMap::new(),
-                },
-            )
-        })
-        .collect();
-    for thread in conversations.values() {
-        if let Some(projection) = projections.get_mut(&thread.resource_id) {
-            projection.conversation = Some(thread);
-        }
-    }
-    for (path, entry) in files {
-        if let Some(projection) = projections.get_mut(&entry.resource_id) {
-            projection
-                .files
-                .insert(path, file_content_projection(entry));
-        }
-    }
-    for (path, entry) in directories {
-        if let Some(projection) = projections.get_mut(&entry.resource_id) {
-            projection.directories.insert(path, entry);
-        }
-    }
-    for (key, tombstone) in tombstones {
-        let owner = match &tombstone.target {
-            TombstoneTarget::File { resource_id, .. }
-            | TombstoneTarget::ProjectContentFile { resource_id, .. }
-            | TombstoneTarget::ProjectContentDirectory { resource_id, .. } => Some(resource_id),
-            TombstoneTarget::Resource { .. } | TombstoneTarget::ConversationThread { .. } => None,
-        };
-        if let Some(projection) = owner.and_then(|owner| projections.get_mut(owner)) {
-            projection.tombstones.insert(key.as_str(), tombstone);
-        }
-    }
-    projections
-        .into_iter()
-        .map(|(resource_id, projection)| {
-            hash_canonical_projection(RESOURCE_CONTENT_DOMAIN, &projection, "resource content")
-                .map(|digest| (resource_id.clone(), digest))
-        })
-        .collect()
-}
-
-/// Canonical projection hashed into the whole-snapshot content digest: the
-/// one definition of logical snapshot equality. It contains every field a
-/// restore can observe and excludes coordinates (generation, commit ID),
-/// timestamps outside semantic entries, transport object keys, publisher
-/// origin, and diagnostic version strings.
-#[derive(Serialize)]
-struct SnapshotContentProjection<'a> {
-    bundle: &'a BundleIdentity,
-    recipe: &'a BundleRecipe,
-    codec_versions: &'a BTreeMap<String, u32>,
-    conversations: &'a BTreeMap<ThreadId, ConversationThread>,
-    resources: &'a BTreeMap<ResourceId, ResourceDescriptor>,
-    resource_content_sha256: &'a BTreeMap<ResourceId, String>,
-    files: BTreeMap<&'a LogicalPath, FileContentProjection<'a>>,
-    directories: &'a BTreeMap<LogicalPath, BundleDirectoryEntry>,
-    tombstones: &'a BTreeMap<String, Tombstone>,
-}
-
-/// The logical snapshot content digest of one manifest. Publication no-op
-/// detection, generation records, and whole-snapshot comparison all use this
-/// helper; there is no second field-by-field equality definition to drift.
-pub fn snapshot_content_sha256(manifest: &BundleManifest) -> Result<String, String> {
-    let projection = SnapshotContentProjection {
-        bundle: &manifest.bundle,
-        recipe: &manifest.recipe,
-        codec_versions: &manifest.captured_with.codec_versions,
-        conversations: &manifest.conversations,
-        resources: &manifest.resources,
-        resource_content_sha256: &manifest.resource_content_sha256,
-        files: manifest
-            .files
-            .iter()
-            .map(|(path, entry)| (path, file_content_projection(entry)))
-            .collect(),
-        directories: &manifest.directories,
-        tombstones: &manifest.tombstones,
-    };
-    hash_canonical_projection(SNAPSHOT_CONTENT_DOMAIN, &projection, "snapshot content")
-}
-
 fn stable_conversation_id(prefix: &str, domain: &str, fields: &[&[u8]]) -> Result<String, String> {
     let mut hasher = Sha256::new();
     update_length_prefixed(&mut hasher, domain.as_bytes());
@@ -2849,6 +2786,32 @@ fn stable_conversation_id(prefix: &str, domain: &str, fields: &[&[u8]]) -> Resul
     Ok(value)
 }
 
+/// Derive the first portable identity for a provider-native conversation.
+/// Fork identities remain random and are persisted in their reviewed plans;
+/// this derivation only makes repeated reviews of the same previously-unbound
+/// local conversation stable before its first publication commits a binding.
+pub fn initial_conversation_thread_id(
+    bundle_id: &BundleId,
+    provider: Provider,
+    provider_thread_id: &str,
+) -> Result<ThreadId, String> {
+    if provider_thread_id.is_empty()
+        || provider_thread_id.len() > 512
+        || provider_thread_id.chars().any(char::is_control)
+    {
+        return Err("provider thread id must be 1-512 non-control characters".to_string());
+    }
+    ThreadId::parse(stable_conversation_id(
+        "thread",
+        "mallard-initial-conversation-thread-v1",
+        &[
+            bundle_id.as_str().as_bytes(),
+            provider.as_str().as_bytes(),
+            provider_thread_id.as_bytes(),
+        ],
+    )?)
+}
+
 pub fn conversation_resource_id(
     provider: Provider,
     thread_id: &ThreadId,
@@ -2856,21 +2819,15 @@ pub fn conversation_resource_id(
     ResourceId::parse(format!("{}:conversation:{}", provider.as_str(), thread_id))
 }
 
-/// Portable thread identity for a provider-native session. Derived only from
-/// the provider and its own thread ID, so independent replicas that capture
-/// the same local session publish the same cloud thread.
-pub fn portable_conversation_thread_id(
+pub fn conversation_transcript_path(
     provider: Provider,
-    source_thread_id: &str,
-) -> Result<ThreadId, String> {
-    if source_thread_id.is_empty() {
-        return Err("portable thread id requires a source thread id".to_string());
-    }
-    ThreadId::parse(stable_conversation_id(
-        "thread",
-        "mallard-portable-thread-v1",
-        &[provider.as_str().as_bytes(), source_thread_id.as_bytes()],
-    )?)
+    thread_id: &ThreadId,
+) -> Result<LogicalPath, String> {
+    LogicalPath::parse(format!(
+        "state/conversations/{}/{}/transcript.jsonl",
+        provider.as_str(),
+        thread_id
+    ))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -2987,112 +2944,14 @@ impl Tombstone {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct BundleVersionRef {
-    pub generation: u64,
-    pub commit_id: String,
-    pub manifest_sha256: String,
-    pub snapshot_content_sha256: String,
-    pub generation_record_sha256: String,
-}
-
-impl BundleVersionRef {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.generation == 0 {
-            return Err("bundle generation must be at least 1".to_string());
-        }
-        validate_named_id("commit id", &self.commit_id)?;
-        validate_sha256("version manifest", &self.manifest_sha256)?;
-        validate_sha256("version snapshot content", &self.snapshot_content_sha256)?;
-        validate_sha256("version generation record", &self.generation_record_sha256)?;
-        Ok(())
-    }
-}
-
-/// Summary counts of one generation against its direct parent. Counts only:
-/// the delta never carries titles, paths, IDs, or chat content, and it is
-/// not used to compare non-adjacent generations.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct GenerationDelta {
-    pub added_resources: u64,
-    pub changed_resources: u64,
-    pub removed_resources: u64,
-    pub added_files: u64,
-    pub changed_files: u64,
-    pub removed_files: u64,
-}
-
-/// Immutable record of one published generation, stored at
-/// `_versions/{generation}-{commit_id}.json`. The record does not contain
-/// its own digest; the head or child record pins the SHA-256 of its exact
-/// serialized bytes, forming the hash-linked history chain.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct BundleGenerationRecord {
-    pub schema_version: u32,
-    pub bundle_id: BundleId,
-    pub generation: u64,
-    pub commit_id: String,
-    pub manifest_sha256: String,
-    pub snapshot_content_sha256: String,
-    /// Complete hash-pinned reference to the parent generation; `None` only
-    /// for generation 1.
-    pub previous: Option<BundleVersionRef>,
-    pub created_at: u64,
-    pub published_by_origin: PortableOrigin,
-    pub delta: GenerationDelta,
-}
-
-impl BundleGenerationRecord {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != BUNDLE_SCHEMA {
-            return Err(format!(
-                "unsupported generation record schema {}",
-                self.schema_version
-            ));
-        }
-        if self.generation == 0 {
-            return Err("bundle generation must be at least 1".to_string());
-        }
-        validate_named_id("commit id", &self.commit_id)?;
-        validate_sha256("generation record manifest", &self.manifest_sha256)?;
-        validate_sha256(
-            "generation record snapshot content",
-            &self.snapshot_content_sha256,
-        )?;
-        self.published_by_origin.validate()?;
-        match &self.previous {
-            None if self.generation != 1 => Err("only generation 1 may lack a parent".to_string()),
-            Some(_) if self.generation == 1 => Err("generation 1 cannot have a parent".to_string()),
-            Some(previous) => {
-                previous.validate()?;
-                if previous.generation.saturating_add(1) != self.generation {
-                    return Err(format!(
-                        "generation {} pins non-adjacent parent {}",
-                        self.generation, previous.generation
-                    ));
-                }
-                Ok(())
-            }
-            None => Ok(()),
-        }
-    }
-
-    pub fn version_ref(&self, generation_record_sha256: String) -> BundleVersionRef {
-        BundleVersionRef {
-            generation: self.generation,
-            commit_id: self.commit_id.clone(),
-            manifest_sha256: self.manifest_sha256.clone(),
-            snapshot_content_sha256: self.snapshot_content_sha256.clone(),
-            generation_record_sha256,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BundleHead {
     pub schema_version: u32,
     pub bundle_id: BundleId,
     pub kind: BundleKind,
-    pub latest: BundleVersionRef,
+    pub generation: u64,
+    pub commit_id: String,
+    pub manifest_key: String,
+    pub manifest_sha256: String,
     pub updated_at: u64,
 }
 
@@ -3104,7 +2963,16 @@ impl BundleHead {
                 self.schema_version
             ));
         }
-        self.latest.validate()
+        validate_named_id("commit id", &self.commit_id)?;
+        validate_sha256("head manifest", &self.manifest_sha256)?;
+        if self.manifest_key.is_empty()
+            || self.manifest_key.starts_with('/')
+            || self.manifest_key.contains("..")
+            || self.manifest_key.contains('\\')
+        {
+            return Err("unsafe manifest key".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -3118,11 +2986,6 @@ pub struct BundleManifest {
     pub recipe: BundleRecipe,
     pub captured_with: CapturedWith,
     pub published_by_origin: PortableOrigin,
-    /// Canonical per-resource content digest for every live resource.
-    /// Required and strictly validated: `validate` recomputes each digest
-    /// from the manifest's own entries, so a stored map can never drift
-    /// from the content it summarizes.
-    pub resource_content_sha256: BTreeMap<ResourceId, String>,
     #[serde(default)]
     pub conversations: BTreeMap<ThreadId, ConversationThread>,
     #[serde(default)]
@@ -3159,6 +3022,21 @@ impl BundleManifest {
                 return Err(format!("resource key '{}' does not match descriptor", id));
             }
             descriptor.validate()?;
+            if descriptor.kind == ResourceKind::StandaloneSkill {
+                if descriptor.provider.is_none() {
+                    return Err(format!("custom skill '{}' lacks its provider", id));
+                }
+                let effective_name = descriptor
+                    .metadata
+                    .get("effective_name")
+                    .ok_or_else(|| format!("custom skill '{}' lacks its effective name", id))?;
+                let install_dir_name = descriptor
+                    .metadata
+                    .get("install_dir_name")
+                    .ok_or_else(|| format!("custom skill '{}' lacks its install directory", id))?;
+                validate_skill_name("custom skill effective name", effective_name)?;
+                validate_skill_name("custom skill install directory", install_dir_name)?;
+            }
         }
         self.validate_conversations()?;
         let recipe_ids = self.recipe.selected_ids();
@@ -3395,22 +3273,6 @@ impl BundleManifest {
                 }
             }
         }
-        for (resource_id, digest) in &self.resource_content_sha256 {
-            validate_sha256(
-                &format!("resource content digest for '{}'", resource_id),
-                digest,
-            )?;
-        }
-        let expected_digests = compute_resource_content_digests(
-            &self.resources,
-            &self.conversations,
-            &self.files,
-            &self.directories,
-            &self.tombstones,
-        )?;
-        if self.resource_content_sha256 != expected_digests {
-            return Err("manifest resource content digests do not match its entries".to_string());
-        }
         Ok(())
     }
 
@@ -3506,10 +3368,34 @@ impl BundleManifest {
                 ));
             }
         }
-        // A conversation-kind resource without a thread entry is auxiliary
-        // provider state (the session index, a rollout the codec cannot yet
-        // identify) and publishes as plain files. The reverse direction
-        // stays strict: every thread must resolve to a live resource above.
+        for (resource_id, descriptor) in &self.resources {
+            if descriptor.kind == ResourceKind::CodexConversation
+                && !thread_resources.contains(resource_id)
+            {
+                return Err(format!(
+                    "conversation resource '{}' belongs to no live thread",
+                    resource_id
+                ));
+            }
+        }
+        for start in self.conversations.keys() {
+            let mut path = BTreeSet::new();
+            let mut cursor = start;
+            while let Some(parent) = self
+                .conversations
+                .get(cursor)
+                .and_then(|thread| thread.forked_from.as_ref())
+                .filter(|parent| self.conversations.contains_key(*parent))
+            {
+                if !path.insert(cursor.clone()) || path.contains(parent) {
+                    return Err(format!(
+                        "conversation fork ancestry contains a cycle at '{}'",
+                        parent
+                    ));
+                }
+                cursor = parent;
+            }
+        }
         Ok(())
     }
 
@@ -3519,8 +3405,8 @@ impl BundleManifest {
         if self.schema_version != head.schema_version
             || self.bundle.bundle_id != head.bundle_id
             || self.bundle.kind != head.kind
-            || self.generation != head.latest.generation
-            || self.commit_id != head.latest.commit_id
+            || self.generation != head.generation
+            || self.commit_id != head.commit_id
         {
             return Err("bundle head and manifest identity differ".to_string());
         }
@@ -3528,38 +3414,6 @@ impl BundleManifest {
     }
 }
 
-/// A verified immutable snapshot at one pinned version — the type every
-/// restore, byte-source, dependency, and readiness path operates on. It
-/// carries no mutable head: historical generations are honestly represented
-/// without fabricating one.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct BundleVersionSnapshot {
-    pub storage_id: StorageId,
-    pub version: BundleVersionRef,
-    pub manifest: BundleManifest,
-    pub fetched_at: u64,
-}
-
-impl BundleVersionSnapshot {
-    pub fn validate(&self) -> Result<(), String> {
-        self.version.validate()?;
-        self.manifest.validate()?;
-        if self.manifest.generation != self.version.generation
-            || self.manifest.commit_id != self.version.commit_id
-        {
-            return Err("version snapshot and manifest coordinates differ".to_string());
-        }
-        Ok(())
-    }
-
-    pub fn bundle_id(&self) -> &BundleId {
-        &self.manifest.bundle.bundle_id
-    }
-}
-
-/// The current-head inspection result: the mutable head plus the manifest it
-/// pins. Restore machinery never consumes this directly — it converts to the
-/// version-pinned snapshot via [`Self::version_snapshot`].
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BundleSnapshot {
     pub storage_id: StorageId,
@@ -3571,15 +3425,6 @@ pub struct BundleSnapshot {
 impl BundleSnapshot {
     pub fn validate(&self) -> Result<(), String> {
         self.manifest.validate_against_head(&self.head)
-    }
-
-    pub fn version_snapshot(&self) -> BundleVersionSnapshot {
-        BundleVersionSnapshot {
-            storage_id: self.storage_id.clone(),
-            version: self.head.latest.clone(),
-            manifest: self.manifest.clone(),
-            fetched_at: self.fetched_at,
-        }
     }
 }
 
@@ -3757,13 +3602,9 @@ pub struct RestorePlan {
     pub host_id: HostId,
     pub replica_id: ReplicaId,
     pub expected_host_identity_revision: u64,
-    /// The reviewed generation this plan restores from. For an ordinary
-    /// current Pull it equals `observed_head`.
-    pub source_version: BundleVersionRef,
-    /// The mutable head observed while planning. Apply requires the head to
-    /// still be exactly this version, even when `source_version` remains an
-    /// ancestor of a newer head.
-    pub observed_head: BundleVersionRef,
+    pub generation: u64,
+    pub commit_id: String,
+    pub manifest_sha256: String,
     pub binding_revision: u64,
     pub created_at: u64,
     pub expires_at: u64,
@@ -3809,11 +3650,8 @@ impl RestorePlan {
                 self.schema_version
             ));
         }
-        self.source_version.validate()?;
-        self.observed_head.validate()?;
-        if self.source_version.generation > self.observed_head.generation {
-            return Err("restore source cannot be newer than the observed head".to_string());
-        }
+        validate_named_id("commit id", &self.commit_id)?;
+        validate_sha256("restore-plan manifest", &self.manifest_sha256)?;
         if self.created_at > self.expires_at
             || self.actions.len() > MAX_ACTIONS
             || self.conversation_actions.len() > MAX_ACTIONS
@@ -3840,9 +3678,9 @@ impl RestorePlan {
             if action.direction != ConversationPlanDirection::Pull
                 || action.host_id != self.host_id
                 || action.replica_id != self.replica_id
-                || action.pinned_generation != self.source_version.generation
-                || action.pinned_commit_id != self.source_version.commit_id
-                || action.pinned_manifest_sha256 != self.source_version.manifest_sha256
+                || action.pinned_generation != self.generation
+                || action.pinned_commit_id != self.commit_id
+                || action.pinned_manifest_sha256 != self.manifest_sha256
                 || action.expected_host_identity_revision != self.expected_host_identity_revision
                 || action.expires_at != self.expires_at
             {
@@ -3937,8 +3775,9 @@ pub struct DependencyPlan {
     pub host_id: HostId,
     pub replica_id: ReplicaId,
     pub expected_host_identity_revision: u64,
-    pub source_version: BundleVersionRef,
-    pub observed_head: BundleVersionRef,
+    pub generation: u64,
+    pub commit_id: String,
+    pub manifest_sha256: String,
     pub binding_revision: u64,
     pub created_at: u64,
     pub expires_at: u64,
@@ -3958,11 +3797,8 @@ impl DependencyPlan {
                 self.schema_version
             ));
         }
-        self.source_version.validate()?;
-        self.observed_head.validate()?;
-        if self.source_version.generation > self.observed_head.generation {
-            return Err("dependency source cannot be newer than the observed head".to_string());
-        }
+        validate_named_id("commit id", &self.commit_id)?;
+        validate_sha256("dependency-plan manifest", &self.manifest_sha256)?;
         if self.created_at > self.expires_at
             || self.actions.len() > MAX_ACTIONS
             || self.blockers.len() > MAX_ACTIONS
@@ -4066,7 +3902,7 @@ impl Default for DependencyApplications {
 }
 
 impl DependencyApplications {
-    pub fn validate(&self, config: &SyncConfigV3) -> Result<(), String> {
+    pub fn validate(&self, config: &SyncConfig) -> Result<(), String> {
         if self.schema != LOCAL_SCHEMA || self.records.len() > 100_000 {
             return Err("invalid dependency applications document".to_string());
         }
@@ -4276,7 +4112,7 @@ impl Default for Materializations {
 }
 
 impl Materializations {
-    pub fn validate(&self, config: &SyncConfigV3) -> Result<(), String> {
+    pub fn validate(&self, config: &SyncConfig) -> Result<(), String> {
         if self.schema != LOCAL_SCHEMA || self.records.len() > 100_000 {
             return Err("invalid materializations document".to_string());
         }
@@ -4328,6 +4164,14 @@ mod tests {
         ResourceId::parse(value).unwrap()
     }
 
+    fn portable_origin() -> PortableOrigin {
+        PortableOrigin {
+            origin_host_token: OriginHostToken::parse("a".repeat(64)).unwrap(),
+            origin_replica_token: OriginReplicaToken::parse("b".repeat(64)).unwrap(),
+            shared_label: None,
+        }
+    }
+
     fn project_content_descriptor(entry_type: &str, relative_path: &str) -> ResourceDescriptor {
         let logical_path = LogicalPath::parse(format!("project/{}", relative_path)).unwrap();
         let (_, resource_id) = project_content_identity(entry_type, &logical_path).unwrap();
@@ -4351,27 +4195,6 @@ mod tests {
         }
     }
 
-    /// Recompute and store the canonical per-resource digests, as the
-    /// publisher does for every real manifest.
-    fn seal_manifest_digests(manifest: &mut BundleManifest) {
-        manifest.resource_content_sha256 = compute_resource_content_digests(
-            &manifest.resources,
-            &manifest.conversations,
-            &manifest.files,
-            &manifest.directories,
-            &manifest.tombstones,
-        )
-        .unwrap();
-    }
-
-    fn test_origin() -> PortableOrigin {
-        PortableOrigin {
-            origin_host_token: OriginHostToken::parse("a".repeat(64)).unwrap(),
-            origin_replica_token: OriginReplicaToken::parse("b".repeat(64)).unwrap(),
-            shared_label: None,
-        }
-    }
-
     fn project_content_manifest() -> BundleManifest {
         let mut manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA,
@@ -4386,8 +4209,7 @@ mod tests {
             },
             recipe: BundleRecipe::default(),
             captured_with: CapturedWith::default(),
-            published_by_origin: test_origin(),
-            resource_content_sha256: BTreeMap::new(),
+            published_by_origin: portable_origin(),
             conversations: BTreeMap::new(),
             resources: BTreeMap::new(),
             files: BTreeMap::new(),
@@ -4437,7 +4259,6 @@ mod tests {
                 mode: Some(0o644),
             },
         );
-        seal_manifest_digests(&mut manifest);
         manifest
     }
 
@@ -4448,6 +4269,34 @@ mod tests {
         assert!(ResourceId::parse("skill:release").is_ok());
         assert!(ResourceId::parse("Skill/Release").is_err());
         assert!(serde_json::from_str::<BundleId>("\"../../etc/passwd\"").is_err());
+    }
+
+    #[test]
+    fn initial_conversation_ids_are_stable_and_bundle_scoped() {
+        let first = initial_conversation_thread_id(
+            &bundle_id(),
+            Provider::Codex,
+            "019f742a-a206-7932-876c-9db8d8ce575a",
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            initial_conversation_thread_id(
+                &bundle_id(),
+                Provider::Codex,
+                "019f742a-a206-7932-876c-9db8d8ce575a",
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            first,
+            initial_conversation_thread_id(
+                &BundleId::parse("11111111111111111111111111111111").unwrap(),
+                Provider::Codex,
+                "019f742a-a206-7932-876c-9db8d8ce575a",
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -4463,7 +4312,7 @@ mod tests {
         let replica_token = derive_origin_replica_token(&host_id, &bundle, &replica).unwrap();
 
         // Golden vectors freeze the domain-separated u64-length-prefixed
-        // encoding used by every schema-5 writer.
+        // encoding used by every portable-bundle writer.
         assert_eq!(
             host_token.as_str(),
             "a4ab94f1dfb193b63b7b1862aa6c9cabe17ff1c463287f2958281527c75bc62d"
@@ -4532,7 +4381,7 @@ mod tests {
 
     #[test]
     fn config_rejects_split_bundle_identity_and_duplicate_cells() {
-        let storage = StorageConfigV3 {
+        let storage = StorageConfig {
             id: StorageId::parse("personal").unwrap(),
             name: "Personal".to_string(),
             kind: StorageKind::Local,
@@ -4558,7 +4407,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         };
-        let mut config = SyncConfigV3 {
+        let mut config = SyncConfig {
             schema: LOCAL_SCHEMA,
             revision: 0,
             storages: vec![storage],
@@ -4580,6 +4429,46 @@ mod tests {
     }
 
     #[test]
+    fn every_mallard_contract_is_reset_to_schema_one() {
+        for (name, schema) in [
+            ("local config", LOCAL_SCHEMA),
+            ("machine projects", MACHINE_PROJECT_SCHEMA),
+            ("host identity", HOST_IDENTITY_SCHEMA),
+            ("conversation bindings", CONVERSATION_BINDINGS_SCHEMA),
+            (
+                "conversation sync journal",
+                CONVERSATION_SYNC_JOURNAL_SCHEMA,
+            ),
+            ("conversation push plan", PUSH_PLAN_SCHEMA),
+            ("bundle", BUNDLE_SCHEMA),
+            ("recipe", RECIPE_SCHEMA),
+            ("restore plan", RESTORE_PLAN_SCHEMA),
+            ("dependency plan", DEPENDENCY_PLAN_SCHEMA),
+            ("setup draft", SETUP_DRAFT_SCHEMA),
+            ("setup transaction", SETUP_TRANSACTION_SCHEMA),
+            (
+                "project content preferences",
+                PROJECT_CONTENT_PREFERENCES_SCHEMA,
+            ),
+        ] {
+            assert_eq!(schema, 1, "{name} must start at schema 1");
+        }
+
+        let current = SyncConfig::default();
+        current.validate().unwrap();
+
+        for unsupported_schema in [2, 3] {
+            let mut unsupported = current.clone();
+            unsupported.schema = unsupported_schema;
+            let error = unsupported.validate().unwrap_err();
+            assert!(
+                error.contains("unsupported project-sync schema"),
+                "{unsupported_schema}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn active_bindings_share_a_checkout_only_through_distinct_provider_configs() {
         let project = |id: &str, bundle: &str| LocalProjectRegistration {
             local_project_id: LocalProjectId::parse(id).unwrap(),
@@ -4593,7 +4482,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         };
-        let config = SyncConfigV3 {
+        let config = SyncConfig {
             schema: LOCAL_SCHEMA,
             revision: 0,
             storages: Vec::new(),
@@ -4720,7 +4609,7 @@ mod tests {
                 mode: Some(0o644),
             },
         );
-        let mut manifest = BundleManifest {
+        let manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA,
             generation: 1,
             commit_id: "commit-1".to_string(),
@@ -4733,15 +4622,13 @@ mod tests {
             },
             recipe,
             captured_with: CapturedWith::default(),
-            published_by_origin: test_origin(),
-            resource_content_sha256: BTreeMap::new(),
+            published_by_origin: portable_origin(),
             conversations: BTreeMap::new(),
             resources,
             files,
             directories: BTreeMap::new(),
             tombstones: BTreeMap::new(),
         };
-        seal_manifest_digests(&mut manifest);
         assert!(manifest.validate().is_ok());
         let mut broken = manifest.clone();
         broken.resources.clear();
@@ -4754,7 +4641,7 @@ mod tests {
         manifest.validate().unwrap();
 
         let mut unsupported = manifest.clone();
-        unsupported.schema_version = 3;
+        unsupported.schema_version = BUNDLE_SCHEMA + 1;
         assert!(unsupported.validate().unwrap_err().contains("unsupported"));
 
         let mut missing_ancestor = manifest.clone();
@@ -4841,7 +4728,6 @@ mod tests {
         manifest
             .tombstones
             .insert(tombstone.canonical_key(), tombstone);
-        seal_manifest_digests(&mut manifest);
         manifest.validate().unwrap();
 
         let key = manifest.tombstones.keys().next().unwrap().clone();
@@ -4978,11 +4864,7 @@ mod tests {
         let bundle = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
         let thread_id = ThreadId::parse("thread-0123456789abcdef0123456789abcdef").unwrap();
         let resource_id = conversation_resource_id(Provider::Codex, &thread_id).unwrap();
-        let transcript_path = LogicalPath::parse(format!(
-            "state/conversations/codex/{}/transcript.jsonl",
-            thread_id
-        ))
-        .unwrap();
+        let transcript_path = conversation_transcript_path(Provider::Codex, &thread_id).unwrap();
         let chain = vec![
             canonical_message("m-a", None, 'a'),
             canonical_message("m-b", Some("m-a"), 'b'),
@@ -5022,7 +4904,7 @@ mod tests {
             codec_version: 1,
             metadata: BTreeMap::new(),
         };
-        let mut manifest = BundleManifest {
+        BundleManifest {
             schema_version: BUNDLE_SCHEMA,
             generation: 2,
             commit_id: "commit-conversation".to_string(),
@@ -5051,8 +4933,11 @@ mod tests {
                 claude_version: None,
                 codec_versions: BTreeMap::from([("codex-lineage-v1".to_string(), 1)]),
             },
-            published_by_origin: test_origin(),
-            resource_content_sha256: BTreeMap::new(),
+            published_by_origin: PortableOrigin {
+                origin_host_token: OriginHostToken::parse("a".repeat(64)).unwrap(),
+                origin_replica_token: OriginReplicaToken::parse("b".repeat(64)).unwrap(),
+                shared_label: None,
+            },
             conversations: BTreeMap::from([(thread_id.clone(), thread)]),
             resources: BTreeMap::from([(resource_id.clone(), descriptor)]),
             files: BTreeMap::from([(
@@ -5062,217 +4947,13 @@ mod tests {
                     sha256: "c".repeat(64),
                     size: 10,
                     source_mtime: 1,
-                    object_key: format!("_objects/{}", "c".repeat(64)),
+                    object_key: "_uploads/upload-1/files/transcript.jsonl".to_string(),
                     mode: Some(0o600),
                 },
             )]),
             directories: BTreeMap::new(),
             tombstones: BTreeMap::new(),
-        };
-        seal_manifest_digests(&mut manifest);
-        manifest
-    }
-
-    #[test]
-    fn content_digests_are_deterministic_and_transport_independent() {
-        let manifest = conversation_manifest();
-        let baseline = snapshot_content_sha256(&manifest).unwrap();
-        assert_eq!(baseline, snapshot_content_sha256(&manifest).unwrap());
-
-        // Coordinates, timestamps, publisher origin, and diagnostic version
-        // strings are not logical content.
-        let mut coordinates = manifest.clone();
-        coordinates.generation = 99;
-        coordinates.commit_id = "commit-elsewhere".to_string();
-        coordinates.updated_at = 999;
-        coordinates.published_by_origin = PortableOrigin {
-            origin_host_token: OriginHostToken::parse("1f".repeat(32)).unwrap(),
-            origin_replica_token: OriginReplicaToken::parse("2e".repeat(32)).unwrap(),
-            shared_label: None,
-        };
-        coordinates.captured_with.app_version = "another-build".to_string();
-        coordinates.captured_with.codex_version = None;
-        assert_eq!(baseline, snapshot_content_sha256(&coordinates).unwrap());
-
-        // Transport placement is not logical content either: moving the
-        // payload to a different immutable key changes neither digest.
-        let mut moved = manifest.clone();
-        let resource_digests_before = moved.resource_content_sha256.clone();
-        moved.files.values_mut().next().unwrap().object_key =
-            format!("_objects/{}", "d".repeat(64));
-        seal_manifest_digests(&mut moved);
-        assert_eq!(resource_digests_before, moved.resource_content_sha256);
-        assert_eq!(baseline, snapshot_content_sha256(&moved).unwrap());
-
-        // Every restore-affecting field moves both digests.
-        let thread_id = manifest.conversations.keys().next().unwrap().clone();
-        let path = manifest.files.keys().next().unwrap().clone();
-        let mutations: Vec<(&str, Box<dyn Fn(&mut BundleManifest)>)> = vec![
-            (
-                "title",
-                Box::new({
-                    let thread_id = thread_id.clone();
-                    move |manifest: &mut BundleManifest| {
-                        manifest
-                            .conversations
-                            .get_mut(&thread_id)
-                            .unwrap()
-                            .display_title = Some("Renamed".to_string());
-                    }
-                }),
-            ),
-            (
-                "transcript sha",
-                Box::new({
-                    let path = path.clone();
-                    move |manifest: &mut BundleManifest| {
-                        manifest.files.get_mut(&path).unwrap().sha256 = "e".repeat(64);
-                    }
-                }),
-            ),
-            (
-                "mode",
-                Box::new({
-                    let path = path.clone();
-                    move |manifest: &mut BundleManifest| {
-                        manifest.files.get_mut(&path).unwrap().mode = Some(0o640);
-                    }
-                }),
-            ),
-            (
-                "mtime",
-                Box::new({
-                    let path = path.clone();
-                    move |manifest: &mut BundleManifest| {
-                        manifest.files.get_mut(&path).unwrap().source_mtime = 77;
-                    }
-                }),
-            ),
-            (
-                "lineage digest",
-                Box::new({
-                    let thread_id = thread_id.clone();
-                    move |manifest: &mut BundleManifest| {
-                        manifest
-                            .conversations
-                            .get_mut(&thread_id)
-                            .unwrap()
-                            .lineage_digest = Some("f".repeat(64));
-                    }
-                }),
-            ),
-            (
-                "descriptor",
-                Box::new(|manifest: &mut BundleManifest| {
-                    manifest.resources.values_mut().next().unwrap().display_name =
-                        "Renamed resource".to_string();
-                }),
-            ),
-            (
-                "recipe",
-                Box::new(|manifest: &mut BundleManifest| {
-                    manifest.recipe.revision += 1;
-                }),
-            ),
-            (
-                "codec versions",
-                Box::new(|manifest: &mut BundleManifest| {
-                    manifest
-                        .captured_with
-                        .codec_versions
-                        .insert("another.codec".to_string(), 2);
-                }),
-            ),
-            (
-                "tombstones",
-                Box::new(|manifest: &mut BundleManifest| {
-                    let tombstone = Tombstone {
-                        target: TombstoneTarget::ConversationThread {
-                            thread_id: ThreadId::parse("thread-gone").unwrap(),
-                        },
-                        last_sha256: Some("9".repeat(64)),
-                        deleted_at: 3,
-                    };
-                    manifest
-                        .tombstones
-                        .insert(tombstone.canonical_key(), tombstone);
-                }),
-            ),
-        ];
-        for (what, mutate) in mutations {
-            let mut changed = manifest.clone();
-            mutate(&mut changed);
-            seal_manifest_digests(&mut changed);
-            assert_ne!(
-                baseline,
-                snapshot_content_sha256(&changed).unwrap(),
-                "snapshot digest ignored a {} change",
-                what
-            );
         }
-
-        // Content-bearing mutations move the owning resource digest too.
-        let mut titled = manifest.clone();
-        titled
-            .conversations
-            .get_mut(&thread_id)
-            .unwrap()
-            .display_title = Some("Renamed".to_string());
-        seal_manifest_digests(&mut titled);
-        assert_ne!(
-            manifest.resource_content_sha256,
-            titled.resource_content_sha256
-        );
-    }
-
-    #[test]
-    fn manifest_rejects_stale_or_malformed_resource_digests() {
-        let manifest = conversation_manifest();
-        manifest.validate().unwrap();
-
-        let mut missing = manifest.clone();
-        missing.resource_content_sha256.clear();
-        assert!(missing
-            .validate()
-            .unwrap_err()
-            .contains("digests do not match"));
-
-        let mut extra = manifest.clone();
-        extra.resource_content_sha256.insert(
-            ResourceId::parse("codex:session:ghost").unwrap(),
-            "a".repeat(64),
-        );
-        assert!(extra
-            .validate()
-            .unwrap_err()
-            .contains("digests do not match"));
-
-        let mut stale = manifest.clone();
-        *stale.resource_content_sha256.values_mut().next().unwrap() = "b".repeat(64);
-        assert!(stale
-            .validate()
-            .unwrap_err()
-            .contains("digests do not match"));
-
-        let mut malformed = manifest.clone();
-        *malformed
-            .resource_content_sha256
-            .values_mut()
-            .next()
-            .unwrap() = "nope".to_string();
-        assert!(malformed
-            .validate()
-            .unwrap_err()
-            .contains("resource content digest"));
-
-        // The field is required: a manifest without it is corrupt data for
-        // the current schema and must fail to parse at all.
-        let mut serialized = serde_json::to_value(&manifest).unwrap();
-        serialized
-            .as_object_mut()
-            .unwrap()
-            .remove("resource_content_sha256");
-        assert!(serde_json::from_value::<BundleManifest>(serialized).is_err());
     }
 
     #[test]
@@ -5297,7 +4978,7 @@ mod tests {
         assert!(wrong_provider
             .validate()
             .unwrap_err()
-            .contains("disagrees with its resource provider"));
+            .contains("non-canonical resource id"));
 
         let mut duplicate_transcript = manifest.clone();
         let thread = duplicate_transcript
@@ -5312,6 +4993,19 @@ mod tests {
             .unwrap_err()
             .contains("repeats file"));
 
+        let mut non_canonical_transcript = manifest.clone();
+        non_canonical_transcript
+            .conversations
+            .values_mut()
+            .next()
+            .unwrap()
+            .files[0]
+            .logical_path = LogicalPath::parse("state/codex/sessions/thread-a.jsonl").unwrap();
+        assert!(non_canonical_transcript
+            .validate()
+            .unwrap_err()
+            .contains("non-canonical transcript path"));
+
         let mut self_fork = manifest.clone();
         {
             let thread = self_fork.conversations.values_mut().next().unwrap();
@@ -5322,11 +5016,45 @@ mod tests {
             .unwrap_err()
             .contains("cannot fork from itself"));
 
-        let mut downgraded = manifest;
-        downgraded.schema_version = 4;
-        assert!(downgraded
+        let mut cyclic_forks = manifest.clone();
+        let first_id = cyclic_forks.conversations.keys().next().unwrap().clone();
+        let second_id = ThreadId::parse("thread-11111111111111111111111111111111").unwrap();
+        let second_resource_id = conversation_resource_id(Provider::Codex, &second_id).unwrap();
+        let second_path = conversation_transcript_path(Provider::Codex, &second_id).unwrap();
+        let mut second_thread = cyclic_forks.conversations.get(&first_id).unwrap().clone();
+        second_thread.thread_id = second_id.clone();
+        second_thread.resource_id = second_resource_id.clone();
+        second_thread.files[0].logical_path = second_path.clone();
+        second_thread.forked_from = Some(first_id.clone());
+        cyclic_forks
+            .conversations
+            .get_mut(&first_id)
+            .unwrap()
+            .forked_from = Some(second_id.clone());
+        let mut second_descriptor = cyclic_forks.resources.values().next().unwrap().clone();
+        second_descriptor.resource_id = second_resource_id.clone();
+        let mut second_file = cyclic_forks.files.values().next().unwrap().clone();
+        second_file.resource_id = second_resource_id.clone();
+        cyclic_forks.conversations.insert(second_id, second_thread);
+        cyclic_forks
+            .resources
+            .insert(second_resource_id.clone(), second_descriptor);
+        cyclic_forks.files.insert(second_path, second_file);
+        cyclic_forks.recipe.entries.insert(
+            second_resource_id.clone(),
+            RecipeEntry {
+                resource_id: second_resource_id,
+                apply_policy: ApplyPolicy::SafeFile,
+                required: false,
+            },
+        );
+        assert!(cyclic_forks
             .validate()
             .unwrap_err()
-            .contains("unsupported bundle manifest schema"));
+            .contains("ancestry contains a cycle"));
+
+        let mut unsupported = manifest;
+        unsupported.schema_version = BUNDLE_SCHEMA + 1;
+        assert!(unsupported.validate().unwrap_err().contains("unsupported"));
     }
 }

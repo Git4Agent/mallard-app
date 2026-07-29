@@ -10,35 +10,27 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+use super::codex_rollout::{
+    analyze_codex_rollout_structure, session_meta_id, structural_record_type,
+    CodexStructureErrorKind, MAX_CODEX_RECORDS,
+};
 use super::domain::{
     conversation_chain_digests, validate_conversation_chain, CanonicalConversationMessage,
-    MessageId, MAX_CONVERSATION_FILE_BYTES,
+    MessageId,
 };
 
-pub const CODEX_LINEAGE_CODEC_KEY: &str = "codex.lineage.v1";
+pub const CODEX_LINEAGE_CODEC_KEY: &str = "codex.lineage.v2";
 pub const CODEX_CODEC_VERSION: u32 = 2;
 
-/// The capture codec version a manifest declares for a lineage codec key.
-/// Codecs without a versioned parser declare 1: the key itself carries the
-/// semantic identity and strict manifest validation only requires presence.
-pub fn codec_version_for(lineage_codec: &str) -> u32 {
-    if lineage_codec == CODEX_LINEAGE_CODEC_KEY {
-        CODEX_CODEC_VERSION
-    } else {
-        1
-    }
-}
-
-const MAX_TRANSCRIPT_BYTES: usize = MAX_CONVERSATION_FILE_BYTES as usize;
-const MAX_LINE_BYTES: usize = 1024 * 1024;
-const MAX_RECORDS: usize = 100_000;
+#[cfg(test)]
+const MAX_TRANSCRIPT_BYTES: usize = super::domain::MAX_CONVERSATION_FILE_BYTES as usize;
+const MAX_RECORDS: usize = MAX_CODEX_RECORDS;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CodecUnknownReason {
     Empty,
     OversizedFile,
-    OversizedLine,
     TooManyRecords,
     MalformedJson,
     MissingSessionMetadata,
@@ -55,7 +47,6 @@ impl CodecUnknownReason {
         match self {
             Self::Empty => "empty_transcript",
             Self::OversizedFile => "oversized_file",
-            Self::OversizedLine => "oversized_line",
             Self::TooManyRecords => "too_many_records",
             Self::MalformedJson => "malformed_json",
             Self::MissingSessionMetadata => "missing_session_metadata",
@@ -98,6 +89,7 @@ impl CodecLineage {
 pub struct CodexTranscriptAnalysis {
     pub source_thread_id: Option<String>,
     pub source_cwd: Option<String>,
+    pub is_internal_subagent: bool,
     pub record_count: usize,
     pub lineage: CodecLineage,
 }
@@ -112,18 +104,18 @@ impl CodexTranscriptAnalysis {
 /// divergent branch. Content failures are represented as bounded reason codes
 /// so capture can safely offer StoredOnly.
 pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
-    if bytes.is_empty() {
-        return unknown(None, None, 0, CodecUnknownReason::Empty);
-    }
-    if bytes.len() > MAX_TRANSCRIPT_BYTES {
-        return unknown(None, None, 0, CodecUnknownReason::OversizedFile);
-    }
-
-    let mut source_thread_id = None;
-    let mut source_cwd = None;
-    let mut chain: Vec<CanonicalConversationMessage> = Vec::new();
+    let structure = match analyze_codex_rollout_structure(bytes, None) {
+        Ok(structure) => structure,
+        Err(error) => return unknown(None, None, 0, structure_error_reason(error.kind), false),
+    };
+    let source_thread_id = Some(structure.current.id.clone());
+    let source_cwd = Some(structure.current.cwd.clone());
+    let is_internal_subagent = structure.current.is_internal_subagent;
+    let mut chain = Vec::new();
+    let mut seen = BTreeMap::<MessageId, (String, Option<MessageId>)>::new();
     let mut record_count = 0_usize;
     for raw in bytes.split(|byte| *byte == b'\n') {
+        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         if raw.is_empty() {
             continue;
         }
@@ -134,14 +126,7 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
                 source_cwd,
                 record_count,
                 CodecUnknownReason::TooManyRecords,
-            );
-        }
-        if raw.len() > MAX_LINE_BYTES {
-            return unknown(
-                source_thread_id,
-                source_cwd,
-                record_count,
-                CodecUnknownReason::OversizedLine,
+                is_internal_subagent,
             );
         }
         let value: Value = match serde_json::from_slice(raw) {
@@ -152,42 +137,23 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
                     source_cwd,
                     record_count,
                     CodecUnknownReason::MalformedJson,
+                    is_internal_subagent,
                 )
             }
         };
 
-        if is_record_type(&value, "session_meta") {
-            let payload = payload_object(&value);
-            let id = payload
-                .and_then(|object| string_field(object, &["id", "session_id"]))
-                .map(str::to_string);
-            let cwd = payload
-                .and_then(|object| string_field(object, &["cwd", "working_directory"]))
-                .map(str::to_string);
-            if merge_unique(&mut source_thread_id, id).is_err()
-                || merge_unique(&mut source_cwd, cwd).is_err()
-            {
-                return unknown(
-                    source_thread_id,
-                    source_cwd,
-                    record_count,
-                    CodecUnknownReason::ConflictingSessionMetadata,
-                );
-            }
-        }
-
-        let Some(identity) =
-            message_identity(&value, chain.last().map(|message| &message.message_id))
-        else {
-            if record_requires_message_id(&value) {
+        let identity = match durable_message_identity(&value) {
+            DurableMessageIdentity::Ignore => continue,
+            DurableMessageIdentity::MissingId => {
                 return unknown(
                     source_thread_id,
                     source_cwd,
                     record_count,
                     CodecUnknownReason::MissingMessageId,
-                );
+                    is_internal_subagent,
+                )
             }
-            continue;
+            DurableMessageIdentity::Present(identity) => identity,
         };
         let message_id = match MessageId::parse(identity.message_id) {
             Ok(id) => id,
@@ -197,10 +163,11 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
                     source_cwd,
                     record_count,
                     CodecUnknownReason::InvalidMessageId,
+                    is_internal_subagent,
                 )
             }
         };
-        let parent_message_id = match identity.parent_message_id {
+        let explicit_parent = match identity.parent_message_id {
             Some(parent) => match MessageId::parse(parent) {
                 Ok(parent) => Some(parent),
                 Err(_) => {
@@ -209,32 +176,69 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
                         source_cwd,
                         record_count,
                         CodecUnknownReason::InvalidMessageId,
+                        is_internal_subagent,
                     )
                 }
             },
             None => None,
         };
+        let fingerprint = semantic_record_fingerprint(value);
+        if let Some((existing_fingerprint, existing_parent)) = seen.get(&message_id) {
+            if existing_fingerprint == &fingerprint
+                && explicit_parent
+                    .as_ref()
+                    .is_none_or(|parent| Some(parent) == existing_parent.as_ref())
+            {
+                continue;
+            }
+            if existing_fingerprint == &fingerprint {
+                return unknown(
+                    source_thread_id,
+                    source_cwd,
+                    record_count,
+                    CodecUnknownReason::NonLinearParentage,
+                    is_internal_subagent,
+                );
+            }
+            return unknown(
+                source_thread_id,
+                source_cwd,
+                record_count,
+                CodecUnknownReason::DuplicateMessageId,
+                is_internal_subagent,
+            );
+        }
+        let previous = chain
+            .last()
+            .map(|message: &CanonicalConversationMessage| message.message_id.clone());
+        if explicit_parent.is_some() && explicit_parent != previous {
+            return unknown(
+                source_thread_id,
+                source_cwd,
+                record_count,
+                CodecUnknownReason::NonLinearParentage,
+                is_internal_subagent,
+            );
+        }
+        let parent_message_id = explicit_parent.or(previous);
+        seen.insert(
+            message_id.clone(),
+            (fingerprint.clone(), parent_message_id.clone()),
+        );
         chain.push(CanonicalConversationMessage {
             message_id,
             parent_message_id,
-            semantic_fingerprint: semantic_record_fingerprint(value),
+            semantic_fingerprint: fingerprint,
         });
     }
 
-    if source_thread_id.is_none() || source_cwd.is_none() {
-        return unknown(
-            source_thread_id,
-            source_cwd,
-            record_count,
-            CodecUnknownReason::MissingSessionMetadata,
-        );
-    }
     if chain.is_empty() {
         return unknown(
             source_thread_id,
             source_cwd,
             record_count,
             CodecUnknownReason::MissingMessageId,
+            is_internal_subagent,
         );
     }
     if let Err(error) = validate_conversation_chain(&chain) {
@@ -243,13 +247,20 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
         } else {
             CodecUnknownReason::NonLinearParentage
         };
-        return unknown(source_thread_id, source_cwd, record_count, reason);
+        return unknown(
+            source_thread_id,
+            source_cwd,
+            record_count,
+            reason,
+            is_internal_subagent,
+        );
     }
     let (lineage_digest, semantic_digest) = conversation_chain_digests(&chain)
         .expect("validated conversation chains always produce digests");
     CodexTranscriptAnalysis {
         source_thread_id,
         source_cwd,
+        is_internal_subagent,
         record_count,
         lineage: CodecLineage::Complete {
             chain,
@@ -259,15 +270,38 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
     }
 }
 
+fn structure_error_reason(kind: CodexStructureErrorKind) -> CodecUnknownReason {
+    match kind {
+        CodexStructureErrorKind::Empty => CodecUnknownReason::Empty,
+        CodexStructureErrorKind::OversizedFile => CodecUnknownReason::OversizedFile,
+        CodexStructureErrorKind::TooManyRecords => CodecUnknownReason::TooManyRecords,
+        CodexStructureErrorKind::MalformedJson => CodecUnknownReason::MalformedJson,
+        CodexStructureErrorKind::MissingSessionMetadata
+        | CodexStructureErrorKind::MalformedSessionMetadata => {
+            CodecUnknownReason::MissingSessionMetadata
+        }
+        CodexStructureErrorKind::ActiveIdentityMismatch
+        | CodexStructureErrorKind::ConflictingParent
+        | CodexStructureErrorKind::SelfParent
+        | CodexStructureErrorKind::AncestryCycle
+        | CodexStructureErrorKind::ForkDepthExceeded
+        | CodexStructureErrorKind::UnrelatedMetadata => {
+            CodecUnknownReason::ConflictingSessionMetadata
+        }
+    }
+}
+
 fn unknown(
     source_thread_id: Option<String>,
     source_cwd: Option<String>,
     record_count: usize,
     reason: CodecUnknownReason,
+    is_internal_subagent: bool,
 ) -> CodexTranscriptAnalysis {
     CodexTranscriptAnalysis {
         source_thread_id,
         source_cwd,
+        is_internal_subagent,
         record_count,
         lineage: CodecLineage::Unknown { reason },
     }
@@ -278,101 +312,78 @@ struct MessageIdentity {
     parent_message_id: Option<String>,
 }
 
-fn message_identity(
-    value: &Value,
-    previous_message_id: Option<&MessageId>,
-) -> Option<MessageIdentity> {
-    if is_event_message_mirror(value) {
-        return None;
+enum DurableMessageIdentity {
+    Ignore,
+    MissingId,
+    Present(MessageIdentity),
+}
+
+fn durable_message_identity(value: &Value) -> DurableMessageIdentity {
+    let Some(outer) = value.as_object() else {
+        return DurableMessageIdentity::Ignore;
+    };
+    let outer_kind = string_field(outer, &["type"]);
+    if outer_kind == Some("event_msg") {
+        return DurableMessageIdentity::Ignore;
     }
-    let outer = value.as_object()?;
     let payload = payload_object(value).unwrap_or(outer);
-    let message_id = string_field(payload, &["message_id"])
-        .or_else(|| string_field(outer, &["message_id"]))
-        .or_else(|| {
-            record_requires_message_id(value)
-                .then(|| string_field(payload, &["id"]))
-                .flatten()
-        })?;
-    let parent_fields = ["parent_message_id", "parent_id"];
-    let has_explicit_parent = parent_fields
-        .iter()
-        .any(|key| payload.contains_key(*key) || outer.contains_key(*key));
-    let parent_message_id = string_field(payload, &parent_fields)
-        .or_else(|| string_field(outer, &parent_fields))
-        .map(str::to_string)
-        .or_else(|| {
-            (outer.get("type").and_then(Value::as_str) == Some("response_item")
-                && !has_explicit_parent)
-                .then(|| previous_message_id.map(|message_id| message_id.as_str().to_string()))
-                .flatten()
-        });
-    Some(MessageIdentity {
+    let payload_kind = string_field(payload, &["type"]);
+    let durable = outer_kind == Some("response_item")
+        || outer_kind.is_some_and(is_durable_message_kind)
+        || payload_kind.is_some_and(is_durable_message_kind);
+    if !durable
+        || !payload_kind
+            .or(outer_kind)
+            .is_some_and(is_durable_message_kind)
+    {
+        return DurableMessageIdentity::Ignore;
+    }
+    let Some(message_id) = string_field(payload, &["message_id", "id"])
+        .or_else(|| string_field(outer, &["message_id", "id"]))
+    else {
+        return DurableMessageIdentity::MissingId;
+    };
+    let parent_message_id = string_field(payload, &["parent_message_id", "parent_id"])
+        .or_else(|| string_field(outer, &["parent_message_id", "parent_id"]))
+        .map(str::to_string);
+    DurableMessageIdentity::Present(MessageIdentity {
         message_id: message_id.to_string(),
         parent_message_id,
     })
 }
 
-fn record_requires_message_id(value: &Value) -> bool {
-    if is_event_message_mirror(value) {
-        return false;
-    }
-    if value.get("type").and_then(Value::as_str) == Some("response_item") {
-        return payload_object(value)
-            .and_then(|payload| string_field(payload, &["type"]))
-            .is_some();
-    }
-    let Some(object) = payload_object(value).or_else(|| value.as_object()) else {
-        return false;
-    };
-    let Some(kind) = string_field(object, &["type"]) else {
-        return false;
-    };
-    is_lineage_item_kind(kind)
-}
-
-fn is_event_message_mirror(value: &Value) -> bool {
-    value.get("type").and_then(Value::as_str) == Some("event_msg")
-        && payload_object(value)
-            .and_then(|payload| string_field(payload, &["type"]))
-            .is_some_and(|kind| matches!(kind, "user_message" | "agent_message"))
-}
-
-fn is_lineage_item_kind(kind: &str) -> bool {
+fn is_durable_message_kind(kind: &str) -> bool {
     matches!(
         kind,
         "message"
             | "user_message"
             | "agent_message"
-            | "reasoning"
             | "tool_call"
             | "tool_result"
             | "function_call"
             | "function_call_output"
             | "custom_tool_call"
             | "custom_tool_call_output"
-            | "web_search_call"
-            | "tool_search_call"
-            | "tool_search_output"
     )
 }
 
 fn semantic_record_fingerprint(mut value: Value) -> String {
-    let remove_payload_id = value.get("type").and_then(Value::as_str) == Some("response_item")
-        || payload_object(&value)
-            .and_then(|payload| string_field(payload, &["type"]))
-            .is_some_and(is_lineage_item_kind);
     if let Some(outer) = value.as_object_mut() {
+        outer.remove("timestamp");
+        outer.remove("created_at");
+        outer.remove("updated_at");
         outer.remove("message_id");
         outer.remove("parent_message_id");
         outer.remove("parent_id");
+        outer.remove("id");
         if let Some(payload) = outer.get_mut("payload").and_then(Value::as_object_mut) {
+            payload.remove("timestamp");
+            payload.remove("created_at");
+            payload.remove("updated_at");
             payload.remove("message_id");
             payload.remove("parent_message_id");
             payload.remove("parent_id");
-            if remove_payload_id {
-                payload.remove("id");
-            }
+            payload.remove("id");
         }
     }
     let canonical = canonical_json(&value);
@@ -435,11 +446,9 @@ pub fn rewrite_codex_transcript(
     let final_newline = bytes.ends_with(b"\n");
     let mut lines = Vec::new();
     for raw in bytes.split(|byte| *byte == b'\n') {
+        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         if raw.is_empty() {
             continue;
-        }
-        if raw.len() > MAX_LINE_BYTES {
-            return Err("Codex transcript line exceeds the rewrite limit".to_string());
         }
         let mut value: Value = serde_json::from_slice(raw)
             .map_err(|_| "Codex transcript contains malformed JSON".to_string())?;
@@ -467,10 +476,17 @@ pub fn rewrite_codex_transcript(
     }
 
     let after = analyze_codex_transcript(&rewritten);
+    let before_structure = analyze_codex_rollout_structure(bytes, Some(expected_source_thread_id))
+        .map_err(|error| error.to_string())?;
+    let after_structure = analyze_codex_rollout_structure(&rewritten, Some(destination_thread_id))
+        .map_err(|error| error.to_string())?;
     if !after.is_resumable()
         || after.source_thread_id.as_deref() != Some(destination_thread_id)
         || after.source_cwd.as_deref() != Some(destination_cwd)
         || lineage_digests(&before) != lineage_digests(&after)
+        || before_structure.fork_ancestry != after_structure.fork_ancestry
+        || after_structure.structural_cwds
+            != std::collections::BTreeSet::from([destination_cwd.to_string()])
     {
         return Err("rewritten Codex transcript failed semantic round-trip validation".to_string());
     }
@@ -492,27 +508,42 @@ fn rewrite_codex_value(
     value: &mut Value,
     source_thread_id: &str,
     destination_thread_id: &str,
-    source_cwd: &str,
+    _source_cwd: &str,
     destination_cwd: &str,
 ) -> Result<(), String> {
-    let is_session = is_record_type(value, "session_meta");
-    let is_turn = is_record_type(value, "turn_context");
+    let record_type = structural_record_type(value);
+    let is_session = record_type == Some("session_meta");
+    let is_turn = record_type == Some("turn_context");
     let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
         return Ok(());
     };
     if is_session {
-        rewrite_matching_string(payload, "id", source_thread_id, destination_thread_id)?;
-        rewrite_matching_string(
-            payload,
-            "session_id",
-            source_thread_id,
-            destination_thread_id,
-        )?;
+        if session_meta_id(payload) == Some(source_thread_id) {
+            for key in ["id", "thread_id", "threadId", "session_id", "sessionId"] {
+                rewrite_matching_string(payload, key, source_thread_id, destination_thread_id)?;
+            }
+        }
     }
     if is_session || is_turn {
-        rewrite_matching_string(payload, "cwd", source_cwd, destination_cwd)?;
-        rewrite_matching_string(payload, "working_directory", source_cwd, destination_cwd)?;
+        for key in ["cwd", "working_directory", "workingDirectory"] {
+            rewrite_structural_cwd(payload, key, destination_cwd)?;
+        }
     }
+    Ok(())
+}
+
+fn rewrite_structural_cwd(
+    object: &mut Map<String, Value>,
+    key: &str,
+    destination_cwd: &str,
+) -> Result<(), String> {
+    let Some(value) = object.get_mut(key) else {
+        return Ok(());
+    };
+    if !value.is_string() {
+        return Err(format!("Codex structural field '{key}' is not a string"));
+    }
+    *value = Value::String(destination_cwd.to_string());
     Ok(())
 }
 
@@ -536,33 +567,13 @@ fn rewrite_matching_string(
     Ok(())
 }
 
-fn payload_object(value: &Value) -> Option<&Map<String, Value>> {
+pub(crate) fn payload_object(value: &Value) -> Option<&Map<String, Value>> {
     value.get("payload").and_then(Value::as_object)
-}
-
-fn is_record_type(value: &Value, expected: &str) -> bool {
-    value.get("type").and_then(Value::as_str) == Some(expected)
-        || payload_object(value).and_then(|payload| string_field(payload, &["type"]))
-            == Some(expected)
 }
 
 fn string_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| object.get(*key).and_then(Value::as_str))
-}
-
-fn merge_unique(target: &mut Option<String>, candidate: Option<String>) -> Result<(), ()> {
-    let Some(candidate) = candidate else {
-        return Ok(());
-    };
-    match target {
-        Some(existing) if existing != &candidate => Err(()),
-        Some(_) => Ok(()),
-        None => {
-            *target = Some(candidate);
-            Ok(())
-        }
-    }
 }
 
 fn validate_rewrite_value(label: &str, value: &str, max: usize) -> Result<(), String> {
@@ -626,110 +637,83 @@ mod tests {
         );
         let analysis = analyze_codex_transcript(&bytes);
         assert!(analysis.is_resumable());
+        assert!(!analysis.is_internal_subagent);
         assert_eq!(analysis.source_thread_id.as_deref(), Some("thread-a"));
         assert_eq!(analysis.lineage.chain().unwrap().len(), 2);
     }
 
     #[test]
-    fn codex_codec_accepts_current_ordered_items_and_ignores_event_mirrors() {
-        let records = [
-            json!({
-                "type": "session_meta",
-                "payload": {"id": "thread-current", "cwd": "/tmp/project-current"}
-            }),
-            json!({
-                "type": "event_msg",
-                "payload": {"type": "user_message", "message": "mirrored prompt"}
-            }),
-            json!({
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "id": "item-a",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "prompt"}]
-                }
-            }),
-            json!({
-                "type": "event_msg",
-                "payload": {"type": "agent_message", "message": "mirrored answer"}
-            }),
-            json!({
-                "type": "response_item",
-                "payload": {
-                    "type": "reasoning",
-                    "id": "item-b",
-                    "summary": []
-                }
-            }),
-            json!({
-                "type": "response_item",
-                "payload": {
-                    "type": "custom_tool_call",
-                    "id": "item-c",
-                    "call_id": "call-a",
-                    "name": "example",
-                    "input": "{}"
-                }
-            }),
-            json!({
-                "type": "response_item",
-                "payload": {
-                    "type": "custom_tool_call_output",
-                    "id": "item-d",
-                    "call_id": "call-a",
-                    "output": "ok"
-                }
-            }),
-            json!({
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "id": "item-e",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": "answer"}]
-                }
-            }),
-        ];
-        let mut bytes = records
+    fn codex_codec_marks_internal_subagent_rollouts() {
+        let bytes = transcript("thread-child", "/tmp/project-a", &[("m-a", None, "one")]);
+        let first_newline = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+        let mut metadata: Value = serde_json::from_slice(&bytes[..first_newline]).unwrap();
+        metadata["payload"]["thread_source"] = Value::String("subagent".to_string());
+        let mut marked = serde_json::to_vec(&metadata).unwrap();
+        marked.push(b'\n');
+        marked.extend_from_slice(&bytes[first_newline + 1..]);
+
+        let analysis = analyze_codex_transcript(&marked);
+        assert!(analysis.is_resumable());
+        assert!(analysis.is_internal_subagent);
+    }
+
+    #[test]
+    fn codex_codec_infers_ordered_parents_when_ids_are_stable() {
+        let bytes = transcript(
+            "thread-a",
+            "/tmp/project-a",
+            &[
+                ("m-a", None, "one"),
+                ("m-b", None, "two"),
+                ("m-c", None, "three"),
+            ],
+        );
+        let chain = analyze_codex_transcript(&bytes)
+            .lineage
+            .chain()
+            .unwrap()
+            .to_vec();
+        assert_eq!(chain[0].parent_message_id, None);
+        assert_eq!(
+            chain[1].parent_message_id.as_ref().map(MessageId::as_str),
+            Some("m-a")
+        );
+        assert_eq!(
+            chain[2].parent_message_id.as_ref().map(MessageId::as_str),
+            Some("m-b")
+        );
+    }
+
+    #[test]
+    fn nested_fork_metadata_does_not_change_active_identity_or_lineage() {
+        let mut bytes = transcript(
+            "p111",
+            "/tmp/project",
+            &[("m-a", None, "one"), ("m-b", None, "two")],
+        );
+        let first_newline = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+        let mut active: Value = serde_json::from_slice(&bytes[..first_newline]).unwrap();
+        active["payload"]["forked_from_id"] = Value::String("p11".to_string());
+        let mut records = vec![active];
+        records.extend([
+            json!({"type":"session_meta","payload":{"id":"p11","forked_from_id":"p1","cwd":"/tmp/project"}}),
+            json!({"type":"session_meta","payload":{"id":"p1","forked_from_id":"p","cwd":"/tmp/project"}}),
+            json!({"type":"session_meta","payload":{"id":"p","cwd":"/tmp/project"}}),
+        ]);
+        let history = bytes.split_off(first_newline + 1);
+        bytes = records
             .into_iter()
             .map(|record| serde_json::to_string(&record).unwrap())
             .collect::<Vec<_>>()
             .join("\n")
             .into_bytes();
         bytes.push(b'\n');
+        bytes.extend_from_slice(&history);
 
         let analysis = analyze_codex_transcript(&bytes);
         assert!(analysis.is_resumable());
-        let chain = analysis.lineage.chain().unwrap();
-        assert_eq!(
-            chain
-                .iter()
-                .map(|message| message.message_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["item-a", "item-b", "item-c", "item-d", "item-e"]
-        );
-        for (index, message) in chain.iter().enumerate() {
-            assert_eq!(
-                message.parent_message_id.as_ref(),
-                index
-                    .checked_sub(1)
-                    .and_then(|previous| chain.get(previous))
-                    .map(|previous| &previous.message_id)
-            );
-        }
-
-        let rewritten = rewrite_codex_transcript(
-            &bytes,
-            "thread-current",
-            "thread-rewritten",
-            "/tmp/project-current",
-            "/tmp/project-rewritten",
-        )
-        .unwrap();
-        let after = analyze_codex_transcript(&rewritten);
-        assert!(after.is_resumable());
-        assert_eq!(lineage_digests(&analysis), lineage_digests(&after));
+        assert_eq!(analysis.source_thread_id.as_deref(), Some("p111"));
+        assert_eq!(analysis.lineage.chain().unwrap().len(), 2);
     }
 
     #[test]
@@ -753,6 +737,49 @@ mod tests {
         let analysis = analyze_codex_transcript(&bytes);
         assert!(analysis.is_resumable());
         assert_eq!(analysis.source_thread_id.as_deref(), Some("thread-large"));
+    }
+
+    #[test]
+    fn codex_codec_accepts_single_records_larger_than_one_mib() {
+        let mut bytes = transcript(
+            "thread-large-record",
+            "/tmp/project-large",
+            &[("m-a", None, "one")],
+        );
+        bytes.extend_from_slice(
+            &serde_json::to_vec(&json!({
+                "type": "compacted",
+                "payload": {
+                    "message": "",
+                    "replacement_history": "x".repeat(2 * 1024 * 1024),
+                }
+            }))
+            .unwrap(),
+        );
+        bytes.push(b'\n');
+        assert!(bytes.len() < MAX_TRANSCRIPT_BYTES);
+
+        let analysis = analyze_codex_transcript(&bytes);
+        assert!(analysis.is_resumable());
+        assert_eq!(
+            analysis.source_thread_id.as_deref(),
+            Some("thread-large-record")
+        );
+
+        let rewritten = rewrite_codex_transcript(
+            &bytes,
+            "thread-large-record",
+            "thread-large-record-copy",
+            "/tmp/project-large",
+            "/tmp/project-large-copy",
+        )
+        .unwrap();
+        let rewritten_analysis = analyze_codex_transcript(&rewritten);
+        assert!(rewritten_analysis.is_resumable());
+        assert_eq!(
+            rewritten_analysis.source_thread_id.as_deref(),
+            Some("thread-large-record-copy")
+        );
     }
 
     #[test]
@@ -811,6 +838,42 @@ mod tests {
         );
         assert!(matches!(
             analyze_codex_transcript(&branched).lineage,
+            CodecLineage::Unknown {
+                reason: CodecUnknownReason::NonLinearParentage
+            }
+        ));
+    }
+
+    #[test]
+    fn exact_duplicate_items_are_ignored_but_conflicting_parents_are_rejected() {
+        let mut exact = transcript(
+            "thread-a",
+            "/tmp/project",
+            &[("m-a", None, "one"), ("m-b", Some("m-a"), "two")],
+        );
+        let lines = exact
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        exact.extend_from_slice(&lines[2]);
+        exact.push(b'\n');
+        assert_eq!(
+            analyze_codex_transcript(&exact)
+                .lineage
+                .chain()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let mut conflicting: Value = serde_json::from_slice(&lines[2]).unwrap();
+        conflicting["payload"]["parent_id"] = Value::String("m-other".to_string());
+        let mut conflicting_bytes = exact;
+        conflicting_bytes.extend_from_slice(&serde_json::to_vec(&conflicting).unwrap());
+        conflicting_bytes.push(b'\n');
+        assert!(matches!(
+            analyze_codex_transcript(&conflicting_bytes).lineage,
             CodecLineage::Unknown {
                 reason: CodecUnknownReason::NonLinearParentage
             }

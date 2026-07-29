@@ -7,6 +7,7 @@ interface Props {
   resources: ProjectResourceDescriptor[];
   selected: Set<string>;
   statuses: Map<string, string>;
+  selectableResourceIds?: ReadonlySet<string>;
   disabled?: boolean;
   onToggle: (resourceId: string) => void;
 }
@@ -47,12 +48,14 @@ function ResourceRow({
   resource,
   checked,
   status,
+  selectable,
   disabled,
   onToggle,
 }: {
   resource: ProjectResourceDescriptor;
   checked: boolean;
   status?: string;
+  selectable: boolean;
   disabled: boolean;
   onToggle: () => void;
 }) {
@@ -65,29 +68,31 @@ function ResourceRow({
     && installDirectory.toLocaleLowerCase() !== resource.display_name.toLocaleLowerCase();
 
   return (
-    <div className={`v3-resource-row${checked ? " selected" : ""}${blocked ? " blocked" : ""}${expanded ? " expanded" : ""}`}>
-      <label className="v3-resource-select">
-        <input
-          type="checkbox"
-          checked={checked}
-          disabled={disabled || blocked}
-          onChange={onToggle}
-          aria-label={`Include ${resource.display_name}`}
-        />
-      </label>
+    <div className={`sync-resource-row${selectable ? " sync-resource-row-selectable" : ""}${checked ? " selected" : ""}${blocked ? " blocked" : ""}${expanded ? " expanded" : ""}`}>
+      {selectable && (
+        <label className="sync-resource-select">
+          <input
+            type="checkbox"
+            checked={checked}
+            disabled={disabled}
+            onChange={onToggle}
+            aria-label={`Include ${resource.display_name}`}
+          />
+        </label>
+      )}
       <button
         type="button"
-        className="v3-resource-main"
+        className="sync-resource-main"
         onClick={() => setExpanded((current) => !current)}
         aria-expanded={expanded}
       >
-        <span className="v3-resource-toggle">
+        <span className="sync-resource-toggle">
           <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
         </span>
-        <span className="v3-resource-kind-icon">
+        <span className="sync-resource-kind-icon">
           <Icon name={resourceIcon(resource)} size={14} />
         </span>
-        <span className="v3-resource-copy">
+        <span className="sync-resource-copy">
           <strong>{resource.display_name}</strong>
           <span>
             {providerLabel(resource.provider)} · {resource.kind === "standalone_skill"
@@ -102,15 +107,15 @@ function ResourceRow({
               : ""}
           </span>
         </span>
-        <span className="v3-resource-meta">
+        <span className="sync-resource-meta">
           {needsInstall && checked && (
-            <span className="v3-resource-install">{resource.install_behavior ?? "install on restore"}</span>
+            <span className="sync-resource-install">{resource.install_behavior ?? "install on restore"}</span>
           )}
-          {status && <span className={`v3-resource-status status-${status}`}>{statusLabel(status)}</span>}
+          {status && <span className={`sync-resource-status status-${status}`}>{statusLabel(status)}</span>}
         </span>
       </button>
       {expanded && (
-        <div className="v3-resource-detail">
+        <div className="sync-resource-detail">
           {resource.description && <p>{resource.description}</p>}
           {resource.logical_paths && resource.logical_paths.length > 0 && (
             <div>
@@ -118,14 +123,14 @@ function ResourceRow({
               <code>{resource.logical_paths.join("\n")}</code>
             </div>
           )}
-          <div className="v3-resource-detail-grid">
+          <div className="sync-resource-detail-grid">
             <span>Resource ID</span><code>{resource.resource_id}</code>
             <span>Kind</span><code>{resource.kind}</code>
             {hasDistinctInstallDirectory && <><span>Install folder</span><code>{installDirectory}</code></>}
             {resource.apply_policy && <><span>Apply</span><code>{resource.apply_policy}</code></>}
           </div>
           {resource.blocked_reason && (
-            <div className="v3-resource-blocker"><Icon name="alert-triangle" size={14} /> {resource.blocked_reason}</div>
+            <div className="sync-resource-blocker"><Icon name="alert-triangle" size={14} /> {resource.blocked_reason}</div>
           )}
           {providedSkills(resource).length > 0 && (
             <div>
@@ -144,6 +149,7 @@ function ResourceGroup({
   items,
   selected,
   statuses,
+  selectableResourceIds,
   disabled,
   onToggle,
 }: {
@@ -151,20 +157,26 @@ function ResourceGroup({
   items: ProjectResourceDescriptor[];
   selected: Set<string>;
   statuses: Map<string, string>;
+  selectableResourceIds?: ReadonlySet<string>;
   disabled: boolean;
   onToggle: (resourceId: string) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
-  const selectable = items.filter((item) => !item.blocked_reason);
-  const selectedCount = selectable.filter((item) => selected.has(item.resource_id)).length;
-  const allSelected = selectable.length > 0 && selectedCount === selectable.length;
+  const selectableItems = items.filter((item) => (
+    !item.blocked_reason
+    && item.apply_policy !== "never"
+    && (selectableResourceIds?.has(item.resource_id) ?? true)
+  ));
+  const selectableIds = new Set(selectableItems.map((item) => item.resource_id));
+  const selectedCount = selectableItems.filter((item) => selected.has(item.resource_id)).length;
+  const allSelected = selectableItems.length > 0 && selectedCount === selectableItems.length;
 
   const toggleCollapsed = () => setCollapsed((current) => !current);
 
   return (
-    <section className={`v3-resource-group category-${group.id}`}>
+    <section className={`sync-resource-group category-${group.id}`}>
       <div
-        className="v3-resource-group-header"
+        className="sync-resource-group-header"
         role="button"
         tabIndex={0}
         aria-expanded={!collapsed}
@@ -176,19 +188,19 @@ function ResourceGroup({
           toggleCollapsed();
         }}
       >
-        <span className="v3-resource-group-icon"><Icon name={CATEGORY_ICON[group.id]} size={16} /></span>
-        <span className="v3-resource-group-copy">
+        <span className="sync-resource-group-icon"><Icon name={CATEGORY_ICON[group.id]} size={16} /></span>
+        <span className="sync-resource-group-copy">
           <strong>{group.label}</strong>
           <span>{group.description}</span>
         </span>
-        <span className="v3-resource-group-count">{selectedCount}/{items.length}</span>
-        <span className="v3-resource-group-actions" onClick={(event) => event.stopPropagation()}>
+        <span className="sync-resource-group-count">{selectedCount}/{items.length}</span>
+        <span className="sync-resource-group-actions" onClick={(event) => event.stopPropagation()}>
           <button
             type="button"
-            className="btn-link v3-resource-group-all"
-            disabled={disabled || selectable.length === 0}
+            className="btn-link sync-resource-group-all"
+            disabled={disabled || selectableItems.length === 0}
             onClick={() => {
-              for (const item of selectable) {
+              for (const item of selectableItems) {
                 if (selected.has(item.resource_id) === allSelected) onToggle(item.resource_id);
               }
             }}
@@ -196,16 +208,17 @@ function ResourceGroup({
             {allSelected ? "Clear" : "Include all"}
           </button>
         </span>
-        <Icon name={collapsed ? "chevron-right" : "chevron-down"} size={13} className="v3-resource-group-chevron" />
+        <Icon name={collapsed ? "chevron-right" : "chevron-down"} size={13} className="sync-resource-group-chevron" />
       </div>
       {!collapsed && (
-        <div className="v3-resource-list">
+        <div className="sync-resource-list">
           {items.map((resource) => (
             <ResourceRow
               key={resource.resource_id}
               resource={resource}
-              checked={selected.has(resource.resource_id)}
+              checked={selectableIds.has(resource.resource_id) && selected.has(resource.resource_id)}
               status={statuses.get(resource.resource_id)}
+              selectable={selectableIds.has(resource.resource_id)}
               disabled={disabled}
               onToggle={() => onToggle(resource.resource_id)}
             />
@@ -216,7 +229,14 @@ function ResourceGroup({
   );
 }
 
-export default function ResourceInventory({ resources, selected, statuses, disabled = false, onToggle }: Props) {
+export default function ResourceInventory({
+  resources,
+  selected,
+  statuses,
+  selectableResourceIds,
+  disabled = false,
+  onToggle,
+}: Props) {
   const grouped = useMemo(() => {
     const result = new Map<ProjectResourceCategory, ProjectResourceDescriptor[]>();
     for (const group of RESOURCE_GROUPS) result.set(group.id, []);
@@ -226,7 +246,7 @@ export default function ResourceInventory({ resources, selected, statuses, disab
 
   if (resources.length === 0) {
     return (
-      <div className="v3-empty-state compact">
+      <div className="sync-empty-state compact">
         <Icon name="folder" size={22} />
         <strong>No project resources discovered</strong>
         <span>Refresh after the provider has created tasks, sessions, or project configuration.</span>
@@ -235,7 +255,7 @@ export default function ResourceInventory({ resources, selected, statuses, disab
   }
 
   return (
-    <div className="v3-resource-groups">
+    <div className="sync-resource-groups">
       {RESOURCE_GROUPS.map((group) => {
         const items = grouped.get(group.id) ?? [];
         if (items.length === 0) return null;
@@ -246,6 +266,7 @@ export default function ResourceInventory({ resources, selected, statuses, disab
             items={items}
             selected={selected}
             statuses={statuses}
+            selectableResourceIds={selectableResourceIds}
             disabled={disabled}
             onToggle={onToggle}
           />

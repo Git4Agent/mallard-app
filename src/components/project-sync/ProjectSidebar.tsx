@@ -3,7 +3,7 @@ import type {
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
 } from "react";
-import type { LocalProjectSummary, SetupDraftSummary, StorageConfigV3 } from "../../types";
+import type { LocalProjectSummary, SetupDraftSummary, StorageConfig } from "../../types";
 import Icon from "../Icons";
 import { projectLabel } from "./model";
 
@@ -29,7 +29,7 @@ interface Props {
   projects: LocalProjectSummary[];
   drafts: SetupDraftSummary[];
   activeDraftId: string | null;
-  storages: StorageConfigV3[];
+  storages: StorageConfig[];
   storageUsage: Record<string, number>;
   storageIssues?: Record<string, string>;
   activeProjectId: string | null;
@@ -130,14 +130,14 @@ export default function ProjectSidebar({
     : storages[0]?.id ?? null;
 
   return (
-    <aside id="project-sidebar" className="v3-sidebar">
-      <div className="v3-sidebar-drag" data-tauri-drag-region />
-      <div className="v3-sidebar-brand" data-tauri-drag-region>
-        <img className="v3-brand-logo" src="/mallard-logo.svg" alt="" data-tauri-drag-region />
+    <aside id="project-sidebar" className="sync-sidebar">
+      <div className="sync-sidebar-drag" data-tauri-drag-region />
+      <div className="sync-sidebar-brand" data-tauri-drag-region>
+        <img className="sync-brand-logo" src="/mallard-logo.svg" alt="" data-tauri-drag-region />
         <strong>Mallard</strong>
       </div>
 
-      <nav className="v3-primary-nav" aria-label="Project sync navigation">
+      <nav className="sync-primary-nav" aria-label="Project sync navigation">
         <button
           type="button"
           className={!activeStorageId ? "active" : undefined}
@@ -162,14 +162,14 @@ export default function ProjectSidebar({
         >
           <Icon name="activity" size={15} /> Logs
           {unreadLogs > 0 && !activityOpen && (
-            <span className="sidebar-nav-badge v3-activity-badge">{unreadLogs}</span>
+            <span className="sidebar-nav-badge sync-activity-badge">{unreadLogs}</span>
           )}
         </button>
       </nav>
 
       <div
         ref={sectionsRef}
-        className={`v3-sidebar-sections sidebar-settings-sections${resizingSections ? " resizing" : ""}`}
+        className={`sync-sidebar-sections sidebar-settings-sections${resizingSections ? " resizing" : ""}`}
         style={{
           gridTemplateRows: `minmax(96px, ${projectShare}fr) 9px minmax(96px, ${1 - projectShare}fr)`,
         }}
@@ -197,7 +197,7 @@ export default function ProjectSidebar({
             {drafts.map((draft) => (
               <div
                 key={draft.draft_id}
-                className={`sidebar-profile-item v3-sidebar-draft${activeDraftId === draft.draft_id ? " active" : ""}`}
+                className={`sidebar-profile-item sync-sidebar-draft${activeDraftId === draft.draft_id ? " active" : ""}`}
               >
                 <button
                   type="button"
@@ -210,7 +210,7 @@ export default function ProjectSidebar({
                 >
                   <Icon name="folder" size={15} />
                   <span>{draft.display_name}</span>
-                  <span className={`v3-draft-badge${draft.status === "attention" ? " attention" : ""}`}>Draft</span>
+                  <span className={`sync-draft-badge${draft.status === "attention" ? " attention" : ""}`}>Draft</span>
                 </button>
                 <div className="sidebar-profile-actions">
                   <button
@@ -238,7 +238,7 @@ export default function ProjectSidebar({
             {loading && projects.length === 0 && drafts.length === 0 ? (
               <div className="sidebar-msg">Loading projects…</div>
             ) : projects.length === 0 && drafts.length === 0 ? (
-              <button type="button" className="v3-sidebar-empty" onClick={onAddProject} disabled={busy}>
+              <button type="button" className="sync-sidebar-empty" onClick={onAddProject} disabled={busy}>
                 <Icon name="plus" size={15} /> Add your first project
               </button>
             ) : projects.map((project) => {
@@ -265,10 +265,10 @@ export default function ProjectSidebar({
                     <Icon
                       name={project.is_git_repository === true ? "git-folder" : "folder"}
                       size={16}
-                      className={project.is_git_repository === true ? "v3-project-git-icon" : "v3-project-folder-icon"}
+                      className={project.is_git_repository === true ? "sync-project-git-icon" : "sync-project-folder-icon"}
                     />
                     <span>{label}</span>
-                    {profileRequired && <Icon name="alert-triangle" size={12} className="v3-sidebar-profile-warning" />}
+                    {profileRequired && <Icon name="alert-triangle" size={12} className="sync-sidebar-profile-warning" />}
                   </button>
                   <div className="sidebar-profile-actions">
                     <button
@@ -347,7 +347,7 @@ export default function ProjectSidebar({
                       <Icon
                         name="alert-triangle"
                         size={12}
-                        className="v3-sidebar-storage-warning"
+                        className="sync-sidebar-storage-warning"
                         aria-hidden="true"
                       />
                     )}

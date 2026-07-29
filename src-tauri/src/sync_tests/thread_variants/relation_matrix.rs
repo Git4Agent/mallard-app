@@ -1,11 +1,11 @@
 use super::harness::{analyzed_chain, chain, TranscriptBuilder};
-use crate::project_sync_v3::conversation_codec::rewrite_codex_transcript;
-use crate::project_sync_v3::conversation_sync::{
+use crate::project_sync::conversation_codec::rewrite_codex_transcript;
+use crate::project_sync::conversation_sync::{
     build_conversation_plan_action, default_conversation_decision,
     validate_conversation_action_pins, ConversationApplyContext, ConversationCapabilities,
     ConversationPlanActionRequest,
 };
-use crate::project_sync_v3::domain::{
+use crate::project_sync::domain::{
     classify_conversation_relation, ActionId, ConversationPlanAction, ConversationPlanActionType,
     ConversationPlanDirection, ConversationReasonCode, ConversationRelation, HostId,
     LocalProjectId, LocalProviderProfileId, PlanId, Provider, ProviderStateExpectation, ReplicaId,
@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 #[derive(Clone)]
 struct MatrixCase {
     name: &'static str,
-    local: Option<Vec<crate::project_sync_v3::domain::CanonicalConversationMessage>>,
-    cloud: Option<Vec<crate::project_sync_v3::domain::CanonicalConversationMessage>>,
+    local: Option<Vec<crate::project_sync::domain::CanonicalConversationMessage>>,
+    cloud: Option<Vec<crate::project_sync::domain::CanonicalConversationMessage>>,
     relation: ConversationRelation,
     push: ConversationPlanActionType,
     pull: ConversationPlanActionType,
@@ -25,7 +25,7 @@ struct MatrixCase {
 
 fn messages(
     ids: &[(&str, &str)],
-) -> Vec<crate::project_sync_v3::domain::CanonicalConversationMessage> {
+) -> Vec<crate::project_sync::domain::CanonicalConversationMessage> {
     analyzed_chain(&chain("thread-a", ids))
 }
 

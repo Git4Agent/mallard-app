@@ -1,10 +1,8 @@
 mod binding_and_tombstones;
 mod conflicts;
 mod continuation;
-mod generation_history;
-mod harness;
+pub(crate) mod harness;
 mod provider_codec;
-mod provider_fork;
 mod recovery;
 mod relation_matrix;
 mod schema_and_privacy;

@@ -1,4 +1,4 @@
-//! Global provider-home inventory for schema-3 project bundles.
+//! Global provider-home inventory for current project bundles.
 //!
 //! Discovers installed global plugins (portable install intent only, never
 //! payload) and global custom skills under a mapped provider home's
@@ -441,7 +441,7 @@ fn classify_global_skills(
     }
 }
 
-/// Adapter contract v2 for standalone skill identity: a valid declared name
+/// Standalone skill identity contract: a valid declared name
 /// is the runtime-visible capability, while the directory name remains the
 /// physical installation path. Providers also accept legacy skills without a
 /// declaration, for which the directory name remains the effective name.

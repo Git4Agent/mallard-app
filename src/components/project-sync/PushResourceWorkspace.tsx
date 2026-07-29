@@ -7,6 +7,7 @@ import type {
   ProjectBinding,
   ProjectContentInventory,
   ProjectResourceDescriptor,
+  PushDestinationStatus,
   ThreadSyncComparison,
 } from "../../types";
 import Icon from "../Icons";
@@ -29,8 +30,7 @@ const STEP_LABELS: Record<SyncReviewStep, string> = {
   review: "Review",
 };
 const STORAGE_BLOCKING_STATES = new Set(["storage_only", "storage_ahead", "diverged"]);
-const MISSING_STORAGE_REPOSITORY_ERROR =
-  "remote bundle head is missing but this project has a prior base";
+const PUSH_SELECTABLE_SYNC_STATES = new Set(["local_only", "local_ahead"]);
 
 export interface PushReviewBlocker {
   kind: "storage" | "local";
@@ -57,6 +57,7 @@ interface Props {
   projectContentLoading?: boolean;
   projectContentRemovals?: ReadonlySet<string>;
   acknowledgedWarningDigests?: ReadonlySet<string>;
+  destinationStatus?: PushDestinationStatus | null;
   /** Live upload progress while the push publishes; renders in the footer button. */
   fetchProgress?: BundleFetchProgress | null;
   showProjectFiles?: boolean;
@@ -73,17 +74,8 @@ interface Props {
   onClose: () => void;
   onPush: () => void;
   onPull?: () => void;
+  onOpenStorageSettings?: () => void;
   onUnlinkStorage?: () => void;
-}
-
-export function pushRequiresStorageUnlink(
-  comparison?: ThreadSyncComparison | null,
-  error?: string | null,
-): boolean {
-  return (
-    (comparison?.generation == null && comparison?.base_generation != null)
-    || !!error?.includes(MISSING_STORAGE_REPOSITORY_ERROR)
-  );
 }
 
 function countSelected(items: ProjectResourceDescriptor[], selected: ReadonlySet<string>): number {
@@ -129,6 +121,9 @@ export function pushReviewBlockers(
 ): PushReviewBlocker[] {
   const blockers: PushReviewBlocker[] = [];
   for (const entry of threadComparison?.entries ?? []) {
+    if (entry.cloud_thread_id) {
+      continue;
+    }
     const kind = pushBlockerKind(entry.state, entry.storage_present, selected.has(entry.resource_id));
     if (kind) blockers.push({ kind, step: "history", resourceId: entry.resource_id, state: entry.state });
   }
@@ -189,29 +184,27 @@ export function pushSelectableResourceIds(
   capabilityReport?: CapabilityStatusReport | null,
   projectContentInventory?: ProjectContentInventory | null,
 ): Set<string> {
-  const excludedIds = new Set<string>();
+  const unselectableIds = new Set<string>();
   for (const entry of threadComparison?.entries ?? []) {
-    if (
-      entry.state === "synced"
-      || entry.state === "unavailable"
-      || (entry.state as string) === "blocked"
-    ) {
-      excludedIds.add(entry.resource_id);
+    if (!entry.push_decision.selectable) {
+      unselectableIds.add(entry.resource_id);
     }
   }
   for (const item of capabilityReport?.items ?? []) {
-    if (item.state === "blocked" || item.blocked_reason) excludedIds.add(item.resource_id);
+    if (!PUSH_SELECTABLE_SYNC_STATES.has(item.state) || item.blocked_reason) {
+      unselectableIds.add(item.resource_id);
+    }
   }
   for (const entry of projectContentInventory?.entries ?? []) {
     if (entry.blocked_reason || STORAGE_BLOCKING_STATES.has(entry.state)) {
-      excludedIds.add(entry.descriptor.resource_id);
+      unselectableIds.add(entry.descriptor.resource_id);
     }
   }
   return new Set(resources
     .filter((resource) => (
       !resource.blocked_reason
       && resource.apply_policy !== "never"
-      && !excludedIds.has(resource.resource_id)
+      && !unselectableIds.has(resource.resource_id)
     ))
     .map((resource) => resource.resource_id));
 }
@@ -229,19 +222,8 @@ export function sanitizePushSelection(
     capabilityReport,
     projectContentInventory,
   );
-  const sanitized = new Set([...selected].filter((resourceId) => selectableIds.has(resourceId)));
-  const conversations = resources.filter((resource) => categoryFor(resource) === "conversations");
-  const sessionIndex = conversations.find((resource) => resource.resource_id === "codex:session-index");
-  if (sessionIndex && !conversations.some((resource) => (
-    resource.resource_id !== sessionIndex.resource_id
-    && sanitized.has(resource.resource_id)
-  ))) {
-    sanitized.delete(sessionIndex.resource_id);
-  }
-  return sanitized;
+  return new Set([...selected].filter((resourceId) => selectableIds.has(resourceId)));
 }
-
-const RECOMMENDED_PUSH_THREAD_STATES = new Set(["local_only", "local_ahead"]);
 
 export function recommendedPushSelection(
   selected: ReadonlySet<string>,
@@ -267,7 +249,11 @@ export function recommendedPushSelection(
     if (resource.resource_id === sessionIndex?.resource_id) continue;
     const comparison = comparisonByResourceId.get(resource.resource_id);
     if (!comparison) continue;
-    if (RECOMMENDED_PUSH_THREAD_STATES.has(comparison.state) && selectableIds.has(resource.resource_id)) {
+    if (
+      comparison.push_decision.selectable
+      && comparison.push_decision.selected_by_default
+      && selectableIds.has(resource.resource_id)
+    ) {
       recommended.add(resource.resource_id);
     } else {
       recommended.delete(resource.resource_id);
@@ -352,6 +338,7 @@ export default function PushResourceWorkspace({
   projectContentLoading = false,
   projectContentRemovals = new Set(),
   acknowledgedWarningDigests = new Set(),
+  destinationStatus,
   fetchProgress = null,
   showProjectFiles = false,
   initialStep = "history",
@@ -367,6 +354,7 @@ export default function PushResourceWorkspace({
   onClose,
   onPush,
   onPull,
+  onOpenStorageSettings,
   onUnlinkStorage,
 }: Props) {
   const steps = useMemo(() => syncReviewSteps(showProjectFiles), [showProjectFiles]);
@@ -391,32 +379,7 @@ export default function PushResourceWorkspace({
     [resources],
   );
   const sessionIndex = conversations.find((resource) => resource.resource_id === "codex:session-index") ?? null;
-  const visibleConversations = useMemo(
-    () => conversations.filter((resource) => resource.resource_id !== sessionIndex?.resource_id),
-    [conversations, sessionIndex?.resource_id],
-  );
-  const reviewedConversationIds = useMemo(
-    () => new Set(visibleConversations.map((resource) => resource.resource_id)),
-    [visibleConversations],
-  );
-  const upToDateConversationIds = useMemo(
-    () => new Set((threadComparison?.entries ?? [])
-      .filter((entry) => entry.state === "synced" && reviewedConversationIds.has(entry.resource_id))
-      .map((entry) => entry.resource_id)),
-    [reviewedConversationIds, threadComparison?.entries],
-  );
-  const outstandingConversations = useMemo(
-    () => visibleConversations.filter((resource) => !upToDateConversationIds.has(resource.resource_id)),
-    [upToDateConversationIds, visibleConversations],
-  );
-  const hiddenPushResourceIds = useMemo(() => new Set([
-    ...upToDateConversationIds,
-    ...(sessionIndex ? [sessionIndex.resource_id] : []),
-  ]), [sessionIndex, upToDateConversationIds]);
-  const visibleResources = useMemo(
-    () => resources.filter((resource) => !hiddenPushResourceIds.has(resource.resource_id)),
-    [hiddenPushResourceIds, resources],
-  );
+  const visibleConversations = conversations.filter((resource) => resource.resource_id !== sessionIndex?.resource_id);
   const skills = useMemo(() => resources.filter((resource) => categoryFor(resource) === "skills"), [resources]);
   const plugins = useMemo(() => resources.filter((resource) => categoryFor(resource) === "plugins"), [resources]);
   const projectFiles = useMemo(
@@ -432,40 +395,20 @@ export default function PushResourceWorkspace({
     [capabilityReport, projectContentInventory, resources, threadComparison],
   );
   const effectiveSelected = useMemo(
-    () => sanitizePushSelection(
-      selected,
-      resources,
-      threadComparison,
-      capabilityReport,
-      projectContentInventory,
-    ),
-    [capabilityReport, projectContentInventory, resources, selected, threadComparison],
+    () => new Set([...selected].filter((resourceId) => selectableIds.has(resourceId))),
+    [selectableIds, selected],
   );
   const safeProjectDefaults = useMemo(
-    () => sanitizePushSelection(
-      projectDefaults,
-      resources,
-      threadComparison,
-      capabilityReport,
-      projectContentInventory,
-    ),
-    [capabilityReport, projectContentInventory, projectDefaults, resources, threadComparison],
-  );
-  const visibleEffectiveSelected = useMemo(
-    () => new Set([...effectiveSelected].filter((resourceId) => !hiddenPushResourceIds.has(resourceId))),
-    [effectiveSelected, hiddenPushResourceIds],
-  );
-  const visibleSafeProjectDefaults = useMemo(
-    () => new Set([...safeProjectDefaults].filter((resourceId) => !hiddenPushResourceIds.has(resourceId))),
-    [hiddenPushResourceIds, safeProjectDefaults],
+    () => new Set([...projectDefaults].filter((resourceId) => selectableIds.has(resourceId))),
+    [projectDefaults, selectableIds],
   );
 
   const counts = {
-    history: countSelected(outstandingConversations, visibleEffectiveSelected),
+    history: countSelected(visibleConversations, effectiveSelected),
     skills: countSelected(skills, effectiveSelected),
     plugins: countSelected(plugins, effectiveSelected),
     project_files: countSelected(projectFiles, effectiveSelected),
-    review: visibleEffectiveSelected.size,
+    review: effectiveSelected.size,
   };
   const blockers = pushReviewBlockers(
     effectiveSelected,
@@ -475,6 +418,10 @@ export default function PushResourceWorkspace({
     acknowledgedWarningDigests,
   );
   const blockingCount = blockers.length;
+  const missingDestination = destinationStatus?.state === "remote_history_missing"
+    ? destinationStatus
+    : null;
+  const remoteHistoryMissing = missingDestination !== null;
   const storageBlockingCount = blockers.filter((blocker) => blocker.kind === "storage").length;
   const localBlockingCount = blockingCount - storageBlockingCount;
   const warningSteps = new Set<SyncReviewStep>();
@@ -514,14 +461,6 @@ export default function PushResourceWorkspace({
       if (selected.has(resourceId) !== safeNext.has(resourceId)) onToggle(resourceId);
     });
   };
-  const syncSessionIndexSelection = (next: Set<string>) => {
-    if (!sessionIndex) return;
-    if (outstandingConversations.some((resource) => next.has(resource.resource_id))) {
-      next.add(sessionIndex.resource_id);
-    } else {
-      next.delete(sessionIndex.resource_id);
-    }
-  };
   const toggleResource = (resourceId: string) => {
     if (!selectableIds.has(resourceId)) return;
     const next = new Set(effectiveSelected);
@@ -530,7 +469,9 @@ export default function PushResourceWorkspace({
     if (next.has(resourceId)) next.delete(resourceId);
     else next.add(resourceId);
     if (conversations.some((resource) => resource.resource_id === resourceId) && sessionIndex) {
-      syncSessionIndexSelection(next);
+      const selectedSessionCount = visibleConversations.filter((resource) => next.has(resource.resource_id)).length;
+      if (selectedSessionCount > 0) next.add(sessionIndex.resource_id);
+      else next.delete(sessionIndex.resource_id);
     }
     commitSelection(next);
   };
@@ -540,13 +481,12 @@ export default function PushResourceWorkspace({
       else commitSelection(new Set(safeProjectDefaults));
       return;
     }
-    const group = groupForStep(activeStep, visibleResources);
+    const group = groupForStep(activeStep, resources);
     const next = new Set(effectiveSelected);
     group.forEach((resource) => next.delete(resource.resource_id));
     group.forEach((resource) => {
       if (safeProjectDefaults.has(resource.resource_id)) next.add(resource.resource_id);
     });
-    if (activeStep === "history") syncSessionIndexSelection(next);
     commitSelection(next);
   };
   const clearStep = () => {
@@ -554,7 +494,7 @@ export default function PushResourceWorkspace({
       onClear();
       return;
     }
-    const group = groupForStep(activeStep, visibleResources);
+    const group = groupForStep(activeStep, resources);
     const next = new Set(effectiveSelected);
     group.forEach((resource) => {
       const projectEntry = projectContentInventory?.entries.find((entry) => (
@@ -564,7 +504,6 @@ export default function PushResourceWorkspace({
         next.delete(resource.resource_id);
       }
     });
-    if (activeStep === "history") syncSessionIndexSelection(next);
     commitSelection(next);
   };
   const stepIndex = steps.indexOf(activeStep);
@@ -572,8 +511,8 @@ export default function PushResourceWorkspace({
   const nextStep = nextPushReviewStep(activeStep, steps);
   const goBack = () => selectStep(previousStep);
   const goNext = () => selectStep(nextStep);
-  const selectedCount = visibleEffectiveSelected.size;
-  const selectableConversationIds = new Set(outstandingConversations
+  const selectedCount = effectiveSelected.size;
+  const selectableConversationIds = new Set(visibleConversations
     .filter((resource) => selectableIds.has(resource.resource_id))
     .map((resource) => resource.resource_id));
   const selectableSkillIds = new Set(skills
@@ -602,29 +541,28 @@ export default function PushResourceWorkspace({
     warningCode: entry.warning_code,
     warningDigest: entry.warning_digest,
   }));
-  const currentGroup = groupForStep(activeStep, visibleResources);
+  const currentGroup = groupForStep(activeStep, resources);
   const currentDefaults = currentGroup.filter((resource) => safeProjectDefaults.has(resource.resource_id));
   const currentMatchesDefaults = activeStep === "review"
-    ? visibleEffectiveSelected.size === visibleSafeProjectDefaults.size
-      && [...visibleEffectiveSelected].every((resourceId) => visibleSafeProjectDefaults.has(resourceId))
+    ? effectiveSelected.size === safeProjectDefaults.size
+      && [...effectiveSelected].every((resourceId) => safeProjectDefaults.has(resourceId))
     : currentGroup.every((resource) => (
       effectiveSelected.has(resource.resource_id) === safeProjectDefaults.has(resource.resource_id)
     ));
-  const recommendedCount = activeStep === "review" ? visibleSafeProjectDefaults.size : currentDefaults.length;
-  const storageUnlinkRequired = pushRequiresStorageUnlink(threadComparison, error);
+  const recommendedCount = activeStep === "review" ? safeProjectDefaults.size : currentDefaults.length;
 
   return (
-    <section className="v3-inline-action-review v3-inline-push-review v3-sync-review-workspace" aria-labelledby="v3-push-resource-title">
-      <header className="v3-inline-action-header v3-push-resource-header v3-sync-review-header">
-        <div className="v3-sync-review-title">
-          <h2 id="v3-push-resource-title">Push review</h2>
+    <section className="sync-inline-action-review sync-inline-push-review sync-sync-review-workspace" aria-labelledby="sync-push-resource-title">
+      <header className="sync-inline-action-header sync-push-resource-header sync-sync-review-header">
+        <div className="sync-sync-review-title">
+          <h2 id="sync-push-resource-title">Push review</h2>
         </div>
-        <div className="v3-push-resource-actions">
+        <div className="sync-push-resource-actions">
           <button
             type="button"
-            className="btn btn-ghost v3-sync-review-icon-action has-count"
+            className="btn btn-ghost sync-sync-review-icon-action has-count"
             onClick={useRecommendedForStep}
-            disabled={busy || visibleSafeProjectDefaults.size === 0 || currentMatchesDefaults}
+            disabled={busy || safeProjectDefaults.size === 0 || currentMatchesDefaults}
             title={`Use the recommended ${activeStep === "review" ? "selection" : `${activeStep} selection`}`}
             aria-label={`Use recommended selection (${recommendedCount})`}
           >
@@ -633,7 +571,7 @@ export default function PushResourceWorkspace({
           </button>
           <button
             type="button"
-            className="btn btn-ghost v3-sync-review-icon-action"
+            className="btn btn-ghost sync-sync-review-icon-action"
             onClick={clearStep}
             disabled={busy || countSelected(currentGroup, effectiveSelected) === 0}
             title="Clear current selection"
@@ -643,7 +581,7 @@ export default function PushResourceWorkspace({
           </button>
           <button
             type="button"
-            className="btn btn-ghost v3-inline-action-close"
+            className="btn btn-ghost sync-inline-action-close"
             onClick={onClose}
             disabled={busy}
             aria-label="Close push review"
@@ -664,12 +602,12 @@ export default function PushResourceWorkspace({
 
       <div
         id={`sync-review-${activeStep}-panel`}
-        className="v3-inline-action-content v3-push-resource-content v3-sync-review-content"
+        className="sync-inline-action-content sync-push-resource-content sync-sync-review-content"
         role="tabpanel"
         aria-labelledby={`sync-review-${activeStep}-tab`}
       >
         <div
-          className="v3-inline-action-scroll v3-sync-review-scroll"
+          className="sync-inline-action-scroll sync-sync-review-scroll"
         >
           {activeStep === "history" && project && binding?.profile_ids?.codex ? (
             <ProjectChatHistoryPage
@@ -682,14 +620,12 @@ export default function PushResourceWorkspace({
               selectionMode="push"
               selectedResourceIds={effectiveSelected}
               selectableResourceIds={selectableConversationIds}
-              reviewResourceIds={reviewedConversationIds}
-              upToDateResourceIds={upToDateConversationIds}
               selectionDisabled={busy}
               onToggleResource={toggleResource}
               comparisonOverride={threadComparison}
             />
           ) : activeStep === "history" ? (
-            <ResourceInventory resources={outstandingConversations} selected={effectiveSelected} statuses={EMPTY_STATUSES} disabled={busy} onToggle={toggleResource} />
+            <ResourceInventory resources={conversations} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectableConversationIds} disabled={busy} onToggle={toggleResource} />
           ) : null}
 
           {(activeStep === "skills" || activeStep === "plugins") && project ? (
@@ -709,9 +645,9 @@ export default function PushResourceWorkspace({
               reportOverride={capabilityReport}
             />
           ) : activeStep === "skills" ? (
-            <ResourceInventory resources={skills} selected={effectiveSelected} statuses={EMPTY_STATUSES} disabled={busy} onToggle={toggleResource} />
+            <ResourceInventory resources={skills} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectableSkillIds} disabled={busy} onToggle={toggleResource} />
           ) : activeStep === "plugins" ? (
-            <ResourceInventory resources={plugins} selected={effectiveSelected} statuses={EMPTY_STATUSES} disabled={busy} onToggle={toggleResource} />
+            <ResourceInventory resources={plugins} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectablePluginIds} disabled={busy} onToggle={toggleResource} />
           ) : null}
 
           {activeStep === "project_files" && (
@@ -751,7 +687,28 @@ export default function PushResourceWorkspace({
           )}
 
           {activeStep === "review" && (
-            <div className="v3-sync-review-summary">
+            <div className="sync-sync-review-summary">
+              {missingDestination && (
+                <div className="sync-callout sync-sync-review-blocker sync-sync-review-remote-missing" role="alert">
+                  <Icon name="alert-triangle" size={15} />
+                  <span>
+                    <strong>Remote history is missing</strong>
+                    Mallard previously synced generation {missingDestination.base_generation} to {storageName || "this storage"}, but that repository is not present at the configured location. Mallard cannot determine why. If this is expected, unlink and link the storage again before pushing.
+                  </span>
+                  <div className="sync-sync-review-recovery-actions">
+                    {onOpenStorageSettings && (
+                      <button type="button" className="btn btn-ghost" onClick={onOpenStorageSettings} disabled={busy}>
+                        Storage settings
+                      </button>
+                    )}
+                    {onUnlinkStorage && (
+                      <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={busy}>
+                        Unlink storage…
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
               <button type="button" onClick={() => selectStep("history")}>
                 <span><Icon name="git-branch" size={15} /><strong>Sessions</strong></span>
                 <span>{counts.history} included<Icon name="chevron-right" size={13} /></span>
@@ -765,16 +722,19 @@ export default function PushResourceWorkspace({
                 <span>{counts.plugins} included<Icon name="chevron-right" size={13} /></span>
               </button>
               {other.length > 0 && (
-                <details className="v3-sync-review-other">
+                <details className="sync-sync-review-other">
                   <summary>
                     <span><Icon name="settings" size={15} /><strong>Requirements</strong></span>
                     <span>{other.length} unavailable<Icon name="chevron-right" size={13} /></span>
                   </summary>
-                  <ResourceInventory resources={other} selected={effectiveSelected} statuses={EMPTY_STATUSES} disabled={busy} onToggle={toggleResource} />
+                  <ResourceInventory resources={other} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectableIds} disabled={busy} onToggle={toggleResource} />
                 </details>
               )}
+              {sessionIndex && effectiveSelected.has(sessionIndex.resource_id) && (
+                <p className="sync-sync-review-derived"><Icon name="check-circle" size={13} />The project session index is included automatically.</p>
+              )}
               {blockingCount > 0 && (
-                <div className="v3-callout v3-sync-review-blocker" role="alert">
+                <div className="sync-callout sync-sync-review-blocker" role="alert">
                   <Icon name="alert-triangle" size={15} />
                   <span><strong>{blockerTitle}</strong>{blockerDetail}</span>
                   {storageBlockingCount > 0 && onPull && <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>Review Pull</button>}
@@ -784,26 +744,13 @@ export default function PushResourceWorkspace({
           )}
         </div>
 
-        {storageUnlinkRequired && onUnlinkStorage ? (
-          <div className="v3-callout error v3-pull-error v3-sync-review-blocker" role="alert">
-            <Icon name="alert-triangle" size={15} />
-            <span>Repository is missing from storage.</span>
-            <button type="button" className="btn btn-ghost" onClick={onUnlinkStorage} disabled={busy}>
-              Unlink storage
-            </button>
-          </div>
-        ) : error ? (
-          <div className="v3-callout error v3-pull-error" role="alert">
-            <Icon name="alert-triangle" size={15} />
-            <span>{error}</span>
-          </div>
-        ) : null}
+        {error && <div className="sync-callout error sync-pull-error"><Icon name="alert-triangle" size={15} /> {error}</div>}
       </div>
 
-      <footer className="v3-inline-action-footer v3-push-resource-footer v3-sync-review-footer">
+      <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
         {blockingCount > 0 && <span><small>{blockerFooter}</small></span>}
         {stepIndex > 0 && (
-          <button type="button" className="btn btn-secondary v3-sync-review-back" onClick={goBack} disabled={busy}>
+          <button type="button" className="btn btn-secondary sync-sync-review-back" onClick={goBack} disabled={busy}>
             <Icon name="chevron-left" size={14} />
             Back: {STEP_LABELS[previousStep]}
           </button>
@@ -814,7 +761,7 @@ export default function PushResourceWorkspace({
             <Icon name="chevron-right" size={14} />
           </button>
         ) : (
-          <button type="button" className="btn btn-primary v3-pull-apply-button" onClick={onPush} disabled={busy || storageUnlinkRequired || (selectedCount === 0 && projectContentRemovals.size === 0) || blockingCount > 0}>
+          <button type="button" className="btn btn-primary sync-pull-apply-button" onClick={onPush} disabled={busy || remoteHistoryMissing || (selectedCount === 0 && projectContentRemovals.size === 0) || blockingCount > 0}>
             <Icon name={busy ? "refresh" : "upload"} size={16} className={busy ? "icon-spin" : undefined} />
             {busy
               ? (fetchProgress && fetchProgress.phase === "push"

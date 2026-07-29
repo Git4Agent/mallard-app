@@ -30,12 +30,13 @@ import type {
   ProjectStorageLink,
   ProviderProfile,
   ProviderProfileSummary,
+  PushDestinationStatus,
   ResourceInventory as ResourceInventoryModel,
   RestorePlan,
   RestoreResult,
   SetupDraftSummary,
-  StorageConfigV3,
-  SyncConfigV3,
+  StorageConfig,
+  SyncConfig,
   ThreadSyncComparison,
 } from "../../types";
 import { PROJECT_SYNC_SCHEMA } from "../../types";
@@ -49,7 +50,6 @@ import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
   nextPushReviewStep,
   preserveSyncedPushRecipeEntries,
-  pushRequiresStorageUnlink,
   pushReviewBlockingCount,
   recommendedPushSelection,
   sanitizePushSelection,
@@ -80,7 +80,7 @@ interface Props {
   onThemeChange: (theme: AppTheme) => void;
 }
 
-const EMPTY_CONFIG: SyncConfigV3 = {
+const EMPTY_CONFIG: SyncConfig = {
   schema: PROJECT_SYNC_SCHEMA,
   revision: 0,
   storages: [],
@@ -157,8 +157,9 @@ interface PendingPush {
   projectName: string;
   project: LocalProjectSummary;
   binding: ProjectBinding | null;
-  storage: StorageConfigV3;
+  storage: StorageConfig;
   inventory: ResourceInventoryModel;
+  destinationStatus: PushDestinationStatus;
   savedRecipe: BundleRecipe | null;
   projectDefaults: Set<string>;
   threadComparison?: ThreadSyncComparison | null;
@@ -166,6 +167,8 @@ interface PendingPush {
   projectContentInventory: ProjectContentInventory | null;
   projectContentScanned: boolean;
   showProjectFiles: boolean;
+  conversationPushPlanId: string | null;
+  conversationActionIds: Record<string, string>;
 }
 
 function pushResources(pending: PendingPush): ReturnType<typeof inventoryResources> {
@@ -231,8 +234,8 @@ function mergeLogLines(...groups: LogLine[][]): LogLine[] {
   ));
 }
 
-export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
-  const [config, setConfig] = useState<SyncConfigV3>(EMPTY_CONFIG);
+export default function ProjectSync({ theme, onThemeChange }: Props) {
+  const [config, setConfig] = useState<SyncConfig>(EMPTY_CONFIG);
   const [registrations, setRegistrations] = useState<LocalProjectRegistration[]>([]);
   const [repositoryKinds, setRepositoryKinds] = useState<Record<string, boolean>>({});
   const [bindings, setBindings] = useState<ProjectBinding[]>([]);
@@ -700,7 +703,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
   };
   const loadShell = async (): Promise<{
     nextProjects: LocalProjectRegistration[];
-    nextConfig: SyncConfigV3;
+    nextConfig: SyncConfig;
     nextBindings: ProjectBinding[];
     nextProfiles: ProviderProfileSummary[];
     hostIdentityReady: boolean;
@@ -717,7 +720,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     setStartupStage("installation");
     const failures: string[] = [];
     let nextProjects: LocalProjectRegistration[] = [];
-    let nextConfig: SyncConfigV3 = EMPTY_CONFIG;
+    let nextConfig: SyncConfig = EMPTY_CONFIG;
     let nextBindings: ProjectBinding[] = [];
     let nextProfiles: ProviderProfileSummary[] = [];
     let verifiedHostIdentity: HostIdentityStatus | null = null;
@@ -912,7 +915,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       setActiveProjectId(first);
       if (first) await loadProjectData(first, nextConfig);
     })();
-  }, []); // ProjectSyncV3 is the schema-3 lifetime boundary.
+  }, []); // ProjectSync is the project-sync lifetime boundary.
 
   const refresh = async (workflowGeneration?: number) => {
     if (
@@ -1360,6 +1363,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
         binding: nextDetail.binding ?? null,
         storage,
         inventory: nextInventory,
+        destinationStatus: context.destination_status,
         savedRecipe,
         projectDefaults,
         threadComparison: nextThreadComparison,
@@ -1367,6 +1371,8 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
         projectContentInventory: lockedProjectContentInventory,
         projectContentScanned: lockedProjectContentInventory !== null,
         showProjectFiles: !isGitRepository || lockedProjectContentInventory !== null,
+        conversationPushPlanId: context.conversation_push_plan_id ?? null,
+        conversationActionIds: context.conversation_action_ids ?? {},
       });
       setPushSelected(new Set(projectDefaults));
       setActiveProjectId(projectId);
@@ -1500,6 +1506,8 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     projectContentReviewToken: string | null = null,
     projectContentRemovalIds: string[] = [],
     acknowledgedWarningDigests: string[] = [],
+    conversationPushPlanId: string | null = null,
+    approvedConversationActionIds: string[] = [],
   ) => {
     const workflowGeneration = hostWorkflowGeneration.current;
     openActivity();
@@ -1514,6 +1522,8 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
         projectContentReviewToken,
         projectContentRemovalIds,
         acknowledgedWarningDigests,
+        conversationPushPlanId,
+        approvedConversationActionIds,
       );
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
       setNotice(result.message);
@@ -1528,8 +1538,30 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     } catch (reason) {
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
       const message = errorMessage(reason);
-      if (pendingPush) setPushError(message);
-      else setError(message);
+      if (pendingPush) {
+        try {
+          const destinationStatus = await projectSyncApi.getPushDestinationStatus(
+            projectId,
+            storageId,
+          );
+          if (hostWorkflowGeneration.current !== workflowGeneration) return;
+          setPendingPush((current) => (
+            current?.projectId === projectId && current.storageId === storageId
+              ? { ...current, destinationStatus }
+              : current
+          ));
+          if (destinationStatus.state === "remote_history_missing") {
+            setPushReviewStep("review");
+            setPushError(null);
+            return;
+          }
+        } catch {
+          // Preserve the original Push error when the lightweight recheck also fails.
+        }
+        setPushError(message);
+      } else {
+        setError(message);
+      }
     } finally {
       if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
     }
@@ -1572,6 +1604,10 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
         : null,
       [...pushProjectContentRemovals],
       [...pushWarningAcknowledgements],
+      pendingPush.conversationPushPlanId,
+      [...safeSelection]
+        .map((resourceId) => pendingPush.conversationActionIds[resourceId])
+        .filter((actionId): actionId is string => Boolean(actionId)),
     );
   };
 
@@ -1902,7 +1938,11 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     });
   };
 
-  const unlinkStorage = async (projectId: string, storageId: string) => {
+  const unlinkStorage = async (
+    projectId: string,
+    storageId: string,
+    reason: "standard" | "remote_history_missing" = "standard",
+  ) => {
     const workflowGeneration = hostWorkflowGeneration.current;
     const project = projects.find((candidate) => candidate.local_project_id === projectId);
     const storage = config.storages.find((candidate) => candidate.id === storageId);
@@ -1911,7 +1951,9 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     const projectName = projectLabel(project);
     const storageName = storage.name || "Storage";
     const approved = await confirm(
-      `Unlink “${storageName}” from “${projectName}”?\n\nPush and Pull will stop for this pairing. Files and repositories already stored there will not be deleted, and you can link the storage again later.`,
+      reason === "remote_history_missing"
+        ? `Unlink “${storageName}” from “${projectName}”?\n\nMallard will clear this project’s reviewed sync base. No project files or cloud objects will be deleted. After unlinking, link this storage again and review a new Push.`
+        : `Unlink “${storageName}” from “${projectName}”?\n\nPush and Pull will stop for this pairing. Files and repositories already stored there will not be deleted, and you can link the storage again later.`,
       { title: "Unlink storage" },
     );
     if (!approved || hostWorkflowGeneration.current !== workflowGeneration) return;
@@ -1953,7 +1995,9 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       await loadProjectData(projectId, nextConfig, nextStorageId, workflowGeneration);
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
       setNotice(removed
-        ? `${storageName} unlinked from ${projectName}. Stored files were not deleted.`
+        ? reason === "remote_history_missing"
+          ? `${storageName} unlinked. No files were deleted. Link it again to start new remote history.`
+          : `${storageName} unlinked from ${projectName}. Stored files were not deleted.`
         : `${storageName} was already unlinked from ${projectName}.`);
     } catch (reason) {
       if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
@@ -2124,10 +2168,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       if (restoreRequest.current !== requestId) return;
       const support = await loadPullReviewSupport(projectSyncApi, nextRestore);
       if (restoreRequest.current !== requestId) return;
-      if (
-        nextRestore.source_version.generation !== currentPlan.source_version.generation ||
-        nextRestore.source_version.manifest_sha256 !== currentPlan.source_version.manifest_sha256
-      ) {
+      if (nextRestore.generation !== currentPlan.generation || nextRestore.manifest_sha256 !== currentPlan.manifest_sha256) {
         setRestoreResult(null);
         setDependencyResult(null);
         setPullApplyPhase("idle");
@@ -2147,7 +2188,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
   };
 
   const saveStorageConfig = async (
-    update: (current: SyncConfigV3) => SyncConfigV3,
+    update: (current: SyncConfig) => SyncConfig,
     successNotice = "Project storage settings saved.",
     workflowGeneration = hostWorkflowGeneration.current,
   ): Promise<boolean> => {
@@ -2190,7 +2231,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     }
   };
 
-  const saveInlineStorage = async (storage: SyncConfigV3["storages"][number]) => {
+  const saveInlineStorage = async (storage: SyncConfig["storages"][number]) => {
     return saveStorageConfig((current) => {
       const exists = current.storages.some((candidate) => candidate.id === storage.id);
       return {
@@ -2264,10 +2305,9 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       pushWarningAcknowledgements,
     )
     : 0;
+  const pendingPushRemoteHistoryMissing =
+    pendingPush?.destinationStatus.state === "remote_history_missing";
   const pendingPushSteps = syncReviewSteps(pendingPush?.showProjectFiles ?? false);
-  const pendingPushRequiresStorageUnlink = pendingPush
-    ? pushRequiresStorageUnlink(pendingPush.threadComparison, pushError)
-    : false;
   const inlineStorageReview = pendingPush ? {
     kind: "push" as const,
     projectId: pendingPush.projectId,
@@ -2282,8 +2322,8 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
     continueDisabled: pushReviewStep === "review"
       && ((safePushSelection.size === 0 && pushProjectContentRemovals.size === 0)
         || pendingPushBlockingCount > 0
-        || projectContentLoading
-        || pendingPushRequiresStorageUnlink),
+        || pendingPushRemoteHistoryMissing
+        || projectContentLoading),
     onClose: () => {
       if (busy) return;
       setPendingPush(null);
@@ -2310,6 +2350,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
         projectContentLoading={projectContentLoading}
         projectContentRemovals={pushProjectContentRemovals}
         acknowledgedWarningDigests={pushWarningAcknowledgements}
+        destinationStatus={pendingPush.destinationStatus}
         fetchProgress={fetchProgress}
         showProjectFiles={pendingPush.showProjectFiles}
         activeStep={pushReviewStep}
@@ -2369,7 +2410,25 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
           setPushWarningAcknowledgements(new Set());
           void beginProjectRestore(pendingPush.projectId, pendingPush.storageId);
         }}
-        onUnlinkStorage={() => void unlinkStorage(pendingPush.projectId, pendingPush.storageId)}
+        onOpenStorageSettings={() => {
+          setPendingPush(null);
+          setPushError(null);
+          setPushProjectContentRemovals(new Set());
+          setPushWarningAcknowledgements(new Set());
+          setStorageEditorRequest((current) => ({
+            mode: "open",
+            storageId: pendingPush.storageId,
+            settingsExpanded: true,
+            requestId: (current?.requestId ?? 0) + 1,
+          }));
+        }}
+        onUnlinkStorage={() => {
+          void unlinkStorage(
+            pendingPush.projectId,
+            pendingPush.storageId,
+            "remote_history_missing",
+          );
+        }}
       />
     ),
   } : restorePlan && restoreBinding ? {
@@ -2406,14 +2465,14 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
 
   if (!hostIdentityStatus && hostIdentityError) {
     return (
-      <main className="v3-host-recovery" aria-labelledby="v3-host-recovery-title">
-        <section className="v3-empty-state" role="alert">
-          <div className="v3-empty-illustration" aria-hidden="true">
+      <main className="sync-host-recovery" aria-labelledby="sync-host-recovery-title">
+        <section className="sync-empty-state" role="alert">
+          <div className="sync-empty-illustration" aria-hidden="true">
             <Icon name="alert-triangle" size={24} />
           </div>
-          <h1 id="v3-host-recovery-title">Host identity unavailable</h1>
+          <h1 id="sync-host-recovery-title">Host identity unavailable</h1>
           <p>Mallard could not verify this installation, so sync remains paused.</p>
-          <div className="v3-callout error">
+          <div className="sync-callout error">
             <Icon name="alert-triangle" size={15} />
             <span>{hostIdentityError}</span>
           </div>
@@ -2431,12 +2490,12 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
 
   return (
     <div
-      className={`v3-app${sidebarVisible ? "" : " sidebar-hidden"}${resizingSidebar ? " resizing-sidebar" : ""}`}
-      style={{ "--v3-sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+      className={`sync-app${sidebarVisible ? "" : " sidebar-hidden"}${resizingSidebar ? " resizing-sidebar" : ""}`}
+      style={{ "--sync-sidebar-width": `${sidebarWidth}px` } as CSSProperties}
     >
       <button
         type="button"
-        className="v3-sidebar-toggle"
+        className="sync-sidebar-toggle"
         onClick={toggleSidebar}
         title={`Toggle sidebar ${sidebarShortcutLabel()}`}
         aria-label={sidebarVisible ? "Hide sidebar" : "Show sidebar"}
@@ -2496,7 +2555,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
       />
 
       <div
-        className="v3-sidebar-resizer"
+        className="sync-sidebar-resizer"
         role="separator"
         aria-label="Resize sidebar"
         aria-orientation="vertical"
@@ -2512,17 +2571,17 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
         onDoubleClick={() => setSidebarWidth(DEFAULT_PROJECT_SIDEBAR_WIDTH)}
       />
 
-      <div className={`v3-workspace${resizingLog ? " resizing-log" : ""}`}>
-        <header className="v3-titlebar" data-tauri-drag-region>
-          <div className="v3-titlebar-context" data-tauri-drag-region title={workspaceTitle}>
+      <div className={`sync-workspace${resizingLog ? " resizing-log" : ""}`}>
+        <header className="sync-titlebar" data-tauri-drag-region>
+          <div className="sync-titlebar-context" data-tauri-drag-region title={workspaceTitle}>
             <Icon name={workspaceIcon} size={16} />
             <strong>{workspaceTitle}</strong>
             {activeDraftSummary && <span>Draft setup</span>}
           </div>
-          <div className="v3-titlebar-actions">
+          <div className="sync-titlebar-actions">
             <button
               type="button"
-              className="v3-theme-button"
+              className="sync-theme-button"
               onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
             >
               {theme === "dark" ? "Light" : "Dark"} theme
@@ -2533,7 +2592,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
                 className="storage-link-more"
                 aria-haspopup="menu"
                 aria-expanded={appMenuOpen}
-                aria-controls="v3-app-actions-menu"
+                aria-controls="sync-app-actions-menu"
                 title="App actions"
                 aria-label="App actions"
                 onClick={() => setAppMenuOpen((current) => !current)}
@@ -2541,7 +2600,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
                 <Icon name="more" size={16} />
               </button>
               <div
-                id="v3-app-actions-menu"
+                id="sync-app-actions-menu"
                 className="storage-link-actions-menu"
                 role="menu"
                 aria-label="App actions"
@@ -2567,17 +2626,17 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
         </header>
 
         {backendError && (
-          <div className="v3-backend-banner">
+          <div className="sync-backend-banner">
             <Icon name="alert-triangle" size={15} />
             <span><strong>Project-sync backend unavailable.</strong> {backendError}</span>
             <button type="button" className="btn" onClick={() => void refresh()}>Retry</button>
           </div>
         )}
         {notice && (
-          <div className="v3-notice" role="status" aria-live="polite">
+          <div className="sync-notice" role="status" aria-live="polite">
             <Icon name="check-circle" size={14} />
             <span>{notice}</span>
-            <button type="button" className="v3-notice-dismiss" onClick={() => setNotice(null)}
+            <button type="button" className="sync-notice-dismiss" onClick={() => setNotice(null)}
               title="Dismiss" aria-label="Dismiss notification">
               <Icon name="x" size={12} />
             </button>
@@ -2641,7 +2700,7 @@ export default function ProjectSyncV3({ theme, onThemeChange }: Props) {
           />
 
         <div
-          className={`log-drawer v3-log-drawer${activityOpen ? " open" : ""}`}
+          className={`log-drawer sync-log-drawer${activityOpen ? " open" : ""}`}
           style={{ height: activityOpen ? logHeight : undefined }}
         >
           {activityOpen && (

@@ -43,7 +43,7 @@ test("application contains no automatic updater", async () => {
     read("package.json"),
     read("package-lock.json"),
     read("src/App.tsx"),
-    read("src/components/project-sync/ProjectSyncV3.tsx"),
+    read("src/components/project-sync/ProjectSync.tsx"),
     read("src/components/project-sync/ProjectSidebar.tsx"),
     read("scripts/run-frontend-integration-tests.mjs"),
   ]);

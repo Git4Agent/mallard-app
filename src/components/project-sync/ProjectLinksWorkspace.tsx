@@ -15,13 +15,13 @@ import type {
   ProjectStorageLink,
   ProviderProfileSummary,
   RemoteBundleSummary,
-  StorageConfigV3,
+  StorageConfig,
 } from "../../types";
 import Icon from "../Icons";
 import ProjectChatHistoryPage from "./ProjectChatHistoryPage";
 import SkillsPluginStatusPage from "./SkillsPluginStatusPage";
 import ConversationPathRepairNotice from "./ConversationPathRepairNotice";
-import { newStorage, storageConfigReady, StorageEditor } from "./StorageSettingsV3";
+import { newStorage, storageConfigReady, StorageEditor } from "./StorageSettings";
 import { projectSyncApi } from "./api";
 import {
   compactProjectPath,
@@ -56,7 +56,7 @@ interface Props {
   activeStorageId: string | null;
   bindings: ProjectBinding[];
   profiles: ProviderProfileSummary[];
-  storages: StorageConfigV3[];
+  storages: StorageConfig[];
   links: ProjectStorageLink[];
   loading: boolean;
   busy: boolean;
@@ -76,7 +76,7 @@ interface Props {
   onRefresh: () => void;
   onAddProject: () => void;
   onOpenStorageSettings: (storageId?: string) => void;
-  onSaveStorage: (storage: StorageConfigV3) => Promise<boolean | void> | boolean | void;
+  onSaveStorage: (storage: StorageConfig) => Promise<boolean | void> | boolean | void;
   storageEditorRequest?: StorageEditorRequest | null;
   onStorageEditorRequestHandled?: () => void;
   onStorageEditorChange?: (storageId: string | null) => void;
@@ -87,7 +87,7 @@ interface Props {
   inlineStorageReview?: InlineStorageReview | null;
 }
 
-function storageSubtitle(storage: StorageConfigV3): string {
+function storageSubtitle(storage: StorageConfig): string {
   if (storage.kind === "local") return compactProjectPath(storage.local_dir || "Folder not configured");
   if (storage.bucket) return `Bucket · ${storage.bucket}`;
   return storage.s3_endpoint ? "S3 endpoint configured" : "S3 storage not configured";
@@ -130,7 +130,7 @@ export function ProjectWorkspaceTabs({
   };
 
   return (
-    <div className="v3-project-tabs" role="tablist" aria-label="Project information">
+    <div className="sync-project-tabs" role="tablist" aria-label="Project information">
       <button
         type="button"
         id="project-history-tab"
@@ -183,15 +183,15 @@ export function ProjectWorkspaceTabs({
 export function StorageRepositoryRow({ bundle }: { bundle: RemoteBundleSummary }) {
   const name = bundle.display_name || "Unnamed repository";
   return (
-    <details className="v3-storage-repository-row" name="storage-repository-details">
+    <details className="sync-storage-repository-row" name="storage-repository-details">
       <summary aria-label={`Show details for ${name}`}>
-        <span className="v3-storage-repository-icon"><Icon name="folder" size={16} /></span>
-        <strong className="v3-storage-repository-name">{name}</strong>
-        <span className="v3-storage-repository-details-icon" title="Repository details">
+        <span className="sync-storage-repository-icon"><Icon name="folder" size={16} /></span>
+        <strong className="sync-storage-repository-name">{name}</strong>
+        <span className="sync-storage-repository-details-icon" title="Repository details">
           <Icon name="info" size={15} />
         </span>
       </summary>
-      <dl className="v3-storage-repository-details">
+      <dl className="sync-storage-repository-details">
         <div>
           <dt>Repository ID</dt>
           <dd><code>{bundle.bundle_id}</code></dd>
@@ -217,14 +217,14 @@ export function StorageSettingsMeta({
   storage,
   creating = false,
 }: {
-  storage: StorageConfigV3;
+  storage: StorageConfig;
   creating?: boolean;
 }) {
   const kindLabel = storage.kind === "local" ? "Local folder" : "Cloudflare R2";
   const label = creating ? kindLabel : storage.name || "Unnamed storage";
 
   return (
-    <div className="v3-storage-settings-meta" title={`${kindLabel}: ${label}`}>
+    <div className="sync-storage-settings-meta" title={`${kindLabel}: ${label}`}>
       <Icon name={storage.kind === "local" ? "drive" : "cloud"} size={12} />
       <span>{label}</span>
     </div>
@@ -301,7 +301,7 @@ export default function ProjectLinksWorkspace({
   const [linkingProjectId, setLinkingProjectId] = useState<string | null>(null);
   const [runningAction, setRunningAction] = useState<string | null>(null);
   const [editingStorage, setEditingStorage] = useState<LinkKey | null>(null);
-  const [storageDraft, setStorageDraft] = useState<StorageConfigV3 | null>(null);
+  const [storageDraft, setStorageDraft] = useState<StorageConfig | null>(null);
   const [storageDetailsExpanded, setStorageDetailsExpanded] = useState(false);
   const [renamingStorageId, setRenamingStorageId] = useState<string | null>(null);
   const [storageNameDraft, setStorageNameDraft] = useState("");
@@ -444,7 +444,7 @@ export default function ProjectLinksWorkspace({
     }
   };
 
-  const loadStorageBundles = async (storage: StorageConfigV3) => {
+  const loadStorageBundles = async (storage: StorageConfig) => {
     const storageId = storage.id;
     const requestId = ++bundleRequestRef.current;
     setBundlePage(null);
@@ -507,7 +507,7 @@ export default function ProjectLinksWorkspace({
     onStorageEditorRequestHandled?.();
   }, [storageEditorRequest?.requestId]);
 
-  const openStorageEditorWithSettings = async (storage: StorageConfigV3) => {
+  const openStorageEditorWithSettings = async (storage: StorageConfig) => {
     const switchingStorage = editingStorage?.storageId !== storage.id;
     if (switchingStorage) {
       setEditingStorage({ projectId: "", storageId: storage.id });
@@ -585,7 +585,7 @@ export default function ProjectLinksWorkspace({
     const storageKindLabel = storageDraft.kind === "local" ? "Local folder" : "Cloudflare R2";
     const storageLocation = storageSubtitle(storageDraft);
     return (
-      <main className="v3-main v3-project-links-page v3-storage-settings-page">
+      <main className="sync-main sync-project-links-page sync-storage-settings-page">
         <section
           className="profile-links-section"
           aria-label={creatingStorage ? "New storage" : storageDraft.name || "Storage settings"}
@@ -598,10 +598,10 @@ export default function ProjectLinksWorkspace({
                   <StorageSettingsMeta storage={storageDraft} creating />
                 </>
               ) : (
-                <div className="v3-project-heading-identity v3-storage-heading-identity">
+                <div className="sync-project-heading-identity sync-storage-heading-identity">
                   {renamingStorageId === storageDraft.id ? (
                     <form
-                      className="v3-project-heading-rename"
+                      className="sync-project-heading-rename"
                       onSubmit={(event) => {
                         event.preventDefault();
                         void saveStorageName();
@@ -630,7 +630,7 @@ export default function ProjectLinksWorkspace({
                       </button>
                     </form>
                   ) : (
-                    <div className="v3-project-heading-name">
+                    <div className="sync-project-heading-name">
                       <h1>{storageDraft.name || "Unnamed storage"}</h1>
                       <button
                         type="button"
@@ -645,27 +645,27 @@ export default function ProjectLinksWorkspace({
                       </button>
                     </div>
                   )}
-                  <div className="v3-project-heading-meta">
-                    <span className="v3-project-heading-meta-item" title={storageKindLabel}>
+                  <div className="sync-project-heading-meta">
+                    <span className="sync-project-heading-meta-item" title={storageKindLabel}>
                       <Icon name={storageDraft.kind === "local" ? "drive" : "cloud"} size={12} />
                       <span>{storageKindLabel}</span>
                     </span>
-                    <span className="v3-project-heading-meta-item" title={storageLocation}>
+                    <span className="sync-project-heading-meta-item" title={storageLocation}>
                       <Icon name="folder" size={12} />
                       <span>{storageLocation}</span>
                     </span>
                   </div>
                   {renamingStorageId === storageDraft.id && error && (
-                    <div className="v3-project-heading-error" role="alert"><Icon name="alert-triangle" size={13} /> {error}</div>
+                    <div className="sync-project-heading-error" role="alert"><Icon name="alert-triangle" size={13} /> {error}</div>
                   )}
                 </div>
               )}
             </div>
-            <div className="v3-storage-settings-actions">
+            <div className="sync-storage-settings-actions">
               {!creatingStorage && (
                 <button
                   type="button"
-                  className={`btn btn-ghost v3-storage-settings-icon${storageDetailsExpanded ? " active" : ""}`}
+                  className={`btn btn-ghost sync-storage-settings-icon${storageDetailsExpanded ? " active" : ""}`}
                   onClick={() => setStorageDetailsExpanded((current) => !current)}
                   disabled={busy}
                   aria-controls={storageDetailsId}
@@ -678,7 +678,7 @@ export default function ProjectLinksWorkspace({
               )}
               <button
                 type="button"
-                className="btn btn-ghost v3-storage-settings-icon"
+                className="btn btn-ghost sync-storage-settings-icon"
                 onClick={() => {
                   setEditingStorage(null);
                   setStorageDraft(null);
@@ -694,11 +694,11 @@ export default function ProjectLinksWorkspace({
 
           <div
             ref={storageSettingsRef}
-            className={`v3-storage-settings-below v3-storage-settings-dedicated${showStorageDetails ? " settings-expanded" : " settings-collapsed"}`}
+            className={`sync-storage-settings-below sync-storage-settings-dedicated${showStorageDetails ? " settings-expanded" : " settings-collapsed"}`}
           >
             <div
               id={storageDetailsId}
-              className="v3-storage-details-panel"
+              className="sync-storage-details-panel"
               hidden={!showStorageDetails}
             >
               {showStorageDetails && (
@@ -727,8 +727,8 @@ export default function ProjectLinksWorkspace({
             </div>
 
             {!creatingStorage && (
-              <section className="v3-storage-repositories" aria-labelledby="storage-repositories-heading">
-                <div className="v3-storage-repositories-heading">
+              <section className="sync-storage-repositories" aria-labelledby="storage-repositories-heading">
+                <div className="sync-storage-repositories-heading">
                   <div>
                     <h2 id="storage-repositories-heading">Repositories</h2>
                     <span>{orderedRemoteBundles.length} repo{orderedRemoteBundles.length === 1 ? "" : "s"} in this storage</span>
@@ -746,16 +746,16 @@ export default function ProjectLinksWorkspace({
                 </div>
 
                 {bundleLoading ? (
-                  <div className="v3-storage-repository-state"><span className="status-loader" /> Loading repositories…</div>
+                  <div className="sync-storage-repository-state"><span className="status-loader" /> Loading repositories…</div>
                 ) : bundleError ? (
-                  <div className="v3-callout error" role="alert">
+                  <div className="sync-callout error" role="alert">
                     <Icon name="alert-triangle" size={15} />
                     <span>{bundleError}</span>
                   </div>
                 ) : orderedRemoteBundles.length === 0 ? (
-                  <div className="v3-storage-repository-state">No repositories in this storage.</div>
+                  <div className="sync-storage-repository-state">No repositories in this storage.</div>
                 ) : (
-                  <div className="v3-storage-repository-list">
+                  <div className="sync-storage-repository-list">
                     {orderedRemoteBundles.map((bundle) => (
                       <StorageRepositoryRow key={bundle.bundle_id} bundle={bundle} />
                     ))}
@@ -765,7 +765,7 @@ export default function ProjectLinksWorkspace({
             )}
 
             {error && renamingStorageId !== storageDraft.id && (
-              <div className="v3-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>
+              <div className="sync-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>
             )}
           </div>
         </section>
@@ -775,7 +775,7 @@ export default function ProjectLinksWorkspace({
 
   if (!workspaceProject && !editingStorage && !newProjectSetup) {
     return (
-      <main className="v3-main v3-project-links-page v3-git-info-page">
+      <main className="sync-main sync-project-links-page sync-git-info-page">
         <section className="profile-links-section" aria-labelledby="git-info-heading">
           <div className="profile-links-heading">
             <div className="profile-links-copy">
@@ -789,7 +789,7 @@ export default function ProjectLinksWorkspace({
   }
 
   return (
-    <main className={`v3-main v3-project-links-page${workspaceProject ? " v3-project-workspace-page v3-project-combined-page" : ""}${newProjectSetup ? " v3-project-setup-page" : ""}${inlineStorageReview ? " v3-sync-review-page" : ""}`}>
+    <main className={`sync-main sync-project-links-page${workspaceProject ? " sync-project-workspace-page sync-project-combined-page" : ""}${newProjectSetup ? " sync-project-setup-page" : ""}${inlineStorageReview ? " sync-sync-review-page" : ""}`}>
       <section
         className="profile-links-section"
         aria-label={newProjectSetup
@@ -800,13 +800,13 @@ export default function ProjectLinksWorkspace({
         aria-labelledby={newProjectSetup || workspaceProject ? undefined : "project-links-heading"}
       >
         {!newProjectSetup && (
-          <div className="profile-links-heading v3-combined-project-heading">
+          <div className="profile-links-heading sync-combined-project-heading">
             <div className="profile-links-copy">
               {workspaceProject ? (
-                <div className="v3-project-heading-identity">
+                <div className="sync-project-heading-identity">
                   {renamingProjectId === workspaceProject.local_project_id ? (
                     <form
-                      className="v3-project-heading-rename"
+                      className="sync-project-heading-rename"
                       onSubmit={(event) => {
                         event.preventDefault();
                         void saveProjectName();
@@ -853,7 +853,7 @@ export default function ProjectLinksWorkspace({
                       )}
                     </form>
                   ) : (
-                    <div className="v3-project-heading-name">
+                    <div className="sync-project-heading-name">
                       <h1>{projectLabel(workspaceProject)}</h1>
                       <button
                         type="button"
@@ -868,10 +868,10 @@ export default function ProjectLinksWorkspace({
                       </button>
                     </div>
                   )}
-                  <div className="v3-project-heading-meta">
+                  <div className="sync-project-heading-meta">
                     {workspaceProject.local_alias && (
                       <span
-                        className="v3-project-heading-meta-item"
+                        className="sync-project-heading-meta-item"
                         title={`Repository: ${workspaceProject.display_name}`}
                         aria-label={`Repository ${workspaceProject.display_name}`}
                       >
@@ -880,7 +880,7 @@ export default function ProjectLinksWorkspace({
                       </span>
                     )}
                     <span
-                      className="v3-project-heading-meta-item"
+                      className="sync-project-heading-meta-item"
                       title={workspaceProject.project_root ?? undefined}
                       aria-label={`Project folder ${workspaceProject.project_root ?? "not configured"}`}
                     >
@@ -888,7 +888,7 @@ export default function ProjectLinksWorkspace({
                       <span>{compactProjectPath(workspaceProject.project_root)}</span>
                     </span>
                     <span
-                      className={`v3-project-heading-meta-item v3-project-heading-agent${workspaceProfileReady ? "" : " warning"}`}
+                      className={`sync-project-heading-meta-item sync-project-heading-agent${workspaceProfileReady ? "" : " warning"}`}
                       title={workspaceProfileTitle}
                     >
                       <Icon name="terminal" size={12} />
@@ -896,7 +896,7 @@ export default function ProjectLinksWorkspace({
                     </span>
                   </div>
                   {renamingProjectId === workspaceProject.local_project_id && error && (
-                    <div className="v3-project-heading-error"><Icon name="alert-triangle" size={13} /> {error}</div>
+                    <div className="sync-project-heading-error"><Icon name="alert-triangle" size={13} /> {error}</div>
                   )}
                 </div>
               ) : (
@@ -936,12 +936,12 @@ export default function ProjectLinksWorkspace({
             </button>
           </div>
         ) : workspaceProject ? (
-          <div id="project-configuration-panel" className="profile-links-list v3-combined-settings-panel">
+          <div id="project-configuration-panel" className="profile-links-list sync-combined-settings-panel">
             {[workspaceProject].map((project) => {
               const projectLinks = linkedByProject.get(project.local_project_id) ?? [];
               const linkedStorages = projectLinks
                 .map((link) => storages.find((storage) => storage.id === link.storage_id))
-                .filter((storage): storage is StorageConfigV3 => !!storage);
+                .filter((storage): storage is StorageConfig => !!storage);
               const selectedStorage = linkedStorages.find((storage) => (
                 project.local_project_id === activeProjectId && storage.id === activeStorageId
               )) ?? linkedStorages[0] ?? null;
@@ -1070,7 +1070,7 @@ export default function ProjectLinksWorkspace({
               return (
                 <article
                   key={project.local_project_id}
-                  className="profile-link-card v3-project-link-card"
+                  className="profile-link-card sync-project-link-card"
                 >
                   <div className="profile-link-connections">
                     <section
@@ -1141,7 +1141,7 @@ export default function ProjectLinksWorkspace({
                       return (
                         <div
                           key={storage.id}
-                          className={`storage-link-block selected${reviewOpen ? " v3-review-open" : ""}${storagePickerOpen ? " storage-picker-open" : ""}${storageActionsOpen ? " storage-actions-open" : ""}`}
+                          className={`storage-link-block selected${reviewOpen ? " sync-review-open" : ""}${storagePickerOpen ? " storage-picker-open" : ""}${storageActionsOpen ? " storage-actions-open" : ""}`}
                           aria-busy={reviewOpen && busy}
                         >
                           <div className="storage-link-row">
@@ -1470,7 +1470,7 @@ export default function ProjectLinksWorkspace({
                           )}
 
                           {reviewOpen && (
-                            <div id={reviewPanelId} className="v3-storage-inline-review">
+                            <div id={reviewPanelId} className="sync-storage-inline-review">
                               {inlineStorageReview?.content}
                             </div>
                           )}
@@ -1524,7 +1524,7 @@ export default function ProjectLinksWorkspace({
         {activeProject && !newProjectSetup && !inlineStorageReview && activeProjectTab === "history" && (
           <div
             id="project-history-panel"
-            className="v3-project-tab-panel"
+            className="sync-project-tab-panel"
             role="tabpanel"
             aria-labelledby="project-history-tab"
           >
@@ -1544,7 +1544,7 @@ export default function ProjectLinksWorkspace({
         ) && (
           <div
             id={`project-${activeProjectTab}-panel`}
-            className="v3-project-tab-panel"
+            className="sync-project-tab-panel"
             role="tabpanel"
             aria-labelledby={`project-${activeProjectTab}-tab`}
           >

@@ -5,12 +5,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import Icon from "../../src/components/Icons";
 import ProjectChatHistoryPage, {
   BranchPicker,
-  normalHistoryThreadVariants,
   ProjectChatHistoryContent,
   ThreadMetrics,
   threadSyncPresentation,
 } from "../../src/components/project-sync/ProjectChatHistoryPage";
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
+import { pushSelectableResourceIds } from "../../src/components/project-sync/PushResourceWorkspace";
 import { createSingleFlight } from "../../src/components/project-sync/api";
 
 const project = {
@@ -96,7 +96,7 @@ test("the branch picker exposes branch state without using the native select men
   assert.doesNotMatch(html, /<select/);
 });
 
-test("V3 thread indicators use the quiet desktop sync vocabulary", () => {
+test("thread indicators use the quiet desktop sync vocabulary", () => {
   const presentation = (state: Parameters<typeof threadSyncPresentation>[0]["state"]) => (
     threadSyncPresentation({ state } as Parameters<typeof threadSyncPresentation>[0], "Storage")
   );
@@ -119,11 +119,11 @@ test("V3 thread indicators use the quiet desktop sync vocabulary", () => {
   );
 
   const css = readFileSync("src/App.css", "utf8");
-  assert.match(css, /\.v3-thread-sync-indicator\.synced \{ color: var\(--text-2\); \}/);
-  assert.match(css, /\.v3-thread-sync-indicator\.local,\s*\n\.v3-thread-sync-indicator\.storage \{ color: var\(--blue\); \}/);
-  assert.match(css, /\.v3-thread-sync-indicator\.diverged \{ color: var\(--yellow\); \}/);
-  assert.match(css, /\.v3-thread-sync-indicator\.unavailable,\s*\n\.v3-thread-sync-error \{ color: var\(--red\); \}/);
-  assert.match(css, /\.v3-thread-sync-indicator\.needs-baseline \{ color: var\(--text-2\); \}/);
+  assert.match(css, /\.sync-thread-sync-indicator\.synced \{ color: var\(--text-2\); \}/);
+  assert.match(css, /\.sync-thread-sync-indicator\.local,\s*\n\.sync-thread-sync-indicator\.storage \{ color: var\(--blue\); \}/);
+  assert.match(css, /\.sync-thread-sync-indicator\.diverged \{ color: var\(--yellow\); \}/);
+  assert.match(css, /\.sync-thread-sync-indicator\.unavailable,\s*\n\.sync-thread-sync-error \{ color: var\(--red\); \}/);
+  assert.match(css, /\.sync-thread-sync-indicator\.needs-baseline \{ color: var\(--text-2\); \}/);
 });
 
 test("refreshing project activity uses one busy refresh icon", () => {
@@ -158,33 +158,33 @@ test("refreshing project activity uses one busy refresh icon", () => {
   );
 
   assert.equal(html.match(/icon-spin/g)?.length, 1);
-  assert.doesNotMatch(html, /v3-thread-sync-loading/);
-  assert.match(html, /v3-history-refresh loading/);
+  assert.doesNotMatch(html, /sync-thread-sync-loading/);
+  assert.match(html, /sync-history-refresh loading/);
   assert.match(html, /aria-busy="true"/);
   assert.match(html, /role="status">Comparing threads with R2 storage 1/);
 
   const css = readFileSync("src/App.css", "utf8");
-  assert.match(css, /\.v3-history-icon-action\.loading:disabled\s*\{[^}]*color:\s*var\(--blue\);[^}]*opacity:\s*1;/s);
+  assert.match(css, /\.sync-history-icon-action\.loading:disabled\s*\{[^}]*color:\s*var\(--blue\);[^}]*opacity:\s*1;/s);
 });
 
 test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   const css = readFileSync("src/App.css", "utf8");
-  const titleRule = css.match(/\.v3-history-thread-title\s*\{[^}]+\}/s)?.[0] ?? "";
-  const tooltipRule = css.match(/\.v3-thread-sync-indicator::after,[\s\S]+?\n\}/)?.[0] ?? "";
+  const titleRule = css.match(/\.sync-history-thread-title\s*\{[^}]+\}/s)?.[0] ?? "";
+  const tooltipRule = css.match(/\.sync-thread-sync-indicator::after,[\s\S]+?\n\}/)?.[0] ?? "";
 
   assert.match(titleRule, /align-items:\s*center/);
   assert.doesNotMatch(tooltipRule, /transform:/);
   assert.doesNotMatch(
     css,
-    /\.v3-thread-sync-indicator:hover,\s*\n\.v3-thread-sync-indicator:focus-visible,\s*\n\.v3-thread-sync-error:hover/,
+    /\.sync-thread-sync-indicator:hover,\s*\n\.sync-thread-sync-indicator:focus-visible,\s*\n\.sync-thread-sync-error:hover/,
   );
 });
 
 test("Push and Pull reviews use only the outer workspace scroll", () => {
   const css = readFileSync("src/App.css", "utf8");
-  const workspaceRule = css.match(/\.v3-main\.v3-sync-review-page\s*\{[^}]+\}/s)?.[0] ?? "";
-  const reviewScrollRule = css.match(/\.v3-sync-review-page \.v3-sync-review-scroll\s*\{[^}]+\}/s)?.[0] ?? "";
-  const reviewSummaryRule = css.match(/\.v3-sync-review-summary\s*\{[^}]+\}/s)?.[0] ?? "";
+  const workspaceRule = css.match(/\.sync-main\.sync-sync-review-page\s*\{[^}]+\}/s)?.[0] ?? "";
+  const reviewScrollRule = css.match(/\.sync-sync-review-page \.sync-sync-review-scroll\s*\{[^}]+\}/s)?.[0] ?? "";
+  const reviewSummaryRule = css.match(/\.sync-sync-review-summary\s*\{[^}]+\}/s)?.[0] ?? "";
   const workspaceSource = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   const pushSource = readFileSync("src/components/project-sync/PushResourceWorkspace.tsx", "utf8");
   const pullSource = readFileSync("src/components/project-sync/RestorePlanView.tsx", "utf8");
@@ -196,7 +196,7 @@ test("Push and Pull reviews use only the outer workspace scroll", () => {
   assert.match(reviewScrollRule, /overflow:\s*visible/);
   assert.doesNotMatch(reviewScrollRule, /overflow-y:\s*(auto|scroll)/);
   assert.match(reviewSummaryRule, /margin:\s*0;/);
-  assert.match(workspaceSource, /v3-sync-review-page/);
+  assert.match(workspaceSource, /sync-sync-review-page/);
   assert.doesNotMatch(pushSource, /useSyncReviewScroll|onScroll=|ref=\{scrollRef\}/);
   assert.doesNotMatch(pullSource, /useSyncReviewScroll|onScroll=|ref=\{scrollRef\}/);
   assert.doesNotMatch(tabsSource, /useSyncReviewScroll/);
@@ -215,7 +215,7 @@ test("Push and Pull reviews use only the outer workspace scroll", () => {
 
 test("completed Push and Pull operations reset the project workspace to its first tab", () => {
   const workspaceSource = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  const syncSource = readFileSync("src/components/project-sync/ProjectSyncV3.tsx", "utf8");
+  const syncSource = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const pushHandler = syncSource.slice(
     syncSource.indexOf("const publishProject = async"),
     syncSource.indexOf("const publishPendingPush = async"),
@@ -234,8 +234,8 @@ test("completed Push and Pull operations reset the project workspace to its firs
 
 test("the combined project header stays aligned with Storage and shares its divider", () => {
   const css = readFileSync("src/App.css", "utf8");
-  const combinedHeadingRule = css.match(/\.v3-project-combined-page \.v3-combined-project-heading\s*\{[^}]+\}/s)?.[0] ?? "";
-  const storageGroupRule = css.match(/\.v3-project-combined-page \.project-storage-group\s*\{[^}]+\}/s)?.[0] ?? "";
+  const combinedHeadingRule = css.match(/\.sync-project-combined-page \.sync-combined-project-heading\s*\{[^}]+\}/s)?.[0] ?? "";
+  const storageGroupRule = css.match(/\.sync-project-combined-page \.project-storage-group\s*\{[^}]+\}/s)?.[0] ?? "";
 
   assert.match(combinedHeadingRule, /align-items:\s*stretch/);
   assert.match(combinedHeadingRule, /margin-bottom:\s*0/);
@@ -300,7 +300,7 @@ test("history content uses the local alias and renders commit/thread actions", (
   );
   assert.doesNotMatch(html, /Project Name/);
   assert.match(html, /Mallard local/);
-  assert.match(html, /v3-history-project-context/);
+  assert.match(html, /sync-history-project-context/);
   assert.match(html, /title="Codex configuration:/);
   assert.match(html, /\/Users\/test\/config\/mallard\/\.codex/);
   assert.match(html, /Local storage 1/);
@@ -310,7 +310,7 @@ test("history content uses the local alias and renders commit/thread actions", (
   assert.match(html, /Add project-scoped history/);
   assert.match(html, new RegExp(`href="https://github\\.com/Git4Agent/mallard/commit/${"b".repeat(40)}"`));
   assert.match(html, /aria-label="Open commit bbbbbbb on GitHub"/);
-  assert.doesNotMatch(html, /v3-history-thread-updated/);
+  assert.doesNotMatch(html, /sync-history-thread-updated/);
   assert.doesNotMatch(html, /aria-label="Updated [^"]+"/);
   assert.doesNotMatch(html, /aria-label="Show session details"/);
   assert.doesNotMatch(html, /aria-label="Hide session details"/);
@@ -325,7 +325,7 @@ test("history content uses the local alias and renders commit/thread actions", (
   assert.doesNotMatch(html, /aria-label="Show conversation details"/);
   assert.match(html, /aria-label="Open in Codex"/);
   assert.match(html, /aria-label="Open in Terminal"/);
-  assert.match(html, /v3-openai-icon/);
+  assert.match(html, /sync-openai-icon/);
   assert.doesNotMatch(html, /aria-label="1 sessions"/);
   assert.doesNotMatch(html, />Open in Codex</);
   assert.doesNotMatch(html, /> Open in Terminal</);
@@ -378,9 +378,9 @@ test("permanent session summaries label every metric icon", () => {
 
 test("thread icon actions stay compact and the chat action follows the metrics", () => {
   const css = readFileSync("src/App.css", "utf8");
-  const metaRule = css.match(/\.v3-history-session-summary \.v3-history-thread-meta\s*\{[^}]+\}/s)?.[0] ?? "";
-  const chatRule = css.match(/\.v3-history-chat-toggle\s*\{[^}]+\}/s)?.[0] ?? "";
-  const launchRule = css.match(/\.v3-history-thread-actions \.v3-history-launch-action\s*\{[^}]+\}/s)?.[0] ?? "";
+  const metaRule = css.match(/\.sync-history-session-summary \.sync-history-thread-meta\s*\{[^}]+\}/s)?.[0] ?? "";
+  const chatRule = css.match(/\.sync-history-chat-toggle\s*\{[^}]+\}/s)?.[0] ?? "";
+  const launchRule = css.match(/\.sync-history-thread-actions \.sync-history-launch-action\s*\{[^}]+\}/s)?.[0] ?? "";
 
   assert.match(metaRule, /flex:\s*0 1 auto/);
   assert.match(chatRule, /width:\s*24px/);
@@ -479,15 +479,15 @@ test("embedded history follows the project workspace without repeating project c
     />,
   );
 
-  assert.match(html, /v3-history-embedded/);
-  assert.match(html, /<h2[^>]*v3-history-embedded-title[^>]*>.*Git history/s);
+  assert.match(html, /sync-history-embedded/);
+  assert.match(html, /<h2[^>]*sync-history-embedded-title[^>]*>.*Git history/s);
   assert.match(html, /<h2 id="uncommitted-heading">Uncommitted<\/h2>/);
   assert.doesNotMatch(html, />Commit history</);
   assert.doesNotMatch(html, /aria-label="1 thread"/);
   assert.doesNotMatch(html, /Sessions not linked to a commit/);
   assert.doesNotMatch(html, /<main/);
   assert.doesNotMatch(html, /aria-label="Project settings"/);
-  assert.doesNotMatch(html, /v3-history-project-context/);
+  assert.doesNotMatch(html, /sync-history-project-context/);
   assert.doesNotMatch(html, /Local storage 1/);
 });
 
@@ -558,55 +558,68 @@ test("selection review removes repeated history and storage labels", () => {
     />,
   );
 
-  assert.match(html, /v3-history-selection-review/);
+  assert.match(html, /sync-history-selection-review/);
   assert.match(html, /aria-label="Git history"/);
-  assert.doesNotMatch(html, /v3-history-header/);
+  assert.doesNotMatch(html, /sync-history-header/);
   assert.doesNotMatch(html, />Local session</);
-  assert.doesNotMatch(html, /v3-history-storage-lens/);
-  assert.doesNotMatch(html, /v3-history-toolbar-count/);
+  assert.doesNotMatch(html, /sync-history-storage-lens/);
+  assert.doesNotMatch(html, /sync-history-toolbar-count/);
   assert.doesNotMatch(html, /aria-label="Branch"/);
   assert.doesNotMatch(html, /aria-label="Refresh activity"/);
 
   const css = readFileSync("src/App.css", "utf8");
-  const compactReviewRule = css.match(/\.v3-sync-review-scroll > \.v3-history-selection-review\s*\{[^}]+\}/s)?.[0] ?? "";
-  const compactHeadingRule = css.match(/\.v3-history-selection-review \.v3-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
+  const compactReviewRule = css.match(/\.sync-sync-review-scroll > \.sync-history-selection-review\s*\{[^}]+\}/s)?.[0] ?? "";
+  const compactHeadingRule = css.match(/\.sync-history-selection-review \.sync-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
   assert.match(compactReviewRule, /padding-top:\s*0/);
   assert.match(compactReviewRule, /padding-right:\s*8px/);
   assert.match(compactHeadingRule, /margin-top:\s*8px/);
 });
 
-test("Push and Pull reviews separate outstanding and up-to-date sessions without extra status copy", () => {
-  const outstandingThread = history.threads[0];
-  const syncedThread = {
-    ...outstandingThread,
-    thread_id: "019f7798-5437-7632-9dbc-5b589cf68bf3",
-    title: "Already synced thread",
-    started_at: outstandingThread.started_at - 7_200,
-    ended_at: outstandingThread.ended_at - 7_200,
-    commit_occurrence_count: 0,
+test("Push review removes selection controls and gutters from non-uploadable sessions", () => {
+  const syncedThread = history.threads[0];
+  const localAheadThread = {
+    ...syncedThread,
+    thread_id: "019f7798-5437-7632-9dbc-5b589cf68bf1",
+    title: "Continue local work",
+    started_at: syncedThread.started_at + 1,
+    ended_at: syncedThread.ended_at + 1,
   };
-  const outstandingResourceId = `codex:session:${outstandingThread.thread_id}`;
   const syncedResourceId = `codex:session:${syncedThread.thread_id}`;
+  const localAheadResourceId = `codex:session:${localAheadThread.thread_id}`;
+  const resources = [
+    {
+      resource_id: syncedResourceId,
+      kind: "conversation",
+      provider: "codex",
+      scope: "provider_state",
+      display_name: syncedThread.title,
+      provenance: { kind: "conversation" as const },
+      apply_policy: "safe_file" as const,
+      codec_version: 1,
+      metadata: {},
+      category: "conversations",
+    },
+    {
+      resource_id: localAheadResourceId,
+      kind: "conversation",
+      provider: "codex",
+      scope: "provider_state",
+      display_name: localAheadThread.title,
+      provenance: { kind: "conversation" as const },
+      apply_policy: "safe_file" as const,
+      codec_version: 1,
+      metadata: {},
+      category: "conversations",
+    },
+  ];
   const comparison = {
     project_id: project.local_project_id,
     storage_id: "storage-1",
-    storage_name: "R2 storage 1",
-    generation: 4,
-    base_generation: 3,
+    storage_name: "Local storage 1",
     compared_at: 1_752_804_000,
-    counts: { synced: 1, local: 0, storage: 1, diverged: 0, unavailable: 0, unknown: 0 },
+    counts: { synced: 1, local: 1, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
     warnings: [],
     entries: [
-      {
-        thread_id: outstandingThread.thread_id,
-        resource_id: outstandingResourceId,
-        display_name: outstandingThread.title,
-        state: "storage_ahead" as const,
-        local_present: true,
-        storage_present: true,
-        local_updated_at: outstandingThread.ended_at - 60,
-        storage_updated_at: outstandingThread.ended_at,
-      },
       {
         thread_id: syncedThread.thread_id,
         resource_id: syncedResourceId,
@@ -614,12 +627,46 @@ test("Push and Pull reviews separate outstanding and up-to-date sessions without
         state: "synced" as const,
         local_present: true,
         storage_present: true,
-        local_updated_at: syncedThread.ended_at,
-        storage_updated_at: syncedThread.ended_at,
+        push_decision: {
+          action: "no_op" as const,
+          reason_code: "identical" as const,
+          selectable: false,
+          selected_by_default: false,
+          requires_explicit_approval: false,
+        },
+        pull_decision: {
+          action: "no_op" as const,
+          reason_code: "identical" as const,
+          selectable: false,
+          selected_by_default: false,
+          requires_explicit_approval: false,
+        },
+      },
+      {
+        thread_id: localAheadThread.thread_id,
+        resource_id: localAheadResourceId,
+        display_name: localAheadThread.title,
+        state: "local_ahead" as const,
+        local_present: true,
+        storage_present: true,
+        push_decision: {
+          action: "fast_forward_cloud" as const,
+          reason_code: "cloud_prefix_of_local" as const,
+          selectable: true,
+          selected_by_default: true,
+          requires_explicit_approval: false,
+        },
+        pull_decision: {
+          action: "keep_local" as const,
+          reason_code: "cloud_prefix_of_local" as const,
+          selectable: false,
+          selected_by_default: false,
+          requires_explicit_approval: false,
+        },
       },
     ],
   };
-  const renderReview = (selectionMode: "push" | "pull") => renderToStaticMarkup(
+  const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       embedded
       project={project}
@@ -635,125 +682,11 @@ test("Push and Pull reviews separate outstanding and up-to-date sessions without
         revision: 1,
         updated_at: 2,
       }}
-      history={{
-        ...history,
-        threads: [outstandingThread, syncedThread],
-      }}
-      comparison={{
-        ...comparison,
-        entries: comparison.entries.map((entry) => (
-          entry.resource_id === outstandingResourceId && selectionMode === "push"
-            ? { ...entry, state: "local_ahead" as const }
-            : entry
-        )),
-      }}
-      activeStorageName="R2 storage 1"
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
-      selectionMode={selectionMode}
-      selectedResourceIds={new Set([outstandingResourceId, syncedResourceId])}
-      selectableResourceIds={new Set([outstandingResourceId])}
-      reviewResourceIds={new Set([outstandingResourceId, syncedResourceId])}
-      upToDateResourceIds={new Set([syncedResourceId])}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
-      onToggleResource={() => undefined}
-    />,
-  );
-  const pullHtml = renderReview("pull");
-  const pushHtml = renderReview("push");
-
-  for (const html of [pullHtml, pushHtml]) {
-    assert.match(html, /<h2 id="sync-uncommitted-heading">Uncommitted<\/h2>/);
-    assert.match(html, /<details class="v3-history-up-to-date">/);
-    assert.match(html, /aria-label="Up to date, 1 session"/);
-    assert.match(html, /<strong>Up to date<\/strong><small>1<\/small>/);
-    assert.equal(html.match(/type="checkbox"/g)?.length, 1);
-    assert.match(html, /v3-thread-sync-indicator synced/);
-    assert.match(html, /aria-label="Up to date here and in R2 storage 1\."/);
-    assert.doesNotMatch(html, /Restore from storage|Keep local|Use storage version|Add to push/);
-    assert.doesNotMatch(html, /Add project-scoped history|Load previous 30 days/);
-  }
-  assert.match(pullHtml, /v3-thread-sync-indicator storage/);
-  assert.match(pullHtml, /aria-label="Newer in R2 storage 1\. Pull to update this computer\."/);
-  assert.match(pushHtml, /v3-thread-sync-indicator local/);
-  assert.match(pushHtml, /aria-label="Newer on this computer\. Push to update R2 storage 1\."/);
-
-  const css = readFileSync("src/App.css", "utf8");
-  assert.match(css, /\.v3-history-sync-review-groups\s*\{[^}]*display:\s*grid/s);
-  assert.match(css, /\.v3-history-up-to-date\s*\{[^}]*border-top:\s*1px solid var\(--border\)/s);
-  assert.match(css, /\.v3-history-up-to-date > summary\s*\{[^}]*min-height:\s*48px/s);
-});
-
-test("normal Git and sessions hides synced no-op cards but keeps actionable variants", () => {
-  const synced = {
-    thread_id: "provider-synced",
-    resource_id: "codex:session:provider-synced",
-    display_name: "Synced card should be hidden",
-    state: "synced" as const,
-    local_present: true,
-    storage_present: true,
-    cloud_thread_id: "thread-synced",
-    provider_thread_id: "provider-synced",
-    relation: "identical" as const,
-    proposed_action: "no_op" as const,
-    reason_code: "identical" as const,
-    materialization_state: "resumable" as const,
-    resumable: true,
-    origin_label: "This host",
-    available_actions: ["no_op" as const],
-    requires_explicit_approval: false,
-  };
-  const actionable = {
-    ...synced,
-    thread_id: "provider-unknown",
-    resource_id: "codex:session:provider-unknown",
-    display_name: "Actionable card stays visible",
-    state: "unknown" as const,
-    cloud_thread_id: "thread-unknown",
-    provider_thread_id: "provider-unknown",
-    relation: "unknown" as const,
-    proposed_action: "store_only" as const,
-    reason_code: "unknown_lineage" as const,
-    available_actions: ["store_only" as const],
-  };
-  assert.deepEqual(
-    normalHistoryThreadVariants([synced, actionable]).map((entry) => entry.resource_id),
-    [actionable.resource_id],
-  );
-
-  const html = renderToStaticMarkup(
-    <ProjectChatHistoryContent
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={history}
-      comparison={{
-        project_id: project.local_project_id,
-        storage_id: "storage-1",
-        storage_name: "Local storage 1",
-        generation: 1,
-        base_generation: 1,
-        compared_at: 1_752_804_000,
-        counts: { synced: 1, local: 0, storage: 0, diverged: 0, unavailable: 0, unknown: 1 },
-        warnings: [],
-        entries: [synced, actionable],
-      }}
+      history={{ ...history, git: null, threads: [syncedThread, localAheadThread] }}
+      comparison={comparison}
+      activeStorageName="Local storage 1"
+      selectionMode="push"
+      selectableResourceIds={pushSelectableResourceIds(resources, comparison)}
       loading={false}
       loadingMore={false}
       actionError={null}
@@ -766,10 +699,14 @@ test("normal Git and sessions hides synced no-op cards but keeps actionable vari
     />,
   );
 
-  assert.doesNotMatch(html, /Synced card should be hidden/);
-  assert.match(html, /Actionable card stays visible/);
-  assert.match(html, /Ancestry unknown/);
-  assert.match(html, /Store without resume/);
+  const syncedInput = html.match(/<input[^>]*aria-label="Include Add Git history mapping"[^>]*>/)?.[0] ?? "";
+  const localAheadInput = html.match(/<input[^>]*aria-label="Include Continue local work"[^>]*>/)?.[0] ?? "";
+  assert.equal(syncedInput, "");
+  assert.notEqual(localAheadInput, "");
+  assert.doesNotMatch(localAheadInput, /disabled=""/);
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 1);
+  assert.equal((html.match(/sync-sync-selectable-row/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /sync-selection-placeholder/);
 });
 
 test("selected storage adds directional indicators and storage-only threads", () => {
@@ -851,11 +788,11 @@ test("selected storage adds directional indicators and storage-only threads", ()
   assert.doesNotMatch(html, /title="2 local thread changes"/);
   assert.match(html, /aria-label="Newer on this computer\. Push to update Local storage 1\."/);
   assert.match(html, /aria-label="Only in Local storage 1\. Pull to download it here\."/);
-  assert.match(html, /v3-thread-sync-indicator local[^>]+aria-label="Newer on this computer\.[^"]+"[^>]*><svg[^>]+>/);
-  assert.match(html, /v3-thread-sync-indicator storage[^>]+aria-label="Only in Local storage 1\.[^"]+"[^>]*><svg[^>]+>/);
-  assert.doesNotMatch(html, /v3-thread-sync-glyph/);
+  assert.match(html, /sync-thread-sync-indicator local[^>]+aria-label="Newer on this computer\.[^"]+"[^>]*><svg[^>]+>/);
+  assert.match(html, /sync-thread-sync-indicator storage[^>]+aria-label="Only in Local storage 1\.[^"]+"[^>]*><svg[^>]+>/);
+  assert.doesNotMatch(html, /sync-thread-sync-glyph/);
   assert.match(html, /Improve cloud thread titles/);
-  assert.match(html, /v3-history-stored-thread-meta/);
+  assert.match(html, /sync-history-stored-thread-meta/);
   assert.match(html, /Updated [^<]+ · Codex thread 019f7798/);
   assert.doesNotMatch(html, /Stored thread 019f7798/);
   assert.match(html, /aria-label="2 threads"/);
@@ -869,7 +806,7 @@ test("selected storage adds directional indicators and storage-only threads", ()
   );
 
   const css = readFileSync("src/App.css", "utf8");
-  const storedCopyRule = css.match(/\.v3-history-stored-thread-copy\s*\{[^}]+\}/s)?.[0] ?? "";
+  const storedCopyRule = css.match(/\.sync-history-stored-thread-copy\s*\{[^}]+\}/s)?.[0] ?? "";
   assert.match(storedCopyRule, /flex-direction:\s*column/);
 });
 
@@ -959,7 +896,7 @@ test("non-Git history renders a flat Codex thread list", () => {
   );
   const headingIndex = html.indexOf('id="codex-sessions-heading"');
   const headingEndIndex = html.indexOf("</h2>", headingIndex);
-  const openAiIconIndex = html.indexOf("v3-openai-icon", headingIndex);
+  const openAiIconIndex = html.indexOf("sync-openai-icon", headingIndex);
 
   assert.match(html, /Codex threads/);
   assert.ok(headingIndex >= 0);
@@ -1066,14 +1003,14 @@ test("completed projects use their main row for history and only mark Git reposi
   assert.match(html, /src="\/mallard-logo\.svg"/);
   assert.doesNotMatch(html, /mallard-logo\.png/);
   assert.doesNotMatch(html, /aria-label="View history for Mallard local"/);
-  assert.equal(html.match(/v3-project-git-icon/g)?.length, 1);
+  assert.equal(html.match(/sync-project-git-icon/g)?.length, 1);
   assert.equal(html.match(/icon-git-folder-mark/g)?.length, 1);
-  assert.equal(html.match(/v3-project-folder-icon/g)?.length, 1);
+  assert.equal(html.match(/sync-project-folder-icon/g)?.length, 1);
   assert.match(html, /aria-label="Mallard local, Git repository"/);
-  assert.doesNotMatch(html, /v3-repository-kind|>git<\/span>/);
+  assert.doesNotMatch(html, /sync-repository-kind|>git<\/span>/);
   assert.doesNotMatch(html, /Default Codex|myconf3 · Codex/);
   const primaryNav = html.slice(
-    html.indexOf('<nav class="v3-primary-nav"'),
+    html.indexOf('<nav class="sync-primary-nav"'),
     html.indexOf("</nav>") + "</nav>".length,
   );
   const projectsNavIndex = primaryNav.indexOf(" Projects</button>");
@@ -1142,7 +1079,7 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
   assert.match(projectButton, /disabled=""/);
   assert.match(storageButton, /disabled=""/);
   assert.match(addStorageButton, /disabled=""/);
-  assert.match(html, /v3-sidebar-storage-warning/);
+  assert.match(html, /sync-sidebar-storage-warning/);
   assert.match(storageButton, /Storage issue: Storage folder unavailable\./);
   assert.doesNotMatch(html, /Legacy profiles|Open legacy/);
 });

@@ -1,25 +1,25 @@
 use super::harness::{assert_manifest_consistent, chain, sha256, ThreadSpec, VariantWorld};
 use super::recovery::install_scope;
-use crate::project_sync_v3::conversation_codec::{
+use crate::project_sync::conversation_codec::{
     analyze_codex_transcript, rewrite_codex_transcript, CodecLineage,
 };
-use crate::project_sync_v3::conversation_materialization::{
+use crate::project_sync::conversation_materialization::{
     apply_conversation_materialization, recover_conversation_materializations,
     ConversationMaterializationRequest, ConversationTargetPayload, NoConversationFailpoints,
 };
-use crate::project_sync_v3::conversation_sync::{
-    default_conversation_decision, rekey_thread_binding, reserve_provider_thread_ids,
-    ConversationBindingScope, ConversationCapabilities, ProviderIdRequest,
+use crate::project_sync::conversation_sync::{
+    default_conversation_decision, rekey_thread_binding, ConversationBindingScope,
+    ConversationCapabilities,
 };
-use crate::project_sync_v3::domain::{
+use crate::project_sync::domain::{
     classify_conversation_relation, ConversationBindings, ConversationFileRole,
     ConversationMaterializationState, ConversationOperationId, ConversationPlanActionType,
     ConversationPlanDirection, ConversationRelation, ConversationSyncOperation,
     ConversationSyncPhase, HostId, LocalConversationBinding, LocalProjectId,
     LocalProviderProfileId, PlanId, Provider, ReplicaId, TargetExpectation, ThreadId,
+    CONVERSATION_BINDINGS_SCHEMA,
 };
-use crate::project_sync_v3::persistence::V3Repository;
-use std::collections::BTreeSet;
+use crate::project_sync::persistence::LocalStateRepository;
 use std::fs;
 
 #[test]
@@ -74,7 +74,7 @@ fn rekey_to_an_already_bound_thread_is_rejected() {
 }
 
 #[test]
-fn fork_pull_rekeys_local_then_materializes_cloud_as_two_journaled_steps() {
+fn fork_pull_rekeys_local_and_materializes_cloud_as_one_composite_operation() {
     let world = VariantWorld::new();
     let scope = install_scope(
         &world.repo_a,
@@ -163,16 +163,15 @@ fn fork_pull_rekeys_local_then_materializes_cloud_as_two_journaled_steps() {
                 local_project_id: scope.project_id.clone(),
                 provider_profile_id: scope.profile_id.clone(),
                 thread_id: cloud_thread_id.clone(),
+                forked_from: None,
                 provider_thread_id: Some("existing-provider-thread".to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
                 last_observed_file_sha256: Some(sha256(&local_transcript)),
                 last_observed_head_message_id: Some(local_head.clone()),
                 last_observed_lineage_digest: Some(local_lineage.clone()),
                 last_observed_semantic_digest: Some(local_semantic.clone()),
-                source_generation: Some(published.snapshot.head.latest.generation),
-                source_manifest_sha256: Some(
-                    published.snapshot.head.latest.manifest_sha256.clone(),
-                ),
+                source_generation: Some(published.snapshot.head.generation),
+                source_manifest_sha256: Some(published.snapshot.head.manifest_sha256.clone()),
                 revision: 0,
                 created_at: 10,
                 updated_at: 10,
@@ -182,64 +181,6 @@ fn fork_pull_rekeys_local_then_materializes_cloud_as_two_journaled_steps() {
         .unwrap();
     let before = world.repo_a.load_conversation_bindings().unwrap();
 
-    // Step 1: mint a thread for the divergent local conversation and rekey
-    // its binding. No provider file is touched and nothing is published; the
-    // conversation now classifies CloudMissing under the minted thread.
-    let rekey_operation = ConversationSyncOperation {
-        operation_id: ConversationOperationId::parse("operation-fork-pull-rekey").unwrap(),
-        plan_id: Some(PlanId::parse("plan-fork-pull").unwrap()),
-        direction: ConversationPlanDirection::Pull,
-        phase: ConversationSyncPhase::Prepared,
-        storage_id: world.storage_id.clone(),
-        bundle_id: world.bundle_id.clone(),
-        generation: published.snapshot.head.latest.generation,
-        commit_id: published.snapshot.head.latest.commit_id.clone(),
-        manifest_sha256: published.snapshot.head.latest.manifest_sha256.clone(),
-        host_id: scope.host_id.clone(),
-        replica_id: scope.replica_id.clone(),
-        local_project_id: scope.project_id.clone(),
-        provider_profile_id: scope.profile_id.clone(),
-        provider: Provider::Codex,
-        thread_id: cloud_thread_id.clone(),
-        old_thread_id: Some(cloud_thread_id.clone()),
-        rekey_committed: false,
-        result_thread_id: minted_thread_id.clone(),
-        forked_from_provider_thread_id: None,
-        provider_thread_id: Some("existing-provider-thread".to_string()),
-        materialization_state: ConversationMaterializationState::Resumable,
-        lineage_digest: Some(local_lineage.clone()),
-        semantic_digest: Some(local_semantic.clone()),
-        expected_host_identity_revision: scope.host_identity_revision,
-        expected_bindings_document_revision: before.revision,
-        expected_binding_revision: Some(before.bindings[0].revision),
-        expected_profile_revision: 0,
-        expected_project_binding_revision: 0,
-        expected_local_digest: Some(sha256(&local_transcript)),
-        targets: Vec::new(),
-        created_at: 20,
-        updated_at: 20,
-    };
-    apply_conversation_materialization(
-        &world.repo_a,
-        ConversationMaterializationRequest {
-            operation: rekey_operation,
-            targets: Vec::new(),
-        },
-        &mut NoConversationFailpoints,
-    )
-    .unwrap();
-    let after_rekey = world.repo_a.load_conversation_bindings().unwrap();
-    assert_eq!(after_rekey.bindings.len(), 1);
-    assert_eq!(after_rekey.bindings[0].thread_id, minted_thread_id);
-    assert_eq!(
-        after_rekey.bindings[0].provider_thread_id.as_deref(),
-        Some("existing-provider-thread")
-    );
-    assert_eq!(after_rekey.bindings[0].source_generation, None);
-    assert_eq!(fs::read(&local_path).unwrap(), local_transcript);
-
-    // Step 2: materialize the cloud chain as a new local conversation bound
-    // to the (now free) cloud thread.
     let incoming_analysis = analyze_codex_transcript(&incoming_transcript);
     let (incoming_lineage, incoming_semantic) = match incoming_analysis.lineage {
         CodecLineage::Complete {
@@ -256,32 +197,34 @@ fn fork_pull_rekeys_local_then_materializes_cloud_as_two_journaled_steps() {
     )
     .into_bytes();
     let materialize_operation = ConversationSyncOperation {
-        operation_id: ConversationOperationId::parse("operation-fork-pull-materialize").unwrap(),
+        operation_id: ConversationOperationId::parse("operation-fork-pull-composite").unwrap(),
         plan_id: Some(PlanId::parse("plan-fork-pull").unwrap()),
+        plan_action_id: None,
         direction: ConversationPlanDirection::Pull,
         phase: ConversationSyncPhase::Prepared,
         storage_id: world.storage_id.clone(),
         bundle_id: world.bundle_id.clone(),
-        generation: published.snapshot.head.latest.generation,
-        commit_id: published.snapshot.head.latest.commit_id.clone(),
-        manifest_sha256: published.snapshot.head.latest.manifest_sha256.clone(),
+        generation: published.snapshot.head.generation,
+        commit_id: published.snapshot.head.commit_id.clone(),
+        manifest_sha256: published.snapshot.head.manifest_sha256.clone(),
         host_id: scope.host_id.clone(),
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
         provider: Provider::Codex,
         thread_id: cloud_thread_id.clone(),
-        old_thread_id: None,
+        old_thread_id: Some(cloud_thread_id.clone()),
         rekey_committed: false,
-        result_thread_id: cloud_thread_id.clone(),
-        forked_from_provider_thread_id: None,
+        result_thread_id: minted_thread_id.clone(),
+        materialized_thread_id: Some(cloud_thread_id.clone()),
+        binding_forked_from: None,
         provider_thread_id: Some("incoming-cloud-thread".to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
         lineage_digest: Some(incoming_lineage),
         semantic_digest: Some(incoming_semantic),
         expected_host_identity_revision: scope.host_identity_revision,
-        expected_bindings_document_revision: after_rekey.revision,
-        expected_binding_revision: None,
+        expected_bindings_document_revision: before.revision,
+        expected_binding_revision: Some(before.bindings[0].revision),
         expected_profile_revision: 0,
         expected_project_binding_revision: 0,
         expected_local_digest: Some(sha256(&local_transcript)),
@@ -326,6 +269,8 @@ fn fork_pull_rekeys_local_then_materializes_cloud_as_two_journaled_steps() {
         minted.provider_thread_id.as_deref(),
         Some("existing-provider-thread")
     );
+    assert_eq!(minted.forked_from.as_ref(), Some(&cloud_thread_id));
+    assert_eq!(minted.source_generation, None);
     let cloud = document
         .bindings
         .iter()
@@ -341,7 +286,6 @@ fn fork_pull_rekeys_local_then_materializes_cloud_as_two_journaled_steps() {
             .inspect(&world.bundle_id)
             .unwrap()
             .head
-            .latest
             .generation,
         1,
         "Pull must not publish or rename the cloud thread",
@@ -358,7 +302,8 @@ fn fork_pull_rekeys_local_then_materializes_cloud_as_two_journaled_steps() {
         fixed_point
     );
 
-    let reopened = V3Repository::from_home_dir(world.repo_a.root().parent().unwrap()).unwrap();
+    let reopened =
+        LocalStateRepository::from_home_dir(world.repo_a.root().parent().unwrap()).unwrap();
     let first = recover_conversation_materializations(&reopened).unwrap();
     let second = recover_conversation_materializations(&reopened).unwrap();
     assert!(first.completed.is_empty());
@@ -396,7 +341,7 @@ fn diverge_once_sync_twice_forks_exactly_once_then_settles_identical() {
         origin_b,
         10,
     );
-    assert_eq!(published.snapshot.head.latest.generation, 1);
+    assert_eq!(published.snapshot.head.generation, 1);
     let local_chain = analyze_codex_transcript(&local_transcript)
         .lineage
         .chain()
@@ -445,7 +390,7 @@ fn diverge_once_sync_twice_forks_exactly_once_then_settles_identical() {
         2,
         "exactly one fork thread appears after round one",
     );
-    assert_eq!(after_fork.snapshot.head.latest.generation, 2);
+    assert_eq!(after_fork.snapshot.head.generation, 2);
 
     // Round two: identity converged — the local chain is Identical to its
     // rekeyed thread, the origin thread is untouched, and a republish of the
@@ -475,45 +420,9 @@ fn diverge_once_sync_twice_forks_exactly_once_then_settles_identical() {
     );
     let republish = world.publish(&[cloud_spec, forked_spec], origin_a, 30);
     assert!(!republish.published, "round two publishes nothing");
-    assert_eq!(republish.snapshot.head.latest.generation, 2);
+    assert_eq!(republish.snapshot.head.generation, 2);
     assert_eq!(republish.snapshot.manifest.conversations.len(), 2);
     assert_manifest_consistent(&world);
-}
-
-#[test]
-fn provider_id_collisions_are_resolved_profile_wide_and_stably() {
-    let requests = vec![
-        ProviderIdRequest {
-            thread_id: ThreadId::parse("thread-v2").unwrap(),
-            source_hint: Some("shared-source".to_string()),
-        },
-        ProviderIdRequest {
-            thread_id: ThreadId::parse("thread-v1").unwrap(),
-            source_hint: Some("shared-source".to_string()),
-        },
-        ProviderIdRequest {
-            thread_id: ThreadId::parse("thread-v3").unwrap(),
-            source_hint: Some("occupied-by-other-project".to_string()),
-        },
-    ];
-    let occupied = BTreeSet::from(["occupied-by-other-project".to_string()]);
-    let mut generated = ["generated-a", "generated-b", "generated-c"].into_iter();
-    let first = reserve_provider_thread_ids(requests.clone(), &occupied, || {
-        Ok(generated.next().unwrap().to_string())
-    })
-    .unwrap();
-    assert_eq!(
-        first[&ThreadId::parse("thread-v1").unwrap()],
-        "shared-source"
-    );
-    assert_eq!(first.len(), first.values().collect::<BTreeSet<_>>().len());
-    assert!(!first.values().any(|id| id == "occupied-by-other-project"));
-
-    // A reviewed plan persists these reservations. Reusing the result is the
-    // retry behavior; recalculating against its occupied values must allocate
-    // different IDs and is therefore correctly treated as a stale replan.
-    let persisted = first.clone();
-    assert_eq!(persisted, first);
 }
 
 fn rekey_fixture() -> (
@@ -529,7 +438,7 @@ fn rekey_fixture() -> (
     let old = ThreadId::parse("thread-old").unwrap();
     let minted = ThreadId::parse("thread-minted").unwrap();
     let document = ConversationBindings {
-        schema: 2,
+        schema: CONVERSATION_BINDINGS_SCHEMA,
         revision: 1,
         host_id: host_id.clone(),
         bindings: vec![LocalConversationBinding {
@@ -538,6 +447,7 @@ fn rekey_fixture() -> (
             local_project_id: project_id.clone(),
             provider_profile_id: profile_id.clone(),
             thread_id: old.clone(),
+            forked_from: None,
             provider_thread_id: Some("thread-existing".to_string()),
             materialization_state: ConversationMaterializationState::Resumable,
             last_observed_file_sha256: None,

@@ -199,13 +199,13 @@ restricted environments may require permission for that test server.
   review, project files, and status UI.
 - `src/components/project-sync/api.ts` and `src/types.ts` — Tauri command and
   DTO contracts.
-- `src-tauri/src/project_sync_v3/chat_history.rs` — Codex history parsing,
+- `src-tauri/src/project_sync/chat_history.rs` — Codex history parsing,
   metrics, previews, and Git mapping.
-- `src-tauri/src/project_sync_v3/provider_capture.rs` — Codex resource
+- `src-tauri/src/project_sync/provider_capture.rs` — Codex resource
   discovery and no-follow project-content scanning.
-- `src-tauri/src/project_sync_v3/bundle_engine.rs` — publish, fetch, integrity
+- `src-tauri/src/project_sync/bundle_engine.rs` — publish, fetch, integrity
   checks, restore planning, backups, and apply.
-- `src-tauri/src/project_sync_v3/s3_store.rs` — S3/R2 object-store adapter.
+- `src-tauri/src/project_sync/s3_store.rs` — S3/R2 object-store adapter.
 
 ## License
 

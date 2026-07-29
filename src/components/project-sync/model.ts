@@ -4,7 +4,7 @@ import type {
   ProjectResourceCategory,
   ProjectResourceDescriptor,
   ResourceInventory,
-  StorageConfigV3,
+  StorageConfig,
 } from "../../types";
 import { userFacingRepoTerms } from "../../terminology";
 
@@ -14,10 +14,12 @@ export function projectLabel(project: { display_name: string; local_alias?: stri
 }
 
 export function repositoryFingerprintMatches(
-  fingerprint: string | null | undefined,
-  candidates: ReadonlySet<string>,
+  remoteFingerprint: string | null | undefined,
+  localFingerprint: string | null | undefined,
 ): boolean {
-  return !!fingerprint && candidates.has(fingerprint);
+  return !!remoteFingerprint
+    && !!localFingerprint
+    && remoteFingerprint === localFingerprint;
 }
 
 export const RESOURCE_GROUPS: Array<{
@@ -25,7 +27,7 @@ export const RESOURCE_GROUPS: Array<{
   label: string;
   description: string;
 }> = [
-  { id: "conversations", label: "Conversations", description: "Tasks, sessions, memory, and their filtered indexes" },
+  { id: "conversations", label: "Conversations", description: "Project-scoped tasks and sessions" },
   { id: "skills", label: "Skills", description: "Selected standalone skills from the provider home" },
   { id: "plugins", label: "Plugins", description: "Portable install intent; payloads and caches never sync" },
   { id: "project_files", label: "Project files", description: "Exact files and folders selected from a non-Git project" },
@@ -132,7 +134,7 @@ export function errorMessage(error: unknown): string {
 }
 
 export function storageAccessErrorMessage(
-  storage: Pick<StorageConfigV3, "kind"> | null | undefined,
+  storage: Pick<StorageConfig, "kind"> | null | undefined,
   error: unknown,
 ): string {
   const message = errorMessage(error);

@@ -3,18 +3,22 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
   BundleReadiness,
+  ConversationPlanAction,
+  ConversationPlanActionType,
+  ConversationReasonCode,
+  ConversationRelation,
   DependencyPlan,
   DependencyResult,
   ProjectBinding,
-  BundleVersionRef,
   RestorePlan,
   RestoreResult,
 } from "../../src/types";
-import RestorePlanView from "../../src/components/project-sync/RestorePlanView";
+import RestorePlanView, {
+  pullSelectableResourceIds,
+} from "../../src/components/project-sync/RestorePlanView";
 import {
   buildPullReviewItems,
   buildPullReviewSelection,
-  isPinnedNoopConversation,
 } from "../../src/components/project-sync/pullReviewModel";
 import {
   applyPullReview,
@@ -45,14 +49,6 @@ const binding: ProjectBinding = {
   updated_at: 1,
 };
 
-const restoreVersion: BundleVersionRef = {
-  generation: 1,
-  commit_id: "commit-restore",
-  manifest_sha256: "a".repeat(64),
-  snapshot_content_sha256: "c".repeat(64),
-  generation_record_sha256: "d".repeat(64),
-};
-
 const restorePlan: RestorePlan = {
   schema_version: 1,
   plan_id: "plan-restore",
@@ -61,11 +57,13 @@ const restorePlan: RestorePlan = {
   host_id: binding.host_id,
   replica_id: binding.replica_id,
   expected_host_identity_revision: 0,
-  source_version: restoreVersion,
-  observed_head: restoreVersion,
+  generation: 1,
+  commit_id: "commit-restore",
+  manifest_sha256: "a".repeat(64),
   binding_revision: binding.revision,
   created_at: 1,
   expires_at: 2,
+  conversation_actions: [],
   actions: [{
     action_id: "action-session",
     resource_id: "codex:session:thread-a",
@@ -80,6 +78,38 @@ const restorePlan: RestorePlan = {
     requires_explicit_approval: false,
   }],
 };
+
+function conversationAction(
+  action: ConversationPlanActionType,
+  reasonCode: ConversationReasonCode,
+  relation: ConversationRelation,
+): ConversationPlanAction {
+  return {
+    action_id: `conversation-${action}`,
+    direction: "pull",
+    action,
+    reason_code: reasonCode,
+    relation,
+    provider: "codex",
+    host_id: binding.host_id,
+    replica_id: binding.replica_id,
+    local_project_id: binding.local_project_id,
+    provider_profile_id: "profile-codex",
+    thread_id: "thread-cloud",
+    source_resource_id: "codex:conversation:thread-cloud",
+    required_codec: "codex.lineage.v2",
+    pinned_generation: restorePlan.generation,
+    pinned_commit_id: restorePlan.commit_id,
+    pinned_manifest_sha256: restorePlan.manifest_sha256,
+    expected_local_target: { state: "absent" },
+    expected_provider_state: [],
+    expected_profile_revision: 0,
+    expected_project_binding_revision: binding.revision,
+    expected_host_identity_revision: restorePlan.expected_host_identity_revision,
+    expected_bindings_document_revision: 0,
+    expires_at: restorePlan.expires_at,
+  };
+}
 
 test("a valid Pull plan renders an enabled non-modal Apply workspace while supporting checks fail", async () => {
   const dependencies = deferred<DependencyPlan>();
@@ -141,12 +171,12 @@ test("a valid Pull plan renders an enabled non-modal Apply workspace while suppo
       onBack={() => undefined}
     />,
   );
-  assert.match(html, /v3-pull-review-workspace/);
+  assert.match(html, /sync-pull-review-workspace/);
   assert.match(html, />Git &amp; sessions</);
   assert.match(html, />Review</);
   assert.doesNotMatch(html, /Project files &amp; setup/, "an empty setup group is omitted");
   assert.doesNotMatch(html, /aria-modal/);
-  assert.doesNotMatch(html, /v3-modal-backdrop/);
+  assert.doesNotMatch(html, /sync-modal-backdrop/);
   const applyText = html.lastIndexOf("Apply changes");
   assert.notEqual(applyText, -1);
   const applyTagStart = html.lastIndexOf("<button", applyText);
@@ -197,118 +227,6 @@ test("a Pull review opens on the first step by default", () => {
   assert.match(html, />Next: Skills</, "the first step advances instead of applying");
 });
 
-test("pinned conversation no-ops stay internal and do not inflate Pull review counts", () => {
-  const digest = "c".repeat(64);
-  const mixedPlan: RestorePlan = {
-    ...restorePlan,
-    actions: [
-      restorePlan.actions[0],
-      {
-        action_id: "action-session-synced",
-        resource_id: "codex:session:thread-synced",
-        kind: {
-          kind: "materialize_conversation",
-          provider: "codex",
-          logical_path: "state/codex/sessions/2026/07/18/thread-synced.jsonl",
-        },
-        target_path: "/Users/test/.codex/sessions/2026/07/18/thread-synced.jsonl",
-        source_sha256: digest,
-        expected_target_sha256: digest,
-        materialized_sha256: digest,
-        requires_explicit_approval: false,
-      },
-      {
-        action_id: "action-session-index",
-        resource_id: "codex:session-index",
-        kind: {
-          kind: "merge_file",
-          logical_path: "state/codex/session_index.jsonl",
-        },
-        target_path: "/Users/test/.codex/session_index.jsonl",
-        source_sha256: "d".repeat(64),
-        expected_target_sha256: null,
-        requires_explicit_approval: false,
-      },
-    ],
-  };
-  const items = buildPullReviewItems(mixedPlan, null);
-  const synced = items.find((item) => item.resourceId === "codex:session:thread-synced");
-  const outstanding = items.find((item) => item.resourceId === "codex:session:thread-a");
-  assert.ok(synced);
-  assert.ok(outstanding);
-  assert.equal(isPinnedNoopConversation(synced), true);
-  assert.equal(isPinnedNoopConversation(outstanding), false);
-
-  const selection = buildPullReviewSelection(
-    items,
-    new Set(items.map((item) => item.resourceId)),
-    new Set(),
-    new Set(),
-  );
-  assert.deepEqual(
-    [...selection.restoreActionIds].sort(),
-    ["action-session", "action-session-index", "action-session-synced"],
-    "hidden pinned and index actions accompany a real Apply",
-  );
-
-  const html = renderToStaticMarkup(
-    <RestorePlanView
-      embedded
-      projectName="gam2"
-      profileLabel="myconf2"
-      plan={mixedPlan}
-      binding={binding}
-      dependencyPlan={null}
-      readiness={null}
-      restoreResult={null}
-      dependencyResult={null}
-      phase="idle"
-      supportLoading={false}
-      completedActionIds={new Set()}
-      completedResourceIds={new Set()}
-      failedResourceIds={new Set()}
-      busy={false}
-      error={null}
-      onApply={() => undefined}
-      onRefresh={() => undefined}
-      onBack={() => undefined}
-    />,
-  );
-
-  assert.match(html, /aria-label="Git &amp; sessions, 1 selected"/);
-  assert.match(html, /aria-label="Use recommended selection \(1\)"/);
-  assert.doesNotMatch(html, /Git &amp; sessions, 2 selected/);
-
-  const syncedOnlyHtml = renderToStaticMarkup(
-    <RestorePlanView
-      embedded
-      projectName="gam2"
-      profileLabel="myconf2"
-      plan={{ ...mixedPlan, actions: [mixedPlan.actions[1], mixedPlan.actions[2]] }}
-      binding={binding}
-      dependencyPlan={null}
-      readiness={null}
-      restoreResult={null}
-      dependencyResult={null}
-      phase="idle"
-      supportLoading={false}
-      completedActionIds={new Set()}
-      completedResourceIds={new Set()}
-      failedResourceIds={new Set()}
-      busy={false}
-      error={null}
-      initialStep="review"
-      onApply={() => undefined}
-      onRefresh={() => undefined}
-      onBack={() => undefined}
-    />,
-  );
-  assert.match(syncedOnlyHtml, /aria-label="Git &amp; sessions, 0 selected"/);
-  assert.match(syncedOnlyHtml, /aria-label="Use recommended selection \(0\)"/);
-  assert.match(syncedOnlyHtml, />Done<\/button>/);
-  assert.doesNotMatch(syncedOnlyHtml, /Agent setup &amp; tools/);
-});
-
 test("the embedded Pull footer omits redundant helper copy", () => {
   const html = renderToStaticMarkup(
     <RestorePlanView
@@ -334,7 +252,7 @@ test("the embedded Pull footer omits redundant helper copy", () => {
     />,
   );
 
-  assert.match(html, /v3-inline-action-footer/);
+  assert.match(html, /sync-inline-action-footer/);
   assert.doesNotMatch(html, /safe change(?:s)? selected by default/);
 });
 
@@ -347,8 +265,9 @@ function dependencyPlan(actions: DependencyPlan["actions"]): DependencyPlan {
     host_id: restorePlan.host_id,
     replica_id: restorePlan.replica_id,
     expected_host_identity_revision: restorePlan.expected_host_identity_revision,
-    source_version: restorePlan.source_version,
-    observed_head: restorePlan.observed_head,
+    generation: restorePlan.generation,
+    commit_id: restorePlan.commit_id,
+    manifest_sha256: restorePlan.manifest_sha256,
     binding_revision: restorePlan.binding_revision,
     created_at: restorePlan.created_at,
     expires_at: restorePlan.expires_at,
@@ -480,6 +399,10 @@ test("conversation conflicts become one-time keep-local decisions without blocki
   );
   assert.deepEqual(selection.restoreActionIds, ["action-session", "restore-custom-skill"]);
   assert.doesNotMatch(selection.restoreActionIds.join(" "), /manual-conflict/);
+  assert.deepEqual(
+    [...pullSelectableResourceIds(items, new Set(), new Set())].sort(),
+    ["codex:session:thread-a", "codex:standalone-skill:frontend-skill"].sort(),
+  );
 
   const html = renderToStaticMarkup(
     <RestorePlanView
@@ -526,6 +449,33 @@ test("conversation conflicts become one-time keep-local decisions without blocki
   assert.doesNotMatch(html, /Project files are not fully materialized/);
   assert.match(html, />Apply changes</);
 
+  const historyHtml = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      profileLabel="myconf2"
+      plan={conflictedPlan}
+      binding={binding}
+      dependencyPlan={null}
+      readiness={null}
+      restoreResult={null}
+      dependencyResult={null}
+      phase="idle"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="history"
+      onApply={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.equal((historyHtml.match(/sync-pull-item-selectable/g) ?? []).length, 1);
+  assert.doesNotMatch(historyHtml, /sync-selection-placeholder/);
+  assert.equal((historyHtml.match(/type="checkbox"/g) ?? []).length, 1);
+
   const calls: string[] = [];
   const keepLocalOnlyPlan = { ...conflictedPlan, actions: [conflictedPlan.actions[1]] };
   const result = await applyPullReview(
@@ -549,6 +499,57 @@ test("conversation conflicts become one-time keep-local decisions without blocki
   );
   assert.deepEqual(calls, ["restore:0", "verify"]);
   assert.equal(result.success, true);
+});
+
+test("stored-only Pull conversations have no checkbox or empty alignment gutter", () => {
+  const storedOnlyPlan: RestorePlan = {
+    ...restorePlan,
+    actions: [],
+    conversation_actions: [
+      conversationAction("store_only", "codec_unsupported", "unknown"),
+    ],
+  };
+  const items = buildPullReviewItems(storedOnlyPlan, null);
+  assert.deepEqual(
+    [...pullSelectableResourceIds(items, new Set(), new Set())],
+    [],
+  );
+  assert.deepEqual(
+    buildPullReviewSelection(
+      items,
+      new Set(["codex:conversation:thread-cloud"]),
+      new Set(),
+      new Set(),
+    ).restoreActionIds,
+    [],
+  );
+
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      profileLabel="myconf2"
+      plan={storedOnlyPlan}
+      binding={binding}
+      dependencyPlan={null}
+      readiness={null}
+      restoreResult={null}
+      dependencyResult={null}
+      phase="idle"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="history"
+      onApply={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.match(html, />Backup only</);
+  assert.doesNotMatch(html, /type="checkbox"/);
+  assert.doesNotMatch(html, /sync-pull-item-select|sync-selection-placeholder/);
 });
 
 test("skipping a required global tool cannot produce a ready Pull outcome", () => {
@@ -743,13 +744,7 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
         getRestoreReadiness: async () => ready,
       },
       restorePlan,
-      {
-        ...dependencies,
-        source_version: {
-          ...dependencies.source_version,
-          generation: dependencies.source_version.generation + 1,
-        },
-      },
+      { ...dependencies, generation: dependencies.generation + 1 },
       {
         resourceIds: ["codex:plugin:computer-use"],
         restoreActionIds: [],
@@ -812,13 +807,7 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
         getRestoreReadiness: async () => ready,
       },
       restorePlan,
-      {
-        ...dependencies,
-        source_version: {
-          ...dependencies.source_version,
-          generation: dependencies.source_version.generation + 1,
-        },
-      },
+      { ...dependencies, generation: dependencies.generation + 1 },
       {
         resourceIds: ["codex:session:thread-a"],
         restoreActionIds: ["action-session"],

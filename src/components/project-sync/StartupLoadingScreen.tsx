@@ -30,28 +30,28 @@ export default function StartupLoadingScreen({ stage }: Props) {
   );
   const currentStage = STARTUP_STAGES[stageIndex];
   const progressStyle = {
-    "--v3-startup-progress": `${currentStage.progress}%`,
+    "--sync-startup-progress": `${currentStage.progress}%`,
   } as CSSProperties;
 
   return (
     <main
-      className="v3-startup-screen"
-      aria-labelledby="v3-startup-title"
-      aria-describedby="v3-startup-status"
+      className="sync-startup-screen"
+      aria-labelledby="sync-startup-title"
+      aria-describedby="sync-startup-status"
     >
-      <div className="v3-startup-drag-region" data-tauri-drag-region />
+      <div className="sync-startup-drag-region" data-tauri-drag-region />
 
-      <section className="v3-startup-content">
-        <div className="v3-startup-brand">
-          <div className="v3-startup-mark" aria-hidden="true">
+      <section className="sync-startup-content">
+        <div className="sync-startup-brand">
+          <div className="sync-startup-mark" aria-hidden="true">
             <img src="/mallard-logo.svg" alt="" />
           </div>
-          <h1 id="v3-startup-title">Mallard</h1>
+          <h1 id="sync-startup-title">Mallard</h1>
         </div>
 
-        <div className="v3-startup-progress">
+        <div className="sync-startup-progress">
           <div
-            className="v3-startup-progress-track"
+            className="sync-startup-progress-track"
             role="progressbar"
             aria-label="Mallard startup progress"
             aria-valuemin={1}
@@ -62,7 +62,7 @@ export default function StartupLoadingScreen({ stage }: Props) {
           >
             <span />
           </div>
-          <p id="v3-startup-status" role="status" aria-live="polite" aria-atomic="true">
+          <p id="sync-startup-status" role="status" aria-live="polite" aria-atomic="true">
             {currentStage.status}
           </p>
         </div>

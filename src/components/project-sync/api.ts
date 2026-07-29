@@ -6,8 +6,6 @@ import type {
   ActivityLogPolicy,
   ActivityLogQuery,
   ActivityLogStats,
-  BundleGenerationComparison,
-  BundleGenerationPage,
   BundlePage,
   BundleReadiness,
   BundleRecipe,
@@ -37,6 +35,7 @@ import type {
   ProviderProfile,
   ProviderProfileProbe,
   ProviderProfileSummary,
+  PushDestinationStatus,
   PushReviewContext,
   RegisterLocalProjectRequest,
   RegisterNewHostRequest,
@@ -48,7 +47,7 @@ import type {
   SaveProjectLinkRequest,
   SetupDraftInspection,
   SetupDraftList,
-  SyncConfigV3,
+  SyncConfig,
   ThreadSyncComparison,
   UpdateHostDisplayNameRequest,
 } from "../../types";
@@ -73,7 +72,7 @@ export function createSingleFlight() {
 const projectSyncSingleFlight = createSingleFlight();
 
 /**
- * Schema-3 Tauri contract. Multi-word Rust parameters use Tauri's camel-case
+ * Current Tauri contract. Multi-word Rust parameters use Tauri's camel-case
  * JavaScript names, matching the existing command surface in App.tsx.
  */
 export const projectSyncApi = {
@@ -129,10 +128,10 @@ export const projectSyncApi = {
     invoke<LocalProjectRegistration>("rename_local_project", { localProjectId, localAlias, expectedRevision }),
 
   getConfig: () =>
-    invoke<SyncConfigV3>("get_project_sync_config"),
+    invoke<SyncConfig>("get_project_sync_config"),
 
-  saveConfig: (config: SyncConfigV3) =>
-    invoke<SyncConfigV3>("save_project_sync_config", { config }),
+  saveConfig: (config: SyncConfig) =>
+    invoke<SyncConfig>("save_project_sync_config", { config }),
 
   getHostIdentityStatus: () =>
     invoke<HostIdentityStatus>("get_host_identity_status"),
@@ -179,6 +178,9 @@ export const projectSyncApi = {
   preparePushReview: (localProjectId: string, storageId: string) =>
     invoke<PushReviewContext>("prepare_push_review", { localProjectId, storageId }),
 
+  getPushDestinationStatus: (localProjectId: string, storageId: string) =>
+    invoke<PushDestinationStatus>("get_push_destination_status", { localProjectId, storageId }),
+
   getCapabilityStatus: (localProjectId: string, storageId?: string | null) =>
     invoke<CapabilityStatusReport>("get_project_capability_status", {
       localProjectId,
@@ -198,6 +200,8 @@ export const projectSyncApi = {
     projectContentReviewToken?: string | null,
     projectContentRemovalIds: string[] = [],
     acknowledgedWarningDigests: string[] = [],
+    conversationPushPlanId?: string | null,
+    approvedConversationActionIds: string[] = [],
   ) => invoke<ProjectOperationResult>("push_bundle", {
     localProjectId,
     storageId,
@@ -205,6 +209,8 @@ export const projectSyncApi = {
     projectContentReviewToken: projectContentReviewToken ?? null,
     projectContentRemovalIds,
     acknowledgedWarningDigests,
+    conversationPushPlanId: conversationPushPlanId ?? null,
+    approvedConversationActionIds,
   }),
 
   getBinding: (localProjectId: string) =>
@@ -222,46 +228,8 @@ export const projectSyncApi = {
   saveBinding: (request: SaveProjectBindingRequest) =>
     invoke<ProjectBinding>("save_project_binding", { request }),
 
-  planRestore: (
-    storageId: string,
-    bundleId: string,
-    binding: ProjectBinding,
-    sourceGeneration?: number | null,
-  ) =>
-    invoke<RestorePlan>("plan_bundle_restore", {
-      storageId,
-      bundleId,
-      binding,
-      sourceGeneration: sourceGeneration ?? null,
-    }),
-
-  listBundleGenerations: (
-    storageId: string,
-    bundleId: string,
-    cursor?: number | null,
-    limit?: number | null,
-  ) =>
-    invoke<BundleGenerationPage>("list_bundle_generations", {
-      storageId,
-      bundleId,
-      cursor: cursor ?? null,
-      limit: limit ?? null,
-    }),
-
-  compareBundleGenerations: (
-    storageId: string,
-    bundleId: string,
-    leftGeneration: number,
-    rightGeneration: number,
-    includeUnchanged: boolean,
-  ) =>
-    invoke<BundleGenerationComparison>("compare_bundle_generations", {
-      storageId,
-      bundleId,
-      leftGeneration,
-      rightGeneration,
-      includeUnchanged,
-    }),
+  planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) =>
+    invoke<RestorePlan>("plan_bundle_restore", { storageId, bundleId, binding }),
 
   applyRestore: (planId: string, approvedActionIds: string[]) =>
     invoke<RestoreResult>("apply_bundle_restore", { planId, approvedActionIds }),

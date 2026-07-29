@@ -1,22 +1,22 @@
 use super::harness::{assert_manifest_consistent, chain, sha256, ThreadSpec, VariantWorld};
 use super::recovery::{install_scope, InstalledScope};
-use crate::project_sync_v3::commands::ThreadSyncState;
-use crate::project_sync_v3::conversation_codec::{
+use crate::project_sync::commands::ThreadSyncState;
+use crate::project_sync::conversation_codec::{
     analyze_codex_transcript, rewrite_codex_transcript, CodecLineage, CODEX_LINEAGE_CODEC_KEY,
 };
-use crate::project_sync_v3::conversation_materialization::{
+use crate::project_sync::conversation_materialization::{
     apply_conversation_cloud_publication, apply_conversation_materialization,
     ConversationCloudPublication, ConversationMaterializationRequest, ConversationTargetPayload,
     NoConversationFailpoints,
 };
-use crate::project_sync_v3::domain::{
+use crate::project_sync::domain::{
     ConversationFileRole, ConversationMaterializationState, ConversationOperationId,
     ConversationPlanActionType, ConversationPlanDirection, ConversationRelation,
     ConversationSyncOperation, ConversationSyncPhase, LocalConversationBinding, PlanId,
     TargetExpectation, ThreadId,
 };
-use crate::project_sync_v3::persistence::V3Repository;
-use crate::project_sync_v3::provider_capture::{
+use crate::project_sync::persistence::LocalStateRepository;
+use crate::project_sync::provider_capture::{
     CapturedConversation, CapturedFile, CapturedResources, Provider as CaptureProvider,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,7 +24,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[test]
-fn schema6_true_noop_does_not_publish_or_change_provenance() {
+fn current_schema_true_noop_does_not_publish_or_change_provenance() {
     let world = VariantWorld::new();
     let origin_a = world.origin(&world.repo_a, "replica-a");
     let thread = ThreadSpec::new(
@@ -111,7 +111,7 @@ fn bound_thread_push_updates_only_its_thread() {
     advanced_t2.last_updated_by = Some(origin_b.clone());
     let second = world.publish(&[t1, advanced_t2], origin_b, 20);
     assert!(second.published);
-    assert_eq!(second.snapshot.head.latest.generation, 2);
+    assert_eq!(second.snapshot.head.generation, 2);
     assert_eq!(second.snapshot.manifest.files[&t1_path], t1_entry);
     assert_eq!(
         second.snapshot.manifest.resources[&t1_entry.resource_id],
@@ -180,7 +180,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     );
     t2.forked_from = Some(t1_id.clone());
     let initial = world.publish(&[t1.clone(), t2.clone()], origin_a.clone(), 10);
-    assert_eq!(initial.snapshot.head.latest.generation, 1);
+    assert_eq!(initial.snapshot.head.generation, 1);
 
     let a_active = rewrite_codex_transcript(
         &t1.transcript,
@@ -293,7 +293,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         "operation-continuation-b",
         30,
     );
-    assert_eq!(after_b.snapshot.head.latest.generation, 3);
+    assert_eq!(after_b.snapshot.head.generation, 3);
     assert_eq!(after_b.snapshot.manifest.conversations.len(), 2);
 
     let a_active_before_pull = fs::read(&a_active_path).unwrap();
@@ -346,7 +346,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         "operation-continuation-a-second",
         40,
     );
-    assert_eq!(after_a_second.snapshot.head.latest.generation, 4);
+    assert_eq!(after_a_second.snapshot.head.generation, 4);
 
     let b_active_before_refresh = fs::read(&b_active_path).unwrap();
     let refreshed_b_t1 = materialize_thread(
@@ -372,7 +372,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     let local_b_before_noop = world.repo_b.load_conversation_bindings().unwrap();
     let fixed_point = world.publish(&[t1.clone(), t2.clone()], origin_b.clone(), 50);
     assert!(!fixed_point.published);
-    assert_eq!(fixed_point.snapshot.head.latest.generation, 4);
+    assert_eq!(fixed_point.snapshot.head.generation, 4);
     assert_eq!(
         world.repo_a.load_conversation_bindings().unwrap(),
         local_a_before_noop,
@@ -382,16 +382,26 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         local_b_before_noop,
     );
 
-    let reopened_a = V3Repository::from_home_dir(world.repo_a.root().parent().unwrap()).unwrap();
-    let reopened_b = V3Repository::from_home_dir(world.repo_b.root().parent().unwrap()).unwrap();
-    assert!(crate::project_sync_v3::conversation_materialization::recover_conversation_materializations(&reopened_a)
+    let reopened_a =
+        LocalStateRepository::from_home_dir(world.repo_a.root().parent().unwrap()).unwrap();
+    let reopened_b =
+        LocalStateRepository::from_home_dir(world.repo_b.root().parent().unwrap()).unwrap();
+    assert!(
+        crate::project_sync::conversation_materialization::recover_conversation_materializations(
+            &reopened_a
+        )
         .unwrap()
         .completed
-        .is_empty());
-    assert!(crate::project_sync_v3::conversation_materialization::recover_conversation_materializations(&reopened_b)
+        .is_empty()
+    );
+    assert!(
+        crate::project_sync::conversation_materialization::recover_conversation_materializations(
+            &reopened_b
+        )
         .unwrap()
         .completed
-        .is_empty());
+        .is_empty()
+    );
     assert_local_branch_state(
         &reopened_a,
         &scope_a,
@@ -418,7 +428,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
 }
 
 #[test]
-fn schema6_comparison_exposes_distinct_typed_threads_without_guessing_by_title() {
+fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_title() {
     let world = VariantWorld::new();
     let scope = install_scope(
         &world.repo_fresh,
@@ -486,16 +496,15 @@ fn schema6_comparison_exposes_distinct_typed_threads_without_guessing_by_title()
                 local_project_id: scope.project_id.clone(),
                 provider_profile_id: scope.profile_id.clone(),
                 thread_id: t2_id.clone(),
+                forked_from: None,
                 provider_thread_id: Some("local-v2".to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
                 last_observed_file_sha256: Some(sha256(&local_transcript)),
                 last_observed_head_message_id: Some(head_message_id.to_string()),
                 last_observed_lineage_digest: Some(lineage_digest.clone()),
                 last_observed_semantic_digest: Some(semantic_digest.clone()),
-                source_generation: Some(published.snapshot.head.latest.generation),
-                source_manifest_sha256: Some(
-                    published.snapshot.head.latest.manifest_sha256.clone(),
-                ),
+                source_generation: Some(published.snapshot.head.generation),
+                source_manifest_sha256: Some(published.snapshot.head.manifest_sha256.clone()),
                 revision: 0,
                 created_at: 10,
                 updated_at: 20,
@@ -514,7 +523,6 @@ fn schema6_comparison_exposes_distinct_typed_threads_without_guessing_by_title()
             lineage_codec: CODEX_LINEAGE_CODEC_KEY.to_string(),
             source_thread_id: Some("local-v2".to_string()),
             source_cwd: Some(scope.provider_root.to_string_lossy().into_owned()),
-            title: None,
             transcript_logical_path: transcript_path.clone(),
             record_count,
             lineage: local_analysis.lineage,
@@ -533,8 +541,8 @@ fn schema6_comparison_exposes_distinct_typed_threads_without_guessing_by_title()
     let machine = world.repo_fresh.load_bindings().unwrap();
     let binding = machine.active_for(&scope.project_id).unwrap();
     let fetched = world.engine().fetch(&world.bundle_id).unwrap();
-    let mut bytes = crate::project_sync_v3::bundle_engine::PreloadedBytes::new(&fetched);
-    let entries = crate::project_sync_v3::commands::stored_thread_entries(
+    let mut bytes = crate::project_sync::bundle_engine::PreloadedBytes::new(&fetched);
+    let entries = crate::project_sync::commands::thread_entries(
         &world.repo_fresh,
         &fetched.snapshot,
         &mut bytes,
@@ -563,17 +571,13 @@ fn schema6_comparison_exposes_distinct_typed_threads_without_guessing_by_title()
         Some(ConversationRelation::LocalMissing)
     );
     assert_eq!(
-        origin_thread.proposed_action,
-        Some(ConversationPlanActionType::CreateLocal)
+        origin_thread.pull_decision.action,
+        ConversationPlanActionType::CreateLocal
     );
-    assert_eq!(
-        origin_thread.materialization_state,
-        Some(ConversationMaterializationState::StoredOnly)
-    );
-    assert!(!origin_thread.resumable);
     assert!(origin_thread.provider_thread_id.is_none());
     assert!(origin_thread.origin_label.is_some());
-    assert!(!origin_thread.requires_explicit_approval);
+    assert!(!origin_thread.pull_decision.requires_explicit_approval);
+    assert!(origin_thread.pull_decision.selectable);
 
     let bound = entries
         .iter()
@@ -591,27 +595,113 @@ fn schema6_comparison_exposes_distinct_typed_threads_without_guessing_by_title()
         Some(ConversationRelation::CloudPrefixOfLocal)
     );
     assert_eq!(
-        bound.proposed_action,
-        Some(ConversationPlanActionType::FastForwardCloud)
+        bound.push_decision.action,
+        ConversationPlanActionType::FastForwardCloud
     );
-    assert_eq!(
-        bound.materialization_state,
-        Some(ConversationMaterializationState::Resumable)
-    );
-    assert!(bound.resumable);
     assert_eq!(bound.provider_thread_id.as_deref(), Some("local-v2"));
     assert!(bound.origin_label.is_some());
     assert_ne!(origin_thread.thread_id, bound.thread_id);
 }
 
+#[test]
+fn current_schema_comparison_recovers_one_unbound_compatible_ancestor_without_provider_id_matching()
+{
+    let world = VariantWorld::new();
+    let scope = install_scope(
+        &world.repo_fresh,
+        &world.bundle_id,
+        "comparison-recovery",
+        "replica-comparison-recovery",
+    );
+    let thread_id = ThreadId::parse("thread-cloud").unwrap();
+    let cloud = ThreadSpec::new(
+        thread_id.as_str(),
+        "cloud-provider-id",
+        chain("cloud-provider-id", &[("m-a", "base"), ("m-b", "answer")]),
+        world.origin(&world.repo_a, "replica-a"),
+        10,
+    );
+    world.publish(
+        &[cloud.clone()],
+        world.origin(&world.repo_a, "replica-a"),
+        10,
+    );
+
+    let rebound = rewrite_codex_transcript(
+        &cloud.transcript,
+        "cloud-provider-id",
+        "different-local-provider-id",
+        "/tmp/project",
+        &scope.project_root.to_string_lossy(),
+    )
+    .unwrap();
+    let local_transcript = append_message(&rebound, "m-c", "continued locally");
+    let analysis = analyze_codex_transcript(&local_transcript);
+    let record_count = analysis.record_count;
+    let resource_id = "codex:session:different-local-provider-id".to_string();
+    let transcript_path = "state/codex/sessions/different-local-provider-id.jsonl".to_string();
+    let mut captured = CapturedResources::default();
+    captured.conversations.insert(
+        resource_id.clone(),
+        CapturedConversation {
+            provider: CaptureProvider::Codex,
+            lineage_codec: CODEX_LINEAGE_CODEC_KEY.to_string(),
+            source_thread_id: Some("different-local-provider-id".to_string()),
+            source_cwd: Some(scope.project_root.to_string_lossy().into_owned()),
+            transcript_logical_path: transcript_path.clone(),
+            record_count,
+            lineage: analysis.lineage,
+        },
+    );
+    captured.files.insert(
+        transcript_path.clone(),
+        CapturedFile {
+            logical_path: transcript_path,
+            resource_id,
+            bytes: local_transcript,
+            source_mtime: 20,
+            mode: 0o600,
+        },
+    );
+
+    let fetched = world.engine().fetch(&world.bundle_id).unwrap();
+    let mut bytes = crate::project_sync::bundle_engine::PreloadedBytes::new(&fetched);
+    let machine = world.repo_fresh.load_bindings().unwrap();
+    let binding = machine.active_for(&scope.project_id).unwrap();
+    let entries = crate::project_sync::commands::thread_entries(
+        &world.repo_fresh,
+        &fetched.snapshot,
+        &mut bytes,
+        &captured,
+        binding,
+    )
+    .unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].cloud_thread_id.as_ref(), Some(&thread_id));
+    assert_eq!(
+        entries[0].provider_thread_id.as_deref(),
+        Some("different-local-provider-id")
+    );
+    assert_eq!(
+        entries[0].relation,
+        Some(ConversationRelation::CloudPrefixOfLocal)
+    );
+    assert_eq!(
+        entries[0].push_decision.action,
+        ConversationPlanActionType::FastForwardCloud
+    );
+    assert!(entries[0].push_decision.selectable);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn install_active_branch(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     scope: &InstalledScope,
     thread_id: &ThreadId,
     provider_thread_id: &str,
     transcript: &[u8],
-    source: &crate::project_sync_v3::bundle_engine::PublishedBundle,
+    source: &crate::project_sync::bundle_engine::PublishedBundle,
     updated_at: u64,
 ) -> PathBuf {
     let sessions = scope.provider_root.join("sessions");
@@ -645,14 +735,15 @@ fn install_active_branch(
                 local_project_id: scope.project_id.clone(),
                 provider_profile_id: scope.profile_id.clone(),
                 thread_id: thread_id.clone(),
+                forked_from: None,
                 provider_thread_id: Some(provider_thread_id.to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
                 last_observed_file_sha256: Some(sha256(transcript)),
                 last_observed_head_message_id: Some(head_message_id.to_string()),
                 last_observed_lineage_digest: Some(lineage_digest),
                 last_observed_semantic_digest: Some(semantic_digest),
-                source_generation: Some(source.snapshot.head.latest.generation),
-                source_manifest_sha256: Some(source.snapshot.head.latest.manifest_sha256.clone()),
+                source_generation: Some(source.snapshot.head.generation),
+                source_manifest_sha256: Some(source.snapshot.head.manifest_sha256.clone()),
                 revision: 0,
                 created_at: updated_at,
                 updated_at,
@@ -666,16 +757,16 @@ fn install_active_branch(
 #[allow(clippy::too_many_arguments)]
 fn publish_bound_thread(
     world: &VariantWorld,
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     scope: &InstalledScope,
     threads: &[ThreadSpec],
     bound_thread_id: &ThreadId,
     provider_thread_id: &str,
     local_transcript: &[u8],
-    publisher: crate::project_sync_v3::domain::PortableOrigin,
+    publisher: crate::project_sync::domain::PortableOrigin,
     operation_id: &str,
     updated_at: u64,
-) -> crate::project_sync_v3::bundle_engine::FetchedBundle {
+) -> crate::project_sync::bundle_engine::FetchedBundle {
     let engine = world.engine();
     let current = engine.inspect(&world.bundle_id).unwrap();
     let head_token = world.current_head().unwrap();
@@ -685,7 +776,7 @@ fn publish_bound_thread(
         publisher,
         updated_at,
         Some(&current.manifest),
-        Some(head_token),
+        crate::project_sync::bundle_engine::PublishExpectation::Match(head_token),
     );
     let bindings = repository.load_conversation_bindings().unwrap();
     let binding = bindings
@@ -711,23 +802,25 @@ fn publish_bound_thread(
     let operation = ConversationSyncOperation {
         operation_id: ConversationOperationId::parse(operation_id).unwrap(),
         plan_id: Some(PlanId::parse(format!("plan-{operation_id}")).unwrap()),
+        plan_action_id: None,
         direction: ConversationPlanDirection::Push,
         phase: ConversationSyncPhase::Prepared,
         storage_id: world.storage_id.clone(),
         bundle_id: world.bundle_id.clone(),
-        generation: current.head.latest.generation,
-        commit_id: current.head.latest.commit_id,
-        manifest_sha256: current.head.latest.manifest_sha256,
+        generation: current.head.generation,
+        commit_id: current.head.commit_id,
+        manifest_sha256: current.head.manifest_sha256,
         host_id: scope.host_id.clone(),
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
-        provider: crate::project_sync_v3::domain::Provider::Codex,
+        provider: crate::project_sync::domain::Provider::Codex,
         thread_id: bound_thread_id.clone(),
         old_thread_id: None,
         rekey_committed: false,
         result_thread_id: bound_thread_id.clone(),
-        forked_from_provider_thread_id: None,
+        materialized_thread_id: None,
+        binding_forked_from: None,
         provider_thread_id: Some(provider_thread_id.to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
         lineage_digest: Some(lineage_digest),
@@ -750,9 +843,9 @@ fn publish_bound_thread(
             engine
                 .publish(request)
                 .map(|published| ConversationCloudPublication {
-                    generation: published.snapshot.head.latest.generation,
-                    commit_id: published.snapshot.head.latest.commit_id,
-                    manifest_sha256: published.snapshot.head.latest.manifest_sha256,
+                    generation: published.snapshot.head.generation,
+                    commit_id: published.snapshot.head.commit_id,
+                    manifest_sha256: published.snapshot.head.manifest_sha256,
                 })
         },
         || Ok(None),
@@ -769,7 +862,7 @@ fn publish_bound_thread(
 
 #[allow(clippy::too_many_arguments)]
 fn materialize_thread(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     scope: &InstalledScope,
     world: &VariantWorld,
     thread_id: &ThreadId,
@@ -818,23 +911,25 @@ fn materialize_thread(
     let operation = ConversationSyncOperation {
         operation_id: ConversationOperationId::parse(operation_id).unwrap(),
         plan_id: Some(PlanId::parse(format!("plan-{operation_id}")).unwrap()),
+        plan_action_id: None,
         direction: ConversationPlanDirection::Pull,
         phase: ConversationSyncPhase::Prepared,
         storage_id: world.storage_id.clone(),
         bundle_id: world.bundle_id.clone(),
-        generation: fetched.snapshot.head.latest.generation,
-        commit_id: fetched.snapshot.head.latest.commit_id.clone(),
-        manifest_sha256: fetched.snapshot.head.latest.manifest_sha256.clone(),
+        generation: fetched.snapshot.head.generation,
+        commit_id: fetched.snapshot.head.commit_id.clone(),
+        manifest_sha256: fetched.snapshot.head.manifest_sha256.clone(),
         host_id: scope.host_id.clone(),
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
-        provider: crate::project_sync_v3::domain::Provider::Codex,
+        provider: crate::project_sync::domain::Provider::Codex,
         thread_id: thread_id.clone(),
         old_thread_id: None,
         rekey_committed: false,
         result_thread_id: thread_id.clone(),
-        forked_from_provider_thread_id: None,
+        materialized_thread_id: None,
+        binding_forked_from: None,
         provider_thread_id: Some(destination_thread_id.to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
         lineage_digest: Some(lineage_digest),
@@ -912,7 +1007,7 @@ fn target_expectation(path: &Path) -> TargetExpectation {
 }
 
 fn assert_local_branch_state(
-    repository: &V3Repository,
+    repository: &LocalStateRepository,
     scope: &InstalledScope,
     expected: &[(&ThreadId, &str)],
 ) {
@@ -994,7 +1089,7 @@ fn append_message(bytes: &[u8], id: &str, text: &str) -> Vec<u8> {
 }
 
 fn digests(
-    analysis: &crate::project_sync_v3::conversation_codec::CodexTranscriptAnalysis,
+    analysis: &crate::project_sync::conversation_codec::CodexTranscriptAnalysis,
 ) -> (&str, &str) {
     match &analysis.lineage {
         CodecLineage::Complete {
