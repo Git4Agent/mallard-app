@@ -50,7 +50,12 @@ fn committed_codex_fixture_proves_structural_rewrite_and_semantic_continuation()
     let index: Value = serde_json::from_slice(INDEX_FRAGMENT).unwrap();
     let sidecar: Value = serde_json::from_slice(SIDECAR).unwrap();
     assert_eq!(index["id"], "thread-fixture");
-    assert_eq!(index["cwd"], "/fixture/project");
+    assert_eq!(index["thread_name"], "Fixture continuation");
+    assert_eq!(index["updated_at"], "2026-07-22T00:00:06.000000Z");
+    assert!(
+        index.get("cwd").is_none(),
+        "index rows use the provider schema, not Mallard-invented fields"
+    );
     assert_eq!(sidecar["thread_id"], "thread-fixture");
     assert_eq!(sidecar["cwd"], "/fixture/project");
 

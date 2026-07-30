@@ -12,8 +12,8 @@ use crate::project_sync::conversation_materialization::{
 use crate::project_sync::domain::{
     ConversationFileRole, ConversationMaterializationState, ConversationOperationId,
     ConversationPlanActionType, ConversationPlanDirection, ConversationRelation,
-    ConversationSyncOperation, ConversationSyncPhase, LocalConversationBinding, PlanId,
-    TargetExpectation, ThreadId,
+    ConversationSyncOperation, ConversationSyncOperationKind, ConversationSyncPhase,
+    LocalConversationBinding, PlanId, TargetExpectation, ThreadId,
 };
 use crate::project_sync::persistence::LocalStateRepository;
 use crate::project_sync::provider_capture::{
@@ -709,11 +709,7 @@ fn install_active_branch(
     let transcript_path = sessions.join(format!("{provider_thread_id}.jsonl"));
     fs::write(&transcript_path, transcript).unwrap();
     let index_path = scope.provider_root.join("session_index.jsonl");
-    fs::write(
-        &index_path,
-        merge_index_target(None, provider_thread_id, &scope.project_root),
-    )
-    .unwrap();
+    fs::write(&index_path, merge_index_target(None, provider_thread_id)).unwrap();
     let analysis = analyze_codex_transcript(transcript);
     let (head_message_id, lineage_digest, semantic_digest) = match analysis.lineage {
         CodecLineage::Complete {
@@ -816,10 +812,7 @@ fn publish_bound_thread(
         provider_profile_id: scope.profile_id.clone(),
         provider: crate::project_sync::domain::Provider::Codex,
         thread_id: bound_thread_id.clone(),
-        old_thread_id: None,
-        rekey_committed: false,
-        result_thread_id: bound_thread_id.clone(),
-        materialized_thread_id: None,
+        operation: ConversationSyncOperationKind::CloudPublication,
         binding_forked_from: None,
         provider_thread_id: Some(provider_thread_id.to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
@@ -895,11 +888,7 @@ fn materialize_thread(
     let transcript_path = sessions.join(format!("{destination_thread_id}.jsonl"));
     let index_path = scope.provider_root.join("session_index.jsonl");
     let existing_index = fs::read(&index_path).ok();
-    let index = merge_index_target(
-        existing_index.as_deref(),
-        destination_thread_id,
-        &scope.project_root,
-    );
+    let index = merge_index_target(existing_index.as_deref(), destination_thread_id);
     let bindings = repository.load_conversation_bindings().unwrap();
     let existing_binding = bindings.bindings.iter().find(|binding| {
         binding.host_id == scope.host_id
@@ -925,10 +914,7 @@ fn materialize_thread(
         provider_profile_id: scope.profile_id.clone(),
         provider: crate::project_sync::domain::Provider::Codex,
         thread_id: thread_id.clone(),
-        old_thread_id: None,
-        rekey_committed: false,
-        result_thread_id: thread_id.clone(),
-        materialized_thread_id: None,
+        operation: ConversationSyncOperationKind::ProviderMaterialization,
         binding_forked_from: None,
         provider_thread_id: Some(destination_thread_id.to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
@@ -966,7 +952,7 @@ fn materialize_thread(
     transcript_path
 }
 
-fn merge_index_target(existing: Option<&[u8]>, thread_id: &str, cwd: &Path) -> Vec<u8> {
+fn merge_index_target(existing: Option<&[u8]>, thread_id: &str) -> Vec<u8> {
     let mut rows = BTreeMap::<String, serde_json::Value>::new();
     for line in existing
         .unwrap_or_default()
@@ -986,8 +972,8 @@ fn merge_index_target(existing: Option<&[u8]>, thread_id: &str, cwd: &Path) -> V
         thread_id.to_string(),
         serde_json::json!({
             "id": thread_id,
-            "cwd": cwd.to_str().unwrap(),
-            "title": "Thread continuation fixture"
+            "thread_name": "Thread continuation fixture",
+            "updated_at": "2026-07-18T00:00:00.000000Z"
         }),
     );
     let mut output = Vec::new();

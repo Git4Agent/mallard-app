@@ -1025,6 +1025,22 @@ pub(crate) fn parse_session_index_titles(bytes: &[u8]) -> BTreeMap<String, Strin
     .collect()
 }
 
+pub(crate) fn first_codex_user_summary(bytes: &[u8]) -> Option<String> {
+    let mut parser = RolloutParser::new(0);
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty() && line.len() <= MAX_LINE_BYTES)
+    {
+        if let Ok(value) = serde_json::from_slice::<Value>(line) {
+            parser.consume(&value);
+            if parser.summary.is_some() {
+                break;
+            }
+        }
+    }
+    parser.summary.or(parser.fallback_summary)
+}
+
 #[cfg(test)]
 fn parse_rollout_lines<'a>(
     lines: impl IntoIterator<Item = &'a str>,
@@ -2572,6 +2588,23 @@ mod tests {
     use std::io::{BufWriter, Write};
     use std::path::Path;
     use std::process::Command;
+
+    #[test]
+    fn first_user_summary_ignores_metadata_and_normalizes_visible_text() {
+        let bytes = [
+            json!({"type":"session_meta","payload":{"id":"thread-a","cwd":"/tmp/project"}}),
+            json!({"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"  Analyze   the graph  "} ]}}),
+            json!({"type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":"Done"}]}}),
+        ]
+        .into_iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert_eq!(
+            first_codex_user_summary(bytes.as_bytes()).as_deref(),
+            Some("Analyze the graph")
+        );
+    }
 
     fn commit(sha: &str, time: u64) -> GitCommitSummary {
         GitCommitSummary {

@@ -7,11 +7,11 @@
 use std::collections::BTreeMap;
 
 use super::domain::{
-    classify_conversation_relation, ActionId, CanonicalConversationMessage, ConversationBindings,
-    ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationReasonCode, ConversationRelation, HostId, LocalConversationBinding, LocalProjectId,
-    LocalProviderProfileId, Provider, ProviderStateExpectation, ReplicaId, ResourceId,
-    TargetExpectation, ThreadId,
+    classify_conversation_relation, ActionId, CanonicalConversationMessage,
+    ConversationDivergencePlan, ConversationPlanAction, ConversationPlanActionType,
+    ConversationPlanDirection, ConversationReasonCode, ConversationRelation, HostId,
+    LocalProjectId, LocalProviderProfileId, Provider, ProviderStateExpectation, ReplicaId,
+    ResourceId, TargetExpectation, ThreadId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,10 +57,9 @@ pub struct ConversationDecision {
     pub blocked_reason: Option<String>,
 }
 
-/// Map a proven relation to one typed default action. Fork is always the
-/// divergence default; the explicit forces (`ReplaceCloud`, `ReplaceLocal`)
-/// and `TombstoneThread` are never synthesized here; callers add those only
-/// from reviewed user intent.
+/// Map a proven relation to one typed default action. Push never publishes a
+/// divergent or unknown branch: divergence requires a reviewed Pull, and
+/// unknown lineage is blocked. Pull exposes one explicit divergence action.
 pub fn default_conversation_decision(
     direction: ConversationPlanDirection,
     relation: ConversationRelation,
@@ -99,45 +98,8 @@ pub fn default_conversation_decision(
             Relation::LocalPrefixOfCloud => {
                 decision(Action::RequirePull, Reason::LocalPrefixOfCloud)
             }
-            Relation::Diverged => {
-                if !capabilities.local_safely_capturable {
-                    decision(Action::Blocked, Reason::CodecUnsupported)
-                } else if matches!(
-                    capabilities.binding,
-                    BindingResolution::Bound | BindingResolution::UniqueCompatibleAncestor
-                ) {
-                    decision(Action::Fork, Reason::Diverged)
-                } else {
-                    decision(
-                        Action::Blocked,
-                        if capabilities.binding == BindingResolution::Ambiguous {
-                            Reason::AmbiguousBinding
-                        } else {
-                            Reason::MissingBinding
-                        },
-                    )
-                }
-            }
-            Relation::Unknown => {
-                if capabilities.local_safely_capturable
-                    && capabilities.binding == BindingResolution::Bound
-                {
-                    // Content is preserved on both sides, so forking under
-                    // unproven ancestry is safe by construction.
-                    decision(Action::Fork, Reason::UnknownLineage)
-                } else {
-                    decision(
-                        Action::Blocked,
-                        if capabilities.binding == BindingResolution::Ambiguous {
-                            Reason::AmbiguousBinding
-                        } else if !capabilities.local_safely_capturable {
-                            Reason::CodecUnsupported
-                        } else {
-                            Reason::MissingBinding
-                        },
-                    )
-                }
-            }
+            Relation::Diverged => decision(Action::RequirePull, Reason::Diverged),
+            Relation::Unknown => decision(Action::Blocked, Reason::UnknownLineage),
             Relation::LocalMissing => decision(Action::NoOp, Reason::LocalMissing),
             Relation::CloudMissing => {
                 if capabilities.binding == BindingResolution::Ambiguous {
@@ -176,14 +138,18 @@ pub fn default_conversation_decision(
                 }
             }
             Relation::Diverged => {
-                if !capabilities.cloud_safely_readable || !capabilities.destination_codec_resumable
+                if !capabilities.local_safely_capturable
+                    || !capabilities.cloud_safely_readable
+                    || !capabilities.destination_codec_resumable
                 {
                     decision(Action::StoreOnly, Reason::CodecUnsupported)
+                } else if !capabilities.provider_quiescent {
+                    decision(Action::StoreOnly, Reason::ProviderNotQuiescent)
                 } else if matches!(
                     capabilities.binding,
                     BindingResolution::Bound | BindingResolution::UniqueCompatibleAncestor
                 ) {
-                    decision(Action::Fork, Reason::Diverged)
+                    decision(Action::ResolveDivergence, Reason::Diverged)
                 } else {
                     decision(
                         Action::Blocked,
@@ -223,7 +189,7 @@ fn decision(
         action,
         ConversationPlanActionType::FastForwardLocal
             | ConversationPlanActionType::FastForwardCloud
-            | ConversationPlanActionType::Fork
+            | ConversationPlanActionType::ResolveDivergence
             | ConversationPlanActionType::CreateCloud
             | ConversationPlanActionType::CreateLocal
             | ConversationPlanActionType::ReplaceLocal
@@ -279,7 +245,7 @@ pub struct ConversationPlanActionRequest<'a> {
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
     pub thread_id: ThreadId,
-    pub result_thread_id: Option<ThreadId>,
+    pub divergence: Option<ConversationDivergencePlan>,
     pub source_resource_id: Option<ResourceId>,
     pub proposed_provider_thread_id: Option<String>,
     pub required_codec: String,
@@ -318,7 +284,7 @@ pub fn build_conversation_plan_action(
         local_project_id: request.local_project_id,
         provider_profile_id: request.provider_profile_id,
         thread_id: request.thread_id,
-        result_thread_id: request.result_thread_id,
+        divergence: request.divergence,
         source_resource_id: request.source_resource_id,
         proposed_provider_thread_id: request.proposed_provider_thread_id,
         required_codec: request.required_codec,
@@ -512,76 +478,14 @@ pub fn validate_conversation_action_pins(
     }
     if matches!(
         action.action,
-        ConversationPlanActionType::FastForwardLocal | ConversationPlanActionType::ReplaceLocal
+        ConversationPlanActionType::FastForwardLocal
+            | ConversationPlanActionType::ResolveDivergence
+            | ConversationPlanActionType::ReplaceLocal
     ) && !current.provider_quiescent
     {
         return Err(ConversationStalePin::ProviderQuiescence);
     }
     Ok(())
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConversationBindingScope {
-    pub host_id: HostId,
-    pub replica_id: ReplicaId,
-    pub local_project_id: LocalProjectId,
-    pub provider_profile_id: LocalProviderProfileId,
-}
-
-/// Move one local conversation binding to a freshly minted thread. This is
-/// the core fork primitive: identity converges while content never does.
-/// Callers invoke it inside `LocalStateRepository::mutate_conversation_bindings`, so
-/// the rekey is one atomic document replacement. The provider thread ID and
-/// transcript are deliberately untouched, and the cloud source pins are
-/// cleared because the minted thread has no published counterpart yet — the
-/// journal's binding commit re-pins them when a publication completes.
-pub fn rekey_thread_binding(
-    document: &mut ConversationBindings,
-    scope: &ConversationBindingScope,
-    old_thread_id: &ThreadId,
-    result_thread_id: &ThreadId,
-    expected_document_revision: u64,
-    expected_binding_revision: u64,
-    updated_at: u64,
-) -> Result<LocalConversationBinding, String> {
-    if document.revision != expected_document_revision {
-        return Err("conversation bindings changed after review".to_string());
-    }
-    if old_thread_id == result_thread_id {
-        return Err("thread fork must mint a distinct thread id".to_string());
-    }
-    if document
-        .bindings
-        .iter()
-        .any(|binding| binding_in_scope(binding, scope) && binding.thread_id == *result_thread_id)
-    {
-        return Err("fork result thread is already bound".to_string());
-    }
-
-    let binding_index = document
-        .bindings
-        .iter()
-        .position(|binding| binding_in_scope(binding, scope) && binding.thread_id == *old_thread_id)
-        .ok_or_else(|| "fork source binding disappeared".to_string())?;
-    if document.bindings[binding_index].revision != expected_binding_revision {
-        return Err("conversation binding changed after review".to_string());
-    }
-
-    let binding = &mut document.bindings[binding_index];
-    binding.thread_id = result_thread_id.clone();
-    binding.forked_from = Some(old_thread_id.clone());
-    binding.source_generation = None;
-    binding.source_manifest_sha256 = None;
-    binding.revision = binding.revision.saturating_add(1);
-    binding.updated_at = updated_at;
-    Ok(binding.clone())
-}
-
-fn binding_in_scope(binding: &LocalConversationBinding, scope: &ConversationBindingScope) -> bool {
-    binding.host_id == scope.host_id
-        && binding.replica_id == scope.replica_id
-        && binding.local_project_id == scope.local_project_id
-        && binding.provider_profile_id == scope.provider_profile_id
 }
 
 #[cfg(test)]
@@ -618,7 +522,8 @@ mod tests {
             ConversationRelation::Unknown,
             ConversationCapabilities::default(),
         );
-        assert_eq!(bound.action, ConversationPlanActionType::Fork);
+        assert_eq!(bound.action, ConversationPlanActionType::Blocked);
+        assert_eq!(bound.reason_code, ConversationReasonCode::UnknownLineage);
 
         let missing = default_conversation_decision(
             ConversationPlanDirection::Push,
@@ -629,7 +534,7 @@ mod tests {
             },
         );
         assert_eq!(missing.action, ConversationPlanActionType::Blocked);
-        assert_eq!(missing.reason_code, ConversationReasonCode::MissingBinding);
+        assert_eq!(missing.reason_code, ConversationReasonCode::UnknownLineage);
 
         let pull = default_conversation_decision(
             ConversationPlanDirection::Pull,
@@ -640,19 +545,21 @@ mod tests {
     }
 
     #[test]
-    fn fork_is_the_divergence_default_in_both_directions() {
+    fn divergence_requires_pull_on_push_and_resolution_on_pull() {
         let push = default_conversation_decision(
             ConversationPlanDirection::Push,
             ConversationRelation::Diverged,
             ConversationCapabilities::default(),
         );
-        assert_eq!(push.action, ConversationPlanActionType::Fork);
+        assert_eq!(push.action, ConversationPlanActionType::RequirePull);
+        assert!(!push.selectable);
         let pull = default_conversation_decision(
             ConversationPlanDirection::Pull,
             ConversationRelation::Diverged,
             ConversationCapabilities::default(),
         );
-        assert_eq!(pull.action, ConversationPlanActionType::Fork);
+        assert_eq!(pull.action, ConversationPlanActionType::ResolveDivergence);
+        assert!(pull.selected_by_default);
         let create = default_conversation_decision(
             ConversationPlanDirection::Push,
             ConversationRelation::CloudMissing,
@@ -716,7 +623,7 @@ mod tests {
             );
             assert!(fast_forward.selected_by_default);
 
-            let fork = default_conversation_decision(
+            let resolution = default_conversation_decision(
                 ConversationPlanDirection::Pull,
                 ConversationRelation::Diverged,
                 ConversationCapabilities {
@@ -724,8 +631,11 @@ mod tests {
                     ..ConversationCapabilities::default()
                 },
             );
-            assert_eq!(fork.action, ConversationPlanActionType::Fork);
-            assert!(fork.selected_by_default);
+            assert_eq!(
+                resolution.action,
+                ConversationPlanActionType::ResolveDivergence
+            );
+            assert!(resolution.selected_by_default);
         }
 
         let ambiguous_new_thread = default_conversation_decision(

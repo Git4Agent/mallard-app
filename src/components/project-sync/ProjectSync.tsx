@@ -63,6 +63,7 @@ import { projectSyncApi } from "./api";
 import {
   applyPullReview,
   beginPullReview,
+  hasPendingRestoreMutations,
   loadPullReviewSupport,
   type PullApplyPhase,
   type PullReviewSelection,
@@ -1696,6 +1697,35 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setRestoreBinding(targetBinding);
     setRestoreProjectName(displayName);
     try {
+      const pendingDivergence = await projectSyncApi.getPendingCodexDivergence(
+        targetBinding.local_project_id,
+      );
+      if (restoreRequest.current !== requestId) return null;
+      if (pendingDivergence?.codex_fork_checkpoint) {
+        if (!pendingDivergence.plan_id) {
+          throw new Error("The pending Codex fork no longer has its reviewed Pull plan.");
+        }
+        const pendingPlan = await projectSyncApi.getRestorePlan(pendingDivergence.plan_id);
+        if (restoreRequest.current !== requestId) return null;
+        const pendingAction = pendingPlan.conversation_actions.find(
+          (action) => action.action_id === pendingDivergence.codex_fork_checkpoint?.action_id,
+        );
+        if (
+          pendingPlan.storage_id !== storageId
+          || pendingPlan.bundle_id !== bundleId
+          || pendingPlan.host_id !== targetBinding.host_id
+          || pendingPlan.replica_id !== targetBinding.replica_id
+          || pendingAction?.local_project_id !== targetBinding.local_project_id
+        ) {
+          throw new Error("The pending Codex fork belongs to a different Pull scope.");
+        }
+        setRestorePlan(pendingPlan);
+        setRestoreResult(pendingDivergence);
+        setPullApplyPhase("complete");
+        setReviewSupportLoading(false);
+        setNotice(`Resume the pending Codex fork for ${displayName}. The original conversation has not been replaced.`);
+        return null;
+      }
       // The project-data review is the primary Pull surface. Render it as soon as it
       // is ready; optional dependency/readiness checks must never hide a valid
       // restore plan or its Apply button.
@@ -2062,6 +2092,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       for (const action of currentRestorePlan.actions) {
         resourceByAction.set(action.action_id, action.resource_id);
       }
+      for (const action of currentRestorePlan.conversation_actions ?? []) {
+        resourceByAction.set(
+          action.action_id,
+          action.source_resource_id ?? `${action.provider}:conversation:${action.thread_id}`,
+        );
+      }
       for (const action of currentDependencyPlan?.actions ?? []) {
         resourceByAction.set(action.action_id, action.resource_id);
       }
@@ -2111,9 +2147,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         return next;
       });
 
-      // Restore plans remain single-use. Refresh both aligned plans after a
-      // partial pass so remaining setup is presented against one current
-      // generation; dependency plans themselves also support direct retry.
+      if (result.restoreResult?.status !== undefined
+        && result.restoreResult.status !== "complete") {
+        return;
+      }
+
+      // Refresh both aligned plans after a partial pass so remaining setup is
+      // presented against one current generation.
       const approvedThisPass = new Set([
         ...selection.restoreActionIds,
         ...selection.dependencyActionIds,
@@ -2147,6 +2187,136 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (restoreRequest.current === requestId) {
         setPullApplyPhase("complete");
         setRestoreError(errorMessage(reason));
+      }
+    } finally {
+      if (restoreRequest.current === requestId) setBusy(false);
+    }
+  };
+
+  const verifyCodexFork = async (
+    operationId: string,
+    providerThreadId: string | null,
+  ) => {
+    if (!restorePlan) return;
+    const requestId = restoreRequest.current;
+    const checkpointActionId = restoreResult?.codex_fork_checkpoint?.action_id;
+    setBusy(true);
+    setRestoreError(null);
+    try {
+      const result = await projectSyncApi.resumeCodexDivergence(
+        operationId,
+        providerThreadId,
+      );
+      if (restoreRequest.current !== requestId) return;
+      setRestoreResult(result);
+      setPullApplyPhase("complete");
+      if (result.status !== "complete" || !result.success) return;
+      const appliedActionIds = new Set(result.applied_action_ids ?? []);
+      setCompletedPullActionIds((current) => new Set([...current, ...appliedActionIds]));
+      const actionId = checkpointActionId ?? [...appliedActionIds][0];
+      const action = restorePlan.conversation_actions.find(
+        (candidate) => candidate.action_id === actionId,
+      );
+      if (action) {
+        const resourceId = action.source_resource_id
+          ?? `${action.provider}:conversation:${action.thread_id}`;
+        setCompletedPullResourceIds((current) => new Set([...current, resourceId]));
+        setFailedPullResourceIds((current) => {
+          const next = new Set(current);
+          next.delete(resourceId);
+          return next;
+        });
+      }
+      setHistoryRefreshEpoch((epoch) => epoch + 1);
+      setProjectTabResetEpoch((epoch) => epoch + 1);
+      setNotice("Codex fork verified. The cloud conversation was restored into the original thread.");
+      if (restoreBinding) {
+        setReviewSupportLoading(true);
+        try {
+          const nextRestore = await projectSyncApi.planRestore(
+            restorePlan.storage_id,
+            restorePlan.bundle_id,
+            restoreBinding,
+          );
+          if (restoreRequest.current !== requestId) return;
+          setRestorePlan(nextRestore);
+          if (!hasPendingRestoreMutations(nextRestore)) {
+            const finalization = await projectSyncApi.applyRestore(
+              nextRestore.plan_id,
+              [],
+              [],
+            );
+            if (restoreRequest.current !== requestId) return;
+            if (!finalization.success || finalization.status !== "complete") {
+              throw new Error("The conversation conflict is resolved, but the Pull baseline could not be finalized.");
+            }
+          }
+          const support = await loadPullReviewSupport(projectSyncApi, nextRestore);
+          if (restoreRequest.current !== requestId) return;
+          setDependencyPlan(support.dependencyPlan);
+          setReadiness(support.readiness);
+          if (support.errors.length > 0) {
+            setRestoreError(`The conversation conflict is resolved. Remaining checks: ${support.errors.join(" ")}`);
+          }
+        } catch (reason) {
+          if (restoreRequest.current === requestId) {
+            setRestoreError(`The conversation conflict is resolved, but remaining changes must be refreshed: ${errorMessage(reason)}`);
+          }
+        } finally {
+          if (restoreRequest.current === requestId) setReviewSupportLoading(false);
+        }
+      }
+    } catch (reason) {
+      if (restoreRequest.current === requestId) {
+        setRestoreError(errorMessage(reason));
+        setPullApplyPhase("complete");
+      }
+    } finally {
+      if (restoreRequest.current === requestId) setBusy(false);
+    }
+  };
+
+  const cancelCodexFork = async (operationId: string) => {
+    const requestId = restoreRequest.current;
+    setBusy(true);
+    setRestoreError(null);
+    try {
+      await projectSyncApi.cancelCodexDivergence(operationId);
+      if (restoreRequest.current !== requestId) return;
+      setRestoreResult(null);
+      setPullApplyPhase("idle");
+      setNotice("Codex fork checkpoint canceled. The original conversation was not replaced.");
+    } catch (reason) {
+      if (restoreRequest.current === requestId) setRestoreError(errorMessage(reason));
+    } finally {
+      if (restoreRequest.current === requestId) setBusy(false);
+    }
+  };
+
+  const restartCodexAppAfterPull = async (
+    operationId: string,
+    appKind: "codex" | "codex_plus_plus",
+  ) => {
+    const requestId = restoreRequest.current;
+    setBusy(true);
+    try {
+      const result = await projectSyncApi.restartCodexAppAfterPull(
+        operationId,
+        appKind,
+        true,
+      );
+      if (restoreRequest.current !== requestId) return;
+      if (result.success) {
+        setRestoreResult((current) => current
+          ? { ...current, codex_app_refresh: null }
+          : current);
+        setNotice(result.message);
+      } else {
+        setNotice(`Pull is complete. ${result.message}`);
+      }
+    } catch (reason) {
+      if (restoreRequest.current === requestId) {
+        setNotice(`Pull is complete. ${errorMessage(reason)}`);
       }
     } finally {
       if (restoreRequest.current === requestId) setBusy(false);
@@ -2457,6 +2627,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         busy={busy}
         error={restoreError}
         onApply={(selection) => void applyReview(selection)}
+        onVerifyCodexFork={(operationId, providerThreadId) => {
+          void verifyCodexFork(operationId, providerThreadId);
+        }}
+        onCancelCodexFork={(operationId) => {
+          void cancelCodexFork(operationId);
+        }}
+        onRestartCodexApp={(operationId, appKind) => {
+          void restartCodexAppAfterPull(operationId, appKind);
+        }}
         onRefresh={() => void refreshRestore()}
         onBack={closePullReview}
       />

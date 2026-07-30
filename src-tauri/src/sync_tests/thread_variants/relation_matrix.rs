@@ -6,10 +6,10 @@ use crate::project_sync::conversation_sync::{
     ConversationPlanActionRequest,
 };
 use crate::project_sync::domain::{
-    classify_conversation_relation, ActionId, ConversationPlanAction, ConversationPlanActionType,
-    ConversationPlanDirection, ConversationReasonCode, ConversationRelation, HostId,
-    LocalProjectId, LocalProviderProfileId, PlanId, Provider, ProviderStateExpectation, ReplicaId,
-    ResourceId, TargetExpectation, ThreadId,
+    classify_conversation_relation, ActionId, CodexForkExecutor, ConversationDivergencePlan,
+    ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
+    ConversationReasonCode, ConversationRelation, HostId, LocalProjectId, LocalProviderProfileId,
+    PlanId, Provider, ProviderStateExpectation, ReplicaId, ResourceId, TargetExpectation, ThreadId,
 };
 use std::collections::BTreeMap;
 
@@ -66,15 +66,15 @@ fn complete_push_pull_relation_matrix_plans_and_revalidates() {
             local: Some(local_long),
             cloud: Some(cloud_long),
             relation: ConversationRelation::Diverged,
-            push: ConversationPlanActionType::Fork,
-            pull: ConversationPlanActionType::Fork,
+            push: ConversationPlanActionType::RequirePull,
+            pull: ConversationPlanActionType::ResolveDivergence,
         },
         MatrixCase {
             name: "reused_ids_changed_semantics",
             local: Some(changed_semantics),
             cloud: Some(base.clone()),
             relation: ConversationRelation::Unknown,
-            push: ConversationPlanActionType::Fork,
+            push: ConversationPlanActionType::Blocked,
             pull: ConversationPlanActionType::StoreOnly,
         },
         MatrixCase {
@@ -82,8 +82,8 @@ fn complete_push_pull_relation_matrix_plans_and_revalidates() {
             local: Some(different_ids),
             cloud: Some(base),
             relation: ConversationRelation::Diverged,
-            push: ConversationPlanActionType::Fork,
-            pull: ConversationPlanActionType::Fork,
+            push: ConversationPlanActionType::RequirePull,
+            pull: ConversationPlanActionType::ResolveDivergence,
         },
         MatrixCase {
             name: "local_missing",
@@ -138,7 +138,7 @@ fn complete_push_pull_relation_matrix_plans_and_revalidates() {
                 local_project_id: template.local_project_id,
                 provider_profile_id: template.provider_profile_id,
                 thread_id: template.thread_id,
-                result_thread_id: template.result_thread_id,
+                divergence: template.divergence,
                 source_resource_id: template.source_resource_id,
                 proposed_provider_thread_id: template.proposed_provider_thread_id,
                 required_codec: template.required_codec,
@@ -238,7 +238,6 @@ pub(super) fn reviewed_action(
     if matches!(
         action_type,
         ConversationPlanActionType::FastForwardLocal
-            | ConversationPlanActionType::Fork
             | ConversationPlanActionType::CreateLocal
             | ConversationPlanActionType::ReplaceLocal
     ) {
@@ -250,8 +249,37 @@ pub(super) fn reviewed_action(
         });
         current_provider_state.insert(target, TargetExpectation::Absent);
     }
-    let result_thread_id = (action_type == ConversationPlanActionType::Fork)
-        .then(|| ThreadId::parse("thread-forked").unwrap());
+    let divergence = (action_type == ConversationPlanActionType::ResolveDivergence).then(|| {
+        let target = "/tmp/provider/rollout-source-native.jsonl".to_string();
+        provider_state.push(ProviderStateExpectation {
+            target_path: target.clone(),
+            expectation: TargetExpectation::Sha256("d".repeat(64)),
+        });
+        current_provider_state.insert(target, TargetExpectation::Sha256("d".repeat(64)));
+        ConversationDivergencePlan {
+            available_resolutions: vec![
+                crate::project_sync::domain::ConversationDivergenceResolution::PreserveLocalWithNativeFork,
+                crate::project_sync::domain::ConversationDivergenceResolution::UseCloudOnly,
+            ],
+            preserved_thread_id: ThreadId::parse("thread-preserved").unwrap(),
+            source_provider_thread_id: "source-native".to_string(),
+            local_lineage_digest: "b".repeat(64),
+            local_semantic_digest: "c".repeat(64),
+            pinned_local_title: Some("Local title".to_string()),
+            pinned_cloud_title: Some("Cloud title".to_string()),
+            desired_fork_name:
+                "Local title — local before Pull · 2026-07-29 18:42Z".to_string(),
+            desired_original_name: Some("Cloud title".to_string()),
+            codex_executable: "/tmp/codex".to_string(),
+            codex_executable_sha256: "e".repeat(64),
+            available_executors: vec![
+                CodexForkExecutor::AppServerStdio,
+                CodexForkExecutor::NativePty,
+                CodexForkExecutor::Manual,
+            ],
+            pre_existing_children: Vec::new(),
+        }
+    });
     let host_id = HostId::parse("11111111111111111111111111111111").unwrap();
     let replica_id = ReplicaId::parse("replica-a").unwrap();
     let local_project_id = LocalProjectId::parse("project-a").unwrap();
@@ -268,7 +296,7 @@ pub(super) fn reviewed_action(
         local_project_id: local_project_id.clone(),
         provider_profile_id: provider_profile_id.clone(),
         thread_id: ThreadId::parse("thread-a").unwrap(),
-        result_thread_id,
+        divergence,
         source_resource_id: Some(ResourceId::parse("codex:conversation:source").unwrap()),
         proposed_provider_thread_id: provider_thread_id,
         required_codec: "codex.lineage.v1".to_string(),

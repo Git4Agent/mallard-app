@@ -4653,6 +4653,18 @@ summary:focus-visible {
 
 .sync-pull-result-details > div { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
 .sync-pull-result-details > div > span { display: grid; grid-template-columns: minmax(180px, 0.45fr) 1fr; gap: 8px; color: var(--red); }
+.sync-divergence-result {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-raised);
+}
+.sync-divergence-result dl { margin: 6px 0 0; display: grid; gap: 4px; }
+.sync-divergence-result dl > div { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px; }
+.sync-divergence-result dt { color: var(--text-3); }
+.sync-divergence-result dd { margin: 0; overflow-wrap: anywhere; color: var(--text-1); }
+.sync-divergence-result > small { display: block; margin-top: 7px; color: var(--amber); line-height: 1.4; }
 
 .sync-pull-apply-bar {
   position: sticky;
@@ -10509,4 +10521,171 @@ button.sync-project-file-expand { cursor: pointer; }
 
 .sync-history-older-inert[open] > summary {
   margin-bottom: 8px;
+}
+
+.sync-divergence-resolutions {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.sync-divergence-card,
+.sync-fork-checkpoint {
+  border: 1px solid color-mix(in srgb, var(--yellow) 38%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--yellow) 5%, var(--bg-1));
+}
+
+.sync-divergence-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.sync-divergence-card legend {
+  padding: 0 5px;
+  color: var(--text-0);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sync-divergence-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.sync-divergence-option:has(input:checked) {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.sync-divergence-option span {
+  display: grid;
+  gap: 3px;
+}
+
+.sync-divergence-option strong {
+  color: var(--text-0);
+  font-size: 12px;
+}
+
+.sync-divergence-option strong em {
+  margin-left: 5px;
+  color: var(--accent);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.sync-divergence-option small,
+.sync-divergence-unselected,
+.sync-divergence-confirm {
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.sync-divergence-confirm {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 8px;
+  color: var(--yellow);
+}
+
+.sync-divergence-preview,
+.sync-fork-checkpoint dl {
+  display: grid;
+  gap: 4px;
+  margin: 4px 8px 0;
+}
+
+.sync-divergence-preview div,
+.sync-fork-checkpoint dl div {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.sync-divergence-preview dt,
+.sync-fork-checkpoint dt {
+  color: var(--text-3);
+  font-size: 10px;
+}
+
+.sync-divergence-preview dd,
+.sync-fork-checkpoint dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-1);
+  font-size: 10.5px;
+}
+
+.sync-fork-checkpoint {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.sync-fork-checkpoint > div {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.sync-fork-checkpoint > div > span {
+  display: grid;
+  gap: 3px;
+}
+
+.sync-fork-checkpoint small,
+.sync-fork-checkpoint label span {
+  color: var(--text-2);
+  font-size: 10.5px;
+}
+
+.sync-fork-checkpoint label {
+  display: grid;
+  gap: 5px;
+  color: var(--text-1);
+  font-size: 11px;
+}
+
+.sync-fork-checkpoint input[type="text"] {
+  width: 100%;
+}
+
+.sync-app-refresh {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-1);
+}
+
+.sync-app-refresh > div,
+.sync-app-refresh label {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.sync-app-refresh > div > span {
+  display: grid;
+  gap: 3px;
+}
+
+.sync-app-refresh small,
+.sync-app-refresh label {
+  color: var(--text-2);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.sync-app-refresh button {
+  justify-self: start;
 }

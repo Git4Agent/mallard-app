@@ -11,9 +11,11 @@ import type {
   BundleRecipe,
   BundleSnapshotSummary,
   CapabilityStatusReport,
+  CodexAppRestartResult,
   CodexConversationPathAudit,
   CodexConversationPathRepairResult,
   ConnectProjectBundleRequest,
+  ConversationResolutionSelection,
   CodexThreadDetailsPage,
   CreateSetupDraftResult,
   DependencyPlan,
@@ -231,8 +233,42 @@ export const projectSyncApi = {
   planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) =>
     invoke<RestorePlan>("plan_bundle_restore", { storageId, bundleId, binding }),
 
-  applyRestore: (planId: string, approvedActionIds: string[]) =>
-    invoke<RestoreResult>("apply_bundle_restore", { planId, approvedActionIds }),
+  getRestorePlan: (planId: string) =>
+    invoke<RestorePlan>("get_restore_plan", { planId }),
+
+  getPendingCodexDivergence: (localProjectId: string) =>
+    invoke<RestoreResult | null>("get_pending_codex_divergence", { localProjectId }),
+
+  applyRestore: (
+    planId: string,
+    approvedActionIds: string[],
+    conversationResolutions: ConversationResolutionSelection[],
+  ) => invoke<RestoreResult>("apply_bundle_restore", {
+    planId,
+    approvedActionIds,
+    conversationResolutions,
+  }),
+
+  resumeCodexDivergence: (operationId: string, providerThreadId?: string | null) =>
+    invoke<RestoreResult>("resume_codex_divergence", {
+      operationId,
+      providerThreadId: providerThreadId ?? null,
+    }),
+
+  cancelCodexDivergence: (operationId: string) =>
+    invoke<boolean>("cancel_codex_divergence", { operationId }),
+
+  restartCodexAppAfterPull: (
+    operationId: string,
+    appKind: "codex" | "codex_plus_plus",
+    activeChatsComplete: boolean,
+  ) => invoke<CodexAppRestartResult>("restart_codex_app_after_pull", {
+    request: {
+      operation_id: operationId,
+      app_kind: appKind,
+      active_chats_complete: activeChatsComplete,
+    },
+  }),
 
   planDependencies: (restorePlanId: string) =>
     invoke<DependencyPlan>("plan_dependencies", { restorePlanId }),

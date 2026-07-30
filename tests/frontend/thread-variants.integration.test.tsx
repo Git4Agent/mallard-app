@@ -92,7 +92,7 @@ function decision(
   const selectable = [
     "fast_forward_local",
     "fast_forward_cloud",
-    "fork",
+    "resolve_divergence",
     "create_cloud",
     "create_local",
     "replace_local",

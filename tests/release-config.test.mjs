@@ -83,6 +83,30 @@ test("application contains no automatic updater", async () => {
   }
 });
 
+test("Codex native fork is compiled in without an Expect helper", async () => {
+  const [tauriConfigSource, cargoSource, nativeForkSource] = await Promise.all([
+    read("src-tauri/tauri.conf.json"),
+    read("src-tauri/Cargo.toml"),
+    read("src-tauri/src/project_sync/codex_native_fork.rs"),
+  ]);
+  const tauriConfig = JSON.parse(tauriConfigSource);
+
+  await assert.rejects(
+    access(new URL("scripts/codex-fork-and-exit", projectUrl)),
+    (error) => error?.code === "ENOENT",
+  );
+  assert.match(cargoSource, /^portable-pty = "0\.9"$/m);
+  assert.match(nativeForkSource, /portable_pty::\{native_pty_system,/);
+  assert.match(nativeForkSource, /let pty_system = native_pty_system\(\);/);
+  assert.match(nativeForkSource, /pty_system\.openpty/);
+  assert.doesNotMatch(
+    nativeForkSource,
+    /include_bytes!|PTY_HELPER|pty_helper|\/usr\/bin\/expect|codex-fork-and-exit/,
+  );
+  assert.equal(tauriConfig.bundle.resources, undefined);
+  assert.equal(tauriConfig.bundle.externalBin, undefined);
+});
+
 test("desktop release builds one verified Apple Silicon DMG", async () => {
   const [tauriConfigSource, workflow, releaseGuide, packageSource, tauriBuildScript] = await Promise.all([
     read("src-tauri/tauri.conf.json"),

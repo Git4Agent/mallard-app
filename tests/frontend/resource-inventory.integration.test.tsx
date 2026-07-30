@@ -212,7 +212,7 @@ test("non-uploadable sessions cannot remain in the active Push selection", () =>
   );
 });
 
-test("fork-aware divergence requires a portable cloud thread identity", () => {
+test("conversation divergence blocks Push even with a portable cloud identity", () => {
   const resource = conversation("codex:session:diverged");
   const entry = {
     thread_id: "provider-diverged",
@@ -221,8 +221,8 @@ test("fork-aware divergence requires a portable cloud thread identity", () => {
     state: "diverged" as const,
     local_present: true,
     storage_present: true,
-    push_decision: decision("fork", "diverged", true),
-    pull_decision: decision("fork", "diverged", true),
+    push_decision: decision("require_pull", "diverged"),
+    pull_decision: decision("resolve_divergence", "diverged", true),
   };
   const comparison = (typed: boolean): ThreadSyncComparison => ({
     project_id: "project-a",
@@ -239,8 +239,13 @@ test("fork-aware divergence requires a portable cloud thread identity", () => {
 
   assert.deepEqual(
     pushReviewBlockers(new Set([resource.resource_id]), comparison(true)),
-    [],
-    "a typed Fork can publish without treating the preserved cloud branch as a blocker",
+    [{
+      kind: "storage",
+      step: "history",
+      resourceId: resource.resource_id,
+      state: "diverged",
+    }],
+    "a divergence must be resolved by Pull before any Push advances storage",
   );
   assert.deepEqual(
     pushReviewBlockers(new Set([resource.resource_id]), comparison(false)),
@@ -250,7 +255,7 @@ test("fork-aware divergence requires a portable cloud thread identity", () => {
       resourceId: resource.resource_id,
       state: "diverged",
     }],
-    "a Fork row without a portable cloud identity has no executable typed plan",
+    "a divergence without a portable cloud identity is also blocked",
   );
 });
 

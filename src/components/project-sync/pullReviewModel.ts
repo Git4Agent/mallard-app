@@ -1,5 +1,6 @@
 import type {
   ConversationPlanAction,
+  ConversationResolutionSelection,
   DependencyAction,
   DependencyPlan,
   ProjectProvider,
@@ -214,8 +215,8 @@ export function buildPullReviewItems(
   for (const action of plan.conversation_actions ?? []) {
     const resourceId = action.source_resource_id
       ?? `${action.provider}:conversation:${action.thread_id}`;
-    const detail = action.action === "fork"
-      ? "Keeps the local branch and restores the cloud branch as a separate conversation."
+    const detail = action.action === "resolve_divergence"
+      ? "Preserves the local branch as a Codex-native fork, then restores the cloud branch into the original conversation."
       : action.action === "create_local"
         ? "Restores this cloud thread as a new local conversation."
         : action.action === "fast_forward_local"
@@ -378,7 +379,7 @@ export function itemKindLabel(item: PullReviewItem): string {
 function conversationActionSelectable(action: ConversationPlanAction): boolean {
   return [
     "fast_forward_local",
-    "fork",
+    "resolve_divergence",
     "create_local",
     "replace_local",
   ].includes(action.action);
@@ -393,13 +394,26 @@ export function buildPullReviewSelection(
   selected: ReadonlySet<string>,
   completedActionIds: ReadonlySet<string>,
   completedResourceIds: ReadonlySet<string>,
+  conversationResolutions: ReadonlyMap<string, ConversationResolutionSelection> = new Map(),
 ): PullReviewSelection {
   const chosen = items.filter((item) => selected.has(item.resourceId) && !completedResourceIds.has(item.resourceId));
+  const chosenConversationActions = chosen.flatMap((item) => (
+    item.conversationActions.filter((action) => (
+      conversationActionSelectable(action) && !completedActionIds.has(action.action_id)
+    ))
+  ));
   return {
     resourceIds: chosen
       .filter((item) => pendingIds(item, completedActionIds).length > 0)
       .map((item) => item.resourceId),
     restoreActionIds: chosen.flatMap((item) => restoreActionIds(item).filter((id) => !completedActionIds.has(id))),
     dependencyActionIds: chosen.flatMap((item) => dependencyActionIds(item).filter((id) => !completedActionIds.has(id))),
+    conversationResolutions: chosenConversationActions
+      .filter((action) => action.action === "resolve_divergence")
+      .map((action) => conversationResolutions.get(action.action_id) ?? {
+        action_id: action.action_id,
+        resolution: "preserve_local_with_native_fork",
+        destructive_approved: false,
+      }),
   };
 }

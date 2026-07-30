@@ -93,6 +93,16 @@ pub(crate) struct HostOperationGuard {
     _file: fs::File,
 }
 
+impl Drop for HostOperationGuard {
+    fn drop(&mut self) {
+        // Explicitly unlock before close. Native fork executors may spawn while
+        // this guard is held; on Unix, a fork briefly inherits open file
+        // descriptions before exec closes them. Unlocking here prevents that
+        // transient child descriptor from extending the operation lock.
+        let _ = self._file.unlock();
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LocalStateRepository {
     root: PathBuf,
@@ -2463,6 +2473,19 @@ mod tests {
             .contains("already in progress"));
         drop(guard);
         second.acquire_host_operation().unwrap();
+    }
+
+    #[test]
+    fn dropping_host_operation_guard_unlocks_a_duplicated_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = repository(&temp);
+        let second = repository(&temp);
+        let guard = first.acquire_host_operation().unwrap();
+        let duplicated = guard._file.try_clone().unwrap();
+
+        drop(guard);
+        second.acquire_host_operation().unwrap();
+        drop(duplicated);
     }
 
     #[test]

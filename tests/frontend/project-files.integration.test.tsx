@@ -327,7 +327,15 @@ test("confirming keep-local still submits an empty approved set so Pull can adva
     {
       applyRestore: async (_planId, actionIds) => {
         calls.push(`restore:${actionIds.length}`);
-        return { success: true, message: "Kept project files local", applied_action_ids: [], failed_actions: [] };
+        return {
+          success: true,
+          status: "complete",
+          message: "Kept project files local",
+          plan_id: pullPlan.plan_id,
+          applied_action_ids: [],
+          failed_actions: [],
+          codex_divergences: [],
+        };
       },
       applyDependencies: async () => {
         throw new Error("not expected");
@@ -339,7 +347,7 @@ test("confirming keep-local still submits an empty approved set so Pull can adva
     },
     pullPlan,
     null,
-    { resourceIds: [], restoreActionIds: [], dependencyActionIds: [] },
+    { resourceIds: [], restoreActionIds: [], dependencyActionIds: [], conversationResolutions: [] },
     () => undefined,
   );
   assert.deepEqual(calls, ["restore:0", "verify"]);

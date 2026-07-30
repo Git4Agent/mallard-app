@@ -355,9 +355,7 @@ function syncReviewStateLabel(
       case "fast_forward_local": return selected ? "Update this thread" : "Keep local";
       case "keep_local": return "Keep local";
       case "require_pull": return "Pull required";
-      case "fork": return selected
-        ? mode === "push" ? "Publish as new thread" : "Keep both branches"
-        : "Not selected";
+      case "resolve_divergence": return selected ? "Keep both branches" : "Not selected";
       case "create_cloud": return selected ? "Publish new thread" : "Not selected";
       case "create_local": return selected ? "Restore new conversation" : "Not selected";
       case "store_only": return "Backup only";

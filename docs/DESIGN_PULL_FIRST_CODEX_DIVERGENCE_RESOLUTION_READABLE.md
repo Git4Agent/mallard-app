@@ -1,6 +1,6 @@
 # Pull-first Codex Conflict Handling — Readable Version
 
-- Status: Approved direction; implementation pending
+- Status: Implemented; native Windows runtime acceptance remains pending
 - Cutover assumption: there are no existing users whose Mallard state must be
   preserved
 - Companion technical design:
@@ -103,22 +103,25 @@ machine-readable app-server interface.
 This is preferred because it does not open an interactive screen, type into a
 composer, or change the currently focused Codex App conversation.
 
-### 2. Hidden PTY helper
+### 2. Hidden native PTY
 
 If app-server is definitely unavailable and definitely created no fork,
 Mallard runs `codex fork` inside a controlled pseudo-terminal.
 
-The helper:
+Mallard's Rust backend:
 
-- does not show the conversation transcript;
-- does not submit a prompt;
+- continuously discards the hidden terminal output without storing or reading
+  the conversation;
+- does not submit a prompt or start a model turn;
 - waits for Codex to save the new fork;
 - exits the Codex terminal screen; and
-- returns the new thread ID to Mallard.
+- lets Mallard's normal Codex scanner find and verify the new thread.
 
-The current helper prototype supports macOS and Linux. Native Windows requires
-an equivalent ConPTY helper. Until that is implemented and tested, Windows
-moves directly from app-server to the manual method.
+This uses the compiled `portable-pty` library: Unix PTY on macOS and Linux,
+and Microsoft ConPTY on supported native Windows. Users do not need Expect,
+Tcl, Python, Node, WSL, or a separate helper installation. If the operating
+system cannot create a PTY before Codex starts, Mallard safely moves to the
+manual method after confirming no fork was created.
 
 ### 3. Ask the user to fork
 
@@ -291,7 +294,7 @@ cloud fixtures rather than real user or production state.
 
 - A conversation conflict always blocks Push.
 - Pull defaults to keeping both branches.
-- Fork creation tries app-server, then PTY, then manual verification.
+- Fork creation tries app-server, then native PTY, then manual verification.
 - Mallard never tries the next method after an uncertain fork attempt.
 - The original Codex thread contains the cloud conversation after Pull.
 - The new Codex fork contains the exact previous local conversation.

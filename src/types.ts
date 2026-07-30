@@ -747,6 +747,54 @@ export interface ConversationProviderStateExpectation {
   expectation: ConversationTargetExpectation;
 }
 
+export type ConversationDivergenceResolution =
+  | "preserve_local_with_native_fork"
+  | "use_cloud_only";
+
+export interface ConversationResolutionSelection {
+  action_id: string;
+  resolution: ConversationDivergenceResolution;
+  destructive_approved: boolean;
+}
+
+export type CodexForkExecutor =
+  | "app_server_stdio"
+  | "native_pty"
+  | "manual";
+
+export interface CodexNativeChildPin {
+  provider_thread_id: string;
+  transcript_sha256: string;
+}
+
+export type ConversationNameStatus =
+  | "applied"
+  | "user_override"
+  | "unchanged"
+  | "deferred"
+  | "failed";
+
+export type CodexInventoryRefreshStatus =
+  | "not_attempted"
+  | "refreshed"
+  | "failed";
+
+export interface ConversationDivergencePlan {
+  available_resolutions: ConversationDivergenceResolution[];
+  preserved_thread_id: string;
+  source_provider_thread_id: string;
+  local_lineage_digest: string;
+  local_semantic_digest: string;
+  pinned_local_title?: string | null;
+  pinned_cloud_title?: string | null;
+  desired_fork_name: string;
+  desired_original_name?: string | null;
+  codex_executable: string;
+  codex_executable_sha256: string;
+  available_executors: CodexForkExecutor[];
+  pre_existing_children: CodexNativeChildPin[];
+}
+
 export interface ConversationPlanAction {
   action_id: string;
   direction: ConversationPlanDirection;
@@ -759,7 +807,7 @@ export interface ConversationPlanAction {
   local_project_id: string;
   provider_profile_id: string;
   thread_id: string;
-  result_thread_id?: string | null;
+  divergence?: ConversationDivergencePlan | null;
   source_resource_id?: string | null;
   proposed_provider_thread_id?: string | null;
   required_codec: string;
@@ -799,10 +847,43 @@ export interface RestorePlan {
 
 export interface RestoreResult {
   success: boolean;
+  status: "complete" | "awaiting_manual_fork" | "recovery_required";
   message: string;
-  plan_id?: string;
-  applied_action_ids?: string[];
-  failed_actions?: Array<{ action_id: string; display_name?: string | null; message: string }>;
+  plan_id: string;
+  applied_action_ids: string[];
+  failed_actions: Array<{ action_id: string; display_name?: string | null; message: string }>;
+  codex_fork_checkpoint?: {
+    operation_id: string;
+    action_id: string;
+    source_provider_thread_id: string;
+    suggested_fork_name: string;
+  } | null;
+  codex_app_refresh?: {
+    operation_id: string;
+    app_kind: "codex" | "codex_plus_plus";
+    app_name: string;
+    state: "restart_available" | "manual_restart";
+    message: string;
+  } | null;
+  codex_divergences: Array<{
+    action_id: string;
+    original_thread_id: string;
+    original_provider_thread_id: string;
+    resolution: ConversationDivergenceResolution;
+    preserved_thread_id?: string | null;
+    preserved_provider_thread_id?: string | null;
+    executor?: CodexForkExecutor | null;
+    desired_fork_name?: string | null;
+    fork_name_status?: ConversationNameStatus | null;
+    desired_original_name?: string | null;
+    original_name_status?: ConversationNameStatus | null;
+    inventory_refresh_status: CodexInventoryRefreshStatus;
+  }>;
+}
+
+export interface CodexAppRestartResult {
+  success: boolean;
+  message: string;
 }
 
 export interface DependencyPlan {
@@ -928,7 +1009,7 @@ export type ConversationPlanActionType =
   | "fast_forward_cloud"
   | "keep_local"
   | "require_pull"
-  | "fork"
+  | "resolve_divergence"
   | "create_cloud"
   | "create_local"
   | "store_only"

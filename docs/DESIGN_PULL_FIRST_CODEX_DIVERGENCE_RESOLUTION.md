@@ -1,6 +1,6 @@
 # Design: Pull-first Codex divergence resolution
 
-- Status: Approved direction; implementation pending
+- Status: Implemented; native Windows runtime acceptance remains pending
 - Last reviewed: July 29, 2026
 - Scope: Codex conversation divergence in `ProjectSync`
 - Compatibility: clean cutover; no migration or legacy execution path
@@ -8,6 +8,8 @@
   will clear `~/.mallard` and the test cloud buckets before acceptance testing
 - Readable companion:
   [DESIGN_PULL_FIRST_CODEX_DIVERGENCE_RESOLUTION_READABLE.md](DESIGN_PULL_FIRST_CODEX_DIVERGENCE_RESOLUTION_READABLE.md)
+- Native PTY implementation plan:
+  [PLAN_CODEX_PORTABLE_PTY_FORK.md](PLAN_CODEX_PORTABLE_PTY_FORK.md)
 
 ## Decision
 
@@ -24,7 +26,7 @@ both advanced from a shared prefix:
      resumable Codex conversation.
 3. The native fork executor uses this order:
    1. app-server `thread/fork` over stdio;
-   2. a bounded PTY wrapper around `codex fork`; and
+   2. a bounded native Rust PTY around `codex fork`; and
    3. a verified user-performed fork.
 4. Every executor feeds the same verification and transaction. A fallback
    never weakens the content, ancestry, or stale-state checks.
@@ -103,16 +105,17 @@ cloud:
 The replacement backup under `~/.mallard` remains private recovery material.
 It is not inventoried as a Codex conversation.
 
-## Current behavior and cutover
+## Previous behavior and cutover
 
-The current implementation maps `Diverged` to `Fork` for Push and Pull.
+Before this clean cutover, the implementation mapped `Diverged` to `Fork` for
+Push and Pull.
 
 - Push publishes the local branch under a new logical ID and rekeys the local
   binding.
 - Pull rekeys the existing local branch and materializes the cloud branch
   under a newly generated provider ID.
 
-The new behavior removes both paths:
+The implemented behavior removes both paths:
 
 - Push `Diverged` becomes non-selectable `RequirePull`.
 - Push `Unknown` becomes `Blocked`.
@@ -210,7 +213,7 @@ Conversation conflict
 The details panel shows the executor order:
 
 ```text
-Fork method: app-server → PTY helper → manual
+Fork method: app-server → native PTY → manual
 Fork name:   Analyze codebase knowledge graph — local before Pull ·
              2026-07-29 18:42Z
 Original:    Analyze codebase knowledge graph
@@ -223,7 +226,7 @@ Apply progress distinguishes:
 
 - probing app-server;
 - creating the fork through app-server;
-- trying the PTY helper after a definitive app-server failure;
+- trying native PTY after a definitive app-server failure;
 - waiting for a manual fork;
 - verifying the fork;
 - applying or deferring the reviewed names;
@@ -256,7 +259,8 @@ Each executor receives:
 - the source rollout fingerprint;
 - the pinned source-title expectation and desired fork name;
 - the bounded set of pre-existing native children of `t`; and
-- bounded time and output limits.
+- bounded runtime and retained-output limits. Native PTY retains no TUI
+  output.
 
 Each executor returns either:
 
@@ -280,8 +284,8 @@ Before planning and again before execution, Mallard verifies:
 - the source rollout is stable and matches its pinned digest;
 - the original target can still be replaced safely;
 - the inventory of existing native children is bounded and complete;
-- the selected executable and helper artifacts match their pinned
-  fingerprints; and
+- the selected executable matches its pinned fingerprint and the native PTY
+  capability remains available; and
 - no known Codex process is actively mutating `t`.
 
 The current `provider_quiescent: true` placeholder is not sufficient. The
@@ -335,35 +339,39 @@ The client:
 App-server is currently an experimental CLI surface, so runtime probing is
 required even though it is the preferred machine integration.
 
-### Preference 2: PTY-wrapped `codex fork`
+### Preference 2: native Rust PTY around `codex fork`
 
 PTY is tried only after app-server has definitively failed without creating a
 fork.
 
-The helper drives:
+Mallard uses `portable-pty` in the Tauri Rust backend to drive:
 
 ```text
 codex fork --no-alt-screen -C <project-directory> <source-thread-id>
 ```
 
-The PTY contract requires the helper to:
+The native PTY contract requires the executor to:
 
 - use the exact pinned CLI and `CODEX_HOME`;
 - verify Codex authentication before launch;
 - snapshot existing native children before launch;
-- suppress and discard TUI transcript output;
+- continuously drain and discard TUI output without retaining or parsing it;
 - never type or submit a prompt;
 - wait for exactly one new persisted native child;
 - exit the idle TUI, then kill and reap it only if bounded graceful exit fails;
-- emit one bounded machine-readable result record; and
+- let the existing Rust structural scanner and common verifier discover the
+  child rather than reading identity from terminal output; and
 - return ambiguous if it cannot prove whether a fork was created.
 
-`scripts/codex-fork-and-exit` is the current macOS/Linux prototype. Production
-packaging must ship a pinned helper artifact rather than depend on a source
-checkout. Native Windows support requires a tested ConPTY implementation with
-the same contract. Until that exists, PTY is unavailable on native Windows and
-the coordinator proceeds to manual fork after a definitive app-server
-failure. It must not route a native Windows profile through WSL.
+`portable_pty::native_pty_system()` selects Unix PTY on macOS/Linux and ConPTY
+on supported native Windows. The implementation does not depend on Expect,
+Tcl, Python, Node, a packaged helper, or WSL. Runtime PTY creation remains a
+capability probe; a failure before Codex is spawned permits the manual method
+only after a complete scan proves no child was created.
+
+The detailed lifecycle, clean DTO cutover, platform tests, and deletion gates
+are defined in
+[PLAN_CODEX_PORTABLE_PTY_FORK.md](PLAN_CODEX_PORTABLE_PTY_FORK.md).
 
 ### Preference 3: verified manual fork
 
@@ -460,9 +468,9 @@ name, so fork creation is not treated as name application.
 
 - For a stdio fork, Mallard names `t'` on the same app-server connection after
   verification and before closing the connection.
-- For a PTY fork, Mallard uses a short-lived app-server naming request after
-  the PTY child has exited. It does not add `/rename` keystrokes to the PTY
-  automation.
+- For a native PTY fork, Mallard uses a short-lived app-server naming request
+  after the PTY child has exited. It does not add `/rename` keystrokes to the
+  PTY automation.
 - For a manual fork, an explicit name chosen by the user wins. Otherwise,
   Mallard applies the planned name when `thread/name/set` is available and
   shows the suggested name for manual use when it is not.
@@ -472,7 +480,12 @@ name, so fork creation is not treated as name application.
 - Cloud-only applies the same original-thread title rule but creates no fork
   name.
 
-Mallard never edits `session_index.jsonl` or Codex SQLite solely to set a name.
+Mallard never edits `session_index.jsonl` or Codex SQLite solely to set a
+name on an existing thread. The one index write happens while materializing
+a new thread on Pull: when the cloud thread carries a real title, the
+transaction appends that thread's own provider-schema row
+(`{id, thread_name, updated_at}`, with the cloud update time) so the title
+survives the machine round trip; a titleless thread writes no row.
 
 ### Failure and recovery
 
@@ -518,7 +531,9 @@ Mallard does not:
 - open `codex://threads/<id>`; or
 - move App focus to make the thread visible.
 
-After `LocalCommitted`:
+After `LocalCommitted` — for any committed conversation materialization, a
+plain Pull as much as a divergence resolution, because a running App is
+equally unaware of a newly materialized thread until its next rescan:
 
 | App state | Behavior |
 | --- | --- |
@@ -617,14 +632,14 @@ identical to the replacement half of the recommended path.
 
 ## Journal and recovery
 
-The current journal fields describe the old rekey/materialize flow and should
-be replaced with a tagged operation for the new transaction.
+The clean cutover replaces the old rekey/materialize journal with a tagged
+operation for this transaction.
 
 The preserving-local operation records at least:
 
 - `T`, pre-minted `F`, and source provider ID `t`;
 - optional verified result `t'`;
-- ordered executor capabilities and pinned artifact fingerprints;
+- ordered executor capabilities and the pinned Codex executable fingerprint;
 - pre-existing native-child fingerprints;
 - every executor attempt and whether it may have created a thread;
 - local/cloud title expectations, desired names, name attempts, and final
@@ -716,8 +731,8 @@ isolated temporary state instead.
 | --- | --- | --- |
 | `conversation_sync.rs` | map Push divergence to `RequirePull`, Push unknown to `Blocked`, and Pull divergence to `ResolveDivergence` | Low |
 | `domain.rs` | add typed resolution selections, planned names/statuses, and replace the old journal shape | Medium |
-| new `codex_native_fork.rs` | coordinate stdio, PTY, manual wait, verification, `thread/name/set`, and ambiguous-result recovery | High |
-| PTY helper packaging | harden the POSIX prototype and add a tested native Windows ConPTY implementation before enabling that capability | High |
+| new `codex_native_fork.rs` | coordinate stdio, native PTY, manual wait, verification, `thread/name/set`, and ambiguous-result recovery | High |
+| native PTY lifecycle | replace the Expect prototype with `portable-pty`, zero-retention output drain, bounded exit escalation, and tested Windows ConPTY | High |
 | `commands.rs` | build options, title expectations, desired names, and pins; execute or pause the transaction; report executor and naming results; remove divergent Push publication | High |
 | `conversation_materialization.rs` | replace rekey-first divergence handling with fork-name-bind-replace recovery | High |
 | `persistence.rs` | validate only the new local operation representation | Medium |
@@ -759,8 +774,8 @@ a user's configured `~/.codex`, `~/.mallard`, or real cloud bucket.
 - definitive PTY no-fork enters manual wait.
 - ambiguous stdio or PTY never invokes the next executor.
 - manual resume rejects missing, duplicate, changed, or unrelated children.
-- a changed CLI or helper fingerprint makes the plan stale.
-- native Windows does not invoke the POSIX helper.
+- a changed CLI fingerprint makes the plan stale.
+- native Windows uses ConPTY and never invokes WSL or a POSIX helper.
 
 ### Naming
 
@@ -788,7 +803,7 @@ a user's configured `~/.codex`, `~/.mallard`, or real cloud bucket.
 - cloud head, profile, project, or binding revision changes;
 - app-server rejection, timeout, oversized output, malformed JSON, or wrong
   request ID;
-- PTY early exit, timeout, oversized output, unexpected input, or unreaped
+- PTY early exit, timeout, output-drain failure, unexpected input, or unreaped
   child;
 - crash before invocation, after Codex creates `t'`, after verification, after
   each binding update, after provider replacement, and during cleanup;
@@ -838,7 +853,7 @@ make the next Push a no-op.
 Keep opt-in smoke tests outside the default suite:
 
 - app-server `thread/fork` against a disposable `CODEX_HOME`;
-- PTY helper against the same kind of disposable fixture on each advertised
+- native PTY against the same kind of disposable fixture on each advertised
   platform; and
 - a release checklist for the manual path and optional App restart.
 
@@ -852,7 +867,8 @@ process exit, and cleanup of only the disposable directory.
 3. Implement deterministic name planning, the shared fork verifier, and the
    journal shape.
 4. Implement and test stdio app-server fork and `thread/name/set`.
-5. Harden and package the PTY executor; keep unsupported platforms disabled.
+5. Implement the `portable-pty` executor, remove the Expect helper, and run
+   native macOS/Linux/Windows lifecycle tests.
 6. Add the durable manual checkpoint and resume/cancel flow.
 7. Implement fork-name-bind-replace and recovery.
 8. Delete old Push fork and Pull rekey/materialize behavior; do not retain
@@ -893,6 +909,12 @@ process exit, and cleanup of only the disposable directory.
   <https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md>
 - CLI commands, including `codex app-server` and `codex fork`:
   <https://learn.chatgpt.com/docs/developer-commands?surface=cli>
+- Native PTY implementation plan:
+  [PLAN_CODEX_PORTABLE_PTY_FORK.md](PLAN_CODEX_PORTABLE_PTY_FORK.md)
+- `portable-pty` API:
+  <https://docs.rs/portable-pty/latest/portable_pty/>
+- Microsoft ConPTY:
+  <https://learn.microsoft.com/en-us/windows/console/createpseudoconsole>
 - Codex App deep links:
   <https://developers.openai.com/codex/app/commands#deep-links>
 - Codex App troubleshooting and restart guidance:

@@ -23,6 +23,7 @@ import {
 import {
   applyPullReview,
   beginPullReview,
+  hasPendingRestoreMutations,
   type PullReviewApi,
 } from "../../src/components/project-sync/pullReviewFlow";
 
@@ -79,6 +80,25 @@ const restorePlan: RestorePlan = {
   }],
 };
 
+test("post-fork replans finalize only when conversation rows are informational", () => {
+  assert.equal(hasPendingRestoreMutations({
+    ...restorePlan,
+    actions: [],
+    conversation_actions: [
+      conversationAction("no_op", "identical", "identical"),
+      conversationAction("keep_local", "cloud_missing", "cloud_missing"),
+    ],
+  }), false);
+  assert.equal(hasPendingRestoreMutations({
+    ...restorePlan,
+    actions: [],
+    conversation_actions: [
+      conversationAction("fast_forward_local", "local_prefix_of_cloud", "local_prefix_of_cloud"),
+    ],
+  }), true);
+  assert.equal(hasPendingRestoreMutations(restorePlan), true);
+});
+
 function conversationAction(
   action: ConversationPlanActionType,
   reasonCode: ConversationReasonCode,
@@ -110,6 +130,220 @@ function conversationAction(
     expires_at: restorePlan.expires_at,
   };
 }
+
+function divergenceAction(): ConversationPlanAction {
+  return {
+    ...conversationAction("resolve_divergence", "diverged", "diverged"),
+    action_id: "conversation-divergence",
+    thread_id: "thread-shared",
+    source_resource_id: "codex:session:thread-shared",
+    expected_local_target: { state: "sha256", sha256: "d".repeat(64) },
+    expected_provider_state: [{
+      target_path: "/Users/test/.codex/sessions/2026/07/29/rollout-thread-shared.jsonl",
+      expectation: { state: "sha256", sha256: "d".repeat(64) },
+    }],
+    expected_binding_revision: 2,
+    divergence: {
+      available_resolutions: [
+        "preserve_local_with_native_fork",
+        "use_cloud_only",
+      ],
+      preserved_thread_id: "thread-preserved",
+      source_provider_thread_id: "019fac21-4aba-7fc2-bb7d-df711c950987",
+      local_lineage_digest: "e".repeat(64),
+      local_semantic_digest: "f".repeat(64),
+      pinned_local_title: "Analyze codebase knowledge graph",
+      pinned_cloud_title: "Analyze codebase knowledge graph",
+      desired_fork_name: "Analyze codebase knowledge graph — local before Pull · 2026-07-29 18:42Z",
+      desired_original_name: "Analyze codebase knowledge graph",
+      codex_executable: "/usr/local/bin/codex",
+      codex_executable_sha256: "1".repeat(64),
+      available_executors: ["app_server_stdio", "native_pty", "manual"],
+      pre_existing_children: [],
+    },
+  };
+}
+
+test("conversation divergence defaults to keep-both and renders the reviewed fork contract", () => {
+  const conflictPlan: RestorePlan = {
+    ...restorePlan,
+    actions: [],
+    conversation_actions: [divergenceAction()],
+  };
+  const items = buildPullReviewItems(conflictPlan, null);
+  const selected = new Set(items.filter((item) => item.conversationActions.length > 0).map((item) => item.resourceId));
+  const selection = buildPullReviewSelection(
+    items,
+    selected,
+    new Set(),
+    new Set(),
+  );
+  assert.deepEqual(selection.conversationResolutions, [{
+    action_id: "conversation-divergence",
+    resolution: "preserve_local_with_native_fork",
+    destructive_approved: false,
+  }]);
+
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      profileLabel="myconf2"
+      plan={conflictPlan}
+      binding={binding}
+      dependencyPlan={null}
+      readiness={null}
+      restoreResult={null}
+      dependencyResult={null}
+      phase="idle"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="history"
+      onApply={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.match(html, /Conversation conflict/);
+  assert.match(html, /Keep both branches <em>Recommended<\/em>/);
+  assert.match(html, /Use cloud version only/);
+  assert.match(html, /app-server → native PTY → manual/);
+  assert.match(html, /local before Pull/);
+  assert.match(
+    html,
+    /type="radio"[^>]*checked=""/,
+    "the keep-both radio is selected initially",
+  );
+});
+
+test("manual fork checkpoints expose only verify and cancel continuation actions", () => {
+  const action = divergenceAction();
+  const conflictPlan: RestorePlan = {
+    ...restorePlan,
+    actions: [],
+    conversation_actions: [action],
+  };
+  const checkpoint: RestoreResult = {
+    success: false,
+    status: "awaiting_manual_fork",
+    message: "Create the reviewed fork in Codex.",
+    plan_id: conflictPlan.plan_id,
+    applied_action_ids: [],
+    failed_actions: [],
+    codex_divergences: [],
+    codex_fork_checkpoint: {
+      operation_id: "operation-divergence",
+      action_id: action.action_id,
+      source_provider_thread_id: action.divergence!.source_provider_thread_id,
+      suggested_fork_name: action.divergence!.desired_fork_name,
+    },
+  };
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      profileLabel="myconf2"
+      plan={conflictPlan}
+      binding={binding}
+      dependencyPlan={null}
+      readiness={null}
+      restoreResult={checkpoint}
+      dependencyResult={null}
+      phase="complete"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="review"
+      onApply={() => undefined}
+      onVerifyCodexFork={() => undefined}
+      onCancelCodexFork={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.match(html, /Create the local fork in Codex/);
+  assert.match(html, /Finish any active turn first/);
+  assert.match(html, /without sending a new message/);
+  assert.match(html, /Verify fork/);
+  assert.match(html, />Cancel</);
+  assert.doesNotMatch(html, /Use cloud version only/);
+  assert.doesNotMatch(html, /Force/);
+});
+
+test("completed divergence reports both identities, naming outcomes, refresh warning, and optional App restart", () => {
+  const action = divergenceAction();
+  const conflictPlan: RestorePlan = {
+    ...restorePlan,
+    actions: [],
+    conversation_actions: [action],
+  };
+  const completed: RestoreResult = {
+    success: true,
+    status: "complete",
+    message: "Restored the cloud conversation and preserved the local fork.",
+    plan_id: conflictPlan.plan_id,
+    applied_action_ids: [action.action_id],
+    failed_actions: [],
+    codex_fork_checkpoint: null,
+    codex_app_refresh: {
+      operation_id: "operation-divergence",
+      app_kind: "codex",
+      app_name: "Codex App",
+      state: "restart_available",
+      message: "Codex App may need a restart to refresh its conversation list.",
+    },
+    codex_divergences: [{
+      action_id: action.action_id,
+      original_thread_id: "thread-shared",
+      original_provider_thread_id: "019fac21-4aba-7fc2-bb7d-df711c950987",
+      resolution: "preserve_local_with_native_fork",
+      preserved_thread_id: "thread-preserved",
+      preserved_provider_thread_id: "019fac73-c1ff-79b3-bb8e-1673ed0d644c",
+      executor: "native_pty",
+      desired_fork_name: action.divergence!.desired_fork_name,
+      fork_name_status: "applied",
+      desired_original_name: action.divergence!.desired_original_name,
+      original_name_status: "unchanged",
+      inventory_refresh_status: "failed",
+    }],
+  };
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      profileLabel="myconf2"
+      plan={conflictPlan}
+      binding={binding}
+      dependencyPlan={null}
+      readiness={null}
+      restoreResult={completed}
+      dependencyResult={null}
+      phase="complete"
+      supportLoading={false}
+      completedActionIds={new Set([action.action_id])}
+      completedResourceIds={new Set([action.source_resource_id!])}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="review"
+      onApply={() => undefined}
+      onRestartCodexApp={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.match(html, /Both Codex branches preserved/);
+  assert.match(html, /019fac21-4aba-7fc2-bb7d-df711c950987/);
+  assert.match(html, /019fac73-c1ff-79b3-bb8e-1673ed0d644c/);
+  assert.match(html, /native PTY/);
+  assert.match(html, /Codex conversation discovery refresh failed/);
+  assert.match(html, /My active Codex chats are complete/);
+  assert.match(html, /Restart Codex App/);
+});
 
 test("a valid Pull plan renders an enabled non-modal Apply workspace while supporting checks fail", async () => {
   const dependencies = deferred<DependencyPlan>();
@@ -482,7 +716,15 @@ test("conversation conflicts become one-time keep-local decisions without blocki
     {
       applyRestore: async (_planId, actionIds) => {
         calls.push(`restore:${actionIds.length}`);
-        return { success: true, message: "Local conversation kept", applied_action_ids: [], failed_actions: [] };
+        return {
+          success: true,
+          status: "complete",
+          message: "Local conversation kept",
+          plan_id: keepLocalOnlyPlan.plan_id,
+          applied_action_ids: [],
+          failed_actions: [],
+          codex_divergences: [],
+        };
       },
       applyDependencies: async () => {
         throw new Error("no dependency action expected");
@@ -494,7 +736,7 @@ test("conversation conflicts become one-time keep-local decisions without blocki
     },
     keepLocalOnlyPlan,
     null,
-    { resourceIds: [], restoreActionIds: [], dependencyActionIds: [] },
+    { resourceIds: [], restoreActionIds: [], dependencyActionIds: [], conversationResolutions: [] },
     () => undefined,
   );
   assert.deepEqual(calls, ["restore:0", "verify"]);
@@ -564,9 +806,12 @@ test("skipping a required global tool cannot produce a ready Pull outcome", () =
   }]);
   const applied: RestoreResult = {
     success: true,
+    status: "complete",
     message: "Applied 1 restore action",
+    plan_id: restorePlan.plan_id,
     applied_action_ids: ["action-session"],
     failed_actions: [],
+    codex_divergences: [],
   };
   const html = renderToStaticMarkup(
     <RestorePlanView
@@ -667,9 +912,12 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
   }]);
   const restoreResult: RestoreResult = {
     success: true,
+    status: "complete",
     message: "Applied 1 restore action",
+    plan_id: restorePlan.plan_id,
     applied_action_ids: ["action-session"],
     failed_actions: [],
+    codex_divergences: [],
   };
   const dependencyResult: DependencyResult = {
     success: true,
@@ -702,6 +950,7 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
       resourceIds: ["codex:session:thread-a", "codex:plugin:computer-use"],
       restoreActionIds: ["action-session"],
       dependencyActionIds: ["install-plugin"],
+      conversationResolutions: [],
     },
     (phase) => phases.push(phase),
   );
@@ -724,6 +973,7 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
       resourceIds: ["codex:session:thread-a", "codex:plugin:computer-use"],
       restoreActionIds: ["action-session"],
       dependencyActionIds: ["install-plugin"],
+      conversationResolutions: [],
     },
     (phase) => partialPhases.push(phase),
   );
@@ -749,6 +999,7 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
         resourceIds: ["codex:plugin:computer-use"],
         restoreActionIds: [],
         dependencyActionIds: ["install-plugin"],
+        conversationResolutions: [],
       },
       () => undefined,
     ),
@@ -769,6 +1020,7 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
         resourceIds: ["codex:plugin:computer-use"],
         restoreActionIds: [],
         dependencyActionIds: ["install-plugin"],
+        conversationResolutions: [],
       },
       () => undefined,
     ),
@@ -792,6 +1044,7 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
         resourceIds: ["codex:plugin:computer-use"],
         restoreActionIds: [],
         dependencyActionIds: ["install-plugin"],
+        conversationResolutions: [],
       },
       () => undefined,
     ),
@@ -812,12 +1065,82 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
         resourceIds: ["codex:session:thread-a"],
         restoreActionIds: ["action-session"],
         dependencyActionIds: [],
+        conversationResolutions: [],
       },
       () => undefined,
     ),
     /different bundle generations/,
     "a visible stale tool plan invalidates the whole composite review even when no tool is checked",
   );
+});
+
+test("a manual fork checkpoint pauses installation and readiness verification", async () => {
+  const action = divergenceAction();
+  const conflictPlan: RestorePlan = {
+    ...restorePlan,
+    actions: [],
+    conversation_actions: [action],
+  };
+  const dependencies = dependencyPlan([{
+    action_id: "install-plugin",
+    resource_id: "codex:plugin:computer-use",
+    kind: "install_codex_plugin",
+    display_name: "computer-use@openai-bundled",
+    provider: "codex",
+    argv: ["plugin", "add", "computer-use@openai-bundled"],
+    requires_explicit_approval: true,
+  }]);
+  const checkpoint: RestoreResult = {
+    success: false,
+    status: "awaiting_manual_fork",
+    message: "Create the fork in Codex.",
+    plan_id: conflictPlan.plan_id,
+    applied_action_ids: [],
+    failed_actions: [],
+    codex_divergences: [],
+    codex_fork_checkpoint: {
+      operation_id: "operation-divergence",
+      action_id: action.action_id,
+      source_provider_thread_id: action.divergence!.source_provider_thread_id,
+      suggested_fork_name: action.divergence!.desired_fork_name,
+    },
+  };
+  const calls: string[] = [];
+  const phases: string[] = [];
+  const result = await applyPullReview(
+    {
+      applyRestore: async () => {
+        calls.push("restore");
+        return checkpoint;
+      },
+      applyDependencies: async () => {
+        calls.push("install");
+        throw new Error("must not install while waiting for a fork");
+      },
+      getRestoreReadiness: async () => {
+        calls.push("verify");
+        throw new Error("must not verify while waiting for a fork");
+      },
+    },
+    conflictPlan,
+    dependencies,
+    {
+      resourceIds: ["codex:session:thread-shared", "codex:plugin:computer-use"],
+      restoreActionIds: [action.action_id],
+      dependencyActionIds: ["install-plugin"],
+      conversationResolutions: [{
+        action_id: action.action_id,
+        resolution: "preserve_local_with_native_fork",
+        destructive_approved: false,
+      }],
+    },
+    (phase) => phases.push(phase),
+  );
+  assert.deepEqual(calls, ["restore"]);
+  assert.deepEqual(phases, ["restoring", "complete"]);
+  assert.equal(result.restoreResult, checkpoint);
+  assert.equal(result.success, false);
+  assert.equal(result.failedPhase, null);
 });
 
 test("a primary restore-plan failure still rejects the Pull review", async () => {

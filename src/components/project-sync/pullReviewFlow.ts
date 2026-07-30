@@ -1,5 +1,6 @@
 import type {
   BundleReadiness,
+  ConversationResolutionSelection,
   DependencyPlan,
   DependencyResult,
   ProjectBinding,
@@ -37,10 +38,15 @@ export interface PullReviewSelection {
   resourceIds: string[];
   restoreActionIds: string[];
   dependencyActionIds: string[];
+  conversationResolutions: ConversationResolutionSelection[];
 }
 
 export interface PullReviewApplyApi {
-  applyRestore: (planId: string, actionIds: string[]) => Promise<RestoreResult>;
+  applyRestore: (
+    planId: string,
+    actionIds: string[],
+    conversationResolutions: ConversationResolutionSelection[],
+  ) => Promise<RestoreResult>;
   applyDependencies: (planId: string, actionIds: string[]) => Promise<DependencyResult>;
   getRestoreReadiness: (restorePlanId: string) => Promise<BundleReadiness>;
 }
@@ -65,6 +71,22 @@ function hasKeepLocalConversationDecision(plan: RestorePlan): boolean {
 }
 
 /**
+ * A post-checkpoint replan can contain only informational conversation rows
+ * (`NoOp` for the restored original and `KeepLocal` for its new fork). In that
+ * case there is no second user decision to collect, but the backend still
+ * needs one empty restore apply to advance the reviewed recipe base.
+ */
+export function hasPendingRestoreMutations(plan: RestorePlan): boolean {
+  if (plan.actions.length > 0) return true;
+  return plan.conversation_actions.some((action) => (
+    action.action === "fast_forward_local"
+    || action.action === "resolve_divergence"
+    || action.action === "create_local"
+    || action.action === "replace_local"
+  ));
+}
+
+/**
  * The two backend plans are immutable approval surfaces. Refuse to combine
  * them unless every pin identifies the same remote snapshot and local
  * binding; otherwise a single Apply click could approve two different states.
@@ -80,6 +102,26 @@ export function assertPullPlansAligned(
   ]);
   if (selection.restoreActionIds.some((actionId) => !restoreIds.has(actionId))) {
     throw new Error("The selected restore actions no longer belong to this Pull review.");
+  }
+  const selectedDivergences = new Set(
+    (restorePlan.conversation_actions ?? [])
+      .filter((action) => (
+        action.action === "resolve_divergence"
+        && selection.restoreActionIds.includes(action.action_id)
+      ))
+      .map((action) => action.action_id),
+  );
+  const resolutionIds = new Set<string>();
+  for (const selectionEntry of selection.conversationResolutions) {
+    if (
+      !selectedDivergences.has(selectionEntry.action_id)
+      || !resolutionIds.add(selectionEntry.action_id)
+    ) {
+      throw new Error("The selected conversation resolution no longer belongs to this Pull review.");
+    }
+  }
+  if (resolutionIds.size !== selectedDivergences.size) {
+    throw new Error("Choose one resolution for every selected conversation conflict.");
   }
   if (!dependencyPlan && selection.dependencyActionIds.length > 0) {
     throw new Error("The selected tools do not have an installation plan yet.");
@@ -130,11 +172,27 @@ export async function applyPullReview(
   onPhase("restoring");
   if (selection.restoreActionIds.length > 0 || hasProjectContentDecisions || hasConversationKeepLocalDecisions) {
     try {
-      restoreResult = await api.applyRestore(restorePlan.plan_id, selection.restoreActionIds);
+      restoreResult = await api.applyRestore(
+        restorePlan.plan_id,
+        selection.restoreActionIds,
+        selection.conversationResolutions,
+      );
     } catch (reason) {
       executionError = `Restore failed: ${errorMessage(reason)}`;
       failedPhase = "restoring";
     }
+  }
+
+  if (restoreResult && restoreResult.status !== "complete") {
+    onPhase("complete");
+    return {
+      restoreResult,
+      dependencyResult: null,
+      readiness: null,
+      success: false,
+      error: null,
+      failedPhase: null,
+    };
   }
 
   onPhase("installing");

@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type {
   BundleReadiness,
+  ConversationPlanAction,
+  ConversationResolutionSelection,
   DependencyPlan,
   DependencyResult,
   LocalProjectSummary,
@@ -55,6 +57,12 @@ interface Props {
   embedded?: boolean;
   initialStep?: SyncReviewStep;
   onApply: (selection: PullReviewSelection) => void;
+  onVerifyCodexFork?: (operationId: string, providerThreadId: string | null) => void;
+  onCancelCodexFork?: (operationId: string) => void;
+  onRestartCodexApp?: (
+    operationId: string,
+    appKind: "codex" | "codex_plus_plus",
+  ) => void;
   onRefresh: () => void;
   onBack: () => void;
 }
@@ -120,6 +128,14 @@ function PhaseProgress({
   );
 }
 
+function nameStatusLabel(status: string | null | undefined): string {
+  if (status === "applied") return "applied";
+  if (status === "user_override") return "kept user override";
+  if (status === "unchanged") return "unchanged";
+  if (status === "deferred") return "deferred";
+  return "failed";
+}
+
 function ResultDetails({
   restoreResult,
   dependencyResult,
@@ -135,6 +151,43 @@ function ResultDetails({
       {results.map((result, index) => (
         <div key={`${result.message}-${index}`}>
           <strong>{result.message}</strong>
+          {"codex_divergences" in result && (result.codex_divergences ?? []).map((divergence) => (
+            <section key={divergence.action_id} className="sync-divergence-result">
+              <strong>
+                {divergence.resolution === "preserve_local_with_native_fork"
+                  ? "Both Codex branches preserved"
+                  : "Cloud branch restored"}
+              </strong>
+              <dl>
+                <div>
+                  <dt>Original</dt>
+                  <dd><code>{divergence.original_thread_id}</code> → <code>{divergence.original_provider_thread_id}</code></dd>
+                </div>
+                {divergence.preserved_thread_id && divergence.preserved_provider_thread_id && (
+                  <div>
+                    <dt>Preserved local</dt>
+                    <dd><code>{divergence.preserved_thread_id}</code> → <code>{divergence.preserved_provider_thread_id}</code></dd>
+                  </div>
+                )}
+                {divergence.executor && (
+                  <div><dt>Fork method</dt><dd>{executorLabel(divergence.executor)}</dd></div>
+                )}
+                {divergence.desired_fork_name && (
+                  <div>
+                    <dt>Fork name</dt>
+                    <dd>{divergence.desired_fork_name} · {nameStatusLabel(divergence.fork_name_status)}</dd>
+                  </div>
+                )}
+                <div>
+                  <dt>Original name</dt>
+                  <dd>{divergence.desired_original_name ?? "Retained current title"} · {nameStatusLabel(divergence.original_name_status)}</dd>
+                </div>
+              </dl>
+              {divergence.inventory_refresh_status === "failed" && (
+                <small>Codex conversation discovery refresh failed. The Pull result is safe; retry by reopening Codex or rechecking later.</small>
+              )}
+            </section>
+          ))}
           {(result.failed_actions ?? []).map((failure) => (
             <span key={failure.action_id}><code>{failure.display_name ?? failure.action_id}</code>{failure.message}</span>
           ))}
@@ -157,6 +210,99 @@ export function pullSelectableResourceIds(
       && !requiresManualResolution(item)
     ))
     .map((item) => item.resourceId));
+}
+
+function executorLabel(executor: string): string {
+  if (executor === "app_server_stdio") return "app-server";
+  if (executor === "native_pty") return "native PTY";
+  return "manual";
+}
+
+function DivergenceResolutionCards({
+  actions,
+  selectedActionIds,
+  resolutions,
+  disabled,
+  onChange,
+}: {
+  actions: ConversationPlanAction[];
+  selectedActionIds: ReadonlySet<string>;
+  resolutions: ReadonlyMap<string, ConversationResolutionSelection>;
+  disabled: boolean;
+  onChange: (selection: ConversationResolutionSelection) => void;
+}) {
+  if (actions.length === 0) return null;
+  return (
+    <div className="sync-divergence-resolutions">
+      {actions.map((action) => {
+        const plan = action.divergence;
+        if (!plan) return null;
+        const selection = resolutions.get(action.action_id) ?? {
+          action_id: action.action_id,
+          resolution: "preserve_local_with_native_fork" as const,
+          destructive_approved: false,
+        };
+        const selected = selectedActionIds.has(action.action_id);
+        const controlsDisabled = disabled || !selected;
+        return (
+          <fieldset key={action.action_id} className="sync-divergence-card" disabled={controlsDisabled}>
+            <legend>Conversation conflict</legend>
+            <label className="sync-divergence-option">
+              <input
+                type="radio"
+                name={`divergence-${action.action_id}`}
+                checked={selection.resolution === "preserve_local_with_native_fork"}
+                onChange={() => onChange({
+                  action_id: action.action_id,
+                  resolution: "preserve_local_with_native_fork",
+                  destructive_approved: false,
+                })}
+              />
+              <span>
+                <strong>Keep both branches <em>Recommended</em></strong>
+                <small>Preserve the current local conversation as a Codex fork, then restore the cloud conversation into the original thread.</small>
+              </span>
+            </label>
+            <label className="sync-divergence-option">
+              <input
+                type="radio"
+                name={`divergence-${action.action_id}`}
+                checked={selection.resolution === "use_cloud_only"}
+                onChange={() => onChange({
+                  action_id: action.action_id,
+                  resolution: "use_cloud_only",
+                  destructive_approved: false,
+                })}
+              />
+              <span>
+                <strong>Use cloud version only</strong>
+                <small>Replace the original local conversation. The divergent local branch will not remain as a Codex conversation.</small>
+              </span>
+            </label>
+            {selection.resolution === "use_cloud_only" && (
+              <label className="sync-divergence-confirm">
+                <input
+                  type="checkbox"
+                  checked={selection.destructive_approved}
+                  onChange={(event) => onChange({
+                    ...selection,
+                    destructive_approved: event.target.checked,
+                  })}
+                />
+                I understand the divergent local branch will not remain available as a Codex conversation.
+              </label>
+            )}
+            <dl className="sync-divergence-preview">
+              <div><dt>Fork method</dt><dd>{plan.available_executors.map(executorLabel).join(" → ")}</dd></div>
+              <div><dt>Fork name</dt><dd>{plan.desired_fork_name}</dd></div>
+              <div><dt>Original</dt><dd>{plan.desired_original_name ?? "Retain current title"}</dd></div>
+            </dl>
+            {!selected && <p className="sync-divergence-unselected">Select this conversation to choose a resolution.</p>}
+          </fieldset>
+        );
+      })}
+    </div>
+  );
 }
 
 function ItemList({
@@ -326,10 +472,29 @@ export default function RestorePlanView({
   embedded = false,
   initialStep = "history",
   onApply,
+  onVerifyCodexFork,
+  onCancelCodexFork,
+  onRestartCodexApp,
   onRefresh,
   onBack,
 }: Props) {
   const items = useMemo(() => buildPullReviewItems(plan, dependencyPlan), [plan, dependencyPlan]);
+  const divergenceActions = useMemo(
+    () => (plan.conversation_actions ?? []).filter((action) => action.action === "resolve_divergence"),
+    [plan],
+  );
+  const [conversationResolutions, setConversationResolutions] = useState<
+    Map<string, ConversationResolutionSelection>
+  >(() => new Map(divergenceActions.map((action) => [
+    action.action_id,
+    {
+      action_id: action.action_id,
+      resolution: "preserve_local_with_native_fork",
+      destructive_approved: false,
+    },
+  ])));
+  const [manualForkProviderThreadId, setManualForkProviderThreadId] = useState("");
+  const [restartChatsComplete, setRestartChatsComplete] = useState(false);
   const conversationItems = useMemo(
     () => items.filter((item) => itemKindLabel(item) === "Conversation"),
     [items],
@@ -359,6 +524,25 @@ export default function RestorePlanView({
   ));
 
   useEffect(() => {
+    setConversationResolutions((current) => new Map(divergenceActions.map((action) => [
+      action.action_id,
+      current.get(action.action_id) ?? {
+        action_id: action.action_id,
+        resolution: "preserve_local_with_native_fork",
+        destructive_approved: false,
+      },
+    ])));
+  }, [divergenceActions]);
+
+  useEffect(() => {
+    setManualForkProviderThreadId("");
+  }, [restoreResult?.codex_fork_checkpoint?.operation_id]);
+
+  useEffect(() => {
+    setRestartChatsComplete(false);
+  }, [restoreResult?.codex_app_refresh?.operation_id]);
+
+  useEffect(() => {
     const currentIds = new Set(items.map((item) => item.resourceId));
     setSelected((current) => {
       const next = new Set([...current].filter((resourceId) => (
@@ -374,10 +558,25 @@ export default function RestorePlanView({
   }, [items, completedResourceIds, failedResourceIds]);
 
   const selection = useMemo(
-    () => buildPullReviewSelection(items, selected, completedActionIds, completedResourceIds),
-    [items, selected, completedActionIds, completedResourceIds],
+    () => buildPullReviewSelection(
+      items,
+      selected,
+      completedActionIds,
+      completedResourceIds,
+      conversationResolutions,
+    ),
+    [items, selected, completedActionIds, completedResourceIds, conversationResolutions],
   );
   const selectedCount = selection.resourceIds.length;
+  const selectedRestoreActionIds = new Set(selection.restoreActionIds);
+  const hasUnconfirmedCloudOnly = selection.conversationResolutions.some((resolution) => (
+    resolution.resolution === "use_cloud_only" && !resolution.destructive_approved
+  ));
+  const forkCheckpoint = restoreResult?.codex_fork_checkpoint ?? null;
+  const appRefresh = restoreResult?.codex_app_refresh ?? null;
+  const forkCheckpointActive = Boolean(
+    forkCheckpoint && restoreResult?.status !== "complete",
+  );
   const pendingProjectContentDecisionCount = projectContentItems.filter((item) => (
     pendingIds(item, completedActionIds).length > 0 && !completedResourceIds.has(item.resourceId)
   )).length;
@@ -409,7 +608,7 @@ export default function RestorePlanView({
   )).length;
   const unchangedCount = skippedTools + manualItems.length;
   const finalReady = hasResult && !error && failureCount === 0 && skippedTools === 0 && readiness?.state === "ready";
-  const reviewCanClose = hasResult && (
+  const reviewCanClose = !forkCheckpointActive && hasResult && (
     finalReady || (selectedCount === 0 && pendingProjectContentDecisionCount === 0)
   );
   const completedProjectItems = projectItems.filter((item) => completedResourceIds.has(item.resourceId));
@@ -421,7 +620,11 @@ export default function RestorePlanView({
   ));
   const failedProjectItems = projectItems.filter((item) => failedResourceIds.has(item.resourceId));
   const failedTools = globalItems.filter((item) => failedResourceIds.has(item.resourceId));
-  const outcomeTitle = error && hasResult
+  const outcomeTitle = forkCheckpointActive
+    ? restoreResult?.status === "awaiting_manual_fork"
+      ? "Waiting for a Codex fork"
+      : "Fork recovery needs verification"
+    : error && hasResult
     ? "Pull needs attention"
     : failureCount > 0
       ? `${failureCount} change${failureCount === 1 ? "" : "s"} need attention`
@@ -436,6 +639,8 @@ export default function RestorePlanView({
       : phase === "verifying"
         ? "Verifying readiness…"
         : "Restoring selected changes…"
+    : forkCheckpointActive
+      ? "Complete the fork checkpoint above"
     : hasResult && failedTools.length > 0 && selectedCount === failedResourceIds.size
       ? `Retry failed installation${failedTools.length === 1 ? "" : "s"}`
       : reviewCanClose
@@ -630,6 +835,19 @@ export default function RestorePlanView({
         <div
           className="sync-inline-action-scroll sync-sync-review-scroll"
         >
+          {activeStep === "history" && (
+            <DivergenceResolutionCards
+              actions={divergenceActions}
+              selectedActionIds={selectedRestoreActionIds}
+              resolutions={conversationResolutions}
+              disabled={busy || finalReady || forkCheckpointActive}
+              onChange={(resolution) => setConversationResolutions((current) => {
+                const next = new Map(current);
+                next.set(resolution.action_id, resolution);
+                return next;
+              })}
+            />
+          )}
           {activeStep === "history" && conversationItems.length > 0 && project && binding.profile_ids.codex ? (
             <ProjectChatHistoryPage
               embedded
@@ -740,6 +958,61 @@ export default function RestorePlanView({
               {phase !== "idle" && (
                 <PhaseProgress phase={phase} ready={finalReady} restoreFailed={failedProjectItems.length > 0} installFailed={failedTools.length > 0} />
               )}
+              {forkCheckpointActive && forkCheckpoint && (
+                <section className="sync-fork-checkpoint" aria-live="polite">
+                  <div>
+                    <Icon name="git-branch" size={18} />
+                    <span>
+                      <strong>{restoreResult?.status === "awaiting_manual_fork" ? "Create the local fork in Codex" : "Verify the recovered Codex fork"}</strong>
+                      <small>{restoreResult?.message}</small>
+                      {restoreResult?.status === "awaiting_manual_fork" && (
+                        <small>Finish any active turn first. Fork the source thread without sending a new message in the fork.</small>
+                      )}
+                    </span>
+                  </div>
+                  <dl>
+                    <div><dt>Source thread</dt><dd><code>{forkCheckpoint.source_provider_thread_id}</code></dd></div>
+                    <div><dt>Suggested name</dt><dd>{forkCheckpoint.suggested_fork_name}</dd></div>
+                  </dl>
+                  <label>
+                    Forked thread ID <span>(optional; leave blank for a bounded scan)</span>
+                    <input
+                      type="text"
+                      value={manualForkProviderThreadId}
+                      disabled={busy}
+                      onChange={(event) => setManualForkProviderThreadId(event.target.value)}
+                      placeholder="019f…"
+                    />
+                  </label>
+                  <div>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={busy || !onVerifyCodexFork}
+                      onClick={() => onVerifyCodexFork?.(
+                        forkCheckpoint.operation_id,
+                        manualForkProviderThreadId.trim() || null,
+                      )}
+                    >
+                      Verify fork
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={busy || !onCancelCodexFork || restoreResult?.status !== "awaiting_manual_fork"}
+                      onClick={() => onCancelCodexFork?.(forkCheckpoint.operation_id)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </section>
+              )}
+              {!hasResult && hasUnconfirmedCloudOnly && (
+                <div className="sync-callout warning" role="alert">
+                  <Icon name="alert-triangle" size={15} />
+                  Confirm that the divergent local Codex branch may be discarded before applying.
+                </div>
+              )}
               {hasResult && (
                 <section className={`sync-pull-outcome${finalReady ? " success" : " warning"}`} aria-live="polite">
                   <Icon name={finalReady ? "check-circle" : "alert-triangle"} size={20} />
@@ -755,6 +1028,43 @@ export default function RestorePlanView({
                       {finalReady && <li>Project is ready</li>}
                     </ul>
                   </div>
+                </section>
+              )}
+              {restoreResult?.status === "complete" && appRefresh && (
+                <section className="sync-app-refresh" aria-live="polite">
+                  <div>
+                    <Icon name="refresh" size={18} />
+                    <span>
+                      <strong>Refresh {appRefresh.app_name}</strong>
+                      <small>{appRefresh.message}</small>
+                    </span>
+                  </div>
+                  {appRefresh.state === "restart_available" ? (
+                    <>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={restartChatsComplete}
+                          disabled={busy}
+                          onChange={(event) => setRestartChatsComplete(event.target.checked)}
+                        />
+                        My active Codex chats are complete.
+                      </label>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        disabled={busy || !restartChatsComplete || !onRestartCodexApp}
+                        onClick={() => onRestartCodexApp?.(
+                          appRefresh.operation_id,
+                          appRefresh.app_kind,
+                        )}
+                      >
+                        Restart {appRefresh.app_name}
+                      </button>
+                    </>
+                  ) : (
+                    <small>Close and reopen the app manually. Pull is already complete.</small>
+                  )}
                 </section>
               )}
 
@@ -871,7 +1181,7 @@ export default function RestorePlanView({
             <button
               type="button"
               className="btn btn-primary sync-pull-apply-button"
-              disabled={busy || (!reviewCanClose
+              disabled={busy || forkCheckpointActive || hasUnconfirmedCloudOnly || (!reviewCanClose
                 && selectedCount === 0
                 && pendingProjectContentDecisionCount === 0
                 && keptLocalConversationItems.length === 0)}

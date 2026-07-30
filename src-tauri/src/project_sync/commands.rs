@@ -11,14 +11,22 @@ use super::bundle_engine::{
     PublishBundleRequest, PublishExpectation, RemoteBundlePage, StoreListPage, StoredObject,
 };
 use super::chat_history::{self, CodexThreadDetailsPage, ProjectChatHistory};
+use super::codex_app_refresh::{
+    refresh_offer as codex_app_refresh_offer, restart_after_pull, CodexAppKind,
+    CodexAppRefreshOffer, CodexAppRefreshState, CodexAppRestartResult,
+};
+use super::codex_native_fork::{build_divergence_plan, CodexForkExecutionRequest};
 use super::codex_rollout::{analyze_codex_rollout_structure, structural_record_type};
 use super::conversation_codec::{
     analyze_codex_transcript, rewrite_codex_transcript, CodecLineage, CODEX_CODEC_VERSION,
     CODEX_LINEAGE_CODEC_KEY,
 };
 use super::conversation_materialization::{
-    apply_conversation_cloud_publications_locked, apply_conversation_materialization_locked,
-    recover_conversation_materializations, ConversationCloudPublication,
+    apply_codex_divergence_locked, apply_conversation_cloud_publications_locked,
+    apply_conversation_materialization_locked, cancel_codex_divergence_locked,
+    codex_fork_request_for_operation, recover_conversation_materializations,
+    resume_codex_divergence_locked, CodexDivergenceApplyOutcome,
+    CodexDivergenceMaterializationRequest, ConversationCloudPublication,
     ConversationMaterializationRequest, ConversationTargetPayload, NoConversationFailpoints,
 };
 use super::conversation_sync::{
@@ -32,13 +40,16 @@ use super::domain::{
     generated_named_id, generated_uuid_v4, initial_conversation_thread_id,
     validate_absolute_clean_path, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt, BindingState,
     BundleDirectoryEntry, BundleHead, BundleId, BundleIdentity, BundleKind, BundleManifest,
-    BundleRecipe, BundleSnapshot, CapturedWith, ConversationFileRef, ConversationFileRole,
-    ConversationLineageStatus, ConversationMaterializationState, ConversationOperationId,
-    ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationPushPlan, ConversationReasonCode, ConversationRelation, ConversationSyncOperation,
-    ConversationSyncPhase, ConversationThread, DependencyAction, DependencyActionKind,
-    DependencyApplicationRecord, DependencyApplyReceipt, DependencyPlan, DraftProfileSelection,
-    DraftRepositoryChoice, DraftStorageSelection, HostId, LocalConversationBinding, LocalProjectId,
+    BundleRecipe, BundleSnapshot, CapturedWith, CodexDivergenceOperation, CodexForkExecutor,
+    CodexInventoryRefreshStatus, ConversationDivergenceResolution, ConversationFileRef,
+    ConversationFileRole, ConversationLineageStatus, ConversationMaterializationState,
+    ConversationNameStatus, ConversationOperationId, ConversationPlanAction,
+    ConversationPlanActionType, ConversationPlanDirection, ConversationPushPlan,
+    ConversationReasonCode, ConversationRelation, ConversationResolutionSelection,
+    ConversationSyncOperation, ConversationSyncOperationKind, ConversationSyncPhase,
+    ConversationThread, DependencyAction, DependencyActionKind, DependencyApplicationRecord,
+    DependencyApplyReceipt, DependencyPlan, DraftProfileSelection, DraftRepositoryChoice,
+    DraftStorageSelection, HostId, LocalConversationBinding, LocalProjectId,
     LocalProjectRegistration, LocalProviderProfileId, LogicalPath, MachineProjectState,
     MaterializationId, MaterializationRecord, MaterializationStatus, OriginHostAlias,
     OriginHostToken, PlanId, PortableOrigin, ProjectBinding, ProjectFileSyncEligibility,
@@ -635,14 +646,67 @@ pub struct FailedAction {
 }
 
 #[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreApplyStatus {
+    Complete,
+    AwaitingManualFork,
+    RecoveryRequired,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct CodexForkCheckpoint {
+    pub operation_id: ConversationOperationId,
+    pub action_id: ActionId,
+    pub source_provider_thread_id: String,
+    pub suggested_fork_name: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct CodexDivergenceResult {
+    pub action_id: ActionId,
+    pub original_thread_id: ThreadId,
+    pub original_provider_thread_id: String,
+    pub resolution: ConversationDivergenceResolution,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_thread_id: Option<ThreadId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_provider_thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executor: Option<CodexForkExecutor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desired_fork_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork_name_status: Option<ConversationNameStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desired_original_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_name_status: Option<ConversationNameStatus>,
+    pub inventory_refresh_status: CodexInventoryRefreshStatus,
+}
+
+#[derive(Serialize, Clone, Debug)]
 pub struct RestoreResult {
     pub success: bool,
+    pub status: RestoreApplyStatus,
     pub message: String,
     pub plan_id: PlanId,
     #[serde(default)]
     pub applied_action_ids: Vec<ActionId>,
     #[serde(default)]
     pub failed_actions: Vec<FailedAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_fork_checkpoint: Option<CodexForkCheckpoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_app_refresh: Option<CodexAppRefreshOffer>,
+    #[serde(default)]
+    pub codex_divergences: Vec<CodexDivergenceResult>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct RestartCodexAppAfterPullRequest {
+    pub operation_id: ConversationOperationId,
+    pub app_kind: CodexAppKind,
+    pub active_chats_complete: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1981,6 +2045,7 @@ pub async fn apply_bundle_restore(
     app: tauri::AppHandle,
     plan_id: PlanId,
     approved_action_ids: Vec<ActionId>,
+    conversation_resolutions: Vec<ConversationResolutionSelection>,
 ) -> Result<RestoreResult, String> {
     let repository = repository(&app)?;
     let log_repository = repository.clone();
@@ -2011,6 +2076,7 @@ pub async fn apply_bundle_restore(
             &repository,
             &plan_id,
             approved_action_ids,
+            conversation_resolutions,
             &mut |update| {
                 if let Some(emitter) = fetch_progress.as_mut() {
                     emitter.observe(update);
@@ -2099,6 +2165,222 @@ pub async fn apply_bundle_restore(
         ),
     }
     result
+}
+
+#[tauri::command]
+pub async fn get_pending_codex_divergence(
+    app: tauri::AppHandle,
+    local_project_id: LocalProjectId,
+) -> Result<Option<RestoreResult>, String> {
+    let repository = repository(&app)?;
+    run_blocking(move || pending_codex_divergence_with_repository(&repository, &local_project_id))
+        .await
+}
+
+pub(crate) fn pending_codex_divergence_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+) -> Result<Option<RestoreResult>, String> {
+    recover_conversation_materializations(repository)?;
+    let mut operations = repository
+        .load_conversation_sync_journal()?
+        .operations
+        .into_iter()
+        .filter(|operation| {
+            operation.local_project_id == *local_project_id
+                && operation.divergence().is_some_and(|divergence| {
+                    divergence.resolution
+                        == ConversationDivergenceResolution::PreserveLocalWithNativeFork
+                })
+        })
+        .collect::<Vec<_>>();
+    if operations.len() > 1 {
+        return Err(
+            "multiple Codex divergence operations require recovery for this project".to_string(),
+        );
+    }
+    let Some(operation) = operations.pop() else {
+        return Ok(None);
+    };
+    let plan_id = operation
+        .plan_id
+        .clone()
+        .ok_or_else(|| "Codex divergence operation lacks a restore plan".to_string())?;
+    let action_id = operation
+        .plan_action_id
+        .clone()
+        .ok_or_else(|| "Codex divergence operation lacks a plan action".to_string())?;
+    let divergence = operation
+        .divergence()
+        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
+    let source_provider_thread_id = divergence.source_provider_thread_id.clone();
+    let suggested_fork_name = divergence.desired_fork_name.clone();
+    let (status, message) = if operation.phase == ConversationSyncPhase::AwaitingManualFork {
+        (
+            RestoreApplyStatus::AwaitingManualFork,
+            "Create the reviewed fork in Codex, then verify it here".to_string(),
+        )
+    } else {
+        (
+            RestoreApplyStatus::RecoveryRequired,
+            "The interrupted Codex fork must be verified before Pull can continue".to_string(),
+        )
+    };
+    Ok(Some(RestoreResult {
+        success: false,
+        status,
+        message,
+        plan_id,
+        applied_action_ids: Vec::new(),
+        failed_actions: Vec::new(),
+        codex_fork_checkpoint: Some(CodexForkCheckpoint {
+            operation_id: operation.operation_id,
+            action_id,
+            source_provider_thread_id,
+            suggested_fork_name,
+        }),
+        codex_app_refresh: None,
+        codex_divergences: Vec::new(),
+    }))
+}
+
+#[tauri::command]
+pub async fn resume_codex_divergence(
+    app: tauri::AppHandle,
+    operation_id: ConversationOperationId,
+    provider_thread_id: Option<String>,
+) -> Result<RestoreResult, String> {
+    let repository = repository(&app)?;
+    run_blocking(move || {
+        let _host_operation = repository.acquire_host_operation()?;
+        let operation = repository
+            .load_conversation_sync_journal()?
+            .operations
+            .into_iter()
+            .find(|operation| operation.operation_id == operation_id)
+            .ok_or_else(|| format!("conversation operation '{}' does not exist", operation_id))?;
+        let plan_id = operation
+            .plan_id
+            .clone()
+            .ok_or_else(|| "Codex divergence operation lacks a restore plan".to_string())?;
+        let action_id = operation
+            .plan_action_id
+            .clone()
+            .ok_or_else(|| "Codex divergence operation lacks a plan action".to_string())?;
+        let divergence = operation
+            .divergence()
+            .cloned()
+            .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
+        let fork = codex_fork_request_for_operation(&repository, &operation)?;
+        let mut failpoints = NoConversationFailpoints;
+        match resume_codex_divergence_locked(
+            &repository,
+            &operation_id,
+            provider_thread_id.as_deref(),
+            fork,
+            &mut failpoints,
+        )? {
+            CodexDivergenceApplyOutcome::Committed(receipt) => {
+                let codex_divergences = codex_divergence_result(action_id.clone(), &receipt)
+                    .into_iter()
+                    .collect();
+                Ok(RestoreResult {
+                    success: true,
+                    status: RestoreApplyStatus::Complete,
+                    message: "Verified the Codex fork and restored the cloud conversation"
+                        .to_string(),
+                    plan_id,
+                    applied_action_ids: vec![action_id],
+                    failed_actions: Vec::new(),
+                    codex_fork_checkpoint: None,
+                    codex_app_refresh: codex_app_refresh_offer(operation_id.clone()),
+                    codex_divergences,
+                })
+            }
+            CodexDivergenceApplyOutcome::AwaitingManualFork { operation_id } => Ok(RestoreResult {
+                success: false,
+                status: RestoreApplyStatus::AwaitingManualFork,
+                message: "Create the reviewed fork in Codex, then verify it here".to_string(),
+                plan_id,
+                applied_action_ids: Vec::new(),
+                failed_actions: Vec::new(),
+                codex_fork_checkpoint: Some(CodexForkCheckpoint {
+                    operation_id,
+                    action_id,
+                    source_provider_thread_id: divergence.source_provider_thread_id,
+                    suggested_fork_name: divergence.desired_fork_name,
+                }),
+                codex_app_refresh: None,
+                codex_divergences: Vec::new(),
+            }),
+            CodexDivergenceApplyOutcome::RecoveryRequired {
+                operation_id,
+                message,
+            } => Ok(RestoreResult {
+                success: false,
+                status: RestoreApplyStatus::RecoveryRequired,
+                message,
+                plan_id,
+                applied_action_ids: Vec::new(),
+                failed_actions: Vec::new(),
+                codex_fork_checkpoint: Some(CodexForkCheckpoint {
+                    operation_id,
+                    action_id,
+                    source_provider_thread_id: divergence.source_provider_thread_id,
+                    suggested_fork_name: divergence.desired_fork_name,
+                }),
+                codex_app_refresh: None,
+                codex_divergences: Vec::new(),
+            }),
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_codex_divergence(
+    app: tauri::AppHandle,
+    operation_id: ConversationOperationId,
+) -> Result<bool, String> {
+    let repository = repository(&app)?;
+    run_blocking(move || {
+        let _host_operation = repository.acquire_host_operation()?;
+        cancel_codex_divergence_locked(&repository, &operation_id)?;
+        Ok(true)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn restart_codex_app_after_pull(
+    app: tauri::AppHandle,
+    request: RestartCodexAppAfterPullRequest,
+) -> Result<CodexAppRestartResult, String> {
+    let repository = repository(&app)?;
+    run_blocking(move || {
+        if !request.active_chats_complete {
+            return Err(
+                "confirm that active Codex chats are complete before restarting".to_string(),
+            );
+        }
+        verify_committed_divergence_receipt(&repository, &request.operation_id)?;
+        let offer = codex_app_refresh_offer(request.operation_id.clone()).ok_or_else(|| {
+            "Codex App no longer needs or supports an automatic restart".to_string()
+        })?;
+        if offer.state != CodexAppRefreshState::RestartAvailable
+            || offer.app_kind != request.app_kind
+        {
+            return Err("Codex App restart capability changed after Pull".to_string());
+        }
+        Ok(match restart_after_pull(request.app_kind) {
+            Ok(result) => result,
+            Err(message) => CodexAppRestartResult {
+                success: false,
+                message,
+            },
+        })
+    })
+    .await
 }
 
 #[tauri::command]
@@ -4332,9 +4614,6 @@ fn thread_review(
             .unwrap_or_else(|| CODEX_LINEAGE_CODEC_KEY.to_string());
 
         if build_push_actions {
-            let push_result = (push.action == ConversationPlanActionType::Fork)
-                .then(|| ThreadId::parse(generated_named_id("thread")?))
-                .transpose()?;
             let push_action = build_conversation_plan_action(ConversationPlanActionRequest {
                 action_id: ActionId::parse(generated_named_id("action")?)?,
                 direction: ConversationPlanDirection::Push,
@@ -4347,7 +4626,7 @@ fn thread_review(
                 local_project_id: binding.local_project_id.clone(),
                 provider_profile_id: profile_id.clone(),
                 thread_id: thread_id.clone(),
-                result_thread_id: push_result,
+                divergence: None,
                 source_resource_id: source_resource_id.clone(),
                 proposed_provider_thread_id: None,
                 required_codec: required_codec.clone(),
@@ -4369,11 +4648,9 @@ fn thread_review(
         }
 
         if build_pull_actions {
-            let pull_result = (pull.action == ConversationPlanActionType::Fork)
-                .then(|| ThreadId::parse(generated_named_id("thread")?))
-                .transpose()?;
             let mut proposed_provider_thread_id = None;
             let mut expected_provider_state = Vec::new();
+            let mut divergence = None;
             match pull.action {
                 ConversationPlanActionType::FastForwardLocal
                 | ConversationPlanActionType::ReplaceLocal => {
@@ -4394,7 +4671,56 @@ fn thread_review(
                         expectation: bounded_file_expectation(&target)?,
                     });
                 }
-                ConversationPlanActionType::Fork | ConversationPlanActionType::CreateLocal => {
+                ConversationPlanActionType::ResolveDivergence => {
+                    let local = local.ok_or_else(|| {
+                        "conversation divergence lacks a captured local branch".to_string()
+                    })?;
+                    let provider_id =
+                        local
+                            .conversation
+                            .source_thread_id
+                            .as_deref()
+                            .ok_or_else(|| {
+                                "captured Codex conversation lacks a provider id".to_string()
+                            })?;
+                    let target = codex_target_from_logical_path(
+                        &codex_home,
+                        &local.transcript.logical_path,
+                    )?;
+                    expected_provider_state.push(ProviderStateExpectation {
+                        target_path: target.to_string_lossy().into_owned(),
+                        expectation: bounded_file_expectation(&target)?,
+                    });
+                    let (local_lineage, local_semantic) =
+                        codec_digests(&local.conversation.lineage);
+                    let local_display_name = local
+                        .descriptor
+                        .as_ref()
+                        .unwrap_or(descriptor)
+                        .display_name
+                        .as_str();
+                    let explicit_local_title =
+                        (local_display_name != provider_id).then_some(local_display_name);
+                    let local_summary =
+                        chat_history::first_codex_user_summary(&local.transcript.bytes);
+                    divergence = Some(build_divergence_plan(
+                        &thread_id,
+                        provider_id,
+                        local_lineage.as_deref().ok_or_else(|| {
+                            "conversation divergence lacks local lineage".to_string()
+                        })?,
+                        local_semantic.as_deref().ok_or_else(|| {
+                            "conversation divergence lacks local semantics".to_string()
+                        })?,
+                        explicit_local_title,
+                        thread.and_then(|thread| thread.display_title.as_deref()),
+                        local_summary.as_deref(),
+                        created_at,
+                        &codex_home,
+                        Path::new(&binding.project_root),
+                    )?);
+                }
+                ConversationPlanActionType::CreateLocal => {
                     let provider_id = loop {
                         let candidate = generated_uuid_v4()?;
                         if occupied_provider_ids.insert(candidate.clone()) {
@@ -4434,7 +4760,7 @@ fn thread_review(
                 local_project_id: binding.local_project_id.clone(),
                 provider_profile_id: profile_id.clone(),
                 thread_id: thread_id.clone(),
-                result_thread_id: pull_result,
+                divergence,
                 source_resource_id,
                 proposed_provider_thread_id,
                 required_codec,
@@ -5697,6 +6023,23 @@ fn selected_conversation_actions(
     plan: &ConversationPushPlan,
     approved_action_ids: &[ActionId],
 ) -> Result<Vec<ConversationPlanAction>, String> {
+    if let Some(action) = plan.actions.iter().find(|action| {
+        matches!(
+            action.action,
+            ConversationPlanActionType::RequirePull | ConversationPlanActionType::Blocked
+        )
+    }) {
+        let instruction = if action.action == ConversationPlanActionType::RequirePull {
+            "Pull and resolve the conversation before pushing"
+        } else {
+            "refresh the review and resolve the blocked conversation before pushing"
+        };
+        return Err(format!(
+            "conversation Push is blocked by thread '{}'; {instruction}",
+            action.thread_id
+        ));
+    }
+
     let mut approved = BTreeSet::new();
     for action_id in approved_action_ids {
         if !approved.insert(action_id.clone()) {
@@ -5730,7 +6073,6 @@ fn selected_conversation_actions(
         !matches!(
             action.action,
             ConversationPlanActionType::FastForwardCloud
-                | ConversationPlanActionType::Fork
                 | ConversationPlanActionType::CreateCloud
                 | ConversationPlanActionType::ReplaceCloud
                 | ConversationPlanActionType::TombstoneThread
@@ -5816,7 +6158,6 @@ fn conversation_thread_from_capture(
             ),
         };
     let forked_from = match action.action {
-        ConversationPlanActionType::Fork => Some(action.thread_id.clone()),
         ConversationPlanActionType::CreateCloud => {
             local_binding.and_then(|binding| binding.forked_from.clone())
         }
@@ -5825,7 +6166,13 @@ fn conversation_thread_from_capture(
     let thread = ConversationThread {
         thread_id: result_thread_id.clone(),
         provider: action.provider,
-        display_title: Some(descriptor.display_name.clone()),
+        // A display name equal to the provider thread ID is the unnamed
+        // default, not a user title. Publishing it would clobber a real
+        // cloud title on the next fast-forward from a machine whose local
+        // index no longer names the thread (Codex prunes its index).
+        display_title: Some(descriptor.display_name.clone())
+            .filter(|name| Some(name.as_str()) != conversation.source_thread_id.as_deref())
+            .or_else(|| previous.and_then(|thread| thread.display_title.clone())),
         resource_id: resource_id.clone(),
         files: vec![ConversationFileRef {
             logical_path: logical_path.clone(),
@@ -6023,11 +6370,7 @@ fn build_publish_request(
     let mut operations = Vec::new();
     for action in actions {
         let (conversation, transcript) = captured_conversation_for_action(captured, action)?;
-        let result_thread_id = action
-            .result_thread_id
-            .as_ref()
-            .unwrap_or(&action.thread_id)
-            .clone();
+        let result_thread_id = action.thread_id.clone();
         let previous_thread = conversations.get(&result_thread_id);
         let local_binding = document.bindings.iter().find(|candidate| {
             candidate.host_id == binding.host_id
@@ -6118,16 +6461,8 @@ fn build_publish_request(
             provider_profile_id: action.provider_profile_id.clone(),
             provider: action.provider,
             thread_id: action.thread_id.clone(),
-            old_thread_id: (action.action == ConversationPlanActionType::Fork)
-                .then(|| action.thread_id.clone()),
-            rekey_committed: false,
-            result_thread_id,
-            materialized_thread_id: None,
-            binding_forked_from: if action.action == ConversationPlanActionType::Fork {
-                Some(action.thread_id.clone())
-            } else {
-                local_binding.and_then(|binding| binding.forked_from.clone())
-            },
+            operation: ConversationSyncOperationKind::CloudPublication,
+            binding_forked_from: local_binding.and_then(|binding| binding.forked_from.clone()),
             provider_thread_id: Some(provider_thread_id),
             materialization_state: ConversationMaterializationState::Resumable,
             lineage_digest: action.pinned_lineage_digest.clone(),
@@ -6201,10 +6536,7 @@ fn snapshot_contains_actions(
     actions: &[ConversationPlanAction],
 ) -> bool {
     actions.iter().all(|action| {
-        let result_thread_id = action
-            .result_thread_id
-            .as_ref()
-            .unwrap_or(&action.thread_id);
+        let result_thread_id = &action.thread_id;
         snapshot
             .manifest
             .conversations
@@ -6212,8 +6544,6 @@ fn snapshot_contains_actions(
             .is_some_and(|thread| {
                 thread.lineage_digest == action.pinned_lineage_digest
                     && thread.semantic_digest == action.pinned_semantic_digest
-                    && (action.action != ConversationPlanActionType::Fork
-                        || thread.forked_from.as_ref() == Some(&action.thread_id))
             })
     })
 }
@@ -6443,6 +6773,23 @@ fn push_bundle_reviewed_with_repository(
     capture_request.include_project_content = wants_project_content;
     let discovery = provider_capture::discover_full(&capture_request)?;
     let discovered = discovery.project_inventory();
+    let local_codex_conversations = discovered
+        .resources
+        .iter()
+        .filter(|candidate| {
+            candidate.kind == CaptureResourceKind::Conversation
+                && candidate.provider == Some(CaptureProvider::Codex)
+        })
+        .collect::<Vec<_>>();
+    if let Some(candidate) = local_codex_conversations
+        .iter()
+        .find(|candidate| candidate.blocked_reason.is_some())
+    {
+        return Err(format!(
+            "conversation Push is blocked because '{}' cannot be reviewed safely; resolve the local capture problem before pushing",
+            candidate.display_name
+        ));
+    }
     project = persist_auto_selected_conversations(
         repository,
         &project.local_project_id,
@@ -6511,6 +6858,21 @@ fn push_bundle_reviewed_with_repository(
         || !project_content_review.removal_ids.is_empty();
     let (_, engine) = storage_engine(repository, storage_id)?;
     let observed = engine.inspect_optional_with_token(&project.bundle_id)?;
+    let has_stored_codex_conversation = observed.as_ref().is_some_and(|(snapshot, _)| {
+        snapshot
+            .manifest
+            .conversations
+            .values()
+            .any(|thread| thread.provider == Provider::Codex)
+    });
+    if conversation_push_plan_id.is_none()
+        && (!local_codex_conversations.is_empty() || has_stored_codex_conversation)
+    {
+        return Err(
+            "Codex conversation Push requires a current Push review; refresh and review before pushing"
+                .to_string(),
+        );
+    }
     let mut reviewed_inventory = None;
     if let Some(review_token) = project_content_review.review_token.as_deref() {
         // The freshness check derives from the same walk instant and the same
@@ -6891,16 +7253,46 @@ fn apply_bundle_restore_with_repository(
     plan_id: &PlanId,
     approved_action_ids: Vec<ActionId>,
 ) -> Result<RestoreResult, String> {
-    apply_bundle_restore_with_progress(repository, plan_id, approved_action_ids, &mut |_| {})
+    let plan = repository.load_restore_plan(plan_id)?;
+    let selected = approved_action_ids.iter().collect::<BTreeSet<_>>();
+    let conversation_resolutions = plan
+        .conversation_actions
+        .iter()
+        .filter(|action| {
+            action.action == ConversationPlanActionType::ResolveDivergence
+                && selected.contains(&action.action_id)
+        })
+        .map(|action| ConversationResolutionSelection {
+            action_id: action.action_id.clone(),
+            resolution: ConversationDivergenceResolution::PreserveLocalWithNativeFork,
+            destructive_approved: false,
+        })
+        .collect();
+    apply_bundle_restore_with_progress(
+        repository,
+        plan_id,
+        approved_action_ids,
+        conversation_resolutions,
+        &mut |_| {},
+    )
 }
 
 struct PreparedPullConversation {
     action: ConversationPlanAction,
+    resolution: Option<ConversationDivergenceResolution>,
     cloud_transcript: Vec<u8>,
     cloud_file_sha256: String,
     cloud_provider_thread_id: String,
     cloud_cwd: String,
     cloud_forked_from: Option<ThreadId>,
+    cloud_display_title: Option<String>,
+    cloud_updated_at: u64,
+}
+
+#[derive(Clone, Debug)]
+struct SelectedPullConversation {
+    action: ConversationPlanAction,
+    resolution: Option<ConversationDivergenceResolution>,
 }
 
 fn capture_local_codex_conversations(
@@ -6956,7 +7348,7 @@ fn prepare_pull_conversation_actions(
     binding: &ProjectBinding,
     snapshot: &BundleSnapshot,
     bytes: &mut dyn BundleBytes,
-    actions: &[ConversationPlanAction],
+    actions: &[SelectedPullConversation],
     now: u64,
 ) -> Result<Vec<PreparedPullConversation>, String> {
     if actions.is_empty() {
@@ -6967,7 +7359,8 @@ fn prepare_pull_conversation_actions(
     let machine = repository.load_bindings()?;
     let identity = repository.load_or_create_host_identity()?;
     let mut prepared = Vec::with_capacity(actions.len());
-    for action in actions {
+    for selected in actions {
+        let action = &selected.action;
         let thread = snapshot
             .manifest
             .conversations
@@ -7062,21 +7455,30 @@ fn prepare_pull_conversation_actions(
         })?;
         prepared.push(PreparedPullConversation {
             action: action.clone(),
+            resolution: selected.resolution,
             cloud_transcript,
             cloud_file_sha256,
             cloud_provider_thread_id,
             cloud_cwd,
             cloud_forked_from: thread.forked_from.clone(),
+            cloud_display_title: thread.display_title.clone(),
+            cloud_updated_at: thread.updated_at,
         });
     }
     Ok(prepared)
 }
 
+/// Read the local Codex session index, reject a colliding reserved thread
+/// ID, and build the appended index payload. Returns no payload without a
+/// title: every row the provider writes is `{id, thread_name, updated_at}`,
+/// so a titleless thread gets no row and stays invisible until Codex
+/// rebuilds its own index from the materialized rollout.
 fn codex_index_payload(
     path: &Path,
     provider_thread_id: &str,
-    project_root: &str,
-) -> Result<(TargetExpectation, Vec<u8>), String> {
+    thread_name: Option<&str>,
+    updated_at: u64,
+) -> Result<(TargetExpectation, Option<Vec<u8>>), String> {
     let expectation = bounded_file_expectation(path)?;
     let mut bytes = match &expectation {
         TargetExpectation::Absent => Vec::new(),
@@ -7097,17 +7499,39 @@ fn codex_index_payload(
             return Err("reserved Codex provider ID is already indexed".to_string());
         }
     }
+    let Some(thread_name) = thread_name else {
+        return Ok((expectation, None));
+    };
+    let updated_at = Utc
+        .timestamp_opt(updated_at as i64, 0)
+        .single()
+        .ok_or_else(|| "cloud conversation timestamp is out of range".to_string())?
+        .format("%Y-%m-%dT%H:%M:%S%.6fZ")
+        .to_string();
     if !bytes.is_empty() && !bytes.ends_with(b"\n") {
         bytes.push(b'\n');
     }
     let mut row = serde_json::to_vec(&serde_json::json!({
         "id": provider_thread_id,
-        "cwd": project_root,
+        "thread_name": thread_name,
+        "updated_at": updated_at,
     }))
     .map_err(|error| format!("serialize Codex session index row: {error}"))?;
     row.push(b'\n');
     bytes.extend(row);
-    Ok((expectation, bytes))
+    Ok((expectation, Some(bytes)))
+}
+
+enum PreparedPullConversationOutcome {
+    Applied(ApplyReceipt),
+    Checkpoint {
+        status: RestoreApplyStatus,
+        operation_id: ConversationOperationId,
+        action_id: ActionId,
+        source_provider_thread_id: String,
+        suggested_fork_name: String,
+        message: String,
+    },
 }
 
 fn apply_prepared_pull_conversation(
@@ -7116,15 +7540,17 @@ fn apply_prepared_pull_conversation(
     binding: &ProjectBinding,
     prepared: PreparedPullConversation,
     applied_at: u64,
-) -> Result<ApplyReceipt, String> {
+) -> Result<PreparedPullConversationOutcome, String> {
     let action = prepared.action;
     let action_id = action.action_id.clone();
     let action_thread_id = action.thread_id.clone();
     let action_provider = action.provider;
     let source_resource_id = action.source_resource_id.clone();
-    let provider_thread_id = action
-        .proposed_provider_thread_id
-        .clone()
+    let divergence_plan = action.divergence.clone();
+    let provider_thread_id = divergence_plan
+        .as_ref()
+        .map(|divergence| divergence.source_provider_thread_id.clone())
+        .or_else(|| action.proposed_provider_thread_id.clone())
         .ok_or_else(|| "conversation Pull action lacks a destination provider id".to_string())?;
     let rewritten = rewrite_codex_transcript(
         &prepared.cloud_transcript,
@@ -7162,14 +7588,29 @@ fn apply_prepared_pull_conversation(
             == Some("session_index.jsonl")
     }) {
         let index_path = PathBuf::from(&index_target.target_path);
-        let (expected, bytes) =
-            codex_index_payload(&index_path, &provider_thread_id, &binding.project_root)?;
-        targets.push(ConversationTargetPayload {
-            target_path: index_path,
-            role: ConversationFileRole::ProviderIndexFragment,
-            expected,
-            bytes,
-        });
+        // A real title is one a user could have set: unnamed captures
+        // publish the provider thread ID as their display title.
+        let cloud_title = prepared
+            .cloud_display_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| {
+                !title.is_empty() && *title != prepared.cloud_provider_thread_id.as_str()
+            });
+        let (expected, bytes) = codex_index_payload(
+            &index_path,
+            &provider_thread_id,
+            cloud_title,
+            prepared.cloud_updated_at,
+        )?;
+        if let Some(bytes) = bytes {
+            targets.push(ConversationTargetPayload {
+                target_path: index_path,
+                role: ConversationFileRole::ProviderIndexFragment,
+                expected,
+                bytes,
+            });
+        }
     }
     let current_document = repository.load_conversation_bindings()?;
     let current_binding = current_document.bindings.iter().find(|candidate| {
@@ -7179,11 +7620,42 @@ fn apply_prepared_pull_conversation(
             && candidate.provider_profile_id == action.provider_profile_id
             && candidate.thread_id == action.thread_id
     });
-    let result_thread_id = action
-        .result_thread_id
-        .clone()
-        .unwrap_or_else(|| action.thread_id.clone());
-    let is_fork = action.action == ConversationPlanActionType::Fork;
+    let operation_kind = match (&divergence_plan, prepared.resolution) {
+        (Some(divergence), Some(resolution)) => {
+            ConversationSyncOperationKind::CodexDivergence(CodexDivergenceOperation {
+                resolution,
+                available_resolutions: divergence.available_resolutions.clone(),
+                preserved_thread_id: divergence.preserved_thread_id.clone(),
+                source_provider_thread_id: divergence.source_provider_thread_id.clone(),
+                fork_provider_thread_id: None,
+                fork_transcript_path: None,
+                fork_transcript_sha256: None,
+                local_lineage_digest: divergence.local_lineage_digest.clone(),
+                local_semantic_digest: divergence.local_semantic_digest.clone(),
+                pinned_local_title: divergence.pinned_local_title.clone(),
+                pinned_cloud_title: divergence.pinned_cloud_title.clone(),
+                desired_fork_name: divergence.desired_fork_name.clone(),
+                desired_original_name: divergence.desired_original_name.clone(),
+                codex_executable: divergence.codex_executable.clone(),
+                codex_executable_sha256: divergence.codex_executable_sha256.clone(),
+                available_executors: divergence.available_executors.clone(),
+                pre_existing_children: divergence.pre_existing_children.clone(),
+                attempts: Vec::new(),
+                current_executor: None,
+                successful_executor: None,
+                fork_name_status: None,
+                original_name_status: None,
+                inventory_refresh_status: CodexInventoryRefreshStatus::NotAttempted,
+            })
+        }
+        (Some(_), None) => {
+            return Err("conversation divergence lacks a selected resolution".to_string())
+        }
+        (None, Some(_)) => {
+            return Err("non-divergence conversation carries a resolution".to_string())
+        }
+        (None, None) => ConversationSyncOperationKind::ProviderMaterialization,
+    };
     let operation = ConversationSyncOperation {
         operation_id: ConversationOperationId::parse(generated_named_id("operation")?)?,
         plan_id: Some(plan.plan_id.clone()),
@@ -7201,10 +7673,7 @@ fn apply_prepared_pull_conversation(
         provider_profile_id: action.provider_profile_id.clone(),
         provider: action.provider,
         thread_id: action.thread_id.clone(),
-        old_thread_id: is_fork.then(|| action.thread_id.clone()),
-        rekey_committed: false,
-        result_thread_id,
-        materialized_thread_id: is_fork.then(|| action.thread_id.clone()),
+        operation: operation_kind,
         binding_forked_from: prepared.cloud_forked_from,
         provider_thread_id: Some(provider_thread_id),
         materialization_state: ConversationMaterializationState::Resumable,
@@ -7224,12 +7693,74 @@ fn apply_prepared_pull_conversation(
         updated_at: applied_at,
     };
     let mut failpoints = NoConversationFailpoints;
-    let conversation = apply_conversation_materialization_locked(
-        repository,
-        ConversationMaterializationRequest { operation, targets },
-        &mut failpoints,
-    )?;
-    Ok(ApplyReceipt {
+    let conversation = if let Some(divergence) = divergence_plan {
+        let codex_home = binding
+            .codex_home
+            .as_deref()
+            .map(PathBuf::from)
+            .ok_or_else(|| "Codex divergence requires a bound Codex home".to_string())?;
+        let source_transcript_sha256 = match &action.expected_local_target {
+            TargetExpectation::Sha256(digest) => digest.clone(),
+            TargetExpectation::Absent => {
+                return Err("Codex divergence source transcript is absent".to_string())
+            }
+        };
+        let fork = CodexForkExecutionRequest {
+            codex_home,
+            project_directory: PathBuf::from(&binding.project_root),
+            codex_executable: PathBuf::from(&divergence.codex_executable),
+            codex_executable_sha256: divergence.codex_executable_sha256.clone(),
+            source_provider_thread_id: divergence.source_provider_thread_id.clone(),
+            source_transcript_sha256,
+            local_lineage_digest: divergence.local_lineage_digest.clone(),
+            local_semantic_digest: divergence.local_semantic_digest.clone(),
+            pinned_local_title: divergence.pinned_local_title.clone(),
+            desired_fork_name: divergence.desired_fork_name.clone(),
+            available_executors: divergence.available_executors.clone(),
+            pre_existing_children: divergence.pre_existing_children.clone(),
+        };
+        match apply_codex_divergence_locked(
+            repository,
+            CodexDivergenceMaterializationRequest {
+                operation,
+                targets,
+                fork,
+            },
+            &mut failpoints,
+        )? {
+            CodexDivergenceApplyOutcome::Committed(conversation) => conversation,
+            CodexDivergenceApplyOutcome::AwaitingManualFork { operation_id } => {
+                return Ok(PreparedPullConversationOutcome::Checkpoint {
+                    status: RestoreApplyStatus::AwaitingManualFork,
+                    operation_id,
+                    action_id,
+                    source_provider_thread_id: divergence.source_provider_thread_id,
+                    suggested_fork_name: divergence.desired_fork_name,
+                    message: "Automatic Codex fork methods were unavailable. Create the fork in Codex, then verify it here.".to_string(),
+                });
+            }
+            CodexDivergenceApplyOutcome::RecoveryRequired {
+                operation_id,
+                message,
+            } => {
+                return Ok(PreparedPullConversationOutcome::Checkpoint {
+                    status: RestoreApplyStatus::RecoveryRequired,
+                    operation_id,
+                    action_id,
+                    source_provider_thread_id: divergence.source_provider_thread_id,
+                    suggested_fork_name: divergence.desired_fork_name,
+                    message,
+                });
+            }
+        }
+    } else {
+        apply_conversation_materialization_locked(
+            repository,
+            ConversationMaterializationRequest { operation, targets },
+            &mut failpoints,
+        )?
+    };
+    Ok(PreparedPullConversationOutcome::Applied(ApplyReceipt {
         action_id,
         resource_id: source_resource_id.unwrap_or(conversation_resource_id(
             action_provider,
@@ -7244,20 +7775,54 @@ fn apply_prepared_pull_conversation(
         applied_at,
         error: None,
         conversation: Some(conversation),
-    })
+    }))
 }
 
 fn apply_bundle_restore_with_progress(
     repository: &LocalStateRepository,
     plan_id: &PlanId,
     approved_action_ids: Vec<ActionId>,
+    conversation_resolutions: Vec<ConversationResolutionSelection>,
     on_progress: &mut dyn FnMut(FetchProgress),
 ) -> Result<RestoreResult, String> {
     let _host_operation = repository.acquire_host_operation()?;
     let plan = repository.load_restore_plan(plan_id)?;
     let binding = current_binding_for_restore_plan(repository, &plan)?;
-    let (approved, approved_conversation_actions) =
-        split_approved_restore_actions(&approved_action_ids, &plan)?;
+    let (mut approved, mut approved_conversation_actions) =
+        split_approved_restore_actions(&approved_action_ids, &conversation_resolutions, &plan)?;
+    let existing_materialization = repository
+        .load_materializations()?
+        .records
+        .into_iter()
+        .find(|record| record.plan_id == plan.plan_id);
+    if let Some(record) = &existing_materialization {
+        if record.host_id != binding.host_id
+            || record.replica_id != binding.replica_id
+            || record.local_project_id != binding.local_project_id
+            || record.storage_id != plan.storage_id
+            || record.bundle_id != plan.bundle_id
+            || record.generation != plan.generation
+            || record.commit_id != plan.commit_id
+            || record.manifest_sha256 != plan.manifest_sha256
+            || record.binding_revision != plan.binding_revision
+        {
+            return Err("existing restore receipts disagree with the reviewed plan".to_string());
+        }
+        let completed = record
+            .receipts
+            .iter()
+            .filter(|receipt| {
+                matches!(
+                    receipt.status,
+                    ActionStatus::Applied | ActionStatus::Skipped
+                )
+            })
+            .map(|receipt| receipt.action_id.clone())
+            .collect::<BTreeSet<_>>();
+        approved.retain(|action_id| !completed.contains(action_id));
+        approved_conversation_actions
+            .retain(|selected| !completed.contains(&selected.action.action_id));
+    }
     let approves_project_content = plan.actions.iter().any(|action| {
         approved.contains(&action.action_id)
             && matches!(
@@ -7274,22 +7839,11 @@ fn apply_bundle_restore_with_progress(
             return Err(eligibility.reason);
         }
     }
-    if repository
-        .load_materializations()?
-        .records
-        .iter()
-        .any(|record| record.plan_id == plan.plan_id)
-    {
-        return Err(format!(
-            "restore plan '{}' was already applied",
-            plan.plan_id
-        ));
-    }
     let (engine, snapshot) = inspect_from_storage(repository, &plan.storage_id, &plan.bundle_id)?;
     let restored_recipe = snapshot.manifest.recipe.clone();
     let applied_at = now_secs();
     let mut byte_source = engine.byte_source(&snapshot, Some(object_cache()), Some(on_progress));
-    let prepared_conversations = prepare_pull_conversation_actions(
+    let mut prepared_conversations = prepare_pull_conversation_actions(
         repository,
         &binding,
         &snapshot,
@@ -7297,6 +7851,46 @@ fn apply_bundle_restore_with_progress(
         &approved_conversation_actions,
         applied_at,
     )?;
+    prepared_conversations.sort_by_key(|prepared| {
+        usize::from(prepared.action.action != ConversationPlanActionType::ResolveDivergence)
+    });
+    let mut conversation_receipts = Vec::new();
+    for prepared in prepared_conversations {
+        match apply_prepared_pull_conversation(repository, &plan, &binding, prepared, applied_at)? {
+            PreparedPullConversationOutcome::Applied(receipt) => {
+                conversation_receipts.push(receipt);
+            }
+            PreparedPullConversationOutcome::Checkpoint {
+                status,
+                operation_id,
+                action_id,
+                source_provider_thread_id,
+                suggested_fork_name,
+                message,
+            } => {
+                return Ok(RestoreResult {
+                    success: false,
+                    status,
+                    message,
+                    plan_id: plan.plan_id,
+                    applied_action_ids: conversation_receipts
+                        .iter()
+                        .filter(|receipt| receipt.status == ActionStatus::Applied)
+                        .map(|receipt| receipt.action_id.clone())
+                        .collect(),
+                    failed_actions: Vec::new(),
+                    codex_fork_checkpoint: Some(CodexForkCheckpoint {
+                        operation_id,
+                        action_id,
+                        source_provider_thread_id,
+                        suggested_fork_name,
+                    }),
+                    codex_app_refresh: None,
+                    codex_divergences: Vec::new(),
+                });
+            }
+        }
+    }
     let mut applied = engine.apply_restore_plan_lazy(
         &snapshot,
         &mut byte_source,
@@ -7306,10 +7900,24 @@ fn apply_bundle_restore_with_progress(
         &repository.backups_dir()?,
         applied_at,
     )?;
-    for prepared in prepared_conversations {
-        applied.receipts.push(apply_prepared_pull_conversation(
-            repository, &plan, &binding, prepared, applied_at,
-        )?);
+    applied.receipts.extend(conversation_receipts);
+    if let Some(record) = repository
+        .load_materializations()?
+        .records
+        .into_iter()
+        .find(|record| record.plan_id == plan.plan_id)
+    {
+        let recorded = applied
+            .receipts
+            .iter()
+            .map(|receipt| receipt.action_id.clone())
+            .collect::<BTreeSet<_>>();
+        applied.receipts.extend(
+            record
+                .receipts
+                .into_iter()
+                .filter(|receipt| !recorded.contains(&receipt.action_id)),
+        );
     }
     let kept_local_conversation_actions = plan
         .actions
@@ -7469,9 +8077,19 @@ fn apply_bundle_restore_with_progress(
                 .unwrap_or_else(|| "Action was not materialized".to_string()),
         })
         .collect::<Vec<_>>();
+    let codex_divergences = applied
+        .receipts
+        .iter()
+        .filter_map(|receipt| {
+            receipt.conversation.as_ref().and_then(|conversation| {
+                codex_divergence_result(receipt.action_id.clone(), conversation)
+            })
+        })
+        .collect::<Vec<_>>();
     let success = overall_success;
     Ok(RestoreResult {
         success,
+        status: RestoreApplyStatus::Complete,
         message: if success {
             format!("Applied {} restore actions", applied_action_ids.len())
         } else {
@@ -7484,6 +8102,65 @@ fn apply_bundle_restore_with_progress(
         plan_id: plan.plan_id,
         applied_action_ids,
         failed_actions,
+        codex_fork_checkpoint: None,
+        // Every committed conversation materialization — not just a
+        // divergence — leaves a running Codex app unaware of the thread
+        // until its next thread/list rescan.
+        codex_app_refresh: applied
+            .receipts
+            .iter()
+            .find_map(|receipt| receipt.conversation.as_ref())
+            .and_then(|receipt| codex_app_refresh_offer(receipt.journal_operation_id.clone())),
+        codex_divergences,
+    })
+}
+
+fn verify_committed_divergence_receipt(
+    repository: &LocalStateRepository,
+    operation_id: &ConversationOperationId,
+) -> Result<(), String> {
+    if repository
+        .load_conversation_sync_journal()?
+        .operations
+        .iter()
+        .any(|operation| &operation.operation_id == operation_id)
+    {
+        return Err("Codex divergence has not finished LocalCommitted cleanup".to_string());
+    }
+    let materializations = repository.load_materializations()?;
+    let committed = materializations.records.iter().any(|record| {
+        record.receipts.iter().any(|receipt| {
+            receipt.status == ActionStatus::Applied
+                && receipt.conversation.as_ref().is_some_and(|conversation| {
+                    &conversation.journal_operation_id == operation_id
+                        && conversation.divergence.is_some()
+                })
+        })
+    });
+    if !committed {
+        return Err("completed Codex divergence receipt was not found".to_string());
+    }
+    Ok(())
+}
+
+fn codex_divergence_result(
+    action_id: ActionId,
+    receipt: &super::domain::ConversationApplyReceipt,
+) -> Option<CodexDivergenceResult> {
+    let divergence = receipt.divergence.as_ref()?;
+    Some(CodexDivergenceResult {
+        action_id,
+        original_thread_id: receipt.thread_id.clone(),
+        original_provider_thread_id: receipt.provider_thread_id.clone()?,
+        resolution: divergence.resolution,
+        preserved_thread_id: divergence.preserved_thread_id.clone(),
+        preserved_provider_thread_id: divergence.preserved_provider_thread_id.clone(),
+        executor: divergence.executor,
+        desired_fork_name: divergence.desired_fork_name.clone(),
+        fork_name_status: divergence.fork_name_status,
+        desired_original_name: divergence.desired_original_name.clone(),
+        original_name_status: divergence.original_name_status,
+        inventory_refresh_status: divergence.inventory_refresh_status,
     })
 }
 
@@ -8148,8 +8825,9 @@ fn shell_quote(value: &str) -> String {
 
 fn split_approved_restore_actions(
     requested: &[ActionId],
+    conversation_resolutions: &[ConversationResolutionSelection],
     plan: &RestorePlan,
-) -> Result<(BTreeSet<ActionId>, Vec<ConversationPlanAction>), String> {
+) -> Result<(BTreeSet<ActionId>, Vec<SelectedPullConversation>), String> {
     let selected = requested.iter().cloned().collect::<BTreeSet<_>>();
     if selected.len() != requested.len() {
         return Err("approved restore actions contain duplicates".to_string());
@@ -8170,17 +8848,17 @@ fn split_approved_restore_actions(
     {
         return Err(format!("restore plan has no action '{}'", unknown));
     }
-    let selected_conversations = plan
+    let selected_conversation_actions = plan
         .conversation_actions
         .iter()
         .filter(|action| selected.contains(&action.action_id))
         .cloned()
         .collect::<Vec<_>>();
-    if let Some(action) = selected_conversations.iter().find(|action| {
+    if let Some(action) = selected_conversation_actions.iter().find(|action| {
         !matches!(
             action.action,
             ConversationPlanActionType::FastForwardLocal
-                | ConversationPlanActionType::Fork
+                | ConversationPlanActionType::ResolveDivergence
                 | ConversationPlanActionType::CreateLocal
                 | ConversationPlanActionType::ReplaceLocal
         )
@@ -8188,6 +8866,98 @@ fn split_approved_restore_actions(
         return Err(format!(
             "conversation Pull action '{}' is informational and cannot be selected",
             action.action_id
+        ));
+    }
+    let mut resolution_by_action = BTreeMap::new();
+    for selection in conversation_resolutions {
+        if resolution_by_action
+            .insert(selection.action_id.clone(), selection)
+            .is_some()
+        {
+            return Err(format!(
+                "conversation resolution '{}' was selected more than once",
+                selection.action_id
+            ));
+        }
+        let action = plan
+            .conversation_actions
+            .iter()
+            .find(|action| action.action_id == selection.action_id)
+            .ok_or_else(|| {
+                format!(
+                    "conversation resolution '{}' is not in this Pull plan",
+                    selection.action_id
+                )
+            })?;
+        if action.action != ConversationPlanActionType::ResolveDivergence
+            || !selected.contains(&selection.action_id)
+        {
+            return Err(format!(
+                "conversation resolution '{}' does not belong to a selected divergence",
+                selection.action_id
+            ));
+        }
+        let divergence = action.divergence.as_ref().ok_or_else(|| {
+            format!(
+                "conversation divergence '{}' lacks its reviewed options",
+                selection.action_id
+            )
+        })?;
+        if !divergence
+            .available_resolutions
+            .contains(&selection.resolution)
+        {
+            return Err(format!(
+                "conversation resolution '{}' was not advertised by this Pull plan",
+                selection.action_id
+            ));
+        }
+        if selection.resolution == ConversationDivergenceResolution::UseCloudOnly
+            && !selection.destructive_approved
+        {
+            return Err(format!(
+                "cloud-only resolution '{}' requires destructive approval",
+                selection.action_id
+            ));
+        }
+        if selection.resolution == ConversationDivergenceResolution::PreserveLocalWithNativeFork
+            && selection.destructive_approved
+        {
+            return Err(format!(
+                "keep-both resolution '{}' must not carry destructive approval",
+                selection.action_id
+            ));
+        }
+    }
+    let mut selected_conversations = Vec::with_capacity(selected_conversation_actions.len());
+    for action in selected_conversation_actions {
+        let resolution = if action.action == ConversationPlanActionType::ResolveDivergence {
+            Some(
+                resolution_by_action
+                    .remove(&action.action_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "conversation divergence '{}' lacks a resolution",
+                            action.action_id
+                        )
+                    })?
+                    .resolution,
+            )
+        } else {
+            if resolution_by_action.remove(&action.action_id).is_some() {
+                return Err(format!(
+                    "non-divergence conversation '{}' has a resolution",
+                    action.action_id
+                ));
+            }
+            None
+        };
+        selected_conversations.push(SelectedPullConversation { action, resolution });
+    }
+    if let Some(action_id) = resolution_by_action.keys().next() {
+        return Err(format!(
+            "conversation resolution '{}' was not consumed by this Pull",
+            action_id
         ));
     }
     Ok((
@@ -11743,6 +12513,44 @@ mod tests {
     };
 
     #[test]
+    fn codex_index_payload_writes_provider_schema_rows_only_for_titled_threads() {
+        let temp = tempfile::tempdir().unwrap();
+        let index_path = temp.path().join("session_index.jsonl");
+
+        let (expectation, bytes) =
+            codex_index_payload(&index_path, "thread-new", None, 1_784_332_800).unwrap();
+        assert_eq!(expectation, TargetExpectation::Absent);
+        assert!(bytes.is_none(), "titleless threads write no index row");
+
+        let (_, bytes) =
+            codex_index_payload(&index_path, "thread-new", Some("Named"), 1_784_332_800).unwrap();
+        let row: serde_json::Value =
+            serde_json::from_slice(bytes.unwrap().trim_ascii_end()).unwrap();
+        assert_eq!(
+            row,
+            serde_json::json!({
+                "id": "thread-new",
+                "thread_name": "Named",
+                "updated_at": "2026-07-18T00:00:00.000000Z",
+            })
+        );
+
+        std::fs::write(
+            &index_path,
+            "{\"id\":\"thread-new\",\"thread_name\":\"Old\",\"updated_at\":\"2026-01-01T00:00:00.000000Z\"}\n",
+        )
+        .unwrap();
+        for title in [None, Some("Named")] {
+            assert!(
+                codex_index_payload(&index_path, "thread-new", title, 1_784_332_800)
+                    .unwrap_err()
+                    .contains("already indexed"),
+                "the collision scan runs whether or not a row will be written"
+            );
+        }
+    }
+
+    #[test]
     fn host_sensitive_workflows_share_the_host_operation_lock() {
         let temp = tempfile::tempdir().unwrap();
         let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
@@ -12389,8 +13197,143 @@ mod tests {
         }
     }
 
+    fn divergence_selection_test_plan() -> RestorePlan {
+        let host_id = HostId::parse("11111111111111111111111111111111").unwrap();
+        let replica_id = ReplicaId::parse("replica-divergence").unwrap();
+        let local_project_id = LocalProjectId::parse("project-divergence").unwrap();
+        let profile_id = LocalProviderProfileId::parse("profile-divergence").unwrap();
+        let action = ConversationPlanAction {
+            action_id: ActionId::parse("action-divergence").unwrap(),
+            direction: ConversationPlanDirection::Pull,
+            action: ConversationPlanActionType::ResolveDivergence,
+            reason_code: ConversationReasonCode::Diverged,
+            relation: ConversationRelation::Diverged,
+            provider: Provider::Codex,
+            host_id: host_id.clone(),
+            replica_id: replica_id.clone(),
+            local_project_id,
+            provider_profile_id: profile_id,
+            thread_id: ThreadId::parse("thread-shared").unwrap(),
+            divergence: Some(crate::project_sync::domain::ConversationDivergencePlan {
+                available_resolutions: vec![
+                    ConversationDivergenceResolution::PreserveLocalWithNativeFork,
+                    ConversationDivergenceResolution::UseCloudOnly,
+                ],
+                preserved_thread_id: ThreadId::parse("thread-preserved").unwrap(),
+                source_provider_thread_id: "source-native".to_string(),
+                local_lineage_digest: "b".repeat(64),
+                local_semantic_digest: "c".repeat(64),
+                pinned_local_title: Some("Local title".to_string()),
+                pinned_cloud_title: Some("Cloud title".to_string()),
+                desired_fork_name: "Local title — local before Pull · 2026-07-29 18:42Z"
+                    .to_string(),
+                desired_original_name: Some("Cloud title".to_string()),
+                codex_executable: "/tmp/codex".to_string(),
+                codex_executable_sha256: "d".repeat(64),
+                available_executors: vec![
+                    crate::project_sync::domain::CodexForkExecutor::AppServerStdio,
+                    crate::project_sync::domain::CodexForkExecutor::NativePty,
+                    crate::project_sync::domain::CodexForkExecutor::Manual,
+                ],
+                pre_existing_children: Vec::new(),
+            }),
+            source_resource_id: Some(
+                ResourceId::parse("codex:conversation:thread-shared").unwrap(),
+            ),
+            proposed_provider_thread_id: None,
+            required_codec: CODEX_LINEAGE_CODEC_KEY.to_string(),
+            pinned_generation: 1,
+            pinned_commit_id: "commit-divergence".to_string(),
+            pinned_manifest_sha256: "a".repeat(64),
+            pinned_lineage_digest: Some("f".repeat(64)),
+            pinned_semantic_digest: Some("1".repeat(64)),
+            expected_local_target: TargetExpectation::Sha256("2".repeat(64)),
+            expected_provider_state: vec![ProviderStateExpectation {
+                target_path: "/tmp/source-native.jsonl".to_string(),
+                expectation: TargetExpectation::Sha256("2".repeat(64)),
+            }],
+            expected_profile_revision: 0,
+            expected_project_binding_revision: 0,
+            expected_host_identity_revision: 0,
+            expected_bindings_document_revision: 0,
+            expected_binding_revision: Some(0),
+            expires_at: 2_000,
+        };
+        RestorePlan {
+            schema_version: crate::project_sync::domain::RESTORE_PLAN_SCHEMA,
+            plan_id: PlanId::parse("plan-divergence").unwrap(),
+            storage_id: StorageId::parse("storage-divergence").unwrap(),
+            bundle_id: BundleId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            host_id,
+            replica_id,
+            expected_host_identity_revision: 0,
+            generation: 1,
+            commit_id: "commit-divergence".to_string(),
+            manifest_sha256: "a".repeat(64),
+            binding_revision: 0,
+            created_at: 1_000,
+            expires_at: 2_000,
+            actions: Vec::new(),
+            conversation_actions: vec![action],
+            project_content_eligibility: None,
+        }
+    }
+
     #[test]
-    fn production_push_forks_a_divergent_tip_once_without_rewriting_provider_bytes() {
+    fn divergence_resolution_selection_is_exact_and_cloud_only_is_destructive() {
+        let plan = divergence_selection_test_plan();
+        let action_id = plan.conversation_actions[0].action_id.clone();
+        let approved = vec![action_id.clone()];
+
+        let missing = split_approved_restore_actions(&approved, &[], &plan).unwrap_err();
+        assert!(missing.contains("lacks a resolution"), "{missing}");
+
+        let keep_both = ConversationResolutionSelection {
+            action_id: action_id.clone(),
+            resolution: ConversationDivergenceResolution::PreserveLocalWithNativeFork,
+            destructive_approved: false,
+        };
+        let duplicate = split_approved_restore_actions(
+            &approved,
+            &[keep_both.clone(), keep_both.clone()],
+            &plan,
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("more than once"), "{duplicate}");
+
+        let unconfirmed = split_approved_restore_actions(
+            &approved,
+            &[ConversationResolutionSelection {
+                action_id: action_id.clone(),
+                resolution: ConversationDivergenceResolution::UseCloudOnly,
+                destructive_approved: false,
+            }],
+            &plan,
+        )
+        .unwrap_err();
+        assert!(
+            unconfirmed.contains("requires destructive approval"),
+            "{unconfirmed}"
+        );
+
+        let (_, selected) = split_approved_restore_actions(
+            &approved,
+            &[ConversationResolutionSelection {
+                action_id,
+                resolution: ConversationDivergenceResolution::UseCloudOnly,
+                destructive_approved: true,
+            }],
+            &plan,
+        )
+        .unwrap();
+        assert_eq!(
+            selected[0].resolution,
+            Some(ConversationDivergenceResolution::UseCloudOnly)
+        );
+    }
+
+    #[test]
+    fn production_push_blocks_a_divergent_tip_and_requires_pull() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("conversation-push-store").unwrap();
@@ -12433,7 +13376,7 @@ mod tests {
             &binding,
             &codex_home,
             &t111,
-            Some(t11),
+            Some(t11.clone()),
             local_provider_id,
             &local_tip,
             &source,
@@ -12449,10 +13392,16 @@ mod tests {
             .find(|entry| entry.cloud_thread_id.as_ref() == Some(&t111))
             .unwrap();
         assert_eq!(tip.relation, Some(ConversationRelation::Diverged));
-        assert_eq!(tip.push_decision.action, ConversationPlanActionType::Fork);
-        assert!(tip.push_decision.selectable);
-        assert!(tip.push_decision.selected_by_default);
-        assert_eq!(tip.pull_decision.action, ConversationPlanActionType::Fork);
+        assert_eq!(
+            tip.push_decision.action,
+            ConversationPlanActionType::RequirePull
+        );
+        assert!(!tip.push_decision.selectable);
+        assert!(!tip.push_decision.selected_by_default);
+        assert_eq!(
+            tip.pull_decision.action,
+            ConversationPlanActionType::ResolveDivergence
+        );
         let plan_id = review.conversation_push_plan_id.clone().unwrap();
         let action_id = review.conversation_action_ids[&tip.resource_id].clone();
         let plan = repo.load_conversation_push_plan(&plan_id).unwrap();
@@ -12462,9 +13411,38 @@ mod tests {
             .find(|action| action.action_id == action_id)
             .unwrap()
             .clone();
-        let fork_id = action.result_thread_id.clone().unwrap();
+        assert_eq!(action.action, ConversationPlanActionType::RequirePull);
 
-        let pushed = push_bundle_reviewed_with_repository(
+        let error = push_bundle_reviewed_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            None,
+            empty_project_content_review(),
+            Some(plan_id.clone()),
+            Vec::new(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(error.contains("Pull and resolve"), "{error}");
+
+        let omitted_plan = push_bundle_reviewed_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            None,
+            empty_project_content_review(),
+            None,
+            Vec::new(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            omitted_plan.contains("requires a current Push review"),
+            "{omitted_plan}"
+        );
+
+        let selected_blocker = push_bundle_reviewed_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
@@ -12474,170 +13452,18 @@ mod tests {
             vec![action_id],
             &mut |_| {},
         )
-        .unwrap();
-        assert!(pushed.success, "{}", pushed.message);
+        .unwrap_err();
+        assert!(
+            selected_blocker.contains("Pull and resolve"),
+            "{selected_blocker}"
+        );
         assert_eq!(std::fs::read(&local_path).unwrap(), local_tip);
         let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
         let published = engine.inspect(&project.bundle_id).unwrap();
-        assert_eq!(published.manifest.conversations.len(), 4);
+        assert_eq!(published.manifest.conversations.len(), 3);
         assert!(published.manifest.conversations.contains_key(&t111));
-        assert_eq!(
-            published.manifest.conversations[&fork_id].forked_from,
-            Some(t111.clone())
-        );
         let bindings = repo.load_conversation_bindings().unwrap();
-        let fork_binding = bindings
-            .bindings
-            .iter()
-            .find(|candidate| {
-                candidate.local_project_id == project.local_project_id
-                    && candidate.thread_id == fork_id
-            })
-            .unwrap();
-        assert_eq!(fork_binding.forked_from, Some(t111.clone()));
-        assert_eq!(
-            fork_binding.provider_thread_id.as_deref(),
-            Some(local_provider_id)
-        );
-
-        let repeated =
-            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
-                .unwrap();
-        let fork_entry = repeated
-            .thread_comparison
-            .as_ref()
-            .unwrap()
-            .entries
-            .iter()
-            .find(|entry| entry.cloud_thread_id.as_ref() == Some(&fork_id))
-            .unwrap();
-        assert_eq!(fork_entry.relation, Some(ConversationRelation::Identical));
-        assert!(!fork_entry.push_decision.selectable);
-        let repeated_result = push_bundle_reviewed_with_repository(
-            &repo,
-            &project.local_project_id,
-            &storage_id,
-            None,
-            empty_project_content_review(),
-            repeated.conversation_push_plan_id,
-            Vec::new(),
-            &mut |_| {},
-        )
-        .unwrap();
-        assert!(repeated_result.success);
-        assert_eq!(
-            engine
-                .inspect(&project.bundle_id)
-                .unwrap()
-                .manifest
-                .conversations
-                .len(),
-            4,
-            "the fixed point must not mint a second fork"
-        );
-    }
-
-    #[test]
-    fn production_pull_forks_a_divergent_tip_and_later_pushes_its_preserved_branch() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = repository(&temp);
-        let storage_id = StorageId::parse("conversation-pull-store").unwrap();
-        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
-        let project = register(&repo);
-        let project_root = temp.path().join("project");
-        let codex_home = temp.path().join("codex-home");
-        let binding =
-            bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
-        let remote_cwd = temp.path().join("remote-project");
-        let remote_tip = command_test_transcript(
-            "provider-t111",
-            &remote_cwd,
-            &[
-                ("base-user", "user", "base"),
-                ("base-agent", "assistant", "answer"),
-                ("remote-tip", "user", "remote branch"),
-            ],
-        );
-        let (source, _t1, t11, t111) = publish_three_level_chain(
-            &repo,
-            &project,
-            &binding,
-            &storage_id,
-            &remote_cwd,
-            remote_tip,
-        );
-        let local_provider_id = "019fa692-3d62-7c90-9c5d-89959bd17204";
-        let local_tip = command_test_transcript(
-            local_provider_id,
-            &project_root,
-            &[
-                ("base-user", "user", "base"),
-                ("base-agent", "assistant", "answer"),
-                ("local-tip", "user", "local branch"),
-            ],
-        );
-        let local_path = bind_local_conversation(
-            &repo,
-            &binding,
-            &codex_home,
-            &t111,
-            Some(t11.clone()),
-            local_provider_id,
-            &local_tip,
-            &source,
-        );
-
-        let pull_plan =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &project.bundle_id, &binding)
-                .unwrap();
-        assert!(pull_plan.actions.iter().all(|action| {
-            action.resource_id != conversation_resource_id(Provider::Codex, &t111).unwrap()
-        }));
-        let fork_action = pull_plan
-            .conversation_actions
-            .iter()
-            .find(|action| action.thread_id == t111)
-            .unwrap()
-            .clone();
-        assert_eq!(fork_action.action, ConversationPlanActionType::Fork);
-        let fork_id = fork_action.result_thread_id.clone().unwrap();
-        let materialized_target = fork_action
-            .expected_provider_state
-            .iter()
-            .find(|target| {
-                Path::new(&target.target_path)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    != Some("session_index.jsonl")
-            })
-            .unwrap()
-            .target_path
-            .clone();
-        let applied = apply_bundle_restore_with_repository(
-            &repo,
-            &pull_plan.plan_id,
-            vec![fork_action.action_id.clone()],
-        )
-        .unwrap();
-        assert!(applied.success, "{}", applied.message);
-        assert!(applied.applied_action_ids.contains(&fork_action.action_id));
-        assert_eq!(std::fs::read(&local_path).unwrap(), local_tip);
-
-        let bindings = repo.load_conversation_bindings().unwrap();
-        let preserved = bindings
-            .bindings
-            .iter()
-            .find(|candidate| {
-                candidate.local_project_id == project.local_project_id
-                    && candidate.thread_id == fork_id
-            })
-            .unwrap();
-        assert_eq!(preserved.forked_from, Some(t111.clone()));
-        assert_eq!(
-            preserved.provider_thread_id.as_deref(),
-            Some(local_provider_id)
-        );
-        let incoming = bindings
+        let original_binding = bindings
             .bindings
             .iter()
             .find(|candidate| {
@@ -12645,68 +13471,11 @@ mod tests {
                     && candidate.thread_id == t111
             })
             .unwrap();
-        assert_eq!(incoming.forked_from, Some(t11));
-        assert_ne!(
-            incoming.provider_thread_id.as_deref(),
+        assert_eq!(original_binding.forked_from, Some(t11));
+        assert_eq!(
+            original_binding.provider_thread_id.as_deref(),
             Some(local_provider_id)
         );
-        let incoming_bytes = std::fs::read(&materialized_target).unwrap();
-        let incoming_analysis = analyze_codex_transcript(&incoming_bytes);
-        assert_eq!(
-            incoming_analysis.source_thread_id.as_deref(),
-            incoming.provider_thread_id.as_deref()
-        );
-        assert_eq!(
-            incoming_analysis.source_cwd.as_deref(),
-            Some(project_root.to_string_lossy().as_ref())
-        );
-
-        let push_review =
-            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
-                .unwrap();
-        let preserved_entry = push_review
-            .thread_comparison
-            .as_ref()
-            .unwrap()
-            .entries
-            .iter()
-            .find(|entry| entry.cloud_thread_id.as_ref() == Some(&fork_id))
-            .unwrap();
-        assert_eq!(
-            preserved_entry.push_decision.action,
-            ConversationPlanActionType::CreateCloud
-        );
-        assert!(preserved_entry.push_decision.selected_by_default);
-        let push_plan_id = push_review.conversation_push_plan_id.clone().unwrap();
-        let push_action_id =
-            push_review.conversation_action_ids[&preserved_entry.resource_id].clone();
-        let pushed = push_bundle_reviewed_with_repository(
-            &repo,
-            &project.local_project_id,
-            &storage_id,
-            None,
-            empty_project_content_review(),
-            Some(push_plan_id),
-            vec![push_action_id],
-            &mut |_| {},
-        )
-        .unwrap();
-        assert!(pushed.success, "{}", pushed.message);
-        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
-        let final_snapshot = engine.inspect(&project.bundle_id).unwrap();
-        assert_eq!(
-            final_snapshot.manifest.conversations[&fork_id].forked_from,
-            Some(t111)
-        );
-        assert_eq!(final_snapshot.manifest.conversations.len(), 4);
-
-        let repeated =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &project.bundle_id, &binding)
-                .unwrap();
-        assert!(repeated
-            .conversation_actions
-            .iter()
-            .all(|action| action.action != ConversationPlanActionType::Fork));
     }
 
     fn reviewed_project_content_recipe(inventory: &ProjectContentInventory) -> BundleRecipe {
@@ -15339,7 +16108,23 @@ mod tests {
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(rows[0]["payload"]["cwd"], target_root.to_str().unwrap());
-        assert!(target_codex.join("session_index.jsonl").is_file());
+        let index = std::fs::read_to_string(target_codex.join("session_index.jsonl")).unwrap();
+        let index_rows = index
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(index_rows.len(), 1);
+        assert_eq!(index_rows[0]["thread_name"], "Change glb color to yellow");
+        assert_eq!(
+            index_rows[0]["id"], rows[0]["payload"]["id"],
+            "the index row must name the rewritten provider thread"
+        );
+        assert!(
+            index_rows[0].get("cwd").is_none(),
+            "index rows use the provider schema, not Mallard-invented fields"
+        );
+        chrono::DateTime::parse_from_rfc3339(index_rows[0]["updated_at"].as_str().unwrap())
+            .expect("index row carries an RFC 3339 update time");
         let materializations = repo.load_materializations().unwrap();
         let target_materialization = materializations
             .records

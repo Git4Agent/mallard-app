@@ -11,14 +11,21 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use super::codex_native_fork::{
+    coordinate_native_fork, preflight_native_fork, refresh_codex_inventory, set_codex_thread_name,
+    verify_manual_fork, verify_recorded_fork, verify_source_idle_and_title,
+    CodexForkCoordinatorOutcome, CodexForkExecutionRequest, CodexNameStatus, VerifiedNativeFork,
+};
 use super::conversation_codec::{analyze_codex_transcript, CodecLineage};
-use super::conversation_sync::{rekey_thread_binding, ConversationBindingScope};
 use super::domain::{
-    conversation_resource_id, ActionId, ActionStatus, ApplyReceipt, ConversationApplyReceipt,
-    ConversationFileRole, ConversationJournalTarget, ConversationMaterializationState,
+    conversation_resource_id, ActionId, ActionStatus, ApplyReceipt, CodexDivergenceReceipt,
+    CodexForkAttempt, CodexForkAttemptStatus, CodexForkExecutor, CodexInventoryRefreshStatus,
+    ConversationApplyReceipt, ConversationDivergenceResolution, ConversationFileRole,
+    ConversationJournalTarget, ConversationMaterializationState, ConversationNameStatus,
     ConversationOperationId, ConversationPlanDirection, ConversationSyncOperation,
-    ConversationSyncPhase, LocalConversationBinding, MaterializationId, MaterializationRecord,
-    MaterializationStatus, RestoreActionType, TargetExpectation, LOCAL_SCHEMA,
+    ConversationSyncOperationKind, ConversationSyncPhase, LocalConversationBinding,
+    MaterializationId, MaterializationRecord, MaterializationStatus, RestoreActionType,
+    TargetExpectation, LOCAL_SCHEMA,
 };
 use super::persistence::LocalStateRepository;
 
@@ -38,6 +45,25 @@ pub struct ConversationMaterializationRequest {
     pub targets: Vec<ConversationTargetPayload>,
 }
 
+#[derive(Clone, Debug)]
+pub struct CodexDivergenceMaterializationRequest {
+    pub operation: ConversationSyncOperation,
+    pub targets: Vec<ConversationTargetPayload>,
+    pub fork: CodexForkExecutionRequest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodexDivergenceApplyOutcome {
+    Committed(ConversationApplyReceipt),
+    AwaitingManualFork {
+        operation_id: ConversationOperationId,
+    },
+    RecoveryRequired {
+        operation_id: ConversationOperationId,
+        message: String,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConversationFailpoint {
     BeforePrepared,
@@ -52,8 +78,9 @@ pub enum ConversationFailpoint {
     },
     BeforeStaged,
     AfterStaged,
-    BeforeLocalRekey,
-    AfterLocalRekey,
+    AfterForkVerified,
+    AfterForkNamingRecorded,
+    AfterLocalForkBound,
     BeforeCloudPublication,
     AfterCloudHeadCas,
     BeforeCloudPublished,
@@ -74,8 +101,10 @@ pub enum ConversationFailpoint {
     AfterProviderCommitted,
     BeforeBindingCommit,
     AfterBindingCommit,
+    AfterBindingsCommitted,
     BeforeReceipt,
     AfterReceipt,
+    AfterOriginalNamingRecorded,
     BeforeLocalCommitted,
     AfterLocalCommitted,
     BeforeCleanup,
@@ -109,10 +138,10 @@ pub struct ConversationCloudPublication {
     pub manifest_sha256: String,
 }
 
-/// Journal a reviewed Push, durably rekey a same-ID local fork when needed,
-/// publish through the caller's production bundle engine, and finalize the
-/// local receipt. `inspect_after_error` closes the important CAS ambiguity:
-/// an object store may commit the head and then return an I/O error.
+/// Journal a reviewed Push, publish through the caller's production bundle
+/// engine, and finalize the local receipt. `inspect_after_error` closes the
+/// important CAS ambiguity: an object store may commit the head and then
+/// return an I/O error.
 #[cfg(test)]
 pub fn apply_conversation_cloud_publication(
     repository: &LocalStateRepository,
@@ -124,6 +153,7 @@ pub fn apply_conversation_cloud_publication(
     let _host_guard = repository.acquire_host_operation()?;
     if operation.direction != ConversationPlanDirection::Push
         || operation.phase != ConversationSyncPhase::Prepared
+        || operation.operation != ConversationSyncOperationKind::CloudPublication
         || !operation.targets.is_empty()
     {
         return Err("cloud publication requires a new Prepared Push operation".to_string());
@@ -158,9 +188,8 @@ pub fn apply_conversation_cloud_publication(
     failpoints.hit(&ConversationFailpoint::AfterCloudPublished)?;
 
     // Preserve the existing binding until immutable publication and the head
-    // CAS are proven complete. Recovery can safely finish this exact rekey
-    // from the journaled result ID after a post-CAS crash.
-    operation = commit_rekey(repository, &operation)?;
+    // CAS are proven complete. Recovery can safely finish this exact binding
+    // refresh after a post-CAS crash.
     failpoints.hit(&ConversationFailpoint::BeforeBindingCommit)?;
     commit_binding(repository, &operation)?;
     failpoints.hit(&ConversationFailpoint::AfterBindingCommit)?;
@@ -200,6 +229,7 @@ pub(crate) fn apply_conversation_cloud_publications_locked(
     for operation in &operations {
         if operation.direction != ConversationPlanDirection::Push
             || operation.phase != ConversationSyncPhase::Prepared
+            || operation.operation != ConversationSyncOperationKind::CloudPublication
             || !operation.targets.is_empty()
         {
             return Err("cloud publication requires Prepared Push operations".to_string());
@@ -219,7 +249,7 @@ pub(crate) fn apply_conversation_cloud_publications_locked(
             return Err("conversation publication batch has inconsistent plan pins".to_string());
         }
         if !operation_ids.insert(operation.operation_id.clone())
-            || !result_threads.insert(operation.result_thread_id.clone())
+            || !result_threads.insert(operation.thread_id.clone())
         {
             return Err(
                 "conversation publication batch repeats an operation or result".to_string(),
@@ -271,7 +301,6 @@ pub(crate) fn apply_conversation_cloud_publications_locked(
             .find(|operation| operation.operation_id == operation_id)
             .ok_or_else(|| format!("conversation operation '{}' disappeared", operation_id))?;
         let operation = rebase_operation_after_batch_progress(repository, &operation)?;
-        let operation = commit_rekey(repository, &operation)?;
         failpoints.hit(&ConversationFailpoint::BeforeBindingCommit)?;
         commit_binding(repository, &operation)?;
         failpoints.hit(&ConversationFailpoint::AfterBindingCommit)?;
@@ -353,7 +382,6 @@ pub fn recover_conversation_cloud_publications(
         }
         if operation.phase == ConversationSyncPhase::CloudPublished {
             operation = rebase_operation_after_batch_progress(repository, &operation)?;
-            operation = commit_rekey(repository, &operation)?;
             commit_binding(repository, &operation)?;
             operation = set_phase(
                 repository,
@@ -397,6 +425,9 @@ pub(crate) fn apply_conversation_materialization_locked(
     failpoints: &mut impl ConversationFailpoints,
 ) -> Result<ConversationApplyReceipt, String> {
     request.operation.validate()?;
+    if request.operation.operation != ConversationSyncOperationKind::ProviderMaterialization {
+        return Err("generic materialization cannot execute a Codex divergence".to_string());
+    }
     validate_operation_scope(repository, &request.operation)?;
     ensure_provider_target_parents(repository, &request.operation, &request.targets)?;
     let (mut operation, payloads) = prepare_operation(repository, request)?;
@@ -415,22 +446,10 @@ pub(crate) fn apply_conversation_materialization_locked(
     operation = set_phase(
         repository,
         &operation.operation_id,
-        ConversationSyncPhase::Staged,
+        ConversationSyncPhase::ReplacementStaged,
         operation.updated_at,
     )?;
     failpoints.hit(&ConversationFailpoint::AfterStaged)?;
-
-    if operation.is_composite_pull_fork() {
-        failpoints.hit(&ConversationFailpoint::BeforeLocalRekey)?;
-        operation = commit_rekey(repository, &operation)?;
-        failpoints.hit(&ConversationFailpoint::AfterLocalRekey)?;
-        operation = set_phase(
-            repository,
-            &operation.operation_id,
-            ConversationSyncPhase::LocalRekeyed,
-            operation.updated_at,
-        )?;
-    }
 
     commit_provider_targets(repository, &operation.operation_id, failpoints)?;
     failpoints.hit(&ConversationFailpoint::BeforeProviderCommitted)?;
@@ -471,6 +490,791 @@ pub(crate) fn apply_conversation_materialization_locked(
     Ok(receipt)
 }
 
+pub(crate) fn apply_codex_divergence_locked(
+    repository: &LocalStateRepository,
+    request: CodexDivergenceMaterializationRequest,
+    failpoints: &mut impl ConversationFailpoints,
+) -> Result<CodexDivergenceApplyOutcome, String> {
+    request.operation.validate()?;
+    if !matches!(
+        request.operation.operation,
+        ConversationSyncOperationKind::CodexDivergence(_)
+    ) {
+        return Err("Codex divergence apply requires a divergence journal".to_string());
+    }
+    validate_operation_scope(repository, &request.operation)?;
+    ensure_provider_target_parents(repository, &request.operation, &request.targets)?;
+    validate_fork_request(&request.operation, &request.fork)?;
+    if request.operation.divergence().is_some_and(|divergence| {
+        divergence.resolution == ConversationDivergenceResolution::PreserveLocalWithNativeFork
+    }) {
+        preflight_native_fork(&request.fork)?;
+    }
+    let (mut operation, payloads) = prepare_operation(
+        repository,
+        ConversationMaterializationRequest {
+            operation: request.operation,
+            targets: request.targets,
+        },
+    )?;
+    validate_target_expectations(&operation.targets)?;
+
+    failpoints.hit(&ConversationFailpoint::BeforePrepared)?;
+    insert_operation(repository, &operation)?;
+    failpoints.hit(&ConversationFailpoint::AfterPrepared)?;
+    for (index, bytes) in payloads.iter().enumerate() {
+        write_intent_payload(repository, &operation.operation_id, index, bytes)?;
+    }
+    stage_targets(repository, &operation, failpoints)?;
+    failpoints.hit(&ConversationFailpoint::BeforeStaged)?;
+    operation = set_phase(
+        repository,
+        &operation.operation_id,
+        ConversationSyncPhase::ReplacementStaged,
+        operation.updated_at,
+    )?;
+    failpoints.hit(&ConversationFailpoint::AfterStaged)?;
+
+    let resolution = operation
+        .divergence()
+        .ok_or_else(|| "Codex divergence journal disappeared".to_string())?
+        .resolution;
+    if resolution == ConversationDivergenceResolution::PreserveLocalWithNativeFork {
+        match continue_fork_attempts(repository, operation, &request.fork)? {
+            ForkAttemptContinuation::Verified(updated) => operation = updated,
+            ForkAttemptContinuation::AwaitingManual(updated) => {
+                return Ok(CodexDivergenceApplyOutcome::AwaitingManualFork {
+                    operation_id: updated.operation_id,
+                });
+            }
+            ForkAttemptContinuation::AbortedBeforeFork { operation, message } => {
+                rollback_prepared(repository, &operation)?;
+                return Err(message);
+            }
+            ForkAttemptContinuation::RecoveryRequired { operation, message } => {
+                return Ok(CodexDivergenceApplyOutcome::RecoveryRequired {
+                    operation_id: operation.operation_id,
+                    message,
+                });
+            }
+        }
+        failpoints.hit(&ConversationFailpoint::AfterForkVerified)?;
+        operation = set_phase(
+            repository,
+            &operation.operation_id,
+            ConversationSyncPhase::ForkNamingRecorded,
+            operation.updated_at,
+        )?;
+        failpoints.hit(&ConversationFailpoint::AfterForkNamingRecorded)?;
+        verify_journaled_fork(&operation, &request.fork)?;
+        operation = commit_preserved_fork_binding(repository, &operation)?;
+        operation = set_phase(
+            repository,
+            &operation.operation_id,
+            ConversationSyncPhase::LocalForkBound,
+            operation.updated_at,
+        )?;
+        failpoints.hit(&ConversationFailpoint::AfterLocalForkBound)?;
+    } else {
+        if let Err(error) = verify_source_idle_and_title(&request.fork) {
+            rollback_prepared(repository, &operation)?;
+            return Err(error);
+        }
+    }
+
+    finish_codex_divergence(repository, operation, &request.fork, failpoints)
+}
+
+pub(crate) fn resume_codex_divergence_locked(
+    repository: &LocalStateRepository,
+    operation_id: &ConversationOperationId,
+    provider_thread_id: Option<&str>,
+    fork: CodexForkExecutionRequest,
+    failpoints: &mut impl ConversationFailpoints,
+) -> Result<CodexDivergenceApplyOutcome, String> {
+    let mut operation = load_operation(repository, operation_id)?;
+    validate_operation_scope_for_resume(repository, &operation)?;
+    validate_fork_request(&operation, &fork)?;
+    let resolution = operation
+        .divergence()
+        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?
+        .resolution;
+    if resolution == ConversationDivergenceResolution::PreserveLocalWithNativeFork {
+        if matches!(
+            operation.phase,
+            ConversationSyncPhase::ReplacementStaged | ConversationSyncPhase::ForkAttemptPending
+        ) {
+            match continue_fork_attempts(repository, operation, &fork)? {
+                ForkAttemptContinuation::Verified(updated) => operation = updated,
+                ForkAttemptContinuation::AwaitingManual(updated) => {
+                    return Ok(CodexDivergenceApplyOutcome::AwaitingManualFork {
+                        operation_id: updated.operation_id,
+                    });
+                }
+                ForkAttemptContinuation::AbortedBeforeFork { operation, message } => {
+                    rollback_prepared(repository, &operation)?;
+                    return Err(message);
+                }
+                ForkAttemptContinuation::RecoveryRequired { operation, message } => {
+                    return Ok(CodexDivergenceApplyOutcome::RecoveryRequired {
+                        operation_id: operation.operation_id,
+                        message,
+                    });
+                }
+            }
+        }
+        if matches!(
+            operation.phase,
+            ConversationSyncPhase::AwaitingManualFork | ConversationSyncPhase::RecoveryRequired
+        ) {
+            let recovered_executor = operation
+                .divergence()
+                .and_then(|divergence| divergence.current_executor);
+            let mut verified = match verify_manual_fork(&fork, provider_thread_id) {
+                Ok(verified) => verified,
+                Err(error) if operation.phase == ConversationSyncPhase::RecoveryRequired => {
+                    return Ok(CodexDivergenceApplyOutcome::RecoveryRequired {
+                        operation_id: operation.operation_id,
+                        message: format!(
+                            "The uncertain Codex fork still cannot be proven safely: {error}"
+                        ),
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+            if operation.phase == ConversationSyncPhase::RecoveryRequired {
+                if let Some(executor) = recovered_executor {
+                    verified.executor = executor;
+                }
+            }
+            operation = record_verified_fork(repository, &operation, &verified)?;
+            failpoints.hit(&ConversationFailpoint::AfterForkVerified)?;
+        }
+        if operation.phase == ConversationSyncPhase::ForkVerified {
+            operation = set_phase(
+                repository,
+                operation_id,
+                ConversationSyncPhase::ForkNamingRecorded,
+                operation.updated_at,
+            )?;
+            failpoints.hit(&ConversationFailpoint::AfterForkNamingRecorded)?;
+        }
+        if operation.phase == ConversationSyncPhase::ForkNamingRecorded {
+            verify_journaled_fork(&operation, &fork)?;
+            operation = commit_preserved_fork_binding(repository, &operation)?;
+            operation = set_phase(
+                repository,
+                operation_id,
+                ConversationSyncPhase::LocalForkBound,
+                operation.updated_at,
+            )?;
+            failpoints.hit(&ConversationFailpoint::AfterLocalForkBound)?;
+        }
+    } else if operation.phase == ConversationSyncPhase::ReplacementStaged {
+        // A failed cloud-only Apply can leave a safe staged replacement.
+        // Recovery must repeat the provider-idle/title precondition rather
+        // than treating staging itself as authority to overwrite the source.
+        verify_source_idle_and_title(&fork)?;
+    }
+    finish_codex_divergence(repository, operation, &fork, failpoints)
+}
+
+enum ForkAttemptContinuation {
+    Verified(ConversationSyncOperation),
+    AwaitingManual(ConversationSyncOperation),
+    AbortedBeforeFork {
+        operation: ConversationSyncOperation,
+        message: String,
+    },
+    RecoveryRequired {
+        operation: ConversationSyncOperation,
+        message: String,
+    },
+}
+
+fn continue_fork_attempts(
+    repository: &LocalStateRepository,
+    mut operation: ConversationSyncOperation,
+    fork: &CodexForkExecutionRequest,
+) -> Result<ForkAttemptContinuation, String> {
+    if operation.phase == ConversationSyncPhase::ReplacementStaged {
+        operation = set_divergence_attempt_pending(repository, &operation)?;
+    }
+    let divergence = operation
+        .divergence()
+        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
+    if let Some(attempt) = divergence.attempts.last() {
+        if attempt.status == CodexForkAttemptStatus::Pending {
+            return match verify_manual_fork(fork, None) {
+                Ok(mut verified) => {
+                    verified.executor = attempt.executor;
+                    record_verified_fork(repository, &operation, &verified)
+                        .map(ForkAttemptContinuation::Verified)
+                }
+                Err(error) => {
+                    let operation =
+                        record_ambiguous_fork(repository, &operation, attempt.executor)?;
+                    Ok(ForkAttemptContinuation::RecoveryRequired {
+                        operation,
+                        message: format!(
+                            "Codex fork execution may have completed, but its result could not be proven: {error}"
+                        ),
+                    })
+                }
+            };
+        }
+        if attempt.status != CodexForkAttemptStatus::DefinitiveNoFork {
+            return Err("Codex fork attempt journal cannot be continued safely".to_string());
+        }
+    }
+
+    let completed_attempts = divergence.attempts.len();
+    let remaining_executors = divergence
+        .available_executors
+        .get(completed_attempts..)
+        .ok_or_else(|| "Codex fork attempt journal exceeds its executor list".to_string())?
+        .to_vec();
+    if remaining_executors.is_empty() {
+        return Err("Codex fork attempt journal has no remaining executor".to_string());
+    }
+    let mut remaining_request = fork.clone();
+    remaining_request.available_executors = remaining_executors;
+    let operation_id = operation.operation_id.clone();
+    match coordinate_native_fork(&remaining_request, |executor, status| {
+        record_fork_attempt(repository, &operation_id, executor, status)
+    })? {
+        CodexForkCoordinatorOutcome::Verified(verified) => {
+            record_verified_fork(repository, &operation, &verified)
+                .map(ForkAttemptContinuation::Verified)
+        }
+        CodexForkCoordinatorOutcome::AwaitingManualFork => {
+            record_manual_wait(repository, &operation).map(ForkAttemptContinuation::AwaitingManual)
+        }
+        CodexForkCoordinatorOutcome::AbortedBeforeInvocation { message } => {
+            let operation = load_operation(repository, &operation_id)?;
+            Ok(ForkAttemptContinuation::AbortedBeforeFork { operation, message })
+        }
+        CodexForkCoordinatorOutcome::RecoveryRequired { executor, message } => {
+            let operation = record_ambiguous_fork(repository, &operation, executor)?;
+            Ok(ForkAttemptContinuation::RecoveryRequired { operation, message })
+        }
+    }
+}
+
+pub(crate) fn cancel_codex_divergence_locked(
+    repository: &LocalStateRepository,
+    operation_id: &ConversationOperationId,
+) -> Result<(), String> {
+    let operation = load_operation(repository, operation_id)?;
+    if operation.phase != ConversationSyncPhase::AwaitingManualFork {
+        return Err("only a manual Codex fork checkpoint can be canceled".to_string());
+    }
+    if operation
+        .targets
+        .iter()
+        .any(|target| target.commit_started || target.committed)
+    {
+        return Err("Codex divergence replacement already started".to_string());
+    }
+    rollback_prepared(repository, &operation)
+}
+
+fn finish_codex_divergence(
+    repository: &LocalStateRepository,
+    mut operation: ConversationSyncOperation,
+    fork: &CodexForkExecutionRequest,
+    failpoints: &mut impl ConversationFailpoints,
+) -> Result<CodexDivergenceApplyOutcome, String> {
+    let may_commit_provider = operation.phase == ConversationSyncPhase::LocalForkBound
+        || (operation.phase == ConversationSyncPhase::ReplacementStaged
+            && operation.divergence().is_some_and(|divergence| {
+                divergence.resolution == ConversationDivergenceResolution::UseCloudOnly
+            }));
+    if may_commit_provider {
+        commit_provider_targets(repository, &operation.operation_id, failpoints)?;
+        failpoints.hit(&ConversationFailpoint::BeforeProviderCommitted)?;
+        operation = set_phase(
+            repository,
+            &operation.operation_id,
+            ConversationSyncPhase::ProviderCommitted,
+            operation.updated_at,
+        )?;
+        failpoints.hit(&ConversationFailpoint::AfterProviderCommitted)?;
+    }
+
+    if operation.phase == ConversationSyncPhase::ProviderCommitted {
+        failpoints.hit(&ConversationFailpoint::BeforeBindingCommit)?;
+        commit_binding(repository, &operation)?;
+        failpoints.hit(&ConversationFailpoint::AfterBindingCommit)?;
+        operation = set_phase(
+            repository,
+            &operation.operation_id,
+            ConversationSyncPhase::BindingsCommitted,
+            operation.updated_at,
+        )?;
+        failpoints.hit(&ConversationFailpoint::AfterBindingsCommitted)?;
+    }
+
+    if operation.phase == ConversationSyncPhase::BindingsCommitted {
+        operation = record_post_commit_presentation(repository, &operation, fork)?;
+        failpoints.hit(&ConversationFailpoint::AfterOriginalNamingRecorded)?;
+    }
+
+    if operation.phase == ConversationSyncPhase::OriginalNamingRecorded {
+        failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
+        let receipt = commit_receipt(repository, &operation)?;
+        failpoints.hit(&ConversationFailpoint::AfterReceipt)?;
+        failpoints.hit(&ConversationFailpoint::BeforeLocalCommitted)?;
+        operation = set_phase(
+            repository,
+            &operation.operation_id,
+            ConversationSyncPhase::LocalCommitted,
+            operation.updated_at,
+        )?;
+        failpoints.hit(&ConversationFailpoint::AfterLocalCommitted)?;
+        failpoints.hit(&ConversationFailpoint::BeforeCleanup)?;
+        cleanup_and_retire(repository, &operation.operation_id)?;
+        failpoints.hit(&ConversationFailpoint::AfterCleanup)?;
+        return Ok(CodexDivergenceApplyOutcome::Committed(receipt));
+    }
+    if operation.phase == ConversationSyncPhase::LocalCommitted {
+        let receipt = conversation_receipt(&operation);
+        cleanup_and_retire(repository, &operation.operation_id)?;
+        return Ok(CodexDivergenceApplyOutcome::Committed(receipt));
+    }
+    return Err(format!(
+        "Codex divergence cannot continue safely from phase '{:?}'",
+        operation.phase
+    ));
+}
+
+fn validate_fork_request(
+    operation: &ConversationSyncOperation,
+    fork: &CodexForkExecutionRequest,
+) -> Result<(), String> {
+    let divergence = operation
+        .divergence()
+        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
+    if operation.provider_thread_id.as_deref() != Some(&divergence.source_provider_thread_id)
+        || fork.source_provider_thread_id != divergence.source_provider_thread_id
+        || fork.source_transcript_sha256 != operation.expected_local_digest.as_deref().unwrap_or("")
+        || fork.local_lineage_digest != divergence.local_lineage_digest
+        || fork.local_semantic_digest != divergence.local_semantic_digest
+        || fork.pinned_local_title != divergence.pinned_local_title
+        || fork.desired_fork_name != divergence.desired_fork_name
+        || fork.codex_executable.to_string_lossy() != divergence.codex_executable
+        || fork.codex_executable_sha256 != divergence.codex_executable_sha256
+        || fork.available_executors != divergence.available_executors
+        || fork.pre_existing_children != divergence.pre_existing_children
+    {
+        return Err("Codex fork executor inputs differ from the reviewed journal".to_string());
+    }
+    Ok(())
+}
+
+fn load_operation(
+    repository: &LocalStateRepository,
+    operation_id: &ConversationOperationId,
+) -> Result<ConversationSyncOperation, String> {
+    repository
+        .load_conversation_sync_journal()?
+        .operations
+        .into_iter()
+        .find(|operation| &operation.operation_id == operation_id)
+        .ok_or_else(|| format!("conversation operation '{}' does not exist", operation_id))
+}
+
+fn validate_operation_scope_for_resume(
+    repository: &LocalStateRepository,
+    operation: &ConversationSyncOperation,
+) -> Result<(), String> {
+    let identity = repository.load_or_create_host_identity()?;
+    if identity.host_id != operation.host_id
+        || identity.revision != operation.expected_host_identity_revision
+    {
+        return Err("conversation operation belongs to a different or changed host".to_string());
+    }
+    let machine = repository.load_bindings()?;
+    let binding = machine
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.host_id == operation.host_id
+                && binding.replica_id == operation.replica_id
+                && binding.local_project_id == operation.local_project_id
+        })
+        .ok_or_else(|| "conversation operation references a missing project replica".to_string())?;
+    if binding.revision != operation.expected_project_binding_revision
+        || binding.profile_ids.get(&operation.provider) != Some(&operation.provider_profile_id)
+    {
+        return Err("conversation project binding changed after review".to_string());
+    }
+    let profile = machine
+        .profiles
+        .iter()
+        .find(|profile| profile.profile_id == operation.provider_profile_id)
+        .ok_or_else(|| "conversation provider profile disappeared".to_string())?;
+    if profile.revision != operation.expected_profile_revision {
+        return Err("conversation provider profile changed after review".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn codex_fork_request_for_operation(
+    repository: &LocalStateRepository,
+    operation: &ConversationSyncOperation,
+) -> Result<CodexForkExecutionRequest, String> {
+    operation.validate()?;
+    let divergence = operation
+        .divergence()
+        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
+    let machine = repository.load_bindings()?;
+    let project_binding = machine
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.host_id == operation.host_id
+                && binding.replica_id == operation.replica_id
+                && binding.local_project_id == operation.local_project_id
+        })
+        .ok_or_else(|| "conversation operation references a missing project replica".to_string())?;
+    let profile = machine
+        .profiles
+        .iter()
+        .find(|profile| profile.profile_id == operation.provider_profile_id)
+        .ok_or_else(|| {
+            "conversation operation references a missing provider profile".to_string()
+        })?;
+    Ok(CodexForkExecutionRequest {
+        codex_home: PathBuf::from(&profile.canonical_path),
+        project_directory: PathBuf::from(&project_binding.project_root),
+        codex_executable: PathBuf::from(&divergence.codex_executable),
+        codex_executable_sha256: divergence.codex_executable_sha256.clone(),
+        source_provider_thread_id: divergence.source_provider_thread_id.clone(),
+        source_transcript_sha256: operation
+            .expected_local_digest
+            .clone()
+            .ok_or_else(|| "Codex divergence lacks its source transcript pin".to_string())?,
+        local_lineage_digest: divergence.local_lineage_digest.clone(),
+        local_semantic_digest: divergence.local_semantic_digest.clone(),
+        pinned_local_title: divergence.pinned_local_title.clone(),
+        desired_fork_name: divergence.desired_fork_name.clone(),
+        available_executors: divergence.available_executors.clone(),
+        pre_existing_children: divergence.pre_existing_children.clone(),
+    })
+}
+
+fn divergence_mut(
+    operation: &mut ConversationSyncOperation,
+) -> Result<&mut super::domain::CodexDivergenceOperation, String> {
+    match &mut operation.operation {
+        ConversationSyncOperationKind::CodexDivergence(divergence) => Ok(divergence),
+        _ => Err("conversation operation is not a Codex divergence".to_string()),
+    }
+}
+
+fn set_divergence_attempt_pending(
+    repository: &LocalStateRepository,
+    operation: &ConversationSyncOperation,
+) -> Result<ConversationSyncOperation, String> {
+    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
+        let divergence = divergence_mut(journaled)?;
+        divergence.current_executor = None;
+        divergence.attempts.clear();
+        journaled.phase = ConversationSyncPhase::ForkAttemptPending;
+        Ok(())
+    })?;
+    Ok(updated)
+}
+
+fn record_fork_attempt(
+    repository: &LocalStateRepository,
+    operation_id: &ConversationOperationId,
+    executor: CodexForkExecutor,
+    status: CodexForkAttemptStatus,
+) -> Result<(), String> {
+    // A verified executor result is not durable until its provider ID, path,
+    // digest, and naming outcome can be committed in the same journal
+    // mutation. Leave the preceding Pending marker in place so a crash in
+    // that narrow window is recovered by scanning for one exact child.
+    if status == CodexForkAttemptStatus::Verified {
+        return Ok(());
+    }
+    mutate_operation(repository, operation_id, |journaled| {
+        let divergence = divergence_mut(journaled)?;
+        if let Some(attempt) = divergence
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.executor == executor)
+        {
+            attempt.status = status;
+        } else {
+            divergence
+                .attempts
+                .push(CodexForkAttempt { executor, status });
+        }
+        divergence.current_executor = matches!(
+            status,
+            CodexForkAttemptStatus::Pending | CodexForkAttemptStatus::Ambiguous
+        )
+        .then_some(executor);
+        if status == CodexForkAttemptStatus::Ambiguous {
+            journaled.phase = ConversationSyncPhase::RecoveryRequired;
+        }
+        Ok(())
+    })
+    .map(|_| ())
+}
+
+fn record_verified_fork(
+    repository: &LocalStateRepository,
+    operation: &ConversationSyncOperation,
+    fork: &VerifiedNativeFork,
+) -> Result<ConversationSyncOperation, String> {
+    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
+        let divergence = divergence_mut(journaled)?;
+        let mut attempts = Vec::new();
+        for executor in &divergence.available_executors {
+            if *executor == fork.executor {
+                attempts.push(CodexForkAttempt {
+                    executor: *executor,
+                    status: CodexForkAttemptStatus::Verified,
+                });
+                break;
+            }
+            attempts.push(CodexForkAttempt {
+                executor: *executor,
+                status: CodexForkAttemptStatus::DefinitiveNoFork,
+            });
+        }
+        divergence.attempts = attempts;
+        divergence.current_executor = None;
+        divergence.successful_executor = Some(fork.executor);
+        divergence.fork_provider_thread_id = Some(fork.provider_thread_id.clone());
+        divergence.fork_transcript_path = Some(fork.transcript_path.to_string_lossy().into_owned());
+        divergence.fork_transcript_sha256 = Some(fork.transcript_sha256.clone());
+        divergence.fork_name_status = Some(map_name_status(&fork.name_status));
+        journaled.phase = ConversationSyncPhase::ForkVerified;
+        Ok(())
+    })?;
+    Ok(updated)
+}
+
+fn record_manual_wait(
+    repository: &LocalStateRepository,
+    operation: &ConversationSyncOperation,
+) -> Result<ConversationSyncOperation, String> {
+    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
+        let divergence = divergence_mut(journaled)?;
+        divergence.attempts = divergence
+            .available_executors
+            .iter()
+            .map(|executor| CodexForkAttempt {
+                executor: *executor,
+                status: if *executor == CodexForkExecutor::Manual {
+                    CodexForkAttemptStatus::Pending
+                } else {
+                    CodexForkAttemptStatus::DefinitiveNoFork
+                },
+            })
+            .collect();
+        divergence.current_executor = Some(CodexForkExecutor::Manual);
+        journaled.phase = ConversationSyncPhase::AwaitingManualFork;
+        Ok(())
+    })?;
+    Ok(updated)
+}
+
+fn record_ambiguous_fork(
+    repository: &LocalStateRepository,
+    operation: &ConversationSyncOperation,
+    ambiguous_executor: CodexForkExecutor,
+) -> Result<ConversationSyncOperation, String> {
+    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
+        let divergence = divergence_mut(journaled)?;
+        let mut attempts = Vec::new();
+        for executor in &divergence.available_executors {
+            attempts.push(CodexForkAttempt {
+                executor: *executor,
+                status: if *executor == ambiguous_executor {
+                    CodexForkAttemptStatus::Ambiguous
+                } else {
+                    CodexForkAttemptStatus::DefinitiveNoFork
+                },
+            });
+            if *executor == ambiguous_executor {
+                break;
+            }
+        }
+        divergence.attempts = attempts;
+        divergence.current_executor = Some(ambiguous_executor);
+        journaled.phase = ConversationSyncPhase::RecoveryRequired;
+        Ok(())
+    })?;
+    Ok(updated)
+}
+
+fn map_name_status(status: &CodexNameStatus) -> ConversationNameStatus {
+    match status {
+        CodexNameStatus::Applied => ConversationNameStatus::Applied,
+        CodexNameStatus::UserOverride => ConversationNameStatus::UserOverride,
+        CodexNameStatus::Unchanged => ConversationNameStatus::Unchanged,
+        CodexNameStatus::Deferred => ConversationNameStatus::Deferred,
+        CodexNameStatus::Failed(_) => ConversationNameStatus::Failed,
+    }
+}
+
+fn verify_journaled_fork(
+    operation: &ConversationSyncOperation,
+    fork: &CodexForkExecutionRequest,
+) -> Result<(), String> {
+    let divergence = operation
+        .divergence()
+        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
+    let provider_thread_id = divergence
+        .fork_provider_thread_id
+        .as_deref()
+        .ok_or_else(|| "verified Codex fork lacks a provider thread id".to_string())?;
+    let transcript_path = divergence
+        .fork_transcript_path
+        .as_deref()
+        .map(Path::new)
+        .ok_or_else(|| "verified Codex fork lacks a transcript path".to_string())?;
+    let transcript_sha256 = divergence
+        .fork_transcript_sha256
+        .as_deref()
+        .ok_or_else(|| "verified Codex fork lacks a transcript digest".to_string())?;
+    verify_recorded_fork(fork, provider_thread_id, transcript_path, transcript_sha256)
+}
+
+fn commit_preserved_fork_binding(
+    repository: &LocalStateRepository,
+    operation: &ConversationSyncOperation,
+) -> Result<ConversationSyncOperation, String> {
+    let divergence = operation
+        .divergence()
+        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
+    let fork_provider_thread_id = divergence
+        .fork_provider_thread_id
+        .as_ref()
+        .ok_or_else(|| "verified Codex fork lacks a provider thread id".to_string())?;
+    let fork_sha256 = divergence
+        .fork_transcript_sha256
+        .as_ref()
+        .ok_or_else(|| "verified Codex fork lacks a transcript digest".to_string())?;
+    let current = repository.load_conversation_bindings()?;
+    let existing = current.bindings.iter().find(|binding| {
+        binding.host_id == operation.host_id
+            && binding.replica_id == operation.replica_id
+            && binding.local_project_id == operation.local_project_id
+            && binding.provider_profile_id == operation.provider_profile_id
+            && binding.thread_id == divergence.preserved_thread_id
+    });
+    let exact_existing = existing.is_some_and(|binding| {
+        binding.forked_from.as_ref() == Some(&operation.thread_id)
+            && binding.provider_thread_id.as_ref() == Some(fork_provider_thread_id)
+            && binding.materialization_state == ConversationMaterializationState::Resumable
+            && binding.last_observed_file_sha256.as_ref() == Some(fork_sha256)
+            && binding.last_observed_lineage_digest.as_ref()
+                == Some(&divergence.local_lineage_digest)
+            && binding.last_observed_semantic_digest.as_ref()
+                == Some(&divergence.local_semantic_digest)
+            && binding.source_generation.is_none()
+            && binding.source_manifest_sha256.is_none()
+    });
+    if existing.is_some() && !exact_existing {
+        return Err("preserved conversation binding is occupied".to_string());
+    }
+    if !exact_existing {
+        if current.revision != operation.expected_bindings_document_revision {
+            return Err("conversation bindings changed after review".to_string());
+        }
+        repository.mutate_conversation_bindings(|document| {
+            let source = document
+                .bindings
+                .iter()
+                .find(|binding| {
+                    binding.host_id == operation.host_id
+                        && binding.replica_id == operation.replica_id
+                        && binding.local_project_id == operation.local_project_id
+                        && binding.provider_profile_id == operation.provider_profile_id
+                        && binding.thread_id == operation.thread_id
+                })
+                .ok_or_else(|| "conversation divergence source binding disappeared".to_string())?;
+            if source.revision != operation.expected_binding_revision.unwrap_or(u64::MAX)
+                || source.provider_thread_id.as_deref()
+                    != Some(&divergence.source_provider_thread_id)
+            {
+                return Err("conversation divergence source binding changed".to_string());
+            }
+            document.bindings.push(LocalConversationBinding {
+                host_id: operation.host_id.clone(),
+                replica_id: operation.replica_id.clone(),
+                local_project_id: operation.local_project_id.clone(),
+                provider_profile_id: operation.provider_profile_id.clone(),
+                thread_id: divergence.preserved_thread_id.clone(),
+                forked_from: Some(operation.thread_id.clone()),
+                provider_thread_id: Some(fork_provider_thread_id.clone()),
+                materialization_state: ConversationMaterializationState::Resumable,
+                last_observed_file_sha256: Some(fork_sha256.clone()),
+                last_observed_head_message_id: None,
+                last_observed_lineage_digest: Some(divergence.local_lineage_digest.clone()),
+                last_observed_semantic_digest: Some(divergence.local_semantic_digest.clone()),
+                source_generation: None,
+                source_manifest_sha256: None,
+                revision: 0,
+                created_at: operation.updated_at,
+                updated_at: operation.updated_at,
+            });
+            Ok(())
+        })?;
+    }
+    let document = repository.load_conversation_bindings()?;
+    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
+        journaled.expected_bindings_document_revision = document.revision;
+        Ok(())
+    })?;
+    Ok(updated)
+}
+
+fn record_post_commit_presentation(
+    repository: &LocalStateRepository,
+    operation: &ConversationSyncOperation,
+    fork: &CodexForkExecutionRequest,
+) -> Result<ConversationSyncOperation, String> {
+    let divergence = operation
+        .divergence()
+        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
+    let inventory_refresh_status = match refresh_codex_inventory(
+        &fork.codex_executable,
+        &fork.codex_home,
+        &fork.project_directory,
+        fork.project_directory.to_string_lossy().as_ref(),
+    ) {
+        Ok(()) => CodexInventoryRefreshStatus::Refreshed,
+        Err(_) => CodexInventoryRefreshStatus::Failed,
+    };
+    let status = match divergence.desired_original_name.as_deref() {
+        Some(desired) => set_codex_thread_name(
+            &fork.codex_executable,
+            &fork.codex_home,
+            &fork.project_directory,
+            &divergence.source_provider_thread_id,
+            divergence.pinned_local_title.as_deref(),
+            desired,
+        ),
+        None => CodexNameStatus::Unchanged,
+    };
+    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
+        let divergence = divergence_mut(journaled)?;
+        divergence.original_name_status = Some(map_name_status(&status));
+        divergence.inventory_refresh_status = inventory_refresh_status;
+        journaled.phase = ConversationSyncPhase::OriginalNamingRecorded;
+        Ok(())
+    })?;
+    Ok(updated)
+}
+
 /// Recover every local operation after reopening the repository. Calling this
 /// twice is intentionally a supported fixed-point check.
 pub fn recover_conversation_materializations(
@@ -486,13 +1290,64 @@ pub fn recover_conversation_materializations(
                 mark_recovery_required(repository, &operation_id)?;
                 return Ok(RecoveryOutcome::RecoveryRequired);
             }
+            if matches!(
+                operation.operation,
+                ConversationSyncOperationKind::CodexDivergence(_)
+            ) {
+                if operation.phase == ConversationSyncPhase::Prepared {
+                    if operation.targets.iter().all(staged_target_is_valid) {
+                        operation = set_phase(
+                            repository,
+                            &operation_id,
+                            ConversationSyncPhase::ReplacementStaged,
+                            operation.updated_at,
+                        )?;
+                    } else if operation.targets.iter().all(target_is_uncommitted) {
+                        rollback_prepared(repository, &operation)?;
+                        return Ok(RecoveryOutcome::RolledBack);
+                    } else {
+                        return Ok(RecoveryOutcome::RecoveryRequired);
+                    }
+                }
+                if operation.phase == ConversationSyncPhase::AwaitingManualFork {
+                    return Ok(RecoveryOutcome::RecoveryRequired);
+                }
+                if operation.phase == ConversationSyncPhase::LocalCommitted {
+                    cleanup_and_retire(repository, &operation_id)?;
+                    return Ok(RecoveryOutcome::Completed);
+                }
+                let fork = codex_fork_request_for_operation(repository, &operation)?;
+                if operation.phase == ConversationSyncPhase::ReplacementStaged
+                    && operation.divergence().is_some_and(|divergence| {
+                        divergence.resolution == ConversationDivergenceResolution::UseCloudOnly
+                    })
+                    && verify_source_idle_and_title(&fork).is_err()
+                {
+                    rollback_prepared(repository, &operation)?;
+                    return Ok(RecoveryOutcome::RolledBack);
+                }
+                let mut no_failpoints = NoConversationFailpoints;
+                return match resume_codex_divergence_locked(
+                    repository,
+                    &operation_id,
+                    None,
+                    fork,
+                    &mut no_failpoints,
+                )? {
+                    CodexDivergenceApplyOutcome::Committed(_) => Ok(RecoveryOutcome::Completed),
+                    CodexDivergenceApplyOutcome::AwaitingManualFork { .. }
+                    | CodexDivergenceApplyOutcome::RecoveryRequired { .. } => {
+                        Ok(RecoveryOutcome::RecoveryRequired)
+                    }
+                };
+            }
             match operation.phase {
                 ConversationSyncPhase::Prepared => {
                     if operation.targets.iter().all(staged_target_is_valid) {
                         operation = set_phase(
                             repository,
                             &operation_id,
-                            ConversationSyncPhase::Staged,
+                            ConversationSyncPhase::ReplacementStaged,
                             operation.updated_at,
                         )?;
                     } else if operation.targets.iter().all(target_is_uncommitted) {
@@ -509,28 +1364,7 @@ pub fn recover_conversation_materializations(
                 _ => {}
             }
 
-            if operation.phase == ConversationSyncPhase::Staged {
-                if operation.is_composite_pull_fork() {
-                    operation = commit_rekey(repository, &operation)?;
-                    operation = set_phase(
-                        repository,
-                        &operation_id,
-                        ConversationSyncPhase::LocalRekeyed,
-                        operation.updated_at,
-                    )?;
-                }
-            }
-            if operation.phase == ConversationSyncPhase::Staged {
-                let mut no_failpoints = NoConversationFailpoints;
-                commit_provider_targets(repository, &operation_id, &mut no_failpoints)?;
-                operation = set_phase(
-                    repository,
-                    &operation_id,
-                    ConversationSyncPhase::ProviderCommitted,
-                    operation.updated_at,
-                )?;
-            }
-            if operation.phase == ConversationSyncPhase::LocalRekeyed {
+            if operation.phase == ConversationSyncPhase::ReplacementStaged {
                 let mut no_failpoints = NoConversationFailpoints;
                 commit_provider_targets(repository, &operation_id, &mut no_failpoints)?;
                 operation = set_phase(
@@ -571,7 +1405,21 @@ pub fn recover_conversation_materializations(
             Ok(RecoveryOutcome::RolledBack) => report.rolled_back.push(operation_id),
             Ok(RecoveryOutcome::RecoveryRequired) => report.recovery_required.push(operation_id),
             Err(error) => {
-                let _ = mark_recovery_required(repository, &operation_id);
+                let remains_pending = repository
+                    .load_conversation_sync_journal()?
+                    .operations
+                    .iter()
+                    .any(|candidate| candidate.operation_id == operation_id);
+                if !remains_pending {
+                    report.rolled_back.push(operation_id);
+                    continue;
+                }
+                if !matches!(
+                    operation.operation,
+                    ConversationSyncOperationKind::CodexDivergence(_)
+                ) {
+                    let _ = mark_recovery_required(repository, &operation_id);
+                }
                 report.recovery_required.push(operation_id);
                 if error.contains("different host") {
                     continue;
@@ -596,6 +1444,13 @@ fn prepare_operation(
     if operation.direction != ConversationPlanDirection::Pull {
         return Err("provider materialization requires a Pull operation".to_string());
     }
+    if !matches!(
+        operation.operation,
+        ConversationSyncOperationKind::ProviderMaterialization
+            | ConversationSyncOperationKind::CodexDivergence(_)
+    ) {
+        return Err("provider materialization requires a materialization journal".to_string());
+    }
     if operation.phase != ConversationSyncPhase::Prepared || !operation.targets.is_empty() {
         return Err("new conversation operation must begin Prepared without targets".to_string());
     }
@@ -604,7 +1459,6 @@ fn prepare_operation(
     }
     if operation.materialization_state == ConversationMaterializationState::Resumable
         && request.targets.is_empty()
-        && !operation.is_pure_rekey()
     {
         return Err("resumable conversation materialization has no provider files".to_string());
     }
@@ -998,12 +1852,6 @@ fn verify_target_role_set(
     operation: &ConversationSyncOperation,
     targets: &[ConversationTargetPayload],
 ) -> Result<(), String> {
-    if operation.is_pure_rekey() {
-        if !targets.is_empty() {
-            return Err("conversation fork rekey must not touch provider targets".to_string());
-        }
-        return Ok(());
-    }
     if operation.materialization_state == ConversationMaterializationState::StoredOnly {
         if !targets.is_empty() || operation.provider_thread_id.is_some() {
             return Err("stored-only conversation cannot publish provider files".to_string());
@@ -1026,17 +1874,11 @@ fn verify_target_role_set(
     if transcripts != 1 {
         return Err("resumable conversation requires exactly one transcript".to_string());
     }
-    let creates_transcript = targets
-        .iter()
-        .find(|target| target.role == ConversationFileRole::Transcript)
-        .is_some_and(|target| target.expected == TargetExpectation::Absent);
-    if operation.provider == super::domain::Provider::Codex
-        && ((creates_transcript && indexes != 1) || (!creates_transcript && indexes > 1))
-    {
-        return Err(
-            "new Codex conversations require one index fragment; replacements allow at most one"
-                .to_string(),
-        );
+    // The Codex index row is conditional presentation metadata, written
+    // only when the cloud thread carries a real title, so creates and
+    // replacements alike allow at most one fragment.
+    if operation.provider == super::domain::Provider::Codex && indexes > 1 {
+        return Err("Codex conversations allow at most one index fragment".to_string());
     }
     // Claude has no provider index: the projects directory listing is the
     // index, so a resumable Claude materialization is exactly one transcript.
@@ -1183,6 +2025,29 @@ fn validate_codex_index_fragment(bytes: &[u8], thread_id: &str) -> Result<(), St
         if !ids.insert(id.to_string()) {
             return Err("Codex index fragment repeats a thread id".to_string());
         }
+        if id == thread_id {
+            // Rows Mallard appends must match the provider schema exactly;
+            // pre-existing rows stay Codex's business.
+            let named = object
+                .get("thread_name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| {
+                    !name.trim().is_empty()
+                        && name.len() <= 1024
+                        && !name.chars().any(char::is_control)
+                });
+            let updated = object
+                .get("updated_at")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok());
+            if !named || !updated {
+                return Err(
+                    "Codex index destination row must carry a thread name and an RFC 3339 \
+                     update time"
+                        .to_string(),
+                );
+            }
+        }
         destination_count += usize::from(id == thread_id);
         row_count += 1;
     }
@@ -1324,32 +2189,9 @@ fn commit_binding(
     if binding_commit_is_complete(&current, operation) {
         return Ok(());
     }
-    let scope = operation_scope(operation);
     repository.mutate_conversation_bindings(|document| {
         if document.revision != operation.expected_bindings_document_revision {
             return Err("conversation bindings changed after review".to_string());
-        }
-        if !operation.rekey_committed {
-            if let Some(old) = operation.old_thread_id.as_ref() {
-                rekey_thread_binding(
-                    document,
-                    &scope,
-                    old,
-                    &operation.result_thread_id,
-                    operation.expected_bindings_document_revision,
-                    operation
-                        .expected_binding_revision
-                        .ok_or_else(|| "conversation rekey lacks a binding revision".to_string())?,
-                    operation.updated_at,
-                )?;
-            }
-        }
-        if operation.is_pure_rekey() {
-            // A deferred-publication fork moves the binding and nothing else:
-            // the transcript, provider files, and observed digests are
-            // already true for the minted thread, and there is no cloud
-            // publication to pin.
-            return Ok(());
         }
 
         let binding_target_thread_id = operation.binding_target_thread_id();
@@ -1360,8 +2202,7 @@ fn commit_binding(
                 && binding.provider_profile_id == operation.provider_profile_id
                 && binding.thread_id == *binding_target_thread_id
         }) {
-            if operation.old_thread_id.is_none()
-                && operation.expected_binding_revision.is_some()
+            if operation.expected_binding_revision.is_some()
                 && binding.revision != operation.expected_binding_revision.unwrap()
             {
                 return Err("conversation binding changed after review".to_string());
@@ -1401,15 +2242,6 @@ fn commit_binding(
     })
 }
 
-fn operation_scope(operation: &ConversationSyncOperation) -> ConversationBindingScope {
-    ConversationBindingScope {
-        host_id: operation.host_id.clone(),
-        replica_id: operation.replica_id.clone(),
-        local_project_id: operation.local_project_id.clone(),
-        provider_profile_id: operation.provider_profile_id.clone(),
-    }
-}
-
 fn binding_commit_is_complete(
     document: &super::domain::ConversationBindings,
     operation: &ConversationSyncOperation,
@@ -1423,10 +2255,6 @@ fn binding_commit_is_complete(
         if !in_scope {
             return false;
         }
-        if operation.is_pure_rekey() {
-            // The rekey clears the cloud pins; everything else is untouched.
-            return binding.source_generation.is_none();
-        }
         binding.provider_thread_id == operation.provider_thread_id
             && binding.forked_from == operation.binding_forked_from
             && binding.materialization_state == operation.materialization_state
@@ -1436,17 +2264,7 @@ fn binding_commit_is_complete(
             && binding.source_generation == Some(operation.generation)
             && binding.source_manifest_sha256.as_deref() == Some(&operation.manifest_sha256)
     });
-    let rekey_complete = operation.old_thread_id.as_ref().is_none_or(|old| {
-        document.bindings.iter().any(|binding| {
-            binding.host_id == operation.host_id
-                && binding.replica_id == operation.replica_id
-                && binding.local_project_id == operation.local_project_id
-                && binding.provider_profile_id == operation.provider_profile_id
-                && binding.thread_id == operation.result_thread_id
-                && binding.forked_from.as_ref() == Some(old)
-        })
-    });
-    materialized_exists && rekey_complete
+    materialized_exists
 }
 
 fn transcript_target_digest(operation: &ConversationSyncOperation) -> Option<String> {
@@ -1456,64 +2274,6 @@ fn transcript_target_digest(operation: &ConversationSyncOperation) -> Option<Str
         .find(|target| target.role == ConversationFileRole::Transcript)
         .and_then(|target| target.staged_sha256.clone())
         .or_else(|| operation.expected_local_digest.clone())
-}
-
-fn commit_rekey(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-) -> Result<ConversationSyncOperation, String> {
-    let Some(old) = operation.old_thread_id.as_ref() else {
-        return Ok(operation.clone());
-    };
-    if operation.rekey_committed {
-        return Ok(operation.clone());
-    }
-    let scope = operation_scope(operation);
-    let current = repository.load_conversation_bindings()?;
-    let rekey_already_persisted = current.bindings.iter().any(|binding| {
-        binding.host_id == operation.host_id
-            && binding.replica_id == operation.replica_id
-            && binding.local_project_id == operation.local_project_id
-            && binding.provider_profile_id == operation.provider_profile_id
-            && binding.thread_id == operation.result_thread_id
-            && binding.forked_from.as_ref() == Some(old)
-    });
-    if !rekey_already_persisted {
-        repository.mutate_conversation_bindings(|document| {
-            rekey_thread_binding(
-                document,
-                &scope,
-                old,
-                &operation.result_thread_id,
-                operation.expected_bindings_document_revision,
-                operation
-                    .expected_binding_revision
-                    .ok_or_else(|| "conversation rekey lacks a binding revision".to_string())?,
-                operation.updated_at,
-            )?;
-            Ok(())
-        })?;
-    }
-    let bindings = repository.load_conversation_bindings()?;
-    let rekeyed_binding = bindings
-        .bindings
-        .iter()
-        .find(|binding| {
-            binding.host_id == operation.host_id
-                && binding.replica_id == operation.replica_id
-                && binding.local_project_id == operation.local_project_id
-                && binding.provider_profile_id == operation.provider_profile_id
-                && binding.thread_id == operation.result_thread_id
-        })
-        .filter(|binding| binding.forked_from.as_ref() == Some(old))
-        .ok_or_else(|| "conversation rekey was not persisted".to_string())?;
-    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
-        journaled.rekey_committed = true;
-        journaled.expected_bindings_document_revision = bindings.revision;
-        journaled.expected_binding_revision = Some(rekeyed_binding.revision);
-        Ok(())
-    })?;
-    Ok(updated)
 }
 
 fn commit_receipt(
@@ -1608,8 +2368,7 @@ fn conversation_receipt(operation: &ConversationSyncOperation) -> ConversationAp
     ConversationApplyReceipt {
         host_id: operation.host_id.clone(),
         replica_id: operation.replica_id.clone(),
-        old_thread_id: operation.old_thread_id.clone(),
-        result_thread_id: operation.result_thread_id.clone(),
+        thread_id: operation.thread_id.clone(),
         provider_profile_id: operation.provider_profile_id.clone(),
         provider_thread_id: operation.provider_thread_id.clone(),
         materialization_state: operation.materialization_state,
@@ -1622,6 +2381,25 @@ fn conversation_receipt(operation: &ConversationSyncOperation) -> ConversationAp
         published_origin_host_token: None,
         published_origin_replica_token: None,
         journal_operation_id: operation.operation_id.clone(),
+        divergence: operation
+            .divergence()
+            .map(|divergence| CodexDivergenceReceipt {
+                resolution: divergence.resolution,
+                preserved_thread_id: divergence
+                    .fork_provider_thread_id
+                    .as_ref()
+                    .map(|_| divergence.preserved_thread_id.clone()),
+                preserved_provider_thread_id: divergence.fork_provider_thread_id.clone(),
+                executor: divergence.successful_executor,
+                desired_fork_name: divergence
+                    .fork_provider_thread_id
+                    .as_ref()
+                    .map(|_| divergence.desired_fork_name.clone()),
+                fork_name_status: divergence.fork_name_status,
+                desired_original_name: divergence.desired_original_name.clone(),
+                original_name_status: divergence.original_name_status,
+                inventory_refresh_status: divergence.inventory_refresh_status,
+            }),
     }
 }
 

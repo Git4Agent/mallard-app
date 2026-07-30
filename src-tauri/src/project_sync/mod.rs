@@ -5,6 +5,8 @@
 
 pub mod bundle_engine;
 pub mod chat_history;
+pub mod codex_app_refresh;
+pub mod codex_native_fork;
 pub mod codex_rollout;
 pub mod commands;
 pub mod conversation_codec;

@@ -121,10 +121,20 @@ export function pushReviewBlockers(
 ): PushReviewBlocker[] {
   const blockers: PushReviewBlocker[] = [];
   for (const entry of threadComparison?.entries ?? []) {
-    if (entry.cloud_thread_id) {
+    const decisionBlocksPush = entry.push_decision?.action === "require_pull"
+      || entry.push_decision?.action === "blocked";
+    if (entry.cloud_thread_id && !decisionBlocksPush) {
       continue;
     }
-    const kind = pushBlockerKind(entry.state, entry.storage_present, selected.has(entry.resource_id));
+    const selectedEntry = selected.has(entry.resource_id);
+    const kind = pushBlockerKind(entry.state, entry.storage_present, selectedEntry)
+      ?? (decisionBlocksPush
+        ? entry.storage_present
+          ? "storage"
+          : selectedEntry
+            ? "local"
+            : null
+        : null);
     if (kind) blockers.push({ kind, step: "history", resourceId: entry.resource_id, state: entry.state });
   }
   for (const item of capabilityReport?.items ?? []) {
