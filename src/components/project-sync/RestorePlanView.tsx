@@ -3,8 +3,6 @@ import type {
   BundleReadiness,
   ConversationPlanAction,
   ConversationResolutionSelection,
-  DependencyPlan,
-  DependencyResult,
   LocalProjectSummary,
   ProjectBinding,
   RestorePlan,
@@ -13,7 +11,6 @@ import type {
 import Icon from "../Icons";
 import ProjectChatHistoryPage from "./ProjectChatHistoryPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
-import SkillsPluginStatusPage from "./SkillsPluginStatusPage";
 import SyncReviewTabs, {
   type SyncReviewStep,
   syncReviewSteps,
@@ -24,7 +21,6 @@ import {
   buildPullReviewItems,
   buildPullReviewSelection,
   defaultSelected,
-  dependencyActionIds,
   itemKindLabel,
   includeRequiredPullProjectDirectories,
   pendingIds,
@@ -43,10 +39,8 @@ interface Props {
   profileLabel: string;
   plan: RestorePlan;
   binding: ProjectBinding;
-  dependencyPlan: DependencyPlan | null;
   readiness: BundleReadiness | null;
   restoreResult: RestoreResult | null;
-  dependencyResult: DependencyResult | null;
   phase: PullApplyPhase;
   supportLoading: boolean;
   completedActionIds: ReadonlySet<string>;
@@ -69,17 +63,14 @@ interface Props {
 
 const STEP_LABELS: Record<SyncReviewStep, string> = {
   history: "Git & sessions",
-  skills: "Skills",
-  plugins: "Plugins",
   project_files: "Project files",
   review: "Review",
 };
 
 function phaseIndex(phase: PullApplyPhase): number {
   if (phase === "restoring") return 0;
-  if (phase === "installing") return 1;
-  if (phase === "verifying") return 2;
-  if (phase === "complete") return 3;
+  if (phase === "verifying") return 1;
+  if (phase === "complete") return 2;
   return -1;
 }
 
@@ -87,17 +78,14 @@ function PhaseProgress({
   phase,
   ready,
   restoreFailed,
-  installFailed,
 }: {
   phase: PullApplyPhase;
   ready: boolean;
   restoreFailed: boolean;
-  installFailed: boolean;
 }) {
   const activeIndex = phaseIndex(phase);
   const steps = [
-    { label: "Restore project data and custom skills", icon: "file" as const },
-    { label: "Install selected plugins and tools", icon: "download" as const },
+    { label: "Restore project data", icon: "file" as const },
     { label: "Verify project readiness", icon: "refresh" as const },
   ];
   return (
@@ -106,8 +94,7 @@ function PhaseProgress({
         const current = activeIndex === index;
         const warning = phase === "complete" && (
           (index === 0 && restoreFailed) ||
-          (index === 1 && installFailed) ||
-          (index === 2 && !ready)
+          (index === 1 && !ready)
         );
         const complete = !warning && (activeIndex > index || phase === "complete");
         return (
@@ -138,12 +125,10 @@ function nameStatusLabel(status: string | null | undefined): string {
 
 function ResultDetails({
   restoreResult,
-  dependencyResult,
 }: {
   restoreResult: RestoreResult | null;
-  dependencyResult: DependencyResult | null;
 }) {
-  const results = [restoreResult, dependencyResult].filter((result): result is RestoreResult | DependencyResult => result !== null);
+  const results = [restoreResult].filter((result): result is RestoreResult => result !== null);
   if (results.length === 0) return null;
   return (
     <details className="sync-pull-result-details">
@@ -318,7 +303,6 @@ function ItemList({
   completedResourceIds,
   failedResourceIds,
   phase,
-  supportLoading,
   disabled,
   onToggle,
 }: {
@@ -328,7 +312,6 @@ function ItemList({
   completedResourceIds: ReadonlySet<string>;
   failedResourceIds: ReadonlySet<string>;
   phase: PullApplyPhase;
-  supportLoading: boolean;
   disabled: boolean;
   onToggle: (resourceId: string) => void;
 }) {
@@ -346,20 +329,13 @@ function ItemList({
         const pending = pendingIds(item, completedActionIds);
         const completed = completedResourceIds.has(item.resourceId);
         const failed = failedResourceIds.has(item.resourceId);
-        const waitingForInstaller =
-          item.category === "global_tool" &&
-          item.toolKind !== "custom_skill" &&
-          pending.length === 0 &&
-          !completed &&
-          supportLoading;
         const keepLocalConversation = keepsLocalConversation(item);
         const manualResolution = requiresManualResolution(item);
-        const blocked = keepLocalConversation || manualResolution || pending.length === 0 || completed || waitingForInstaller;
+        const blocked = keepLocalConversation || manualResolution || pending.length === 0 || completed;
         const selectable = !blocked;
         const checked = selected.has(item.resourceId) && !completed;
         const expanded = expandedItems.has(item.resourceId);
         const activeRestore = phase === "restoring" && checked && restoreActionIds(item).some((id) => !completedActionIds.has(id));
-        const activeInstall = phase === "installing" && checked && dependencyActionIds(item).some((id) => !completedActionIds.has(id));
         const conversationAction = item.conversationActions[0]?.action;
         const status: string | null = conversationAction === "no_op"
           ? "Already up to date"
@@ -373,16 +349,6 @@ function ItemList({
           ? "Keep local"
           : manualResolution
           ? "Resolve manually"
-          : item.category === "global_tool"
-          ? completed
-            ? "Installed"
-            : failed
-              ? "Failed"
-              : activeRestore || activeInstall
-                ? "Installing"
-                : checked || waitingForInstaller
-                  ? null
-                  : "Needs approval"
           : completed
             ? "Restored"
             : failed
@@ -423,7 +389,7 @@ function ItemList({
               </span>
               <span className="sync-pull-item-icon">
                 <Icon
-                  name={failed || manualResolution || keepLocalConversation ? "alert-triangle" : completed ? "check-circle" : item.toolKind === "plugin" ? "download" : item.toolKind === "custom_skill" ? "folder" : "file"}
+                  name={failed || manualResolution || keepLocalConversation ? "alert-triangle" : completed ? "check-circle" : "file"}
                   size={14}
                 />
               </span>
@@ -445,9 +411,6 @@ function ItemList({
                   {item.conversationActions.map((action) => (
                     <Fragment key={action.action_id}><span>Conversation</span><code>{action.action}</code></Fragment>
                   ))}
-                  {item.dependencyActions.map((action) => (
-                    <Fragment key={action.action_id}><span>Installer</span><code>{action.action_id}</code></Fragment>
-                  ))}
                 </div>
               </div>
             )}
@@ -464,10 +427,8 @@ export default function RestorePlanView({
   storageName = "storage",
   plan,
   binding,
-  dependencyPlan,
   readiness,
   restoreResult,
-  dependencyResult,
   phase,
   supportLoading,
   completedActionIds,
@@ -484,7 +445,7 @@ export default function RestorePlanView({
   onRefresh,
   onBack,
 }: Props) {
-  const items = useMemo(() => buildPullReviewItems(plan, dependencyPlan), [plan, dependencyPlan]);
+  const items = useMemo(() => buildPullReviewItems(plan), [plan]);
   const divergenceActions = useMemo(
     () => (plan.conversation_actions ?? []).filter((action) => action.action === "resolve_divergence"),
     [plan],
@@ -505,20 +466,15 @@ export default function RestorePlanView({
     () => items.filter((item) => itemKindLabel(item) === "Conversation"),
     [items],
   );
-  const skillItems = useMemo(() => items.filter((item) => item.toolKind === "custom_skill"), [items]);
-  const pluginItems = useMemo(() => items.filter((item) => item.toolKind === "plugin"), [items]);
   const projectContentItems = useMemo(
     () => items.filter((item) => item.category === "project_content"),
     [items],
   );
   const otherItems = useMemo(() => items.filter((item) => (
     itemKindLabel(item) !== "Conversation"
-    && item.toolKind !== "custom_skill"
-    && item.toolKind !== "plugin"
     && item.category !== "project_content"
   )), [items]);
   const projectItems = useMemo(() => items.filter((item) => item.category === "project_data"), [items]);
-  const globalItems = useMemo(() => items.filter((item) => item.category === "global_tool"), [items]);
   const showProjectFiles = plan.project_content_eligibility?.state === "eligible" || projectContentItems.length > 0;
   const reviewSteps = useMemo(() => syncReviewSteps(showProjectFiles), [showProjectFiles]);
   const knownItems = useRef(new Set<string>());
@@ -587,7 +543,7 @@ export default function RestorePlanView({
   const pendingProjectContentDecisionCount = projectContentItems.filter((item) => (
     pendingIds(item, completedActionIds).length > 0 && !completedResourceIds.has(item.resourceId)
   )).length;
-  const hasResult = phase === "complete" || restoreResult !== null || dependencyResult !== null;
+  const hasResult = phase === "complete" || restoreResult !== null;
   const approvalItems = items.filter((item) => (
     item.category !== "project_content"
     && requiresApproval(item)
@@ -609,24 +565,14 @@ export default function RestorePlanView({
     if (!reviewSteps.includes(activeStep)) setActiveStep("review");
   }, [activeStep, reviewSteps]);
 
-  const failureCount = (restoreResult?.failed_actions?.length ?? 0) + (dependencyResult?.failed_actions?.length ?? 0);
-  const skippedTools = globalItems.filter((item) => (
-    !selected.has(item.resourceId) && !completedResourceIds.has(item.resourceId)
-  )).length;
-  const unchangedCount = skippedTools + manualItems.length;
-  const finalReady = hasResult && !error && failureCount === 0 && skippedTools === 0 && readiness?.state === "ready";
+  const failureCount = restoreResult?.failed_actions?.length ?? 0;
+  const unchangedCount = manualItems.length;
+  const finalReady = hasResult && !error && failureCount === 0 && readiness?.state === "ready";
   const reviewCanClose = !forkCheckpointActive && hasResult && (
     finalReady || (selectedCount === 0 && pendingProjectContentDecisionCount === 0)
   );
   const completedProjectItems = projectItems.filter((item) => completedResourceIds.has(item.resourceId));
-  const completedSkills = globalItems.filter((item) => (
-    item.toolKind === "custom_skill" && completedResourceIds.has(item.resourceId)
-  ));
-  const completedPlugins = globalItems.filter((item) => (
-    item.toolKind === "plugin" && completedResourceIds.has(item.resourceId)
-  ));
   const failedProjectItems = projectItems.filter((item) => failedResourceIds.has(item.resourceId));
-  const failedTools = globalItems.filter((item) => failedResourceIds.has(item.resourceId));
   const outcomeTitle = forkCheckpointActive
     ? forkCheckpoint?.status === "awaiting_manual_fork"
       ? "Waiting for a Codex fork"
@@ -641,15 +587,11 @@ export default function RestorePlanView({
           ? "Pull complete"
           : "Project restored; setup needs attention";
   const buttonLabel = busy
-    ? phase === "installing"
-      ? "Installing selected tools…"
-      : phase === "verifying"
-        ? "Verifying readiness…"
-        : "Restoring selected changes…"
+    ? phase === "verifying"
+      ? "Verifying readiness…"
+      : "Restoring selected changes…"
     : forkCheckpointActive
       ? "Complete the fork checkpoint above"
-    : hasResult && failedTools.length > 0 && selectedCount === failedResourceIds.size
-      ? `Retry failed installation${failedTools.length === 1 ? "" : "s"}`
       : reviewCanClose
         ? "Done"
         : hasResult && selectedCount > 0
@@ -676,17 +618,12 @@ export default function RestorePlanView({
     else next.add(resourceId);
     return includeRequiredPullProjectDirectories(items, next);
   });
-  const dependencyMessages = (dependencyPlan?.blockers?.length ?? 0) + (dependencyPlan?.warnings?.length ?? 0);
   const recommendedIds = new Set(items.filter(defaultSelected).map((item) => item.resourceId));
   const stepItems = activeStep === "history"
     ? conversationItems
-    : activeStep === "skills"
-      ? skillItems
-      : activeStep === "plugins"
-        ? pluginItems
-        : activeStep === "project_files"
-          ? projectContentItems
-        : items;
+    : activeStep === "project_files"
+      ? projectContentItems
+      : items;
   const pendingStepItems = stepItems.filter((item) => (
     pendingIds(item, completedActionIds).length > 0 && !completedResourceIds.has(item.resourceId)
   ));
@@ -712,16 +649,12 @@ export default function RestorePlanView({
   const selectedIn = (chosen: PullReviewItem[]) => chosen.filter((item) => selected.has(item.resourceId)).length;
   const counts = {
     history: selectedIn(conversationItems),
-    skills: selectedIn(skillItems),
-    plugins: selectedIn(pluginItems),
     project_files: selectedIn(projectContentItems),
     review: selectedCount,
   };
   const warningSteps = new Set<SyncReviewStep>();
   for (const item of approvalItems) {
     if (itemKindLabel(item) === "Conversation") warningSteps.add("history");
-    else if (item.toolKind === "custom_skill") warningSteps.add("skills");
-    else if (item.toolKind === "plugin") warningSteps.add("plugins");
     warningSteps.add("review");
   }
   for (const item of manualItems) {
@@ -732,7 +665,7 @@ export default function RestorePlanView({
     warningSteps.add("history");
     warningSteps.add("review");
   }
-  if (dependencyMessages > 0 || failureCount > 0) warningSteps.add("review");
+  if (failureCount > 0) warningSteps.add("review");
   if (projectContentItems.length > 0 && !projectContentEligible) {
     warningSteps.add("project_files");
     warningSteps.add("review");
@@ -742,8 +675,6 @@ export default function RestorePlanView({
     completedActionIds,
     completedResourceIds,
   );
-  const skillIds = pullSelectableResourceIds(skillItems, completedActionIds, completedResourceIds);
-  const pluginIds = pullSelectableResourceIds(pluginItems, completedActionIds, completedResourceIds);
   const stepIndex = reviewSteps.indexOf(activeStep);
   const goBack = () => setActiveStep(reviewSteps[Math.max(0, stepIndex - 1)]);
   const goNext = () => setActiveStep(reviewSteps[Math.min(reviewSteps.length - 1, stepIndex + 1)]);
@@ -877,54 +808,11 @@ export default function RestorePlanView({
               completedResourceIds={completedResourceIds}
               failedResourceIds={failedResourceIds}
               phase={phase}
-              supportLoading={supportLoading}
               disabled={busy || finalReady}
               onToggle={toggle}
             />
           ) : activeStep === "history" ? (
             <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No session changes</strong><small>Sessions already match this storage.</small></span></div>
-          ) : null}
-
-          {activeStep === "skills" && skillItems.length > 0 && project ? (
-            <SkillsPluginStatusPage
-              view="skills"
-              project={project}
-              binding={binding}
-              refreshEpoch={0}
-              activeStorageId={plan.storage_id}
-              activeStorageName={storageName}
-              onOpenProjectSettings={() => undefined}
-              selectionMode="pull"
-              selectedResourceIds={selected}
-              selectableResourceIds={skillIds}
-              selectionDisabled={busy || finalReady}
-              onToggleResource={toggle}
-            />
-          ) : activeStep === "skills" && skillItems.length > 0 ? (
-            <ItemList items={skillItems} selected={selected} completedActionIds={completedActionIds} completedResourceIds={completedResourceIds} failedResourceIds={failedResourceIds} phase={phase} supportLoading={supportLoading} disabled={busy || finalReady} onToggle={toggle} />
-          ) : activeStep === "skills" ? (
-            <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No skill changes</strong><small>Skills already match this storage.</small></span></div>
-          ) : null}
-
-          {activeStep === "plugins" && pluginItems.length > 0 && project ? (
-            <SkillsPluginStatusPage
-              view="plugins"
-              project={project}
-              binding={binding}
-              refreshEpoch={0}
-              activeStorageId={plan.storage_id}
-              activeStorageName={storageName}
-              onOpenProjectSettings={() => undefined}
-              selectionMode="pull"
-              selectedResourceIds={selected}
-              selectableResourceIds={pluginIds}
-              selectionDisabled={busy || finalReady}
-              onToggleResource={toggle}
-            />
-          ) : activeStep === "plugins" && pluginItems.length > 0 ? (
-            <ItemList items={pluginItems} selected={selected} completedActionIds={completedActionIds} completedResourceIds={completedResourceIds} failedResourceIds={failedResourceIds} phase={phase} supportLoading={supportLoading} disabled={busy || finalReady} onToggle={toggle} />
-          ) : activeStep === "plugins" ? (
-            <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No plugin changes</strong><small>Plugins already match this storage.</small></span></div>
           ) : null}
 
           {activeStep === "project_files" && (
@@ -963,7 +851,7 @@ export default function RestorePlanView({
           {activeStep === "review" && (
             <div className="sync-sync-review-summary">
               {phase !== "idle" && (
-                <PhaseProgress phase={phase} ready={finalReady} restoreFailed={failedProjectItems.length > 0} installFailed={failedTools.length > 0} />
+                <PhaseProgress phase={phase} ready={finalReady} restoreFailed={failedProjectItems.length > 0} />
               )}
               {forkCheckpointActive && forkCheckpoint && (
                 <section className="sync-fork-checkpoint" aria-live="polite">
@@ -1030,9 +918,6 @@ export default function RestorePlanView({
                     <h2>{outcomeTitle}</h2>
                     <ul>
                       {completedProjectItems.length > 0 && <li>{completedProjectItems.length} project data change{completedProjectItems.length === 1 ? "" : "s"} restored</li>}
-                      {completedSkills.length > 0 && <li>{completedSkills.length} custom skill{completedSkills.length === 1 ? "" : "s"} restored</li>}
-                      {completedPlugins.length > 0 && <li>{completedPlugins.map((item) => item.title).join(", ")} installed</li>}
-                      {skippedTools > 0 && <li>{globalItems.filter((item) => !selected.has(item.resourceId) && !completedResourceIds.has(item.resourceId)).map((item) => item.title).join(", ")} left unchanged</li>}
                       {keptLocalConversationItems.length > 0 && <li>{keptLocalConversationItems.length} conversation{keptLocalConversationItems.length === 1 ? "" : "s"} kept local</li>}
                       {manualItems.length > 0 && <li>{manualItems.length} conflict{manualItems.length === 1 ? "" : "s"} left unchanged for manual resolution</li>}
                       {finalReady && <li>Project is ready</li>}
@@ -1083,27 +968,17 @@ export default function RestorePlanView({
                 <span><Icon name="git-branch" size={15} /><strong>Sessions</strong></span>
                 <span>{counts.history} selected<Icon name="chevron-right" size={13} /></span>
               </button>
-              <button type="button" onClick={() => setActiveStep("skills")}>
-                <span><Icon name="folder" size={15} /><strong>Skills</strong></span>
-                <span>{counts.skills} selected<Icon name="chevron-right" size={13} /></span>
-              </button>
-              <button type="button" onClick={() => setActiveStep("plugins")}>
-                <span><Icon name="link" size={15} /><strong>Plugins</strong></span>
-                <span>{counts.plugins} selected<Icon name="chevron-right" size={13} /></span>
-              </button>
               {(otherItems.length > 0 || supportLoading) && (
                 <details className="sync-sync-review-other">
                   <summary>
                     <span><Icon name="settings" size={15} /><strong>Agent setup & tools</strong></span>
                     <span>{selectedIn(otherItems)} selected<Icon name="chevron-right" size={13} /></span>
                   </summary>
-                  <ItemList items={otherItems} selected={selected} completedActionIds={completedActionIds} completedResourceIds={completedResourceIds} failedResourceIds={failedResourceIds} phase={phase} supportLoading={supportLoading} disabled={busy || finalReady} onToggle={toggle} />
-                  {supportLoading && <div className="sync-pull-support-loading"><Icon name="refresh" className="icon-spin" size={14} /> Checking installers…</div>}
+                  <ItemList items={otherItems} selected={selected} completedActionIds={completedActionIds} completedResourceIds={completedResourceIds} failedResourceIds={failedResourceIds} phase={phase} disabled={busy || finalReady} onToggle={toggle} />
+                  {supportLoading && <div className="sync-pull-support-loading"><Icon name="refresh" className="icon-spin" size={14} /> Checking readiness…</div>}
                 </details>
               )}
 
-              {(dependencyPlan?.blockers ?? []).map((blocker) => <div key={blocker} className="sync-callout error"><Icon name="alert-triangle" size={15} /> {blocker}</div>)}
-              {(dependencyPlan?.warnings ?? []).map((warning) => <div key={warning} className="sync-callout"><Icon name="alert-triangle" size={15} /> {warning}</div>)}
               {!hasResult && keptLocalConversationItems.length > 0 && (
                 <div className="sync-callout warning sync-sync-review-blocker">
                   <Icon name="alert-triangle" size={15} />
@@ -1135,7 +1010,7 @@ export default function RestorePlanView({
                       ? `${approvalItems.map((item) => item.title).join(", ")} ${approvalItems.length === 1 ? "was" : "were"} left unchanged.`
                       : `Apply will skip ${approvalItems.map((item) => item.title).join(", ")} and leave ${approvalItems.length === 1 ? "it" : "them"} unchanged on this machine.`}
                   </span>
-                  <button type="button" className="btn btn-ghost" onClick={() => setActiveStep(approvalItems[0]?.toolKind === "plugin" ? "plugins" : approvalItems[0]?.toolKind === "custom_skill" ? "skills" : "review")}>Review optional</button>
+                  <button type="button" className="btn btn-ghost" onClick={() => setActiveStep("review")}>Review optional</button>
                 </div>
               )}
 
@@ -1166,7 +1041,7 @@ export default function RestorePlanView({
               )}
 
               {error && <div className="sync-callout error sync-pull-error" role="alert"><Icon name="alert-triangle" size={15} /> {error}</div>}
-              <ResultDetails restoreResult={restoreResult} dependencyResult={dependencyResult} />
+              <ResultDetails restoreResult={restoreResult} />
             </div>
           )}
         </div>

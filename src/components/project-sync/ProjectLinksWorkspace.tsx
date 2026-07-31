@@ -3,7 +3,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 import type {
@@ -19,7 +18,6 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import ProjectChatHistoryPage from "./ProjectChatHistoryPage";
-import SkillsPluginStatusPage from "./SkillsPluginStatusPage";
 import ConversationPathRepairNotice from "./ConversationPathRepairNotice";
 import { newStorage, storageConfigReady, StorageEditor } from "./StorageSettings";
 import { projectSyncApi } from "./api";
@@ -34,7 +32,6 @@ import {
 } from "./model";
 
 type LinkKey = { projectId: string; storageId: string };
-export type ProjectWorkspaceTab = "history" | "skills" | "plugins";
 export type StorageReviewKind = "pull" | "push";
 type StorageEditorRequest =
   | { mode: "open"; storageId: string; settingsExpanded: boolean; requestId: number }
@@ -83,7 +80,6 @@ interface Props {
   onStorageIssueChange?: (storageId: string, issue: string | null) => void;
   newProjectSetup?: ReactNode;
   historyRefreshEpoch?: number;
-  projectTabResetEpoch?: number;
   inlineStorageReview?: InlineStorageReview | null;
 }
 
@@ -91,93 +87,6 @@ function storageSubtitle(storage: StorageConfig): string {
   if (storage.kind === "local") return compactProjectPath(storage.local_dir || "Folder not configured");
   if (storage.bucket) return `Bucket · ${storage.bucket}`;
   return storage.s3_endpoint ? "S3 endpoint configured" : "S3 storage not configured";
-}
-
-export function ProjectWorkspaceTabs({
-  activeTab,
-  isGitRepository,
-  onChange,
-}: {
-  activeTab: ProjectWorkspaceTab;
-  isGitRepository: boolean;
-  onChange: (tab: ProjectWorkspaceTab) => void;
-}) {
-  const tabOrder: ProjectWorkspaceTab[] = ["history", "skills", "plugins"];
-  const selectFromKeyboard = (
-    event: ReactKeyboardEvent<HTMLButtonElement>,
-    tab: ProjectWorkspaceTab,
-  ) => {
-    event.preventDefault();
-    const tabList = event.currentTarget.parentElement;
-    onChange(tab);
-    window.requestAnimationFrame(() => {
-      tabList
-        ?.querySelector<HTMLButtonElement>(`[data-project-tab="${tab}"]`)
-        ?.focus();
-    });
-  };
-  const handleKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-    const currentTab = event.currentTarget.dataset.projectTab as ProjectWorkspaceTab;
-    const currentIndex = tabOrder.indexOf(currentTab);
-    if (event.key === "Home") return selectFromKeyboard(event, tabOrder[0]);
-    if (event.key === "End") return selectFromKeyboard(event, tabOrder[tabOrder.length - 1]);
-    if (event.key === "ArrowLeft") {
-      return selectFromKeyboard(event, tabOrder[(currentIndex - 1 + tabOrder.length) % tabOrder.length]);
-    }
-    if (event.key === "ArrowRight") {
-      selectFromKeyboard(event, tabOrder[(currentIndex + 1) % tabOrder.length]);
-    }
-  };
-
-  return (
-    <div className="sync-project-tabs" role="tablist" aria-label="Project information">
-      <button
-        type="button"
-        id="project-history-tab"
-        data-project-tab="history"
-        role="tab"
-        aria-selected={activeTab === "history"}
-        aria-controls="project-history-panel"
-        tabIndex={activeTab === "history" ? 0 : -1}
-        className={activeTab === "history" ? "active" : undefined}
-        onClick={() => onChange("history")}
-        onKeyDown={handleKeyDown}
-      >
-        <Icon name={isGitRepository ? "git-branch" : "openai"} size={14} />
-        {isGitRepository ? "Git & sessions" : "Sessions"}
-      </button>
-      <button
-        type="button"
-        id="project-skills-tab"
-        data-project-tab="skills"
-        role="tab"
-        aria-selected={activeTab === "skills"}
-        aria-controls="project-skills-panel"
-        tabIndex={activeTab === "skills" ? 0 : -1}
-        className={activeTab === "skills" ? "active" : undefined}
-        onClick={() => onChange("skills")}
-        onKeyDown={handleKeyDown}
-      >
-        <Icon name="folder" size={14} />
-        Skills
-      </button>
-      <button
-        type="button"
-        id="project-plugins-tab"
-        data-project-tab="plugins"
-        role="tab"
-        aria-selected={activeTab === "plugins"}
-        aria-controls="project-plugins-panel"
-        tabIndex={activeTab === "plugins" ? 0 : -1}
-        className={activeTab === "plugins" ? "active" : undefined}
-        onClick={() => onChange("plugins")}
-        onKeyDown={handleKeyDown}
-      >
-        <Icon name="link" size={14} />
-        Plugins
-      </button>
-    </div>
-  );
 }
 
 export function StorageRepositoryRow({ bundle }: { bundle: RemoteBundleSummary }) {
@@ -295,7 +204,6 @@ export default function ProjectLinksWorkspace({
   onStorageIssueChange,
   newProjectSetup,
   historyRefreshEpoch = 0,
-  projectTabResetEpoch = 0,
   inlineStorageReview,
 }: Props) {
   const [linkingProjectId, setLinkingProjectId] = useState<string | null>(null);
@@ -310,7 +218,6 @@ export default function ProjectLinksWorkspace({
   const [bundleError, setBundleError] = useState<string | null>(null);
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [projectAliasDraft, setProjectAliasDraft] = useState("");
-  const [activeProjectTab, setActiveProjectTab] = useState<ProjectWorkspaceTab>("history");
   const [storagePickerProjectId, setStoragePickerProjectId] = useState<string | null>(null);
   const [storageActionsProjectId, setStorageActionsProjectId] = useState<string | null>(null);
   const bundleRequestRef = useRef(0);
@@ -343,10 +250,6 @@ export default function ProjectLinksWorkspace({
     setStoragePickerProjectId(null);
     setStorageActionsProjectId(null);
   }, [activeProjectId, activeStorageId]);
-
-  useEffect(() => {
-    setActiveProjectTab("history");
-  }, [projectTabResetEpoch]);
 
   useEffect(() => {
     if (!inlineStorageReview) return;
@@ -1514,20 +1417,7 @@ export default function ProjectLinksWorkspace({
         ) : null)}
 
         {activeProject && !newProjectSetup && !inlineStorageReview && (
-          <ProjectWorkspaceTabs
-            activeTab={activeProjectTab}
-            isGitRepository={!!activeProject.is_git_repository}
-            onChange={setActiveProjectTab}
-          />
-        )}
-
-        {activeProject && !newProjectSetup && !inlineStorageReview && activeProjectTab === "history" && (
-          <div
-            id="project-history-panel"
-            className="sync-project-tab-panel"
-            role="tabpanel"
-            aria-labelledby="project-history-tab"
-          >
+          <div id="project-history-panel" className="sync-project-tab-panel">
             <ProjectChatHistoryPage
               embedded
               project={activeProject}
@@ -1535,32 +1425,6 @@ export default function ProjectLinksWorkspace({
               refreshEpoch={historyRefreshEpoch}
               activeStorageId={activeStorageId}
               activeStorageName={storages.find((storage) => storage.id === activeStorageId)?.name ?? null}
-            />
-          </div>
-        )}
-
-        {activeProject && !newProjectSetup && !inlineStorageReview && (
-          activeProjectTab === "skills" || activeProjectTab === "plugins"
-        ) && (
-          <div
-            id={`project-${activeProjectTab}-panel`}
-            className="sync-project-tab-panel"
-            role="tabpanel"
-            aria-labelledby={`project-${activeProjectTab}-tab`}
-          >
-            <SkillsPluginStatusPage
-              view={activeProjectTab}
-              project={activeProject}
-              binding={activeBindingByProject.get(activeProject.local_project_id) ?? null}
-              refreshEpoch={historyRefreshEpoch}
-              activeStorageId={activeStorageId}
-              activeStorageName={storages.find((storage) => storage.id === activeStorageId)?.name ?? null}
-              onOpenProjectSettings={() => {
-                document.getElementById("project-configuration-panel")?.scrollIntoView({
-                  block: "start",
-                  behavior: "smooth",
-                });
-              }}
             />
           </div>
         )}

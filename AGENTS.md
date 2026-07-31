@@ -3,8 +3,8 @@
 ## Product and architecture
 
 Mallard is a review-first Tauri 2 desktop application that makes project-scoped
-Codex and Claude sessions and provider-home setup — skills, plugins, memory,
-and state under any bound `CODEX_HOME`/`CLAUDE_CONFIG_DIR` — portable between
+Codex and Claude sessions and provider-home state — memory and session state
+under any bound `CODEX_HOME`/`CLAUDE_CONFIG_DIR` — portable between
 machines. It never captures agent configuration from inside the project
 directory; for non-Git projects, selected ordinary files can additionally
 travel as explicitly reviewed project content. The active stack is Rust 2021

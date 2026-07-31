@@ -17,7 +17,7 @@ superseded formats, migrations, or compatibility behavior.
 | Host identity and conversation state | Schema 1 |
 | Bundle recipe | Schema 1 |
 | Per-link project-content preferences | Schema 1 |
-| Restore and dependency plans | Schema 1 |
+| Restore plans | Schema 1 |
 | Setup drafts and transactions | Schema 1 |
 | Activity entries and policy | Schema 1 |
 
@@ -82,8 +82,8 @@ change storage B.
 Every portable resource has a `ResourceDescriptor` with a stable ID, kind,
 scope, display name, portable provenance, apply policy, codec version, and
 bounded metadata. Current resource kinds include provider conversations,
-memory, standalone skills, plugins, requirement placeholders, and ordinary
-project-content files/directories.
+memory, requirement placeholders, and ordinary project-content
+files/directories.
 
 ## 4. Machine-local metadata
 
@@ -98,13 +98,11 @@ Machine state is stored directly under `~/.mallard`:
 |-- conversation_bindings.json
 |-- conversation_sync_journal.json
 |-- materializations.json
-|-- dependency_applications.json
 |-- chat_history_cache.json
 |-- project_drafts/<draft-id>.json
 |-- setup_transactions/<draft-id>.json
 |-- conversation_push_plans/<plan-id>.json
 |-- restore_plans/<plan-id>.json
-|-- dependency_plans/<plan-id>.json
 |-- backups/<plan-id>/...
 `-- logs/
 ```
@@ -120,11 +118,11 @@ bindings. Exact and canonical project/profile paths stay here. Resolved
 `CODEX_HOME` and `CLAUDE_CONFIG_DIR` values are runtime fields and are not
 serialized into portable bundles.
 
-Restore and dependency plans are immutable approval documents. Restore plans
-contain resolved absolute targets, source digests, expected target digests or
-modes, a binding revision, a remote generation/commit/hash pin, and a 24-hour
-expiry. Materialization and dependency-application records contain the
-resulting receipts. Backups are stored per restore plan.
+Restore plans are immutable approval documents. They contain resolved
+absolute targets, source digests, expected target digests or modes, a binding
+revision, a remote generation/commit/hash pin, and a 24-hour expiry.
+Materialization records contain the resulting receipts. Backups are stored
+per restore plan.
 
 Persistence uses bounded reads, schema validation, no-symlink path checks,
 revision checks, a process mutex, synced temporary files, and atomic
@@ -230,7 +228,7 @@ the remote actions are visible but cannot be selected.
 The review order is:
 
 ```text
-Git & sessions -> Skills -> Plugins -> Project files -> Review
+Git & sessions -> Project files -> Review
 ```
 
 The Project files step is the opt-in. Opening Push does not scan the ordinary
@@ -396,12 +394,10 @@ Project content uses four explicit action kinds:
 Every project-content action requires approval and starts unchecked in the
 UI. Selecting a nested file also selects its planned ancestor directories.
 Unchecked actions mean **Keep local / skip this Pull** and do not block
-approved conversations, skills, or plugins.
+approved conversations.
 
 The plan pins the storage, bundle, replica, generation, commit, manifest hash,
-binding revision, targets, expected target digests/modes, and expiry. Native
-plugin/installer work is placed in a separate dependency plan with identical
-snapshot and binding pins.
+binding revision, targets, expected target digests/modes, and expiry.
 
 ### 10.2 Apply preflight
 
@@ -442,9 +438,8 @@ as skipped actions, it updates the link recipe to the pulled manifest recipe
 and advances the `RecipeBase`. Project-content exclusion preferences are not
 rewritten by Pull.
 
-Dependency actions are applied and recorded separately, followed by readiness
-verification. Supporting dependency/readiness failures do not hide an already
-valid restore plan from the user.
+Apply is followed by readiness verification. A readiness failure does not
+hide an already valid restore plan from the user.
 
 ## 11. Integrity, concurrency, and path safety
 

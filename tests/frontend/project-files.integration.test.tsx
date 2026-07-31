@@ -98,9 +98,9 @@ const inventory: ProjectContentInventory = {
   scanned_at: 1,
 };
 
-const emptyCounts = { history: 0, skills: 0, plugins: 0, project_files: 0, review: 0 };
+const emptyCounts = { history: 0, project_files: 0, review: 0 };
 
-test("eligible reviews put Project files directly between Plugins and Review", () => {
+test("eligible reviews put Project files directly between Sessions and Review", () => {
   const eligible = renderToStaticMarkup(
     <SyncReviewTabs
       activeStep="project_files"
@@ -109,14 +109,14 @@ test("eligible reviews put Project files directly between Plugins and Review", (
       onChange={() => undefined}
     />,
   );
-  const plugins = eligible.indexOf(">Plugins<");
+  const history = eligible.indexOf(">Git &amp; sessions<");
   const projectFiles = eligible.indexOf(">Project files<");
   const review = eligible.indexOf(">Review<");
-  assert.ok(plugins >= 0 && plugins < projectFiles && projectFiles < review);
+  assert.ok(history >= 0 && history < projectFiles && projectFiles < review);
 
   const git = renderToStaticMarkup(
     <SyncReviewTabs
-      activeStep="plugins"
+      activeStep="history"
       steps={syncReviewSteps(false)}
       counts={emptyCounts}
       onChange={() => undefined}
@@ -287,7 +287,7 @@ const pullPlan: RestorePlan = {
 };
 
 test("Pull project content starts as keep-local and selecting a nested file requires its folders", () => {
-  const items = buildPullReviewItems(pullPlan, null);
+  const items = buildPullReviewItems(pullPlan);
   assert.ok(items.every((item) => item.category === "project_content"));
   assert.ok(items.every((item) => !defaultSelected(item)));
   const selected = includeRequiredPullProjectDirectories(items, new Set(["file-a"]));
@@ -299,10 +299,8 @@ test("Pull project content starts as keep-local and selecting a nested file requ
       profileLabel="Profile"
       plan={pullPlan}
       binding={binding}
-      dependencyPlan={null}
       readiness={null}
       restoreResult={null}
-      dependencyResult={null}
       phase="idle"
       supportLoading={false}
       completedActionIds={new Set()}
@@ -316,7 +314,7 @@ test("Pull project content starts as keep-local and selecting a nested file requ
       onBack={() => undefined}
     />,
   );
-  assert.match(html, /Plugins[\s\S]*Project files[\s\S]*Review/);
+  assert.match(html, /Git &amp; sessions[\s\S]*Project files[\s\S]*Review/);
   assert.doesNotMatch(html, /<strong>Project files<\/strong>|0 apply · 3 keep local/);
   assert.match(html, />Keep project entries local</);
 });
@@ -337,17 +335,13 @@ test("confirming keep-local still submits an empty approved set so Pull can adva
           codex_divergences: [],
         };
       },
-      applyDependencies: async () => {
-        throw new Error("not expected");
-      },
       getRestoreReadiness: async () => {
         calls.push("verify");
         return { bundle_id: binding.bundle_id, state: "ready", issues: [] };
       },
     },
     pullPlan,
-    null,
-    { resourceIds: [], restoreActionIds: [], dependencyActionIds: [], conversationResolutions: [] },
+    { resourceIds: [], restoreActionIds: [], conversationResolutions: [] },
     () => undefined,
   );
   assert.deepEqual(calls, ["restore:0", "verify"]);

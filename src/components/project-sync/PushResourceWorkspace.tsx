@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   BundleFetchProgress,
   BundleRecipe,
-  CapabilityStatusReport,
   LocalProjectSummary,
   ProjectBinding,
   ProjectContentInventory,
@@ -15,7 +14,6 @@ import Icon from "../Icons";
 import ProjectChatHistoryPage from "./ProjectChatHistoryPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
 import ResourceInventory from "./ResourceInventory";
-import SkillsPluginStatusPage from "./SkillsPluginStatusPage";
 import SyncReviewTabs, {
   type SyncReviewStep,
   syncReviewSteps,
@@ -25,13 +23,10 @@ import { categoryFor } from "./model";
 const EMPTY_STATUSES = new Map<string, string>();
 const STEP_LABELS: Record<SyncReviewStep, string> = {
   history: "Git & sessions",
-  skills: "Skills",
-  plugins: "Plugins",
   project_files: "Project files",
   review: "Review",
 };
 const STORAGE_BLOCKING_STATES = new Set(["storage_only", "storage_ahead", "diverged"]);
-const PUSH_SELECTABLE_SYNC_STATES = new Set(["local_only", "local_ahead"]);
 
 export interface PushReviewBlocker {
   kind: "storage" | "local";
@@ -52,7 +47,6 @@ interface Props {
   storageName?: string | null;
   refreshEpoch?: number;
   threadComparison?: ThreadSyncComparison | null;
-  capabilityReport?: CapabilityStatusReport | null;
   projectContentInventory?: ProjectContentInventory | null;
   projectContentScanned?: boolean;
   projectContentLoading?: boolean;
@@ -85,8 +79,6 @@ function countSelected(items: ProjectResourceDescriptor[], selected: ReadonlySet
 
 function groupForStep(step: SyncReviewStep, resources: ProjectResourceDescriptor[]): ProjectResourceDescriptor[] {
   if (step === "history") return resources.filter((resource) => categoryFor(resource) === "conversations");
-  if (step === "skills") return resources.filter((resource) => categoryFor(resource) === "skills");
-  if (step === "plugins") return resources.filter((resource) => categoryFor(resource) === "plugins");
   if (step === "project_files") return resources.filter((resource) => categoryFor(resource) === "project_files");
   return resources;
 }
@@ -129,7 +121,6 @@ export function pushReviewPullHolds(
 export function pushReviewBlockers(
   selected: ReadonlySet<string>,
   threadComparison?: ThreadSyncComparison | null,
-  capabilityReport?: CapabilityStatusReport | null,
   projectContentInventory?: ProjectContentInventory | null,
   acknowledgedWarningDigests: ReadonlySet<string> = new Set(),
 ): PushReviewBlocker[] {
@@ -144,17 +135,6 @@ export function pushReviewBlockers(
     const selectedEntry = selected.has(entry.resource_id);
     const kind = pushBlockerKind(entry.state, entry.storage_present, selectedEntry);
     if (kind) blockers.push({ kind, step: "history", resourceId: entry.resource_id, state: entry.state });
-  }
-  for (const item of capabilityReport?.items ?? []) {
-    const kind = pushBlockerKind(item.state, item.storage_present, selected.has(item.resource_id));
-    if (kind) {
-      blockers.push({
-        kind,
-        step: item.kind === "plugin" ? "plugins" : "skills",
-        resourceId: item.resource_id,
-        state: item.state,
-      });
-    }
   }
   for (const entry of projectContentInventory?.entries ?? []) {
     const selectedEntry = selected.has(entry.descriptor.resource_id);
@@ -183,14 +163,12 @@ export function pushReviewBlockers(
 export function pushReviewBlockingCount(
   selected: ReadonlySet<string>,
   threadComparison?: ThreadSyncComparison | null,
-  capabilityReport?: CapabilityStatusReport | null,
   projectContentInventory?: ProjectContentInventory | null,
   acknowledgedWarningDigests: ReadonlySet<string> = new Set(),
 ): number {
   return pushReviewBlockers(
     selected,
     threadComparison,
-    capabilityReport,
     projectContentInventory,
     acknowledgedWarningDigests,
   ).length;
@@ -199,18 +177,12 @@ export function pushReviewBlockingCount(
 export function pushSelectableResourceIds(
   resources: ProjectResourceDescriptor[],
   threadComparison?: ThreadSyncComparison | null,
-  capabilityReport?: CapabilityStatusReport | null,
   projectContentInventory?: ProjectContentInventory | null,
 ): Set<string> {
   const unselectableIds = new Set<string>();
   for (const entry of threadComparison?.entries ?? []) {
     if (!entry.push_decision.selectable) {
       unselectableIds.add(entry.resource_id);
-    }
-  }
-  for (const item of capabilityReport?.items ?? []) {
-    if (!PUSH_SELECTABLE_SYNC_STATES.has(item.state) || item.blocked_reason) {
-      unselectableIds.add(item.resource_id);
     }
   }
   for (const entry of projectContentInventory?.entries ?? []) {
@@ -231,13 +203,11 @@ export function sanitizePushSelection(
   selected: ReadonlySet<string>,
   resources: ProjectResourceDescriptor[],
   threadComparison?: ThreadSyncComparison | null,
-  capabilityReport?: CapabilityStatusReport | null,
   projectContentInventory?: ProjectContentInventory | null,
 ): Set<string> {
   const selectableIds = pushSelectableResourceIds(
     resources,
     threadComparison,
-    capabilityReport,
     projectContentInventory,
   );
   return new Set([...selected].filter((resourceId) => selectableIds.has(resourceId)));
@@ -247,13 +217,11 @@ export function recommendedPushSelection(
   selected: ReadonlySet<string>,
   resources: ProjectResourceDescriptor[],
   threadComparison?: ThreadSyncComparison | null,
-  capabilityReport?: CapabilityStatusReport | null,
   projectContentInventory?: ProjectContentInventory | null,
 ): Set<string> {
   const selectableIds = pushSelectableResourceIds(
     resources,
     threadComparison,
-    capabilityReport,
     projectContentInventory,
   );
   const recommended = new Set([...selected].filter((resourceId) => selectableIds.has(resourceId)));
@@ -350,7 +318,6 @@ export default function PushResourceWorkspace({
   storageName = "storage",
   refreshEpoch = 0,
   threadComparison,
-  capabilityReport,
   projectContentInventory = null,
   projectContentScanned = false,
   projectContentLoading = false,
@@ -398,8 +365,6 @@ export default function PushResourceWorkspace({
   );
   const sessionIndex = conversations.find((resource) => resource.resource_id === "codex:session-index") ?? null;
   const visibleConversations = conversations.filter((resource) => resource.resource_id !== sessionIndex?.resource_id);
-  const skills = useMemo(() => resources.filter((resource) => categoryFor(resource) === "skills"), [resources]);
-  const plugins = useMemo(() => resources.filter((resource) => categoryFor(resource) === "plugins"), [resources]);
   const projectFiles = useMemo(
     () => resources.filter((resource) => categoryFor(resource) === "project_files"),
     [resources],
@@ -409,8 +374,8 @@ export default function PushResourceWorkspace({
     [resources],
   );
   const selectableIds = useMemo(
-    () => pushSelectableResourceIds(resources, threadComparison, capabilityReport, projectContentInventory),
-    [capabilityReport, projectContentInventory, resources, threadComparison],
+    () => pushSelectableResourceIds(resources, threadComparison, projectContentInventory),
+    [projectContentInventory, resources, threadComparison],
   );
   const effectiveSelected = useMemo(
     () => new Set([...selected].filter((resourceId) => selectableIds.has(resourceId))),
@@ -423,15 +388,12 @@ export default function PushResourceWorkspace({
 
   const counts = {
     history: countSelected(visibleConversations, effectiveSelected),
-    skills: countSelected(skills, effectiveSelected),
-    plugins: countSelected(plugins, effectiveSelected),
     project_files: countSelected(projectFiles, effectiveSelected),
     review: effectiveSelected.size,
   };
   const blockers = pushReviewBlockers(
     effectiveSelected,
     threadComparison,
-    capabilityReport,
     projectContentInventory,
     acknowledgedWarningDigests,
   );
@@ -532,12 +494,6 @@ export default function PushResourceWorkspace({
   const goNext = () => selectStep(nextStep);
   const selectedCount = effectiveSelected.size;
   const selectableConversationIds = new Set(visibleConversations
-    .filter((resource) => selectableIds.has(resource.resource_id))
-    .map((resource) => resource.resource_id));
-  const selectableSkillIds = new Set(skills
-    .filter((resource) => selectableIds.has(resource.resource_id))
-    .map((resource) => resource.resource_id));
-  const selectablePluginIds = new Set(plugins
     .filter((resource) => selectableIds.has(resource.resource_id))
     .map((resource) => resource.resource_id));
   const requiredProjectDirectories = requiredProjectContentDirectoryIds(
@@ -648,28 +604,6 @@ export default function PushResourceWorkspace({
             <ResourceInventory resources={conversations} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectableConversationIds} disabled={busy} onToggle={toggleResource} />
           ) : null}
 
-          {(activeStep === "skills" || activeStep === "plugins") && project ? (
-            <SkillsPluginStatusPage
-              view={activeStep}
-              project={project}
-              binding={binding}
-              refreshEpoch={refreshEpoch}
-              activeStorageId={storageId}
-              activeStorageName={storageName}
-              onOpenProjectSettings={() => undefined}
-              selectionMode="push"
-              selectedResourceIds={effectiveSelected}
-              selectableResourceIds={activeStep === "skills" ? selectableSkillIds : selectablePluginIds}
-              selectionDisabled={busy}
-              onToggleResource={toggleResource}
-              reportOverride={capabilityReport}
-            />
-          ) : activeStep === "skills" ? (
-            <ResourceInventory resources={skills} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectableSkillIds} disabled={busy} onToggle={toggleResource} />
-          ) : activeStep === "plugins" ? (
-            <ResourceInventory resources={plugins} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectablePluginIds} disabled={busy} onToggle={toggleResource} />
-          ) : null}
-
           {activeStep === "project_files" && (
             <ProjectFilesReviewPage
               mode="push"
@@ -732,14 +666,6 @@ export default function PushResourceWorkspace({
               <button type="button" onClick={() => selectStep("history")}>
                 <span><Icon name="git-branch" size={15} /><strong>Sessions</strong></span>
                 <span>{counts.history} included<Icon name="chevron-right" size={13} /></span>
-              </button>
-              <button type="button" onClick={() => selectStep("skills")}>
-                <span><Icon name="folder" size={15} /><strong>Skills</strong></span>
-                <span>{counts.skills} included<Icon name="chevron-right" size={13} /></span>
-              </button>
-              <button type="button" onClick={() => selectStep("plugins")}>
-                <span><Icon name="link" size={15} /><strong>Plugins</strong></span>
-                <span>{counts.plugins} included<Icon name="chevron-right" size={13} /></span>
               </button>
               {other.length > 0 && (
                 <details className="sync-sync-review-other">

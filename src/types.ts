@@ -79,8 +79,6 @@ export type ProjectProvider = "codex" | "claude";
 
 export type ProjectResourceCategory =
   | "conversations"
-  | "skills"
-  | "plugins"
   | "project_files"
   | "tools";
 
@@ -102,12 +100,10 @@ export type ProjectResourceKind =
   | "project_content_file"
   | "project_content_directory"
   | "project_memory"
-  | "standalone_skill"
-  | "plugin"
   | "requirement";
 
-export type ProjectResourceScope = "project" | "provider_state" | "dependency" | "requirement";
-export type ProjectApplyPolicy = "safe_file" | "merge" | "explicit_install" | "explicit_review" | "manual_only" | "never";
+export type ProjectResourceScope = "project" | "provider_state" | "requirement";
+export type ProjectApplyPolicy = "safe_file" | "merge" | "explicit_review" | "manual_only" | "never";
 
 export interface ProjectResourceDescriptor {
   resource_id: string;
@@ -127,8 +123,6 @@ export interface ProjectResourceDescriptor {
   default_selected?: boolean;
   selected_by_default?: boolean;
   blocked_reason?: string | null;
-  provided_by?: string | null;
-  install_behavior?: string | null;
 }
 
 export interface RecipeEntry {
@@ -530,7 +524,7 @@ export interface ResourceStatusReport {
   warnings?: string[];
 }
 
-export type CapabilityStatusState =
+export type ResourceSyncState =
   | "synced"
   | "local_only"
   | "local_ahead"
@@ -540,44 +534,6 @@ export type CapabilityStatusState =
   | "blocked"
   | "unknown"
   | "not_compared";
-
-export interface CapabilityProfileContext {
-  provider: ProjectProvider;
-  profile_id: string;
-  display_name: string;
-  path: string;
-  shared_project_count: number;
-}
-
-export interface CapabilityStatusItem extends ProjectResourceDescriptor {
-  category: "skills" | "plugins" | string;
-  state: CapabilityStatusState | string;
-  local_present: boolean;
-  storage_present: boolean;
-  selected_in_recipe: boolean;
-  blocked_reason?: string | null;
-  logical_paths: string[];
-  local_digest?: string | null;
-  storage_digest?: string | null;
-  local_version?: string | null;
-  storage_version?: string | null;
-  enabled?: boolean | null;
-  provided_skills: string[];
-  message?: string | null;
-}
-
-export interface CapabilityStatusReport {
-  project_id: string;
-  project_name: string;
-  profiles: CapabilityProfileContext[];
-  storage_id?: string | null;
-  storage_name?: string | null;
-  generation?: number | null;
-  base_generation?: number | null;
-  compared_at: number;
-  items: CapabilityStatusItem[];
-  warnings: string[];
-}
 
 export type ProjectFileSyncEligibilityState = "eligible" | "git_managed" | "unknown";
 
@@ -597,7 +553,7 @@ export interface ProjectContentEntry {
   size?: number | null;
   mode?: number | null;
   source_mtime?: number | null;
-  state: CapabilityStatusState | string;
+  state: ResourceSyncState | string;
   local_present: boolean;
   storage_present: boolean;
   base_present: boolean;
@@ -697,8 +653,6 @@ export interface PushReviewContext {
   destination_status: PushDestinationStatus;
   thread_comparison: ThreadSyncComparison | null;
   thread_comparison_error: string | null;
-  capability_report: CapabilityStatusReport | null;
-  capability_report_error: string | null;
   project_files: ProjectContentInventory | null;
   project_files_error: string | null;
   conversation_push_plan_id?: string | null;
@@ -725,8 +679,6 @@ export type RestoreActionKind =
   | { kind: "delete_project_directory"; logical_path: string }
   | { kind: "merge_file"; logical_path: string }
   | { kind: "materialize_conversation"; provider: ProjectProvider; logical_path: string }
-  | { kind: "install_custom_skill"; provider: ProjectProvider; skill_name: string }
-  | { kind: "overwrite_custom_skill"; provider: ProjectProvider; skill_name: string }
   | { kind: "manual"; message: string };
 
 export interface RestoreAction {
@@ -898,42 +850,6 @@ export interface RestoreResult {
 export interface CodexAppRestartResult {
   success: boolean;
   message: string;
-}
-
-export interface DependencyPlan {
-  schema_version: 1;
-  plan_id: string;
-  storage_id: string;
-  bundle_id: string;
-  host_id: string;
-  replica_id: string;
-  expected_host_identity_revision: number;
-  generation: number;
-  commit_id: string;
-  manifest_sha256: string;
-  binding_revision: number;
-  created_at: number;
-  expires_at: number;
-  actions: DependencyAction[];
-  blockers?: string[];
-  warnings?: string[];
-}
-
-export interface DependencyAction {
-  action_id: string;
-  resource_id: string;
-  kind: "install_codex_plugin" | "install_claude_plugin" | "install_standalone_skill" | "check_binary" | "check_environment" | "manual";
-  display_name: string;
-  provider?: ProjectProvider | null;
-  argv: string[];
-  requires_explicit_approval: boolean;
-}
-
-export interface DependencyResult {
-  success: boolean;
-  message: string;
-  applied_action_ids?: string[];
-  failed_actions?: Array<{ action_id: string; display_name?: string | null; message: string }>;
 }
 
 export interface BundleReadinessIssue {

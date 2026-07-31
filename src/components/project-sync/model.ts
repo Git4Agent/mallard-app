@@ -28,8 +28,6 @@ export const RESOURCE_GROUPS: Array<{
   description: string;
 }> = [
   { id: "conversations", label: "Conversations", description: "Project-scoped tasks and sessions" },
-  { id: "skills", label: "Skills", description: "Selected standalone skills from the provider home" },
-  { id: "plugins", label: "Plugins", description: "Portable install intent; payloads and caches never sync" },
   { id: "project_files", label: "Project files", description: "Exact files and folders selected from a non-Git project" },
   { id: "tools", label: "Requirements", description: "Environment requirements this backup expects on each machine" },
 ];
@@ -46,16 +44,12 @@ const CATEGORY_BY_KIND: Record<string, ProjectResourceCategory> = {
   project_memory: "conversations",
   project_content_file: "project_files",
   project_content_directory: "project_files",
-  skill: "skills",
-  standalone_skill: "skills",
-  plugin_skill: "skills",
-  plugin: "plugins",
   requirement: "tools",
 };
 
 export function categoryFor(resource: ProjectResourceDescriptor): ProjectResourceCategory {
   const explicit = resource.category;
-  if (explicit === "conversations" || explicit === "skills" || explicit === "plugins" || explicit === "project_files" || explicit === "tools") {
+  if (explicit === "conversations" || explicit === "project_files" || explicit === "tools") {
     return explicit;
   }
   return CATEGORY_BY_KIND[resource.kind.toLowerCase()] ?? "tools";

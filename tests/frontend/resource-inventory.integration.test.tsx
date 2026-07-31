@@ -34,33 +34,24 @@ function decision(
   };
 }
 
-function standaloneSkill(
-  effectiveName: string,
-  installDirectory: string,
+function memoryResource(
+  name: string,
   blockedReason: string | null = null,
 ): ProjectResourceDescriptor {
   return {
-    resource_id: `codex:standalone-skill:${effectiveName}`,
-    kind: "standalone_skill",
+    resource_id: `codex:memory:${name}`,
+    kind: "project_memory",
     provider: "codex",
     scope: "provider_state",
-    display_name: effectiveName,
-    provenance: {
-      kind: "standalone_snapshot",
-      stable_key: `custom-skill:v1:codex:${effectiveName}`,
-    },
+    display_name: name,
+    provenance: { kind: "unknown" },
     apply_policy: blockedReason ? "explicit_review" : "safe_file",
     codec_version: 1,
-    metadata: {
-      effective_name: effectiveName,
-      install_dir_name: installDirectory,
-      provider_adapter_version: "2",
-    },
-    category: "skills",
-    logical_paths: [`state/codex/skills/${installDirectory}/SKILL.md`],
+    metadata: {},
+    category: "conversations",
+    logical_paths: [`state/codex/memory/${name}/context.md`],
     default_selected: false,
     blocked_reason: blockedReason,
-    install_behavior: "install on restore",
   };
 }
 
@@ -84,7 +75,7 @@ test("recommended Push selection includes only locally changed sessions", () => 
   const synced = conversation("codex:session:synced");
   const storageAhead = conversation("codex:session:storage-ahead");
   const sessionIndex = conversation("codex:session-index");
-  const skill = standaloneSkill("frontend-skill", "frontend-skill");
+  const memory = memoryResource("frontend-memory");
   const comparison: ThreadSyncComparison = {
     project_id: "project-a",
     storage_id: "storage-a",
@@ -127,20 +118,20 @@ test("recommended Push selection includes only locally changed sessions", () => 
   };
 
   const recommended = recommendedPushSelection(
-    new Set([synced.resource_id, storageAhead.resource_id, sessionIndex.resource_id, skill.resource_id]),
-    [localAhead, synced, storageAhead, sessionIndex, skill],
+    new Set([synced.resource_id, storageAhead.resource_id, sessionIndex.resource_id, memory.resource_id]),
+    [localAhead, synced, storageAhead, sessionIndex, memory],
     comparison,
   );
 
   assert.deepEqual(
     [...recommended].sort(),
-    [localAhead.resource_id, sessionIndex.resource_id, skill.resource_id].sort(),
+    [localAhead.resource_id, sessionIndex.resource_id, memory.resource_id].sort(),
   );
 
   const sourceRecipe: BundleRecipe = {
     schema_version: 1,
     revision: 3,
-    entries: Object.fromEntries([synced, sessionIndex, skill].map((resource) => [resource.resource_id, {
+    entries: Object.fromEntries([synced, sessionIndex, memory].map((resource) => [resource.resource_id, {
       resource_id: resource.resource_id,
       apply_policy: resource.apply_policy,
       required: false,
@@ -148,12 +139,12 @@ test("recommended Push selection includes only locally changed sessions", () => 
   };
   const selectedRecipe: BundleRecipe = {
     ...sourceRecipe,
-    entries: { [skill.resource_id]: sourceRecipe.entries[skill.resource_id] },
+    entries: { [memory.resource_id]: sourceRecipe.entries[memory.resource_id] },
   };
   const publishedRecipe = preserveSyncedPushRecipeEntries(selectedRecipe, sourceRecipe, comparison);
   assert.deepEqual(
     Object.keys(publishedRecipe.entries).sort(),
-    [synced.resource_id, sessionIndex.resource_id, skill.resource_id].sort(),
+    [synced.resource_id, sessionIndex.resource_id, memory.resource_id].sort(),
     "unchecked synced sessions stay stored without appearing in the recommended action set",
   );
 });
@@ -259,51 +250,13 @@ test("conversation divergence holds only its thread instead of blocking Push", (
   );
 });
 
-function inputTagFor(html: string, accessibleName: string): string {
-  const marker = `aria-label="${accessibleName}"`;
-  const markerIndex = html.indexOf(marker);
-  assert.notEqual(markerIndex, -1, `missing input '${accessibleName}'`);
-  const start = html.lastIndexOf("<input", markerIndex);
-  const end = html.indexOf(">", markerIndex);
-  assert.notEqual(start, -1);
-  assert.notEqual(end, -1);
-  return html.slice(start, end + 1);
-}
-
-test("a declared skill name may differ from its selectable install folder", () => {
-  const resource = standaloneSkill(
-    "get-real-hardware-rh-service",
-    "capture-lsservice-detail",
-  );
-  const html = renderToStaticMarkup(
-    <ResourceInventory
-      resources={[resource]}
-      selected={new Set()}
-      statuses={new Map()}
-      onToggle={() => undefined}
-    />,
-  );
-
-  assert.match(html, /get-real-hardware-rh-service/);
-  assert.match(html, /folder capture-lsservice-detail/);
-  assert.doesNotMatch(html, /contradicts directory/);
-  assert.doesNotMatch(
-    inputTagFor(html, "Include get-real-hardware-rh-service"),
-    /\bdisabled\b/,
-    "a valid declared-name/folder mismatch must stay selectable",
-  );
-});
-
-test("duplicate effective-name claims remain unselectable", () => {
-  const reason = "effective skill name 'review' is declared by multiple directories";
+test("blocked resources remain unselectable in the inventory", () => {
+  const reason = "memory directory is unreadable";
   const html = renderToStaticMarkup(
     <ResourceInventory
       resources={[
-        standaloneSkill("review", "review-one", reason),
-        {
-          ...standaloneSkill("review", "review-two", reason),
-          resource_id: "codex:standalone-skill:review-two-blocked",
-        },
+        memoryResource("review-one", reason),
+        memoryResource("review-two", reason),
       ]}
       selected={new Set()}
       statuses={new Map()}
@@ -311,16 +264,14 @@ test("duplicate effective-name claims remain unselectable", () => {
     />,
   );
 
-  assert.match(html, /folder review-one/);
-  assert.match(html, /folder review-two/);
   assert.equal((html.match(/sync-resource-row blocked/g) ?? []).length, 2);
   assert.doesNotMatch(html, /sync-resource-row-selectable|sync-selection-placeholder/);
   assert.doesNotMatch(html, /type="checkbox"/);
 });
 
 test("blocked resources cannot enter a published recipe", () => {
-  const allowed = standaloneSkill("frontend-skill", "frontend-skill");
-  const blocked = standaloneSkill("broken-skill", "broken-skill", "SKILL.md is unreadable");
+  const allowed = memoryResource("frontend-memory");
+  const blocked = memoryResource("broken-memory", "context.md is unreadable");
   const recipe = recipeWithSelection(
     { schema_version: 1, revision: 3, entries: {} },
     [allowed, blocked],
@@ -331,7 +282,7 @@ test("blocked resources cannot enter a published recipe", () => {
 });
 
 test("the push chooser shows one concise selection summary", () => {
-  const resource = standaloneSkill("review", "review");
+  const resource = memoryResource("review");
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
       resources={[resource]}
@@ -359,7 +310,7 @@ test("the push chooser shows one concise selection summary", () => {
   const closeAction = html.indexOf('aria-label="Close push review"');
   assert.ok(recommendedAction < clearAction && clearAction < closeAction);
   assert.match(html, />Review</);
-  assert.match(html, /Back: Plugins/);
+  assert.match(html, /Back: Git &amp; sessions/);
   assert.match(html, /btn btn-secondary sync-sync-review-back/);
   assert.match(html, />Push<\/button>/);
   const footer = html.slice(html.indexOf('<footer class="sync-inline-action-footer sync-push-resource-footer'));
@@ -371,7 +322,7 @@ test("the push chooser shows one concise selection summary", () => {
 });
 
 test("the push chooser gives a minimal recovery path when remote history is missing", () => {
-  const resource = standaloneSkill("review", "review");
+  const resource = memoryResource("review");
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
       resources={[resource]}
@@ -407,7 +358,7 @@ test("the push chooser gives a minimal recovery path when remote history is miss
 });
 
 test("the push chooser provides contextual back and next actions", () => {
-  const resource = standaloneSkill("review", "review");
+  const resource = memoryResource("review");
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
       resources={[resource]}
@@ -415,7 +366,7 @@ test("the push chooser provides contextual back and next actions", () => {
       projectDefaults={new Set([resource.resource_id])}
       busy={false}
       error={null}
-      initialStep="skills"
+      initialStep="history"
       onToggle={() => undefined}
       onUseProjectDefaults={() => undefined}
       onClear={() => undefined}
@@ -424,10 +375,16 @@ test("the push chooser provides contextual back and next actions", () => {
     />,
   );
 
-  assert.match(html, /Back: Git &amp; sessions/);
-  assert.match(html, /Next: Plugins/);
-  assert.equal(nextPushReviewStep("history"), "skills");
-  assert.equal(nextPushReviewStep("skills"), "plugins");
-  assert.equal(nextPushReviewStep("plugins"), "review");
+  assert.match(html, /Next: Review/);
+  assert.doesNotMatch(html, /Back: /, "the first step has nothing to go back to");
+  assert.equal(nextPushReviewStep("history"), "review");
   assert.equal(nextPushReviewStep("review"), "review");
+  assert.equal(
+    nextPushReviewStep("history", ["history", "project_files", "review"]),
+    "project_files",
+  );
+  assert.equal(
+    nextPushReviewStep("project_files", ["history", "project_files", "review"]),
+    "review",
+  );
 });

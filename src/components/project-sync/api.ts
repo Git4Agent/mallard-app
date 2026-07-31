@@ -10,7 +10,6 @@ import type {
   BundleReadiness,
   BundleRecipe,
   BundleSnapshotSummary,
-  CapabilityStatusReport,
   CodexAppRestartResult,
   CodexConversationPathAudit,
   CodexConversationPathRepairResult,
@@ -18,8 +17,6 @@ import type {
   ConversationResolutionSelection,
   CodexThreadDetailsPage,
   CreateSetupDraftResult,
-  DependencyPlan,
-  DependencyResult,
   HostIdentityStatus,
   LocalProjectRegistration,
   OriginHostAlias,
@@ -187,12 +184,6 @@ export const projectSyncApi = {
   getPushDestinationStatus: (localProjectId: string, storageId: string) =>
     invoke<PushDestinationStatus>("get_push_destination_status", { localProjectId, storageId }),
 
-  getCapabilityStatus: (localProjectId: string, storageId?: string | null) =>
-    invoke<CapabilityStatusReport>("get_project_capability_status", {
-      localProjectId,
-      storageId: storageId ?? null,
-    }),
-
   getThreadSyncComparison: (localProjectId: string, storageId: string) =>
     invoke<ThreadSyncComparison>("get_project_thread_sync_comparison", { localProjectId, storageId }),
 
@@ -273,12 +264,6 @@ export const projectSyncApi = {
       active_chats_complete: activeChatsComplete,
     },
   }),
-
-  planDependencies: (restorePlanId: string) =>
-    invoke<DependencyPlan>("plan_dependencies", { restorePlanId }),
-
-  applyDependencies: (planId: string, actionIds: string[]) =>
-    invoke<DependencyResult>("apply_dependency_actions", { planId, actionIds }),
 
   getReadiness: (storageId: string, bundleId: string, binding: ProjectBinding) =>
     invoke<BundleReadiness>("get_bundle_readiness", { storageId, bundleId, binding }),

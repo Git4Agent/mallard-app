@@ -7,8 +7,6 @@ import type {
   ConversationPlanActionType,
   ConversationReasonCode,
   ConversationRelation,
-  DependencyPlan,
-  DependencyResult,
   ProjectBinding,
   RestorePlan,
   RestoreResult,
@@ -170,7 +168,7 @@ test("conversation divergence defaults to keep-both and renders the reviewed for
     actions: [],
     conversation_actions: [divergenceAction()],
   };
-  const items = buildPullReviewItems(conflictPlan, null);
+  const items = buildPullReviewItems(conflictPlan);
   const selected = new Set(items.filter((item) => item.conversationActions.length > 0).map((item) => item.resourceId));
   const selection = buildPullReviewSelection(
     items,
@@ -190,10 +188,8 @@ test("conversation divergence defaults to keep-both and renders the reviewed for
       profileLabel="myconf2"
       plan={conflictPlan}
       binding={binding}
-      dependencyPlan={null}
       readiness={null}
       restoreResult={null}
-      dependencyResult={null}
       phase="idle"
       supportLoading={false}
       completedActionIds={new Set()}
@@ -251,10 +247,8 @@ test("manual fork checkpoints expose only verify and cancel continuation actions
       profileLabel="myconf2"
       plan={conflictPlan}
       binding={binding}
-      dependencyPlan={null}
       readiness={null}
       restoreResult={checkpoint}
-      dependencyResult={null}
       phase="complete"
       supportLoading={false}
       completedActionIds={new Set()}
@@ -343,10 +337,8 @@ test("a fork checkpoint queue verifies one fork at a time in the same review", (
       profileLabel="myconf2"
       plan={conflictPlan}
       binding={binding}
-      dependencyPlan={null}
       readiness={null}
       restoreResult={queued}
-      dependencyResult={null}
       phase="complete"
       supportLoading={false}
       completedActionIds={new Set()}
@@ -386,10 +378,8 @@ test("multiple conversation conflicts stay distinguishable by title", () => {
       profileLabel="myconf2"
       plan={conflictPlan}
       binding={binding}
-      dependencyPlan={null}
       readiness={null}
       restoreResult={null}
-      dependencyResult={null}
       phase="idle"
       supportLoading={false}
       completedActionIds={new Set()}
@@ -450,10 +440,8 @@ test("completed divergence reports both identities, naming outcomes, refresh war
       profileLabel="myconf2"
       plan={conflictPlan}
       binding={binding}
-      dependencyPlan={null}
       readiness={null}
       restoreResult={restoreResult}
-      dependencyResult={null}
       phase="complete"
       supportLoading={false}
       completedActionIds={new Set([action.action_id])}
@@ -487,18 +475,12 @@ test("completed divergence reports both identities, naming outcomes, refresh war
 });
 
 test("a valid Pull plan renders an enabled non-modal Apply workspace while supporting checks fail", async () => {
-  const dependencies = deferred<DependencyPlan>();
   const readiness = deferred<BundleReadiness>();
   const calls: string[] = [];
   const api: PullReviewApi = {
     planRestore: async () => {
       calls.push("plan-restore");
       return restorePlan;
-    },
-    planDependencies: (restorePlanId) => {
-      assert.equal(restorePlanId, restorePlan.plan_id);
-      calls.push("plan-dependencies");
-      return dependencies.promise;
     },
     getRestoreReadiness: (restorePlanId) => {
       assert.equal(restorePlanId, restorePlan.plan_id);
@@ -515,7 +497,7 @@ test("a valid Pull plan renders an enabled non-modal Apply workspace while suppo
   assert.equal(review.restorePlan, restorePlan);
   // Planning fetches the bundle itself — a separate prefetch would download
   // the full payload twice.
-  assert.deepEqual(calls, ["plan-restore", "plan-dependencies", "readiness"]);
+  assert.deepEqual(calls, ["plan-restore", "readiness"]);
   let supportFinished = false;
   void review.support.then(() => {
     supportFinished = true;
@@ -529,10 +511,8 @@ test("a valid Pull plan renders an enabled non-modal Apply workspace while suppo
       profileLabel="myconf2"
       plan={review.restorePlan}
       binding={binding}
-      dependencyPlan={null}
       readiness={null}
       restoreResult={null}
-      dependencyResult={null}
       phase="idle"
       supportLoading={false}
       completedActionIds={new Set()}
@@ -562,13 +542,10 @@ test("a valid Pull plan renders an enabled non-modal Apply workspace while suppo
     "the default-approved conversation keeps Apply enabled",
   );
 
-  dependencies.reject(new Error("invalid generated id prefix"));
   readiness.reject(new Error("readiness unavailable"));
   const support = await review.support;
-  assert.equal(support.dependencyPlan, null);
   assert.equal(support.readiness, null);
   assert.deepEqual(support.errors, [
-    "Dependency checks: invalid generated id prefix",
     "Readiness checks: readiness unavailable",
   ]);
 });
@@ -580,10 +557,8 @@ test("a Pull review opens on the first step by default", () => {
       profileLabel="myconf2"
       plan={restorePlan}
       binding={binding}
-      dependencyPlan={null}
       readiness={null}
       restoreResult={null}
-      dependencyResult={null}
       phase="idle"
       supportLoading={false}
       completedActionIds={new Set()}
@@ -599,7 +574,7 @@ test("a Pull review opens on the first step by default", () => {
 
   assert.match(html, /aria-selected="true"[^>]*aria-label="Git &amp; sessions, 1 selected"/);
   assert.doesNotMatch(html, /aria-selected="true"[^>]*aria-label="Review"/);
-  assert.match(html, />Next: Skills</, "the first step advances instead of applying");
+  assert.match(html, />Next: Review</, "the first step advances instead of applying");
 });
 
 test("the embedded Pull footer omits redundant helper copy", () => {
@@ -610,10 +585,8 @@ test("the embedded Pull footer omits redundant helper copy", () => {
       profileLabel="myconf2"
       plan={restorePlan}
       binding={binding}
-      dependencyPlan={null}
       readiness={null}
       restoreResult={null}
-      dependencyResult={null}
       phase="idle"
       supportLoading={false}
       completedActionIds={new Set()}
@@ -631,113 +604,6 @@ test("the embedded Pull footer omits redundant helper copy", () => {
   assert.doesNotMatch(html, /safe change(?:s)? selected by default/);
 });
 
-function dependencyPlan(actions: DependencyPlan["actions"]): DependencyPlan {
-  return {
-    schema_version: 1,
-    plan_id: "plan-dependencies",
-    storage_id: restorePlan.storage_id,
-    bundle_id: restorePlan.bundle_id,
-    host_id: restorePlan.host_id,
-    replica_id: restorePlan.replica_id,
-    expected_host_identity_revision: restorePlan.expected_host_identity_revision,
-    generation: restorePlan.generation,
-    commit_id: restorePlan.commit_id,
-    manifest_sha256: restorePlan.manifest_sha256,
-    binding_revision: restorePlan.binding_revision,
-    created_at: restorePlan.created_at,
-    expires_at: restorePlan.expires_at,
-    actions,
-    blockers: [],
-    warnings: [],
-  };
-}
-
-test("restore and native dependency actions merge into one global-tool row per resource", () => {
-  const mergedRestore: RestorePlan = {
-    ...restorePlan,
-    actions: [
-      {
-        action_id: "restore-custom-skill",
-        resource_id: "codex:standalone-skill:frontend-skill",
-        kind: { kind: "install_custom_skill", provider: "codex", skill_name: "frontend-skill" },
-        target_path: "/Users/test/.codex/skills/frontend-skill",
-        requires_explicit_approval: true,
-      },
-    ],
-  };
-  const dependencies = dependencyPlan([
-    {
-      action_id: "dependency:codex:skill:frontend-skill",
-      resource_id: "codex:standalone-skill:frontend-skill",
-      kind: "install_standalone_skill",
-      display_name: "frontend-skill",
-      provider: "codex",
-      argv: ["skill", "add", "frontend-skill"],
-      requires_explicit_approval: true,
-    },
-    {
-      action_id: "dependency:codex:plugin:computer-use",
-      resource_id: "codex:plugin:computer-use",
-      kind: "install_codex_plugin",
-      display_name: "computer-use@openai-bundled",
-      provider: "codex",
-      argv: ["plugin", "add", "computer-use@openai-bundled"],
-      requires_explicit_approval: true,
-    },
-  ]);
-
-  const items = buildPullReviewItems(mergedRestore, dependencies);
-  assert.equal(items.length, 2);
-  assert.ok(items.every((item) => item.category === "global_tool"));
-  const skill = items.find((item) => item.resourceId === "codex:standalone-skill:frontend-skill");
-  assert.equal(skill?.restoreActions.length, 1);
-  assert.equal(skill?.dependencyActions.length, 1);
-  const plugin = items.find((item) => item.resourceId === "codex:plugin:computer-use");
-  assert.equal(plugin?.restoreActions.length, 0);
-  assert.equal(plugin?.dependencyActions.length, 1);
-  const selection = buildPullReviewSelection(
-    items,
-    new Set(items.map((item) => item.resourceId)),
-    new Set(),
-    new Set(),
-  );
-  assert.deepEqual(selection.restoreActionIds, ["restore-custom-skill"]);
-  assert.deepEqual(
-    [...selection.dependencyActionIds].sort(),
-    ["dependency:codex:plugin:computer-use", "dependency:codex:skill:frontend-skill"],
-  );
-
-  const html = renderToStaticMarkup(
-    <RestorePlanView
-      projectName="gam2"
-      profileLabel="myconf2"
-      plan={mergedRestore}
-      binding={binding}
-      dependencyPlan={dependencies}
-      readiness={null}
-      restoreResult={null}
-      dependencyResult={null}
-      phase="idle"
-      supportLoading={false}
-      completedActionIds={new Set()}
-      completedResourceIds={new Set()}
-      failedResourceIds={new Set()}
-      busy={false}
-      error={null}
-      initialStep="review"
-      onApply={() => undefined}
-      onRefresh={() => undefined}
-      onBack={() => undefined}
-    />,
-  );
-  assert.doesNotMatch(html, /Plugins &amp; standalone skills/);
-  assert.doesNotMatch(html, /Install selected/);
-  assert.doesNotMatch(html, /deferred to the native dependency runner/);
-  assert.doesNotMatch(html, /Ready to restore|Preparing installer/);
-  assert.match(html, /aria-label="Skills, 0 selected, needs attention/);
-  assert.match(html, /aria-label="Plugins, 0 selected, needs attention/);
-  assert.match(html, />Optional changes not selected</);
-});
 
 test("conversation conflicts become one-time keep-local decisions without blocking safe Pull changes", async () => {
   const conflictedPlan: RestorePlan = {
@@ -757,26 +623,30 @@ test("conversation conflicts become one-time keep-local decisions without blocki
         requires_explicit_approval: true,
       },
       {
-        action_id: "restore-custom-skill",
-        resource_id: "codex:standalone-skill:frontend-skill",
-        kind: { kind: "overwrite_custom_skill", provider: "codex", skill_name: "frontend-skill" },
-        target_path: "/Users/test/.codex/skills/frontend-skill",
+        action_id: "restore-agents-definition",
+        resource_id: "codex:config:agents",
+        kind: { kind: "write_file", logical_path: "state/codex/config/agents.md" },
+        target_path: "/Users/test/.codex/config/agents.md",
+        source_sha256: "e".repeat(64),
         requires_explicit_approval: true,
       },
     ],
   };
-  const items = buildPullReviewItems(conflictedPlan, null);
+  const items = buildPullReviewItems(conflictedPlan);
   const selection = buildPullReviewSelection(
     items,
     new Set(items.map((item) => item.resourceId)),
     new Set(),
     new Set(),
   );
-  assert.deepEqual(selection.restoreActionIds, ["action-session", "restore-custom-skill"]);
+  assert.deepEqual(
+    [...selection.restoreActionIds].sort(),
+    ["action-session", "restore-agents-definition"],
+  );
   assert.doesNotMatch(selection.restoreActionIds.join(" "), /manual-conflict/);
   assert.deepEqual(
     [...pullSelectableResourceIds(items, new Set(), new Set())].sort(),
-    ["codex:session:thread-a", "codex:standalone-skill:frontend-skill"].sort(),
+    ["codex:session:thread-a", "codex:config:agents"].sort(),
   );
 
   const html = renderToStaticMarkup(
@@ -785,7 +655,6 @@ test("conversation conflicts become one-time keep-local decisions without blocki
       profileLabel="myconf2"
       plan={conflictedPlan}
       binding={binding}
-      dependencyPlan={null}
       readiness={{
         bundle_id: binding.bundle_id,
         state: "needs_setup",
@@ -798,7 +667,6 @@ test("conversation conflicts become one-time keep-local decisions without blocki
         }],
       }}
       restoreResult={null}
-      dependencyResult={null}
       phase="idle"
       supportLoading={false}
       completedActionIds={new Set()}
@@ -818,8 +686,7 @@ test("conversation conflicts become one-time keep-local decisions without blocki
   assert.match(html, /establish a comparison baseline/);
   assert.match(html, /It can be pushed later/);
   assert.match(html, />Optional change not selected</);
-  assert.match(html, /Apply will skip frontend-skill and leave it unchanged/);
-  assert.doesNotMatch(html, />Needs approval</);
+  assert.match(html, /Apply will skip agents\.md and leave it unchanged/);
   assert.doesNotMatch(html, /resolve.*separately/i);
   assert.doesNotMatch(html, /Project files are not fully materialized/);
   assert.match(html, />Apply changes</);
@@ -830,10 +697,8 @@ test("conversation conflicts become one-time keep-local decisions without blocki
       profileLabel="myconf2"
       plan={conflictedPlan}
       binding={binding}
-      dependencyPlan={null}
       readiness={null}
       restoreResult={null}
-      dependencyResult={null}
       phase="idle"
       supportLoading={false}
       completedActionIds={new Set()}
@@ -867,17 +732,13 @@ test("conversation conflicts become one-time keep-local decisions without blocki
           codex_divergences: [],
         };
       },
-      applyDependencies: async () => {
-        throw new Error("no dependency action expected");
-      },
       getRestoreReadiness: async () => {
         calls.push("verify");
         return { bundle_id: binding.bundle_id, state: "ready", issues: [] };
       },
     },
     keepLocalOnlyPlan,
-    null,
-    { resourceIds: [], restoreActionIds: [], dependencyActionIds: [], conversationResolutions: [] },
+    { resourceIds: [], restoreActionIds: [], conversationResolutions: [] },
     () => undefined,
   );
   assert.deepEqual(calls, ["restore:0", "verify"]);
@@ -892,7 +753,7 @@ test("stored-only Pull conversations have no checkbox or empty alignment gutter"
       conversationAction("store_only", "codec_unsupported", "unknown"),
     ],
   };
-  const items = buildPullReviewItems(storedOnlyPlan, null);
+  const items = buildPullReviewItems(storedOnlyPlan);
   assert.deepEqual(
     [...pullSelectableResourceIds(items, new Set(), new Set())],
     [],
@@ -913,10 +774,8 @@ test("stored-only Pull conversations have no checkbox or empty alignment gutter"
       profileLabel="myconf2"
       plan={storedOnlyPlan}
       binding={binding}
-      dependencyPlan={null}
       readiness={null}
       restoreResult={null}
-      dependencyResult={null}
       phase="idle"
       supportLoading={false}
       completedActionIds={new Set()}
@@ -935,122 +794,8 @@ test("stored-only Pull conversations have no checkbox or empty alignment gutter"
   assert.doesNotMatch(html, /sync-pull-item-select|sync-selection-placeholder/);
 });
 
-test("skipping a required global tool cannot produce a ready Pull outcome", () => {
-  const dependencies = dependencyPlan([{
-    action_id: "install-plugin",
-    resource_id: "codex:plugin:computer-use",
-    kind: "install_codex_plugin",
-    display_name: "computer-use@openai-bundled",
-    provider: "codex",
-    argv: ["plugin", "add", "computer-use@openai-bundled"],
-    requires_explicit_approval: true,
-  }]);
-  const applied: RestoreResult = {
-    success: true,
-    status: "complete",
-    message: "Applied 1 restore action",
-    plan_id: restorePlan.plan_id,
-    applied_action_ids: ["action-session"],
-    failed_actions: [],
-    codex_divergences: [],
-  };
-  const html = renderToStaticMarkup(
-    <RestorePlanView
-      projectName="gam2"
-      profileLabel="myconf2"
-      plan={restorePlan}
-      binding={binding}
-      dependencyPlan={dependencies}
-      readiness={{ bundle_id: binding.bundle_id, state: "ready", issues: [] }}
-      restoreResult={applied}
-      dependencyResult={null}
-      phase="complete"
-      supportLoading={false}
-      completedActionIds={new Set(["action-session"])}
-      completedResourceIds={new Set(["codex:session:thread-a"])}
-      failedResourceIds={new Set()}
-      busy={false}
-      error={null}
-      initialStep="review"
-      onApply={() => undefined}
-      onRefresh={() => undefined}
-      onBack={() => undefined}
-    />,
-  );
-  assert.match(html, /Project restored; 1 item left unchanged/);
-  assert.doesNotMatch(html, />Pull complete</);
-  assert.match(html, /computer-use@openai-bundled(?:<!-- -->)? left unchanged/);
-  assert.match(html, />Remaining items</);
-  assert.match(html, /Readiness is not confirmed/);
-  assert.match(html, /aria-label="Use recommended selection \(0\)"/);
-  const doneText = html.lastIndexOf(">Done<");
-  assert.notEqual(doneText, -1, "a completed data restore can be dismissed even when optional setup was skipped");
-  const doneTagStart = html.lastIndexOf("<button", doneText);
-  const doneTagEnd = html.indexOf(">", doneTagStart);
-  assert.doesNotMatch(html.slice(doneTagStart, doneTagEnd), /disabled/);
-});
 
-test("dependency failures show the plugin name instead of its hashed action id", () => {
-  const hashedActionId = "dependency:codex:plugin:sha256-0313d68879b46d2035391eb489f0aae0c13bb8fc40c65494ee596f437bdc7f01";
-  const dependencies = dependencyPlan([{
-    action_id: hashedActionId,
-    resource_id: "codex:plugin:sha256-0313d68879b46d2035391eb489f0aae0c13bb8fc40c65494ee596f437bdc7f01",
-    kind: "install_codex_plugin",
-    display_name: "documents@openai-primary-runtime",
-    provider: "codex",
-    argv: ["plugin", "add", "documents@openai-primary-runtime"],
-    requires_explicit_approval: true,
-  }]);
-  const dependencyResult: DependencyResult = {
-    success: false,
-    message: "Applied 0 dependencies; 1 failed",
-    applied_action_ids: [],
-    failed_actions: [{
-      action_id: hashedActionId,
-      display_name: "documents@openai-primary-runtime",
-      message: "managed marketplace is unavailable",
-    }],
-  };
-
-  const html = renderToStaticMarkup(
-    <RestorePlanView
-      projectName="gam2"
-      profileLabel="myconf2"
-      plan={restorePlan}
-      binding={binding}
-      dependencyPlan={dependencies}
-      readiness={{ bundle_id: binding.bundle_id, state: "needs_setup", issues: [] }}
-      restoreResult={null}
-      dependencyResult={dependencyResult}
-      phase="complete"
-      supportLoading={false}
-      completedActionIds={new Set()}
-      completedResourceIds={new Set()}
-      failedResourceIds={new Set([dependencies.actions[0].resource_id])}
-      busy={false}
-      error={null}
-      initialStep="review"
-      onApply={() => undefined}
-      onRefresh={() => undefined}
-      onBack={() => undefined}
-    />,
-  );
-
-  assert.match(html, /documents@openai-primary-runtime/);
-  assert.match(html, /managed marketplace is unavailable/);
-  assert.doesNotMatch(html, new RegExp(hashedActionId));
-});
-
-test("the composite Apply coordinator restores, installs, then verifies one aligned generation", async () => {
-  const dependencies = dependencyPlan([{
-    action_id: "install-plugin",
-    resource_id: "codex:plugin:computer-use",
-    kind: "install_codex_plugin",
-    display_name: "computer-use@openai-bundled",
-    provider: "codex",
-    argv: ["plugin", "add", "computer-use@openai-bundled"],
-    requires_explicit_approval: true,
-  }]);
+test("the Apply coordinator restores then verifies, rejecting selections outside the plan", async () => {
   const restoreResult: RestoreResult = {
     success: true,
     status: "complete",
@@ -1059,12 +804,6 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
     applied_action_ids: ["action-session"],
     failed_actions: [],
     codex_divergences: [],
-  };
-  const dependencyResult: DependencyResult = {
-    success: true,
-    message: "Applied 1 dependency action",
-    applied_action_ids: ["install-plugin"],
-    failed_actions: [],
   };
   const ready: BundleReadiness = { bundle_id: binding.bundle_id, state: "ready", issues: [] };
   const calls: string[] = [];
@@ -1075,10 +814,6 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
         calls.push("restore");
         return restoreResult;
       },
-      applyDependencies: async () => {
-        calls.push("install");
-        return dependencyResult;
-      },
       getRestoreReadiness: async (restorePlanId) => {
         assert.equal(restorePlanId, restorePlan.plan_id);
         calls.push("verify");
@@ -1086,43 +821,37 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
       },
     },
     restorePlan,
-    dependencies,
     {
-      resourceIds: ["codex:session:thread-a", "codex:plugin:computer-use"],
+      resourceIds: ["codex:session:thread-a"],
       restoreActionIds: ["action-session"],
-      dependencyActionIds: ["install-plugin"],
       conversationResolutions: [],
     },
     (phase) => phases.push(phase),
   );
-  assert.deepEqual(calls, ["restore", "install", "verify"]);
-  assert.deepEqual(phases, ["restoring", "installing", "verifying", "complete"]);
+  assert.deepEqual(calls, ["restore", "verify"]);
+  assert.deepEqual(phases, ["restoring", "verifying", "complete"]);
   assert.equal(result.success, true);
 
-  const partialPhases: string[] = [];
-  const partial = await applyPullReview(
+  const failingPhases: string[] = [];
+  const failing = await applyPullReview(
     {
-      applyRestore: async () => restoreResult,
-      applyDependencies: async () => {
-        throw new Error("native runner unavailable");
+      applyRestore: async () => {
+        throw new Error("restore engine unavailable");
       },
       getRestoreReadiness: async () => ({ ...ready, state: "needs_setup" }),
     },
     restorePlan,
-    dependencies,
     {
-      resourceIds: ["codex:session:thread-a", "codex:plugin:computer-use"],
+      resourceIds: ["codex:session:thread-a"],
       restoreActionIds: ["action-session"],
-      dependencyActionIds: ["install-plugin"],
       conversationResolutions: [],
     },
-    (phase) => partialPhases.push(phase),
+    (phase) => failingPhases.push(phase),
   );
-  assert.equal(partial.restoreResult, restoreResult, "an applied restore is retained when native installation throws");
-  assert.match(partial.error ?? "", /native runner unavailable/);
-  assert.equal(partial.failedPhase, "installing");
-  assert.equal(partial.success, false);
-  assert.deepEqual(partialPhases, ["restoring", "installing", "verifying", "complete"]);
+  assert.match(failing.error ?? "", /restore engine unavailable/);
+  assert.equal(failing.failedPhase, "restoring");
+  assert.equal(failing.success, false);
+  assert.deepEqual(failingPhases, ["restoring", "verifying", "complete"]);
 
   await assert.rejects(
     applyPullReview(
@@ -1131,106 +860,28 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
           calls.push("unexpected-restore");
           return restoreResult;
         },
-        applyDependencies: async () => dependencyResult,
         getRestoreReadiness: async () => ready,
       },
       restorePlan,
-      { ...dependencies, generation: dependencies.generation + 1 },
-      {
-        resourceIds: ["codex:plugin:computer-use"],
-        restoreActionIds: [],
-        dependencyActionIds: ["install-plugin"],
-        conversationResolutions: [],
-      },
-      () => undefined,
-    ),
-    /different bundle generations/,
-  );
-  assert.doesNotMatch(calls.join(","), /unexpected-restore/);
-
-  await assert.rejects(
-    applyPullReview(
-      {
-        applyRestore: async () => restoreResult,
-        applyDependencies: async () => dependencyResult,
-        getRestoreReadiness: async () => ready,
-      },
-      restorePlan,
-      { ...dependencies, host_id: "ffeeddccbbaa99887766554433221100" },
-      {
-        resourceIds: ["codex:plugin:computer-use"],
-        restoreActionIds: [],
-        dependencyActionIds: ["install-plugin"],
-        conversationResolutions: [],
-      },
-      () => undefined,
-    ),
-    /different bundle generations/,
-    "a dependency plan from another host must not share one approval click",
-  );
-
-  await assert.rejects(
-    applyPullReview(
-      {
-        applyRestore: async () => restoreResult,
-        applyDependencies: async () => dependencyResult,
-        getRestoreReadiness: async () => ready,
-      },
-      restorePlan,
-      {
-        ...dependencies,
-        expected_host_identity_revision: dependencies.expected_host_identity_revision + 1,
-      },
-      {
-        resourceIds: ["codex:plugin:computer-use"],
-        restoreActionIds: [],
-        dependencyActionIds: ["install-plugin"],
-        conversationResolutions: [],
-      },
-      () => undefined,
-    ),
-    /different bundle generations/,
-    "a dependency plan from another host-identity revision must not share one approval click",
-  );
-
-  await assert.rejects(
-    applyPullReview(
-      {
-        applyRestore: async () => restoreResult,
-        applyDependencies: async () => dependencyResult,
-        getRestoreReadiness: async () => ready,
-      },
-      restorePlan,
-      { ...dependencies, generation: dependencies.generation + 1 },
       {
         resourceIds: ["codex:session:thread-a"],
-        restoreActionIds: ["action-session"],
-        dependencyActionIds: [],
+        restoreActionIds: ["action-from-another-plan"],
         conversationResolutions: [],
       },
       () => undefined,
     ),
-    /different bundle generations/,
-    "a visible stale tool plan invalidates the whole composite review even when no tool is checked",
+    /no longer belong to this Pull review/,
   );
+  assert.doesNotMatch(calls.join(","), /unexpected-restore/);
 });
 
-test("a manual fork checkpoint defers only its thread while installation and verification proceed", async () => {
+test("a manual fork checkpoint defers only its thread while verification proceeds", async () => {
   const action = divergenceAction();
   const conflictPlan: RestorePlan = {
     ...restorePlan,
     actions: [],
     conversation_actions: [action],
   };
-  const dependencies = dependencyPlan([{
-    action_id: "install-plugin",
-    resource_id: "codex:plugin:computer-use",
-    kind: "install_codex_plugin",
-    display_name: "computer-use@openai-bundled",
-    provider: "codex",
-    argv: ["plugin", "add", "computer-use@openai-bundled"],
-    requires_explicit_approval: true,
-  }]);
   const checkpoint: RestoreResult = {
     success: true,
     status: "awaiting_manual_fork",
@@ -1258,26 +909,15 @@ test("a manual fork checkpoint defers only its thread while installation and ver
         calls.push("restore");
         return checkpoint;
       },
-      applyDependencies: async () => {
-        calls.push("install");
-        return {
-          success: true,
-          message: "Applied 1 dependency actions",
-          applied_action_ids: ["install-plugin"],
-          failed_actions: [],
-        };
-      },
       getRestoreReadiness: async () => {
         calls.push("verify");
         return { bundle_id: binding.bundle_id, state: "needs_setup", issues: [] };
       },
     },
     conflictPlan,
-    dependencies,
     {
-      resourceIds: ["codex:session:thread-shared", "codex:plugin:computer-use"],
+      resourceIds: ["codex:session:thread-shared"],
       restoreActionIds: [action.action_id],
-      dependencyActionIds: ["install-plugin"],
       conversationResolutions: [{
         action_id: action.action_id,
         resolution: "preserve_local_with_native_fork",
@@ -1286,8 +926,8 @@ test("a manual fork checkpoint defers only its thread while installation and ver
     },
     (phase) => phases.push(phase),
   );
-  assert.deepEqual(calls, ["restore", "install", "verify"]);
-  assert.deepEqual(phases, ["restoring", "installing", "verifying", "complete"]);
+  assert.deepEqual(calls, ["restore", "verify"]);
+  assert.deepEqual(phases, ["restoring", "verifying", "complete"]);
   assert.equal(result.restoreResult, checkpoint);
   assert.equal(result.success, false, "a pending fork checkpoint keeps the composite Pull unsettled");
   assert.equal(result.failedPhase, null);
@@ -1297,9 +937,6 @@ test("a primary restore-plan failure still rejects the Pull review", async () =>
   const api: PullReviewApi = {
     planRestore: async () => {
       throw new Error("bundle head changed");
-    },
-    planDependencies: async () => {
-      throw new Error("must not run");
     },
     getRestoreReadiness: async () => {
       throw new Error("must not run");

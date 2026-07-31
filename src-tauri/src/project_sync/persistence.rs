@@ -7,10 +7,10 @@
 use super::domain::{
     derive_origin_host_token, derive_origin_replica_token, fallback_origin_host_label,
     generated_named_id, BundleId, ConversationBindings, ConversationPushPlan,
-    ConversationSyncJournal, DependencyApplications, DependencyPlan, HostId, HostIdentity,
-    LocalProjectId, MachineProjectState, Materializations, OriginHostToken, OriginReplicaToken,
-    PlanId, ProjectSetupDraft, ReplicaId, RestorePlan, SetupDraftId, SetupTransaction, SyncConfig,
-    CONVERSATION_BINDINGS_SCHEMA, HOST_IDENTITY_SCHEMA, MACHINE_PROJECT_SCHEMA, MAX_SETUP_DRAFTS,
+    ConversationSyncJournal, HostId, HostIdentity, LocalProjectId, MachineProjectState,
+    Materializations, OriginHostToken, OriginReplicaToken, PlanId, ProjectSetupDraft, ReplicaId,
+    RestorePlan, SetupDraftId, SetupTransaction, SyncConfig, CONVERSATION_BINDINGS_SCHEMA,
+    HOST_IDENTITY_SCHEMA, MACHINE_PROJECT_SCHEMA, MAX_SETUP_DRAFTS,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -26,8 +26,6 @@ const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BINDINGS_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_MATERIALIZATIONS_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RESTORE_PLAN_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_DEPENDENCY_PLAN_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_DEPENDENCY_APPLICATIONS_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SETUP_DRAFT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SETUP_TRANSACTION_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_HOST_IDENTITY_BYTES: u64 = 16 * 1024;
@@ -55,8 +53,6 @@ struct HostRotationQuarantine {
     conversation_bindings: bool,
     #[serde(default)]
     materializations: bool,
-    #[serde(default)]
-    dependency_applications: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -85,7 +81,7 @@ impl BoundedJsonReadError {
     }
 }
 
-/// Held across host-sensitive workflows (restore/dependency apply, setup,
+/// Held across host-sensitive workflows (restore apply, setup,
 /// publication, and rotation). The OS lock coordinates separate Mallard
 /// processes; dropping the file releases it on every supported platform.
 #[derive(Debug)]
@@ -204,19 +200,9 @@ impl LocalStateRepository {
         self.root.join("materializations.json")
     }
 
-    pub fn dependency_applications_path(&self) -> PathBuf {
-        self.root.join("dependency_applications.json")
-    }
-
     pub fn restore_plan_path(&self, plan_id: &PlanId) -> PathBuf {
         self.root
             .join("restore_plans")
-            .join(format!("{}.json", plan_id.as_str()))
-    }
-
-    pub fn dependency_plan_path(&self, plan_id: &PlanId) -> PathBuf {
-        self.root
-            .join("dependency_plans")
             .join(format!("{}.json", plan_id.as_str()))
     }
 
@@ -353,14 +339,6 @@ impl LocalStateRepository {
             }
             Err(error) => return Err(error),
         };
-        // Validate dependency receipts before changing the current host so a
-        // damaged document is quarantined instead of silently carried over.
-        match self.load_dependency_applications_unlocked(&config) {
-            Ok(_) => {}
-            Err(_) if allow_damaged_recovery => quarantine.dependency_applications = true,
-            Err(error) => return Err(error),
-        }
-
         let timestamp = next.updated_at;
         let mut replica_map = BTreeMap::new();
         for binding in &mut machine.bindings {
@@ -701,34 +679,6 @@ impl LocalStateRepository {
             &self.materializations_path(),
             &materializations,
             MAX_MATERIALIZATIONS_BYTES,
-        )?;
-        Ok(result)
-    }
-
-    pub fn load_dependency_applications(&self) -> Result<DependencyApplications, String> {
-        let _guard = persistence_guard(&self.root)?;
-        self.load_or_create_host_identity_unlocked()?;
-        let config = self.load_config_unlocked()?;
-        self.load_dependency_applications_unlocked(&config)
-    }
-
-    pub fn mutate_dependency_applications<T>(
-        &self,
-        mutate: impl FnOnce(&SyncConfig, &mut DependencyApplications) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let _guard = persistence_guard(&self.root)?;
-        self.load_or_create_host_identity_unlocked()?;
-        let config = self.load_config_unlocked()?;
-        let mut applications = self.load_dependency_applications_unlocked(&config)?;
-        let result = mutate(&config, &mut applications)?;
-        applications.schema = super::domain::LOCAL_SCHEMA;
-        applications.revision = applications.revision.saturating_add(1);
-        applications.validate(&config)?;
-        write_json_atomic(
-            &self.root,
-            &self.dependency_applications_path(),
-            &applications,
-            MAX_DEPENDENCY_APPLICATIONS_BYTES,
         )?;
         Ok(result)
     }
@@ -1084,26 +1034,6 @@ impl LocalStateRepository {
         }
     }
 
-    pub fn save_dependency_plan(&self, plan: &DependencyPlan) -> Result<(), String> {
-        let _guard = persistence_guard(&self.root)?;
-        plan.validate()?;
-        let path = self.dependency_plan_path(&plan.plan_id);
-        self.ensure_directory(path.parent().ok_or("dependency plan has no parent")?)?;
-        if fs::symlink_metadata(&path).is_ok() {
-            return Err(format!("dependency plan '{}' already exists", plan.plan_id));
-        }
-        write_json_atomic(&self.root, &path, plan, MAX_DEPENDENCY_PLAN_BYTES)
-    }
-
-    pub fn load_dependency_plan(&self, plan_id: &PlanId) -> Result<DependencyPlan, String> {
-        let _guard = persistence_guard(&self.root)?;
-        let path = self.dependency_plan_path(plan_id);
-        let plan: DependencyPlan = read_json_bounded(&self.root, &path, MAX_DEPENDENCY_PLAN_BYTES)?
-            .ok_or_else(|| format!("dependency plan '{}' does not exist", plan_id))?;
-        plan.validate()?;
-        Ok(plan)
-    }
-
     fn load_config_unlocked(&self) -> Result<SyncConfig, String> {
         let config: SyncConfig =
             read_json_bounded(&self.root, &self.config_path(), MAX_CONFIG_BYTES)?
@@ -1139,7 +1069,6 @@ impl LocalStateRepository {
             self.machine_projects_path(),
             self.conversation_bindings_path(),
             self.materializations_path(),
-            self.dependency_applications_path(),
         ] {
             if self.path_exists_unlocked(&path)? {
                 has_host_scoped_state = true;
@@ -1658,13 +1587,6 @@ impl LocalStateRepository {
             MAX_MATERIALIZATIONS_BYTES,
             &transaction.materializations,
         )?;
-        if transaction.quarantine.dependency_applications {
-            self.quarantine_host_rotation_file_unlocked(
-                transaction,
-                &self.dependency_applications_path(),
-                "dependency-applications",
-            )?;
-        }
         Ok(())
     }
 
@@ -1674,9 +1596,8 @@ impl LocalStateRepository {
     ) -> Result<(), String> {
         // Quarantine intent is part of the durable transaction. Replaying it
         // before any replacement write preserves damaged originals across a
-        // crash and ensures dependency receipts cannot remain malformed after
-        // the journal is retired. Already-written replacement documents are
-        // recognized and left in place, making recovery idempotent.
+        // crash. Already-written replacement documents are recognized and
+        // left in place, making recovery idempotent.
         self.apply_host_rotation_quarantine_unlocked(transaction)?;
         write_json_atomic(
             &self.root,
@@ -1767,22 +1688,6 @@ impl LocalStateRepository {
             .map_err(|error| format!("parse '{}': {}", path.display(), error))?;
         materializations.validate(config)?;
         Ok(materializations)
-    }
-
-    fn load_dependency_applications_unlocked(
-        &self,
-        config: &SyncConfig,
-    ) -> Result<DependencyApplications, String> {
-        let path = self.dependency_applications_path();
-        let Some(value) =
-            read_json_bounded::<Value>(&self.root, &path, MAX_DEPENDENCY_APPLICATIONS_BYTES)?
-        else {
-            return Ok(DependencyApplications::default());
-        };
-        let applications: DependencyApplications = serde_json::from_value(value)
-            .map_err(|error| format!("parse '{}': {}", path.display(), error))?;
-        applications.validate(config)?;
-        Ok(applications)
     }
 
     fn read_conversation_bindings_unlocked(&self) -> Result<Option<ConversationBindings>, String> {
@@ -2908,11 +2813,6 @@ mod tests {
         let previous = repo.load_or_create_host_identity().unwrap();
         fs::write(repo.machine_projects_path(), b"{broken-machine").unwrap();
         fs::write(repo.materializations_path(), b"{broken-materializations").unwrap();
-        fs::write(
-            repo.dependency_applications_path(),
-            b"{broken-dependency-receipts",
-        )
-        .unwrap();
 
         // Explicit rotation stays strict: an invalid display name fails
         // before any load, and damaged documents keep it failing closed.
@@ -2938,11 +2838,6 @@ mod tests {
         assert_ne!(registered.host_id, previous.host_id);
         assert!(repo.load_bindings().unwrap().bindings.is_empty());
         assert!(repo.load_materializations().unwrap().records.is_empty());
-        assert!(repo
-            .load_dependency_applications()
-            .unwrap()
-            .records
-            .is_empty());
         let names = fs::read_dir(repo.root().join("host_recovery_quarantine"))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -2953,9 +2848,6 @@ mod tests {
         assert!(names
             .iter()
             .any(|name| name.starts_with("materializations-")));
-        assert!(names
-            .iter()
-            .any(|name| name.starts_with("dependency-applications-")));
     }
 
     #[test]
@@ -2974,7 +2866,6 @@ mod tests {
                 machine_projects: true,
                 conversation_bindings: true,
                 materializations: true,
-                dependency_applications: true,
             },
             created_at: 1,
         };
@@ -2989,10 +2880,6 @@ mod tests {
             (
                 repo.materializations_path(),
                 b"{broken-materializations".as_slice(),
-            ),
-            (
-                repo.dependency_applications_path(),
-                b"{broken-dependency-receipts".as_slice(),
             ),
         ] {
             fs::write(path, bytes).unwrap();
@@ -3037,13 +2924,11 @@ mod tests {
             .bindings
             .is_empty());
         assert!(repo.load_materializations().unwrap().records.is_empty());
-        assert!(!repo.dependency_applications_path().exists());
         assert!(!repo.host_rotation_path().exists());
         for category in [
             "machine-projects",
             "conversation-bindings",
             "materializations",
-            "dependency-applications",
         ] {
             assert!(
                 repo.host_rotation_quarantine_destination(&transaction, category)
@@ -3066,17 +2951,18 @@ mod tests {
             conversation_bindings: ConversationBindings::empty(next.host_id.clone()),
             materializations: Materializations::default(),
             quarantine: HostRotationQuarantine {
-                dependency_applications: true,
+                machine_projects: true,
                 ..HostRotationQuarantine::default()
             },
             created_at: 1,
         };
 
+        fs::remove_file(repo.machine_projects_path()).ok();
         let error = repo
             .quarantine_host_rotation_file_unlocked(
                 &transaction,
-                &repo.dependency_applications_path(),
-                "dependency-applications",
+                &repo.machine_projects_path(),
+                "machine-projects",
             )
             .unwrap_err();
         assert!(error.contains("confirm preserved"), "{error}");

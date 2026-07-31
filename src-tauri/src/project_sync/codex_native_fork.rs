@@ -482,7 +482,7 @@ pub fn build_divergence_plan(
     codex_home: &Path,
     _project_directory: &Path,
 ) -> Result<ConversationDivergencePlan, String> {
-    let codex_executable = crate::codex_plugins::find_binary("codex")?;
+    let codex_executable = crate::codex_binary::find_binary("codex")?;
     let codex_executable = fs::canonicalize(&codex_executable)
         .map_err(|error| format!("resolve Codex executable: {error}"))?;
     let metadata = fs::symlink_metadata(&codex_executable)

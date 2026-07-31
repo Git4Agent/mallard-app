@@ -1,14 +1,14 @@
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import Icon from "../Icons";
 
-export type SyncReviewStep = "history" | "skills" | "plugins" | "project_files" | "review";
+export type SyncReviewStep = "history" | "project_files" | "review";
 
 export type SyncReviewTabCounts = Record<SyncReviewStep, number>;
 
 export function syncReviewSteps(includeProjectFiles: boolean): SyncReviewStep[] {
   return includeProjectFiles
-    ? ["history", "skills", "plugins", "project_files", "review"]
-    : ["history", "skills", "plugins", "review"];
+    ? ["history", "project_files", "review"]
+    : ["history", "review"];
 }
 
 interface Props {
@@ -23,11 +23,9 @@ interface Props {
 const STEP_DEFINITIONS: Record<SyncReviewStep, {
   id: SyncReviewStep;
   label: string;
-  icon: "git-branch" | "folder" | "link" | "file" | "check-circle";
+  icon: "git-branch" | "file" | "check-circle";
 }> = {
   history: { id: "history", label: "Git & sessions", icon: "git-branch" },
-  skills: { id: "skills", label: "Skills", icon: "folder" },
-  plugins: { id: "plugins", label: "Plugins", icon: "link" },
   project_files: { id: "project_files", label: "Project files", icon: "file" },
   review: { id: "review", label: "Review", icon: "check-circle" },
 };

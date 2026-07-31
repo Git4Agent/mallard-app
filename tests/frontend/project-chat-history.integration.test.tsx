@@ -219,25 +219,6 @@ test("Push and Pull reviews use only the outer workspace scroll", () => {
   assert.doesNotMatch(pushReviewHandler, /scrollIntoView/);
 });
 
-test("completed Push and Pull operations reset the project workspace to its first tab", () => {
-  const workspaceSource = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  const syncSource = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
-  const pushHandler = syncSource.slice(
-    syncSource.indexOf("const publishProject = async"),
-    syncSource.indexOf("const publishPendingPush = async"),
-  );
-  const pullHandler = syncSource.slice(
-    syncSource.indexOf("const applyReview = async"),
-    syncSource.indexOf("const openNewStorageConfiguration"),
-  );
-
-  assert.match(workspaceSource, /projectTabResetEpoch/);
-  assert.match(workspaceSource, /setActiveProjectTab\("history"\)/);
-  assert.match(pushHandler, /setProjectTabResetEpoch/);
-  assert.match(pullHandler, /setProjectTabResetEpoch/);
-  assert.match(pullHandler, /!result\.error && pullMutationCompleted/);
-});
-
 test("the combined project header stays aligned with Storage and shares its divider", () => {
   const css = readFileSync("src/App.css", "utf8");
   const combinedHeadingRule = css.match(/\.sync-project-combined-page \.sync-combined-project-heading\s*\{[^}]+\}/s)?.[0] ?? "";

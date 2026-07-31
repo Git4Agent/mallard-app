@@ -235,7 +235,7 @@ test("selection mode folds decisions into the existing thread cards", () => {
 
   assert.match(html, />Can&#x27;t sync</);
   assert.match(html, /sync-sync-review-state[^"]*action-blocked/);
-  assert.match(html, /sync-sync-row-blocked/, "blocked rows reuse the skills-style gutter marker");
+  assert.match(html, /sync-sync-row-blocked/, "blocked rows reuse the shared gutter marker");
   assert.match(html, /saved by an older Codex version\. It still opens on this computer\./);
   assert.doesNotMatch(html, /sync-history-sync-hold/, "the reason lives in the marker tooltip, not visible text");
   assert.doesNotMatch(html, /cannot be transformed safely by the active codec/);

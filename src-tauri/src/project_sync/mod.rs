@@ -13,7 +13,6 @@ pub mod conversation_codec;
 pub mod conversation_materialization;
 pub mod conversation_sync;
 pub mod domain;
-pub mod global_inventory;
 pub mod persistence;
 pub mod provider_capture;
 pub mod s3_store;

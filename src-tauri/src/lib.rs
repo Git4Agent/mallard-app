@@ -1,6 +1,5 @@
 mod activity_log;
-mod codex_config;
-mod codex_plugins;
+mod codex_binary;
 mod project_sync;
 
 #[cfg(test)]
@@ -77,7 +76,6 @@ pub fn run() {
             project_sync::commands::list_remote_bundle_snapshots,
             project_sync::commands::find_remote_bundle_matches,
             project_sync::commands::get_bundle_status,
-            project_sync::commands::get_project_capability_status,
             project_sync::commands::get_project_thread_sync_comparison,
             project_sync::commands::prepare_push_review,
             project_sync::commands::get_push_destination_status,
@@ -88,8 +86,6 @@ pub fn run() {
             project_sync::commands::resume_codex_divergence,
             project_sync::commands::cancel_codex_divergence,
             project_sync::commands::restart_codex_app_after_pull,
-            project_sync::commands::plan_dependencies,
-            project_sync::commands::apply_dependency_actions,
             project_sync::commands::get_bundle_readiness,
             project_sync::commands::get_restore_readiness,
             project_sync::commands::list_setup_drafts,

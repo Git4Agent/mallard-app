@@ -25,8 +25,8 @@ resources portable across teammates and machines.
   team can explore the reasoning behind a diff.
 - Parses session summaries and conversation previews locally, with metrics for
   start and end times, user turns, tokens, agent messages, and tool calls.
-- Syncs selected project conversations and provider-home resources — skills,
-  plugins, memory, and session state — through a local folder or Cloudflare R2.
+- Syncs selected project conversations and provider-home resources — memory
+  and session state — through a local folder or Cloudflare R2.
 - Compares local and stored resources before Push or Pull, including
   local-only, storage-only, ahead, synchronized, and conflict states.
 - Publishes immutable, SHA-256-verified bundle generations and presents an
@@ -117,8 +117,8 @@ This flow works with a new or existing Git project, or with a non-Git folder.
 3. Finish setup and open **Project History**. Git projects show the selected
    branch's commit-to-session mapping; both Git and non-Git projects show
    summaries, conversation previews, and session metrics.
-4. Choose **Push** and review **Git & sessions**, **Skills**, **Plugins**, and
-   the final **Review** step.
+4. Choose **Push** and review **Git & sessions** and the final **Review**
+   step.
 5. For a non-Git project, optionally open **Project files**, run
    **Scan files**, and select the ordinary files and folders that
    should travel with the bundle. This step is unavailable for Git-managed

@@ -15,10 +15,7 @@ import type {
   BundleRecipe,
   BundleReadiness,
   BundleSnapshotSummary,
-  CapabilityStatusReport,
   CodexConversationPathAudit,
-  DependencyPlan,
-  DependencyResult,
   HostIdentityStatus,
   LocalProjectRegistration,
   LocalProjectSummary,
@@ -164,7 +161,6 @@ interface PendingPush {
   savedRecipe: BundleRecipe | null;
   projectDefaults: Set<string>;
   threadComparison?: ThreadSyncComparison | null;
-  capabilityReport?: CapabilityStatusReport | null;
   projectContentInventory: ProjectContentInventory | null;
   projectContentScanned: boolean;
   showProjectFiles: boolean;
@@ -307,11 +303,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [fetchProgress, setFetchProgress] = useState<BundleFetchProgress | null>(null);
   const [restoreBinding, setRestoreBinding] = useState<ProjectBinding | null>(null);
   const [restoreProjectName, setRestoreProjectName] = useState("project");
-  const [dependencyPlan, setDependencyPlan] = useState<DependencyPlan | null>(null);
   const [restoreResult, setRestoreResult] = useState<RestoreResult | null>(null);
   const [historyRefreshEpoch, setHistoryRefreshEpoch] = useState(0);
-  const [projectTabResetEpoch, setProjectTabResetEpoch] = useState(0);
-  const [dependencyResult, setDependencyResult] = useState<DependencyResult | null>(null);
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [pullApplyPhase, setPullApplyPhase] = useState<PullApplyPhase>("idle");
   const [reviewSupportLoading, setReviewSupportLoading] = useState(false);
@@ -637,9 +630,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setEditingBinding(null);
     setRestorePlan(null);
     setRestoreBinding(null);
-    setDependencyPlan(null);
     setRestoreResult(null);
-    setDependencyResult(null);
     setRestoreError(null);
     setPullApplyPhase("idle");
     setReviewSupportLoading(false);
@@ -1333,7 +1324,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // Degraded sections (storage offline, capture failures) open the dialog
       // without their comparison, exactly like the old per-command flow.
       const nextThreadComparison = context.thread_comparison ?? undefined;
-      const nextCapabilityReport = context.capability_report ?? undefined;
       const isGitRepository = repositoryKinds[projectId] ?? false;
       const lockedProjectContentInventory =
         context.project_files && context.project_files.entries.length > 0
@@ -1343,7 +1333,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         recipeSelection(nextInventory.recipe),
         nextResources,
         nextThreadComparison,
-        nextCapabilityReport,
       );
       const projectSummary: LocalProjectSummary = {
         local_project_id: nextDetail.project.local_project_id,
@@ -1377,7 +1366,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         savedRecipe,
         projectDefaults,
         threadComparison: nextThreadComparison,
-        capabilityReport: nextCapabilityReport,
         projectContentInventory: lockedProjectContentInventory,
         projectContentScanned: lockedProjectContentInventory !== null,
         showProjectFiles: !isGitRepository || lockedProjectContentInventory !== null,
@@ -1538,7 +1526,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
       setNotice(result.message);
       setHistoryRefreshEpoch((epoch) => epoch + 1);
-      setProjectTabResetEpoch((epoch) => epoch + 1);
       setPendingPush(null);
       setPushProjectContentRemovals(new Set());
       setPushWarningAcknowledgements(new Set());
@@ -1589,7 +1576,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       pushSelected,
       resources,
       pendingPush.threadComparison,
-      pendingPush.capabilityReport,
       pendingPush.projectContentInventory,
     );
     const preservationRecipe: BundleRecipe = {
@@ -1693,7 +1679,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setBusy(true);
     setRestoreError(null);
     setRestoreResult(null);
-    setDependencyResult(null);
     setFetchProgress(null);
     setPullApplyPhase("idle");
     setReviewSupportLoading(true);
@@ -1701,7 +1686,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setCompletedPullResourceIds(new Set());
     setFailedPullResourceIds(new Set());
     setRestorePlan(null);
-    setDependencyPlan(null);
     setReadiness(null);
     setRestoreBinding(targetBinding);
     setRestoreProjectName(displayName);
@@ -1750,7 +1734,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       void review.support
         .then((support) => {
           if (restoreRequest.current !== requestId) return;
-          setDependencyPlan(support.dependencyPlan);
           setReadiness(support.readiness);
           if (support.errors.length > 0) {
             setRestoreError(`The project changes are ready to apply. ${support.errors.join(" ")}`);
@@ -1948,9 +1931,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     restoreRequest.current += 1;
     setRestorePlan(null);
     setRestoreBinding(null);
-    setDependencyPlan(null);
     setRestoreResult(null);
-    setDependencyResult(null);
     setRestoreError(null);
     setPullApplyPhase("idle");
     setReviewSupportLoading(false);
@@ -2050,7 +2031,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     const requestId = restoreRequest.current;
     const workflowGeneration = hostWorkflowGeneration.current;
     const currentRestorePlan = restorePlan;
-    const currentDependencyPlan = dependencyPlan;
     // The review-ready notice describes the pre-Apply state. Clear it before
     // execution so a completed Pull can never still claim that nothing was
     // applied.
@@ -2061,7 +2041,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       return next;
     });
     if (selection.restoreActionIds.length > 0) setRestoreResult(null);
-    if (selection.dependencyActionIds.length > 0) setDependencyResult(null);
     openActivity();
     setBusy(true);
     setRestoreError(null);
@@ -2069,29 +2048,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const result = await applyPullReview(
         projectSyncApi,
         currentRestorePlan,
-        currentDependencyPlan,
         selection,
         (phase) => {
           if (restoreRequest.current === requestId) setPullApplyPhase(phase);
         },
       );
       if (restoreRequest.current !== requestId) return;
-      const pullMutationCompleted = (
-        result.restoreResult !== null || result.dependencyResult !== null
-      ) && (
-        result.restoreResult?.success ?? true
-      ) && (
-        result.dependencyResult?.success ?? true
-      );
-      if (result.success || (!result.error && pullMutationCompleted)) {
-        setProjectTabResetEpoch((epoch) => epoch + 1);
-      }
       if (result.restoreResult) {
         setRestoreResult(result.restoreResult);
       }
-      if (result.dependencyResult) setDependencyResult(result.dependencyResult);
-      if (result.restoreResult?.success
-        || (result.dependencyResult?.applied_action_ids?.length ?? 0) > 0) {
+      if (result.restoreResult?.success) {
         setHistoryRefreshEpoch((epoch) => epoch + 1);
       }
       if (result.readiness) setReadiness(result.readiness);
@@ -2107,22 +2073,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           action.source_resource_id ?? `${action.provider}:conversation:${action.thread_id}`,
         );
       }
-      for (const action of currentDependencyPlan?.actions ?? []) {
-        resourceByAction.set(action.action_id, action.resource_id);
-      }
-      const appliedActionIds = new Set([
-        ...(result.restoreResult?.applied_action_ids ?? []),
-        ...(result.dependencyResult?.applied_action_ids ?? []),
-      ]);
-      const failedActionIds = new Set([
-        ...(result.restoreResult?.failed_actions ?? []).map((failure) => failure.action_id),
-        ...(result.dependencyResult?.failed_actions ?? []).map((failure) => failure.action_id),
-      ]);
+      const appliedActionIds = new Set(result.restoreResult?.applied_action_ids ?? []);
+      const failedActionIds = new Set(
+        (result.restoreResult?.failed_actions ?? []).map((failure) => failure.action_id),
+      );
       const interruptedActionIds = result.failedPhase === "restoring"
         ? selection.restoreActionIds
-        : result.failedPhase === "installing"
-          ? selection.dependencyActionIds
-          : [];
+        : [];
       for (const actionId of interruptedActionIds) {
         if (!appliedActionIds.has(actionId)) failedActionIds.add(actionId);
       }
@@ -2137,7 +2094,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           .map((actionId) => resourceByAction.get(actionId))
           .filter((resourceId): resourceId is string => Boolean(resourceId)),
       );
-      const selectedActions = [...selection.restoreActionIds, ...selection.dependencyActionIds];
+      const selectedActions = selection.restoreActionIds;
       const successfulResources = new Set(selection.resourceIds.filter((resourceId) => {
         const actionIds = selectedActions.filter((actionId) => resourceByAction.get(actionId) === resourceId);
         return actionIds.length > 0 && actionIds.every((actionId) => appliedActionIds.has(actionId));
@@ -2161,18 +2118,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         return;
       }
 
-      // Refresh both aligned plans after a partial pass so remaining setup is
+      // Refresh the plan after a partial pass so remaining setup is
       // presented against one current generation.
-      const approvedThisPass = new Set([
-        ...selection.restoreActionIds,
-        ...selection.dependencyActionIds,
-      ]);
-      const hasSkippedActions = [
-        ...currentRestorePlan.actions.map((action) => action.action_id),
-        ...(currentDependencyPlan?.actions ?? []).map((action) => action.action_id),
-      ].some((actionId) => (
-        !completedPullActionIds.has(actionId) && !approvedThisPass.has(actionId)
-      ));
+      const approvedThisPass = new Set(selection.restoreActionIds);
+      const hasSkippedActions = currentRestorePlan.actions
+        .map((action) => action.action_id)
+        .some((actionId) => (
+          !completedPullActionIds.has(actionId) && !approvedThisPass.has(actionId)
+        ));
       if (!result.success || hasSkippedActions) {
         const nextRestore = await projectSyncApi.planRestore(
           currentRestorePlan.storage_id,
@@ -2183,7 +2136,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         setRestorePlan(nextRestore);
         const support = await loadPullReviewSupport(projectSyncApi, nextRestore);
         if (restoreRequest.current !== requestId) return;
-        setDependencyPlan(support.dependencyPlan);
         setReadiness(support.readiness);
         if (support.errors.length > 0) {
           setRestoreError(`Changes were applied, but remaining setup could not be prepared: ${support.errors.join(" ")}`);
@@ -2232,7 +2184,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       }
       const support = await loadPullReviewSupport(projectSyncApi, nextRestore);
       if (restoreRequest.current !== requestId) return;
-      setDependencyPlan(support.dependencyPlan);
       setReadiness(support.readiness);
       if (support.errors.length > 0) {
         setRestoreError(`${resolvedNote}. Remaining checks: ${support.errors.join(" ")}`);
@@ -2282,7 +2233,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         });
       }
       setHistoryRefreshEpoch((epoch) => epoch + 1);
-      setProjectTabResetEpoch((epoch) => epoch + 1);
       const remaining = result.codex_fork_checkpoints.length;
       if (remaining > 0) {
         setNotice(`Codex fork verified. ${remaining} more fork checkpoint${remaining === 1 ? "" : "s"} to resolve.`);
@@ -2372,14 +2322,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (restoreRequest.current !== requestId) return;
       if (nextRestore.generation !== currentPlan.generation || nextRestore.manifest_sha256 !== currentPlan.manifest_sha256) {
         setRestoreResult(null);
-        setDependencyResult(null);
         setPullApplyPhase("idle");
         setCompletedPullActionIds(new Set());
         setCompletedPullResourceIds(new Set());
         setFailedPullResourceIds(new Set());
       }
       setRestorePlan(nextRestore);
-      setDependencyPlan(support.dependencyPlan);
       setReadiness(support.readiness);
       if (support.errors.length > 0) setRestoreError(support.errors.join(" "));
     } catch (reason) {
@@ -2494,7 +2442,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       pushSelected,
       pushResources(pendingPush),
       pendingPush.threadComparison,
-      pendingPush.capabilityReport,
       pendingPush.projectContentInventory,
     )
     : pushSelected;
@@ -2502,7 +2449,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     ? pushReviewBlockingCount(
       safePushSelection,
       pendingPush.threadComparison,
-      pendingPush.capabilityReport,
       pendingPush.projectContentInventory,
       pushWarningAcknowledgements,
     )
@@ -2546,7 +2492,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         storageName={pendingPush.storage.name}
         refreshEpoch={historyRefreshEpoch}
         threadComparison={pendingPush.threadComparison}
-        capabilityReport={pendingPush.capabilityReport}
         projectContentInventory={pendingPush.projectContentInventory}
         projectContentScanned={pendingPush.projectContentScanned}
         projectContentLoading={projectContentLoading}
@@ -2647,10 +2592,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         profileLabel={restoreProfileLabel}
         plan={restorePlan}
         binding={restoreBinding}
-        dependencyPlan={dependencyPlan}
         readiness={readiness}
         restoreResult={restoreResult}
-        dependencyResult={dependencyResult}
         phase={pullApplyPhase}
         supportLoading={reviewSupportLoading}
         completedActionIds={completedPullActionIds}
@@ -2886,7 +2829,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onStorageEditorChange={setActiveStorageSettingsId}
             onStorageIssueChange={updateStorageIssue}
             historyRefreshEpoch={historyRefreshEpoch}
-            projectTabResetEpoch={projectTabResetEpoch}
             inlineStorageReview={inlineStorageReview}
             newProjectSetup={setupDraftId ? (
               <ProjectSetupWorkspace

@@ -12,10 +12,8 @@ interface Props {
   onToggle: (resourceId: string) => void;
 }
 
-const CATEGORY_ICON: Record<ProjectResourceCategory, "activity" | "settings" | "folder" | "link"> = {
+const CATEGORY_ICON: Record<ProjectResourceCategory, "activity" | "settings" | "folder"> = {
   conversations: "activity",
-  skills: "folder",
-  plugins: "link",
   project_files: "folder",
   tools: "settings",
 };
@@ -25,20 +23,7 @@ function statusLabel(status?: string): string {
   return status.replace(/_/g, " ");
 }
 
-function providedSkills(resource: ProjectResourceDescriptor): string[] {
-  const raw = resource.metadata?.plugin_provided_skills_json;
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((name) => typeof name === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function resourceIcon(resource: ProjectResourceDescriptor): "activity" | "file" | "folder" | "link" | "settings" {
-  if (resource.kind === "standalone_skill") return "folder";
-  if (resource.kind === "plugin") return "link";
+function resourceIcon(resource: ProjectResourceDescriptor): "activity" | "file" | "settings" {
   if (resource.kind === "requirement") return "settings";
   if (resource.kind.includes("conversation")) return "activity";
   return "file";
@@ -61,11 +46,6 @@ function ResourceRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const blocked = !!resource.blocked_reason;
-  const needsInstall = resource.kind.includes("plugin") || resource.kind.includes("skill");
-  const installDirectory = resource.metadata?.install_dir_name;
-  const hasDistinctInstallDirectory = resource.kind === "standalone_skill"
-    && !!installDirectory
-    && installDirectory.toLocaleLowerCase() !== resource.display_name.toLocaleLowerCase();
 
   return (
     <div className={`sync-resource-row${selectable ? " sync-resource-row-selectable" : ""}${checked ? " selected" : ""}${blocked ? " blocked" : ""}${expanded ? " expanded" : ""}`}>
@@ -95,22 +75,10 @@ function ResourceRow({
         <span className="sync-resource-copy">
           <strong>{resource.display_name}</strong>
           <span>
-            {providerLabel(resource.provider)} · {resource.kind === "standalone_skill"
-              ? "global custom skill"
-              : resource.metadata?.plugin_origin
-                ? `global plugin (${resource.metadata.plugin_origin})`
-                : resource.scope.replace(/_/g, " ")}
-            {resource.provided_by ? ` · provided by ${resource.provided_by}` : ""}
-            {hasDistinctInstallDirectory ? ` · folder ${installDirectory}` : ""}
-            {resource.metadata?.plugin_observed_version
-              ? ` · v${resource.metadata.plugin_observed_version} observed`
-              : ""}
+            {providerLabel(resource.provider)} · {resource.scope.replace(/_/g, " ")}
           </span>
         </span>
         <span className="sync-resource-meta">
-          {needsInstall && checked && (
-            <span className="sync-resource-install">{resource.install_behavior ?? "install on restore"}</span>
-          )}
           {status && <span className={`sync-resource-status status-${status}`}>{statusLabel(status)}</span>}
         </span>
       </button>
@@ -126,17 +94,10 @@ function ResourceRow({
           <div className="sync-resource-detail-grid">
             <span>Resource ID</span><code>{resource.resource_id}</code>
             <span>Kind</span><code>{resource.kind}</code>
-            {hasDistinctInstallDirectory && <><span>Install folder</span><code>{installDirectory}</code></>}
             {resource.apply_policy && <><span>Apply</span><code>{resource.apply_policy}</code></>}
           </div>
           {resource.blocked_reason && (
             <div className="sync-resource-blocker"><Icon name="alert-triangle" size={14} /> {resource.blocked_reason}</div>
-          )}
-          {providedSkills(resource).length > 0 && (
-            <div>
-              <span>Skills provided by this plugin (not separately selectable)</span>
-              <code>{providedSkills(resource).join("\n")}</code>
-            </div>
           )}
         </div>
       )}
