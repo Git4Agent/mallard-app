@@ -1703,6 +1703,7 @@ pub enum ConversationNameStatus {
 #[serde(rename_all = "snake_case")]
 pub enum CodexInventoryRefreshStatus {
     NotAttempted,
+    Deferred,
     Refreshed,
     Failed,
 }
@@ -2241,6 +2242,11 @@ pub struct ProjectSetupDraft {
     /// signature flags the saved selection for re-review, never silent reuse.
     #[serde(default)]
     pub discovery_signature: String,
+    /// Digest over the provider home paths the discovery signature was taken
+    /// against.  Repointing a profile changes what is discoverable at all, so
+    /// that is a re-derive, not the drift `discovery_signature` reports.
+    #[serde(default)]
+    pub discovery_profile_signature: String,
     pub revision: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -2300,6 +2306,12 @@ impl ProjectSetupDraft {
         }
         if !self.discovery_signature.is_empty() {
             validate_sha256("draft discovery signature", &self.discovery_signature)?;
+        }
+        if !self.discovery_profile_signature.is_empty() {
+            validate_sha256(
+                "draft discovery profile signature",
+                &self.discovery_profile_signature,
+            )?;
         }
         if let Some(error) = &self.last_error {
             if error.len() > 4_096 || error.chars().any(char::is_control) {
@@ -2816,6 +2828,7 @@ pub enum ConversationReasonCode {
     TombstoneUnchanged,
     TombstoneModified,
     StalePlan,
+    ResolutionPending,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

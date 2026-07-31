@@ -113,6 +113,7 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
     let is_internal_subagent = structure.current.is_internal_subagent;
     let mut chain = Vec::new();
     let mut seen = BTreeMap::<MessageId, (String, Option<MessageId>)>::new();
+    let mut idless_turn_ordinals = BTreeMap::<String, usize>::new();
     let mut record_count = 0_usize;
     for raw in bytes.split(|byte| *byte == b'\n') {
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
@@ -142,7 +143,7 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
             }
         };
 
-        let identity = match durable_message_identity(&value) {
+        let identity = match durable_message_identity(&value, &mut idless_turn_ordinals) {
             DurableMessageIdentity::Ignore => continue,
             DurableMessageIdentity::MissingId => {
                 return unknown(
@@ -318,7 +319,10 @@ enum DurableMessageIdentity {
     Present(MessageIdentity),
 }
 
-fn durable_message_identity(value: &Value) -> DurableMessageIdentity {
+fn durable_message_identity(
+    value: &Value,
+    idless_turn_ordinals: &mut BTreeMap<String, usize>,
+) -> DurableMessageIdentity {
     let Some(outer) = value.as_object() else {
         return DurableMessageIdentity::Ignore;
     };
@@ -338,18 +342,51 @@ fn durable_message_identity(value: &Value) -> DurableMessageIdentity {
     {
         return DurableMessageIdentity::Ignore;
     }
-    let Some(message_id) = string_field(payload, &["message_id", "id"])
+    let message_id = string_field(payload, &["message_id", "id"])
         .or_else(|| string_field(outer, &["message_id", "id"]))
-    else {
+        .map(str::to_string)
+        .or_else(|| {
+            synthetic_turn_message_id(payload, idless_turn_ordinals).or_else(|| {
+                if std::ptr::eq(payload, outer) {
+                    None
+                } else {
+                    synthetic_turn_message_id(outer, idless_turn_ordinals)
+                }
+            })
+        });
+    let Some(message_id) = message_id else {
         return DurableMessageIdentity::MissingId;
     };
     let parent_message_id = string_field(payload, &["parent_message_id", "parent_id"])
         .or_else(|| string_field(outer, &["parent_message_id", "parent_id"]))
         .map(str::to_string);
     DurableMessageIdentity::Present(MessageIdentity {
-        message_id: message_id.to_string(),
+        message_id,
         parent_message_id,
     })
+}
+
+/// Current Codex rollouts can omit `payload.id` from turn-injected durable
+/// messages while retaining a stable turn ID. Turn ID plus the record's
+/// id-less ordinal gives Mallard a deterministic, transcript-local identity
+/// without weakening the missing-ID rule for records that have no durable
+/// anchor.
+fn synthetic_turn_message_id(
+    object: &Map<String, Value>,
+    idless_turn_ordinals: &mut BTreeMap<String, usize>,
+) -> Option<String> {
+    let metadata = object
+        .get("internal_chat_message_metadata_passthrough")
+        .and_then(Value::as_object)?;
+    let turn_id = string_field(metadata, &["turn_id", "turnId"])?;
+    MessageId::parse(turn_id.to_string()).ok()?;
+    let ordinal = idless_turn_ordinals.entry(turn_id.to_string()).or_default();
+    let identity = format!(
+        "codex-turn-message-v1:{}",
+        hex_sha256(format!("codex-turn-message-v1\0{turn_id}\0{ordinal}").as_bytes())
+    );
+    *ordinal += 1;
+    Some(identity)
 }
 
 fn is_durable_message_kind(kind: &str) -> bool {
@@ -597,6 +634,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project_sync::domain::{classify_conversation_relation, ConversationRelation};
     use serde_json::json;
 
     fn transcript(thread: &str, cwd: &str, messages: &[(&str, Option<&str>, &str)]) -> Vec<u8> {
@@ -681,6 +719,82 @@ mod tests {
         assert_eq!(
             chain[2].parent_message_id.as_ref().map(MessageId::as_str),
             Some("m-b")
+        );
+    }
+
+    #[test]
+    fn codex_codec_tracks_turn_scoped_messages_without_payload_ids() {
+        let base = transcript(
+            "thread-a",
+            "/tmp/project-a",
+            &[("m-a", None, "one"), ("m-b", Some("m-a"), "two")],
+        );
+        let base_analysis = analyze_codex_transcript(&base);
+        let base_chain = base_analysis.lineage.chain().unwrap().to_vec();
+        let mut continued = base;
+        for (role, text) in [
+            ("developer", "turn-scoped context"),
+            ("user", "continue this conversation"),
+        ] {
+            continued.extend_from_slice(
+                &serde_json::to_vec(&json!({
+                    "timestamp": "2026-07-22T00:01:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": role,
+                        "content": [{"type": "input_text", "text": text}],
+                        "internal_chat_message_metadata_passthrough": {
+                            "turn_id": "turn-continued"
+                        }
+                    }
+                }))
+                .unwrap(),
+            );
+            continued.push(b'\n');
+        }
+        continued.extend_from_slice(
+            &serde_json::to_vec(&json!({
+                "timestamp": "2026-07-22T00:01:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "id": "m-c",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "continued"}]
+                }
+            }))
+            .unwrap(),
+        );
+        continued.push(b'\n');
+
+        let continued_analysis = analyze_codex_transcript(&continued);
+        assert!(continued_analysis.is_resumable());
+        let continued_chain = continued_analysis.lineage.chain().unwrap();
+        assert_eq!(&continued_chain[..base_chain.len()], base_chain);
+        assert_eq!(continued_chain.len(), base_chain.len() + 3);
+        assert_ne!(
+            continued_chain[base_chain.len()].message_id,
+            continued_chain[base_chain.len() + 1].message_id
+        );
+        assert_eq!(
+            classify_conversation_relation(Some(continued_chain), Some(&base_chain)),
+            ConversationRelation::CloudPrefixOfLocal
+        );
+
+        let rewritten = rewrite_codex_transcript(
+            &continued,
+            "thread-a",
+            "thread-b",
+            "/tmp/project-a",
+            "/tmp/project-b",
+        )
+        .unwrap();
+        let rewritten_analysis = analyze_codex_transcript(&rewritten);
+        assert!(rewritten_analysis.is_resumable());
+        assert_eq!(
+            lineage_digests(&continued_analysis),
+            lineage_digests(&rewritten_analysis)
         );
     }
 

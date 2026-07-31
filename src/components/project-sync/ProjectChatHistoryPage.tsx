@@ -26,6 +26,7 @@ interface PageProps {
   selectableResourceIds?: ReadonlySet<string>;
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
+  onReviewPull?: () => void;
   comparisonOverride?: ThreadSyncComparison | null;
 }
 
@@ -62,6 +63,7 @@ interface ContentProps {
   selectableResourceIds?: ReadonlySet<string>;
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
+  onReviewPull?: () => void;
 }
 
 const THREAD_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -283,8 +285,13 @@ export function threadSyncPresentation(entry: ThreadSyncEntry, storageName: stri
         className: "unavailable",
         label: `Unavailable for sync. ${entry.status_detail ?? "Mallard could not safely read this session."}`,
       };
+    case "unknown":
     default:
-      return { icon: "cloud-off", className: "needs-baseline", label: `Comparison baseline needed in ${storageName}. Pull or Push to establish one.` };
+      return {
+        icon: "octagon-x",
+        className: "unavailable",
+        label: `Comparison unavailable. ${entry.status_detail ?? "Mallard could not prove this thread's ancestry safely."}`,
+      };
   }
 }
 
@@ -338,6 +345,41 @@ interface ThreadCardProps {
   selectable?: boolean;
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
+  onReviewPull?: () => void;
+}
+
+/**
+ * Per-row "Review Pull" affordance for push rows held behind a Pull
+ * (diverged or behind storage). The hold applies to this one thread; the
+ * rest of the Push proceeds without it.
+ */
+function ReviewPullRowAction({
+  mode,
+  entry,
+  disabled,
+  onReviewPull,
+}: {
+  mode: "push" | "pull" | undefined;
+  entry: ThreadSyncEntry | undefined;
+  disabled: boolean;
+  onReviewPull?: () => void;
+}) {
+  if (mode !== "push" || !entry || !onReviewPull) return null;
+  if (entry.push_decision?.action !== "require_pull") return null;
+  const detail = syncHoldDetail("push", entry)
+    ?? "Pull this conversation before pushing it.";
+  return (
+    <button
+      type="button"
+      className="btn btn-ghost sync-sync-review-pull-action"
+      disabled={disabled}
+      title={detail}
+      aria-label={`Review Pull — ${detail}`}
+      onClick={onReviewPull}
+    >
+      Review Pull
+    </button>
+  );
 }
 
 function syncReviewStateLabel(
@@ -403,15 +445,22 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
         return "Can't sync right now — Codex may still be writing this session.";
       case "stale_plan":
         return "The comparison is out of date. Refresh and review again.";
+      case "resolution_pending":
+        return "A Codex fork checkpoint from an earlier Pull is pending. Verify or cancel it in the Pull review.";
       default:
         return "Can't sync — this session can't be changed safely right now.";
     }
   }
   if (decision.action === "store_only") {
-    return "Pulling saves a backup copy that can't be opened on this computer.";
+    return decision.reason_code === "provider_not_quiescent"
+      ? entry.status_detail
+        ?? "Conflict resolution is unavailable right now. Finish any active Codex turn, then refresh."
+      : "Pulling saves a backup copy that can't be opened on this computer.";
   }
   if (mode === "push" && decision.action === "require_pull") {
-    return "The stored thread has newer messages. Pull them before pushing.";
+    return entry.state === "diverged"
+      ? "Local and stored history have diverged. Pull and choose how to preserve the local branch before pushing."
+      : "The stored thread has newer messages. Pull them before pushing.";
   }
   return null;
 }
@@ -419,7 +468,7 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
 function ThreadCard({
   thread, occurrenceKey, busy = false, details, detailsOpen = false, onOpenCodex, onOpenTerminal, onToggleDetails, onLoadMoreDetails,
   syncEntry, storageName, resourceId, selectionMode, selected = false, selectable = false,
-  selectionDisabled = false, onToggleResource,
+  selectionDisabled = false, onToggleResource, onReviewPull,
 }: ThreadCardProps) {
   const launchable = THREAD_UUID.test(thread.thread_id);
   const chatDetailsId = `thread-chat-${occurrenceKey.replace(/[^a-z0-9_-]/gi, "-")}`;
@@ -468,6 +517,12 @@ function ThreadCard({
           {activeDecision?.requires_explicit_approval && (
             <span className="sync-sync-review-flag">Review required</span>
           )}
+          <ReviewPullRowAction
+            mode={selectionMode}
+            entry={syncEntry}
+            disabled={selectionDisabled || busy}
+            onReviewPull={onReviewPull}
+          />
         </div>
         <div className="sync-history-thread-actions">
           <button type="button" className="btn btn-ghost sync-history-launch-action" disabled={!launchable || busy}
@@ -525,6 +580,7 @@ function SyncEntryCard({
   selectable = false,
   selectionDisabled = false,
   onToggleResource,
+  onReviewPull,
 }: {
   entry: ThreadSyncEntry;
   storageName: string;
@@ -533,6 +589,7 @@ function SyncEntryCard({
   selectable?: boolean;
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
+  onReviewPull?: () => void;
 }) {
   const shortId = entry.thread_id.length > 12 ? entry.thread_id.slice(0, 8) : entry.thread_id;
   const title = entry.display_name.trim() && entry.display_name !== entry.thread_id
@@ -590,6 +647,12 @@ function SyncEntryCard({
           {activeDecision?.requires_explicit_approval && (
             <span className="sync-sync-review-flag">Review required</span>
           )}
+          <ReviewPullRowAction
+            mode={selectionMode}
+            entry={entry}
+            disabled={selectionDisabled}
+            onReviewPull={onReviewPull}
+          />
         </div>
       </div>
     </article>
@@ -602,7 +665,7 @@ export function ProjectChatHistoryContent({
   onOpenTerminal, onToggleDetails, onLoadMoreDetails, embedded = false, comparison = null,
   comparisonLoading = false, comparisonError = null, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
-  selectionDisabled = false, onToggleResource,
+  selectionDisabled = false, onToggleResource, onReviewPull,
 }: ContentProps) {
   const label = projectLabel(project);
   const aliased = label !== project.display_name;
@@ -636,7 +699,7 @@ export function ProjectChatHistoryContent({
   const visibleComparisonCounts = useMemo(() => {
     const visibleThreadIds = new Set(threads.keys());
     storedOnlyEntries.forEach((entry) => visibleThreadIds.add(entry.thread_id));
-    const counts = { local: 0, storage: 0, diverged: 0, unavailable: 0, needsBaseline: 0 };
+    const counts = { local: 0, storage: 0, diverged: 0, unavailable: 0 };
 
     for (const entry of comparison?.entries ?? []) {
       if (!visibleThreadIds.has(entry.thread_id)) continue;
@@ -647,8 +710,7 @@ export function ProjectChatHistoryContent({
         if (entry.pull_decision?.action === "blocked") counts.unavailable += 1;
         else counts.storage += 1;
       } else if (entry.state === "diverged") counts.diverged += 1;
-      else if (entry.state === "unavailable") counts.unavailable += 1;
-      else if (entry.state === "unknown") counts.needsBaseline += 1;
+      else if (entry.state === "unavailable" || entry.state === "unknown") counts.unavailable += 1;
     }
 
     return counts;
@@ -656,8 +718,7 @@ export function ProjectChatHistoryContent({
   const visibleComparisonChangeCount = visibleComparisonCounts.local
     + visibleComparisonCounts.storage
     + visibleComparisonCounts.diverged
-    + visibleComparisonCounts.unavailable
-    + visibleComparisonCounts.needsBaseline;
+    + visibleComparisonCounts.unavailable;
   const refreshing = loading || comparisonLoading;
   const refreshStatus = comparisonLoading
     ? `Comparing threads with ${activeStorageName ?? "storage"}`
@@ -676,7 +737,8 @@ export function ProjectChatHistoryContent({
       syncEntry={entry} storageName={comparison ? comparisonStorageName : null}
       resourceId={resourceId} selectionMode={selectionMode} selected={selectedResourceIds.has(resourceId)}
       selectable={selectableResourceIds?.has(resourceId) ?? !!selectionMode}
-      selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} />
+      selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
+      onReviewPull={onReviewPull} />
     );
   };
   const orderedReferences = (references: { thread_id: string }[]) => [...references].sort((left, right) => {
@@ -762,7 +824,6 @@ export function ProjectChatHistoryContent({
                     {visibleComparisonCounts.storage > 0 && <span className="storage" title={`${visibleComparisonCounts.storage} thread change${visibleComparisonCounts.storage === 1 ? "" : "s"} in ${comparisonStorageName}`}><Icon name="download" size={12} />{visibleComparisonCounts.storage}</span>}
                     {visibleComparisonCounts.diverged > 0 && <span className="diverged" title={`${visibleComparisonCounts.diverged} diverged thread${visibleComparisonCounts.diverged === 1 ? "" : "s"}`}><Icon name="git-compare-arrows" size={12} />{visibleComparisonCounts.diverged}</span>}
                     {visibleComparisonCounts.unavailable > 0 && <span className="unavailable" title={`${visibleComparisonCounts.unavailable} thread${visibleComparisonCounts.unavailable === 1 ? " is" : "s are"} unavailable for sync`}><Icon name="octagon-x" size={12} />{visibleComparisonCounts.unavailable}</span>}
-                    {visibleComparisonCounts.needsBaseline > 0 && <span className="needs-baseline" title={`${visibleComparisonCounts.needsBaseline} thread${visibleComparisonCounts.needsBaseline === 1 ? " needs" : "s need"} a comparison baseline`}><Icon name="cloud-off" size={12} />{visibleComparisonCounts.needsBaseline}</span>}
                   </span>
                 )}
               </span>
@@ -819,7 +880,8 @@ export function ProjectChatHistoryContent({
                       {storedOnlyEntries.map((entry) => <SyncEntryCard key={`stored:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName}
                         selectionMode={selectionMode} selected={selectedResourceIds.has(entry.resource_id)}
                         selectable={selectableResourceIds?.has(entry.resource_id) ?? !!selectionMode}
-                        selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} />)}
+                        selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
+                        onReviewPull={onReviewPull} />)}
                     </div>
                   </section>
                 )}
@@ -864,7 +926,8 @@ export function ProjectChatHistoryContent({
                   : <SyncEntryCard key={`stored:${row.entry.resource_id}`} entry={row.entry} storageName={comparisonStorageName}
                     selectionMode={selectionMode} selected={selectedResourceIds.has(row.entry.resource_id)}
                     selectable={selectableResourceIds?.has(row.entry.resource_id) ?? !!selectionMode}
-                    selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} />)
+                    selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
+                    onReviewPull={onReviewPull} />)
                   : <div className="sync-history-state">No project-owned Codex sessions were found in this 30-day window.</div>}</div>
               </section>
             )}
@@ -885,7 +948,8 @@ export function ProjectChatHistoryContent({
                       <SyncEntryCard key={`older:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName}
                         selectionMode={selectionMode} selected={selectedResourceIds.has(entry.resource_id)}
                         selectable={selectableResourceIds?.has(entry.resource_id) ?? !!selectionMode}
-                        selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} />
+                        selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
+                        onReviewPull={onReviewPull} />
                     ))}
                     {olderInert.length > 0 && (
                       <details className="sync-history-older-inert">
@@ -897,7 +961,7 @@ export function ProjectChatHistoryContent({
                         <div className="sync-history-thread-list flat">
                           {olderInert.map((entry) => (
                             <SyncEntryCard key={`older:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName}
-                              selectionMode={selectionMode} />
+                              selectionMode={selectionMode} onReviewPull={onReviewPull} />
                           ))}
                         </div>
                       </details>
@@ -954,6 +1018,7 @@ export default function ProjectChatHistoryPage({
   selectableResourceIds,
   selectionDisabled = false,
   onToggleResource,
+  onReviewPull,
   comparisonOverride,
 }: PageProps) {
   const [history, setHistory] = useState<ProjectChatHistory | null>(null);
@@ -1081,5 +1146,5 @@ export default function ProjectChatHistoryPage({
     if (!wasOpen && !detailsByThread[threadId]?.page && !detailsByThread[threadId]?.loading) void loadDetails(threadId);
   };
 
-  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void load(null, branch, true); void loadComparison(); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} />;
+  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void load(null, branch, true); void loadComparison(); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} />;
 }

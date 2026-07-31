@@ -114,6 +114,10 @@ export const projectSyncApi = {
   listProjects: () =>
     invoke<LocalProjectRegistration[]>("list_local_projects"),
 
+  /** Heal interrupted setup and conversation work; run once per launch. */
+  recoverStartupState: () =>
+    invoke<void>("recover_startup_state"),
+
   listProjectRepositoryKinds: () =>
     invoke<Record<string, boolean>>("list_project_repository_kinds"),
 
@@ -256,7 +260,7 @@ export const projectSyncApi = {
     }),
 
   cancelCodexDivergence: (operationId: string) =>
-    invoke<boolean>("cancel_codex_divergence", { operationId }),
+    invoke<RestoreResult>("cancel_codex_divergence", { operationId }),
 
   restartCodexAppAfterPull: (
     operationId: string,

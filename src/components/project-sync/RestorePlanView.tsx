@@ -183,6 +183,9 @@ function ResultDetails({
                   <dd>{divergence.desired_original_name ?? "Retained current title"} · {nameStatusLabel(divergence.original_name_status)}</dd>
                 </div>
               </dl>
+              {divergence.inventory_refresh_status === "deferred" && (
+                <small>Codex names and conversation discovery are finishing in the background.</small>
+              )}
               {divergence.inventory_refresh_status === "failed" && (
                 <small>Codex conversation discovery refresh failed. The Pull result is safe; retry by reopening Codex or rechecking later.</small>
               )}
@@ -244,9 +247,12 @@ function DivergenceResolutionCards({
         };
         const selected = selectedActionIds.has(action.action_id);
         const controlsDisabled = disabled || !selected;
+        const conflictTitle = plan.pinned_local_title
+          ?? plan.pinned_cloud_title
+          ?? plan.source_provider_thread_id;
         return (
           <fieldset key={action.action_id} className="sync-divergence-card" disabled={controlsDisabled}>
-            <legend>Conversation conflict</legend>
+            <legend>Conversation conflict — {conflictTitle}</legend>
             <label className="sync-divergence-option">
               <input
                 type="radio"
@@ -536,7 +542,7 @@ export default function RestorePlanView({
 
   useEffect(() => {
     setManualForkProviderThreadId("");
-  }, [restoreResult?.codex_fork_checkpoint?.operation_id]);
+  }, [restoreResult?.codex_fork_checkpoints?.[0]?.operation_id]);
 
   useEffect(() => {
     setRestartChatsComplete(false);
@@ -572,7 +578,8 @@ export default function RestorePlanView({
   const hasUnconfirmedCloudOnly = selection.conversationResolutions.some((resolution) => (
     resolution.resolution === "use_cloud_only" && !resolution.destructive_approved
   ));
-  const forkCheckpoint = restoreResult?.codex_fork_checkpoint ?? null;
+  const forkCheckpoints = restoreResult?.codex_fork_checkpoints ?? [];
+  const forkCheckpoint = forkCheckpoints[0] ?? null;
   const appRefresh = restoreResult?.codex_app_refresh ?? null;
   const forkCheckpointActive = Boolean(
     forkCheckpoint && restoreResult?.status !== "complete",
@@ -621,7 +628,7 @@ export default function RestorePlanView({
   const failedProjectItems = projectItems.filter((item) => failedResourceIds.has(item.resourceId));
   const failedTools = globalItems.filter((item) => failedResourceIds.has(item.resourceId));
   const outcomeTitle = forkCheckpointActive
-    ? restoreResult?.status === "awaiting_manual_fork"
+    ? forkCheckpoint?.status === "awaiting_manual_fork"
       ? "Waiting for a Codex fork"
       : "Fork recovery needs verification"
     : error && hasResult
@@ -963,9 +970,12 @@ export default function RestorePlanView({
                   <div>
                     <Icon name="git-branch" size={18} />
                     <span>
-                      <strong>{restoreResult?.status === "awaiting_manual_fork" ? "Create the local fork in Codex" : "Verify the recovered Codex fork"}</strong>
-                      <small>{restoreResult?.message}</small>
-                      {restoreResult?.status === "awaiting_manual_fork" && (
+                      <strong>{forkCheckpoint.status === "awaiting_manual_fork" ? "Create the local fork in Codex" : "Verify the recovered Codex fork"}</strong>
+                      {forkCheckpoints.length > 1 && (
+                        <small>Fork checkpoint 1 of {forkCheckpoints.length} — the rest of this Pull is already applied.</small>
+                      )}
+                      <small>{forkCheckpoint.message}</small>
+                      {forkCheckpoint.status === "awaiting_manual_fork" && (
                         <small>Finish any active turn first. Fork the source thread without sending a new message in the fork.</small>
                       )}
                     </span>
@@ -999,7 +1009,7 @@ export default function RestorePlanView({
                     <button
                       type="button"
                       className="btn btn-ghost"
-                      disabled={busy || !onCancelCodexFork || restoreResult?.status !== "awaiting_manual_fork"}
+                      disabled={busy || !onCancelCodexFork || forkCheckpoint.status !== "awaiting_manual_fork"}
                       onClick={() => onCancelCodexFork?.(forkCheckpoint.operation_id)}
                     >
                       Cancel

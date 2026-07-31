@@ -334,6 +334,8 @@ export interface ProjectSetupDraft {
   repository: DraftRepositoryChoice;
   selected_resource_ids: string[];
   discovery_signature: string;
+  /** Digest of the provider homes `discovery_signature` was taken against. */
+  discovery_profile_signature: string;
   revision: number;
   created_at: number;
   updated_at: number;
@@ -371,6 +373,9 @@ export interface SetupDraftInspection {
   sections: SetupSectionStatus[];
   inventory?: ResourceInventory | null;
   fresh_discovery_signature?: string | null;
+  fresh_profile_signature?: string | null;
+  /** Saved against different provider homes; never true with selection_stale. */
+  profile_changed: boolean;
   selection_stale: boolean;
   can_finalize: boolean;
   warnings?: string[];
@@ -776,6 +781,7 @@ export type ConversationNameStatus =
 
 export type CodexInventoryRefreshStatus =
   | "not_attempted"
+  | "deferred"
   | "refreshed"
   | "failed";
 
@@ -845,19 +851,27 @@ export interface RestorePlan {
   project_content_eligibility?: ProjectFileSyncEligibility | null;
 }
 
+export type RestoreApplyStatus = "complete" | "awaiting_manual_fork" | "recovery_required";
+
+export interface CodexForkCheckpoint {
+  operation_id: string;
+  plan_id: string;
+  action_id: string;
+  thread_id: string;
+  source_provider_thread_id: string;
+  suggested_fork_name: string;
+  status: RestoreApplyStatus;
+  message: string;
+}
+
 export interface RestoreResult {
   success: boolean;
-  status: "complete" | "awaiting_manual_fork" | "recovery_required";
+  status: RestoreApplyStatus;
   message: string;
   plan_id: string;
   applied_action_ids: string[];
   failed_actions: Array<{ action_id: string; display_name?: string | null; message: string }>;
-  codex_fork_checkpoint?: {
-    operation_id: string;
-    action_id: string;
-    source_provider_thread_id: string;
-    suggested_fork_name: string;
-  } | null;
+  codex_fork_checkpoints: CodexForkCheckpoint[];
   codex_app_refresh?: {
     operation_id: string;
     app_kind: "codex" | "codex_plus_plus";
@@ -1034,7 +1048,8 @@ export type ConversationReasonCode =
   | "missing_binding"
   | "tombstone_unchanged"
   | "tombstone_modified"
-  | "stale_plan";
+  | "stale_plan"
+  | "resolution_pending";
 
 export interface ThreadSyncDecision {
   action: ConversationPlanActionType;

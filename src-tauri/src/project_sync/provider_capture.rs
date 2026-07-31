@@ -540,6 +540,7 @@ pub fn capture_from_discovery(
 
 /// Domain-facing capture entry point. The recipe remains the sole selection
 /// authority; no transient UI filter is accepted here.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn capture_recipe(
     request: &CaptureRequest,
     recipe: &domain::BundleRecipe,

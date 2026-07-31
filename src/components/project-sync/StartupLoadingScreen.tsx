@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 export type StartupStage =
   | "installation"
   | "settings"
+  | "repair"
   | "projects"
   | "providers"
   | "workspace";
@@ -12,10 +13,13 @@ const STARTUP_STAGES: ReadonlyArray<{
   status: string;
   progress: number;
 }> = [
-  { id: "installation", status: "Checking installation…", progress: 14 },
-  { id: "settings", status: "Loading settings…", progress: 34 },
-  { id: "projects", status: "Finding projects…", progress: 56 },
-  { id: "providers", status: "Checking profiles…", progress: 78 },
+  { id: "installation", status: "Checking installation…", progress: 12 },
+  { id: "settings", status: "Loading settings…", progress: 28 },
+  // Recovery rescans provider history and can take a while after an
+  // interrupted sync, so it says so instead of stalling a later stage.
+  { id: "repair", status: "Finishing interrupted work…", progress: 46 },
+  { id: "projects", status: "Finding projects…", progress: 64 },
+  { id: "providers", status: "Checking profiles…", progress: 80 },
   { id: "workspace", status: "Opening workspace…", progress: 96 },
 ];
 

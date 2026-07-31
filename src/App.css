@@ -8589,6 +8589,24 @@ div.storage-link-main {
   align-items: center;
   gap: 5px;
 }
+/* Selection notices stack a title over detail, with the action trailing. */
+.sync-setup-selection-callout { align-items: center; }
+.sync-setup-selection-callout > svg { flex: 0 0 auto; }
+.sync-setup-selection-callout > span {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+.sync-setup-selection-callout .btn {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.sync-setup-selection-callout code {
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
 .sync-setup-warning-disclosure {
   position: relative;
   width: auto;
@@ -9109,7 +9127,6 @@ div.storage-link-main {
 .sync-thread-sync-summary .storage { color: var(--blue); }
 .sync-thread-sync-summary .diverged { color: var(--yellow); }
 .sync-thread-sync-summary .unavailable { color: var(--red); }
-.sync-thread-sync-summary .needs-baseline { color: var(--text-2); }
 
 .sync-history-branch-select {
   position: relative;
@@ -9609,7 +9626,6 @@ div.storage-link-main {
 .sync-thread-sync-indicator.diverged { color: var(--yellow); }
 .sync-thread-sync-indicator.unavailable,
 .sync-thread-sync-error { color: var(--red); }
-.sync-thread-sync-indicator.needs-baseline { color: var(--text-2); }
 
 .sync-thread-sync-indicator::after,
 .sync-thread-sync-error::after {

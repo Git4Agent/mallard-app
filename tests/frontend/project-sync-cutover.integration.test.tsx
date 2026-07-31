@@ -163,8 +163,8 @@ test("the startup screen communicates minimal, staged loading progress", () => {
   assert.match(html, /Finding projects…/);
   assert.doesNotMatch(html, /Preparing your workspace/);
   assert.match(html, /role="progressbar"/);
-  assert.match(html, /aria-valuenow="3"/);
-  assert.match(html, /aria-valuemax="5"/);
+  assert.match(html, /aria-valuenow="4"/);
+  assert.match(html, /aria-valuemax="6"/);
   assert.match(css, /\.sync-startup-screen \{/);
   assert.match(css, /@keyframes sync-startup-pulse/);
   assert.match(css, /@keyframes sync-startup-progress-glint/);

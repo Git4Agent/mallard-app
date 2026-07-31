@@ -32,6 +32,7 @@ const MAX_APP_SERVER_LINE_BYTES: usize = 1024 * 1024;
 const MAX_APP_SERVER_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_APP_SERVER_MESSAGES: usize = 4_096;
 const APP_SERVER_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const APP_SERVER_FORK_OBSERVATION_INTERVAL: Duration = Duration::from_millis(200);
 const FORK_PERSIST_TIMEOUT: Duration = Duration::from_secs(10);
 const LOGIN_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const NATIVE_PTY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -47,6 +48,7 @@ pub struct NativeCodexThread {
     pub provider_thread_id: String,
     pub transcript_path: PathBuf,
     pub transcript_sha256: String,
+    pub cwd: PathBuf,
     pub forked_from_id: Option<String>,
     pub lineage_digest: String,
     pub semantic_digest: String,
@@ -88,6 +90,29 @@ pub enum CodexNameStatus {
     Failed(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct CodexThreadRenameRequest {
+    pub thread_id: String,
+    pub expected_current: Option<String>,
+    pub desired: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodexPostCommitPresentationRequest {
+    pub codex_executable: PathBuf,
+    pub codex_home: PathBuf,
+    pub project_directory: PathBuf,
+    pub fork_rename: Option<CodexThreadRenameRequest>,
+    pub original_rename: Option<CodexThreadRenameRequest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodexPostCommitPresentationOutcome {
+    pub fork_name_status: Option<CodexNameStatus>,
+    pub original_name_status: CodexNameStatus,
+    pub inventory_refreshed: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodexForkCoordinatorOutcome {
     Verified(VerifiedNativeFork),
@@ -117,6 +142,11 @@ enum AppServerMessage {
     Eof,
 }
 
+enum AppServerRequestOutcome<T> {
+    Response(Value),
+    Observed(T),
+}
+
 struct AppServerClient {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -128,11 +158,7 @@ struct AppServerClient {
 
 impl AppServerClient {
     fn start(executable: &Path, codex_home: &Path, project: &Path) -> Result<Self, String> {
-        let mut child = Command::new(executable)
-            .arg("app-server")
-            .arg("--stdio")
-            .current_dir(project)
-            .env("CODEX_HOME", codex_home)
+        let mut child = build_app_server_command(executable, codex_home, project)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -224,20 +250,40 @@ impl AppServerClient {
     }
 
     fn request(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+        match self.request_observing(method, params, timeout, timeout, || {
+            Ok(None::<std::convert::Infallible>)
+        })? {
+            AppServerRequestOutcome::Response(response) => Ok(response),
+            AppServerRequestOutcome::Observed(never) => match never {},
+        }
+    }
+
+    fn request_observing<T>(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        observation_interval: Duration,
+        mut observe: impl FnMut() -> Result<Option<T>, String>,
+    ) -> Result<AppServerRequestOutcome<T>, String> {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         self.write_json(&json!({ "method": method, "id": id, "params": params }))?;
         let deadline = Instant::now() + timeout;
         loop {
+            if let Some(observed) = observe()? {
+                return Ok(AppServerRequestOutcome::Observed(observed));
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(format!("Codex app-server {method} timed out"));
             }
-            let message = match self.stdout.recv_timeout(remaining) {
+            let message = match self
+                .stdout
+                .recv_timeout(remaining.min(observation_interval))
+            {
                 Ok(message) => message,
-                Err(RecvTimeoutError::Timeout) => {
-                    return Err(format!("Codex app-server {method} timed out"))
-                }
+                Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(format!("Codex app-server closed during {method}"))
                 }
@@ -268,7 +314,7 @@ impl AppServerClient {
                 .map_err(|_| "Codex app-server emitted malformed JSON".to_string())?;
             if let Some(response_id) = value.get("id") {
                 if response_id.as_u64() == Some(id) {
-                    return Ok(value);
+                    return Ok(AppServerRequestOutcome::Response(value));
                 }
                 return Err(format!(
                     "Codex app-server {method} returned an unexpected response id"
@@ -307,11 +353,18 @@ impl AppServerClient {
             .ok_or_else(|| app_server_error("thread/read", &response))
     }
 
-    fn fork_thread(&mut self, thread_id: &str) -> Result<Value, String> {
-        self.request(
+    fn fork_thread_observing<T>(
+        &mut self,
+        thread_id: &str,
+        project_directory: &Path,
+        observe: impl FnMut() -> Result<Option<T>, String>,
+    ) -> Result<AppServerRequestOutcome<T>, String> {
+        self.request_observing(
             "thread/fork",
-            json!({ "threadId": thread_id }),
+            app_server_fork_params(thread_id, project_directory)?,
             APP_SERVER_REQUEST_TIMEOUT,
+            APP_SERVER_FORK_OBSERVATION_INTERVAL,
+            observe,
         )
     }
 
@@ -326,6 +379,31 @@ impl AppServerClient {
         }
         Ok(())
     }
+
+    fn terminate_now(&mut self) {
+        self.stdin.take();
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+}
+
+fn build_app_server_command(executable: &Path, codex_home: &Path, project: &Path) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .arg("app-server")
+        .arg("--stdio")
+        .current_dir(project)
+        .env("CODEX_HOME", codex_home);
+    command
+}
+
+fn app_server_fork_params(thread_id: &str, project_directory: &Path) -> Result<Value, String> {
+    let cwd = project_directory
+        .to_str()
+        .ok_or_else(|| "project directory is not valid UTF-8".to_string())?;
+    Ok(json!({ "threadId": thread_id, "cwd": cwd }))
 }
 
 impl Drop for AppServerClient {
@@ -402,7 +480,7 @@ pub fn build_divergence_plan(
     local_summary: Option<&str>,
     created_at: u64,
     codex_home: &Path,
-    project_directory: &Path,
+    _project_directory: &Path,
 ) -> Result<ConversationDivergencePlan, String> {
     let codex_executable = crate::codex_plugins::find_binary("codex")?;
     let codex_executable = fs::canonicalize(&codex_executable)
@@ -415,15 +493,6 @@ pub fn build_divergence_plan(
     let executable_sha256 = sha256_file(&codex_executable, 512 * 1024 * 1024)?;
     let pinned_local_title = normalize_title(local_title);
     let pinned_cloud_title = normalize_title(cloud_title);
-    if let Ok(mut client) = AppServerClient::start(&codex_executable, codex_home, project_directory)
-    {
-        if let Ok(source) = client.read_thread(source_provider_thread_id) {
-            ensure_thread_idle(&source)?;
-            if normalize_title(source.get("name").and_then(Value::as_str)) != pinned_local_title {
-                return Err("Codex source title changed during Pull review".to_string());
-            }
-        }
-    }
     let base = fork_base_title(
         pinned_local_title.as_deref(),
         pinned_cloud_title.as_deref(),
@@ -603,7 +672,8 @@ fn scan_native_threads(codex_home: &Path) -> Result<BTreeMap<String, NativeCodex
                 provider_thread_id: structure.current.id.clone(),
                 transcript_path: canonical_path,
                 transcript_sha256: hex_digest(Sha256::digest(&bytes).as_slice()),
-                forked_from_id: structure.current.forked_from_id,
+                cwd: PathBuf::from(&structure.current.cwd),
+                forked_from_id: structure.current.forked_from_id.clone(),
                 lineage_digest,
                 semantic_digest,
                 history_record_digest,
@@ -638,14 +708,11 @@ pub fn coordinate_native_fork(
     )
 }
 
-/// Validate all pinned artifacts and, when app-server status is available,
-/// require the reviewed source to be idle before Mallard creates staging or
-/// records an executor attempt. Executors repeat these checks immediately
-/// before their own invocation.
+/// Validate the reviewed filesystem and executable pins before Mallard
+/// creates staging. The executor performs the only app-server idle/title
+/// check immediately before invoking the fork, avoiding a redundant process.
 pub fn preflight_native_fork(request: &CodexForkExecutionRequest) -> Result<(), String> {
-    validate_execution_request(request)?;
-    let _ = probe_source_idle_and_title(request)?;
-    Ok(())
+    validate_execution_request(request)
 }
 
 fn run_executor_sequence(
@@ -702,7 +769,6 @@ pub fn verify_manual_fork(
     provider_thread_id: Option<&str>,
 ) -> Result<VerifiedNativeFork, String> {
     validate_execution_artifacts_and_source(request)?;
-    let _ = probe_source_idle_and_title(request)?;
     let candidate = match provider_thread_id {
         Some(thread_id) => {
             let candidate = find_native_thread(&request.codex_home, thread_id)?;
@@ -715,13 +781,12 @@ pub fn verify_manual_fork(
     };
     verify_candidate(request, &candidate)?;
     verify_source_unchanged(request)?;
-    let name_status = name_with_short_lived_app_server(request, &candidate.provider_thread_id);
     Ok(VerifiedNativeFork {
         provider_thread_id: candidate.provider_thread_id,
         transcript_path: candidate.transcript_path,
         transcript_sha256: candidate.transcript_sha256,
         executor: CodexForkExecutor::Manual,
-        name_status,
+        name_status: CodexNameStatus::Deferred,
     })
 }
 
@@ -732,7 +797,6 @@ pub fn verify_recorded_fork(
     transcript_sha256: &str,
 ) -> Result<(), String> {
     validate_execution_artifacts_and_source(request)?;
-    let _ = probe_source_idle_and_title(request)?;
     let candidate = find_native_thread(&request.codex_home, provider_thread_id)?;
     if candidate.transcript_path != transcript_path
         || candidate.transcript_sha256 != transcript_sha256
@@ -741,24 +805,6 @@ pub fn verify_recorded_fork(
     }
     verify_candidate(request, &candidate)?;
     verify_source_unchanged(request)
-}
-
-pub fn set_codex_thread_name(
-    executable: &Path,
-    codex_home: &Path,
-    project: &Path,
-    thread_id: &str,
-    expected_current: Option<&str>,
-    desired: &str,
-) -> CodexNameStatus {
-    let mut client = match AppServerClient::start(executable, codex_home, project) {
-        Ok(client) => client,
-        Err(_) => return CodexNameStatus::Deferred,
-    };
-    match name_with_app_server_client(&mut client, thread_id, expected_current, desired) {
-        Ok(status) => status,
-        Err(error) => CodexNameStatus::Failed(error),
-    }
 }
 
 pub fn verify_source_idle_and_title(request: &CodexForkExecutionRequest) -> Result<(), String> {
@@ -790,13 +836,13 @@ fn probe_source_idle_and_title(request: &CodexForkExecutionRequest) -> Result<bo
     Ok(true)
 }
 
-pub fn refresh_codex_inventory(
-    executable: &Path,
-    codex_home: &Path,
-    project: &Path,
-    project_cwd: &str,
+fn refresh_codex_inventory_with_client(
+    client: &mut AppServerClient,
+    project_cwd: &Path,
 ) -> Result<(), String> {
-    let mut client = AppServerClient::start(executable, codex_home, project)?;
+    let project_cwd = project_cwd
+        .to_str()
+        .ok_or_else(|| "project directory is not valid UTF-8".to_string())?;
     let response = client.request(
         "thread/list",
         json!({
@@ -811,6 +857,80 @@ pub fn refresh_codex_inventory(
         return Err(app_server_error("thread/list", &response));
     }
     Ok(())
+}
+
+/// Complete best-effort naming and inventory presentation through one
+/// app-server process. Core Pull materialization commits before this runs.
+pub fn complete_codex_post_commit_presentation(
+    request: &CodexPostCommitPresentationRequest,
+) -> CodexPostCommitPresentationOutcome {
+    let mut client = match AppServerClient::start(
+        &request.codex_executable,
+        &request.codex_home,
+        &request.project_directory,
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            return CodexPostCommitPresentationOutcome {
+                fork_name_status: request
+                    .fork_rename
+                    .as_ref()
+                    .map(|_| CodexNameStatus::Failed(error.clone())),
+                original_name_status: if request.original_rename.is_some() {
+                    CodexNameStatus::Failed(error)
+                } else {
+                    CodexNameStatus::Unchanged
+                },
+                inventory_refreshed: false,
+            };
+        }
+    };
+    let mut transport_error = None;
+    let fork_name_status = request.fork_rename.as_ref().map(|rename| {
+        match name_with_app_server_client(
+            &mut client,
+            &rename.thread_id,
+            rename.expected_current.as_deref(),
+            &rename.desired,
+        ) {
+            Ok(status) => status,
+            Err(error) => {
+                transport_error = Some(error.clone());
+                CodexNameStatus::Failed(error)
+            }
+        }
+    });
+    let original_name_status = if request.original_rename.is_none() {
+        CodexNameStatus::Unchanged
+    } else if let Some(error) = transport_error.clone() {
+        CodexNameStatus::Failed(format!(
+            "skipped after the preserved-thread naming request failed: {error}"
+        ))
+    } else {
+        let rename = request
+            .original_rename
+            .as_ref()
+            .expect("checked original rename above");
+        match name_with_app_server_client(
+            &mut client,
+            &rename.thread_id,
+            rename.expected_current.as_deref(),
+            &rename.desired,
+        ) {
+            Ok(status) => status,
+            Err(error) => {
+                transport_error = Some(error.clone());
+                CodexNameStatus::Failed(error)
+            }
+        }
+    };
+    let inventory_refreshed = transport_error.is_none()
+        && refresh_codex_inventory_with_client(&mut client, &request.project_directory).is_ok();
+    CodexPostCommitPresentationOutcome {
+        fork_name_status,
+        original_name_status,
+        inventory_refreshed,
+    }
 }
 
 fn try_app_server_fork(request: &CodexForkExecutionRequest) -> Result<ExecutorOutcome, String> {
@@ -836,11 +956,72 @@ fn try_app_server_fork(request: &CodexForkExecutionRequest) -> Result<ExecutorOu
         threads: scan_native_threads(&request.codex_home)?,
         rollout_paths: scan_rollout_paths(&request.codex_home)?,
     };
-    let response = match client.fork_thread(&request.source_provider_thread_id) {
-        Ok(response) => response,
+    let mut stable_candidate: Option<(String, String, Instant)> = None;
+    let fork_outcome = match client.fork_thread_observing(
+        &request.source_provider_thread_id,
+        &request.project_directory,
+        || match observe_native_pty_fork(request, &baseline)? {
+            NativePtyObservation::NoChild => {
+                if stable_candidate.is_some() {
+                    return Err("Codex app-server fork disappeared during verification".to_string());
+                }
+                Ok(None)
+            }
+            NativePtyObservation::Persisting => {
+                if stable_candidate.is_some() {
+                    return Err("Codex app-server fork changed during verification".to_string());
+                }
+                Ok(None)
+            }
+            NativePtyObservation::Exact {
+                provider_thread_id,
+                transcript_sha256,
+            } => {
+                let now = Instant::now();
+                let observed_at = match &stable_candidate {
+                    Some((existing_id, existing_digest, observed_at))
+                        if existing_id == &provider_thread_id
+                            && existing_digest == &transcript_sha256 =>
+                    {
+                        *observed_at
+                    }
+                    Some(_) => {
+                        return Err("Codex app-server fork identity changed during verification"
+                            .to_string())
+                    }
+                    None => {
+                        stable_candidate =
+                            Some((provider_thread_id.clone(), transcript_sha256, now));
+                        now
+                    }
+                };
+                if now.saturating_duration_since(observed_at) < NATIVE_PTY_STABILITY_INTERVAL {
+                    return Ok(None);
+                }
+                exact_profile_delta_candidate(request, &baseline, Some(&provider_thread_id))
+            }
+            NativePtyObservation::Unsafe => {
+                Err("Codex app-server changed unexpected rollout state".to_string())
+            }
+        },
+    ) {
+        Ok(outcome) => outcome,
         Err(error) => {
             return classify_app_server_result(request, &baseline, error, false);
         }
+    };
+    let response = match fork_outcome {
+        AppServerRequestOutcome::Observed(candidate) => {
+            client.terminate_now();
+            return Ok(ExecutorOutcome::Verified(VerifiedNativeFork {
+                provider_thread_id: candidate.provider_thread_id,
+                transcript_path: candidate.transcript_path,
+                transcript_sha256: candidate.transcript_sha256,
+                executor: CodexForkExecutor::AppServerStdio,
+                name_status: CodexNameStatus::Deferred,
+            }));
+        }
+        AppServerRequestOutcome::Response(response) => response,
     };
     if response.get("error").is_some() {
         return classify_app_server_result(
@@ -884,21 +1065,13 @@ fn try_app_server_fork(request: &CodexForkExecutionRequest) -> Result<ExecutorOu
         }
         Err(error) => return Ok(ExecutorOutcome::Ambiguous(error)),
     };
-    let name_status = match name_with_app_server_client(
-        &mut client,
-        &candidate_id,
-        request.pinned_local_title.as_deref(),
-        &request.desired_fork_name,
-    ) {
-        Ok(status) => status,
-        Err(error) => CodexNameStatus::Failed(error),
-    };
+    client.terminate_now();
     Ok(ExecutorOutcome::Verified(VerifiedNativeFork {
         provider_thread_id: candidate.provider_thread_id,
         transcript_path: candidate.transcript_path,
         transcript_sha256: candidate.transcript_sha256,
         executor: CodexForkExecutor::AppServerStdio,
-        name_status,
+        name_status: CodexNameStatus::Deferred,
     }))
 }
 
@@ -1377,13 +1550,12 @@ fn classify_native_pty_completion(
                 "native PTY fork failed final ancestry or content verification".to_string(),
             ));
         }
-        let name_status = name_with_short_lived_app_server(request, &candidate.provider_thread_id);
         return Ok(ExecutorOutcome::Verified(VerifiedNativeFork {
             provider_thread_id: candidate.provider_thread_id.clone(),
             transcript_path: candidate.transcript_path.clone(),
             transcript_sha256: candidate.transcript_sha256.clone(),
             executor: CodexForkExecutor::NativePty,
-            name_status,
+            name_status: CodexNameStatus::Deferred,
         }));
     }
     if !new_paths.is_empty() {
@@ -1445,17 +1617,13 @@ fn classify_app_server_result(
     definitively_rejected: bool,
 ) -> Result<ExecutorOutcome, String> {
     match exact_profile_delta_candidate(request, baseline, None) {
-        Ok(Some(candidate)) => {
-            let name_status =
-                name_with_short_lived_app_server(request, &candidate.provider_thread_id);
-            Ok(ExecutorOutcome::Verified(VerifiedNativeFork {
-                provider_thread_id: candidate.provider_thread_id,
-                transcript_path: candidate.transcript_path,
-                transcript_sha256: candidate.transcript_sha256,
-                executor: CodexForkExecutor::AppServerStdio,
-                name_status,
-            }))
-        }
+        Ok(Some(candidate)) => Ok(ExecutorOutcome::Verified(VerifiedNativeFork {
+            provider_thread_id: candidate.provider_thread_id,
+            transcript_path: candidate.transcript_path,
+            transcript_sha256: candidate.transcript_sha256,
+            executor: CodexForkExecutor::AppServerStdio,
+            name_status: CodexNameStatus::Deferred,
+        })),
         Ok(None) if definitively_rejected => Ok(ExecutorOutcome::DefinitiveNoFork),
         Ok(None) | Err(_) => Ok(ExecutorOutcome::Ambiguous(error)),
     }
@@ -1602,6 +1770,7 @@ fn verify_candidate(
     request: &CodexForkExecutionRequest,
     candidate: &NativeCodexThread,
 ) -> Result<(), String> {
+    verify_candidate_workspace(request, candidate)?;
     let source = find_native_thread(&request.codex_home, &request.source_provider_thread_id)?;
     if candidate.provider_thread_id == request.source_provider_thread_id
         || candidate.forked_from_id.as_deref() != Some(&request.source_provider_thread_id)
@@ -1630,6 +1799,48 @@ fn verify_candidate(
     Ok(())
 }
 
+fn verify_candidate_workspace(
+    request: &CodexForkExecutionRequest,
+    candidate: &NativeCodexThread,
+) -> Result<(), String> {
+    let canonical_cwd = fs::canonicalize(&candidate.cwd)
+        .map_err(|_| "Codex fork candidate cwd could not be resolved".to_string())?;
+    let metadata = fs::symlink_metadata(&canonical_cwd)
+        .map_err(|_| "Codex fork candidate cwd could not be inspected".to_string())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("Codex fork candidate cwd is not a real directory".to_string());
+    }
+    if canonical_cwd != request.project_directory
+        && !canonical_cwd.starts_with(&request.project_directory)
+    {
+        return Err("Codex fork candidate cwd is outside the reviewed project".to_string());
+    }
+    Ok(())
+}
+
+/// Records a faithful fork does not reproduce byte for byte.
+/// `session_meta` carries the fork's own identity and parent pointer, while
+/// `turn_context` and `event_msg/thread_settings_applied` carry environment
+/// that the app re-emits under its current schema. We have observed those
+/// environment records drop default fields such as `missing_path_behavior`
+/// while describing the same policy. None is conversation content, and the
+/// message chain is pinned separately by the lineage and semantic digests.
+const FORK_VOLATILE_RECORD_TYPES: [&str; 2] = ["session_meta", "turn_context"];
+
+fn is_fork_volatile_record(value: &Value) -> bool {
+    if super::codex_rollout::structural_record_type(value)
+        .is_some_and(|record_type| FORK_VOLATILE_RECORD_TYPES.contains(&record_type))
+    {
+        return true;
+    }
+    value.get("type").and_then(Value::as_str) == Some("event_msg")
+        && value.pointer("/payload/type").and_then(Value::as_str) == Some("thread_settings_applied")
+}
+
+/// Digest over the records a fork must carry over unchanged.  Comparing it
+/// against the source is what proves a candidate preserves the same
+/// conversation, so it must tolerate exactly what Codex rewrites when forking
+/// and nothing more.
 fn non_metadata_record_digest(bytes: &[u8]) -> Result<(String, usize), String> {
     let mut hasher = Sha256::new();
     let mut count = 0_usize;
@@ -1638,10 +1849,15 @@ fn non_metadata_record_digest(bytes: &[u8]) -> Result<(String, usize), String> {
         if raw.is_empty() {
             continue;
         }
-        let value: Value = serde_json::from_slice(raw)
+        let mut value: Value = serde_json::from_slice(raw)
             .map_err(|_| "Codex rollout contains malformed JSON".to_string())?;
-        if super::codex_rollout::structural_record_type(&value) == Some("session_meta") {
+        if is_fork_volatile_record(&value) {
             continue;
+        }
+        // Codex restamps every record it copies into a fork.  Only the record
+        // envelope is dropped; timestamps inside the payload stay hashed.
+        if let Some(object) = value.as_object_mut() {
+            object.remove("timestamp");
         }
         let canonical = serde_json::to_vec(&value)
             .map_err(|_| "Codex rollout record could not be canonicalized".to_string())?;
@@ -1701,20 +1917,6 @@ fn pre_existing_map(children: &[CodexNativeChildPin]) -> BTreeMap<String, String
             )
         })
         .collect()
-}
-
-fn name_with_short_lived_app_server(
-    request: &CodexForkExecutionRequest,
-    thread_id: &str,
-) -> CodexNameStatus {
-    set_codex_thread_name(
-        &request.codex_executable,
-        &request.codex_home,
-        &request.project_directory,
-        thread_id,
-        request.pinned_local_title.as_deref(),
-        &request.desired_fork_name,
-    )
 }
 
 fn name_with_app_server_client(
@@ -1777,17 +1979,37 @@ mod tests {
     use std::ffi::OsString;
     use std::io::IsTerminal;
 
-    fn test_rollout(thread_id: &str, parent: Option<&str>) -> Vec<u8> {
-        let records = [
-            json!({
+    fn test_rollout(thread_id: &str, parent: Option<&str>, cwd: &Path) -> Vec<u8> {
+        test_rollout_with_parent_metadata(thread_id, parent, cwd, None)
+    }
+
+    fn test_rollout_with_parent_metadata(
+        thread_id: &str,
+        parent: Option<&str>,
+        cwd: &Path,
+        parent_cwd: Option<&Path>,
+    ) -> Vec<u8> {
+        let mut records = vec![json!({
+            "timestamp": "2026-07-29T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": thread_id,
+                "forked_from_id": parent,
+                "cwd": cwd.to_str().unwrap(),
+            },
+        })];
+        if let (Some(parent), Some(parent_cwd)) = (parent, parent_cwd) {
+            records.push(json!({
                 "timestamp": "2026-07-29T00:00:00Z",
                 "type": "session_meta",
                 "payload": {
-                    "id": thread_id,
-                    "forked_from_id": parent,
-                    "cwd": "/tmp/project",
+                    "id": parent,
+                    "forked_from_id": null,
+                    "cwd": parent_cwd.to_str().unwrap(),
                 },
-            }),
+            }));
+        }
+        records.extend([
             json!({
                 "timestamp": "2026-07-29T00:00:01Z",
                 "type": "response_item",
@@ -1810,7 +2032,7 @@ mod tests {
                     "content": [{"type": "output_text", "text": "answer"}],
                 },
             }),
-        ];
+        ]);
         let mut bytes = records
             .into_iter()
             .map(|record| record.to_string())
@@ -1821,11 +2043,16 @@ mod tests {
         bytes
     }
 
-    fn write_test_rollout(home: &Path, thread_id: &str, parent: Option<&str>) -> PathBuf {
+    fn write_test_rollout(
+        home: &Path,
+        thread_id: &str,
+        parent: Option<&str>,
+        cwd: &Path,
+    ) -> PathBuf {
         let directory = home.join("sessions/2026/07/29");
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join(format!("rollout-{thread_id}.jsonl"));
-        fs::write(&path, test_rollout(thread_id, parent)).unwrap();
+        fs::write(&path, test_rollout(thread_id, parent, cwd)).unwrap();
         path
     }
 
@@ -1836,7 +2063,7 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         let home = fs::canonicalize(home).unwrap();
         let project = fs::canonicalize(project).unwrap();
-        write_test_rollout(&home, source_id, None);
+        write_test_rollout(&home, source_id, None, &project);
         let executable = root.join("codex-test-bin");
         fs::write(&executable, b"not an executable").unwrap();
         let executable = fs::canonicalize(executable).unwrap();
@@ -1947,6 +2174,167 @@ mod tests {
     }
 
     #[test]
+    fn app_server_fork_params_include_the_reviewed_project_cwd() {
+        let project = Path::new("/tmp/project with spaces/知识图");
+        assert_eq!(
+            app_server_fork_params("thread-a", project).unwrap(),
+            json!({
+                "threadId": "thread-a",
+                "cwd": "/tmp/project with spaces/知识图",
+            })
+        );
+    }
+
+    #[test]
+    fn app_server_command_uses_stdio_project_cwd_and_reviewed_home() {
+        let executable = Path::new("/opt/codex/bin/codex");
+        let codex_home = Path::new("/tmp/myconf");
+        let project = Path::new("/tmp/HorrorGame");
+        let command = build_app_server_command(executable, codex_home, project);
+
+        assert_eq!(command.get_program(), executable.as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec!["app-server", "--stdio"]
+        );
+        assert_eq!(command.get_current_dir(), Some(project));
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(name, _)| *name == "CODEX_HOME")
+                .and_then(|(_, value)| value),
+            Some(codex_home.as_os_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_server_adopts_a_verified_rollout_before_the_fork_response() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
+        let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
+        let (mut request, home) = manual_test_request(temp.path(), source_id);
+        fs::write(
+            home.join("fork-template.jsonl"),
+            test_rollout(child_id, Some(source_id), &request.project_directory),
+        )
+        .unwrap();
+        let script = r#"#!/bin/sh
+while IFS= read -r line
+do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"id":1,"result":{}}'
+      ;;
+    *'"method":"thread/read"'*)
+      printf '%s\n' '{"id":2,"result":{"thread":{"id":"__SOURCE_ID__","name":null,"status":{"type":"idle"}}}}'
+      ;;
+    *'"method":"thread/fork"'*)
+      cp "$CODEX_HOME/fork-template.jsonl" "$CODEX_HOME/sessions/2026/07/29/rollout-__CHILD_ID__.jsonl"
+      ;;
+  esac
+done
+"#
+        .replace("__SOURCE_ID__", source_id)
+        .replace("__CHILD_ID__", child_id);
+        let executable = temp.path().join("fake-codex");
+        fs::write(&executable, script).unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let executable = fs::canonicalize(executable).unwrap();
+        request.codex_executable = executable.clone();
+        request.codex_executable_sha256 = sha256_file(&executable, 512 * 1024 * 1024).unwrap();
+
+        let started = Instant::now();
+        let outcome = try_app_server_fork(&request).unwrap();
+
+        let ExecutorOutcome::Verified(verified) = outcome else {
+            panic!("persisted fork was not adopted");
+        };
+        assert_eq!(verified.provider_thread_id, child_id);
+        assert_eq!(verified.executor, CodexForkExecutor::AppServerStdio);
+        assert_eq!(verified.name_status, CodexNameStatus::Deferred);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "fork waited for the missing app-server response"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_commit_presentation_reuses_one_app_server_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let home = fs::canonicalize(home).unwrap();
+        let project = fs::canonicalize(project).unwrap();
+        let script = r#"#!/bin/sh
+printf '%s\n' start >> "$CODEX_HOME/app-server-starts"
+read_count=0
+name_count=0
+while IFS= read -r line
+do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"id":1,"result":{}}'
+      ;;
+    *'"method":"thread/read"'*)
+      read_count=$((read_count + 1))
+      if [ "$read_count" -eq 1 ]; then response_id=2; else response_id=4; fi
+      printf '{"id":%s,"result":{"thread":{"name":null}}}\n' "$response_id"
+      ;;
+    *'"method":"thread/name/set"'*)
+      name_count=$((name_count + 1))
+      if [ "$name_count" -eq 1 ]; then response_id=3; else response_id=5; fi
+      printf '{"id":%s,"result":{}}\n' "$response_id"
+      ;;
+    *'"method":"thread/list"'*)
+      printf '%s\n' '{"id":6,"result":{"data":[],"nextCursor":null}}'
+      ;;
+  esac
+done
+"#;
+        let executable = temp.path().join("fake-codex");
+        fs::write(&executable, script).unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let executable = fs::canonicalize(executable).unwrap();
+        let request = CodexPostCommitPresentationRequest {
+            codex_executable: executable,
+            codex_home: home.clone(),
+            project_directory: project,
+            fork_rename: Some(CodexThreadRenameRequest {
+                thread_id: "fork".to_string(),
+                expected_current: None,
+                desired: "Preserved local".to_string(),
+            }),
+            original_rename: Some(CodexThreadRenameRequest {
+                thread_id: "original".to_string(),
+                expected_current: None,
+                desired: "Cloud".to_string(),
+            }),
+        };
+
+        let outcome = complete_codex_post_commit_presentation(&request);
+
+        assert_eq!(outcome.fork_name_status, Some(CodexNameStatus::Applied));
+        assert_eq!(outcome.original_name_status, CodexNameStatus::Applied);
+        assert!(outcome.inventory_refreshed);
+        assert_eq!(
+            fs::read_to_string(home.join("app-server-starts")).unwrap(),
+            "start\n"
+        );
+    }
+
+    #[test]
     fn bounded_line_reader_rejects_oversized_jsonl() {
         let bytes = vec![b'x'; MAX_APP_SERVER_LINE_BYTES + 1];
         let mut reader = BufReader::new(bytes.as_slice());
@@ -1963,12 +2351,82 @@ mod tests {
         let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
         let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
         let (request, home) = manual_test_request(temp.path(), source_id);
-        write_test_rollout(&home, child_id, Some(source_id));
+        write_test_rollout(&home, child_id, Some(source_id), &request.project_directory);
 
         let verified = verify_manual_fork(&request, Some(child_id)).unwrap();
         assert_eq!(verified.provider_thread_id, child_id);
         assert_eq!(verified.executor, CodexForkExecutor::Manual);
         assert_eq!(verified.name_status, CodexNameStatus::Deferred);
+    }
+
+    #[test]
+    fn manual_verifier_accepts_a_child_workspace_below_the_project_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
+        let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
+        let (request, home) = manual_test_request(temp.path(), source_id);
+        let child_cwd = request.project_directory.join("apps/web");
+        fs::create_dir_all(&child_cwd).unwrap();
+        let child_cwd = fs::canonicalize(child_cwd).unwrap();
+        write_test_rollout(&home, child_id, Some(source_id), &child_cwd);
+
+        let verified = verify_manual_fork(&request, Some(child_id)).unwrap();
+        assert_eq!(verified.provider_thread_id, child_id);
+        assert_eq!(find_native_thread(&home, child_id).unwrap().cwd, child_cwd);
+    }
+
+    #[test]
+    fn app_server_bad_workspace_child_requires_recovery_instead_of_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
+        let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
+        let (request, home) = manual_test_request(temp.path(), source_id);
+        let baseline = NativeForkBaseline {
+            threads: scan_native_threads(&request.codex_home).unwrap(),
+            rollout_paths: scan_rollout_paths(&request.codex_home).unwrap(),
+        };
+
+        assert_eq!(
+            classify_app_server_result(
+                &request,
+                &baseline,
+                "app-server rejected the fork".to_string(),
+                true,
+            )
+            .unwrap(),
+            ExecutorOutcome::DefinitiveNoFork
+        );
+
+        let outside_cwd = temp.path().join("project-elsewhere");
+        fs::create_dir_all(&outside_cwd).unwrap();
+        let outside_cwd = fs::canonicalize(outside_cwd).unwrap();
+        let directory = home.join("sessions/2026/07/29");
+        let candidate_path = directory.join(format!("rollout-{child_id}.jsonl"));
+        fs::write(
+            candidate_path,
+            test_rollout_with_parent_metadata(
+                child_id,
+                Some(source_id),
+                &outside_cwd,
+                Some(&request.project_directory),
+            ),
+        )
+        .unwrap();
+
+        let candidate = find_native_thread(&home, child_id).unwrap();
+        assert_eq!(candidate.cwd, outside_cwd);
+        let error = exact_profile_delta_candidate(&request, &baseline, Some(child_id)).unwrap_err();
+        assert!(error.contains("outside the reviewed project"), "{error}");
+        assert_eq!(
+            classify_app_server_result(
+                &request,
+                &baseline,
+                "app-server rejected the fork".to_string(),
+                true,
+            )
+            .unwrap(),
+            ExecutorOutcome::Ambiguous("app-server rejected the fork".to_string())
+        );
     }
 
     #[test]
@@ -1978,8 +2436,8 @@ mod tests {
         let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
         let other_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644d";
         let (request, home) = manual_test_request(temp.path(), source_id);
-        write_test_rollout(&home, child_id, Some(source_id));
-        write_test_rollout(&home, other_id, Some(source_id));
+        write_test_rollout(&home, child_id, Some(source_id), &request.project_directory);
+        write_test_rollout(&home, other_id, Some(source_id), &request.project_directory);
 
         let error = verify_manual_fork(&request, Some(child_id)).unwrap_err();
         assert!(error.contains("inventory changed"), "{error}");
@@ -1995,7 +2453,7 @@ mod tests {
             threads: scan_native_threads(&request.codex_home).unwrap(),
             rollout_paths: scan_rollout_paths(&request.codex_home).unwrap(),
         };
-        write_test_rollout(&home, child_id, Some(source_id));
+        write_test_rollout(&home, child_id, Some(source_id), &request.project_directory);
 
         let outcome = classify_native_pty_completion(
             &request,
@@ -2057,7 +2515,11 @@ mod tests {
         let before = scan_rollout_paths(&request.codex_home).unwrap();
         fs::write(
             home.join("sessions/2026/07/29/unrelated.jsonl"),
-            test_rollout("019fac73-c1ff-79b3-bb8e-1673ed0d644c", Some(source_id)),
+            test_rollout(
+                "019fac73-c1ff-79b3-bb8e-1673ed0d644c",
+                Some(source_id),
+                &request.project_directory,
+            ),
         )
         .unwrap();
 
@@ -2087,7 +2549,11 @@ mod tests {
             .expect("fake Codex source is provided by the parent test");
         let child_id = std::env::var("MALLARD_TEST_CODEX_CHILD")
             .expect("fake Codex child is provided by the parent test");
-        write_test_rollout(&home, &child_id, Some(&source_id));
+        let project = PathBuf::from(
+            std::env::var_os("MALLARD_TEST_CODEX_PROJECT")
+                .expect("fake Codex project is provided by the parent test"),
+        );
+        write_test_rollout(&home, &child_id, Some(&source_id), &project);
 
         let sentinel = b"MALLARD-PTY-OUTPUT-MUST-NOT-BE-RETAINED";
         let mut stdout = std::io::stdout().lock();
@@ -2142,6 +2608,7 @@ mod tests {
         command.cwd(&request.project_directory);
         command.env("MALLARD_TEST_CODEX_PTY_CHILD", "1");
         command.env("MALLARD_TEST_CODEX_HOME", &home);
+        command.env("MALLARD_TEST_CODEX_PROJECT", &request.project_directory);
         command.env("MALLARD_TEST_CODEX_SOURCE", source_id);
         command.env("MALLARD_TEST_CODEX_CHILD", child_id);
         let child = slave.spawn_command(command).unwrap();

@@ -5,6 +5,7 @@ import PushResourceWorkspace, {
   nextPushReviewStep,
   preserveSyncedPushRecipeEntries,
   pushReviewBlockers,
+  pushReviewPullHolds,
   recommendedPushSelection,
   sanitizePushSelection,
 } from "../../src/components/project-sync/PushResourceWorkspace";
@@ -212,7 +213,7 @@ test("non-uploadable sessions cannot remain in the active Push selection", () =>
   );
 });
 
-test("conversation divergence blocks Push even with a portable cloud identity", () => {
+test("conversation divergence holds only its thread instead of blocking Push", () => {
   const resource = conversation("codex:session:diverged");
   const entry = {
     thread_id: "provider-diverged",
@@ -224,7 +225,7 @@ test("conversation divergence blocks Push even with a portable cloud identity", 
     push_decision: decision("require_pull", "diverged"),
     pull_decision: decision("resolve_divergence", "diverged", true),
   };
-  const comparison = (typed: boolean): ThreadSyncComparison => ({
+  const comparison: ThreadSyncComparison = {
     project_id: "project-a",
     storage_id: "storage-a",
     storage_name: "Local storage 1",
@@ -233,29 +234,28 @@ test("conversation divergence blocks Push even with a portable cloud identity", 
     warnings: [],
     entries: [{
       ...entry,
-      cloud_thread_id: typed ? "thread-diverged" : null,
+      cloud_thread_id: "thread-diverged",
     }],
-  });
+  };
 
   assert.deepEqual(
-    pushReviewBlockers(new Set([resource.resource_id]), comparison(true)),
-    [{
-      kind: "storage",
-      step: "history",
-      resourceId: resource.resource_id,
-      state: "diverged",
-    }],
-    "a divergence must be resolved by Pull before any Push advances storage",
+    pushReviewBlockers(new Set([resource.resource_id]), comparison),
+    [],
+    "a divergence never disables the whole Push; its row is simply not pushable",
   );
   assert.deepEqual(
-    pushReviewBlockers(new Set([resource.resource_id]), comparison(false)),
-    [{
-      kind: "storage",
-      step: "history",
-      resourceId: resource.resource_id,
-      state: "diverged",
-    }],
-    "a divergence without a portable cloud identity is also blocked",
+    [...sanitizePushSelection(
+      new Set([resource.resource_id]),
+      [resource],
+      comparison,
+    )],
+    [],
+    "the divergent row itself stays unselectable until a Pull resolves it",
+  );
+  assert.deepEqual(
+    pushReviewPullHolds(comparison).map((held) => held.resource_id),
+    [resource.resource_id],
+    "the held thread is surfaced for the Pull-first affordance",
   );
 });
 

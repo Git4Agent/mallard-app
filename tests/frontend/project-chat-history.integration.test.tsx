@@ -114,16 +114,22 @@ test("thread indicators use the quiet desktop sync vocabulary", () => {
       { icon: "download", className: "storage" },
       { icon: "git-compare-arrows", className: "diverged" },
       { icon: "octagon-x", className: "unavailable" },
-      { icon: "cloud-off", className: "needs-baseline" },
+      { icon: "octagon-x", className: "unavailable" },
     ],
   );
+
+  const unknown = threadSyncPresentation({
+    state: "unknown",
+    status_detail: "Conversation ancestry could not be proven safely.",
+  } as Parameters<typeof threadSyncPresentation>[0], "Storage");
+  assert.match(unknown.label, /ancestry could not be proven safely/i);
+  assert.doesNotMatch(unknown.label, /baseline/i);
 
   const css = readFileSync("src/App.css", "utf8");
   assert.match(css, /\.sync-thread-sync-indicator\.synced \{ color: var\(--text-2\); \}/);
   assert.match(css, /\.sync-thread-sync-indicator\.local,\s*\n\.sync-thread-sync-indicator\.storage \{ color: var\(--blue\); \}/);
   assert.match(css, /\.sync-thread-sync-indicator\.diverged \{ color: var\(--yellow\); \}/);
   assert.match(css, /\.sync-thread-sync-indicator\.unavailable,\s*\n\.sync-thread-sync-error \{ color: var\(--red\); \}/);
-  assert.match(css, /\.sync-thread-sync-indicator\.needs-baseline \{ color: var\(--text-2\); \}/);
 });
 
 test("refreshing project activity uses one busy refresh icon", () => {

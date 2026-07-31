@@ -12,9 +12,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::codex_native_fork::{
-    coordinate_native_fork, preflight_native_fork, refresh_codex_inventory, set_codex_thread_name,
+    complete_codex_post_commit_presentation, coordinate_native_fork, preflight_native_fork,
     verify_manual_fork, verify_recorded_fork, verify_source_idle_and_title,
-    CodexForkCoordinatorOutcome, CodexForkExecutionRequest, CodexNameStatus, VerifiedNativeFork,
+    CodexForkCoordinatorOutcome, CodexForkExecutionRequest, CodexNameStatus,
+    CodexPostCommitPresentationRequest, CodexThreadRenameRequest, VerifiedNativeFork,
 };
 use super::conversation_codec::{analyze_codex_transcript, CodecLineage};
 use super::domain::{
@@ -30,6 +31,12 @@ use super::domain::{
 use super::persistence::LocalStateRepository;
 
 const MAX_PROVIDER_TARGET_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Clone, Debug)]
+struct CodexPostCommitPresentationTask {
+    operation_id: ConversationOperationId,
+    request: CodexPostCommitPresentationRequest,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConversationTargetPayload {
@@ -816,11 +823,12 @@ fn finish_codex_divergence(
     }
 
     if operation.phase == ConversationSyncPhase::BindingsCommitted {
-        operation = record_post_commit_presentation(repository, &operation, fork)?;
+        operation = record_post_commit_presentation(repository, &operation)?;
         failpoints.hit(&ConversationFailpoint::AfterOriginalNamingRecorded)?;
     }
 
     if operation.phase == ConversationSyncPhase::OriginalNamingRecorded {
+        let presentation_task = post_commit_presentation_task(&operation, fork)?;
         failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
         let receipt = commit_receipt(repository, &operation)?;
         failpoints.hit(&ConversationFailpoint::AfterReceipt)?;
@@ -835,11 +843,18 @@ fn finish_codex_divergence(
         failpoints.hit(&ConversationFailpoint::BeforeCleanup)?;
         cleanup_and_retire(repository, &operation.operation_id)?;
         failpoints.hit(&ConversationFailpoint::AfterCleanup)?;
+        if let Some(task) = presentation_task {
+            schedule_post_commit_presentation(repository.clone(), task);
+        }
         return Ok(CodexDivergenceApplyOutcome::Committed(receipt));
     }
     if operation.phase == ConversationSyncPhase::LocalCommitted {
         let receipt = conversation_receipt(&operation);
+        let presentation_task = post_commit_presentation_task(&operation, fork)?;
         cleanup_and_retire(repository, &operation.operation_id)?;
+        if let Some(task) = presentation_task {
+            schedule_post_commit_presentation(repository.clone(), task);
+        }
         return Ok(CodexDivergenceApplyOutcome::Committed(receipt));
     }
     return Err(format!(
@@ -1240,39 +1255,117 @@ fn commit_preserved_fork_binding(
 fn record_post_commit_presentation(
     repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
-    fork: &CodexForkExecutionRequest,
 ) -> Result<ConversationSyncOperation, String> {
     let divergence = operation
         .divergence()
         .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
-    let inventory_refresh_status = match refresh_codex_inventory(
-        &fork.codex_executable,
-        &fork.codex_home,
-        &fork.project_directory,
-        fork.project_directory.to_string_lossy().as_ref(),
-    ) {
-        Ok(()) => CodexInventoryRefreshStatus::Refreshed,
-        Err(_) => CodexInventoryRefreshStatus::Failed,
-    };
-    let status = match divergence.desired_original_name.as_deref() {
-        Some(desired) => set_codex_thread_name(
-            &fork.codex_executable,
-            &fork.codex_home,
-            &fork.project_directory,
-            &divergence.source_provider_thread_id,
-            divergence.pinned_local_title.as_deref(),
-            desired,
-        ),
-        None => CodexNameStatus::Unchanged,
+    let original_name_status = if divergence.desired_original_name.as_deref()
+        == divergence.pinned_local_title.as_deref()
+        || divergence.desired_original_name.is_none()
+    {
+        ConversationNameStatus::Unchanged
+    } else {
+        ConversationNameStatus::Deferred
     };
     let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
         let divergence = divergence_mut(journaled)?;
-        divergence.original_name_status = Some(map_name_status(&status));
-        divergence.inventory_refresh_status = inventory_refresh_status;
+        divergence.original_name_status = Some(original_name_status);
+        divergence.inventory_refresh_status = CodexInventoryRefreshStatus::Deferred;
         journaled.phase = ConversationSyncPhase::OriginalNamingRecorded;
         Ok(())
     })?;
     Ok(updated)
+}
+
+fn post_commit_presentation_task(
+    operation: &ConversationSyncOperation,
+    fork: &CodexForkExecutionRequest,
+) -> Result<Option<CodexPostCommitPresentationTask>, String> {
+    let divergence = operation
+        .divergence()
+        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
+    let fork_rename = divergence
+        .fork_provider_thread_id
+        .as_ref()
+        .filter(|_| divergence.fork_name_status == Some(ConversationNameStatus::Deferred))
+        .map(|thread_id| CodexThreadRenameRequest {
+            thread_id: thread_id.clone(),
+            expected_current: divergence.pinned_local_title.clone(),
+            desired: divergence.desired_fork_name.clone(),
+        });
+    let original_rename = divergence
+        .desired_original_name
+        .as_ref()
+        .filter(|_| divergence.original_name_status == Some(ConversationNameStatus::Deferred))
+        .map(|desired| CodexThreadRenameRequest {
+            thread_id: divergence.source_provider_thread_id.clone(),
+            expected_current: divergence.pinned_local_title.clone(),
+            desired: desired.clone(),
+        });
+    if fork_rename.is_none()
+        && original_rename.is_none()
+        && divergence.inventory_refresh_status != CodexInventoryRefreshStatus::Deferred
+    {
+        return Ok(None);
+    }
+    Ok(Some(CodexPostCommitPresentationTask {
+        operation_id: operation.operation_id.clone(),
+        request: CodexPostCommitPresentationRequest {
+            codex_executable: fork.codex_executable.clone(),
+            codex_home: fork.codex_home.clone(),
+            project_directory: fork.project_directory.clone(),
+            fork_rename,
+            original_rename,
+        },
+    }))
+}
+
+fn complete_post_commit_presentation_task(
+    repository: &LocalStateRepository,
+    task: &CodexPostCommitPresentationTask,
+) -> Result<(), String> {
+    let outcome = complete_codex_post_commit_presentation(&task.request);
+    repository.mutate_materializations(|_, materializations| {
+        let conversation = materializations
+            .records
+            .iter_mut()
+            .flat_map(|record| record.receipts.iter_mut())
+            .filter_map(|receipt| receipt.conversation.as_mut())
+            .find(|conversation| conversation.journal_operation_id == task.operation_id)
+            .ok_or_else(|| "deferred Codex presentation receipt disappeared".to_string())?;
+        let divergence = conversation
+            .divergence
+            .as_mut()
+            .ok_or_else(|| "deferred Codex presentation lacks a divergence receipt".to_string())?;
+        if let Some(status) = outcome.fork_name_status.as_ref() {
+            divergence.fork_name_status = Some(map_name_status(status));
+        }
+        divergence.original_name_status = Some(map_name_status(&outcome.original_name_status));
+        divergence.inventory_refresh_status = if outcome.inventory_refreshed {
+            CodexInventoryRefreshStatus::Refreshed
+        } else {
+            CodexInventoryRefreshStatus::Failed
+        };
+        Ok(())
+    })
+}
+
+fn schedule_post_commit_presentation(
+    repository: LocalStateRepository,
+    task: CodexPostCommitPresentationTask,
+) {
+    #[cfg(not(test))]
+    {
+        let _ = std::thread::Builder::new()
+            .name("mallard-codex-presentation".to_string())
+            .spawn(move || {
+                let _ = complete_post_commit_presentation_task(&repository, &task);
+            });
+    }
+    #[cfg(test)]
+    {
+        let _ = (repository, task);
+    }
 }
 
 /// Recover every local operation after reopening the repository. Calling this
@@ -1309,11 +1402,20 @@ pub fn recover_conversation_materializations(
                         return Ok(RecoveryOutcome::RecoveryRequired);
                     }
                 }
-                if operation.phase == ConversationSyncPhase::AwaitingManualFork {
+                if matches!(
+                    operation.phase,
+                    ConversationSyncPhase::AwaitingManualFork
+                        | ConversationSyncPhase::RecoveryRequired
+                ) {
                     return Ok(RecoveryOutcome::RecoveryRequired);
                 }
                 if operation.phase == ConversationSyncPhase::LocalCommitted {
+                    let fork = codex_fork_request_for_operation(repository, &operation)?;
+                    let presentation_task = post_commit_presentation_task(&operation, &fork)?;
                     cleanup_and_retire(repository, &operation_id)?;
+                    if let Some(task) = presentation_task {
+                        schedule_post_commit_presentation(repository.clone(), task);
+                    }
                     return Ok(RecoveryOutcome::Completed);
                 }
                 let fork = codex_fork_request_for_operation(repository, &operation)?;
@@ -1698,7 +1800,7 @@ fn insert_operations(
 ) -> Result<(), String> {
     let journal = repository.load_conversation_sync_journal()?;
     repository.mutate_conversation_sync_journal(journal.revision, |journal| {
-        for operation in operations {
+        for (index, operation) in operations.iter().enumerate() {
             if journal
                 .operations
                 .iter()
@@ -1707,6 +1809,25 @@ fn insert_operations(
                 return Err(format!(
                     "conversation operation '{}' already exists",
                     operation.operation_id
+                ));
+            }
+            // One thread never carries two concurrent journal operations:
+            // a pending checkpoint must be verified or canceled before any
+            // new Push or Pull mutation of the same conversation begins.
+            if journal
+                .operations
+                .iter()
+                .chain(operations[..index].iter())
+                .any(|existing| {
+                    existing.local_project_id == operation.local_project_id
+                        && existing.provider == operation.provider
+                        && existing.thread_id == operation.thread_id
+                })
+            {
+                return Err(format!(
+                    "conversation thread '{}' already has a pending sync operation; \
+                     verify or cancel it before syncing this conversation again",
+                    operation.thread_id
                 ));
             }
         }

@@ -183,18 +183,6 @@ export async function applyPullReview(
     }
   }
 
-  if (restoreResult && restoreResult.status !== "complete") {
-    onPhase("complete");
-    return {
-      restoreResult,
-      dependencyResult: null,
-      readiness: null,
-      success: false,
-      error: null,
-      failedPhase: null,
-    };
-  }
-
   onPhase("installing");
   if (!executionError && selection.dependencyActionIds.length > 0 && dependencyPlan) {
     try {
@@ -219,6 +207,7 @@ export async function applyPullReview(
   const success =
     executionError === null &&
     (restoreResult?.success ?? true) &&
+    (restoreResult ? restoreResult.status === "complete" : true) &&
     (dependencyResult?.success ?? true) &&
     readiness?.state === "ready";
   onPhase("complete");

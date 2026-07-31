@@ -9,6 +9,7 @@ import type {
   ProjectResourceDescriptor,
   PushDestinationStatus,
   ThreadSyncComparison,
+  ThreadSyncEntry,
 } from "../../types";
 import Icon from "../Icons";
 import ProjectChatHistoryPage from "./ProjectChatHistoryPage";
@@ -112,6 +113,19 @@ function pushBlockerKind(
   return null;
 }
 
+/**
+ * Conversation threads that cannot push until a Pull resolves them
+ * (diverged or behind storage). They hold back only themselves: the Push
+ * button stays enabled and their cloud versions are retained untouched.
+ */
+export function pushReviewPullHolds(
+  threadComparison?: ThreadSyncComparison | null,
+): ThreadSyncEntry[] {
+  return (threadComparison?.entries ?? []).filter((entry) => (
+    entry.push_decision?.action === "require_pull"
+  ));
+}
+
 export function pushReviewBlockers(
   selected: ReadonlySet<string>,
   threadComparison?: ThreadSyncComparison | null,
@@ -121,20 +135,14 @@ export function pushReviewBlockers(
 ): PushReviewBlocker[] {
   const blockers: PushReviewBlocker[] = [];
   for (const entry of threadComparison?.entries ?? []) {
-    const decisionBlocksPush = entry.push_decision?.action === "require_pull"
-      || entry.push_decision?.action === "blocked";
-    if (entry.cloud_thread_id && !decisionBlocksPush) {
+    // Thread rows never disable the whole Push: a diverged or held thread
+    // is unselectable and keeps its cloud version, while every other
+    // selected thread still publishes.
+    if (entry.cloud_thread_id) {
       continue;
     }
     const selectedEntry = selected.has(entry.resource_id);
-    const kind = pushBlockerKind(entry.state, entry.storage_present, selectedEntry)
-      ?? (decisionBlocksPush
-        ? entry.storage_present
-          ? "storage"
-          : selectedEntry
-            ? "local"
-            : null
-        : null);
+    const kind = pushBlockerKind(entry.state, entry.storage_present, selectedEntry);
     if (kind) blockers.push({ kind, step: "history", resourceId: entry.resource_id, state: entry.state });
   }
   for (const item of capabilityReport?.items ?? []) {
@@ -428,6 +436,7 @@ export default function PushResourceWorkspace({
     acknowledgedWarningDigests,
   );
   const blockingCount = blockers.length;
+  const pullHolds = pushReviewPullHolds(threadComparison);
   const missingDestination = destinationStatus?.state === "remote_history_missing"
     ? destinationStatus
     : null;
@@ -632,6 +641,7 @@ export default function PushResourceWorkspace({
               selectableResourceIds={selectableConversationIds}
               selectionDisabled={busy}
               onToggleResource={toggleResource}
+              onReviewPull={onPull}
               comparisonOverride={threadComparison}
             />
           ) : activeStep === "history" ? (
@@ -742,6 +752,16 @@ export default function PushResourceWorkspace({
               )}
               {sessionIndex && effectiveSelected.has(sessionIndex.resource_id) && (
                 <p className="sync-sync-review-derived"><Icon name="check-circle" size={13} />The project session index is included automatically.</p>
+              )}
+              {pullHolds.length > 0 && (
+                <div className="sync-callout sync-sync-review-pull-holds">
+                  <Icon name="git-compare-arrows" size={15} />
+                  <span>
+                    <strong>{pullHolds.length} conversation{pullHolds.length === 1 ? "" : "s"} held for Pull</strong>
+                    Diverged or behind storage. Held threads keep their stored versions; everything selected still pushes.
+                  </span>
+                  {onPull && <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>Review Pull</button>}
+                </div>
               )}
               {blockingCount > 0 && (
                 <div className="sync-callout sync-sync-review-blocker" role="alert">

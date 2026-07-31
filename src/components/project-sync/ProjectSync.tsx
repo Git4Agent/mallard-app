@@ -762,10 +762,19 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       failures.push(`Configuration: ${errorMessage(reason)}`);
       setConfig(EMPTY_CONFIG);
     }
+    setStartupStage("repair");
+    try {
+      // Heals interrupted finalizations before any project data is rendered.
+      // It owns a stage because rescanning provider history after an
+      // interrupted sync can take a while, and it must not read as a freeze.
+      await projectSyncApi.recoverStartupState();
+    } catch (reason) {
+      failures.push(`Recovery: ${errorMessage(reason)}`);
+    }
+    if (shellRequest.current !== requestId) return unavailableResult();
     setStartupStage("projects");
     try {
-      // Listing projects also completes any interrupted setup finalization,
-      // so drafts are refreshed afterwards to reflect consumed drafts.
+      // Recovery above may have consumed drafts, so they are refreshed after.
       nextProjects = await projectSyncApi.listProjects();
       if (shellRequest.current !== requestId) return unavailableResult();
       setRegistrations(nextProjects);
@@ -1701,14 +1710,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         targetBinding.local_project_id,
       );
       if (restoreRequest.current !== requestId) return null;
-      if (pendingDivergence?.codex_fork_checkpoint) {
-        if (!pendingDivergence.plan_id) {
-          throw new Error("The pending Codex fork no longer has its reviewed Pull plan.");
-        }
-        const pendingPlan = await projectSyncApi.getRestorePlan(pendingDivergence.plan_id);
+      const pendingCheckpoint = pendingDivergence?.codex_fork_checkpoints[0];
+      if (pendingDivergence && pendingCheckpoint) {
+        const pendingPlan = await projectSyncApi.getRestorePlan(pendingCheckpoint.plan_id);
         if (restoreRequest.current !== requestId) return null;
         const pendingAction = pendingPlan.conversation_actions.find(
-          (action) => action.action_id === pendingDivergence.codex_fork_checkpoint?.action_id,
+          (action) => action.action_id === pendingCheckpoint.action_id,
         );
         if (
           pendingPlan.storage_id !== storageId
@@ -1723,7 +1730,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         setRestoreResult(pendingDivergence);
         setPullApplyPhase("complete");
         setReviewSupportLoading(false);
-        setNotice(`Resume the pending Codex fork for ${displayName}. The original conversation has not been replaced.`);
+        setNotice(pendingDivergence.codex_fork_checkpoints.length === 1
+          ? `Resume the pending Codex fork for ${displayName}. The original conversation has not been replaced.`
+          : `Resume ${pendingDivergence.codex_fork_checkpoints.length} pending Codex forks for ${displayName}. No original conversation has been replaced.`);
         return null;
       }
       // The project-data review is the primary Pull surface. Render it as soon as it
@@ -2193,13 +2202,58 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
+  /**
+   * After the last checkpoint of the queue resolves (verified or canceled),
+   * replan against the same bundle so the review reflects the settled local
+   * state; when nothing mutable remains, one empty apply finalizes the
+   * reviewed Pull baseline.
+   */
+  const refreshReviewAfterForkQueue = async (requestId: number, resolvedNote: string) => {
+    if (!restorePlan || !restoreBinding) return;
+    setReviewSupportLoading(true);
+    try {
+      const nextRestore = await projectSyncApi.planRestore(
+        restorePlan.storage_id,
+        restorePlan.bundle_id,
+        restoreBinding,
+      );
+      if (restoreRequest.current !== requestId) return;
+      setRestorePlan(nextRestore);
+      if (!hasPendingRestoreMutations(nextRestore)) {
+        const finalization = await projectSyncApi.applyRestore(
+          nextRestore.plan_id,
+          [],
+          [],
+        );
+        if (restoreRequest.current !== requestId) return;
+        if (!finalization.success || finalization.status !== "complete") {
+          throw new Error(`${resolvedNote}, but the Pull baseline could not be finalized.`);
+        }
+      }
+      const support = await loadPullReviewSupport(projectSyncApi, nextRestore);
+      if (restoreRequest.current !== requestId) return;
+      setDependencyPlan(support.dependencyPlan);
+      setReadiness(support.readiness);
+      if (support.errors.length > 0) {
+        setRestoreError(`${resolvedNote}. Remaining checks: ${support.errors.join(" ")}`);
+      }
+    } catch (reason) {
+      if (restoreRequest.current === requestId) {
+        setRestoreError(`${resolvedNote}, but remaining changes must be refreshed: ${errorMessage(reason)}`);
+      }
+    } finally {
+      if (restoreRequest.current === requestId) setReviewSupportLoading(false);
+    }
+  };
+
   const verifyCodexFork = async (
     operationId: string,
     providerThreadId: string | null,
   ) => {
     if (!restorePlan) return;
     const requestId = restoreRequest.current;
-    const checkpointActionId = restoreResult?.codex_fork_checkpoint?.action_id;
+    const checkpointActionId = restoreResult?.codex_fork_checkpoints
+      .find((checkpoint) => checkpoint.operation_id === operationId)?.action_id;
     setBusy(true);
     setRestoreError(null);
     try {
@@ -2210,7 +2264,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (restoreRequest.current !== requestId) return;
       setRestoreResult(result);
       setPullApplyPhase("complete");
-      if (result.status !== "complete" || !result.success) return;
+      if (!result.success) return;
       const appliedActionIds = new Set(result.applied_action_ids ?? []);
       setCompletedPullActionIds((current) => new Set([...current, ...appliedActionIds]));
       const actionId = checkpointActionId ?? [...appliedActionIds][0];
@@ -2229,43 +2283,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       }
       setHistoryRefreshEpoch((epoch) => epoch + 1);
       setProjectTabResetEpoch((epoch) => epoch + 1);
-      setNotice("Codex fork verified. The cloud conversation was restored into the original thread.");
-      if (restoreBinding) {
-        setReviewSupportLoading(true);
-        try {
-          const nextRestore = await projectSyncApi.planRestore(
-            restorePlan.storage_id,
-            restorePlan.bundle_id,
-            restoreBinding,
-          );
-          if (restoreRequest.current !== requestId) return;
-          setRestorePlan(nextRestore);
-          if (!hasPendingRestoreMutations(nextRestore)) {
-            const finalization = await projectSyncApi.applyRestore(
-              nextRestore.plan_id,
-              [],
-              [],
-            );
-            if (restoreRequest.current !== requestId) return;
-            if (!finalization.success || finalization.status !== "complete") {
-              throw new Error("The conversation conflict is resolved, but the Pull baseline could not be finalized.");
-            }
-          }
-          const support = await loadPullReviewSupport(projectSyncApi, nextRestore);
-          if (restoreRequest.current !== requestId) return;
-          setDependencyPlan(support.dependencyPlan);
-          setReadiness(support.readiness);
-          if (support.errors.length > 0) {
-            setRestoreError(`The conversation conflict is resolved. Remaining checks: ${support.errors.join(" ")}`);
-          }
-        } catch (reason) {
-          if (restoreRequest.current === requestId) {
-            setRestoreError(`The conversation conflict is resolved, but remaining changes must be refreshed: ${errorMessage(reason)}`);
-          }
-        } finally {
-          if (restoreRequest.current === requestId) setReviewSupportLoading(false);
-        }
+      const remaining = result.codex_fork_checkpoints.length;
+      if (remaining > 0) {
+        setNotice(`Codex fork verified. ${remaining} more fork checkpoint${remaining === 1 ? "" : "s"} to resolve.`);
+        return;
       }
+      setNotice("Codex fork verified. The cloud conversation was restored into the original thread.");
+      await refreshReviewAfterForkQueue(requestId, "The conversation conflict is resolved");
     } catch (reason) {
       if (restoreRequest.current === requestId) {
         setRestoreError(errorMessage(reason));
@@ -2281,11 +2305,19 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setBusy(true);
     setRestoreError(null);
     try {
-      await projectSyncApi.cancelCodexDivergence(operationId);
+      const result = await projectSyncApi.cancelCodexDivergence(operationId);
       if (restoreRequest.current !== requestId) return;
+      const remaining = result.codex_fork_checkpoints.length;
+      if (remaining > 0) {
+        setRestoreResult(result);
+        setPullApplyPhase("complete");
+        setNotice(`Codex fork checkpoint canceled. ${remaining} more fork checkpoint${remaining === 1 ? "" : "s"} to resolve.`);
+        return;
+      }
       setRestoreResult(null);
       setPullApplyPhase("idle");
       setNotice("Codex fork checkpoint canceled. The original conversation was not replaced.");
+      await refreshReviewAfterForkQueue(requestId, "The fork checkpoint is canceled");
     } catch (reason) {
       if (restoreRequest.current === requestId) setRestoreError(errorMessage(reason));
     } finally {

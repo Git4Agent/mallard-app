@@ -2368,6 +2368,22 @@ fn codex_app_deep_links(
     ])
 }
 
+/// The invocation `open_in_codex` performs for a project, rendered as a shell
+/// line.  Logs quote this so the command they teach is the one that runs.
+pub(crate) fn codex_app_project_open_command(
+    codex_home: &Path,
+    project_root: &Path,
+) -> Option<String> {
+    if !codex_home.is_absolute() || !project_root.is_absolute() {
+        return None;
+    }
+    let deep_link = format!(
+        "codex://threads/new?path={}",
+        percent_encode_uri_component(&project_root.to_string_lossy())
+    );
+    Some(codex_app_open_command(codex_home, &deep_link))
+}
+
 fn codex_app_open_command(codex_home: &Path, deep_link: &str) -> String {
     format!(
         "'/usr/bin/open' -n -a '/Applications/ChatGPT.app' --env {} {}",

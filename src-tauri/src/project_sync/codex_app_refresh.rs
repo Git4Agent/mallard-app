@@ -78,11 +78,25 @@ const SUPPORTED_MAC_APPS: [SupportedMacApp; 2] = [
     },
 ];
 
+/// Offer a refresh for the app that will show the synced threads. The
+/// restart is home-aware: the default `~/.codex` profile relaunches through
+/// LaunchServices, while any other profile relaunches the validated bundle
+/// executable directly with `CODEX_HOME` pinned to that profile.
 pub fn refresh_offer(
     operation_id: super::domain::ConversationOperationId,
+    codex_home: Option<&Path>,
 ) -> Option<CodexAppRefreshOffer> {
     #[cfg(all(not(test), target_os = "macos"))]
     {
+        let profile_note = codex_home
+            .filter(|home| !is_default_codex_home(home))
+            .map(|home| {
+                format!(
+                    " Mallard will relaunch it with this project's Codex home ({}).",
+                    home.display()
+                )
+            })
+            .unwrap_or_default();
         let mut manual_offer = None;
         for specification in SUPPORTED_MAC_APPS {
             let Some(app) = find_installed_mac_app(specification) else {
@@ -96,8 +110,8 @@ pub fn refresh_offer(
                         app_name: specification.app_name.to_string(),
                         state: CodexAppRefreshState::RestartAvailable,
                         message: format!(
-                            "{} may need a restart to refresh its conversation list.",
-                            specification.app_name
+                            "{} may need a restart to refresh its conversation list.{}",
+                            specification.app_name, profile_note
                         ),
                     });
                 }
@@ -121,12 +135,15 @@ pub fn refresh_offer(
     }
     #[cfg(any(test, not(target_os = "macos")))]
     {
-        let _ = operation_id;
+        let _ = (operation_id, codex_home);
         None
     }
 }
 
-pub fn restart_after_pull(app_kind: CodexAppKind) -> Result<CodexAppRestartResult, String> {
+pub fn restart_after_pull(
+    app_kind: CodexAppKind,
+    codex_home: &Path,
+) -> Result<CodexAppRestartResult, String> {
     #[cfg(target_os = "macos")]
     {
         let specification = SUPPORTED_MAC_APPS
@@ -149,25 +166,7 @@ pub fn restart_after_pull(app_kind: CodexAppKind) -> Result<CodexAppRestartResul
         let deadline = Instant::now() + APP_QUIT_TIMEOUT;
         while Instant::now() < deadline {
             if !mac_app_is_running(&app)? {
-                let status = run_status_bounded(
-                    Command::new("/usr/bin/open")
-                        .arg("-a")
-                        .arg(&app.bundle_path)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null()),
-                    APP_COMMAND_TIMEOUT,
-                )?;
-                if !status {
-                    return Err(format!(
-                        "{} closed, but the exact application bundle could not be relaunched",
-                        specification.app_name
-                    ));
-                }
-                return Ok(CodexAppRestartResult {
-                    success: true,
-                    message: format!("{} restarted.", specification.app_name),
-                });
+                return relaunch_mac_app(&app, codex_home);
             }
             thread::sleep(Duration::from_millis(250));
         }
@@ -178,9 +177,108 @@ pub fn restart_after_pull(app_kind: CodexAppKind) -> Result<CodexAppRestartResul
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = app_kind;
+        let _ = (app_kind, codex_home);
         Err("automatic Codex App restart is unavailable on this platform".to_string())
     }
+}
+
+/// Relaunch a stopped, validated app bundle. The default `~/.codex` profile
+/// goes through LaunchServices, exactly as before. Any other profile starts
+/// the bundle executable directly so `CODEX_HOME` can be pinned — a
+/// LaunchServices relaunch would silently come up with the GUI session
+/// environment and read the wrong home. If the pinned launch cannot be
+/// proven, the caller gets manual guidance with the exact command; the
+/// graceful quit has already happened either way.
+#[cfg(target_os = "macos")]
+fn relaunch_mac_app(
+    app: &InstalledMacApp,
+    codex_home: &Path,
+) -> Result<CodexAppRestartResult, String> {
+    if is_default_codex_home(codex_home) {
+        let status = run_status_bounded(
+            Command::new("/usr/bin/open")
+                .arg("-a")
+                .arg(&app.bundle_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+            APP_COMMAND_TIMEOUT,
+        )?;
+        if !status {
+            return Err(format!(
+                "{} closed, but the exact application bundle could not be relaunched",
+                app.specification.app_name
+            ));
+        }
+        return Ok(CodexAppRestartResult {
+            success: true,
+            message: format!("{} restarted.", app.specification.app_name),
+        });
+    }
+    let executable = app
+        .bundle_path
+        .join("Contents/MacOS")
+        .join(app.specification.executable_name);
+    let manual_guidance = format!(
+        "{} closed, but relaunching it with this project's Codex home did not \
+         complete. Start it manually, for example: CODEX_HOME={} {}",
+        app.specification.app_name,
+        shell_quote_path(codex_home),
+        shell_quote_path(&executable),
+    );
+    let mut child = match Command::new(&executable)
+        .env("CODEX_HOME", codex_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Err(manual_guidance),
+    };
+    let deadline = Instant::now() + APP_QUIT_TIMEOUT;
+    while Instant::now() < deadline {
+        // Reap an early exit so a crashed launch never lingers as a zombie;
+        // the LaunchServices running check stays the only success authority.
+        let _ = child.try_wait();
+        if let Ok(true) = mac_app_is_running(app) {
+            return Ok(CodexAppRestartResult {
+                success: true,
+                message: format!(
+                    "{} restarted with this project's Codex home ({}).",
+                    app.specification.app_name,
+                    codex_home.display()
+                ),
+            });
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(manual_guidance)
+}
+
+/// Whether this profile home is the one a plain LaunchServices relaunch
+/// would already read. Unresolvable paths compare as non-default so the
+/// pinned-environment launch path is chosen — the safe direction.
+#[cfg(target_os = "macos")]
+fn is_default_codex_home(codex_home: &Path) -> bool {
+    let Some(default_home) = dirs::home_dir().map(|home| home.join(".codex")) else {
+        return false;
+    };
+    if codex_home == default_home {
+        return true;
+    }
+    match (
+        fs::canonicalize(codex_home),
+        fs::canonicalize(&default_home),
+    ) {
+        (Ok(profile), Ok(default_home)) => profile == default_home,
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn shell_quote_path(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
 #[cfg(target_os = "macos")]
@@ -382,5 +480,27 @@ mod tests {
 
         assert!(validate_mac_app_bundle(&bundle, SUPPORTED_MAC_APPS[0]).is_some());
         assert!(validate_mac_app_bundle(&bundle, SUPPORTED_MAC_APPS[1]).is_none());
+    }
+
+    #[test]
+    fn only_the_default_home_relaunches_through_launch_services() {
+        let default_home = dirs::home_dir().unwrap().join(".codex");
+        assert!(is_default_codex_home(&default_home));
+
+        let temp = tempfile::tempdir().unwrap();
+        let profile_home = fs::canonicalize(temp.path()).unwrap().join("conf2/.codex");
+        assert!(!is_default_codex_home(&profile_home));
+    }
+
+    #[test]
+    fn manual_guidance_shell_quotes_the_profile_home() {
+        assert_eq!(
+            shell_quote_path(Path::new("/tmp/conf 2/.codex")),
+            "'/tmp/conf 2/.codex'"
+        );
+        assert_eq!(
+            shell_quote_path(Path::new("/tmp/it's/.codex")),
+            "'/tmp/it'\\''s/.codex'"
+        );
     }
 }

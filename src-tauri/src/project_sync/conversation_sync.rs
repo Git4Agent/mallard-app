@@ -32,6 +32,10 @@ pub struct ConversationCapabilities {
     /// True only when raw bytes differ solely through fields the verified
     /// codec declares structural (thread ID and mapped cwd).
     pub structural_rewrite_only: bool,
+    /// True while a journaled sync operation (for example a paused Codex
+    /// fork checkpoint) still owns this thread. Every new mutation is
+    /// blocked until that operation is verified or canceled.
+    pub resolution_pending: bool,
 }
 
 impl Default for ConversationCapabilities {
@@ -43,6 +47,7 @@ impl Default for ConversationCapabilities {
             destination_codec_resumable: true,
             provider_quiescent: true,
             structural_rewrite_only: false,
+            resolution_pending: false,
         }
     }
 }
@@ -68,6 +73,10 @@ pub fn default_conversation_decision(
     use ConversationPlanActionType as Action;
     use ConversationReasonCode as Reason;
     use ConversationRelation as Relation;
+
+    if capabilities.resolution_pending {
+        return decision(Action::Blocked, Reason::ResolutionPending);
+    }
 
     if relation == Relation::Identical && capabilities.structural_rewrite_only {
         return decision(Action::NoOp, Reason::StructuralRewriteOnly);
@@ -224,6 +233,10 @@ fn blocked_reason(reason: ConversationReasonCode) -> &'static str {
         }
         ConversationReasonCode::StalePlan => {
             "The reviewed conversation state changed. Refresh before applying."
+        }
+        ConversationReasonCode::ResolutionPending => {
+            "A Codex fork checkpoint from an earlier Pull is still pending. \
+             Verify or cancel it in the Pull review first."
         }
         _ => "This conversation cannot be changed safely.",
     }
@@ -572,6 +585,38 @@ mod tests {
             ConversationCapabilities::default(),
         );
         assert_eq!(materialize.action, ConversationPlanActionType::CreateLocal);
+    }
+
+    #[test]
+    fn a_pending_resolution_blocks_both_directions() {
+        for direction in [
+            ConversationPlanDirection::Push,
+            ConversationPlanDirection::Pull,
+        ] {
+            for relation in [
+                ConversationRelation::Identical,
+                ConversationRelation::Diverged,
+                ConversationRelation::LocalPrefixOfCloud,
+                ConversationRelation::CloudPrefixOfLocal,
+            ] {
+                let decision = default_conversation_decision(
+                    direction,
+                    relation,
+                    ConversationCapabilities {
+                        resolution_pending: true,
+                        ..ConversationCapabilities::default()
+                    },
+                );
+                assert_eq!(decision.action, ConversationPlanActionType::Blocked);
+                assert_eq!(
+                    decision.reason_code,
+                    ConversationReasonCode::ResolutionPending
+                );
+                assert!(!decision.selectable);
+                assert!(!decision.selected_by_default);
+                assert!(decision.blocked_reason.is_some());
+            }
+        }
     }
 
     #[test]

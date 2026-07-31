@@ -24,9 +24,11 @@ import {
   PROJECT_PROVIDERS,
   projectLabel,
   providerLabel,
+  prunedSelection,
   recipeSelection,
   repositoryFingerprintMatches,
   singleProviderSelection,
+  unavailableSelection,
 } from "./model";
 
 export type SetupCompletion = "open" | "pull";
@@ -55,6 +57,12 @@ const AUTOSAVE_DELAY_MS = 700;
 
 function sectionState(sections: SetupSectionStatus[], id: string): SetupSectionStatus | null {
   return sections.find((section) => section.section === id) ?? null;
+}
+
+/** Name a few resource IDs without letting a long tail take over the callout. */
+function summarizeIds(ids: string[], limit = 3): string {
+  if (ids.length <= limit) return ids.join(", ");
+  return `${ids.slice(0, limit).join(", ")} +${ids.length - limit} more`;
 }
 
 function sectionBadge(section: SetupSectionStatus | null) {
@@ -99,6 +107,9 @@ export default function ProjectSetupWorkspace({
   const [bundlesLoading, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
   const [setupProvider, setSetupProvider] = useState<ProjectProvider>("codex");
+  // Set when a profile change re-derived the selection, so the note outlives
+  // the inspection that reported it.
+  const [rediscovered, setRediscovered] = useState(false);
 
   // Autosave bookkeeping: edits mark the draft dirty; one debounced save
   // persists the latest state and refreshes inspection afterwards.
@@ -293,6 +304,27 @@ export default function ProjectSetupWorkspace({
       ...current,
       selected_resource_ids: [...defaults].sort(),
       discovery_signature: inspection.fresh_discovery_signature ?? "",
+      discovery_profile_signature: inspection.fresh_profile_signature ?? "",
+    }));
+  }, [draft, inspection]);
+
+  // Repointing a profile changes which resources exist at all, so the saved
+  // selection describes sources that are no longer in play.  Re-derive the
+  // defaults exactly as first discovery would, and say so, instead of
+  // reporting drift the user just caused on purpose.
+  useEffect(() => {
+    if (!draft || !inspection?.profile_changed || !inspection.inventory) return;
+    if (!inspection.fresh_profile_signature) return;
+    // The edit below lands before the next inspection arrives; matching
+    // signatures mean this already ran for that inspection.
+    if (draft.discovery_profile_signature === inspection.fresh_profile_signature) return;
+    const defaults = recipeSelection(inspection.inventory.recipe);
+    setRediscovered(true);
+    edit((current) => ({
+      ...current,
+      selected_resource_ids: [...defaults].sort(),
+      discovery_signature: inspection.fresh_discovery_signature ?? current.discovery_signature,
+      discovery_profile_signature: inspection.fresh_profile_signature ?? "",
     }));
   }, [draft, inspection]);
 
@@ -300,6 +332,11 @@ export default function ProjectSetupWorkspace({
   const resources = useMemo(() => inventoryResources(inspection?.inventory ?? null), [inspection?.inventory]);
   const selectedResources = useMemo(() => new Set(draft?.selected_resource_ids ?? []), [draft?.selected_resource_ids]);
   const usesExistingRepo = draft?.repository.kind === "existing";
+  // Selected resources discovery no longer offers.  Finalize drops these with
+  // a warning, so name them here while the choice is still editable.
+  const droppedResources = useMemo(() => (
+    inspection?.inventory ? unavailableSelection(resources, selectedResources) : []
+  ), [inspection?.inventory, resources, selectedResources]);
   const exactMatches = useMemo(() => (
     remoteBundles.filter((bundle) => (
       repositoryFingerprintMatches(
@@ -748,17 +785,41 @@ export default function ProjectSetupWorkspace({
               )}
             </div>
           </div>
-          {inspection?.selection_stale && (
-            <div className="sync-callout warning">
+          {/* Both notices concern the saved selection, which an existing remote
+              repo ignores in favour of its own recipe. */}
+          {!usesExistingRepo && rediscovered && (
+            <div className="sync-callout sync-setup-selection-callout">
+              <Icon name="info" size={15} />
+              <span>
+                <strong>Agent profile changed</strong>
+                Resources were re-discovered from the new home, and the selection reset to this profile's defaults.
+              </span>
+            </div>
+          )}
+          {!usesExistingRepo && inspection?.selection_stale && (
+            <div className="sync-callout warning sync-setup-selection-callout">
               <Icon name="alert-triangle" size={15} />
-              <span>Resources changed. Review or accept the current list.</span>
+              <span>
+                <strong>Discovered resources changed</strong>
+                {droppedResources.length > 0
+                  ? <>
+                      {droppedResources.length} selected {droppedResources.length === 1 ? "resource is" : "resources are"} no longer
+                      available and will be left out: <code>{summarizeIds(droppedResources)}</code>
+                    </>
+                  : "Review the list, or accept it to keep syncing what is still there."}
+              </span>
               <button
                 type="button"
                 className="btn"
                 disabled={working || !inspection.fresh_discovery_signature}
+                // "Accept" means the selection now describes what was
+                // discovered: drop what is gone rather than carry IDs that
+                // finalize would silently discard.
                 onClick={() => edit((current) => ({
                   ...current,
+                  selected_resource_ids: [...prunedSelection(resources, new Set(current.selected_resource_ids))].sort(),
                   discovery_signature: inspection.fresh_discovery_signature ?? current.discovery_signature,
+                  discovery_profile_signature: inspection.fresh_profile_signature ?? current.discovery_profile_signature,
                 }))}
               >
                 Accept current list
@@ -785,6 +846,7 @@ export default function ProjectSetupWorkspace({
                   ...current,
                   selected_resource_ids: [...next].sort(),
                   discovery_signature: inspection?.fresh_discovery_signature ?? current.discovery_signature,
+                  discovery_profile_signature: inspection?.fresh_profile_signature ?? current.discovery_profile_signature,
                 };
               })}
             />

@@ -234,12 +234,16 @@ test("manual fork checkpoints expose only verify and cancel continuation actions
     applied_action_ids: [],
     failed_actions: [],
     codex_divergences: [],
-    codex_fork_checkpoint: {
+    codex_fork_checkpoints: [{
       operation_id: "operation-divergence",
+      plan_id: conflictPlan.plan_id,
       action_id: action.action_id,
+      thread_id: action.thread_id,
       source_provider_thread_id: action.divergence!.source_provider_thread_id,
       suggested_fork_name: action.divergence!.desired_fork_name,
-    },
+      status: "awaiting_manual_fork",
+      message: "Create the reviewed fork in Codex, then verify it here",
+    }],
   };
   const html = renderToStaticMarkup(
     <RestorePlanView
@@ -275,6 +279,134 @@ test("manual fork checkpoints expose only verify and cancel continuation actions
   assert.doesNotMatch(html, /Force/);
 });
 
+function secondDivergenceAction(): ConversationPlanAction {
+  const base = divergenceAction();
+  return {
+    ...base,
+    action_id: "conversation-divergence-second",
+    thread_id: "thread-shared-second",
+    source_resource_id: "codex:session:thread-shared-second",
+    divergence: {
+      ...base.divergence!,
+      preserved_thread_id: "thread-preserved-second",
+      source_provider_thread_id: "019fac21-4aba-7fc2-bb7d-df711c950988",
+      pinned_local_title: "Draft the release notes",
+      pinned_cloud_title: "Draft the release notes",
+      desired_fork_name: "Draft the release notes — local before Pull · 2026-07-29 18:42Z",
+      desired_original_name: "Draft the release notes",
+    },
+  };
+}
+
+test("a fork checkpoint queue verifies one fork at a time in the same review", () => {
+  const first = divergenceAction();
+  const second = secondDivergenceAction();
+  const conflictPlan: RestorePlan = {
+    ...restorePlan,
+    actions: [],
+    conversation_actions: [first, second],
+  };
+  const queued: RestoreResult = {
+    success: true,
+    status: "awaiting_manual_fork",
+    message: "Applied 0 restore actions; 2 Codex fork checkpoint(s) need verification",
+    plan_id: conflictPlan.plan_id,
+    applied_action_ids: [],
+    failed_actions: [],
+    codex_divergences: [],
+    codex_fork_checkpoints: [
+      {
+        operation_id: "operation-divergence-first",
+        plan_id: conflictPlan.plan_id,
+        action_id: first.action_id,
+        thread_id: first.thread_id,
+        source_provider_thread_id: first.divergence!.source_provider_thread_id,
+        suggested_fork_name: first.divergence!.desired_fork_name,
+        status: "awaiting_manual_fork",
+        message: "Create the reviewed fork in Codex, then verify it here",
+      },
+      {
+        operation_id: "operation-divergence-second",
+        plan_id: conflictPlan.plan_id,
+        action_id: second.action_id,
+        thread_id: second.thread_id,
+        source_provider_thread_id: second.divergence!.source_provider_thread_id,
+        suggested_fork_name: second.divergence!.desired_fork_name,
+        status: "awaiting_manual_fork",
+        message: "Create the reviewed fork in Codex, then verify it here",
+      },
+    ],
+  };
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      profileLabel="myconf2"
+      plan={conflictPlan}
+      binding={binding}
+      dependencyPlan={null}
+      readiness={null}
+      restoreResult={queued}
+      dependencyResult={null}
+      phase="complete"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="review"
+      onApply={() => undefined}
+      onVerifyCodexFork={() => undefined}
+      onCancelCodexFork={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.match(html, /Fork checkpoint 1 of 2/);
+  assert.match(html, /the rest of this Pull is already applied/);
+  assert.match(html, /019fac21-4aba-7fc2-bb7d-df711c950987/);
+  assert.doesNotMatch(
+    html,
+    /019fac21-4aba-7fc2-bb7d-df711c950988/,
+    "only the first checkpoint of the queue is actionable at a time",
+  );
+  assert.match(html, /Verify fork/);
+  assert.match(html, />Cancel</);
+});
+
+test("multiple conversation conflicts stay distinguishable by title", () => {
+  const conflictPlan: RestorePlan = {
+    ...restorePlan,
+    actions: [],
+    conversation_actions: [divergenceAction(), secondDivergenceAction()],
+  };
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      profileLabel="myconf2"
+      plan={conflictPlan}
+      binding={binding}
+      dependencyPlan={null}
+      readiness={null}
+      restoreResult={null}
+      dependencyResult={null}
+      phase="idle"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="history"
+      onApply={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.match(html, /Conversation conflict — Analyze codebase knowledge graph/);
+  assert.match(html, /Conversation conflict — Draft the release notes/);
+});
+
 test("completed divergence reports both identities, naming outcomes, refresh warning, and optional App restart", () => {
   const action = divergenceAction();
   const conflictPlan: RestorePlan = {
@@ -289,7 +421,7 @@ test("completed divergence reports both identities, naming outcomes, refresh war
     plan_id: conflictPlan.plan_id,
     applied_action_ids: [action.action_id],
     failed_actions: [],
-    codex_fork_checkpoint: null,
+    codex_fork_checkpoints: [],
     codex_app_refresh: {
       operation_id: "operation-divergence",
       app_kind: "codex",
@@ -312,7 +444,7 @@ test("completed divergence reports both identities, naming outcomes, refresh war
       inventory_refresh_status: "failed",
     }],
   };
-  const html = renderToStaticMarkup(
+  const renderCompleted = (restoreResult: RestoreResult) => renderToStaticMarkup(
     <RestorePlanView
       projectName="gam2"
       profileLabel="myconf2"
@@ -320,7 +452,7 @@ test("completed divergence reports both identities, naming outcomes, refresh war
       binding={binding}
       dependencyPlan={null}
       readiness={null}
-      restoreResult={completed}
+      restoreResult={restoreResult}
       dependencyResult={null}
       phase="complete"
       supportLoading={false}
@@ -336,6 +468,7 @@ test("completed divergence reports both identities, naming outcomes, refresh war
       onBack={() => undefined}
     />,
   );
+  const html = renderCompleted(completed);
   assert.match(html, /Both Codex branches preserved/);
   assert.match(html, /019fac21-4aba-7fc2-bb7d-df711c950987/);
   assert.match(html, /019fac73-c1ff-79b3-bb8e-1673ed0d644c/);
@@ -343,6 +476,14 @@ test("completed divergence reports both identities, naming outcomes, refresh war
   assert.match(html, /Codex conversation discovery refresh failed/);
   assert.match(html, /My active Codex chats are complete/);
   assert.match(html, /Restart Codex App/);
+  const deferredHtml = renderCompleted({
+    ...completed,
+    codex_divergences: completed.codex_divergences.map((divergence) => ({
+      ...divergence,
+      inventory_refresh_status: "deferred",
+    })),
+  });
+  assert.match(deferredHtml, /finishing in the background/);
 });
 
 test("a valid Pull plan renders an enabled non-modal Apply workspace while supporting checks fail", async () => {
@@ -1074,7 +1215,7 @@ test("the composite Apply coordinator restores, installs, then verifies one alig
   );
 });
 
-test("a manual fork checkpoint pauses installation and readiness verification", async () => {
+test("a manual fork checkpoint defers only its thread while installation and verification proceed", async () => {
   const action = divergenceAction();
   const conflictPlan: RestorePlan = {
     ...restorePlan,
@@ -1091,19 +1232,23 @@ test("a manual fork checkpoint pauses installation and readiness verification", 
     requires_explicit_approval: true,
   }]);
   const checkpoint: RestoreResult = {
-    success: false,
+    success: true,
     status: "awaiting_manual_fork",
-    message: "Create the fork in Codex.",
+    message: "Applied 0 restore actions; 1 Codex fork checkpoint(s) need verification",
     plan_id: conflictPlan.plan_id,
     applied_action_ids: [],
     failed_actions: [],
     codex_divergences: [],
-    codex_fork_checkpoint: {
+    codex_fork_checkpoints: [{
       operation_id: "operation-divergence",
+      plan_id: conflictPlan.plan_id,
       action_id: action.action_id,
+      thread_id: action.thread_id,
       source_provider_thread_id: action.divergence!.source_provider_thread_id,
       suggested_fork_name: action.divergence!.desired_fork_name,
-    },
+      status: "awaiting_manual_fork",
+      message: "Create the reviewed fork in Codex, then verify it here",
+    }],
   };
   const calls: string[] = [];
   const phases: string[] = [];
@@ -1115,11 +1260,16 @@ test("a manual fork checkpoint pauses installation and readiness verification", 
       },
       applyDependencies: async () => {
         calls.push("install");
-        throw new Error("must not install while waiting for a fork");
+        return {
+          success: true,
+          message: "Applied 1 dependency actions",
+          applied_action_ids: ["install-plugin"],
+          failed_actions: [],
+        };
       },
       getRestoreReadiness: async () => {
         calls.push("verify");
-        throw new Error("must not verify while waiting for a fork");
+        return { bundle_id: binding.bundle_id, state: "needs_setup", issues: [] };
       },
     },
     conflictPlan,
@@ -1136,10 +1286,10 @@ test("a manual fork checkpoint pauses installation and readiness verification", 
     },
     (phase) => phases.push(phase),
   );
-  assert.deepEqual(calls, ["restore"]);
-  assert.deepEqual(phases, ["restoring", "complete"]);
+  assert.deepEqual(calls, ["restore", "install", "verify"]);
+  assert.deepEqual(phases, ["restoring", "installing", "verifying", "complete"]);
   assert.equal(result.restoreResult, checkpoint);
-  assert.equal(result.success, false);
+  assert.equal(result.success, false, "a pending fork checkpoint keeps the composite Pull unsettled");
   assert.equal(result.failedPhase, null);
 });
 

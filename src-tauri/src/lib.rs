@@ -40,6 +40,7 @@ pub fn run() {
             project_sync::commands::save_origin_host_alias,
             project_sync::commands::resolve_origin_host_label,
             project_sync::commands::list_local_projects,
+            project_sync::commands::recover_startup_state,
             project_sync::commands::get_project,
             project_sync::commands::get_local_project,
             project_sync::commands::list_project_repository_kinds,
