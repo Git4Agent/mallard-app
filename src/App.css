@@ -1982,7 +1982,31 @@ summary:focus-visible {
   border-top: 1px solid var(--border);
 }
 
-.icon-spin { animation: icon-spin 0.8s linear infinite; }
+.icon-spin {
+  transform-box: view-box;
+  transform-origin: center;
+  animation: icon-spin 0.8s linear infinite;
+}
+
+.icon-spin-frame {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 16px;
+  transform-origin: 8px 8px;
+}
+
+.icon-spin-frame > svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.icon-spin-frame.spinning {
+  animation: icon-spin 0.8s linear infinite;
+}
 
 @keyframes icon-spin {
   to { transform: rotate(360deg); }
@@ -1999,6 +2023,7 @@ summary:focus-visible {
   }
 
   .icon-spin,
+  .icon-spin-frame.spinning,
   .exclusion-summary::before,
   .exclusion-switch,
   .exclusion-switch::before { transition: none; animation: none; }
@@ -9809,6 +9834,138 @@ div.storage-link-main {
   margin-left: 1px;
 }
 
+.sync-history-debug-menu {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.sync-history-debug-trigger {
+  width: 22px;
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  color: var(--text-3);
+}
+
+.sync-history-debug-trigger[aria-expanded="true"] {
+  background: var(--surface-row-active);
+  color: var(--text-0);
+}
+
+.sync-history-debug-popover {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 6px);
+  right: 0;
+  width: min(380px, calc(100vw - 48px));
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-popover);
+  box-shadow: var(--shadow-popover);
+  color: var(--text-1);
+}
+
+.sync-history-debug-popover > header {
+  display: grid;
+  gap: 2px;
+  padding: 9px 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sync-history-debug-popover > header strong {
+  color: var(--text-0);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.sync-history-debug-popover > header span {
+  color: var(--text-3);
+  font-size: 10px;
+}
+
+.sync-history-debug-values {
+  display: grid;
+  gap: 1px;
+  padding: 4px;
+}
+
+.sync-history-debug-copy {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) 38px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sync-history-debug-copy:hover,
+.sync-history-debug-copy:focus-visible {
+  outline: none;
+  background: var(--surface-row-hover);
+}
+
+.sync-history-debug-copy > span {
+  color: var(--text-3);
+  font-size: 9.5px;
+}
+
+.sync-history-debug-copy code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.sync-history-debug-copy small {
+  justify-self: end;
+  color: var(--text-3);
+  font-size: 9.5px;
+}
+
+.sync-history-debug-copy small.copied {
+  color: var(--green);
+}
+
+.sync-history-debug-popover > footer {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px 5px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-subtle);
+}
+
+.sync-history-debug-status {
+  min-width: 0;
+  flex: 1;
+  color: var(--text-3);
+  font-size: 9.5px;
+}
+
+.sync-history-debug-status.error { color: var(--red); }
+.sync-history-debug-status.success { color: var(--green); }
+
+.sync-history-debug-copy-all {
+  min-height: 24px;
+  padding: 0 7px;
+  color: var(--text-2);
+  font-size: 10px;
+}
+
 .sync-openai-icon { flex: 0 0 auto; }
 
 .sync-history-load-more {
@@ -10436,6 +10593,7 @@ button.sync-project-file-expand { cursor: pointer; }
   .sync-history-commit-heading time { display: none; }
   .sync-history-thread-topline { align-items: flex-start; flex-direction: column; }
   .sync-history-thread-actions { max-width: 100%; flex-wrap: wrap; }
+  .sync-history-debug-popover { right: auto; left: 0; }
   .sync-history-project-context { align-items: stretch; flex-direction: column; }
   .sync-history-context-item { max-width: none; }
   .sync-history-storage-item { margin-left: 0; padding-left: 8px; border-left: 0; }

@@ -690,19 +690,35 @@ fn scan_native_threads(codex_home: &Path) -> Result<BTreeMap<String, NativeCodex
     Ok(threads)
 }
 
+/// Sink for fork sub-phase timings, mirroring the Pull `on_phase` callback.
+/// Diagnostics only: nothing here affects fork correctness, and the no-op
+/// observer (`&mut |_, _| {}`) is always a valid argument.
+pub type ForkPhaseObserver<'a> = &'a mut dyn FnMut(&str, Duration);
+
+/// Time `work`, report it under `label`, and hand back its result.
+fn timed<T>(on_phase: ForkPhaseObserver<'_>, label: &str, work: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let result = work();
+    on_phase(label, started.elapsed());
+    result
+}
+
 pub fn coordinate_native_fork(
     request: &CodexForkExecutionRequest,
     record_attempt: impl FnMut(CodexForkExecutor, CodexForkAttemptStatus) -> Result<(), String>,
+    on_phase: ForkPhaseObserver<'_>,
 ) -> Result<CodexForkCoordinatorOutcome, String> {
-    if let Err(message) = validate_execution_request(request) {
+    if let Err(message) = timed(on_phase, "fork: validate request", || {
+        validate_execution_request(request)
+    }) {
         return Ok(CodexForkCoordinatorOutcome::AbortedBeforeInvocation { message });
     }
     run_executor_sequence(
         &request.available_executors,
         record_attempt,
         |executor| match executor {
-            CodexForkExecutor::AppServerStdio => try_app_server_fork(request),
-            CodexForkExecutor::NativePty => try_native_pty_fork(request),
+            CodexForkExecutor::AppServerStdio => try_app_server_fork(request, on_phase),
+            CodexForkExecutor::NativePty => try_native_pty_fork(request, on_phase),
             CodexForkExecutor::Manual => unreachable!("manual is handled by the coordinator"),
         },
     )
@@ -711,8 +727,13 @@ pub fn coordinate_native_fork(
 /// Validate the reviewed filesystem and executable pins before Mallard
 /// creates staging. The executor performs the only app-server idle/title
 /// check immediately before invoking the fork, avoiding a redundant process.
-pub fn preflight_native_fork(request: &CodexForkExecutionRequest) -> Result<(), String> {
-    validate_execution_request(request)
+pub fn preflight_native_fork(
+    request: &CodexForkExecutionRequest,
+    on_phase: ForkPhaseObserver<'_>,
+) -> Result<(), String> {
+    timed(on_phase, "fork: preflight", || {
+        validate_execution_request(request)
+    })
 }
 
 fn run_executor_sequence(
@@ -767,20 +788,33 @@ fn run_executor_sequence(
 pub fn verify_manual_fork(
     request: &CodexForkExecutionRequest,
     provider_thread_id: Option<&str>,
+    on_phase: ForkPhaseObserver<'_>,
 ) -> Result<VerifiedNativeFork, String> {
-    validate_execution_artifacts_and_source(request)?;
-    let candidate = match provider_thread_id {
-        Some(thread_id) => {
-            let candidate = find_native_thread(&request.codex_home, thread_id)?;
-            if pre_existing_map(&request.pre_existing_children).contains_key(thread_id) {
-                return Err("the selected Codex fork existed before this Pull review".to_string());
+    timed(on_phase, "verify: validate artifacts and source", || {
+        validate_execution_artifacts_and_source(request)
+    })?;
+    let candidate = timed(
+        on_phase,
+        "verify: locate candidate",
+        || match provider_thread_id {
+            Some(thread_id) => {
+                let candidate = find_native_thread(&request.codex_home, thread_id)?;
+                if pre_existing_map(&request.pre_existing_children).contains_key(thread_id) {
+                    return Err(
+                        "the selected Codex fork existed before this Pull review".to_string()
+                    );
+                }
+                Ok(candidate)
             }
-            candidate
-        }
-        None => exact_new_child(request)?,
-    };
-    verify_candidate(request, &candidate)?;
-    verify_source_unchanged(request)?;
+            None => exact_new_child(request),
+        },
+    )?;
+    timed(on_phase, "verify: candidate ancestry and content", || {
+        verify_candidate(request, &candidate)
+    })?;
+    timed(on_phase, "verify: source unchanged", || {
+        verify_source_unchanged(request)
+    })?;
     Ok(VerifiedNativeFork {
         provider_thread_id: candidate.provider_thread_id,
         transcript_path: candidate.transcript_path,
@@ -933,16 +967,23 @@ pub fn complete_codex_post_commit_presentation(
     }
 }
 
-fn try_app_server_fork(request: &CodexForkExecutionRequest) -> Result<ExecutorOutcome, String> {
-    let mut client = match AppServerClient::start(
-        &request.codex_executable,
-        &request.codex_home,
-        &request.project_directory,
-    ) {
+fn try_app_server_fork(
+    request: &CodexForkExecutionRequest,
+    on_phase: ForkPhaseObserver<'_>,
+) -> Result<ExecutorOutcome, String> {
+    let mut client = match timed(on_phase, "app-server: start", || {
+        AppServerClient::start(
+            &request.codex_executable,
+            &request.codex_home,
+            &request.project_directory,
+        )
+    }) {
         Ok(client) => client,
         Err(_) => return Ok(ExecutorOutcome::DefinitiveNoFork),
     };
-    let source = match client.read_thread(&request.source_provider_thread_id) {
+    let source = match timed(on_phase, "app-server: read source thread", || {
+        client.read_thread(&request.source_provider_thread_id)
+    }) {
         Ok(thread) => thread,
         Err(_) => return Ok(ExecutorOutcome::DefinitiveNoFork),
     };
@@ -951,62 +992,88 @@ fn try_app_server_fork(request: &CodexForkExecutionRequest) -> Result<ExecutorOu
     if normalize_title(current_title) != request.pinned_local_title {
         return Err("Codex source title changed after Pull review".to_string());
     }
-    verify_source_unchanged(request)?;
-    let baseline = NativeForkBaseline {
-        threads: scan_native_threads(&request.codex_home)?,
-        rollout_paths: scan_rollout_paths(&request.codex_home)?,
-    };
+    timed(on_phase, "app-server: verify source unchanged", || {
+        verify_source_unchanged(request)
+    })?;
+    let baseline = timed(on_phase, "app-server: scan baseline", || {
+        Ok::<_, String>(NativeForkBaseline {
+            threads: scan_native_threads(&request.codex_home)?,
+            rollout_paths: scan_rollout_paths(&request.codex_home)?,
+        })
+    })?;
+    // Each observation tick rescans the whole profile, so the poll count is
+    // the multiplier on that cost — report it alongside the elapsed time.
+    let mut polls = 0_usize;
+    let observation_started = Instant::now();
     let mut stable_candidate: Option<(String, String, Instant)> = None;
     let fork_outcome = match client.fork_thread_observing(
         &request.source_provider_thread_id,
         &request.project_directory,
-        || match observe_native_pty_fork(request, &baseline)? {
-            NativePtyObservation::NoChild => {
-                if stable_candidate.is_some() {
-                    return Err("Codex app-server fork disappeared during verification".to_string());
-                }
-                Ok(None)
-            }
-            NativePtyObservation::Persisting => {
-                if stable_candidate.is_some() {
-                    return Err("Codex app-server fork changed during verification".to_string());
-                }
-                Ok(None)
-            }
-            NativePtyObservation::Exact {
-                provider_thread_id,
-                transcript_sha256,
-            } => {
-                let now = Instant::now();
-                let observed_at = match &stable_candidate {
-                    Some((existing_id, existing_digest, observed_at))
-                        if existing_id == &provider_thread_id
-                            && existing_digest == &transcript_sha256 =>
-                    {
-                        *observed_at
+        || {
+            polls = polls.saturating_add(1);
+            let observation = observe_native_pty_fork(request, &baseline)?;
+            match observation {
+                NativePtyObservation::NoChild => {
+                    if stable_candidate.is_some() {
+                        return Err(
+                            "Codex app-server fork disappeared during verification".to_string()
+                        );
                     }
-                    Some(_) => {
-                        return Err("Codex app-server fork identity changed during verification"
-                            .to_string())
-                    }
-                    None => {
-                        stable_candidate =
-                            Some((provider_thread_id.clone(), transcript_sha256, now));
-                        now
-                    }
-                };
-                if now.saturating_duration_since(observed_at) < NATIVE_PTY_STABILITY_INTERVAL {
-                    return Ok(None);
+                    Ok(None)
                 }
-                exact_profile_delta_candidate(request, &baseline, Some(&provider_thread_id))
-            }
-            NativePtyObservation::Unsafe => {
-                Err("Codex app-server changed unexpected rollout state".to_string())
+                NativePtyObservation::Persisting => {
+                    if stable_candidate.is_some() {
+                        return Err("Codex app-server fork changed during verification".to_string());
+                    }
+                    Ok(None)
+                }
+                NativePtyObservation::Exact {
+                    provider_thread_id,
+                    transcript_sha256,
+                } => {
+                    let now = Instant::now();
+                    let observed_at = match &stable_candidate {
+                        Some((existing_id, existing_digest, observed_at))
+                            if existing_id == &provider_thread_id
+                                && existing_digest == &transcript_sha256 =>
+                        {
+                            *observed_at
+                        }
+                        Some(_) => {
+                            return Err(
+                                "Codex app-server fork identity changed during verification"
+                                    .to_string(),
+                            )
+                        }
+                        None => {
+                            stable_candidate =
+                                Some((provider_thread_id.clone(), transcript_sha256, now));
+                            now
+                        }
+                    };
+                    if now.saturating_duration_since(observed_at) < NATIVE_PTY_STABILITY_INTERVAL {
+                        return Ok(None);
+                    }
+                    exact_profile_delta_candidate(request, &baseline, Some(&provider_thread_id))
+                }
+                NativePtyObservation::Unsafe => {
+                    Err("Codex app-server changed unexpected rollout state".to_string())
+                }
             }
         },
     ) {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            on_phase(
+                &format!("app-server: fork and observe ({polls} profile rescans)"),
+                observation_started.elapsed(),
+            );
+            outcome
+        }
         Err(error) => {
+            on_phase(
+                &format!("app-server: fork and observe, failed ({polls} profile rescans)"),
+                observation_started.elapsed(),
+            );
             return classify_app_server_result(request, &baseline, error, false);
         }
     };
@@ -1105,26 +1172,38 @@ struct NativePtyDrainReport {
     io_failed: bool,
 }
 
-fn try_native_pty_fork(request: &CodexForkExecutionRequest) -> Result<ExecutorOutcome, String> {
-    validate_execution_request(request)?;
-    let baseline = NativeForkBaseline {
-        threads: scan_native_threads(&request.codex_home)?,
-        rollout_paths: scan_rollout_paths(&request.codex_home)?,
-    };
-    if !probe_source_idle_and_title(request)? {
+fn try_native_pty_fork(
+    request: &CodexForkExecutionRequest,
+    on_phase: ForkPhaseObserver<'_>,
+) -> Result<ExecutorOutcome, String> {
+    timed(on_phase, "pty: validate request", || {
+        validate_execution_request(request)
+    })?;
+    let baseline = timed(on_phase, "pty: scan baseline", || {
+        Ok::<_, String>(NativeForkBaseline {
+            threads: scan_native_threads(&request.codex_home)?,
+            rollout_paths: scan_rollout_paths(&request.codex_home)?,
+        })
+    })?;
+    if !timed(on_phase, "pty: probe source idle and title", || {
+        probe_source_idle_and_title(request)
+    })? {
         return classify_native_pty_without_spawn(
             request,
             &baseline,
             "Codex source status is unavailable for native PTY fork",
         );
     }
-    if !codex_login_status_ready(request)? {
+    if !timed(on_phase, "pty: login status preflight", || {
+        codex_login_status_ready(request)
+    })? {
         return classify_native_pty_without_spawn(
             request,
             &baseline,
             "Codex login status preflight did not complete successfully",
         );
     }
+    let spawn_started = Instant::now();
     let pty_system = native_pty_system();
     let pair = match pty_system.openpty(PtySize {
         rows: 40,
@@ -1174,7 +1253,14 @@ fn try_native_pty_fork(request: &CodexForkExecutionRequest) -> Result<ExecutorOu
         }
     };
     drop(slave);
-    match run_native_pty_session(request, baseline, child, reader, writer, master) {
+    on_phase("pty: spawn codex fork", spawn_started.elapsed());
+    let session_started = Instant::now();
+    let session = run_native_pty_session(request, baseline, child, reader, writer, master);
+    // The session polls a full profile rescan every NATIVE_PTY_POLL_INTERVAL
+    // until it observes a stable child or hits NATIVE_PTY_TIMEOUT, so this
+    // phase alone can account for the whole timeout budget.
+    on_phase("pty: run session and observe", session_started.elapsed());
+    match session {
         Ok(outcome) => Ok(outcome),
         Err(_) => Ok(ExecutorOutcome::Ambiguous(
             "native PTY fork completion could not be verified safely".to_string(),
@@ -2249,7 +2335,7 @@ done
         request.codex_executable_sha256 = sha256_file(&executable, 512 * 1024 * 1024).unwrap();
 
         let started = Instant::now();
-        let outcome = try_app_server_fork(&request).unwrap();
+        let outcome = try_app_server_fork(&request, &mut |_, _| {}).unwrap();
 
         let ExecutorOutcome::Verified(verified) = outcome else {
             panic!("persisted fork was not adopted");
@@ -2353,7 +2439,7 @@ done
         let (request, home) = manual_test_request(temp.path(), source_id);
         write_test_rollout(&home, child_id, Some(source_id), &request.project_directory);
 
-        let verified = verify_manual_fork(&request, Some(child_id)).unwrap();
+        let verified = verify_manual_fork(&request, Some(child_id), &mut |_, _| {}).unwrap();
         assert_eq!(verified.provider_thread_id, child_id);
         assert_eq!(verified.executor, CodexForkExecutor::Manual);
         assert_eq!(verified.name_status, CodexNameStatus::Deferred);
@@ -2370,7 +2456,7 @@ done
         let child_cwd = fs::canonicalize(child_cwd).unwrap();
         write_test_rollout(&home, child_id, Some(source_id), &child_cwd);
 
-        let verified = verify_manual_fork(&request, Some(child_id)).unwrap();
+        let verified = verify_manual_fork(&request, Some(child_id), &mut |_, _| {}).unwrap();
         assert_eq!(verified.provider_thread_id, child_id);
         assert_eq!(find_native_thread(&home, child_id).unwrap().cwd, child_cwd);
     }
@@ -2439,7 +2525,7 @@ done
         write_test_rollout(&home, child_id, Some(source_id), &request.project_directory);
         write_test_rollout(&home, other_id, Some(source_id), &request.project_directory);
 
-        let error = verify_manual_fork(&request, Some(child_id)).unwrap_err();
+        let error = verify_manual_fork(&request, Some(child_id), &mut |_, _| {}).unwrap_err();
         assert!(error.contains("inventory changed"), "{error}");
     }
 

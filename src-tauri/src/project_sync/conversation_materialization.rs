@@ -15,7 +15,8 @@ use super::codex_native_fork::{
     complete_codex_post_commit_presentation, coordinate_native_fork, preflight_native_fork,
     verify_manual_fork, verify_recorded_fork, verify_source_idle_and_title,
     CodexForkCoordinatorOutcome, CodexForkExecutionRequest, CodexNameStatus,
-    CodexPostCommitPresentationRequest, CodexThreadRenameRequest, VerifiedNativeFork,
+    CodexPostCommitPresentationRequest, CodexThreadRenameRequest, ForkPhaseObserver,
+    VerifiedNativeFork,
 };
 use super::conversation_codec::{analyze_codex_transcript, CodecLineage};
 use super::domain::{
@@ -501,6 +502,7 @@ pub(crate) fn apply_codex_divergence_locked(
     repository: &LocalStateRepository,
     request: CodexDivergenceMaterializationRequest,
     failpoints: &mut impl ConversationFailpoints,
+    on_phase: ForkPhaseObserver<'_>,
 ) -> Result<CodexDivergenceApplyOutcome, String> {
     request.operation.validate()?;
     if !matches!(
@@ -515,7 +517,7 @@ pub(crate) fn apply_codex_divergence_locked(
     if request.operation.divergence().is_some_and(|divergence| {
         divergence.resolution == ConversationDivergenceResolution::PreserveLocalWithNativeFork
     }) {
-        preflight_native_fork(&request.fork)?;
+        preflight_native_fork(&request.fork, on_phase)?;
     }
     let (mut operation, payloads) = prepare_operation(
         repository,
@@ -547,7 +549,7 @@ pub(crate) fn apply_codex_divergence_locked(
         .ok_or_else(|| "Codex divergence journal disappeared".to_string())?
         .resolution;
     if resolution == ConversationDivergenceResolution::PreserveLocalWithNativeFork {
-        match continue_fork_attempts(repository, operation, &request.fork)? {
+        match continue_fork_attempts(repository, operation, &request.fork, on_phase)? {
             ForkAttemptContinuation::Verified(updated) => operation = updated,
             ForkAttemptContinuation::AwaitingManual(updated) => {
                 return Ok(CodexDivergenceApplyOutcome::AwaitingManualFork {
@@ -598,6 +600,7 @@ pub(crate) fn resume_codex_divergence_locked(
     provider_thread_id: Option<&str>,
     fork: CodexForkExecutionRequest,
     failpoints: &mut impl ConversationFailpoints,
+    on_phase: ForkPhaseObserver<'_>,
 ) -> Result<CodexDivergenceApplyOutcome, String> {
     let mut operation = load_operation(repository, operation_id)?;
     validate_operation_scope_for_resume(repository, &operation)?;
@@ -611,7 +614,7 @@ pub(crate) fn resume_codex_divergence_locked(
             operation.phase,
             ConversationSyncPhase::ReplacementStaged | ConversationSyncPhase::ForkAttemptPending
         ) {
-            match continue_fork_attempts(repository, operation, &fork)? {
+            match continue_fork_attempts(repository, operation, &fork, on_phase)? {
                 ForkAttemptContinuation::Verified(updated) => operation = updated,
                 ForkAttemptContinuation::AwaitingManual(updated) => {
                     return Ok(CodexDivergenceApplyOutcome::AwaitingManualFork {
@@ -637,7 +640,7 @@ pub(crate) fn resume_codex_divergence_locked(
             let recovered_executor = operation
                 .divergence()
                 .and_then(|divergence| divergence.current_executor);
-            let mut verified = match verify_manual_fork(&fork, provider_thread_id) {
+            let mut verified = match verify_manual_fork(&fork, provider_thread_id, on_phase) {
                 Ok(verified) => verified,
                 Err(error) if operation.phase == ConversationSyncPhase::RecoveryRequired => {
                     return Ok(CodexDivergenceApplyOutcome::RecoveryRequired {
@@ -703,6 +706,7 @@ fn continue_fork_attempts(
     repository: &LocalStateRepository,
     mut operation: ConversationSyncOperation,
     fork: &CodexForkExecutionRequest,
+    on_phase: ForkPhaseObserver<'_>,
 ) -> Result<ForkAttemptContinuation, String> {
     if operation.phase == ConversationSyncPhase::ReplacementStaged {
         operation = set_divergence_attempt_pending(repository, &operation)?;
@@ -712,7 +716,7 @@ fn continue_fork_attempts(
         .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
     if let Some(attempt) = divergence.attempts.last() {
         if attempt.status == CodexForkAttemptStatus::Pending {
-            return match verify_manual_fork(fork, None) {
+            return match verify_manual_fork(fork, None, on_phase) {
                 Ok(mut verified) => {
                     verified.executor = attempt.executor;
                     record_verified_fork(repository, &operation, &verified)
@@ -747,9 +751,11 @@ fn continue_fork_attempts(
     let mut remaining_request = fork.clone();
     remaining_request.available_executors = remaining_executors;
     let operation_id = operation.operation_id.clone();
-    match coordinate_native_fork(&remaining_request, |executor, status| {
-        record_fork_attempt(repository, &operation_id, executor, status)
-    })? {
+    match coordinate_native_fork(
+        &remaining_request,
+        |executor, status| record_fork_attempt(repository, &operation_id, executor, status),
+        on_phase,
+    )? {
         CodexForkCoordinatorOutcome::Verified(verified) => {
             record_verified_fork(repository, &operation, &verified)
                 .map(ForkAttemptContinuation::Verified)
@@ -1435,6 +1441,9 @@ pub fn recover_conversation_materializations(
                     None,
                     fork,
                     &mut no_failpoints,
+                    // Startup recovery has no log scope; timings are only
+                    // reported for user-initiated Pull and verify.
+                    &mut |_, _| {},
                 )? {
                     CodexDivergenceApplyOutcome::Committed(_) => Ok(RecoveryOutcome::Completed),
                     CodexDivergenceApplyOutcome::AwaitingManualFork { .. }
@@ -2122,7 +2131,6 @@ fn verify_provider_payload(
 fn validate_codex_index_fragment(bytes: &[u8], thread_id: &str) -> Result<(), String> {
     let mut row_count = 0_usize;
     let mut destination_count = 0_usize;
-    let mut ids = std::collections::BTreeSet::new();
     for line in bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -2143,12 +2151,11 @@ fn validate_codex_index_fragment(bytes: &[u8], thread_id: &str) -> Result<(), St
         if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
             return Err("Codex index fragment has an invalid thread id".to_string());
         }
-        if !ids.insert(id.to_string()) {
-            return Err("Codex index fragment repeats a thread id".to_string());
-        }
         if id == thread_id {
             // Rows Mallard appends must match the provider schema exactly;
-            // pre-existing rows stay Codex's business.
+            // pre-existing rows stay Codex's business. In particular, the
+            // append-only index can contain multiple rename rows for another
+            // thread ID.
             let named = object
                 .get("thread_name")
                 .and_then(serde_json::Value::as_str)
@@ -2178,6 +2185,32 @@ fn validate_codex_index_fragment(bytes: &[u8], thread_id: &str) -> Result<(), St
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod codex_index_fragment_tests {
+    use super::validate_codex_index_fragment;
+
+    #[test]
+    fn accepts_repeated_pre_existing_ids_in_append_only_index() {
+        let bytes = br#"{"id":"existing","thread_name":"Before"}
+{"id":"existing","thread_name":"After"}
+{"id":"destination","thread_name":"Imported","updated_at":"2026-07-31T22:00:03.000000Z"}
+"#;
+
+        validate_codex_index_fragment(bytes, "destination").unwrap();
+    }
+
+    #[test]
+    fn rejects_more_than_one_destination_row() {
+        let bytes = br#"{"id":"destination","thread_name":"Imported","updated_at":"2026-07-31T22:00:03.000000Z"}
+{"id":"destination","thread_name":"Imported again","updated_at":"2026-07-31T22:01:03.000000Z"}
+"#;
+
+        assert!(validate_codex_index_fragment(bytes, "destination")
+            .unwrap_err()
+            .contains("exactly one destination"));
+    }
 }
 
 fn commit_provider_targets(

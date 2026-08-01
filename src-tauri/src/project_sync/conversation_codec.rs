@@ -42,24 +42,6 @@ pub enum CodecUnknownReason {
     InvalidMessageId,
 }
 
-impl CodecUnknownReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Empty => "empty_transcript",
-            Self::OversizedFile => "oversized_file",
-            Self::TooManyRecords => "too_many_records",
-            Self::MalformedJson => "malformed_json",
-            Self::MissingSessionMetadata => "missing_session_metadata",
-            Self::ConflictingSessionMetadata => "conflicting_session_metadata",
-            Self::UnsupportedCodec => "unsupported_codec",
-            Self::MissingMessageId => "missing_message_id",
-            Self::DuplicateMessageId => "duplicate_message_id",
-            Self::NonLinearParentage => "non_linear_parentage",
-            Self::InvalidMessageId => "invalid_message_id",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodecLineage {
     Complete {

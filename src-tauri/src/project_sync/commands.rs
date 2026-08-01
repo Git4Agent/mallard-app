@@ -31,9 +31,9 @@ use super::conversation_materialization::{
 };
 use super::conversation_sync::{
     build_conversation_plan_action, default_conversation_decision,
-    recover_unique_compatible_binding, validate_conversation_action_pins, BindingRecoveryCandidate,
+    recover_unique_compatible_binding_from_meta, validate_conversation_action_pins,
     BindingRecoveryResult, BindingResolution, ConversationApplyContext, ConversationCapabilities,
-    ConversationDecision, ConversationPlanActionRequest,
+    ConversationDecision, ConversationPlanActionRequest, MetaBindingRecoveryCandidate,
 };
 use super::domain::{
     absent_bundle_head_pin, conversation_resource_id, conversation_transcript_path,
@@ -824,8 +824,8 @@ fn object_cache() -> Arc<ObjectCache> {
 }
 
 /// Codex transcript analyses keyed by transcript sha256. Analysis is pure on
-/// the bytes, so entries never go stale; repeated thread-sync comparisons
-/// stop re-downloading unchanged rollouts entirely.
+/// the bytes, so entries never go stale. Sole caller today: Pull planning's
+/// stored-subagent refusal, which opens only offerable transcripts.
 fn cached_transcript_analysis(
     sha256: &str,
     bytes: &mut dyn BundleBytes,
@@ -1658,12 +1658,73 @@ pub async fn get_project_thread_sync_comparison(
     storage_id: StorageId,
 ) -> Result<ThreadSyncComparison, String> {
     let repository = repository(&app)?;
-    run_blocking(move || {
-        get_project_thread_sync_comparison_with_repository(
+    let (project, storage) =
+        project_storage_log_labels(&repository, &local_project_id, &storage_id);
+    let log = ActivityLogScope::new(ActivityLogType::History)
+        .project(&local_project_id, Some(&project))
+        .storage(&storage_id, Some(&storage));
+    let phase_app = app.clone();
+    let phase_log = log.clone();
+    let total_started = Instant::now();
+    let result = run_blocking(move || {
+        get_project_thread_sync_comparison_with_progress(
             &repository,
             &local_project_id,
             &storage_id,
+            &mut |phase, elapsed| {
+                phase_log.emit(
+                    &phase_app,
+                    "info",
+                    "refresh.phase_timing",
+                    &format!(
+                        "   Thread refresh phase — {phase}: {:.3}s",
+                        elapsed.as_secs_f64()
+                    ),
+                );
+            },
         )
+    })
+    .await;
+    match &result {
+        Ok(comparison) => log.emit(
+            &app,
+            "info",
+            "refresh.timing",
+            &format!(
+                "   Thread refresh total: {:.3}s ({} threads)",
+                total_started.elapsed().as_secs_f64(),
+                comparison.entries.len()
+            ),
+        ),
+        Err(error) => log.emit(
+            &app,
+            "error",
+            "refresh.failed",
+            &format!("✗  Thread refresh failed: {}", error),
+        ),
+    }
+    result
+}
+
+/// Explicit durability audit: downloads and re-verifies every object the
+/// current manifest references. This is the read-back Push deliberately does
+/// not perform — it runs only when invoked.
+#[tauri::command]
+pub async fn verify_bundle_objects(
+    app: tauri::AppHandle,
+    local_project_id: LocalProjectId,
+    storage_id: StorageId,
+) -> Result<super::bundle_engine::BundleObjectAudit, String> {
+    let repository = repository(&app)?;
+    run_blocking(move || {
+        let config = repository.load_config()?;
+        let project = config
+            .project(&local_project_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
+        require_project_link(&config, &project, &storage_id)?;
+        let (_, engine) = storage_engine(&repository, &storage_id)?;
+        engine.verify_objects(&project.bundle_id)
     })
     .await
 }
@@ -1709,6 +1770,7 @@ pub async fn push_bundle(
                 project.bundle_id,
             )
         });
+    let total_started = Instant::now();
     let result = run_blocking(move || {
         worker_log.emit(
             &worker_app,
@@ -1718,7 +1780,7 @@ pub async fn push_bundle(
                 .map(|count| format!("   Scanning {} resources selected for this storage…", count))
                 .unwrap_or_else(|| "   Scanning selected project resources…".to_string()),
         );
-        push_bundle_reviewed_with_repository(
+        push_bundle_reviewed_with_progress(
             &repository,
             &local_project_id,
             &storage_id,
@@ -1741,9 +1803,26 @@ pub async fn push_bundle(
                     emitter.observe(update);
                 }
             },
+            &mut |phase, elapsed| {
+                worker_log.emit(
+                    &worker_app,
+                    "info",
+                    "push.phase_timing",
+                    &format!("   Push phase — {phase}: {:.3}s", elapsed.as_secs_f64()),
+                );
+            },
         )
     })
     .await;
+    log.emit(
+        &app,
+        "info",
+        "push.timing",
+        &format!(
+            "   Push total: {:.3}s",
+            total_started.elapsed().as_secs_f64()
+        ),
+    );
     match &result {
         Ok(operation) => {
             for resource in &operation.results {
@@ -2350,6 +2429,8 @@ pub async fn resume_codex_divergence(
     provider_thread_id: Option<String>,
 ) -> Result<RestoreResult, String> {
     let repository = repository(&app)?;
+    let phase_app = app.clone();
+    let phase_log = ActivityLogScope::new(ActivityLogType::Pull);
     run_blocking(move || {
         let _host_operation = repository.acquire_host_operation()?;
         let operation = repository
@@ -2376,6 +2457,17 @@ pub async fn resume_codex_divergence(
             provider_thread_id.as_deref(),
             fork,
             &mut failpoints,
+            &mut |phase, elapsed| {
+                phase_log.emit(
+                    &phase_app,
+                    "info",
+                    "pull.phase_timing",
+                    &format!(
+                        "   Fork verify phase — {phase}: {:.3}s",
+                        elapsed.as_secs_f64()
+                    ),
+                );
+            },
         )? {
             CodexDivergenceApplyOutcome::Committed(receipt) => {
                 let codex_divergences = codex_divergence_result(action_id.clone(), &receipt)
@@ -4416,37 +4508,32 @@ fn thread_review(
         })
         .collect::<BTreeMap<_, _>>();
 
+    // Every mode — refresh, Push review, Pull planning — classifies every
+    // thread from manifest metadata, the local chain, and the last-synced
+    // pin; classification reads no cloud payloads.  Pull planning alone
+    // opens transcripts afterwards, only for threads it could offer to
+    // materialize (the stored-subagent refusal below); apply-time pin
+    // validation re-proves everything against actual content.
+    // See docs/DESIGN_MANIFEST_ONLY_THREAD_REFRESH.md and
+    // docs/DESIGN_PUSH_PULL_FLOW.md.
     let manifest = snapshot.map(|snapshot| &snapshot.manifest);
-    let mut cloud_analyses = BTreeMap::new();
-    let mut excluded_cloud_thread_ids = BTreeSet::new();
-    for (thread_id, thread) in manifest
+
+    // Ancestor recovery candidates for unbound local conversations.
+    // Ancestry is witnessed by locally recomputed prefix digests against
+    // the manifest pair — content only, no cloud reads.
+    let meta_recovery_candidates = manifest
         .into_iter()
         .flat_map(|manifest| manifest.conversations.iter())
         .filter(|(_, thread)| thread.provider == Provider::Codex)
-    {
-        let analysis = thread
-            .files
-            .iter()
-            .find(|file| file.role == ConversationFileRole::Transcript)
-            .and_then(|file| {
-                manifest
-                    .and_then(|manifest| manifest.files.get(&file.logical_path))
-                    .map(|entry| (file, entry))
-            })
-            .map(|(file, entry)| {
-                cached_transcript_analysis(&entry.sha256, bytes, &file.logical_path)
-            })
-            .transpose()?;
-        if analysis
-            .as_ref()
-            .is_some_and(|analysis| analysis.is_internal_subagent)
-        {
-            excluded_cloud_thread_ids.insert(thread_id.clone());
-            continue;
-        }
-        cloud_analyses.insert(thread_id.clone(), analysis);
-    }
-
+        .map(|(thread_id, thread)| MetaBindingRecoveryCandidate {
+            thread_id: thread_id.clone(),
+            meta: super::domain::RefreshCloudMeta {
+                message_count: thread.message_count,
+                lineage_digest: &thread.lineage_digest,
+                semantic_digest: &thread.semantic_digest,
+            },
+        })
+        .collect::<Vec<_>>();
     let mut local_threads = BTreeMap::<ThreadId, LocalThreadReview>::new();
     for (resource_id_text, conversation) in &captured.conversations {
         if conversation.provider != provider_capture::Provider::Codex {
@@ -4460,16 +4547,11 @@ fn thread_review(
         let (logical_thread_id, binding_resolution) = match &local_binding {
             Some(local_binding) => (local_binding.thread_id.clone(), BindingResolution::Bound),
             None => {
-                let candidates = cloud_analyses
-                    .iter()
-                    .map(|(thread_id, analysis)| BindingRecoveryCandidate {
-                        thread_id: thread_id.clone(),
-                        chain: analysis
-                            .as_ref()
-                            .and_then(|analysis| analysis.lineage.chain()),
-                    })
-                    .collect::<Vec<_>>();
-                match recover_unique_compatible_binding(conversation.lineage.chain(), &candidates) {
+                let recovery = recover_unique_compatible_binding_from_meta(
+                    conversation.lineage.chain(),
+                    &meta_recovery_candidates,
+                );
+                match recovery {
                     BindingRecoveryResult::Unique(thread_id) => {
                         (thread_id, BindingResolution::UniqueCompatibleAncestor)
                     }
@@ -4530,10 +4612,42 @@ fn thread_review(
         .map(|(thread_id, _)| thread_id.clone())
         .chain(bindings_by_thread.keys().cloned())
         .chain(local_threads.keys().cloned())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .filter(|thread_id| !excluded_cloud_thread_ids.contains(thread_id))
         .collect::<BTreeSet<_>>();
+
+    // The only payload reads planning performs: Pull opens the transcripts
+    // of threads it could offer to materialize locally — cloud-present with
+    // no captured local copy — in one batched prefetch, to recognize and
+    // refuse stored internal-subagent rollouts before they reach review.
+    let mut offerable_cloud_transcripts = BTreeMap::new();
+    if build_pull_actions {
+        for (thread_id, thread) in manifest
+            .into_iter()
+            .flat_map(|manifest| manifest.conversations.iter())
+            .filter(|(_, thread)| thread.provider == Provider::Codex)
+            .filter(|(thread_id, _)| !local_threads.contains_key(*thread_id))
+        {
+            let Some(entry) = thread
+                .files
+                .iter()
+                .find(|file| file.role == ConversationFileRole::Transcript)
+                .and_then(|file| {
+                    manifest
+                        .and_then(|manifest| manifest.files.get(&file.logical_path))
+                        .map(|entry| (file.logical_path.clone(), entry.sha256.clone()))
+                })
+            else {
+                continue;
+            };
+            offerable_cloud_transcripts.insert(thread_id.clone(), entry);
+        }
+        let prefetch_paths = offerable_cloud_transcripts
+            .values()
+            .map(|(logical_path, _)| logical_path.clone())
+            .collect::<Vec<_>>();
+        // Best-effort: a failed batch falls back to the per-thread get()
+        // in the loop below, which reports precise per-thread errors.
+        let _ = bytes.prefetch(&prefetch_paths);
+    }
     let index_path = codex_home.join("session_index.jsonl");
     let index_expectation = build_pull_actions
         .then(|| bounded_file_expectation(&index_path))
@@ -4562,28 +4676,45 @@ fn thread_review(
         let local_binding = local
             .and_then(|local| local.binding.as_ref())
             .or_else(|| bindings_by_thread.get(&thread_id));
-        let cloud_analysis = cloud_analyses
-            .get(&thread_id)
-            .and_then(|analysis| analysis.clone());
         let local_chain = local.and_then(|local| local.conversation.lineage.chain());
-        let cloud_chain = cloud_analysis
-            .as_ref()
-            .and_then(|analysis| analysis.lineage.chain());
-        let relation = match (local, cloud_analysis.as_ref()) {
-            (Some(_), Some(_)) if local_chain.is_none() || cloud_chain.is_none() => {
-                ConversationRelation::Unknown
-            }
-            (Some(_), Some(_)) => {
-                super::domain::classify_conversation_relation(local_chain, cloud_chain)
-            }
-            (None, Some(_)) => ConversationRelation::LocalMissing,
-            (Some(_), None) => ConversationRelation::CloudMissing,
-            (None, None) => ConversationRelation::BothMissing,
+        let cloud_descriptor = thread.and_then(|thread| {
+            manifest.and_then(|manifest| manifest.resources.get(&thread.resource_id))
+        });
+        let descriptor = local
+            .and_then(|local| local.descriptor.as_ref())
+            .or(cloud_descriptor);
+        // A bound thread with neither a captured transcript nor a stored
+        // copy cannot be proven anything; hold this one row instead of
+        // failing the whole review.
+        let relation = if descriptor.is_none() {
+            ConversationRelation::Unknown
+        } else {
+            super::domain::classify_thread_refresh(
+                match (local, local_chain) {
+                    (None, _) => super::domain::RefreshLocalState::Missing,
+                    (Some(_), Some(chain)) => super::domain::RefreshLocalState::Chain(chain),
+                    (Some(_), None) => super::domain::RefreshLocalState::Uncapturable,
+                },
+                thread.map(|thread| super::domain::RefreshCloudMeta {
+                    message_count: thread.message_count,
+                    lineage_digest: &thread.lineage_digest,
+                    semantic_digest: &thread.semantic_digest,
+                }),
+                local_binding.and_then(|binding| {
+                    binding
+                        .last_observed_lineage_digest
+                        .as_deref()
+                        .zip(binding.last_observed_semantic_digest.as_deref())
+                }),
+            )
         };
         let local_capturable = local.is_some_and(|local| local.conversation.lineage.is_complete());
-        let cloud_readable = cloud_analysis
-            .as_ref()
-            .is_some_and(|analysis| analysis.lineage.is_complete());
+        // Manifest validation admits only proven-lineage conversations, so
+        // the manifest claim substitutes for payload analysis; apply-time
+        // pin validation re-proves readability from the actual transcript.
+        let cloud_readable = thread.is_some_and(|thread| {
+            matches!(thread.lineage_status, ConversationLineageStatus::Complete)
+        });
         let mut capabilities = ConversationCapabilities {
             binding: if local_binding.is_some() {
                 BindingResolution::Bound
@@ -4604,19 +4735,25 @@ fn thread_review(
         let mut pull =
             default_conversation_decision(ConversationPlanDirection::Pull, relation, capabilities);
 
-        let cloud_descriptor = thread.and_then(|thread| {
-            manifest.and_then(|manifest| manifest.resources.get(&thread.resource_id))
-        });
+        // Stored internal-subagent rollouts are never offered by Pull.  Only
+        // rows Pull would materialize are opened (prefetched above), so
+        // refresh and Push review still list them from metadata alone —
+        // pinned by
+        // previously_stored_subagent_tasks_are_hidden_from_pull_but_not_refresh.
+        if build_pull_actions && pull.action == ConversationPlanActionType::CreateLocal {
+            if let Some((logical_path, sha256)) = offerable_cloud_transcripts.get(&thread_id) {
+                if cached_transcript_analysis(sha256, bytes, logical_path)?.is_internal_subagent {
+                    continue;
+                }
+            }
+        }
+
         let source_resource_id = local
             .map(|local| local.resource_id.clone())
             .or_else(|| thread.map(|thread| thread.resource_id.clone()));
         let provider_thread_id = local
             .and_then(|local| local.conversation.source_thread_id.clone())
             .or_else(|| local_binding.and_then(|binding| binding.provider_thread_id.clone()));
-        let descriptor = local
-            .and_then(|local| local.descriptor.as_ref())
-            .or(cloud_descriptor)
-            .ok_or_else(|| format!("conversation thread '{}' has no descriptor", thread_id))?;
         let origin_label = thread
             .and_then(|thread| {
                 thread
@@ -4637,7 +4774,8 @@ fn thread_review(
             .transpose()?;
         let display_name = thread
             .and_then(|thread| thread.display_title.clone())
-            .unwrap_or_else(|| descriptor.display_name.clone());
+            .or_else(|| descriptor.map(|descriptor| descriptor.display_name.clone()))
+            .unwrap_or_else(|| thread_id.to_string());
 
         // A divergence is only offered when its fork contract can be built
         // right now (captured local branch, resolvable codex binary, idle
@@ -4646,6 +4784,10 @@ fn thread_review(
         let mut divergence_plan = None;
         let mut divergence_unavailable: Option<String> = None;
         if build_pull_actions && pull.action == ConversationPlanActionType::ResolveDivergence {
+            // Pull planning already failed above when the descriptor is
+            // absent, so this lookup cannot miss.
+            let descriptor = descriptor
+                .ok_or_else(|| format!("conversation thread '{}' has no descriptor", thread_id))?;
             match prebuild_thread_divergence_plan(
                 &thread_id,
                 local,
@@ -4673,9 +4815,15 @@ fn thread_review(
                 .clone()
                 .or_else(|| thread.and_then(|thread| thread.source_thread_id.clone()))
                 .unwrap_or_else(|| thread_id.to_string()),
-            resource_id: source_resource_id
+            resource_id: match source_resource_id
                 .clone()
-                .unwrap_or_else(|| descriptor.resource_id.clone()),
+                .or_else(|| descriptor.map(|descriptor| descriptor.resource_id.clone()))
+            {
+                Some(resource_id) => resource_id,
+                // Descriptor-less rows synthesize the canonical id so the
+                // held row still renders.
+                None => conversation_resource_id(Provider::Codex, &thread_id)?,
+            },
             display_name,
             state: relation_sync_state(relation),
             local_present: local.is_some(),
@@ -4719,18 +4867,22 @@ fn thread_review(
                 ))
             })
             .unwrap_or(TargetExpectation::Absent);
+        // Pull actions pin the manifest's digest pair: the same values the
+        // pusher computed from the canonical chain, hash-verified through
+        // head → manifest, and re-proven against the downloaded transcript
+        // by apply-time pin validation.
         let (push_lineage, push_semantic) = local
             .map(|local| codec_digests(&local.conversation.lineage))
-            .or_else(|| {
-                cloud_analysis
-                    .as_ref()
-                    .map(|analysis| codec_digests(&analysis.lineage))
-            })
-            .unwrap_or((None, None));
-        let (pull_lineage, pull_semantic) = cloud_analysis
-            .as_ref()
-            .map(|analysis| codec_digests(&analysis.lineage))
-            .unwrap_or((None, None));
+            .unwrap_or_else(|| {
+                (
+                    thread.map(|thread| thread.lineage_digest.clone()),
+                    thread.map(|thread| thread.semantic_digest.clone()),
+                )
+            });
+        let (pull_lineage, pull_semantic) = (
+            thread.map(|thread| thread.lineage_digest.clone()),
+            thread.map(|thread| thread.semantic_digest.clone()),
+        );
         let required_codec = thread
             .map(|thread| thread.lineage_codec.clone())
             .or_else(|| local.map(|local| local.conversation.lineage_codec.clone()))
@@ -4740,8 +4892,7 @@ fn thread_review(
             let push_action = build_conversation_plan_action(ConversationPlanActionRequest {
                 action_id: ActionId::parse(generated_named_id("action")?)?,
                 direction: ConversationPlanDirection::Push,
-                local_chain,
-                cloud_chain,
+                relation,
                 capabilities,
                 provider: Provider::Codex,
                 host_id: binding.host_id.clone(),
@@ -4841,8 +4992,7 @@ fn thread_review(
             let pull_action = build_conversation_plan_action(ConversationPlanActionRequest {
                 action_id: ActionId::parse(generated_named_id("action")?)?,
                 direction: ConversationPlanDirection::Pull,
-                local_chain,
-                cloud_chain,
+                relation,
                 capabilities,
                 provider: Provider::Codex,
                 host_id: binding.host_id.clone(),
@@ -4955,11 +5105,27 @@ pub(crate) fn thread_entries(
     .entries)
 }
 
+#[cfg(test)]
 fn get_project_thread_sync_comparison_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
 ) -> Result<ThreadSyncComparison, String> {
+    get_project_thread_sync_comparison_with_progress(
+        repository,
+        local_project_id,
+        storage_id,
+        &mut |_, _| {},
+    )
+}
+
+fn get_project_thread_sync_comparison_with_progress(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    on_phase: &mut dyn FnMut(&str, Duration),
+) -> Result<ThreadSyncComparison, String> {
+    let phase_started = Instant::now();
     let config = repository.load_config()?;
     let project = config
         .project(local_project_id)
@@ -4983,10 +5149,15 @@ fn get_project_thread_sync_comparison_with_repository(
             )
         })?;
 
+    on_phase("load config and binding", phase_started.elapsed());
+    let phase_started = Instant::now();
     let capture_request = capture_request_for_binding(repository, &binding)?;
     let discovery = provider_capture::discover_full(&capture_request)?;
+    on_phase("discover local state", phase_started.elapsed());
+    let phase_started = Instant::now();
     let (_, engine) = storage_engine(repository, storage_id)?;
     let current = engine.inspect_optional(&project.bundle_id)?;
+    on_phase("inspect remote head", phase_started.elapsed());
     Ok(build_thread_sync_comparison(
         repository,
         local_project_id,
@@ -4999,6 +5170,7 @@ fn get_project_thread_sync_comparison_with_repository(
         &engine,
         current.as_ref(),
         false,
+        on_phase,
     )?
     .comparison)
 }
@@ -5024,7 +5196,9 @@ fn build_thread_sync_comparison(
     engine: &StorageEngine,
     current: Option<&BundleSnapshot>,
     build_push_actions: bool,
+    on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<ThreadComparisonBuild, String> {
+    let phase_started = Instant::now();
     let discovered = discovery.project_inventory();
     let mut warnings = discovered.warnings.clone();
     let selected_resource_ids = discovered
@@ -5042,6 +5216,8 @@ fn build_thread_sync_comparison(
         &selected_resource_ids,
     )?;
     warnings.extend(captured.warnings.clone());
+    on_phase("capture local conversations", phase_started.elapsed());
+    let phase_started = Instant::now();
 
     let created_at = now_secs();
     let mut review = match current {
@@ -5140,6 +5316,10 @@ fn build_thread_sync_comparison(
     }
     warnings.sort();
     warnings.dedup();
+    on_phase(
+        "classify threads and build actions",
+        phase_started.elapsed(),
+    );
 
     Ok(ThreadComparisonBuild {
         comparison: ThreadSyncComparison {
@@ -5379,11 +5559,22 @@ pub struct PushReviewContext {
     pub prepared_at: u64,
 }
 
+#[cfg(test)]
 fn prepare_push_review_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
 ) -> Result<PushReviewContext, String> {
+    prepare_push_review_with_progress(repository, local_project_id, storage_id, &mut |_, _| {})
+}
+
+fn prepare_push_review_with_progress(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    on_phase: &mut dyn FnMut(&str, Duration),
+) -> Result<PushReviewContext, String> {
+    let phase_started = Instant::now();
     // The review token minted here is what a later push validates, so mint it
     // while pushes, pulls, and repairs are excluded.
     let _host_operation = repository.acquire_host_operation()?;
@@ -5416,12 +5607,17 @@ fn prepare_push_review_with_repository(
             )
         })?;
 
+    on_phase("load config and binding", phase_started.elapsed());
+    let phase_started = Instant::now();
+
     // Project content stays out of the dialog-open walk: eligible (non-Git)
     // projects defer it to the explicit Scan, and Git-managed projects get a
     // storage-side inventory below without any local content walk.
     let eligibility = project_file_sync_eligibility(&binding);
     let capture_request = capture_request_for_binding(repository, &binding)?;
     let discovery = provider_capture::discover_full(&capture_request)?;
+    on_phase("discover local state", phase_started.elapsed());
+    let phase_started = Instant::now();
 
     let inventory = build_resource_inventory(repository, local_project_id, &binding, &discovery)?;
     // Auto-selection may have advanced the stored recipe; the remaining
@@ -5431,6 +5627,9 @@ fn prepare_push_review_with_repository(
         .project(local_project_id)
         .cloned()
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
+
+    on_phase("build resource inventory", phase_started.elapsed());
+    let phase_started = Instant::now();
 
     let remote = storage_engine(repository, storage_id).and_then(|(_, engine)| {
         let current = engine.inspect_optional(&project.bundle_id)?;
@@ -5446,6 +5645,7 @@ fn prepare_push_review_with_repository(
             message: error.clone(),
         },
     };
+    on_phase("inspect remote head", phase_started.elapsed());
 
     let wants_thread_comparison = binding.profile_ids.contains_key(&Provider::Codex);
     // Mirrors the old dialog-open flow: only Git-managed projects surface a
@@ -5461,6 +5661,7 @@ fn prepare_push_review_with_repository(
     match &remote {
         Ok((engine, current)) => {
             if wants_thread_comparison {
+                let phase_started = Instant::now();
                 match build_thread_sync_comparison(
                     repository,
                     local_project_id,
@@ -5473,6 +5674,7 @@ fn prepare_push_review_with_repository(
                     engine,
                     current.as_ref(),
                     true,
+                    &mut *on_phase,
                 ) {
                     Ok(build) => {
                         thread_comparison = Some(build.comparison);
@@ -5520,8 +5722,10 @@ fn prepare_push_review_with_repository(
                     }
                     Err(error) => thread_comparison_error = Some(error),
                 }
+                on_phase("thread comparison and push plan", phase_started.elapsed());
             }
             if wants_project_files {
+                let phase_started = Instant::now();
                 match build_project_files_inventory(
                     local_project_id,
                     storage_id,
@@ -5538,6 +5742,7 @@ fn prepare_push_review_with_repository(
                     Ok(inventory) => project_files = Some(inventory),
                     Err(error) => project_files_error = Some(error),
                 }
+                on_phase("project files inventory", phase_started.elapsed());
             }
         }
         Err(error) => {
@@ -5605,10 +5810,74 @@ pub async fn prepare_push_review(
     storage_id: StorageId,
 ) -> Result<PushReviewContext, String> {
     let repository = repository(&app)?;
-    run_blocking(move || {
-        prepare_push_review_with_repository(&repository, &local_project_id, &storage_id)
+    let (project, storage) =
+        project_storage_log_labels(&repository, &local_project_id, &storage_id);
+    let log = ActivityLogScope::new(ActivityLogType::Push)
+        .project(&local_project_id, Some(&project))
+        .storage(&storage_id, Some(&storage));
+    log.emit(
+        &app,
+        "info",
+        "push.review_started",
+        &format!("↑  Preparing Push review — {} → {}", project, storage),
+    );
+    let phase_app = app.clone();
+    let phase_log = log.clone();
+    let total_started = Instant::now();
+    let result = run_blocking(move || {
+        prepare_push_review_with_progress(
+            &repository,
+            &local_project_id,
+            &storage_id,
+            &mut |phase, elapsed| {
+                phase_log.emit(
+                    &phase_app,
+                    "info",
+                    "push.phase_timing",
+                    &format!(
+                        "   Push review phase — {phase}: {:.3}s",
+                        elapsed.as_secs_f64()
+                    ),
+                );
+            },
+        )
     })
-    .await
+    .await;
+    log.emit(
+        &app,
+        "info",
+        "push.review_timing",
+        &format!(
+            "   Push review total: {:.3}s",
+            total_started.elapsed().as_secs_f64()
+        ),
+    );
+    match &result {
+        Ok(context) => {
+            let threads = context
+                .thread_comparison
+                .as_ref()
+                .map(|comparison| comparison.entries.len())
+                .unwrap_or(0);
+            log.emit(
+                &app,
+                "ok",
+                "push.review_ready",
+                &format!(
+                    "✓  Push review ready — {} threads compared, {} pushable conversations",
+                    threads,
+                    context.conversation_action_ids.len()
+                ),
+            );
+        }
+        Err(error) => log.emit(
+            &app,
+            "error",
+            "push.review_failed",
+            &format!("✗  Push review failed: {}", error),
+        ),
+    }
+    result
 }
 
 #[tauri::command]
@@ -5785,29 +6054,27 @@ fn conversation_thread_from_capture(
 ) -> Result<(ConversationThread, ResourceDescriptor, LogicalPath), String> {
     let resource_id = conversation_resource_id(action.provider, result_thread_id)?;
     let logical_path = conversation_transcript_path(action.provider, result_thread_id)?;
-    let (lineage_status, head_message_id, message_count, lineage_digest, semantic_digest) =
-        match &conversation.lineage {
-            CodecLineage::Complete {
-                chain,
-                lineage_digest,
-                semantic_digest,
-            } => (
-                ConversationLineageStatus::Complete,
-                chain.last().map(|message| message.message_id.clone()),
-                Some(chain.len() as u64),
-                Some(lineage_digest.clone()),
-                Some(semantic_digest.clone()),
-            ),
-            CodecLineage::Unknown { reason } => (
-                ConversationLineageStatus::Unknown {
-                    reason_code: reason.as_str().to_string(),
-                },
-                None,
-                None,
-                None,
-                None,
-            ),
-        };
+    // The decision matrix blocks Push for unproven lineage, so this arm is a
+    // consistency error, not a reachable outcome.  Manifest entries always
+    // carry the count and digest pair; refresh classifies from them alone.
+    let CodecLineage::Complete {
+        chain,
+        lineage_digest,
+        semantic_digest,
+    } = &conversation.lineage
+    else {
+        return Err(format!(
+            "conversation '{}' has unproven lineage and cannot be published",
+            result_thread_id
+        ));
+    };
+    let (lineage_status, head_message_id, message_count, lineage_digest, semantic_digest) = (
+        ConversationLineageStatus::Complete,
+        chain.last().map(|message| message.message_id.clone()),
+        chain.len() as u64,
+        lineage_digest.clone(),
+        semantic_digest.clone(),
+    );
     let forked_from = match action.action {
         ConversationPlanActionType::CreateCloud => {
             local_binding.and_then(|binding| binding.forked_from.clone())
@@ -6193,10 +6460,19 @@ fn snapshot_contains_actions(
             .conversations
             .get(result_thread_id)
             .is_some_and(|thread| {
-                thread.lineage_digest == action.pinned_lineage_digest
-                    && thread.semantic_digest == action.pinned_semantic_digest
+                Some(thread.lineage_digest.as_str()) == action.pinned_lineage_digest.as_deref()
+                    && Some(thread.semantic_digest.as_str())
+                        == action.pinned_semantic_digest.as_deref()
             })
     })
+}
+
+struct ReviewedPublishOutcome {
+    published: bool,
+    snapshot: BundleSnapshot,
+    /// Reviewed actions whose apply-time re-proof failed; each kept its
+    /// previous cloud state and reports its own reason.
+    stale_conversations: Vec<(ConversationPlanAction, String)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6213,7 +6489,9 @@ fn publish_reviewed(
     approved_conversation_action_ids: &[ActionId],
     updated_at: u64,
     on_progress: &mut dyn FnMut(FetchProgress),
-) -> Result<(bool, BundleSnapshot), String> {
+    on_phase: &mut dyn FnMut(&str, Duration),
+) -> Result<ReviewedPublishOutcome, String> {
+    let phase_started = Instant::now();
     let previous = observed.as_ref().map(|(snapshot, _)| snapshot);
     let expected_head = observed
         .as_ref()
@@ -6255,10 +6533,16 @@ fn publish_reviewed(
     let plan_id = conversation_push_plan_id
         .cloned()
         .unwrap_or(PlanId::parse(generated_named_id("plan")?)?);
+    on_phase("load reviewed conversation plan", phase_started.elapsed());
+    let phase_started = Instant::now();
     let document = repository.load_conversation_bindings()?;
     let machine = repository.load_bindings()?;
     let identity = repository.load_or_create_host_identity()?;
-    for action in &selected_actions {
+    // Apply-time re-proof, one item at a time: an action whose local
+    // conversation or shared state moved after review fails closed by
+    // itself; the other reviewed actions still publish, and every skipped
+    // thread keeps its previous cloud state in the manifest.
+    let revalidate = |action: &ConversationPlanAction| -> Result<(), String> {
         let (conversation, transcript) = captured_conversation_for_action(captured, action)?;
         if action
             .source_resource_id
@@ -6311,8 +6595,19 @@ fn publish_reviewed(
                 "conversation Push action '{}' is stale at {:?}",
                 action.action_id, pin
             )
-        })?;
+        })
+    };
+    let mut stale_conversations: Vec<(ConversationPlanAction, String)> = Vec::new();
+    let mut validated_actions = Vec::with_capacity(selected_actions.len());
+    for action in selected_actions {
+        match revalidate(&action) {
+            Ok(()) => validated_actions.push(action),
+            Err(message) => stale_conversations.push((action, message)),
+        }
     }
+    let selected_actions = validated_actions;
+    on_phase("revalidate reviewed conversations", phase_started.elapsed());
+    let phase_started = Instant::now();
     let (request, operations) = build_publish_request(
         repository,
         &plan_id,
@@ -6326,12 +6621,18 @@ fn publish_reviewed(
         &selected_actions,
         updated_at,
     )?;
+    on_phase("build publish request", phase_started.elapsed());
+    let phase_started = Instant::now();
     if operations.is_empty() {
-        let outcome = engine.publish_with_progress(request, on_progress)?;
+        let outcome = engine.publish_with_progress(request, on_progress, on_phase)?;
         if let Some(plan_id) = conversation_push_plan_id {
             let _ = repository.discard_conversation_push_plan(plan_id);
         }
-        return Ok((outcome.published, outcome.snapshot));
+        return Ok(ReviewedPublishOutcome {
+            published: outcome.published,
+            snapshot: outcome.snapshot,
+            stale_conversations,
+        });
     }
     let published = std::cell::Cell::new(false);
     let mut failpoints = NoConversationFailpoints;
@@ -6339,7 +6640,7 @@ fn publish_reviewed(
         repository,
         operations,
         || {
-            let outcome = engine.publish_with_progress(request, on_progress)?;
+            let outcome = engine.publish_with_progress(request, on_progress, &mut *on_phase)?;
             published.set(outcome.published);
             Ok(ConversationCloudPublication {
                 generation: outcome.snapshot.head.generation,
@@ -6365,6 +6666,11 @@ fn publish_reviewed(
         },
         &mut failpoints,
     )?;
+    on_phase(
+        "publish and journal conversation receipts",
+        phase_started.elapsed(),
+    );
+    let phase_started = Instant::now();
     let snapshot = engine.inspect(&project.bundle_id)?;
     if !snapshot_contains_actions(&snapshot, &selected_actions) {
         return Err(
@@ -6374,9 +6680,16 @@ fn publish_reviewed(
     if let Some(plan_id) = conversation_push_plan_id {
         let _ = repository.discard_conversation_push_plan(plan_id);
     }
-    Ok((published.get(), snapshot))
+    on_phase("confirm published head", phase_started.elapsed());
+    Ok(ReviewedPublishOutcome {
+        published: published.get(),
+        snapshot,
+        stale_conversations,
+    })
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn push_bundle_reviewed_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
@@ -6387,6 +6700,32 @@ fn push_bundle_reviewed_with_repository(
     approved_conversation_action_ids: Vec<ActionId>,
     on_progress: &mut dyn FnMut(FetchProgress),
 ) -> Result<ProjectOperationResult, String> {
+    push_bundle_reviewed_with_progress(
+        repository,
+        local_project_id,
+        storage_id,
+        requested_recipe,
+        project_content_review,
+        conversation_push_plan_id,
+        approved_conversation_action_ids,
+        on_progress,
+        &mut |_, _| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_bundle_reviewed_with_progress(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    requested_recipe: Option<BundleRecipe>,
+    project_content_review: ProjectContentPushReview,
+    conversation_push_plan_id: Option<PlanId>,
+    approved_conversation_action_ids: Vec<ActionId>,
+    on_progress: &mut dyn FnMut(FetchProgress),
+    on_phase: &mut dyn FnMut(&str, Duration),
+) -> Result<ProjectOperationResult, String> {
+    let phase_started = Instant::now();
     let _host_operation = repository.acquire_host_operation()?;
     let config = repository.load_config()?;
     let mut project = config
@@ -6413,6 +6752,8 @@ fn push_bundle_reviewed_with_repository(
             )
         })?;
     require_codex_conversation_paths_ready(repository, &binding.local_project_id)?;
+    on_phase("load config and binding", phase_started.elapsed());
+    let phase_started = Instant::now();
     // One provider walk feeds selection persistence, the review-token
     // freshness check, and the byte capture below.
     let wants_project_content = project_content_review.review_token.is_some();
@@ -6441,6 +6782,8 @@ fn push_bundle_reviewed_with_repository(
             candidate.display_name
         ));
     }
+    on_phase("discover local state", phase_started.elapsed());
+    let phase_started = Instant::now();
     project = persist_auto_selected_conversations(
         repository,
         &project.local_project_id,
@@ -6507,6 +6850,8 @@ fn push_bundle_reviewed_with_repository(
             .cloned()
             .collect::<BTreeSet<_>>()
         || !project_content_review.removal_ids.is_empty();
+    on_phase("reconcile selection and recipe", phase_started.elapsed());
+    let phase_started = Instant::now();
     let (_, engine) = storage_engine(repository, storage_id)?;
     let observed = engine.inspect_optional_with_token(&project.bundle_id)?;
     let has_stored_codex_conversation = observed.as_ref().is_some_and(|(snapshot, _)| {
@@ -6524,6 +6869,8 @@ fn push_bundle_reviewed_with_repository(
                 .to_string(),
         );
     }
+    on_phase("inspect remote head", phase_started.elapsed());
+    let mut phase_started = Instant::now();
     let mut reviewed_inventory = None;
     if let Some(review_token) = project_content_review.review_token.as_deref() {
         // The freshness check derives from the same walk instant and the same
@@ -6626,6 +6973,8 @@ fn push_bundle_reviewed_with_repository(
             }
         }
         reviewed_inventory = Some(inventory);
+        on_phase("verify reviewed project files", phase_started.elapsed());
+        phase_started = Instant::now();
     } else if generic_selection_changed {
         return Err(
             "Scan and review Project files before changing stored project content".to_string(),
@@ -6643,6 +6992,7 @@ fn push_bundle_reviewed_with_repository(
         &discovery,
         &push_recipe,
     )?;
+    on_phase("capture selected payloads", phase_started.elapsed());
     let destination_status = classify_push_destination(
         observed.as_ref().map(|(snapshot, _)| &snapshot.head),
         project.recipe_bases.get(storage_id),
@@ -6652,7 +7002,7 @@ fn push_bundle_reviewed_with_repository(
         return Err(error);
     }
     let pushed_at = now_secs();
-    let (was_published, published_snapshot) = publish_reviewed(
+    let publish_outcome = publish_reviewed(
         repository,
         &engine,
         storage_id,
@@ -6665,7 +7015,11 @@ fn push_bundle_reviewed_with_repository(
         &approved_conversation_action_ids,
         pushed_at,
         on_progress,
+        &mut *on_phase,
     )?;
+    let was_published = publish_outcome.published;
+    let published_snapshot = publish_outcome.snapshot;
+    let phase_started = Instant::now();
     let generation = published_snapshot.head.generation;
     let commit_id = published_snapshot.head.commit_id.clone();
     let manifest_sha256 = published_snapshot.head.manifest_sha256.clone();
@@ -6755,8 +7109,9 @@ fn push_bundle_reviewed_with_repository(
         current.updated_at = pushed_at;
         Ok(())
     })?;
+    on_phase("persist push receipts and config", phase_started.elapsed());
     let state = if was_published { "synced" } else { "unchanged" };
-    let results = published_snapshot
+    let mut results = published_snapshot
         .manifest
         .resources
         .keys()
@@ -6767,15 +7122,42 @@ fn push_bundle_reviewed_with_repository(
             message: None,
         })
         .collect::<Vec<_>>();
+    let resources_changed = Some(if was_published { results.len() } else { 0 });
+    for (action, message) in &publish_outcome.stale_conversations {
+        results.push(OperationResourceResult {
+            resource_id: action
+                .source_resource_id
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(|| conversation_resource_id(action.provider, &action.thread_id))?,
+            state: "failed".to_string(),
+            message: Some(message.clone()),
+        });
+    }
+    let skipped = publish_outcome.stale_conversations.len();
+    let skipped_note = match skipped {
+        0 => String::new(),
+        1 => "; 1 reviewed conversation changed during review, kept its stored state, and needs \
+              a fresh Push review"
+            .to_string(),
+        _ => format!(
+            "; {} reviewed conversations changed during review, kept their stored state, and \
+             need a fresh Push review",
+            skipped
+        ),
+    };
     Ok(ProjectOperationResult {
         success: true,
         message: if was_published {
-            format!("Published generation {}", generation)
+            format!("Published generation {}{}", generation, skipped_note)
         } else {
-            format!("Already up to date — generation {}", generation)
+            format!(
+                "Already up to date — generation {}{}",
+                generation, skipped_note
+            )
         },
         operation_id: Some(commit_id),
-        resources_changed: Some(if was_published { results.len() } else { 0 }),
+        resources_changed,
         generation: Some(generation),
         results,
     })
@@ -6842,6 +7224,8 @@ fn plan_bundle_restore_with_progress(
         }),
         None => None,
     };
+    on_phase("inspect remote head and manifest", phase_started.elapsed());
+    let phase_started = Instant::now();
     let identity = repository.load_or_create_host_identity()?;
     if identity.host_id != binding.host_id {
         return Err("host identity changed while preparing the Pull review".to_string());
@@ -6852,14 +7236,14 @@ fn plan_bundle_restore_with_progress(
         now_secs(),
         identity.revision,
     )?;
-    on_phase("load bundle and validate inputs", phase_started.elapsed());
-    let phase_started = Instant::now();
+    on_phase("build file restore plan", phase_started.elapsed());
     if snapshot
         .manifest
         .conversations
         .values()
         .any(|thread| thread.provider == Provider::Codex)
     {
+        let phase_started = Instant::now();
         let mut byte_source =
             engine.byte_source(&snapshot, Some(object_cache()), Some(on_progress));
         let capture_request = capture_request_for_binding(repository, &binding)?;
@@ -6879,6 +7263,11 @@ fn plan_bundle_restore_with_progress(
             &discovery,
             &selected_resource_ids,
         )?;
+        on_phase(
+            "discover and capture local conversations",
+            phase_started.elapsed(),
+        );
+        let phase_started = Instant::now();
         let review = thread_review(
             repository,
             Some(&snapshot),
@@ -6891,8 +7280,8 @@ fn plan_bundle_restore_with_progress(
             true,
         )?;
         plan.conversation_actions = review.pull_actions;
+        on_phase("classify and build pull actions", phase_started.elapsed());
     }
-    on_phase("review Codex conversations", phase_started.elapsed());
     let phase_started = Instant::now();
     plan.actions.retain(|action| {
         if !is_conversation_keep_local_action(action, &snapshot.manifest) {
@@ -7039,6 +7428,26 @@ fn prepare_pull_conversation_actions(
     let document = repository.load_conversation_bindings()?;
     let machine = repository.load_bindings()?;
     let identity = repository.load_or_create_host_identity()?;
+    // One batched prefetch covers every approved transcript; the per-action
+    // get() below is then a verified cache hit. Best-effort: a failed batch
+    // falls back to per-action gets, which fail one item, not the pass.
+    let transcript_paths = actions
+        .iter()
+        .filter_map(|selected| {
+            snapshot
+                .manifest
+                .conversations
+                .get(&selected.action.thread_id)
+                .and_then(|thread| {
+                    thread
+                        .files
+                        .iter()
+                        .find(|file| file.role == ConversationFileRole::Transcript)
+                })
+                .map(|file| file.logical_path.clone())
+        })
+        .collect::<Vec<_>>();
+    let _ = bytes.prefetch(&transcript_paths);
     let mut prepared = Vec::with_capacity(actions.len());
     let mut failures = Vec::new();
     let prepare_one = |selected: &SelectedPullConversation,
@@ -7252,6 +7661,7 @@ fn apply_prepared_pull_conversation(
     binding: &ProjectBinding,
     prepared: PreparedPullConversation,
     applied_at: u64,
+    on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<PreparedPullConversationOutcome, String> {
     let action = prepared.action;
     let action_id = action.action_id.clone();
@@ -7439,6 +7849,7 @@ fn apply_prepared_pull_conversation(
                 fork,
             },
             &mut failpoints,
+            on_phase,
         )? {
             CodexDivergenceApplyOutcome::Committed(conversation) => conversation,
             CodexDivergenceApplyOutcome::AwaitingManualFork { operation_id } => {
@@ -7601,7 +8012,9 @@ fn apply_bundle_restore_with_progress(
             .unwrap_or_else(|| action.thread_id.to_string());
         let phase_label = format!("apply conversation {resource}");
         let phase_started = Instant::now();
-        match apply_prepared_pull_conversation(repository, &plan, &binding, prepared, applied_at) {
+        match apply_prepared_pull_conversation(
+            repository, &plan, &binding, prepared, applied_at, on_phase,
+        ) {
             Ok(PreparedPullConversationOutcome::Applied(receipt)) => {
                 conversation_receipts.push(receipt);
             }
@@ -14552,8 +14965,15 @@ mod tests {
             .contains_key(&child_resource));
     }
 
+    /// Push excludes subagent rollouts at capture, so post-cutover manifests
+    /// cannot legitimately contain one.  This fixture writes one directly
+    /// into storage to pin the split introduced by manifest-only refresh:
+    /// the comparison trusts the manifest and surfaces the stored thread
+    /// without opening it, while Pull planning — which does read payloads —
+    /// still refuses to offer it.  If refresh ever starts hiding the row
+    /// again, payload reads have crept back into the manifest-only path.
     #[test]
-    fn previously_stored_subagent_tasks_are_hidden_from_comparison_and_pull() {
+    fn previously_stored_subagent_tasks_are_hidden_from_pull_but_not_refresh() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("subagent-pull-store").unwrap();
@@ -14615,14 +15035,16 @@ mod tests {
             &storage_id,
         )
         .unwrap();
-        assert_eq!(comparison.entries.len(), 1);
-        assert_eq!(comparison.entries[0].thread_id.as_str(), parent_provider_id);
+        assert_eq!(comparison.entries.len(), 2);
+        let mut cloud_ids = comparison
+            .entries
+            .iter()
+            .map(|entry| entry.cloud_thread_id.as_ref().map(ThreadId::as_str))
+            .collect::<Vec<_>>();
+        cloud_ids.sort_unstable();
         assert_eq!(
-            comparison.entries[0]
-                .cloud_thread_id
-                .as_ref()
-                .map(ThreadId::as_str),
-            Some("stored-parent")
+            cloud_ids,
+            vec![Some("stored-parent"), Some("stored-subagent")]
         );
 
         let restore =
@@ -14634,6 +15056,258 @@ mod tests {
             restore.conversation_actions[0].thread_id.as_str(),
             "stored-parent"
         );
+    }
+
+    /// Counts payload traffic through the planning byte source. Pinned by
+    /// docs/DESIGN_PUSH_PULL_FLOW.md: refresh and Push review read no cloud
+    /// payloads at all; Pull planning opens exactly the transcripts it could
+    /// offer to materialize, through one batched prefetch.
+    struct CountingBytes<'a> {
+        inner: &'a mut dyn BundleBytes,
+        gets: Vec<LogicalPath>,
+        prefetches: Vec<Vec<LogicalPath>>,
+    }
+
+    impl BundleBytes for CountingBytes<'_> {
+        fn get(&mut self, logical_path: &LogicalPath) -> Result<&[u8], String> {
+            self.gets.push(logical_path.clone());
+            self.inner.get(logical_path)
+        }
+
+        fn prefetch(&mut self, paths: &[LogicalPath]) -> Result<(), String> {
+            self.prefetches.push(paths.to_vec());
+            self.inner.prefetch(paths)
+        }
+    }
+
+    #[test]
+    fn planning_reads_cloud_payloads_only_for_offerable_pull_threads() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("planning-cost-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        let binding =
+            bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let (origin_host_token, origin_replica_token) = repo
+            .derive_origin_tokens(&project.bundle_id, &binding.replica_id)
+            .unwrap();
+        let origin = PortableOrigin {
+            origin_host_token,
+            origin_replica_token,
+            shared_label: None,
+        };
+        // Two stored threads with no local copy — the offerable set — and
+        // one local-only session, which needs no cloud bytes in any mode.
+        let stored_a = ThreadSpec::new(
+            "stored-a",
+            "019f7600-0000-7000-8000-0000000000a0",
+            command_test_transcript(
+                "019f7600-0000-7000-8000-0000000000a0",
+                &project_root,
+                &[("message-a", "user", "stored a")],
+            ),
+            origin.clone(),
+            10,
+        );
+        let stored_b = ThreadSpec::new(
+            "stored-b",
+            "019f7600-0000-7000-8000-0000000000b0",
+            command_test_transcript(
+                "019f7600-0000-7000-8000-0000000000b0",
+                &project_root,
+                &[("message-b", "user", "stored b")],
+            ),
+            origin.clone(),
+            11,
+        );
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        engine
+            .publish(publish_request(
+                project.bundle_id.clone(),
+                &[stored_a, stored_b],
+                origin,
+                11,
+                None,
+                PublishExpectation::Absent,
+            ))
+            .unwrap();
+        write_codex_session(
+            &codex_home,
+            "019f7600-0000-7000-8000-0000000000c0",
+            &project_root,
+        );
+
+        let snapshot = engine.inspect(&project.bundle_id).unwrap();
+        let captured = capture_local_codex_conversations(&repo, &binding).unwrap();
+        let now = now_secs();
+        let offerable = snapshot
+            .manifest
+            .conversations
+            .values()
+            .flat_map(|thread| thread.files.iter())
+            .filter(|file| file.role == ConversationFileRole::Transcript)
+            .map(|file| file.logical_path.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(offerable.len(), 2);
+
+        for (build_push, build_pull) in [(false, false), (true, false)] {
+            let mut inner = engine.byte_source(&snapshot, None, None);
+            let mut bytes = CountingBytes {
+                inner: &mut inner,
+                gets: Vec::new(),
+                prefetches: Vec::new(),
+            };
+            thread_review(
+                &repo,
+                Some(&snapshot),
+                &mut bytes,
+                &captured,
+                &binding,
+                now,
+                now.saturating_add(PLAN_LIFETIME_SECS),
+                build_push,
+                build_pull,
+            )
+            .unwrap();
+            assert!(
+                bytes.gets.is_empty() && bytes.prefetches.is_empty(),
+                "refresh and Push review read no cloud payloads (push={build_push}): \
+                 gets={:?} prefetches={:?}",
+                bytes.gets,
+                bytes.prefetches,
+            );
+        }
+
+        let mut inner = engine.byte_source(&snapshot, None, None);
+        let mut bytes = CountingBytes {
+            inner: &mut inner,
+            gets: Vec::new(),
+            prefetches: Vec::new(),
+        };
+        let review = thread_review(
+            &repo,
+            Some(&snapshot),
+            &mut bytes,
+            &captured,
+            &binding,
+            now,
+            now.saturating_add(PLAN_LIFETIME_SECS),
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(review.pull_actions.len(), 3);
+        assert_eq!(
+            bytes.prefetches.len(),
+            1,
+            "one batched prefetch covers the offerable set"
+        );
+        assert_eq!(
+            bytes.prefetches[0].iter().cloned().collect::<BTreeSet<_>>(),
+            offerable
+        );
+        assert!(
+            bytes
+                .gets
+                .iter()
+                .all(|logical_path| offerable.contains(logical_path)),
+            "pull planning opens only offerable transcripts: {:?}",
+            bytes.gets,
+        );
+    }
+
+    /// The apply-time re-proof is per item: a conversation that changes
+    /// while the review dialog is open fails closed by itself and keeps its
+    /// stored state, while the other reviewed conversations publish. Pinned
+    /// by docs/DESIGN_PUSH_PULL_FLOW.md (Push step 5).
+    #[test]
+    fn push_publishes_surviving_items_when_one_changes_after_review() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("review-gap-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let stable_id = "019f7601-0000-7000-8000-0000000000aa";
+        let drifting_id = "019f7601-0000-7000-8000-0000000000bb";
+        write_codex_session(&codex_home, stable_id, &project_root);
+        write_codex_session(&codex_home, drifting_id, &project_root);
+
+        let review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let plan_id = review.conversation_push_plan_id.clone().unwrap();
+        let approved = review
+            .conversation_action_ids
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(approved.len(), 2);
+
+        // The user keeps chatting in one thread while the review dialog is
+        // open: the rollout stays valid but its bytes and chain move.
+        std::fs::write(
+            codex_home
+                .join("sessions/2026/07/22")
+                .join(format!("rollout-{}.jsonl", drifting_id)),
+            command_test_transcript(
+                drifting_id,
+                &project_root,
+                &[
+                    ("message-test", "user", "hello"),
+                    ("message-drift", "assistant", "kept chatting"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let pushed = push_bundle_reviewed_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            None,
+            empty_project_content_review(),
+            Some(plan_id),
+            approved,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(pushed.success, "{}", pushed.message);
+        assert!(
+            pushed.message.contains("changed during review"),
+            "{}",
+            pushed.message
+        );
+        let failed = pushed
+            .results
+            .iter()
+            .filter(|result| result.state == "failed")
+            .collect::<Vec<_>>();
+        assert_eq!(failed.len(), 1, "exactly the drifted item fails closed");
+        assert!(
+            failed[0]
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("is stale at"),
+            "{:?}",
+            failed[0].message
+        );
+
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let published = engine.inspect(&project.bundle_id).unwrap();
+        assert_eq!(
+            published.manifest.conversations.len(),
+            1,
+            "the drifted thread kept its (absent) stored state"
+        );
+        let stored = published.manifest.conversations.values().next().unwrap();
+        assert_eq!(stored.source_thread_id.as_deref(), Some(stable_id));
     }
 
     #[test]
@@ -14671,6 +15345,109 @@ mod tests {
             context.destination_status,
             PushDestinationStatus::Unavailable { .. }
         ));
+    }
+
+    /// A bound thread that is neither capturable locally nor present in
+    /// storage — for example a fork Codex preserved into a different
+    /// workspace — holds its own row instead of failing the whole refresh.
+    #[test]
+    fn refresh_holds_unresolvable_bound_threads_instead_of_failing() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("phantom-binding-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        let binding =
+            bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let (origin_host_token, origin_replica_token) = repo
+            .derive_origin_tokens(&project.bundle_id, &binding.replica_id)
+            .unwrap();
+        let origin = PortableOrigin {
+            origin_host_token,
+            origin_replica_token,
+            shared_label: None,
+        };
+        let stored_provider_id = "019f7500-0000-7000-8000-0000000000a0";
+        let stored = ThreadSpec::new(
+            "stored-thread",
+            stored_provider_id,
+            command_test_transcript(
+                stored_provider_id,
+                &project_root,
+                &[("message-stored", "user", "stored")],
+            ),
+            origin.clone(),
+            10,
+        );
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        engine
+            .publish(publish_request(
+                project.bundle_id.clone(),
+                &[stored],
+                origin,
+                10,
+                None,
+                PublishExpectation::Absent,
+            ))
+            .unwrap();
+
+        // The phantom: bound on this replica, no rollout under the Codex
+        // home, never pushed.
+        let profile_id = binding.profile_ids[&Provider::Codex].clone();
+        repo.mutate_conversation_bindings(|document| {
+            document.bindings.push(LocalConversationBinding {
+                host_id: binding.host_id.clone(),
+                replica_id: binding.replica_id.clone(),
+                local_project_id: binding.local_project_id.clone(),
+                provider_profile_id: profile_id,
+                thread_id: ThreadId::parse("thread-phantom").unwrap(),
+                forked_from: None,
+                provider_thread_id: Some("019f7500-0000-7000-8000-0000000000a1".to_string()),
+                materialization_state: ConversationMaterializationState::Resumable,
+                last_observed_file_sha256: Some("a".repeat(64)),
+                last_observed_head_message_id: None,
+                last_observed_lineage_digest: Some("b".repeat(64)),
+                last_observed_semantic_digest: Some("c".repeat(64)),
+                source_generation: None,
+                source_manifest_sha256: None,
+                revision: 0,
+                created_at: 11,
+                updated_at: 11,
+            });
+            Ok(())
+        })
+        .unwrap();
+
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(comparison.entries.len(), 2);
+        let phantom = comparison
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.cloud_thread_id.as_ref().map(ThreadId::as_str) == Some("thread-phantom")
+            })
+            .expect("phantom binding surfaces as its own row");
+        assert_eq!(phantom.relation, Some(ConversationRelation::Unknown));
+        assert!(!phantom.push_decision.selectable);
+        assert!(!phantom.pull_decision.selectable);
+        let stored_entry = comparison
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.cloud_thread_id.as_ref().map(ThreadId::as_str) == Some("stored-thread")
+            })
+            .expect("stored thread still classifies normally");
+        assert_eq!(
+            stored_entry.relation,
+            Some(ConversationRelation::LocalMissing)
+        );
     }
 
     #[test]

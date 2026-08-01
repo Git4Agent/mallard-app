@@ -7,6 +7,7 @@ import ProjectChatHistoryPage, {
   BranchPicker,
   ProjectChatHistoryContent,
   ThreadMetrics,
+  threadDebugCopyText,
   threadSyncPresentation,
 } from "../../src/components/project-sync/ProjectChatHistoryPage";
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
@@ -32,6 +33,7 @@ const history = {
   project_id: project.local_project_id,
   threads: [{
     thread_id: "019f7798-5437-7632-9dbc-5b589cf68bf0",
+    working_directory: "/Users/test/projects/mallard/packages/desktop",
     title: "Add Git history mapping",
     summary: "Map project-owned Codex sessions onto the first-parent rail.",
     started_at: 1_752_800_000,
@@ -132,7 +134,7 @@ test("thread indicators use the quiet desktop sync vocabulary", () => {
   assert.match(css, /\.sync-thread-sync-indicator\.unavailable,\s*\n\.sync-thread-sync-error \{ color: var\(--red\); \}/);
 });
 
-test("refreshing project activity uses one busy refresh icon", () => {
+test("refreshing project activity uses the centered Tabler refresh icon", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       project={project}
@@ -163,14 +165,17 @@ test("refreshing project activity uses one busy refresh icon", () => {
     />,
   );
 
-  assert.equal(html.match(/icon-spin/g)?.length, 1);
+  assert.equal(html.match(/icon-spin-frame spinning/g)?.length, 1);
   assert.doesNotMatch(html, /sync-thread-sync-loading/);
   assert.match(html, /sync-history-refresh loading/);
   assert.match(html, /aria-busy="true"/);
   assert.match(html, /role="status">Comparing threads with R2 storage 1/);
+  assert.match(html, /data-icon="refresh"/);
 
   const css = readFileSync("src/App.css", "utf8");
   assert.match(css, /\.sync-history-icon-action\.loading:disabled\s*\{[^}]*color:\s*var\(--blue\);[^}]*opacity:\s*1;/s);
+  assert.match(css, /\.icon-spin-frame\s*\{[^}]*width:\s*16px;[^}]*height:\s*16px;[^}]*transform-origin:\s*8px 8px;/s);
+  assert.match(css, /\.icon-spin-frame\.spinning\s*\{[^}]*animation:\s*icon-spin 0\.8s linear infinite;/s);
 });
 
 test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
@@ -312,6 +317,18 @@ test("history content uses the local alias and renders commit/thread actions", (
   assert.doesNotMatch(html, /aria-label="Show conversation details"/);
   assert.match(html, /aria-label="Open in Codex"/);
   assert.match(html, /aria-label="Open in Terminal"/);
+  assert.match(html, /aria-label="Show thread debug info"/);
+  assert.match(html, /aria-haspopup="dialog"/);
+  assert.match(html, /aria-label="Thread debug info"/);
+  assert.match(html, /aria-label="Copy thread id"/);
+  assert.match(html, /aria-label="Copy working directory"/);
+  assert.match(html, /aria-label="Copy codex home"/);
+  assert.match(html, /\/Users\/test\/projects\/mallard\/packages\/desktop/);
+  assert.match(html, />Copy all</);
+  assert.ok(
+    html.indexOf('data-tooltip="Tool calls · 8"')
+      < html.indexOf('aria-label="Show thread debug info"'),
+  );
   assert.match(html, /sync-openai-icon/);
   assert.doesNotMatch(html, /aria-label="1 sessions"/);
   assert.doesNotMatch(html, />Open in Codex</);
@@ -368,12 +385,31 @@ test("thread icon actions stay compact and the chat action follows the metrics",
   const metaRule = css.match(/\.sync-history-session-summary \.sync-history-thread-meta\s*\{[^}]+\}/s)?.[0] ?? "";
   const chatRule = css.match(/\.sync-history-chat-toggle\s*\{[^}]+\}/s)?.[0] ?? "";
   const launchRule = css.match(/\.sync-history-thread-actions \.sync-history-launch-action\s*\{[^}]+\}/s)?.[0] ?? "";
+  const debugMenuRule = css.match(/\.sync-history-debug-menu\s*\{[^}]+\}/s)?.[0] ?? "";
+  const debugPopoverRule = css.match(/\.sync-history-debug-popover\s*\{[^}]+\}/s)?.[0] ?? "";
 
   assert.match(metaRule, /flex:\s*0 1 auto/);
   assert.match(chatRule, /width:\s*24px/);
   assert.match(chatRule, /padding:\s*0/);
   assert.match(launchRule, /width:\s*28px/);
   assert.match(launchRule, /padding:\s*0/);
+  assert.match(debugMenuRule, /position:\s*relative/);
+  assert.match(debugPopoverRule, /position:\s*absolute/);
+});
+
+test("thread debug copy text keeps complete local identifiers", () => {
+  assert.equal(
+    threadDebugCopyText(
+      history.threads[0].thread_id,
+      history.threads[0].working_directory,
+      history.codex_home,
+    ),
+    [
+      `Thread ID: ${history.threads[0].thread_id}`,
+      `Working directory: ${history.threads[0].working_directory}`,
+      `Codex home: ${history.codex_home}`,
+    ].join("\n"),
+  );
 });
 
 test("chat history remains independently collapsible under the permanent summary", () => {

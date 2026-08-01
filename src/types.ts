@@ -872,6 +872,7 @@ export interface BundleReadiness {
 
 export interface CodexThreadSummary {
   thread_id: string;
+  working_directory?: string | null;
   title: string;
   summary: string;
   started_at: number;

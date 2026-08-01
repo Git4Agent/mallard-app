@@ -39,6 +39,8 @@ const CODEX_PROJECT_ROUTE_POLL_INTERVAL: std::time::Duration = std::time::Durati
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CodexThreadSummary {
     pub thread_id: String,
+    #[serde(default)]
+    pub working_directory: String,
     pub title: String,
     pub summary: String,
     pub started_at: u64,
@@ -834,7 +836,11 @@ fn scan_codex_threads(
                 continue;
             }
             let has_record_endpoints = parsed.has_record_endpoints;
+            let working_directory = parsed.cwd.to_string_lossy().into_owned();
             let mut thread = parsed.thread;
+            if thread.working_directory.is_empty() {
+                thread.working_directory = working_directory;
+            }
             if let Some(index_entry) = index.get(&thread.thread_id) {
                 apply_index_metadata(&mut thread, has_record_endpoints, index_entry);
             }
@@ -1296,6 +1302,7 @@ impl RolloutParser {
         let cwd = self
             .cwd
             .ok_or_else(|| "rollout has no cwd metadata".to_string())?;
+        let working_directory = cwd.to_string_lossy().into_owned();
         let summary = self.summary.or(self.fallback_summary).unwrap_or_default();
         let started_at = self
             .first_timestamp
@@ -1308,6 +1315,7 @@ impl RolloutParser {
         Ok(ParsedRollout {
             thread: CodexThreadSummary {
                 thread_id,
+                working_directory,
                 title: summary.clone(),
                 summary,
                 started_at,
@@ -2635,6 +2643,7 @@ mod tests {
     fn thread(id: &str, start: u64, end: u64) -> CodexThreadSummary {
         CodexThreadSummary {
             thread_id: id.to_string(),
+            working_directory: "/tmp/project".to_string(),
             title: id.to_string(),
             summary: String::new(),
             started_at: start,
@@ -2716,6 +2725,7 @@ mod tests {
             "019f742a-a206-7932-876c-9db8d8ce575a"
         );
         assert_eq!(parsed.cwd, Path::new("/tmp/project"));
+        assert_eq!(parsed.thread.working_directory, "/tmp/project");
         assert_eq!(parsed.thread.branch.as_deref(), Some("feature/x"));
         assert_eq!(parsed.thread.recorded_sha.as_deref(), Some("abc"));
         assert_eq!(parsed.thread.summary, "Build the history page please");

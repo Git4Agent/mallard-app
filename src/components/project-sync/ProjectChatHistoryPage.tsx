@@ -1,5 +1,6 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { TbRefresh } from "react-icons/tb";
 import type {
   CodexThreadDetailsPage,
   CodexThreadSummary,
@@ -309,7 +310,15 @@ function ThreadSyncIndicator({ entry, storageName }: { entry: ThreadSyncEntry; s
   );
 }
 
-export function ThreadMetrics({ thread, id }: { thread: CodexThreadSummary; id?: string }) {
+export function ThreadMetrics({
+  thread,
+  id,
+  debugInfo,
+}: {
+  thread: CodexThreadSummary;
+  id?: string;
+  debugInfo?: ThreadDebugMenuProps;
+}) {
   const startedLabel = `Started ${formatDate(thread.started_at)}`;
   const endedLabel = `${thread.is_active ? "Last activity" : "Ended"} ${formatDate(thread.ended_at)}${thread.is_active ? ", active" : ""}`;
 
@@ -320,6 +329,7 @@ export function ThreadMetrics({ thread, id }: { thread: CodexThreadSummary; id?:
     <span className="sync-history-thread-metric" data-tooltip={`Total tokens · ${formatCount(thread.total_tokens)}`} aria-label={`Total tokens: ${formatCount(thread.total_tokens)}`} tabIndex={0}><Icon name="token" size={12} /><b>{formatCount(thread.total_tokens)}</b></span>
     <span className="sync-history-thread-metric" data-tooltip={`Agent messages · ${thread.agent_message_count}`} aria-label={`Agent messages: ${thread.agent_message_count}`} tabIndex={0}><Icon name="message" size={12} /><b>{thread.agent_message_count}</b></span>
     <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${thread.tool_call_count}`} aria-label={`Tool calls: ${thread.tool_call_count}`} tabIndex={0}><Icon name="tool" size={12} /><b>{thread.tool_call_count}</b></span>
+    {debugInfo && <ThreadDebugMenu {...debugInfo} />}
     {thread.commit_occurrence_count > 1 && (
       <span className="sync-history-thread-metric" data-tooltip={`Commit appearances · ${thread.commit_occurrence_count}`} aria-label={`Appears under ${thread.commit_occurrence_count} commits`} tabIndex={0}><Icon name="git-branch" size={12} /><b>{thread.commit_occurrence_count}</b></span>
     )}
@@ -330,6 +340,8 @@ export function ThreadMetrics({ thread, id }: { thread: CodexThreadSummary; id?:
 interface ThreadCardProps {
   thread: CodexThreadSummary;
   occurrenceKey: string;
+  workingDirectory: string;
+  codexHome: string;
   busy?: boolean;
   details?: ThreadDetailsState;
   detailsOpen?: boolean;
@@ -346,6 +358,195 @@ interface ThreadCardProps {
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
+}
+
+type ThreadDebugCopyTarget = "thread-id" | "working-directory" | "codex-home" | "all";
+
+interface ThreadDebugMenuProps {
+  threadId: string;
+  workingDirectory: string;
+  codexHome: string;
+}
+
+export function threadDebugCopyText(
+  threadId: string,
+  workingDirectory: string,
+  codexHome: string,
+): string {
+  return [
+    `Thread ID: ${threadId}`,
+    `Working directory: ${workingDirectory}`,
+    `Codex home: ${codexHome}`,
+  ].join("\n");
+}
+
+async function writeClipboardText(value: string, fallbackRoot: HTMLElement | null): Promise<void> {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // Some WebViews expose Clipboard but still reject it. Use the local
+      // document fallback while this user gesture is active.
+    }
+  }
+  if (typeof document === "undefined") throw new Error("Clipboard access is unavailable");
+  const field = document.createElement("textarea");
+  field.value = value;
+  field.readOnly = true;
+  field.style.position = "fixed";
+  field.style.opacity = "0";
+  field.style.pointerEvents = "none";
+  const previousFocus = document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+  (fallbackRoot ?? document.body).append(field);
+  let copied = false;
+  try {
+    field.select();
+    copied = document.execCommand("copy");
+  } finally {
+    field.remove();
+    previousFocus?.focus();
+  }
+  if (!copied) throw new Error("Clipboard access is unavailable");
+}
+
+function ThreadDebugMenu({ threadId, workingDirectory, codexHome }: ThreadDebugMenuProps) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState<ThreadDebugCopyTarget | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuId = `thread-debug-${useId().replace(/:/g, "")}`;
+  const rows: Array<{ key: Exclude<ThreadDebugCopyTarget, "all">; label: string; value: string }> = [
+    { key: "thread-id", label: "Thread ID", value: threadId },
+    { key: "working-directory", label: "Working directory", value: workingDirectory },
+    { key: "codex-home", label: "Codex home", value: codexHome },
+  ];
+  const copiedLabel = copied === "thread-id"
+    ? "Thread ID copied."
+    : copied === "working-directory"
+      ? "Working directory copied."
+      : copied === "codex-home"
+        ? "Codex home copied."
+        : copied === "all"
+          ? "Debug info copied."
+          : "";
+
+  const closeMenu = (restoreFocus = false) => {
+    setOpen(false);
+    setCopied(null);
+    setCopyError(null);
+    if (restoreFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+
+  const copyValue = async (target: ThreadDebugCopyTarget, value: string) => {
+    try {
+      await writeClipboardText(value, rootRef.current);
+      setCopyError(null);
+      setCopied(target);
+    } catch (reason) {
+      setCopied(null);
+      setCopyError(`Could not copy: ${errorMessage(reason)}`);
+    }
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) closeMenu();
+    };
+    const handleFocusIn = (event: FocusEvent) => {
+      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) closeMenu();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeMenu(true);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("focusin", handleFocusIn);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("focusin", handleFocusIn);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timeout = window.setTimeout(() => setCopied(null), 2_000);
+    return () => window.clearTimeout(timeout);
+  }, [copied]);
+
+  return (
+    <div ref={rootRef} className="sync-history-debug-menu">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="btn btn-ghost sync-history-debug-trigger"
+        title="Thread debug info"
+        aria-label="Show thread debug info"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={menuId}
+        onClick={() => open ? closeMenu() : setOpen(true)}
+      >
+        <Icon name="info" size={14} />
+      </button>
+      <div
+        id={menuId}
+        className="sync-history-debug-popover"
+        role="dialog"
+        aria-label="Thread debug info"
+        hidden={!open}
+      >
+        <header>
+          <strong>Thread debug info</strong>
+          <span>Click a value to copy it.</span>
+        </header>
+        <div className="sync-history-debug-values">
+          {rows.map((row) => (
+            <button
+              key={row.key}
+              type="button"
+              className="sync-history-debug-copy"
+              aria-label={`Copy ${row.label.toLowerCase()}`}
+              title={`Copy ${row.label.toLowerCase()}`}
+              onClick={() => void copyValue(row.key, row.value)}
+            >
+              <span>{row.label}</span>
+              <code>{row.value}</code>
+              <small className={copied === row.key ? "copied" : undefined}>
+                {copied === row.key ? "Copied" : "Copy"}
+              </small>
+            </button>
+          ))}
+        </div>
+        <footer>
+          <span
+            className={`sync-history-debug-status${copyError ? " error" : copied ? " success" : ""}`}
+            role="status"
+            aria-live="polite"
+          >
+            {copyError ?? copiedLabel}
+          </span>
+          <button
+            type="button"
+            className="btn btn-ghost sync-history-debug-copy-all"
+            onClick={() => void copyValue(
+              "all",
+              threadDebugCopyText(threadId, workingDirectory, codexHome),
+            )}
+          >
+            {copied === "all" ? "Copied all" : "Copy all"}
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -466,7 +667,7 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
 }
 
 function ThreadCard({
-  thread, occurrenceKey, busy = false, details, detailsOpen = false, onOpenCodex, onOpenTerminal, onToggleDetails, onLoadMoreDetails,
+  thread, occurrenceKey, workingDirectory, codexHome, busy = false, details, detailsOpen = false, onOpenCodex, onOpenTerminal, onToggleDetails, onLoadMoreDetails,
   syncEntry, storageName, resourceId, selectionMode, selected = false, selectable = false,
   selectionDisabled = false, onToggleResource, onReviewPull,
 }: ThreadCardProps) {
@@ -539,7 +740,14 @@ function ThreadCard({
 
       <div className="sync-history-session-details">
         <div className="sync-history-session-summary">
-          <ThreadMetrics thread={thread} />
+          <ThreadMetrics
+            thread={thread}
+            debugInfo={{
+              threadId: thread.thread_id,
+              workingDirectory,
+              codexHome,
+            }}
+          />
           {onToggleDetails && (
             <button type="button" className={`btn btn-ghost sync-history-chat-toggle${detailsOpen ? " active" : ""}`}
               aria-label={chatDetailsLabel} title={chatDetailsLabel} aria-expanded={detailsOpen} aria-controls={chatDetailsId}
@@ -730,8 +938,14 @@ export function ProjectChatHistoryContent({
   const renderThread = (thread: CodexThreadSummary, key: string) => {
     const entry = syncByThread.get(thread.thread_id);
     const resourceId = entry?.resource_id ?? `codex:session:${thread.thread_id}`;
+    const workingDirectory = thread.working_directory
+      || binding?.canonical_project_root
+      || binding?.project_root
+      || project.project_root
+      || "Not configured";
     return (
-    <ThreadCard key={key} thread={thread} occurrenceKey={key} busy={actionBusyThreadId === thread.thread_id}
+    <ThreadCard key={key} thread={thread} occurrenceKey={key} workingDirectory={workingDirectory}
+      codexHome={history?.codex_home ?? "Not configured"} busy={actionBusyThreadId === thread.thread_id}
       details={detailsByThread[thread.thread_id]} detailsOpen={openDetailOccurrences.has(key)} onOpenCodex={onOpenCodex} onOpenTerminal={onOpenTerminal}
       onToggleDetails={onToggleDetails} onLoadMoreDetails={onLoadMoreDetails}
       syncEntry={entry} storageName={comparison ? comparisonStorageName : null}
@@ -838,7 +1052,12 @@ export function ProjectChatHistoryContent({
               title={refreshing ? "Refreshing activity" : "Refresh activity"}
               aria-label={refreshing ? "Refreshing activity" : "Refresh activity"}
             >
-              <Icon name="refresh" size={15} className={refreshing ? "icon-spin" : undefined} />
+              <span
+                aria-hidden="true"
+                className={`icon-spin-frame${refreshing ? " spinning" : ""}`}
+              >
+                <TbRefresh data-icon="refresh" size={16} />
+              </span>
             </button>
             {refreshStatus && <span className="sync-visually-hidden" role="status">{refreshStatus}</span>}
           </div>

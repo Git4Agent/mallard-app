@@ -257,13 +257,14 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           <path d="M5 12h14" />
         </>
       )}
+      {/* Lucide Refresh CW, ISC licensed: https://lucide.dev/icons/refresh-cw */}
       {name === "refresh" && (
-        <>
-          <path d="M20 11a8 8 0 0 0-13.5-5.8L4 8" />
-          <path d="M4 4v4h4" />
-          <path d="M4 13a8 8 0 0 0 13.5 5.8L20 16" />
-          <path d="M16 16h4v4" />
-        </>
+        <g className="icon-lucide-refresh-cw" strokeWidth="2">
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+          <path d="M21 3v5h-5" />
+          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+          <path d="M8 16H3v5" />
+        </g>
       )}
       {name === "settings" && (
         <>

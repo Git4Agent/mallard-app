@@ -7,11 +7,11 @@
 use std::collections::BTreeMap;
 
 use super::domain::{
-    classify_conversation_relation, ActionId, CanonicalConversationMessage,
-    ConversationDivergencePlan, ConversationPlanAction, ConversationPlanActionType,
-    ConversationPlanDirection, ConversationReasonCode, ConversationRelation, HostId,
-    LocalProjectId, LocalProviderProfileId, Provider, ProviderStateExpectation, ReplicaId,
-    ResourceId, TargetExpectation, ThreadId,
+    classify_thread_refresh, ActionId, CanonicalConversationMessage, ConversationDivergencePlan,
+    ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
+    ConversationReasonCode, ConversationRelation, HostId, LocalProjectId, LocalProviderProfileId,
+    Provider, ProviderStateExpectation, RefreshCloudMeta, RefreshLocalState, ReplicaId, ResourceId,
+    TargetExpectation, ThreadId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,11 +246,12 @@ fn blocked_reason(reason: ConversationReasonCode) -> &'static str {
 /// these values together makes it difficult for Push, Pull, or a test facade
 /// to omit one of the concurrency pins.
 #[derive(Clone, Debug)]
-pub struct ConversationPlanActionRequest<'a> {
+pub struct ConversationPlanActionRequest {
     pub action_id: ActionId,
     pub direction: ConversationPlanDirection,
-    pub local_chain: Option<&'a [CanonicalConversationMessage]>,
-    pub cloud_chain: Option<&'a [CanonicalConversationMessage]>,
+    /// Classified by the caller from the manifest-only decision table; the
+    /// action pins re-prove it against actual content at apply time.
+    pub relation: ConversationRelation,
     pub capabilities: ConversationCapabilities,
     pub provider: Provider,
     pub host_id: HostId,
@@ -281,9 +282,9 @@ pub struct ConversationPlanActionRequest<'a> {
 /// This function is pure: ID reservations and target expectations are copied
 /// into the plan, but provider, binding, and cloud state are never changed.
 pub fn build_conversation_plan_action(
-    request: ConversationPlanActionRequest<'_>,
+    request: ConversationPlanActionRequest,
 ) -> Result<ConversationPlanAction, String> {
-    let relation = classify_conversation_relation(request.local_chain, request.cloud_chain);
+    let relation = request.relation;
     let decision = default_conversation_decision(request.direction, relation, request.capabilities);
     let action = ConversationPlanAction {
         action_id: request.action_id,
@@ -319,12 +320,6 @@ pub fn build_conversation_plan_action(
     Ok(action)
 }
 
-#[derive(Clone, Debug)]
-pub struct BindingRecoveryCandidate<'a> {
-    pub thread_id: ThreadId,
-    pub chain: Option<&'a [CanonicalConversationMessage]>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindingRecoveryResult {
     Unique(ThreadId),
@@ -333,33 +328,45 @@ pub enum BindingRecoveryResult {
     Unknown,
 }
 
+/// A recovery candidate known only by its manifest metadata.
+#[derive(Clone, Debug)]
+pub struct MetaBindingRecoveryCandidate<'a> {
+    pub thread_id: ThreadId,
+    pub meta: RefreshCloudMeta<'a>,
+}
+
 /// Recover a missing binding only from one unique longest compatible cloud
-/// ancestor among all threads. Names, titles, and provider IDs are
+/// ancestor among all threads.  Ancestry is witnessed by locally recomputed
+/// prefix digests against the manifest's digest pair, so recovery never
+/// reads cloud transcripts.  Names, titles, and provider IDs are
 /// intentionally absent from this API and therefore cannot influence the
-/// result. Callers must skip conversations that are already bound: a
+/// result.  Callers must skip conversations that are already bound: a
 /// deliberately forked conversation is always bound to its minted thread and
 /// must never be silently re-attached to a compatible ancestor.
-pub fn recover_unique_compatible_binding(
+pub fn recover_unique_compatible_binding_from_meta(
     local_chain: Option<&[CanonicalConversationMessage]>,
-    candidates: &[BindingRecoveryCandidate<'_>],
+    candidates: &[MetaBindingRecoveryCandidate<'_>],
 ) -> BindingRecoveryResult {
     let Some(local_chain) = local_chain else {
         return BindingRecoveryResult::Unknown;
     };
-    if candidates.iter().any(|candidate| candidate.chain.is_none()) {
-        return BindingRecoveryResult::Unknown;
-    }
-    let compatible = candidates
-        .iter()
-        .filter_map(|candidate| {
-            let chain = candidate.chain?;
-            matches!(
-                classify_conversation_relation(Some(local_chain), Some(chain)),
-                ConversationRelation::Identical | ConversationRelation::CloudPrefixOfLocal
-            )
-            .then_some((chain.len(), candidate.thread_id.clone()))
-        })
-        .collect::<Vec<_>>();
+    unique_longest_compatible(candidates.iter().filter_map(|candidate| {
+        matches!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(local_chain),
+                Some(candidate.meta),
+                None,
+            ),
+            ConversationRelation::Identical | ConversationRelation::CloudPrefixOfLocal
+        )
+        .then_some((candidate.meta.message_count, candidate.thread_id.clone()))
+    }))
+}
+
+fn unique_longest_compatible(
+    compatible: impl Iterator<Item = (u64, ThreadId)>,
+) -> BindingRecoveryResult {
+    let compatible = compatible.collect::<Vec<_>>();
     let Some(longest) = compatible.iter().map(|(length, _)| *length).max() else {
         return BindingRecoveryResult::Missing;
     };

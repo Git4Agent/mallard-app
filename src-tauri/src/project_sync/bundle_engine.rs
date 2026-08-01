@@ -13,7 +13,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 use super::domain::{
@@ -462,6 +462,16 @@ pub struct CapturedBundleFile {
     pub bytes: Vec<u8>,
     pub source_mtime: u64,
     pub mode: Option<u32>,
+}
+
+/// Result of the explicit object durability audit (`verify_objects`).
+#[derive(Clone, Debug, Serialize)]
+pub struct BundleObjectAudit {
+    pub generation: u64,
+    pub commit_id: String,
+    pub objects_total: usize,
+    pub objects_verified: usize,
+    pub failures: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1034,22 +1044,31 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 updated_at: request.updated_at,
             },
             on_progress,
+            &mut |_, _| {},
         )
     }
     /// Publish one complete reviewed bundle snapshot. The caller supplies the
-    /// live resource and conversation sets; the engine enforces retention,
-    /// verifies immutable objects, skips true no-ops, and advances the head
-    /// only through compare-and-swap.
+    /// live resource and conversation sets; the engine enforces retention
+    /// against the previous hash-verified manifest, skips true no-ops, and
+    /// advances the head only through compare-and-swap. Uploads carry their
+    /// sha256 checksum so the accepted PUT is the verification receipt;
+    /// publish downloads nothing back. Durability audits are the separate
+    /// `verify_objects` pass.
     #[cfg(test)]
     pub fn publish(&self, request: PublishBundleRequest) -> Result<PublishedBundle, String> {
-        self.publish_with_progress(request, &mut |_| {})
+        self.publish_with_progress(request, &mut |_| {}, &mut |_, _| {})
     }
 
+    /// `on_phase` receives one timing per publish stage — head read,
+    /// manifest build, uploads, immutable writes, head swing — so callers
+    /// can log where a slow Push actually spends its time.
     pub fn publish_with_progress(
         &self,
         request: PublishBundleRequest,
         on_progress: &mut dyn FnMut(FetchProgress),
+        on_phase: &mut dyn FnMut(&str, Duration),
     ) -> Result<PublishedBundle, String> {
+        let phase_started = Instant::now();
         request.identity.validate()?;
         request.recipe.validate()?;
         request.published_by_origin.validate()?;
@@ -1090,7 +1109,12 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             .as_ref()
             .map(|(head, _)| self.read_manifest(head))
             .transpose()?;
+        on_phase(
+            "publish: read head and previous manifest",
+            phase_started.elapsed(),
+        );
 
+        let phase_started = Instant::now();
         for (path, entry) in &request.retained_files {
             entry.validate()?;
             let previous = previous_manifest
@@ -1105,17 +1129,6 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 return Err(format!(
                     "retained file '{}' was not in the reviewed manifest",
                     path
-                ));
-            }
-            let key = repository_object_key(&request.identity.bundle_id, &entry.object_key)?;
-            let object = self
-                .store
-                .get(&key)?
-                .ok_or_else(|| format!("retained bundle object '{}' is missing", key))?;
-            if object.bytes.len() as u64 != entry.size || sha256(&object.bytes) != entry.sha256 {
-                return Err(format!(
-                    "retained bundle object '{}' does not match its reviewed digest",
-                    key
                 ));
             }
         }
@@ -1172,6 +1185,10 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         if let Some(previous) = &previous_manifest {
             validate_conversation_retention(previous, &manifest)?;
         }
+        on_phase(
+            "publish: validate retention and build manifest",
+            phase_started.elapsed(),
+        );
 
         if let (Some((head, token)), Some(previous)) = (&current, &previous_manifest) {
             if manifest_is_semantic_noop(previous, &manifest) {
@@ -1188,6 +1205,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             }
         }
 
+        let phase_started = Instant::now();
         let mut pending = BTreeMap::<String, Bytes>::new();
         for captured in request.captured_files.values() {
             pending
@@ -1201,26 +1219,15 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         let mut uploaded_bytes = 0_u64;
         for chunk in pending.chunks(UPLOAD_BATCH_OBJECTS) {
             let mut batch = Vec::with_capacity(chunk.len());
-            let mut keys = Vec::with_capacity(chunk.len());
             for (digest, bytes) in chunk {
                 let key = repository_object_key(
                     &request.identity.bundle_id,
                     &format!("_objects/{}", digest),
                 )?;
-                keys.push(key.clone());
                 batch.push((key, bytes.clone()));
             }
             self.store.put_many(batch)?;
-            let stored = self.store.get_many(&keys)?;
-            for (((digest, bytes), key), stored) in chunk.iter().zip(&keys).zip(stored) {
-                let stored =
-                    stored.ok_or_else(|| format!("bundle object '{}' disappeared", key))?;
-                if stored.bytes.len() != bytes.len() || sha256(&stored.bytes) != *digest {
-                    return Err(format!(
-                        "bundle object '{}' failed post-publication verification",
-                        key
-                    ));
-                }
+            for (_, bytes) in chunk {
                 uploaded_objects += 1;
                 uploaded_bytes = uploaded_bytes.saturating_add(bytes.len() as u64);
                 on_progress(FetchProgress {
@@ -1232,6 +1239,9 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             }
         }
 
+        on_phase("publish: upload objects", phase_started.elapsed());
+
+        let phase_started = Instant::now();
         let manifest_bytes = serde_json::to_vec(&manifest)
             .map_err(|error| format!("serialize bundle manifest: {error}"))?;
         let manifest_sha256 = sha256(&manifest_bytes);
@@ -1263,7 +1273,12 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             &format!("_commits/{}-{}.json", generation, commit_id),
         )?;
         self.store.put_immutable(&commit_key, &commit_bytes)?;
+        on_phase(
+            "publish: write manifest and commit",
+            phase_started.elapsed(),
+        );
 
+        let phase_started = Instant::now();
         let head = BundleHead {
             schema_version: BUNDLE_SCHEMA,
             bundle_id: request.identity.bundle_id.clone(),
@@ -1291,6 +1306,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 }
             };
         let _ = self.publish_tag(&manifest);
+        on_phase("publish: swing head", phase_started.elapsed());
         Ok(PublishedBundle {
             published: true,
             snapshot: BundleSnapshot {
@@ -1444,6 +1460,54 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             return Err("historical manifest coordinates do not match its contents".to_string());
         }
         Ok(manifest)
+    }
+
+    /// Explicit durability audit: download every object the current manifest
+    /// references and verify each against its recorded digest and size. This
+    /// is the read-back publish deliberately does not perform; it runs only
+    /// when invoked, never as part of Push or Pull.
+    pub fn verify_objects(&self, bundle_id: &BundleId) -> Result<BundleObjectAudit, String> {
+        let snapshot = self.inspect(bundle_id)?;
+        let mut entries = BTreeMap::<String, (String, u64)>::new();
+        for entry in snapshot.manifest.files.values() {
+            entries
+                .entry(entry.object_key.clone())
+                .or_insert((entry.sha256.clone(), entry.size));
+        }
+        let entries = entries.into_iter().collect::<Vec<_>>();
+        let mut verified = 0_usize;
+        let mut failures = Vec::new();
+        for batch in entries.chunks(PREFETCH_BATCH_OBJECTS) {
+            let keys = batch
+                .iter()
+                .map(|(object_key, _)| repository_object_key(bundle_id, object_key))
+                .collect::<Result<Vec<_>, String>>()?;
+            let objects = self.store.get_many(&keys)?;
+            for (((_, (expected_sha, expected_size)), key), object) in
+                batch.iter().zip(&keys).zip(objects)
+            {
+                match object {
+                    None => failures.push(format!("bundle object '{}' is missing", key)),
+                    Some(stored)
+                        if stored.bytes.len() as u64 != *expected_size
+                            || sha256(&stored.bytes) != *expected_sha =>
+                    {
+                        failures.push(format!(
+                            "bundle object '{}' does not match manifest size/hash",
+                            key
+                        ));
+                    }
+                    Some(_) => verified += 1,
+                }
+            }
+        }
+        Ok(BundleObjectAudit {
+            generation: snapshot.head.generation,
+            commit_id: snapshot.head.commit_id.clone(),
+            objects_total: entries.len(),
+            objects_verified: verified,
+            failures,
+        })
     }
 
     /// Cursor-paginated remote discovery. The cursor is the last returned
@@ -2533,6 +2597,12 @@ mod tests {
             store.payload_puts(),
             vec![changed_key.as_str().to_string()],
             "only the changed payload uploads"
+        );
+        assert_eq!(
+            store.payload_gets(),
+            0,
+            "publish downloads nothing — retained entries are witnessed by the previous \
+             manifest and the checksummed PUT is the upload receipt"
         );
         let stable_path = second
             .snapshot

@@ -629,6 +629,18 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
             } => (lineage_digest, semantic_digest),
             other => panic!("checkpoint transcript is not resumable: {other:?}"),
         };
+        // The binding starts pinned at the generation-1 content; a committed
+        // publication must advance the pin to the pushed digests, because
+        // manifest-only refresh reads the pin as "nothing local is unsaved".
+        let initial_analysis = analyze_codex_transcript(&initial_thread.transcript);
+        let (initial_lineage, initial_semantic) = match initial_analysis.lineage {
+            CodecLineage::Complete {
+                lineage_digest,
+                semantic_digest,
+                ..
+            } => (lineage_digest, semantic_digest),
+            other => panic!("initial checkpoint transcript is not resumable: {other:?}"),
+        };
         world
             .repo_a
             .mutate_conversation_bindings(|document| {
@@ -641,10 +653,10 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                     forked_from: None,
                     provider_thread_id: Some("source-thread".to_string()),
                     materialization_state: ConversationMaterializationState::Resumable,
-                    last_observed_file_sha256: Some(sha256(&advanced_transcript)),
-                    last_observed_head_message_id: Some("m-b".to_string()),
-                    last_observed_lineage_digest: Some(lineage.clone()),
-                    last_observed_semantic_digest: Some(semantic.clone()),
+                    last_observed_file_sha256: Some(sha256(&initial_thread.transcript)),
+                    last_observed_head_message_id: Some("m-a".to_string()),
+                    last_observed_lineage_digest: Some(initial_lineage.clone()),
+                    last_observed_semantic_digest: Some(initial_semantic.clone()),
                     source_generation: Some(initial.snapshot.head.generation),
                     source_manifest_sha256: Some(initial.snapshot.head.manifest_sha256.clone()),
                     revision: 0,
@@ -735,6 +747,23 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                 Some(2),
                 "{checkpoint:?}",
             );
+            // The push receipt advanced the last-synced pin to the pushed
+            // digests; manifest-only refresh depends on this to classify
+            // later cloud growth as a fast-forward instead of divergence.
+            assert_eq!(
+                final_bindings.bindings[0]
+                    .last_observed_lineage_digest
+                    .as_deref(),
+                Some(lineage.as_str()),
+                "{checkpoint:?}",
+            );
+            assert_eq!(
+                final_bindings.bindings[0]
+                    .last_observed_semantic_digest
+                    .as_deref(),
+                Some(semantic.as_str()),
+                "{checkpoint:?}",
+            );
             assert_eq!(final_receipts.records.len(), 1, "{checkpoint:?}");
             assert_eq!(final_receipts.records[0].receipts.len(), 1);
             assert_eq!(
@@ -744,6 +773,14 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
         } else {
             assert_eq!(final_snapshot.head.generation, 1, "{checkpoint:?}");
             assert_eq!(final_bindings.bindings[0].source_generation, Some(1));
+            // An uncommitted publication leaves the pin untouched.
+            assert_eq!(
+                final_bindings.bindings[0]
+                    .last_observed_lineage_digest
+                    .as_deref(),
+                Some(initial_lineage.as_str()),
+                "{checkpoint:?}",
+            );
             assert!(final_receipts.records.is_empty());
             if checkpoint != ConversationFailpoint::BeforePrepared {
                 assert_eq!(first.rolled_back.len(), 1, "{checkpoint:?}");
@@ -961,6 +998,7 @@ fn recommended_codex_divergence_preserves_native_local_fork_then_replaces_origin
         Some(&fixture.child_provider_id),
         fixture.fork.clone(),
         &mut failpoints,
+        &mut |_, _| {},
     )
     .unwrap();
     let CodexDivergenceApplyOutcome::Committed(receipt) = outcome else {
@@ -1080,6 +1118,7 @@ fn a_thread_with_a_pending_checkpoint_rejects_a_second_operation() {
             fork: fixture.fork.clone(),
         },
         &mut failpoints,
+        &mut |_, _| {},
     )
     .unwrap_err();
     assert!(
@@ -1122,6 +1161,7 @@ fn cloud_only_codex_divergence_replaces_original_without_creating_a_fork() {
             fork: fixture.fork.clone(),
         },
         &mut failpoints,
+        &mut |_, _| {},
     )
     .unwrap();
     let CodexDivergenceApplyOutcome::Committed(receipt) = outcome else {
@@ -1179,6 +1219,7 @@ fn cloud_only_status_failure_rolls_back_staging_without_replacing_original() {
             fork: fixture.fork.clone(),
         },
         &mut failpoints,
+        &mut |_, _| {},
     )
     .unwrap_err();
     assert!(error.contains("status is unavailable"), "{error}");
@@ -1224,6 +1265,7 @@ fn cloud_only_staging_crash_rolls_back_when_provider_status_cannot_be_rechecked(
             fork: fixture.fork.clone(),
         },
         &mut fail_once,
+        &mut |_, _| {},
     )
     .is_err());
 
@@ -1265,6 +1307,7 @@ fn every_post_verification_codex_checkpoint_recovers_without_a_second_fork() {
             Some(&fixture.child_provider_id),
             fixture.fork.clone(),
             &mut fail_once,
+            &mut |_, _| {},
         )
         .unwrap_err();
         assert!(
@@ -1309,6 +1352,7 @@ fn changed_verified_fork_blocks_original_replacement_during_recovery() {
         Some(&fixture.child_provider_id),
         fixture.fork.clone(),
         &mut fail_once,
+        &mut |_, _| {},
     )
     .is_err());
     let mut changed_child = fixture.child_bytes.clone();
@@ -1843,6 +1887,7 @@ impl CodexDivergenceFixture {
                 fork: self.fork.clone(),
             },
             &mut failpoints,
+            &mut |_, _| {},
         )
         .unwrap();
         assert_eq!(

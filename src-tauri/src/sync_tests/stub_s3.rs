@@ -287,10 +287,26 @@ async fn handle(
         .get("if-none-match")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+    let checksum_sha256 = req
+        .headers()
+        .get("x-amz-checksum-sha256")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let body = match req.into_body().collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => return Ok(xml_error(StatusCode::BAD_REQUEST, "IncompleteBody")),
     };
+    // Server-side write verification, exactly like S3/R2: every PUT must
+    // carry a sha256 checksum matching its body. The accepted PUT is the
+    // client's only write receipt — publish never reads objects back — so
+    // the stub enforces what the client relies on.
+    if method == Method::PUT {
+        let valid = checksum_sha256.as_deref()
+            == Some(aws_smithy_types::base64::encode(Sha256::digest(&body)).as_str());
+        if !valid {
+            return Ok(xml_error(StatusCode::BAD_REQUEST, "BadDigest"));
+        }
+    }
 
     let (bucket, key) = match path.split_once('/') {
         Some((bucket, key)) => (bucket.to_string(), pct_decode(key)),

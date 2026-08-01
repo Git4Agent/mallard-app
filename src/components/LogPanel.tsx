@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { ActivityLogLevel, ActivityLogType, LogLine } from "../types";
 import { userFacingRepoTerms } from "../terminology";
 import Icon from "./Icons";
@@ -41,6 +41,33 @@ const LOG_LEVELS: Array<{ value: ActivityLogLevel; label: string }> = [
   { value: "error", label: "Error" },
 ];
 
+/** A little over one line: a tail that lags by one arrival is still a tail. */
+const TAIL_SLACK_PX = 24;
+
+export interface TailMetrics {
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+  /** Where the last pin left the viewport, read back after the browser clamped it. */
+  pinnedScrollTop: number;
+}
+
+/**
+ * Whether the log keeps following its tail once a scroll event lands.
+ *
+ * Pinning to the tail queues a scroll event of our own making, delivered a frame or
+ * more later — by which time newer lines have grown the list past the offset that
+ * pin landed on, so the event reports a distance of a line or more rather than zero.
+ * Reading that as "the reader scrolled away" is what stranded the panel mid-list
+ * while sync bursts streamed in. While the tail is engaged the viewport has only
+ * truly moved if it left the offset the last pin put it at.
+ */
+export function nextFollowTail(following: boolean, metrics: TailMetrics): boolean {
+  if (following && Math.abs(metrics.scrollTop - metrics.pinnedScrollTop) < 1) return true;
+
+  return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= TAIL_SLACK_PX;
+}
+
 function formatTs(ts: number): string {
   return new Date(ts).toLocaleTimeString([], {
     hour: "2-digit",
@@ -78,7 +105,16 @@ export default function LogPanel({
 }: Props) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const followTailRef = useRef(true);
+  const pinnedScrollTopRef = useRef(-1);
   const typeFilterRef = useRef<HTMLDetailsElement>(null);
+
+  const pinToTail = useCallback(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+
+    body.scrollTop = body.scrollHeight;
+    pinnedScrollTopRef.current = body.scrollTop; // read back: the assignment is clamped
+  }, []);
 
   useEffect(() => {
     const closeOnOutsidePointer = (event: PointerEvent) => {
@@ -103,43 +139,40 @@ export default function LogPanel({
   }, []);
 
   useEffect(() => {
-    if (!followTailRef.current) return;
-
-    const body = bodyRef.current;
-    if (body) body.scrollTop = body.scrollHeight;
-  }, [lines]);
+    if (followTailRef.current) pinToTail();
+  }, [lines, pinToTail]);
 
   useEffect(() => {
     followTailRef.current = true;
+    pinToTail();
 
-    const body = bodyRef.current;
-    if (!body) return;
-
-    const scrollToBottom = () => {
-      body.scrollTop = body.scrollHeight;
-    };
-    scrollToBottom();
-    const frame = window.requestAnimationFrame(scrollToBottom);
+    // The drawer animates open, so the first pin lands against a body that is still
+    // growing; pin again once it has settled.
+    const frame = window.requestAnimationFrame(pinToTail);
     return () => window.cancelAnimationFrame(frame);
-  }, [scrollToBottomEpoch]);
+  }, [scrollToBottomEpoch, pinToTail]);
 
   useEffect(() => {
     const body = bodyRef.current;
     if (!body || typeof ResizeObserver === "undefined") return;
 
     const observer = new ResizeObserver(() => {
-      if (followTailRef.current) body.scrollTop = body.scrollHeight;
+      if (followTailRef.current) pinToTail();
     });
     observer.observe(body);
     return () => observer.disconnect();
-  }, []);
+  }, [pinToTail]);
 
   const handleScroll = () => {
     const body = bodyRef.current;
     if (!body) return;
 
-    const distanceFromBottom = body.scrollHeight - body.scrollTop - body.clientHeight;
-    followTailRef.current = distanceFromBottom <= 16;
+    followTailRef.current = nextFollowTail(followTailRef.current, {
+      scrollTop: body.scrollTop,
+      scrollHeight: body.scrollHeight,
+      clientHeight: body.clientHeight,
+      pinnedScrollTop: pinnedScrollTopRef.current,
+    });
   };
 
   return (

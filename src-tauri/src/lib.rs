@@ -77,6 +77,7 @@ pub fn run() {
             project_sync::commands::find_remote_bundle_matches,
             project_sync::commands::get_bundle_status,
             project_sync::commands::get_project_thread_sync_comparison,
+            project_sync::commands::verify_bundle_objects,
             project_sync::commands::prepare_push_review,
             project_sync::commands::get_push_destination_status,
             project_sync::commands::push_bundle,

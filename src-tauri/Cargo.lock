@@ -2797,6 +2797,7 @@ version = "0.1.2"
 dependencies = [
  "aws-sdk-s3",
  "aws-smithy-http-client",
+ "aws-smithy-types",
  "bytes",
  "chrono",
  "dirs 5.0.1",

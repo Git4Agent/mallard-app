@@ -2415,12 +2415,12 @@ pub struct ConversationThread {
     pub lineage_codec: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_message_id: Option<MessageId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_digest: Option<String>,
+    /// Canonical chain length. Required: manifest-only refresh classifies
+    /// threads from this and the digest pair without reading transcripts, so
+    /// a thread without them cannot be published at all.
+    pub message_count: u64,
+    pub lineage_digest: String,
+    pub semantic_digest: String,
     /// Provenance of a fork only. Never consulted by the resolver, and the
     /// referenced thread may have been tombstoned or pruned since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2493,38 +2493,27 @@ impl ConversationThread {
                 self.thread_id
             ));
         }
-        let complete_fields = self.head_message_id.is_some()
-            && self.message_count.is_some_and(|count| count > 0)
-            && self.lineage_digest.is_some()
-            && self.semantic_digest.is_some();
-        match self.lineage_status {
-            ConversationLineageStatus::Complete if !complete_fields => {
-                return Err(format!(
-                    "conversation thread '{}' has incomplete lineage metadata",
-                    self.thread_id
-                ));
-            }
-            ConversationLineageStatus::Unknown { .. }
-                if self.head_message_id.is_some()
-                    || self.message_count.is_some()
-                    || self.lineage_digest.is_some()
-                    || self.semantic_digest.is_some() =>
-            {
-                return Err(format!(
-                    "conversation thread '{}' has misleading unknown-lineage metadata",
-                    self.thread_id
-                ));
-            }
-            _ => {}
+        // Only proven-lineage conversations may be published: manifest-only
+        // refresh classifies from the count and digest pair, so an entry
+        // whose chain could not be canonicalized has no valid metadata to
+        // publish and is rejected outright.
+        if let ConversationLineageStatus::Unknown { .. } = self.lineage_status {
+            return Err(format!(
+                "conversation thread '{}' has unproven lineage and cannot be published",
+                self.thread_id
+            ));
         }
-        for (label, digest) in [
-            ("conversation lineage", self.lineage_digest.as_deref()),
-            ("conversation semantic", self.semantic_digest.as_deref()),
-        ] {
-            if let Some(digest) = digest {
-                validate_sha256(label, digest)?;
-            }
+        if self.head_message_id.is_none()
+            || self.message_count == 0
+            || self.message_count > MAX_FILES as u64
+        {
+            return Err(format!(
+                "conversation thread '{}' has incomplete lineage metadata",
+                self.thread_id
+            ));
         }
+        validate_sha256("conversation lineage", &self.lineage_digest)?;
+        validate_sha256("conversation semantic", &self.semantic_digest)?;
         if self.forked_from.as_ref() == Some(&self.thread_id) {
             return Err(format!(
                 "conversation thread '{}' cannot fork from itself",
@@ -3048,6 +3037,11 @@ impl ConversationPushPlan {
     }
 }
 
+/// Chain-level relation oracle. Production classification runs entirely on
+/// [`classify_thread_refresh`] (manifest metadata, local chain, pin); this
+/// full-chain twin remains as the test suite's independent witness that the
+/// metadata table agrees with chain-level truth.
+#[cfg(test)]
 pub fn classify_conversation_relation(
     local: Option<&[CanonicalConversationMessage]>,
     cloud: Option<&[CanonicalConversationMessage]>,
@@ -3079,6 +3073,86 @@ pub fn classify_conversation_relation(
                 std::cmp::Ordering::Less => ConversationRelation::LocalPrefixOfCloud,
             }
         }
+    }
+}
+
+/// The local side of a manifest-only refresh classification.
+#[derive(Clone, Copy, Debug)]
+pub enum RefreshLocalState<'a> {
+    /// No local conversation exists for this thread.
+    Missing,
+    /// A local conversation exists but its canonical chain is unavailable
+    /// (unreadable transcript, incomplete codec lineage).
+    Uncapturable,
+    /// The captured canonical chain.
+    Chain(&'a [CanonicalConversationMessage]),
+}
+
+/// The cloud side of a manifest-only refresh classification: the manifest's
+/// per-thread metadata, never transcript content.
+#[derive(Clone, Copy, Debug)]
+pub struct RefreshCloudMeta<'a> {
+    pub message_count: u64,
+    pub lineage_digest: &'a str,
+    pub semantic_digest: &'a str,
+}
+
+/// Classify a thread's sync state from manifest metadata, the local chain,
+/// and the binding's last-synced digest pin — no cloud payload reads.  See
+/// docs/DESIGN_MANIFEST_ONLY_THREAD_REFRESH.md for the decision table and
+/// its soundness argument.  Every branch is witnessed by content digests;
+/// anything unwitnessed classifies as `Diverged` (review) or `Unknown`,
+/// never as a fast-forward.
+pub fn classify_thread_refresh(
+    local: RefreshLocalState<'_>,
+    cloud: Option<RefreshCloudMeta<'_>>,
+    last_synced: Option<(&str, &str)>,
+) -> ConversationRelation {
+    let (chain, cloud) = match (local, cloud) {
+        (RefreshLocalState::Missing, None) => return ConversationRelation::BothMissing,
+        (RefreshLocalState::Missing, Some(_)) => return ConversationRelation::LocalMissing,
+        (_, None) => return ConversationRelation::CloudMissing,
+        (RefreshLocalState::Uncapturable, Some(_)) => return ConversationRelation::Unknown,
+        (RefreshLocalState::Chain(chain), Some(cloud)) => (chain, cloud),
+    };
+    let Ok((local_lineage, local_semantic)) = conversation_chain_digests(chain) else {
+        return ConversationRelation::Unknown;
+    };
+    if (local_lineage.as_str(), local_semantic.as_str())
+        == (cloud.lineage_digest, cloud.semantic_digest)
+    {
+        return ConversationRelation::Identical;
+    }
+    let local_count = chain.len() as u64;
+    match local_count.cmp(&cloud.message_count) {
+        std::cmp::Ordering::Greater => {
+            // The prefix is recomputed locally; a match proves the cloud
+            // thread is an ancestor of the local one.
+            let Ok((prefix_lineage, prefix_semantic)) =
+                conversation_chain_digests(&chain[..cloud.message_count as usize])
+            else {
+                return ConversationRelation::Unknown;
+            };
+            if (prefix_lineage.as_str(), prefix_semantic.as_str())
+                == (cloud.lineage_digest, cloud.semantic_digest)
+            {
+                ConversationRelation::CloudPrefixOfLocal
+            } else {
+                ConversationRelation::Diverged
+            }
+        }
+        std::cmp::Ordering::Less => {
+            // Equality with the last-synced pin proves nothing local is
+            // unsaved, which is exactly what a fast-forward pull needs.  A
+            // position or timestamp cannot witness this; only content can.
+            if last_synced == Some((local_lineage.as_str(), local_semantic.as_str())) {
+                ConversationRelation::LocalPrefixOfCloud
+            } else {
+                ConversationRelation::Diverged
+            }
+        }
+        // Equal counts with different digests cannot fast-forward either way.
+        std::cmp::Ordering::Equal => ConversationRelation::Diverged,
     }
 }
 
@@ -5036,6 +5110,226 @@ mod tests {
         assert_ne!(first_digests.1, lineage_digests.1);
     }
 
+    fn refresh_meta(chain: &[CanonicalConversationMessage]) -> ((String, String), u64) {
+        (
+            conversation_chain_digests(chain).unwrap(),
+            chain.len() as u64,
+        )
+    }
+
+    fn cloud_meta<'a>(pair: &'a (String, String), count: u64) -> RefreshCloudMeta<'a> {
+        RefreshCloudMeta {
+            message_count: count,
+            lineage_digest: &pair.0,
+            semantic_digest: &pair.1,
+        }
+    }
+
+    /// Every row of the decision table in
+    /// docs/DESIGN_MANIFEST_ONLY_THREAD_REFRESH.md, straight down the table.
+    /// Row 1 (tombstones) and row 5's binding-only variant live in the
+    /// review layer; everything else is the classifier's contract.
+    #[test]
+    fn manifest_only_refresh_covers_every_decision_row() {
+        let shared = vec![
+            canonical_message("m-a", None, 'a'),
+            canonical_message("m-b", Some("m-a"), 'b'),
+        ];
+        let extended = {
+            let mut chain = shared.clone();
+            chain.push(canonical_message("m-c", Some("m-b"), 'c'));
+            chain
+        };
+        let (shared_pair, shared_count) = refresh_meta(&shared);
+        let (extended_pair, extended_count) = refresh_meta(&extended);
+        let branched = vec![
+            canonical_message("m-a", None, 'a'),
+            canonical_message("m-x", Some("m-a"), '4'),
+            canonical_message("m-y", Some("m-x"), '5'),
+        ];
+        let (branched_pair, _) = refresh_meta(&branched);
+
+        // Rows 2-4: presence.
+        assert_eq!(
+            classify_thread_refresh(RefreshLocalState::Missing, None, None),
+            ConversationRelation::BothMissing
+        );
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Missing,
+                Some(cloud_meta(&shared_pair, shared_count)),
+                None
+            ),
+            ConversationRelation::LocalMissing
+        );
+        assert_eq!(
+            classify_thread_refresh(RefreshLocalState::Chain(&shared), None, None),
+            ConversationRelation::CloudMissing
+        );
+        // Row 5: bound but uncapturable holds the row.
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Uncapturable,
+                Some(cloud_meta(&shared_pair, shared_count)),
+                None
+            ),
+            ConversationRelation::Unknown
+        );
+        // Row 6: digest-pair equality is sync.
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(&shared),
+                Some(cloud_meta(&shared_pair, shared_count)),
+                None
+            ),
+            ConversationRelation::Identical
+        );
+        // Rows 7-8: longer local proves ancestry with a prefix pair or goes
+        // to review.
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(&extended),
+                Some(cloud_meta(&shared_pair, shared_count)),
+                None
+            ),
+            ConversationRelation::CloudPrefixOfLocal
+        );
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(&branched),
+                Some(cloud_meta(&shared_pair, shared_count)),
+                None
+            ),
+            ConversationRelation::Diverged
+        );
+        // Rows 9-10: shorter local fast-forwards only when the pin proves
+        // nothing local is unsaved.
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(&shared),
+                Some(cloud_meta(&extended_pair, extended_count)),
+                Some((&shared_pair.0, &shared_pair.1))
+            ),
+            ConversationRelation::LocalPrefixOfCloud
+        );
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(&shared),
+                Some(cloud_meta(&extended_pair, extended_count)),
+                Some((&branched_pair.0, &branched_pair.1))
+            ),
+            ConversationRelation::Diverged
+        );
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(&shared),
+                Some(cloud_meta(&extended_pair, extended_count)),
+                None
+            ),
+            ConversationRelation::Diverged
+        );
+        // Row 11: equal counts with different content cannot fast-forward.
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(&branched),
+                Some(cloud_meta(&extended_pair, extended_count)),
+                None
+            ),
+            ConversationRelation::Diverged
+        );
+    }
+
+    /// The loss scenarios that defeated the timestamp- and position-based
+    /// refresh designs, kept as regressions so they cannot return.  Each
+    /// comment names the design the scenario broke.
+    #[test]
+    fn manifest_only_refresh_defeats_the_recorded_loss_scenarios() {
+        let synced = vec![
+            canonical_message("m-a", None, 'a'),
+            canonical_message("m-b", Some("m-a"), 'b'),
+            canonical_message("m-c", Some("m-b"), 'c'),
+        ];
+        let (synced_pair, _) = refresh_meta(&synced);
+        let cloud_extended = {
+            let mut chain = synced.clone();
+            chain.push(canonical_message("m-d", Some("m-c"), 'd'));
+            chain.push(canonical_message("m-e", Some("m-d"), 'e'));
+            chain
+        };
+        let (cloud_pair, cloud_count) = refresh_meta(&cloud_extended);
+
+        // Two-machine ping-pong: A pushed (pin moved), B pushed on top.  A's
+        // refresh must read cloud-outstanding, not divergent — the pull-time
+        // timestamp design classified this happy path as divergence.
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(&synced),
+                Some(cloud_meta(&cloud_pair, cloud_count)),
+                Some((&synced_pair.0, &synced_pair.1))
+            ),
+            ConversationRelation::LocalPrefixOfCloud
+        );
+
+        // Edit-and-resubmit that regrows to the synced length: the
+        // position-pin design read pin == length as clean and clobbered the
+        // local branch with a pull.
+        let regrown = vec![
+            canonical_message("m-a", None, 'a'),
+            canonical_message("m-b", Some("m-a"), 'b'),
+            canonical_message("m-r", Some("m-b"), '7'),
+        ];
+        assert_eq!(refresh_meta(&regrown).1, synced.len() as u64);
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(&regrown),
+                Some(cloud_meta(&cloud_pair, cloud_count)),
+                Some((&synced_pair.0, &synced_pair.1))
+            ),
+            ConversationRelation::Diverged
+        );
+
+        // Truncation below the last-synced state: unspecified in both
+        // rejected designs, drifting toward a destructive pull.
+        let truncated = &synced[..2];
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(truncated),
+                Some(cloud_meta(&cloud_pair, cloud_count)),
+                Some((&synced_pair.0, &synced_pair.1))
+            ),
+            ConversationRelation::Diverged
+        );
+
+        // Never synced on this replica: the 'max' timestamp sentinel
+        // auto-classified this as cloud-outstanding and replaced local
+        // content that had never been saved anywhere.
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(&synced),
+                Some(cloud_meta(&cloud_pair, cloud_count)),
+                None
+            ),
+            ConversationRelation::Diverged
+        );
+
+        // Equal-length force-replace over a pin-clean local: review, never a
+        // silent replace.
+        let replaced = vec![
+            canonical_message("m-a", None, 'a'),
+            canonical_message("m-b", Some("m-a"), 'b'),
+            canonical_message("m-z", Some("m-b"), '9'),
+        ];
+        let (replaced_pair, replaced_count) = refresh_meta(&replaced);
+        assert_eq!(
+            classify_thread_refresh(
+                RefreshLocalState::Chain(&synced),
+                Some(cloud_meta(&replaced_pair, replaced_count)),
+                Some((&synced_pair.0, &synced_pair.1))
+            ),
+            ConversationRelation::Diverged
+        );
+    }
+
     fn conversation_manifest() -> BundleManifest {
         let bundle = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
         let thread_id = ThreadId::parse("thread-0123456789abcdef0123456789abcdef").unwrap();
@@ -5058,9 +5352,9 @@ mod tests {
             lineage_status: ConversationLineageStatus::Complete,
             lineage_codec: "codex-lineage-v1".to_string(),
             head_message_id: Some(MessageId::parse("m-b").unwrap()),
-            message_count: Some(2),
-            lineage_digest: Some(lineage_digest),
-            semantic_digest: Some(semantic_digest),
+            message_count: 2,
+            lineage_digest,
+            semantic_digest,
             forked_from: None,
             source_thread_id: Some("thread-a".to_string()),
             created_by_origin: None,
@@ -5130,6 +5424,52 @@ mod tests {
             directories: BTreeMap::new(),
             tombstones: BTreeMap::new(),
         }
+    }
+
+    /// Manifest-only refresh classifies from the count and digest pair, so a
+    /// conversation entry without valid metadata may not exist at all.
+    #[test]
+    fn manifest_rejects_conversations_without_refresh_metadata() {
+        let manifest = conversation_manifest();
+        manifest.validate().unwrap();
+
+        let mut unproven = manifest.clone();
+        unproven
+            .conversations
+            .values_mut()
+            .next()
+            .unwrap()
+            .lineage_status = ConversationLineageStatus::Unknown {
+            reason_code: "missing-parent".to_string(),
+        };
+        assert!(unproven
+            .validate()
+            .unwrap_err()
+            .contains("unproven lineage"));
+
+        let mut empty = manifest.clone();
+        empty
+            .conversations
+            .values_mut()
+            .next()
+            .unwrap()
+            .message_count = 0;
+        assert!(empty
+            .validate()
+            .unwrap_err()
+            .contains("incomplete lineage metadata"));
+
+        let mut malformed = manifest;
+        malformed
+            .conversations
+            .values_mut()
+            .next()
+            .unwrap()
+            .lineage_digest = "not-a-digest".to_string();
+        assert!(malformed
+            .validate()
+            .unwrap_err()
+            .contains("not a lowercase SHA-256"));
     }
 
     #[test]

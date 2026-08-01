@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import LogPanel from "../../src/components/LogPanel";
+import LogPanel, { nextFollowTail } from "../../src/components/LogPanel";
 
 test("log bar keeps the multi-type filter and Manage logs in the header", () => {
   const html = renderToStaticMarkup(
@@ -74,4 +74,23 @@ test("Push and Pull open the activity log at its live tail", () => {
   assert.match(logSource, /followTailRef\.current = true/);
   assert.match(logSource, /body\.scrollTop = body\.scrollHeight/);
   assert.match(logSource, /new ResizeObserver/);
+});
+
+test("the log tail is not dropped by the scroll events its own pinning queues", () => {
+  // The last pin landed at 1000; the list has grown by two lines since.
+  const pinnedScrollTop = 1000;
+  const grown = { scrollHeight: 1235, clientHeight: 193, pinnedScrollTop };
+
+  // The pin's own scroll event arrives late and reports a two-line gap. The
+  // viewport never moved, so the tail stays engaged.
+  assert.equal(nextFollowTail(true, { ...grown, scrollTop: 1000 }), true);
+  // The reader scrolls away from the pinned offset: following stops.
+  assert.equal(nextFollowTail(true, { ...grown, scrollTop: 700 }), false);
+  // ...and resumes once they scroll back down to the newest line.
+  assert.equal(nextFollowTail(false, { ...grown, scrollTop: 1042 }), true);
+  // A reader parked mid-list is not dragged back by a stale pinned offset.
+  assert.equal(
+    nextFollowTail(false, { scrollHeight: 2000, clientHeight: 193, pinnedScrollTop, scrollTop: 1000 }),
+    false,
+  );
 });

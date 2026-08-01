@@ -6,8 +6,8 @@ use crate::project_sync::conversation_sync::{
     default_conversation_decision, ConversationCapabilities,
 };
 use crate::project_sync::domain::{
-    ConversationPlanActionType, ConversationPlanDirection, ConversationRelation,
-    MAX_CONVERSATION_FILE_BYTES,
+    classify_thread_refresh, ConversationPlanActionType, ConversationPlanDirection,
+    ConversationRelation, RefreshCloudMeta, RefreshLocalState, MAX_CONVERSATION_FILE_BYTES,
 };
 use serde_json::{json, Value};
 
@@ -85,6 +85,55 @@ fn committed_codex_fixture_proves_structural_rewrite_and_semantic_continuation()
             after.lineage.chain(),
         ),
         ConversationRelation::CloudPrefixOfLocal
+    );
+}
+
+/// Codex restamps every record envelope and re-serializes context records
+/// under its current schema when it forks or rewrites a thread.  The
+/// canonical digests must ignore all of that, or manifest-only refresh would
+/// read every faithful provider rewrite as divergence.
+#[test]
+fn canonical_digests_survive_envelope_restamps_and_context_reserialization() {
+    let before = analyze_codex_transcript(VALID_TRANSCRIPT);
+    let rewritten_lines = VALID_TRANSCRIPT
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let mut record: Value = serde_json::from_slice(line).unwrap();
+            record["timestamp"] = json!("2026-07-31T09:00:00Z");
+            if record["type"] == "turn_context" {
+                // The schema-default field Codex drops or adds when it
+                // re-emits the turn's environment.
+                record["payload"]["sandbox_policy"] = json!({
+                    "type": "workspace-write",
+                    "missing_path_behavior": "skip",
+                });
+            }
+            serde_json::to_string(&record).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let rewritten = format!("{}\n", rewritten_lines.join("\n")).into_bytes();
+    assert_ne!(VALID_TRANSCRIPT, rewritten.as_slice());
+
+    let after = analyze_codex_transcript(&rewritten);
+    assert!(after.is_resumable());
+    assert_eq!(lineage_digests(&before), lineage_digests(&after));
+
+    // The stored metadata of the original classifies the rewritten local as
+    // in sync without any payload in hand.
+    let chain = after.lineage.chain().unwrap();
+    let (lineage_digest, semantic_digest) = lineage_digests(&before);
+    assert_eq!(
+        classify_thread_refresh(
+            RefreshLocalState::Chain(chain),
+            Some(RefreshCloudMeta {
+                message_count: chain.len() as u64,
+                lineage_digest,
+                semantic_digest,
+            }),
+            None,
+        ),
+        ConversationRelation::Identical
     );
 }
 
@@ -226,10 +275,6 @@ fn every_codex_unknown_reason_is_bounded_and_never_resumable() {
             "{name} Pull"
         );
     }
-    assert_eq!(
-        CodecUnknownReason::UnsupportedCodec.as_str(),
-        "unsupported_codec"
-    );
 }
 
 fn lineage_digests(

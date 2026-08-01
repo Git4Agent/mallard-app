@@ -129,8 +129,7 @@ fn complete_push_pull_relation_matrix_plans_and_revalidates() {
             let action = build_conversation_plan_action(ConversationPlanActionRequest {
                 action_id: template.action_id,
                 direction,
-                local_chain: case.local.as_deref(),
-                cloud_chain: case.cloud.as_deref(),
+                relation,
                 capabilities: ConversationCapabilities::default(),
                 provider: template.provider,
                 host_id: template.host_id,

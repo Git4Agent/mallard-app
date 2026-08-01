@@ -154,29 +154,24 @@ pub fn publish_request(
         let analysis = analyze_codex_transcript(&spec.transcript);
         let resource_id = conversation_resource_id(Provider::Codex, &spec.thread_id).unwrap();
         let logical_path = conversation_transcript_path(Provider::Codex, &spec.thread_id).unwrap();
-        let (lineage_status, head_message_id, message_count, lineage_digest, semantic_digest) =
-            match analysis.lineage {
-                CodecLineage::Complete {
-                    chain,
-                    lineage_digest,
-                    semantic_digest,
-                } => (
-                    ConversationLineageStatus::Complete,
-                    chain.last().map(|message| message.message_id.clone()),
-                    Some(chain.len() as u64),
-                    Some(lineage_digest),
-                    Some(semantic_digest),
-                ),
-                CodecLineage::Unknown { reason } => (
-                    ConversationLineageStatus::Unknown {
-                        reason_code: reason.as_str().to_string(),
-                    },
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-            };
+        // Post-cutover manifests carry only proven-lineage conversations, so
+        // the fixture demands the same of its specs.
+        let CodecLineage::Complete {
+            chain,
+            lineage_digest,
+            semantic_digest,
+        } = analysis.lineage
+        else {
+            panic!(
+                "harness thread '{}' transcript is not canonicalizable",
+                spec.thread_id
+            );
+        };
+        let (lineage_status, head_message_id, message_count) = (
+            ConversationLineageStatus::Complete,
+            chain.last().map(|message| message.message_id.clone()),
+            chain.len() as u64,
+        );
         let thread = ConversationThread {
             thread_id: spec.thread_id.clone(),
             provider: Provider::Codex,

@@ -1,9 +1,13 @@
 use super::harness::{analyzed_chain, chain, publish_request, sha256, ThreadSpec, VariantWorld};
 use crate::project_sync::bundle_engine::{PublishBundleRequest, PublishExpectation};
 use crate::project_sync::conversation_sync::{
-    recover_unique_compatible_binding, BindingRecoveryCandidate, BindingRecoveryResult,
+    recover_unique_compatible_binding_from_meta, BindingRecoveryResult,
+    MetaBindingRecoveryCandidate,
 };
-use crate::project_sync::domain::{BundleRecipe, ThreadId, Tombstone, TombstoneTarget};
+use crate::project_sync::domain::{
+    conversation_chain_digests, BundleRecipe, CanonicalConversationMessage, RefreshCloudMeta,
+    ThreadId, Tombstone, TombstoneTarget,
+};
 use std::collections::BTreeMap;
 
 #[test]
@@ -15,70 +19,68 @@ fn missing_binding_recovers_only_one_unique_longest_compatible_ancestor() {
     let short = analyzed_chain(&chain("cloud-short", &[("m-a", "one")]));
     let longest = analyzed_chain(&chain("cloud-long", &[("m-a", "one"), ("m-b", "two")]));
     let unrelated = analyzed_chain(&chain("cloud-other", &[("m-x", "same title")]));
+    // Recovery sees candidates exactly as a manifest describes them: the
+    // digest pair and message count, never the chain itself.
+    let digests = |chain: &[CanonicalConversationMessage]| -> (u64, String, String) {
+        let (lineage, semantic) = conversation_chain_digests(chain).unwrap();
+        (chain.len() as u64, lineage, semantic)
+    };
+    let short_meta = digests(&short);
+    let longest_meta = digests(&longest);
+    let unrelated_meta = digests(&unrelated);
+    fn candidate<'a>(
+        thread_id: &ThreadId,
+        meta: &'a (u64, String, String),
+    ) -> MetaBindingRecoveryCandidate<'a> {
+        MetaBindingRecoveryCandidate {
+            thread_id: thread_id.clone(),
+            meta: RefreshCloudMeta {
+                message_count: meta.0,
+                lineage_digest: &meta.1,
+                semantic_digest: &meta.2,
+            },
+        }
+    }
     let short_id = ThreadId::parse("thread-short").unwrap();
     let longest_id = ThreadId::parse("thread-long").unwrap();
     let unrelated_id = ThreadId::parse("thread-unrelated").unwrap();
+    let equal_id = ThreadId::parse("thread-equal").unwrap();
 
     assert_eq!(
-        recover_unique_compatible_binding(
+        recover_unique_compatible_binding_from_meta(
             Some(&local),
             &[
-                BindingRecoveryCandidate {
-                    thread_id: short_id.clone(),
-                    chain: Some(&short),
-                },
-                BindingRecoveryCandidate {
-                    thread_id: longest_id.clone(),
-                    chain: Some(&longest),
-                },
-                BindingRecoveryCandidate {
-                    thread_id: unrelated_id,
-                    chain: Some(&unrelated),
-                },
+                candidate(&short_id, &short_meta),
+                candidate(&longest_id, &longest_meta),
+                candidate(&unrelated_id, &unrelated_meta),
             ],
         ),
         BindingRecoveryResult::Unique(longest_id.clone())
     );
 
     assert_eq!(
-        recover_unique_compatible_binding(
+        recover_unique_compatible_binding_from_meta(
             Some(&local),
             &[
-                BindingRecoveryCandidate {
-                    thread_id: longest_id,
-                    chain: Some(&longest),
-                },
-                BindingRecoveryCandidate {
-                    thread_id: ThreadId::parse("thread-equal").unwrap(),
-                    chain: Some(&longest),
-                },
+                candidate(&longest_id, &longest_meta),
+                candidate(&equal_id, &longest_meta),
             ],
         ),
         BindingRecoveryResult::Ambiguous
     );
     assert_eq!(
-        recover_unique_compatible_binding(
+        recover_unique_compatible_binding_from_meta(
             Some(&local),
-            &[BindingRecoveryCandidate {
-                thread_id: ThreadId::parse("thread-title-only").unwrap(),
-                chain: Some(&unrelated),
-            }],
+            &[candidate(
+                &ThreadId::parse("thread-title-only").unwrap(),
+                &unrelated_meta,
+            )],
         ),
         BindingRecoveryResult::Missing,
         "display titles and provider IDs are intentionally absent from recovery evidence",
     );
     assert_eq!(
-        recover_unique_compatible_binding(
-            Some(&local),
-            &[BindingRecoveryCandidate {
-                thread_id: short_id,
-                chain: None,
-            }],
-        ),
-        BindingRecoveryResult::Unknown
-    );
-    assert_eq!(
-        recover_unique_compatible_binding(None, &[]),
+        recover_unique_compatible_binding_from_meta(None, &[]),
         BindingRecoveryResult::Unknown
     );
 }

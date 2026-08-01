@@ -164,11 +164,16 @@ impl S3BundleObjectStore {
         body: Bytes,
         expectation: &CasExpectation,
     ) -> Result<PutAttempt, String> {
+        // The service verifies the received bytes against this digest before
+        // accepting, so an acknowledged PUT is a content-verified receipt and
+        // no write path ever reads its object back.
+        let checksum = aws_smithy_types::base64::encode(Sha256::digest(&body));
         let mut request = self
             .client
             .put_object()
             .bucket(&self.bucket)
             .key(key.as_str())
+            .checksum_sha256(checksum)
             .body(ByteStream::from(body));
         request = match expectation {
             CasExpectation::Absent => request.if_none_match("*"),
