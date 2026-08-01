@@ -1,7 +1,9 @@
 # Measurements: Sync Path Performance
 
-- Status: findings only — nothing in this document has been implemented
-- Measured: July 31, 2026
+- Status: measurements. Two findings have since been implemented — the
+  dependency-only dev profile and the fused single parse (D7); both are marked
+  below with their verified results. The rest remain proposals.
+- Measured: July 31 – August 1, 2026
 - Scope: Push review, thread refresh, and Pull planning in `ProjectSync` —
   provider discovery, local capture, thread classification, and storage reads
 - Method: temporary read-only instrumentation over an anonymized local
@@ -20,19 +22,23 @@ the cause of today's latency.
 
 **The unbounded capture set is not only a performance issue** — it terminates in
 a hard failure at 512 MB that breaks refresh, Push review, and Pull planning
-simultaneously. See "The 512 MB cliff" below. One measured project scope is
-already at 56% of that ceiling.
+simultaneously. See "The 512 MB cliff" below. The measured bindings sit at 14.5%
+and 14.7% of that ceiling, roughly six months out at the observed growth rate.
 
 Ranked by payoff per unit of effort:
 
-| # | change | effect | cost |
-| - | --- | --- | --- |
-| 0 | bound the capture set (see the cliff) | prevents a total sync outage | design work |
-| 1 | `[profile.dev.package."*"] opt-level = 1` | 3.9× faster capture | none measurable |
-| 2 | whole-crate `opt-level = 1` in dev | 13× faster capture | 8.6× slower rebuilds |
-| 3 | fuse the double JSONL parse | −37% of analysis | contained, one function |
-| 4 | memoize derivation (D2) | removes repeat parses across operations | new on-disk store |
-| 5 | hoist the chain digest out of the candidate loop | removes the 4.1s Push-review classify phase | a few lines |
+| # | change | effect | cost | state |
+| - | --- | --- | --- | --- |
+| 0 | bound the capture set (see the cliff) | prevents a total sync outage | design work | proposed |
+| 1 | `[profile.dev.package."*"] opt-level = 1` | 3.9× faster capture | none measurable | **landed** |
+| 2 | single-pass secret scan | ~27% off capture (1.5× on ~80% of per-byte cost) | contained, one function | proposed |
+| 3 | fuse the double JSONL parse (D7) | −36% to −60% of analysis; ~10–15% of capture | contained, one function | **landed** |
+| 4 | memoize derivation (D2) | skips analyze **and** the secret scan for unchanged files — ~87% of per-byte work | new on-disk store | proposed |
+| 5 | hoist the chain digest out of the candidate loop | removes the 4.1s Push-review classify phase | a few lines | proposed |
+| — | whole-crate `opt-level = 1` in dev | 13× faster capture | 8.6× slower rebuilds | rejected: rebuild cost |
+
+End-to-end effect of the two landed changes: the reported capture fell from
+15.652s to ~3.3s and refresh from ~18.4s to ~3.5s, about 4.5×.
 
 ## The 512 MB cliff
 
@@ -88,10 +94,13 @@ largest transcript measured is 26.7 MB.
 
 ## Environment measured
 
-- App under test: `src-tauri/target/debug/mallard` — an unoptimized dev build.
-  No `[profile]` section exists in `src-tauri/Cargo.toml`, so dev builds run at
+- App under test at the time of the original measurements:
+  `src-tauri/target/debug/mallard`, an unoptimized dev build — no `[profile]`
+  section existed in `src-tauri/Cargo.toml`, so dev builds ran at
   `opt-level = 0`. `scripts/tauri-build.mjs` builds `release`, so **shipped
-  users never saw this**; it is a dev-environment cost only.
+  users never saw this**; it was a dev-environment cost only. A
+  `[profile.dev.package."*"] opt-level = 1` section has since been added, so
+  figures labelled `opt-level = 0` are historical.
 - Benchmark session corpus: 2.36 GB across 522 `.jsonl` files, with 126 files /
   378 MB matching the synthetic `mallard-app` scope.
 - Registered-fixture setup: two anonymized bindings targeting one
