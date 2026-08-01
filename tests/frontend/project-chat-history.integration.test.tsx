@@ -337,6 +337,71 @@ test("history content uses the local alias and renders commit/thread actions", (
   assert.doesNotMatch(html, /Show chat details/);
 });
 
+test("changed storage history explains the recovery path and exposes only unlink", () => {
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      embedded
+      project={project}
+      binding={{
+        host_id: "00112233445566778899aabbccddeeff",
+        replica_id: "replica",
+        local_project_id: project.local_project_id,
+        bundle_id: project.bundle_id,
+        project_root: project.project_root,
+        canonical_project_root: project.project_root,
+        profile_ids: { codex: "profile-codex" },
+        state: "active",
+        revision: 1,
+        updated_at: 2,
+      }}
+      history={history}
+      comparison={{
+        project_id: project.local_project_id,
+        storage_id: "storage-1",
+        storage_name: "Local storage 1",
+        generation: 2,
+        base_generation: 1,
+        compared_at: 3,
+        entries: [],
+        counts: {
+          synced: 0,
+          local: 0,
+          storage: 0,
+          diverged: 0,
+          unavailable: 0,
+          unknown: 0,
+        },
+        warnings: [],
+        remote_continuity: {
+          state: "replaced",
+          base_generation: 1,
+          remote_generation: 2,
+        },
+      }}
+      loading={false}
+      loadingMore={false}
+      actionError={null}
+      actionBusyThreadId={null}
+      onBranchChange={() => undefined}
+      onRefresh={() => undefined}
+      onLoadMore={() => undefined}
+      onOpenCodex={() => undefined}
+      onOpenTerminal={() => undefined}
+      onUnlinkStorage={() => undefined}
+    />,
+  );
+
+  assert.match(html, />Storage history changed</);
+  assert.match(html, /sync history in Local storage 1 is different from the one Mallard last synced for this project \(generation 1\)/);
+  assert.match(html, /sync data in that storage was deleted and created again/);
+  assert.match(html, /session statuses below use the replacement/);
+  assert.match(html, /Unlinking does not delete files/);
+  assert.match(html, /saved only in the previous storage history cannot be recovered from this machine/);
+  assert.doesNotMatch(html, />Pull and review<\/button>/);
+  assert.match(html, />Unlink storage<\/button>/);
+  assert.doesNotMatch(html, /Remote history was replaced/);
+});
+
 test("commit hashes remain plain text without a GitHub remote", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent

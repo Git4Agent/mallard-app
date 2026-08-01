@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use super::codex_rollout::{
-    analyze_codex_rollout_structure, session_meta_id, structural_record_type,
-    CodexStructureErrorKind, MAX_CODEX_RECORDS,
+    analyze_codex_rollout_structure, check_rollout_bounds, session_meta_id, structural_record_type,
+    CodexStructureAccumulator, CodexStructureErrorKind,
 };
 use super::domain::{
     conversation_chain_digests, validate_conversation_chain, CanonicalConversationMessage,
@@ -24,7 +24,6 @@ pub const CODEX_CODEC_VERSION: u32 = 2;
 
 #[cfg(test)]
 const MAX_TRANSCRIPT_BYTES: usize = super::domain::MAX_CONVERSATION_FILE_BYTES as usize;
-const MAX_RECORDS: usize = MAX_CODEX_RECORDS;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -85,83 +84,50 @@ impl CodexTranscriptAnalysis {
 /// Analyze a Codex rollout without ever treating malformed ancestry as a
 /// divergent branch. Content failures are represented as bounded reason codes
 /// so capture can safely offer StoredOnly.
+///
+/// One fused pass: each JSONL record is parsed exactly once and handed to
+/// both the structure accumulator and the chain builder. A transcript that
+/// yields `Complete` passes both validators over every record, so fusion
+/// cannot change a successful analysis. On unsound transcripts the first
+/// failure in file order wins, and its diagnostics carry whatever structural
+/// identity was already proven — the authoritative session_meta precedes
+/// every conversation item in any rollout that can succeed.
 pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
-    let structure = match analyze_codex_rollout_structure(bytes, None) {
-        Ok(structure) => structure,
-        Err(error) => return unknown(None, None, 0, structure_error_reason(error.kind), false),
-    };
-    let source_thread_id = Some(structure.current.id.clone());
-    let source_cwd = Some(structure.current.cwd.clone());
-    let is_internal_subagent = structure.current.is_internal_subagent;
+    if let Err(error) = check_rollout_bounds(bytes) {
+        return unknown(None, None, 0, structure_error_reason(error.kind), false);
+    }
+    let mut structure = CodexStructureAccumulator::new(None);
     let mut chain = Vec::new();
     let mut seen = BTreeMap::<MessageId, (String, Option<MessageId>)>::new();
     let mut idless_turn_ordinals = BTreeMap::<String, usize>::new();
-    let mut record_count = 0_usize;
     for raw in bytes.split(|byte| *byte == b'\n') {
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         if raw.is_empty() {
             continue;
         }
-        record_count += 1;
-        if record_count > MAX_RECORDS {
-            return unknown(
-                source_thread_id,
-                source_cwd,
-                record_count,
-                CodecUnknownReason::TooManyRecords,
-                is_internal_subagent,
-            );
-        }
         let value: Value = match serde_json::from_slice(raw) {
             Ok(value) => value,
-            Err(_) => {
-                return unknown(
-                    source_thread_id,
-                    source_cwd,
-                    record_count,
-                    CodecUnknownReason::MalformedJson,
-                    is_internal_subagent,
-                )
-            }
+            Err(_) => return unknown_from(&structure, CodecUnknownReason::MalformedJson),
         };
+        if let Err(error) = structure.feed(&value) {
+            return unknown_from(&structure, structure_error_reason(error.kind));
+        }
 
         let identity = match durable_message_identity(&value, &mut idless_turn_ordinals) {
             DurableMessageIdentity::Ignore => continue,
             DurableMessageIdentity::MissingId => {
-                return unknown(
-                    source_thread_id,
-                    source_cwd,
-                    record_count,
-                    CodecUnknownReason::MissingMessageId,
-                    is_internal_subagent,
-                )
+                return unknown_from(&structure, CodecUnknownReason::MissingMessageId)
             }
             DurableMessageIdentity::Present(identity) => identity,
         };
         let message_id = match MessageId::parse(identity.message_id) {
             Ok(id) => id,
-            Err(_) => {
-                return unknown(
-                    source_thread_id,
-                    source_cwd,
-                    record_count,
-                    CodecUnknownReason::InvalidMessageId,
-                    is_internal_subagent,
-                )
-            }
+            Err(_) => return unknown_from(&structure, CodecUnknownReason::InvalidMessageId),
         };
         let explicit_parent = match identity.parent_message_id {
             Some(parent) => match MessageId::parse(parent) {
                 Ok(parent) => Some(parent),
-                Err(_) => {
-                    return unknown(
-                        source_thread_id,
-                        source_cwd,
-                        record_count,
-                        CodecUnknownReason::InvalidMessageId,
-                        is_internal_subagent,
-                    )
-                }
+                Err(_) => return unknown_from(&structure, CodecUnknownReason::InvalidMessageId),
             },
             None => None,
         };
@@ -175,33 +141,15 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
                 continue;
             }
             if existing_fingerprint == &fingerprint {
-                return unknown(
-                    source_thread_id,
-                    source_cwd,
-                    record_count,
-                    CodecUnknownReason::NonLinearParentage,
-                    is_internal_subagent,
-                );
+                return unknown_from(&structure, CodecUnknownReason::NonLinearParentage);
             }
-            return unknown(
-                source_thread_id,
-                source_cwd,
-                record_count,
-                CodecUnknownReason::DuplicateMessageId,
-                is_internal_subagent,
-            );
+            return unknown_from(&structure, CodecUnknownReason::DuplicateMessageId);
         }
         let previous = chain
             .last()
             .map(|message: &CanonicalConversationMessage| message.message_id.clone());
         if explicit_parent.is_some() && explicit_parent != previous {
-            return unknown(
-                source_thread_id,
-                source_cwd,
-                record_count,
-                CodecUnknownReason::NonLinearParentage,
-                is_internal_subagent,
-            );
+            return unknown_from(&structure, CodecUnknownReason::NonLinearParentage);
         }
         let parent_message_id = explicit_parent.or(previous);
         seen.insert(
@@ -214,6 +162,30 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
             semantic_fingerprint: fingerprint,
         });
     }
+
+    // Whole-file structural verdict first, preserving the pre-fusion
+    // end-of-file precedence: ancestry problems outrank an empty chain.
+    let record_count = structure.record_count();
+    let fallback_thread_id = structure.current_meta().map(|meta| meta.id.clone());
+    let fallback_cwd = structure.current_meta().map(|meta| meta.cwd.clone());
+    let fallback_subagent = structure
+        .current_meta()
+        .is_some_and(|meta| meta.is_internal_subagent);
+    let structure = match structure.finalize() {
+        Ok(structure) => structure,
+        Err(finalize_error) => {
+            return unknown(
+                fallback_thread_id,
+                fallback_cwd,
+                record_count,
+                structure_error_reason(finalize_error.kind),
+                fallback_subagent,
+            )
+        }
+    };
+    let source_thread_id = Some(structure.current.id.clone());
+    let source_cwd = Some(structure.current.cwd.clone());
+    let is_internal_subagent = structure.current.is_internal_subagent;
 
     if chain.is_empty() {
         return unknown(
@@ -288,6 +260,23 @@ fn unknown(
         record_count,
         lineage: CodecLineage::Unknown { reason },
     }
+}
+
+/// Mid-file failure result for the fused pass: carries whatever structural
+/// identity the accumulator has already proven.
+fn unknown_from(
+    structure: &CodexStructureAccumulator<'_>,
+    reason: CodecUnknownReason,
+) -> CodexTranscriptAnalysis {
+    unknown(
+        structure.current_meta().map(|meta| meta.id.clone()),
+        structure.current_meta().map(|meta| meta.cwd.clone()),
+        structure.record_count(),
+        reason,
+        structure
+            .current_meta()
+            .is_some_and(|meta| meta.is_internal_subagent),
+    )
 }
 
 struct MessageIdentity {

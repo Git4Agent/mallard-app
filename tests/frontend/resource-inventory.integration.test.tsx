@@ -357,6 +357,79 @@ test("the push chooser gives a minimal recovery path when remote history is miss
   assert.match(pushButton ?? "", /disabled=""/);
 });
 
+test("the push chooser blocks and explains when remote history was replaced", () => {
+  const resource = memoryResource("review");
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={[resource]}
+      selected={new Set([resource.resource_id])}
+      projectDefaults={new Set([resource.resource_id])}
+      busy={false}
+      error={null}
+      storageName="R2 storage 1"
+      destinationStatus={{
+        state: "remote_history_replaced",
+        base_generation: 1,
+        remote_generation: 2,
+        base_manifest_sha256: "a".repeat(64),
+        remote_manifest_sha256: "b".repeat(64),
+      }}
+      initialStep="review"
+      onToggle={() => undefined}
+      onUseProjectDefaults={() => undefined}
+      onClear={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+      onPull={() => undefined}
+      onUnlinkStorage={() => undefined}
+    />,
+  );
+
+  assert.match(html, /role="alert"/);
+  assert.match(html, />Storage history changed</);
+  assert.match(html, /is different from the one Mallard last synced for this project \(generation 1\)/);
+  assert.match(html, /sync data in that storage was deleted and created again/);
+  assert.doesNotMatch(html, />Pull and review<\/button>/);
+  assert.match(html, />Unlink storage<\/button>/);
+  assert.match(html, /saved only in the previous storage history cannot be recovered from this machine/);
+  const pushButton = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[^>]*>/)?.[0];
+  assert.match(pushButton ?? "", /disabled=""/);
+});
+
+test("the push chooser gates an advanced remote at review time, not at preflight", () => {
+  const resource = memoryResource("review");
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={[resource]}
+      selected={new Set([resource.resource_id])}
+      projectDefaults={new Set([resource.resource_id])}
+      busy={false}
+      error={null}
+      storageName="R2 storage 1"
+      destinationStatus={{
+        state: "requires_pull",
+        reason: "remote_advanced",
+        remote_generation: 4,
+        base_generation: 3,
+      }}
+      initialStep="review"
+      onToggle={() => undefined}
+      onUseProjectDefaults={() => undefined}
+      onClear={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+      onPull={() => undefined}
+    />,
+  );
+
+  assert.match(html, />Pull before pushing</);
+  assert.match(html, /advanced to generation 4/);
+  assert.match(html, /base is generation 3/);
+  assert.match(html, />Review Pull<\/button>/);
+  const pushButton = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[^>]*>/)?.[0];
+  assert.match(pushButton ?? "", /disabled=""/);
+});
+
 test("the push chooser provides contextual back and next actions", () => {
   const resource = memoryResource("review");
   const html = renderToStaticMarkup(

@@ -59,6 +59,7 @@ interface Props {
   ) => void;
   onRefresh: () => void;
   onBack: () => void;
+  onUnlinkStorage?: () => void;
 }
 
 const STEP_LABELS: Record<SyncReviewStep, string> = {
@@ -444,6 +445,7 @@ export default function RestorePlanView({
   onRestartCodexApp,
   onRefresh,
   onBack,
+  onUnlinkStorage,
 }: Props) {
   const items = useMemo(() => buildPullReviewItems(plan), [plan]);
   const divergenceActions = useMemo(
@@ -799,6 +801,8 @@ export default function RestorePlanView({
               selectableResourceIds={conversationIds}
               selectionDisabled={busy || finalReady}
               onToggleResource={toggle}
+              onUnlinkStorage={onUnlinkStorage}
+              continuityActionBusy={busy || finalReady}
             />
           ) : activeStep === "history" && conversationItems.length > 0 ? (
             <ItemList
@@ -979,6 +983,22 @@ export default function RestorePlanView({
                 </details>
               )}
 
+              {!hasResult && plan.remote_continuity?.state === "replaced" && (
+                <div className="sync-callout warning sync-sync-review-blocker">
+                  <Icon name="alert-triangle" size={15} />
+                  <span>
+                    <strong>Storage history changed</strong>
+                    {`The sync history in ${storageName || "this storage"} is different from the one Mallard last synced for this project (generation ${plan.remote_continuity.base_generation}). This usually means Mallard's sync data in that storage was deleted and created again. Applying this Pull adopts the replacement history. Mallard backs up and checks local content before changing it, and local-only items can be pushed afterward. If this change is unexpected, unlink the storage instead; unlinking does not delete files.`}
+                  </span>
+                  {onUnlinkStorage && (
+                    <div className="sync-sync-review-recovery-actions">
+                      <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={busy || finalReady}>
+                        Unlink storage
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
               {!hasResult && keptLocalConversationItems.length > 0 && (
                 <div className="sync-callout warning sync-sync-review-blocker">
                   <Icon name="alert-triangle" size={15} />

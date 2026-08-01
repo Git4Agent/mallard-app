@@ -478,6 +478,39 @@ assertion must still pass.
   failure. The engine keeps exactly one single-object entry point, used for
   the head and for genuinely singleton reads.
 
+## D7 — One parse per record (implemented)
+
+`analyze_codex_transcript` used to JSON-parse every rollout line twice:
+once inside `analyze_codex_rollout_structure` (identity, ancestry, cwds)
+and once in its own chain-building loop. Measured on a 148 MB corpus with
+optimized dependencies, the structure pre-pass was 37% of total analysis
+time (0.0045 of 0.0122 s/MB).
+
+The structural semantics now live in one `CodexStructureAccumulator`
+(`codex_rollout.rs`): `feed(&Value)` per record, `finalize()` for the
+whole-file ancestry checks. `analyze_codex_rollout_structure` remains the
+standalone driver for fork verification and rewrite checks;
+`analyze_codex_transcript` parses each record once and feeds both the
+accumulator and the chain builder — one implementation, two drivers.
+
+Soundness: a transcript that yields `Complete` passes both validators over
+every record, so fusion cannot change any chain, digest, or
+classification. On unsound transcripts only, the first failure in file
+order now wins (previously whole-file structure errors outranked earlier
+chain errors) and mid-file failures carry the already-proven thread
+identity instead of `None` — every such result is still `Unknown`, which
+sync treats uniformly. All pre-existing reason-pinning fixtures pass
+unchanged.
+
+This cuts the cost lane D2 cannot reach: first-touch and changed files.
+D2 then removes repeat parses of unchanged files on top of it.
+
+Shipped alongside it: `[profile.dev.package."*"] opt-level = 1` in
+`Cargo.toml`. The wildcard excludes the app crate, so edits keep opt-level
+0 incremental builds while serde_json/sha2/aws-* run optimized — measured
+3.9× on transcript analysis in dev builds, for a one-time dependency
+rebuild.
+
 ## Work budgets
 
 Enforced as **work counts**, not wall-clock. One thread changed in a

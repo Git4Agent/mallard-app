@@ -782,11 +782,11 @@ impl BundleRecipe {
 pub struct RecipeBase {
     pub generation: u64,
     pub manifest_sha256: String,
-    /// Immutable commit that established this reviewed base. Keeping the
-    /// commit ID locally lets status views reload the exact historical
-    /// manifest after the storage head advances.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit_id: Option<String>,
+    /// Immutable commit that established this reviewed base. It lets status
+    /// views reload the exact historical manifest after the storage head
+    /// advances, and names the manifest the continuity probe checks for
+    /// lineage membership — which is why it is required, not optional.
+    pub commit_id: String,
     pub recipe_revision: u64,
     /// The machine binding that established this reviewed remote base. Older
     /// experimental bases deserialize as `None` and cannot authorize Push.
@@ -801,10 +801,94 @@ pub struct RecipeBase {
 impl RecipeBase {
     pub fn validate(&self) -> Result<(), String> {
         validate_sha256("recipe base manifest", &self.manifest_sha256)?;
-        if let Some(commit_id) = &self.commit_id {
-            validate_named_id("recipe base commit", commit_id)?;
-        }
+        validate_named_id("recipe base commit", &self.commit_id)?;
         Ok(())
+    }
+}
+
+/// Repository-level continuity between this replica's recorded sync base and
+/// the observed bundle head — rows 1–8 of DESIGN_REMOTE_HISTORY_CONTINUITY.md.
+/// Computed by every plan phase and surfaced by Refresh, Pull review, and
+/// Push review. Advisory: it gates and explains, never mutates.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RemoteContinuity {
+    /// No remote history and no recorded base: a first publication target.
+    Fresh,
+    /// A base is recorded but the remote holds no history at all.
+    RemoteMissing { base_generation: u64 },
+    /// Remote history exists but this replica has never reviewed a base.
+    Unreviewed { remote_generation: u64 },
+    /// The head names exactly the manifest this replica last synced.
+    InSync { generation: u64 },
+    /// The recorded base is still part of the remote history; a pull
+    /// fast-forwards onto it.
+    Advanced {
+        base_generation: u64,
+        remote_generation: u64,
+    },
+    /// The remote no longer contains the recorded base: the history this
+    /// replica synced was replaced, not extended.
+    Replaced {
+        base_generation: u64,
+        remote_generation: u64,
+    },
+    /// The probe could not reach the store; no verdict is claimed.
+    Unknown { message: String },
+}
+
+/// Classify remote history continuity from content witnesses alone.
+///
+/// The probe runs only in the generation-ahead arm and must read the store —
+/// never a local cache, whose contents witness nothing about the remote —
+/// reporting whether the base manifest is still present with exactly the
+/// recorded digest. Every other row is decided for free: equal generations
+/// with different digests cannot share a lineage (a lineage commits each
+/// generation exactly once), and generations never regress within one.
+pub fn classify_remote_continuity(
+    observed_head: Option<&BundleHead>,
+    base: Option<&RecipeBase>,
+    probe: &mut dyn FnMut(&RecipeBase) -> Result<bool, String>,
+) -> RemoteContinuity {
+    match (observed_head, base) {
+        (None, None) => RemoteContinuity::Fresh,
+        (None, Some(base)) => RemoteContinuity::RemoteMissing {
+            base_generation: base.generation,
+        },
+        (Some(head), None) => RemoteContinuity::Unreviewed {
+            remote_generation: head.generation,
+        },
+        (Some(head), Some(base)) => {
+            if head.generation == base.generation {
+                if head.manifest_sha256 == base.manifest_sha256 {
+                    RemoteContinuity::InSync {
+                        generation: head.generation,
+                    }
+                } else {
+                    RemoteContinuity::Replaced {
+                        base_generation: base.generation,
+                        remote_generation: head.generation,
+                    }
+                }
+            } else if head.generation < base.generation {
+                RemoteContinuity::Replaced {
+                    base_generation: base.generation,
+                    remote_generation: head.generation,
+                }
+            } else {
+                match probe(base) {
+                    Ok(true) => RemoteContinuity::Advanced {
+                        base_generation: base.generation,
+                        remote_generation: head.generation,
+                    },
+                    Ok(false) => RemoteContinuity::Replaced {
+                        base_generation: base.generation,
+                        remote_generation: head.generation,
+                    },
+                    Err(message) => RemoteContinuity::Unknown { message },
+                }
+            }
+        }
     }
 }
 
@@ -4024,6 +4108,10 @@ pub struct RestorePlan {
     pub conversation_actions: Vec<ConversationPlanAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_content_eligibility: Option<ProjectFileSyncEligibility>,
+    /// Advisory repository-level continuity computed at plan time, so the
+    /// pull review can explain a replaced history before anything applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_continuity: Option<RemoteContinuity>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -4399,11 +4487,22 @@ mod tests {
     #[test]
     fn recipe_base_defaults_sync_activity_timestamps() {
         let base: RecipeBase = serde_json::from_str(
-            r#"{"generation":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","recipe_revision":2}"#,
+            r#"{"generation":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","commit_id":"commit-1","recipe_revision":2}"#,
         )
         .unwrap();
         assert_eq!(base.last_pull_at, None);
         assert_eq!(base.last_push_at, None);
+    }
+
+    /// The commit ID names the manifest the continuity probe checks, so a
+    /// base without one is invalid rather than quietly unprobeable
+    /// (DESIGN_REMOTE_HISTORY_CONTINUITY.md cutover step 1).
+    #[test]
+    fn recipe_base_requires_an_immutable_commit_id() {
+        assert!(serde_json::from_str::<RecipeBase>(
+            r#"{"generation":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","recipe_revision":2}"#,
+        )
+        .is_err());
     }
 
     fn bundle_id() -> BundleId {

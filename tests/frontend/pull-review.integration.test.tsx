@@ -78,6 +78,44 @@ const restorePlan: RestorePlan = {
   }],
 };
 
+test("a replacement storage history offers unlinking from Pull review", () => {
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      storageName="Local storage 1"
+      profileLabel="myconf2"
+      plan={{
+        ...restorePlan,
+        remote_continuity: {
+          state: "replaced",
+          base_generation: 1,
+          remote_generation: 2,
+        },
+      }}
+      binding={binding}
+      readiness={null}
+      restoreResult={null}
+      phase="idle"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="review"
+      onApply={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+      onUnlinkStorage={() => undefined}
+    />,
+  );
+
+  assert.match(html, />Storage history changed</);
+  assert.match(html, /Applying this Pull adopts the replacement history/);
+  assert.match(html, /unlinking does not delete files/);
+  assert.match(html, />Unlink storage<\/button>/);
+});
+
 test("post-fork replans finalize only when conversation rows are informational", () => {
   assert.equal(hasPendingRestoreMutations({
     ...restorePlan,

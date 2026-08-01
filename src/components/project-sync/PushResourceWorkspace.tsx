@@ -403,6 +403,14 @@ export default function PushResourceWorkspace({
     ? destinationStatus
     : null;
   const remoteHistoryMissing = missingDestination !== null;
+  const replacedDestination = destinationStatus?.state === "remote_history_replaced"
+    ? destinationStatus
+    : null;
+  const remoteHistoryReplaced = replacedDestination !== null;
+  const requiresPullDestination = destinationStatus?.state === "requires_pull"
+    ? destinationStatus
+    : null;
+  const remotePullRequired = requiresPullDestination !== null;
   const storageBlockingCount = blockers.filter((blocker) => blocker.kind === "storage").length;
   const localBlockingCount = blockingCount - storageBlockingCount;
   const warningSteps = new Set<SyncReviewStep>();
@@ -598,6 +606,8 @@ export default function PushResourceWorkspace({
               selectionDisabled={busy}
               onToggleResource={toggleResource}
               onReviewPull={onPull}
+              onUnlinkStorage={onUnlinkStorage}
+              continuityActionBusy={busy}
               comparisonOverride={threadComparison}
             />
           ) : activeStep === "history" ? (
@@ -663,6 +673,40 @@ export default function PushResourceWorkspace({
                   </div>
                 </div>
               )}
+              {replacedDestination && (
+                <div className="sync-callout sync-sync-review-blocker sync-sync-review-remote-missing" role="alert">
+                  <Icon name="alert-triangle" size={15} />
+                  <span>
+                    <strong>Storage history changed</strong>
+                    The sync history in {storageName || "this storage"} is different from the one Mallard last synced for this project (generation {replacedDestination.base_generation}). This usually means Mallard&apos;s sync data in that storage was deleted and created again. Unlink this storage and link it again to start fresh. Unlinking does not delete files, but anything saved only in the previous storage history cannot be recovered from this machine.
+                  </span>
+                  {onUnlinkStorage && (
+                    <div className="sync-sync-review-recovery-actions">
+                      <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={busy}>
+                        Unlink storage
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+              {requiresPullDestination && (
+                <div className="sync-callout sync-sync-review-blocker" role="alert">
+                  <Icon name="git-compare-arrows" size={15} />
+                  <span>
+                    <strong>Pull before pushing</strong>
+                    {requiresPullDestination.reason === "remote_advanced"
+                      ? `${storageName || "This storage"} advanced to generation ${requiresPullDestination.remote_generation}${requiresPullDestination.base_generation != null ? ` while this replica's base is generation ${requiresPullDestination.base_generation}` : ""}. Pull and review the newer history, then push.`
+                      : requiresPullDestination.reason === "remote_without_base"
+                        ? `${storageName || "This storage"} already has history this replica has not reviewed. Pull and review it before pushing.`
+                        : "The project checkout or provider profile changed after the last reviewed base. Pull and review before pushing."}
+                  </span>
+                  {onPull && (
+                    <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>
+                      Review Pull
+                    </button>
+                  )}
+                </div>
+              )}
               <button type="button" onClick={() => selectStep("history")}>
                 <span><Icon name="git-branch" size={15} /><strong>Sessions</strong></span>
                 <span>{counts.history} included<Icon name="chevron-right" size={13} /></span>
@@ -717,7 +761,7 @@ export default function PushResourceWorkspace({
             <Icon name="chevron-right" size={14} />
           </button>
         ) : (
-          <button type="button" className="btn btn-primary sync-pull-apply-button" onClick={onPush} disabled={busy || remoteHistoryMissing || (selectedCount === 0 && projectContentRemovals.size === 0) || blockingCount > 0}>
+          <button type="button" className="btn btn-primary sync-pull-apply-button" onClick={onPush} disabled={busy || remoteHistoryMissing || remoteHistoryReplaced || remotePullRequired || (selectedCount === 0 && projectContentRemovals.size === 0) || blockingCount > 0}>
             <Icon name={busy ? "refresh" : "upload"} size={16} className={busy ? "icon-spin" : undefined} />
             {busy
               ? (fetchProgress && fetchProgress.phase === "push"

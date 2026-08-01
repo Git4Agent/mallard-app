@@ -55,3 +55,15 @@ From [PLAN_LEGACY_ROLLOUT_BLOCKED_THREADS.md](PLAN_LEGACY_ROLLOUT_BLOCKED_THREAD
       (not scheduled; sequence after the Push→`publish_schema6` wiring from
       [PLAN_REMOVE_BACKWARD_COMPAT.md](PLAN_REMOVE_BACKWARD_COMPAT.md)
       Tier 2)
+- [ ] **Row-7 ancestry walk for retained-files force-resets** — the
+      remote-history-continuity probe misreads a rewound-and-regrown
+      repository as `Advanced` when the reset kept old files (`rsync`
+      without `--delete` over the storage dir, or an S3 rollback of
+      `_head`'s latest version only) and the new lineage overtook the
+      base's generation. Degrades safely (pull is offered; pins and
+      apply-time verification hold) but the diagnosis is wrong: no
+      replaced-history warning, and purged content can be innocently
+      re-pushed. Fix: row 7 requires *ancestry* via
+      `CommitRecord.previous_commit_id`, not *presence*. Worked example in
+      [DESIGN_REMOTE_HISTORY_CONTINUITY.md](DESIGN_REMOTE_HISTORY_CONTINUITY.md)
+      (*Considered and deferred*)

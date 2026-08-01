@@ -28,6 +28,8 @@ interface PageProps {
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
+  onUnlinkStorage?: () => void;
+  continuityActionBusy?: boolean;
   comparisonOverride?: ThreadSyncComparison | null;
 }
 
@@ -65,6 +67,8 @@ interface ContentProps {
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
+  onUnlinkStorage?: () => void;
+  continuityActionBusy?: boolean;
 }
 
 const THREAD_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -873,7 +877,8 @@ export function ProjectChatHistoryContent({
   onOpenTerminal, onToggleDetails, onLoadMoreDetails, embedded = false, comparison = null,
   comparisonLoading = false, comparisonError = null, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
-  selectionDisabled = false, onToggleResource, onReviewPull,
+  selectionDisabled = false, onToggleResource, onReviewPull, onUnlinkStorage,
+  continuityActionBusy = false,
 }: ContentProps) {
   const label = projectLabel(project);
   const aliased = label !== project.display_name;
@@ -1064,6 +1069,24 @@ export function ProjectChatHistoryContent({
         </header>}
 
         {actionError && <div className="sync-callout error sync-history-error" role="alert"><Icon name="alert-triangle" size={15} /><span>{actionError}</span></div>}
+        {comparison?.remote_continuity?.state === "replaced" && (
+          <div className="sync-callout warning sync-history-continuity" role="status">
+            <Icon name="alert-triangle" size={15} />
+            <div className="sync-history-continuity-copy">
+              <strong>Storage history changed</strong>
+              <span>
+                {`The sync history in ${comparisonStorageName} is different from the one Mallard last synced for this project (generation ${comparison.remote_continuity.base_generation}). This usually means Mallard's sync data in that storage was deleted and created again. The session statuses below use the replacement. Unlink this storage and link it again to start fresh. Unlinking does not delete files, but anything saved only in the previous storage history cannot be recovered from this machine.`}
+              </span>
+            </div>
+            {onUnlinkStorage && (
+              <div className="sync-sync-review-recovery-actions">
+                <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={continuityActionBusy}>
+                  Unlink storage
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         {!hasCodexProfile ? (
           <div className="sync-history-state sync-history-profile-state"><Icon name="alert-triangle" size={18} /><div><strong>No Codex profile is connected.</strong><span>Remove and add the project again to choose a Codex profile.</span></div></div>
         ) : loading && !history ? <div className="sync-history-state" role="status" aria-live="polite"><span className="status-loader" /> Loading project activity…</div> : !history ? null : (
@@ -1238,6 +1261,8 @@ export default function ProjectChatHistoryPage({
   selectionDisabled = false,
   onToggleResource,
   onReviewPull,
+  onUnlinkStorage,
+  continuityActionBusy = false,
   comparisonOverride,
 }: PageProps) {
   const [history, setHistory] = useState<ProjectChatHistory | null>(null);
@@ -1365,5 +1390,5 @@ export default function ProjectChatHistoryPage({
     if (!wasOpen && !detailsByThread[threadId]?.page && !detailsByThread[threadId]?.loading) void loadDetails(threadId);
   };
 
-  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void load(null, branch, true); void loadComparison(); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} />;
+  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void load(null, branch, true); void loadComparison(); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
 }

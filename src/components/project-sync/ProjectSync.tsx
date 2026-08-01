@@ -1547,7 +1547,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
               ? { ...current, destinationStatus }
               : current
           ));
-          if (destinationStatus.state === "remote_history_missing") {
+          if (
+            destinationStatus.state === "remote_history_missing"
+            || destinationStatus.state === "remote_history_replaced"
+          ) {
             setPushReviewStep("review");
             setPushError(null);
             return;
@@ -2453,8 +2456,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       pushWarningAcknowledgements,
     )
     : 0;
-  const pendingPushRemoteHistoryMissing =
-    pendingPush?.destinationStatus.state === "remote_history_missing";
+  const pendingPushDestinationBlocked =
+    pendingPush?.destinationStatus.state === "remote_history_missing"
+    || pendingPush?.destinationStatus.state === "remote_history_replaced"
+    || pendingPush?.destinationStatus.state === "requires_pull";
   const pendingPushSteps = syncReviewSteps(pendingPush?.showProjectFiles ?? false);
   const inlineStorageReview = pendingPush ? {
     kind: "push" as const,
@@ -2470,7 +2475,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     continueDisabled: pushReviewStep === "review"
       && ((safePushSelection.size === 0 && pushProjectContentRemovals.size === 0)
         || pendingPushBlockingCount > 0
-        || pendingPushRemoteHistoryMissing
+        || pendingPushDestinationBlocked
         || projectContentLoading),
     onClose: () => {
       if (busy) return;
@@ -2613,6 +2618,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         }}
         onRefresh={() => void refreshRestore()}
         onBack={closePullReview}
+        onUnlinkStorage={() => {
+          void unlinkStorage(
+            restoreBinding.local_project_id,
+            restorePlan.storage_id,
+            "remote_history_missing",
+          );
+        }}
       />
     ),
   } : null;

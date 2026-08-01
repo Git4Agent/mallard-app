@@ -36,24 +36,25 @@ use super::conversation_sync::{
     ConversationDecision, ConversationPlanActionRequest, MetaBindingRecoveryCandidate,
 };
 use super::domain::{
-    absent_bundle_head_pin, conversation_resource_id, conversation_transcript_path,
-    generated_named_id, generated_uuid_v4, initial_conversation_thread_id,
-    validate_absolute_clean_path, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt, BindingState,
-    BundleDirectoryEntry, BundleHead, BundleId, BundleIdentity, BundleKind, BundleManifest,
-    BundleRecipe, BundleSnapshot, CapturedWith, CodexDivergenceOperation, CodexForkExecutor,
-    CodexInventoryRefreshStatus, ConversationDivergencePlan, ConversationDivergenceResolution,
-    ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
-    ConversationMaterializationState, ConversationNameStatus, ConversationOperationId,
-    ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationPushPlan, ConversationReasonCode, ConversationRelation,
-    ConversationResolutionSelection, ConversationSyncOperation, ConversationSyncOperationKind,
-    ConversationSyncPhase, ConversationThread, DraftProfileSelection, DraftRepositoryChoice,
-    DraftStorageSelection, HostId, LocalConversationBinding, LocalProjectId,
-    LocalProjectRegistration, LocalProviderProfileId, LogicalPath, MachineProjectState,
-    MaterializationId, MaterializationRecord, MaterializationStatus, OriginHostAlias,
-    OriginHostToken, PlanId, PortableOrigin, ProjectBinding, ProjectFileSyncEligibility,
-    ProjectFileSyncEligibilityState, ProjectSetupDraft, ProjectStorageLink, Provenance, Provider,
-    ProviderProfile, ProviderStateExpectation, RecipeBase, RecipeEntry, ReplicaId,
+    absent_bundle_head_pin, classify_remote_continuity, conversation_resource_id,
+    conversation_transcript_path, generated_named_id, generated_uuid_v4,
+    initial_conversation_thread_id, validate_absolute_clean_path, ActionId, ActionStatus,
+    ApplyPolicy, ApplyReceipt, BindingState, BundleDirectoryEntry, BundleHead, BundleId,
+    BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleSnapshot, CapturedWith,
+    CodexDivergenceOperation, CodexForkExecutor, CodexInventoryRefreshStatus,
+    ConversationDivergencePlan, ConversationDivergenceResolution, ConversationFileRef,
+    ConversationFileRole, ConversationLineageStatus, ConversationMaterializationState,
+    ConversationNameStatus, ConversationOperationId, ConversationPlanAction,
+    ConversationPlanActionType, ConversationPlanDirection, ConversationPushPlan,
+    ConversationReasonCode, ConversationRelation, ConversationResolutionSelection,
+    ConversationSyncOperation, ConversationSyncOperationKind, ConversationSyncPhase,
+    ConversationThread, DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection,
+    HostId, LocalConversationBinding, LocalProjectId, LocalProjectRegistration,
+    LocalProviderProfileId, LogicalPath, MachineProjectState, MaterializationId,
+    MaterializationRecord, MaterializationStatus, OriginHostAlias, OriginHostToken, PlanId,
+    PortableOrigin, ProjectBinding, ProjectFileSyncEligibility, ProjectFileSyncEligibilityState,
+    ProjectSetupDraft, ProjectStorageLink, Provenance, Provider, ProviderProfile,
+    ProviderStateExpectation, RecipeBase, RecipeEntry, RemoteContinuity, ReplicaId,
     ResourceDescriptor, ResourceId, ResourceKind, ResourceScope, RestoreAction, RestoreActionKind,
     RestoreActionType, RestorePlan, SetupDraftId, SetupTransaction, StorageConfig, StorageId,
     StorageKind, SyncConfig, TargetExpectation, ThreadId, TombstoneTarget,
@@ -508,6 +509,10 @@ pub struct ThreadSyncComparison {
     pub counts: ThreadSyncCounts,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Advisory repository-level continuity between the recorded base and
+    /// the observed head (DESIGN_REMOTE_HISTORY_CONTINUITY.md). Explains a
+    /// wiped-and-recreated storage wherever the comparison is shown.
+    pub remote_continuity: RemoteContinuity,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -3209,25 +3214,18 @@ fn build_project_files_inventory(
         .unwrap_or_default();
     let mut warnings = Vec::new();
     let (base_versions, base_unavailable) = match project.recipe_bases.get(storage_id) {
-        Some(base) => match base.commit_id.as_deref() {
-            Some(commit_id) => match engine.inspect_manifest_version(
-                &project.bundle_id,
-                base.generation,
-                commit_id,
-                &base.manifest_sha256,
-            ) {
-                Ok(manifest) => (project_content_versions(&manifest)?, false),
-                Err(error) => {
-                    warnings.push(format!(
-                        "Reviewed project-content base is unavailable: {}",
-                        error
-                    ));
-                    (BTreeMap::new(), true)
-                }
-            },
-            None => {
-                warnings
-                    .push("Reviewed project-content base has no immutable commit ID".to_string());
+        Some(base) => match engine.inspect_manifest_version(
+            &project.bundle_id,
+            base.generation,
+            &base.commit_id,
+            &base.manifest_sha256,
+        ) {
+            Ok(manifest) => (project_content_versions(&manifest)?, false),
+            Err(error) => {
+                warnings.push(format!(
+                    "Reviewed project-content base is unavailable: {}",
+                    error
+                ));
                 (BTreeMap::new(), true)
             }
         },
@@ -5158,6 +5156,11 @@ fn get_project_thread_sync_comparison_with_progress(
     let (_, engine) = storage_engine(repository, storage_id)?;
     let current = engine.inspect_optional(&project.bundle_id)?;
     on_phase("inspect remote head", phase_started.elapsed());
+    let remote_continuity = classify_remote_continuity(
+        current.as_ref().map(|snapshot| &snapshot.head),
+        project.recipe_bases.get(storage_id),
+        &mut continuity_probe(&engine, &project.bundle_id),
+    );
     Ok(build_thread_sync_comparison(
         repository,
         local_project_id,
@@ -5170,6 +5173,7 @@ fn get_project_thread_sync_comparison_with_progress(
         &engine,
         current.as_ref(),
         false,
+        remote_continuity,
         on_phase,
     )?
     .comparison)
@@ -5196,6 +5200,7 @@ fn build_thread_sync_comparison(
     engine: &StorageEngine,
     current: Option<&BundleSnapshot>,
     build_push_actions: bool,
+    remote_continuity: RemoteContinuity,
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<ThreadComparisonBuild, String> {
     let phase_started = Instant::now();
@@ -5335,6 +5340,7 @@ fn build_thread_sync_comparison(
             entries: review.entries,
             counts,
             warnings,
+            remote_continuity,
         },
         push_actions: review.push_actions,
     })
@@ -5462,6 +5468,16 @@ pub enum PushDestinationStatus {
     RemoteHistoryMissing {
         base_generation: u64,
     },
+    /// The remote holds a history that does not contain this replica's base:
+    /// the repository was wiped and recreated, or otherwise reset. Blocks
+    /// Push like `RemoteHistoryMissing`; the remedy is a pull (which adopts
+    /// the new history and rewrites the base) or an unlink-and-relink.
+    RemoteHistoryReplaced {
+        base_generation: u64,
+        remote_generation: u64,
+        base_manifest_sha256: String,
+        remote_manifest_sha256: String,
+    },
     RequiresPull {
         reason: PushDestinationPullReason,
         remote_generation: u64,
@@ -5473,41 +5489,110 @@ pub enum PushDestinationStatus {
     },
 }
 
-fn classify_push_destination(
+/// Map continuity onto the push-side destination status. The binding-revision
+/// overlay is push policy, not continuity, and always wins first.
+fn push_destination_from_continuity(
+    continuity: &RemoteContinuity,
     observed_head: Option<&BundleHead>,
     base: Option<&RecipeBase>,
     binding_revision: u64,
 ) -> PushDestinationStatus {
-    match (observed_head, base) {
-        (None, None) => PushDestinationStatus::Ready { generation: None },
-        (None, Some(base)) => PushDestinationStatus::RemoteHistoryMissing {
-            base_generation: base.generation,
-        },
-        (Some(head), None) => PushDestinationStatus::RequiresPull {
-            reason: PushDestinationPullReason::RemoteWithoutBase,
-            remote_generation: head.generation,
-            base_generation: None,
-        },
-        (Some(head), Some(base)) if base.binding_revision != Some(binding_revision) => {
-            PushDestinationStatus::RequiresPull {
+    if let (Some(head), Some(base)) = (observed_head, base) {
+        if base.binding_revision != Some(binding_revision) {
+            return PushDestinationStatus::RequiresPull {
                 reason: PushDestinationPullReason::BindingChanged,
                 remote_generation: head.generation,
                 base_generation: Some(base.generation),
+            };
+        }
+    }
+    match continuity {
+        RemoteContinuity::Fresh => PushDestinationStatus::Ready { generation: None },
+        RemoteContinuity::RemoteMissing { base_generation } => {
+            PushDestinationStatus::RemoteHistoryMissing {
+                base_generation: *base_generation,
             }
         }
-        (Some(head), Some(base))
-            if head.generation == base.generation
-                && head.manifest_sha256 == base.manifest_sha256 =>
-        {
-            PushDestinationStatus::Ready {
-                generation: Some(head.generation),
-            }
-        }
-        (Some(head), Some(base)) => PushDestinationStatus::RequiresPull {
-            reason: PushDestinationPullReason::RemoteAdvanced,
-            remote_generation: head.generation,
-            base_generation: Some(base.generation),
+        RemoteContinuity::Unreviewed { remote_generation } => PushDestinationStatus::RequiresPull {
+            reason: PushDestinationPullReason::RemoteWithoutBase,
+            remote_generation: *remote_generation,
+            base_generation: None,
         },
+        RemoteContinuity::InSync { generation } => PushDestinationStatus::Ready {
+            generation: Some(*generation),
+        },
+        RemoteContinuity::Advanced {
+            base_generation,
+            remote_generation,
+        } => PushDestinationStatus::RequiresPull {
+            reason: PushDestinationPullReason::RemoteAdvanced,
+            remote_generation: *remote_generation,
+            base_generation: Some(*base_generation),
+        },
+        RemoteContinuity::Replaced {
+            base_generation,
+            remote_generation,
+        } => PushDestinationStatus::RemoteHistoryReplaced {
+            base_generation: *base_generation,
+            remote_generation: *remote_generation,
+            base_manifest_sha256: base
+                .map(|base| base.manifest_sha256.clone())
+                .unwrap_or_default(),
+            remote_manifest_sha256: observed_head
+                .map(|head| head.manifest_sha256.clone())
+                .unwrap_or_default(),
+        },
+        RemoteContinuity::Unknown { message } => PushDestinationStatus::Unavailable {
+            message: message.clone(),
+        },
+    }
+}
+
+/// One-call form for sites that need only the destination status. The
+/// binding overlay is checked before continuity so a mismatch never spends
+/// a probe read.
+fn classify_push_destination(
+    observed_head: Option<&BundleHead>,
+    base: Option<&RecipeBase>,
+    binding_revision: u64,
+    probe: &mut dyn FnMut(&RecipeBase) -> Result<bool, String>,
+) -> PushDestinationStatus {
+    if let (Some(head), Some(base)) = (observed_head, base) {
+        if base.binding_revision != Some(binding_revision) {
+            return PushDestinationStatus::RequiresPull {
+                reason: PushDestinationPullReason::BindingChanged,
+                remote_generation: head.generation,
+                base_generation: Some(base.generation),
+            };
+        }
+    }
+    let continuity = classify_remote_continuity(observed_head, base, probe);
+    push_destination_from_continuity(&continuity, observed_head, base, binding_revision)
+}
+
+/// Head-end of a sha256 for log and error lines; full digests stay in the
+/// serialized status for the UI.
+fn short_digest(digest: &str) -> &str {
+    digest.get(..8).unwrap_or(digest)
+}
+
+/// Store-read continuity probe over a storage engine. Present with the
+/// recorded digest ⇒ `Ok(true)`; absent or different bytes ⇒ `Ok(false)`;
+/// transport failure ⇒ `Err`, which classifies as `Unknown`. Reads the
+/// store, never a cache — a local copy witnesses nothing about the remote.
+fn continuity_probe<'a>(
+    engine: &'a StorageEngine,
+    bundle_id: &'a BundleId,
+) -> impl FnMut(&RecipeBase) -> Result<bool, String> + 'a {
+    move |base: &RecipeBase| {
+        engine
+            .fetch_manifest_version_optional(
+                bundle_id,
+                base.generation,
+                &base.commit_id,
+                &base.manifest_sha256,
+            )
+            .map(|manifest| manifest.is_some())
     }
 }
 
@@ -5518,6 +5603,18 @@ fn push_destination_error(status: &PushDestinationStatus) -> Option<String> {
             "remote history is missing at the configured storage; if this is expected, unlink and relink the storage before pushing again"
                 .to_string(),
         ),
+        PushDestinationStatus::RemoteHistoryReplaced {
+            base_generation,
+            remote_generation,
+            base_manifest_sha256,
+            remote_manifest_sha256,
+        } => Some(format!(
+            "remote history at this storage was replaced: remote generation {} (manifest {}) does not contain this replica's base generation {} (manifest {}); pull and review to adopt the new history, or unlink and relink the storage",
+            remote_generation,
+            short_digest(remote_manifest_sha256),
+            base_generation,
+            short_digest(base_manifest_sha256),
+        )),
         PushDestinationStatus::RequiresPull {
             reason: PushDestinationPullReason::RemoteWithoutBase,
             ..
@@ -5534,11 +5631,15 @@ fn push_destination_error(status: &PushDestinationStatus) -> Option<String> {
         ),
         PushDestinationStatus::RequiresPull {
             reason: PushDestinationPullReason::RemoteAdvanced,
-            ..
-        } => Some(
-            "remote bundle advanced since this replica's base; pull and review before pushing"
-                .to_string(),
-        ),
+            remote_generation,
+            base_generation,
+        } => Some(format!(
+            "remote bundle advanced since this replica's base (base generation {}, remote generation {}); pull and review before pushing",
+            base_generation
+                .map(|generation| generation.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            remote_generation,
+        )),
         PushDestinationStatus::Unavailable { message } => Some(message.clone()),
     }
 }
@@ -5635,15 +5736,32 @@ fn prepare_push_review_with_progress(
         let current = engine.inspect_optional(&project.bundle_id)?;
         Ok((engine, current))
     });
-    let destination_status = match &remote {
-        Ok((_, current)) => classify_push_destination(
-            current.as_ref().map(|snapshot| &snapshot.head),
-            project.recipe_bases.get(storage_id),
-            binding.revision,
+    // Continuity is classified once per operation — at most one probe read —
+    // then the destination status maps it push-side and the thread
+    // comparison carries it verbatim.
+    let (destination_status, remote_continuity) = match &remote {
+        Ok((engine, current)) => {
+            let observed_head = current.as_ref().map(|snapshot| &snapshot.head);
+            let base = project.recipe_bases.get(storage_id);
+            let continuity = classify_remote_continuity(
+                observed_head,
+                base,
+                &mut continuity_probe(engine, &project.bundle_id),
+            );
+            let destination = push_destination_from_continuity(
+                &continuity,
+                observed_head,
+                base,
+                binding.revision,
+            );
+            (destination, Some(continuity))
+        }
+        Err(error) => (
+            PushDestinationStatus::Unavailable {
+                message: error.clone(),
+            },
+            None,
         ),
-        Err(error) => PushDestinationStatus::Unavailable {
-            message: error.clone(),
-        },
     };
     on_phase("inspect remote head", phase_started.elapsed());
 
@@ -5674,6 +5792,9 @@ fn prepare_push_review_with_progress(
                     engine,
                     current.as_ref(),
                     true,
+                    remote_continuity
+                        .clone()
+                        .expect("continuity is classified whenever the storage engine opened"),
                     &mut *on_phase,
                 ) {
                     Ok(build) => {
@@ -5796,11 +5917,13 @@ fn get_push_destination_status_with_repository(
         })?;
     let (_, engine) = storage_engine(repository, storage_id)?;
     let current = engine.inspect_optional(&project.bundle_id)?;
-    Ok(classify_push_destination(
+    let status = classify_push_destination(
         current.as_ref().map(|snapshot| &snapshot.head),
         project.recipe_bases.get(storage_id),
         binding.revision,
-    ))
+        &mut continuity_probe(&engine, &project.bundle_id),
+    );
+    Ok(status)
 }
 
 #[tauri::command]
@@ -6997,6 +7120,7 @@ fn push_bundle_reviewed_with_progress(
         observed.as_ref().map(|(snapshot, _)| &snapshot.head),
         project.recipe_bases.get(storage_id),
         binding.revision,
+        &mut continuity_probe(&engine, &project.bundle_id),
     );
     if let Some(error) = push_destination_error(&destination_status) {
         return Err(error);
@@ -7051,7 +7175,7 @@ fn push_bundle_reviewed_with_progress(
             RecipeBase {
                 generation,
                 manifest_sha256: manifest_sha256.clone(),
-                commit_id: Some(commit_id.clone()),
+                commit_id: commit_id.clone(),
                 recipe_revision,
                 binding_revision: Some(binding.revision),
                 last_pull_at,
@@ -7201,10 +7325,29 @@ fn plan_bundle_restore_with_progress(
         .project(&binding.local_project_id)
         .cloned()
         .ok_or_else(|| format!("unknown local project '{}'", binding.local_project_id))?;
-    let recipe_base = project
-        .recipe_bases
-        .get(storage_id)
-        .filter(|base| base.binding_revision == Some(binding.revision));
+    // One store read serves both consumers in the generation-ahead arm: the
+    // continuity probe and, when the coordinates line up, the keep-local
+    // base manifest below.
+    let raw_base = project.recipe_bases.get(storage_id);
+    let mut probe_attempted = false;
+    let mut probed_base_manifest: Option<BundleManifest> = None;
+    let remote_continuity =
+        classify_remote_continuity(Some(&snapshot.head), raw_base, &mut |base: &RecipeBase| {
+            probe_attempted = true;
+            engine
+                .fetch_manifest_version_optional(
+                    bundle_id,
+                    base.generation,
+                    &base.commit_id,
+                    &base.manifest_sha256,
+                )
+                .map(|manifest| {
+                    let present = manifest.is_some();
+                    probed_base_manifest = manifest;
+                    present
+                })
+        });
+    let recipe_base = raw_base.filter(|base| base.binding_revision == Some(binding.revision));
     let base_manifest = match recipe_base {
         Some(base)
             if snapshot.head.generation == base.generation
@@ -7212,16 +7355,15 @@ fn plan_bundle_restore_with_progress(
         {
             Some(snapshot.manifest.clone())
         }
-        Some(base) => base.commit_id.as_deref().and_then(|commit_id| {
-            engine
-                .inspect_manifest_version(
-                    bundle_id,
-                    base.generation,
-                    commit_id,
-                    &base.manifest_sha256,
-                )
-                .ok()
-        }),
+        Some(_) if probe_attempted => probed_base_manifest.take(),
+        Some(base) => engine
+            .inspect_manifest_version(
+                bundle_id,
+                base.generation,
+                &base.commit_id,
+                &base.manifest_sha256,
+            )
+            .ok(),
         None => None,
     };
     on_phase("inspect remote head and manifest", phase_started.elapsed());
@@ -7236,6 +7378,7 @@ fn plan_bundle_restore_with_progress(
         now_secs(),
         identity.revision,
     )?;
+    plan.remote_continuity = Some(remote_continuity);
     on_phase("build file restore plan", phase_started.elapsed());
     if snapshot
         .manifest
@@ -8169,7 +8312,7 @@ fn apply_bundle_restore_with_progress(
                 RecipeBase {
                     generation: plan.generation,
                     manifest_sha256: plan.manifest_sha256.clone(),
-                    commit_id: Some(plan.commit_id.clone()),
+                    commit_id: plan.commit_id.clone(),
                     recipe_revision: restored_recipe.revision,
                     binding_revision: Some(binding.revision),
                     last_pull_at: successful_pull_timestamp(
@@ -12124,9 +12267,8 @@ mod tests {
         drop(guard);
     }
 
-    #[test]
-    fn push_destination_classification_preserves_remote_history_safety() {
-        let head = |generation: u64, manifest_sha256: &str| BundleHead {
+    fn continuity_head(generation: u64, manifest_sha256: &str) -> BundleHead {
+        BundleHead {
             schema_version: crate::project_sync::domain::BUNDLE_SCHEMA,
             bundle_id: BundleId::parse("0123456789abcdef0123456789abcdef").unwrap(),
             kind: BundleKind::Project,
@@ -12135,39 +12277,168 @@ mod tests {
             manifest_key: format!("_manifests/{}.json", generation),
             manifest_sha256: manifest_sha256.to_string(),
             updated_at: generation,
-        };
-        let base = |generation: u64, manifest_sha256: &str, binding_revision: u64| RecipeBase {
+        }
+    }
+
+    fn continuity_base(
+        generation: u64,
+        manifest_sha256: &str,
+        binding_revision: u64,
+    ) -> RecipeBase {
+        RecipeBase {
             generation,
             manifest_sha256: manifest_sha256.to_string(),
-            commit_id: Some(format!("commit-{}", generation)),
+            commit_id: format!("commit-{}", generation),
             recipe_revision: 1,
             binding_revision: Some(binding_revision),
             last_pull_at: None,
             last_push_at: Some(99),
-        };
+        }
+    }
+
+    /// One fixture per row of the continuity table
+    /// (DESIGN_REMOTE_HISTORY_CONTINUITY.md), asserting the exact verdict and
+    /// that the probe runs only in the generation-ahead arm.
+    #[test]
+    fn remote_continuity_rows_classify_from_content_witnesses() {
         let digest_a = "a".repeat(64);
         let digest_b = "b".repeat(64);
-        let reviewed = base(3, &digest_a, 7);
-        let current = head(3, &digest_a);
+        let base = continuity_base(3, &digest_a, 7);
+        let mut forbidden: Box<dyn FnMut(&RecipeBase) -> Result<bool, String>> =
+            Box::new(|_: &RecipeBase| panic!("probe must not run for this row"));
+
+        // Row 1 — no head, no base.
+        assert_eq!(
+            classify_remote_continuity(None, None, &mut forbidden),
+            RemoteContinuity::Fresh
+        );
+        // Row 2 — no head, base recorded.
+        assert_eq!(
+            classify_remote_continuity(None, Some(&base), &mut forbidden),
+            RemoteContinuity::RemoteMissing { base_generation: 3 }
+        );
+        // Row 3 — head, no base.
+        assert_eq!(
+            classify_remote_continuity(Some(&continuity_head(3, &digest_a)), None, &mut forbidden),
+            RemoteContinuity::Unreviewed {
+                remote_generation: 3
+            }
+        );
+        // Row 4 — generations equal, digests equal.
+        assert_eq!(
+            classify_remote_continuity(
+                Some(&continuity_head(3, &digest_a)),
+                Some(&base),
+                &mut forbidden
+            ),
+            RemoteContinuity::InSync { generation: 3 }
+        );
+        // Row 5 — generations equal, digests differ: one lineage commits a
+        // generation exactly once, so this is proof of replacement, free.
+        assert_eq!(
+            classify_remote_continuity(
+                Some(&continuity_head(3, &digest_b)),
+                Some(&base),
+                &mut forbidden
+            ),
+            RemoteContinuity::Replaced {
+                base_generation: 3,
+                remote_generation: 3
+            }
+        );
+        // Row 6 — head generation regressed below the base.
+        assert_eq!(
+            classify_remote_continuity(
+                Some(&continuity_head(2, &digest_b)),
+                Some(&base),
+                &mut forbidden
+            ),
+            RemoteContinuity::Replaced {
+                base_generation: 3,
+                remote_generation: 2
+            }
+        );
+
+        // Rows 7 and 8 — generation ahead: the probe decides, exactly once.
+        let mut probe_calls = 0_usize;
+        let mut present = |_: &RecipeBase| {
+            probe_calls += 1;
+            Ok::<_, String>(true)
+        };
+        assert_eq!(
+            classify_remote_continuity(
+                Some(&continuity_head(5, &digest_b)),
+                Some(&base),
+                &mut present
+            ),
+            RemoteContinuity::Advanced {
+                base_generation: 3,
+                remote_generation: 5
+            }
+        );
+        assert_eq!(probe_calls, 1);
+
+        let mut probe_calls = 0_usize;
+        let mut absent = |_: &RecipeBase| {
+            probe_calls += 1;
+            Ok::<_, String>(false)
+        };
+        assert_eq!(
+            classify_remote_continuity(
+                Some(&continuity_head(5, &digest_b)),
+                Some(&base),
+                &mut absent
+            ),
+            RemoteContinuity::Replaced {
+                base_generation: 3,
+                remote_generation: 5
+            }
+        );
+        assert_eq!(probe_calls, 1);
+
+        // Probe transport failure claims no verdict.
+        let mut failing = |_: &RecipeBase| Err::<bool, _>("storage offline".to_string());
+        assert_eq!(
+            classify_remote_continuity(
+                Some(&continuity_head(5, &digest_b)),
+                Some(&base),
+                &mut failing
+            ),
+            RemoteContinuity::Unknown {
+                message: "storage offline".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn push_destination_classification_preserves_remote_history_safety() {
+        let digest_a = "a".repeat(64);
+        let digest_b = "b".repeat(64);
+        let reviewed = continuity_base(3, &digest_a, 7);
+        let current = continuity_head(3, &digest_a);
+        let mut forbidden: Box<dyn FnMut(&RecipeBase) -> Result<bool, String>> =
+            Box::new(|_: &RecipeBase| panic!("probe must not run for this case"));
 
         assert_eq!(
-            classify_push_destination(None, None, 7),
+            classify_push_destination(None, None, 7, &mut forbidden),
             PushDestinationStatus::Ready { generation: None }
         );
         assert_eq!(
-            classify_push_destination(None, Some(&reviewed), 7),
+            classify_push_destination(None, Some(&reviewed), 7, &mut forbidden),
             PushDestinationStatus::RemoteHistoryMissing { base_generation: 3 }
         );
         assert_eq!(
-            classify_push_destination(Some(&current), None, 7),
+            classify_push_destination(Some(&current), None, 7, &mut forbidden),
             PushDestinationStatus::RequiresPull {
                 reason: PushDestinationPullReason::RemoteWithoutBase,
                 remote_generation: 3,
                 base_generation: None,
             }
         );
+        // Binding-revision mismatch is push policy and wins before continuity
+        // — and therefore before any probe read is spent.
         assert_eq!(
-            classify_push_destination(Some(&current), Some(&reviewed), 8),
+            classify_push_destination(Some(&current), Some(&reviewed), 8, &mut forbidden),
             PushDestinationStatus::RequiresPull {
                 reason: PushDestinationPullReason::BindingChanged,
                 remote_generation: 3,
@@ -12175,21 +12446,73 @@ mod tests {
             }
         );
         assert_eq!(
-            classify_push_destination(Some(&current), Some(&reviewed), 7),
+            classify_push_destination(Some(&current), Some(&reviewed), 7, &mut forbidden),
             PushDestinationStatus::Ready {
                 generation: Some(3),
             }
         );
+        // Equal generation with a different digest is replacement, no probe.
         assert_eq!(
-            classify_push_destination(Some(&head(4, &digest_b)), Some(&reviewed), 7),
+            classify_push_destination(
+                Some(&continuity_head(3, &digest_b)),
+                Some(&reviewed),
+                7,
+                &mut forbidden
+            ),
+            PushDestinationStatus::RemoteHistoryReplaced {
+                base_generation: 3,
+                remote_generation: 3,
+                base_manifest_sha256: digest_a.clone(),
+                remote_manifest_sha256: digest_b.clone(),
+            }
+        );
+        // Generation ahead + base manifest still present ⇒ a true advance.
+        let mut present = |_: &RecipeBase| Ok::<_, String>(true);
+        assert_eq!(
+            classify_push_destination(
+                Some(&continuity_head(4, &digest_b)),
+                Some(&reviewed),
+                7,
+                &mut present
+            ),
             PushDestinationStatus::RequiresPull {
                 reason: PushDestinationPullReason::RemoteAdvanced,
                 remote_generation: 4,
                 base_generation: Some(3),
             }
         );
+        // Generation ahead + base manifest gone ⇒ replaced history.
+        let mut absent = |_: &RecipeBase| Ok::<_, String>(false);
+        let replaced = classify_push_destination(
+            Some(&continuity_head(4, &digest_b)),
+            Some(&reviewed),
+            7,
+            &mut absent,
+        );
+        assert_eq!(
+            replaced,
+            PushDestinationStatus::RemoteHistoryReplaced {
+                base_generation: 3,
+                remote_generation: 4,
+                base_manifest_sha256: digest_a.clone(),
+                remote_manifest_sha256: digest_b.clone(),
+            }
+        );
+        // A probe transport failure fails closed as a storage error.
+        let mut failing = |_: &RecipeBase| Err::<bool, _>("storage offline".to_string());
+        assert_eq!(
+            classify_push_destination(
+                Some(&continuity_head(4, &digest_b)),
+                Some(&reviewed),
+                7,
+                &mut failing
+            ),
+            PushDestinationStatus::Unavailable {
+                message: "storage offline".to_string()
+            }
+        );
 
-        let missing = classify_push_destination(None, Some(&reviewed), 7);
+        let missing = classify_push_destination(None, Some(&reviewed), 7, &mut forbidden);
         assert_eq!(
             serde_json::to_value(&missing).unwrap(),
             serde_json::json!({
@@ -12201,6 +12524,35 @@ mod tests {
         assert!(message.contains("remote history is missing"));
         assert!(message.contains("unlink and relink"));
         assert!(!message.contains("deleted"));
+
+        assert_eq!(
+            serde_json::to_value(&replaced).unwrap(),
+            serde_json::json!({
+                "state": "remote_history_replaced",
+                "base_generation": 3,
+                "remote_generation": 4,
+                "base_manifest_sha256": digest_a,
+                "remote_manifest_sha256": digest_b,
+            })
+        );
+        let message = push_destination_error(&replaced).unwrap();
+        assert!(message.contains("was replaced"));
+        assert!(message.contains("base generation 3"));
+        assert!(message.contains("remote generation 4"));
+        assert!(message.contains(&digest_a[..8]));
+        assert!(message.contains(&digest_b[..8]));
+        assert!(message.contains("pull and review"));
+        assert!(message.contains("unlink and relink"));
+
+        let advanced = classify_push_destination(
+            Some(&continuity_head(4, &digest_b)),
+            Some(&reviewed),
+            7,
+            &mut |_: &RecipeBase| Ok::<_, String>(true),
+        );
+        let message = push_destination_error(&advanced).unwrap();
+        assert!(message.contains("base generation 3"));
+        assert!(message.contains("remote generation 4"));
     }
 
     #[test]
@@ -12475,7 +12827,7 @@ mod tests {
                 RecipeBase {
                     generation: snapshot.head.generation,
                     manifest_sha256: snapshot.head.manifest_sha256.clone(),
-                    commit_id: Some(snapshot.head.commit_id.clone()),
+                    commit_id: snapshot.head.commit_id.clone(),
                     recipe_revision: snapshot.manifest.recipe.revision,
                     binding_revision: Some(binding.revision),
                     last_pull_at: Some(12),
@@ -12631,6 +12983,7 @@ mod tests {
             actions: Vec::new(),
             conversation_actions: vec![action],
             project_content_eligibility: None,
+            remote_continuity: None,
         }
     }
 
@@ -13940,7 +14293,7 @@ mod tests {
             .unwrap();
         assert!(base.last_push_at.is_some());
         assert_eq!(base.last_pull_at, None);
-        assert!(base.commit_id.is_some());
+        assert!(!base.commit_id.is_empty());
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
@@ -14183,7 +14536,7 @@ mod tests {
                     RecipeBase {
                         generation: 1,
                         manifest_sha256: "a".repeat(64),
-                        commit_id: None,
+                        commit_id: "commit-1".to_string(),
                         recipe_revision: 1,
                         binding_revision: Some(1),
                         last_pull_at: Some(1),
@@ -14775,6 +15128,324 @@ mod tests {
         let republished =
             push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
         assert_eq!(republished.generation, Some(1));
+    }
+
+    /// The two-replica incident from DESIGN_REMOTE_HISTORY_CONTINUITY.md:
+    /// replica A loses the remote, unlinks, relinks, and republishes under
+    /// the same bundle id. Replica B — simulated by restoring the pre-wipe
+    /// base — must see the recreated history as replaced on every surface,
+    /// be blocked from pushing, and be healed by an ordinary pull.
+    #[test]
+    fn replaced_remote_history_blocks_push_on_every_surface_and_pull_heals_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("replaced-history-store").unwrap();
+        let storage_root = temp.path().join("store");
+        add_local_storage(&repo, &storage_id, &storage_root);
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        write_codex_session(
+            &codex_home,
+            "019f7500-0000-7000-8000-0000000000bd",
+            &project_root,
+        );
+
+        let first =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert_eq!(first.generation, Some(1));
+        let pre_wipe_base = repo
+            .load_config()
+            .unwrap()
+            .project(&project.local_project_id)
+            .unwrap()
+            .recipe_bases
+            .get(&storage_id)
+            .cloned()
+            .unwrap();
+
+        // The wipe, then replica A's sanctioned recovery: unlink (drops the
+        // base), relink, republish — same bundle id, brand-new lineage.
+        let repository_root = storage_root
+            .join(".mallard/v1/repositories")
+            .join(project.bundle_id.as_str());
+        std::fs::remove_dir_all(&repository_root).unwrap();
+        assert!(
+            remove_project_link_with_repository(&repo, &project.local_project_id, &storage_id,)
+                .unwrap()
+        );
+        save_project_link_with_repository(
+            &repo,
+            SaveProjectLinkRequest {
+                local_project_id: project.local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+        let recreated =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert_eq!(recreated.generation, Some(1));
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let recreated_head = engine.inspect(&project.bundle_id).unwrap().head;
+        assert_ne!(
+            recreated_head.manifest_sha256, pre_wipe_base.manifest_sha256,
+            "the recreated lineage must not reproduce the wiped manifest"
+        );
+
+        // Replica B: same binding, but its recorded base names the wiped
+        // lineage.
+        repo.mutate_config(|config| {
+            config
+                .projects
+                .iter_mut()
+                .find(|candidate| candidate.local_project_id == project.local_project_id)
+                .unwrap()
+                .recipe_bases
+                .insert(storage_id.clone(), pre_wipe_base.clone());
+            Ok(())
+        })
+        .unwrap();
+
+        // Push review blocks with the replaced-history status (row 5: equal
+        // generations, different digests — no probe read needed)...
+        let context =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        assert_eq!(
+            context.destination_status,
+            PushDestinationStatus::RemoteHistoryReplaced {
+                base_generation: 1,
+                remote_generation: 1,
+                base_manifest_sha256: pre_wipe_base.manifest_sha256.clone(),
+                remote_manifest_sha256: recreated_head.manifest_sha256.clone(),
+            }
+        );
+        // ...the comparison shown by refresh carries the same continuity...
+        assert_eq!(
+            context
+                .thread_comparison
+                .as_ref()
+                .expect("thread comparison")
+                .remote_continuity,
+            RemoteContinuity::Replaced {
+                base_generation: 1,
+                remote_generation: 1
+            }
+        );
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            comparison.remote_continuity,
+            RemoteContinuity::Replaced {
+                base_generation: 1,
+                remote_generation: 1
+            }
+        );
+        // ...and the push preflight fails with the same diagnosis.
+        let error =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap_err();
+        assert!(error.contains("was replaced"), "got: {error}");
+        assert!(error.contains("pull and review"), "got: {error}");
+
+        // The pull plan carries the verdict, and applying it heals the base.
+        let binding = repo
+            .load_bindings()
+            .unwrap()
+            .active_for(&project.local_project_id)
+            .cloned()
+            .unwrap();
+        let plan =
+            plan_bundle_restore_with_repository(&repo, &storage_id, &project.bundle_id, &binding)
+                .unwrap();
+        assert_eq!(
+            plan.remote_continuity,
+            Some(RemoteContinuity::Replaced {
+                base_generation: 1,
+                remote_generation: 1
+            })
+        );
+        apply_bundle_restore_with_repository(
+            &repo,
+            &plan.plan_id,
+            plan.actions
+                .iter()
+                .map(|action| action.action_id.clone())
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            get_push_destination_status_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap(),
+            PushDestinationStatus::Ready {
+                generation: Some(1),
+            }
+        );
+        assert_eq!(
+            get_project_thread_sync_comparison_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap()
+            .remote_continuity,
+            RemoteContinuity::InSync { generation: 1 }
+        );
+    }
+
+    /// Generation-ahead disambiguation: a recreated lineage that overtook
+    /// the base classifies `Replaced` (probe misses the wiped manifest),
+    /// while a base from the live lineage classifies a plain advance (probe
+    /// finds its manifest still present).
+    #[test]
+    fn replaced_history_that_overtook_the_base_is_distinguished_from_an_advance() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("overtaken-history-store").unwrap();
+        let storage_root = temp.path().join("store");
+        add_local_storage(&repo, &storage_id, &storage_root);
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let session_id = "019f7500-0000-7000-8000-0000000000be";
+        write_codex_session(&codex_home, session_id, &project_root);
+
+        let first =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert_eq!(first.generation, Some(1));
+        let pre_wipe_base = repo
+            .load_config()
+            .unwrap()
+            .project(&project.local_project_id)
+            .unwrap()
+            .recipe_bases
+            .get(&storage_id)
+            .cloned()
+            .unwrap();
+
+        // Wipe and recreate under the same bundle id.
+        std::fs::remove_dir_all(
+            storage_root
+                .join(".mallard/v1/repositories")
+                .join(project.bundle_id.as_str()),
+        )
+        .unwrap();
+        assert!(
+            remove_project_link_with_repository(&repo, &project.local_project_id, &storage_id,)
+                .unwrap()
+        );
+        save_project_link_with_repository(
+            &repo,
+            SaveProjectLinkRequest {
+                local_project_id: project.local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap()
+                .generation,
+            Some(1)
+        );
+        let new_lineage_base = repo
+            .load_config()
+            .unwrap()
+            .project(&project.local_project_id)
+            .unwrap()
+            .recipe_bases
+            .get(&storage_id)
+            .cloned()
+            .unwrap();
+
+        // Grow the session so the new lineage overtakes the base generation.
+        std::fs::write(
+            codex_home
+                .join("sessions/2026/07/22")
+                .join(format!("rollout-{}.jsonl", session_id)),
+            command_test_transcript(
+                session_id,
+                &project_root,
+                &[
+                    ("message-test", "user", "hello"),
+                    ("message-more", "user", "and more"),
+                ],
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap()
+                .generation,
+            Some(2)
+        );
+
+        // A base from the wiped lineage: the probe misses ⇒ replaced.
+        repo.mutate_config(|config| {
+            config
+                .projects
+                .iter_mut()
+                .find(|candidate| candidate.local_project_id == project.local_project_id)
+                .unwrap()
+                .recipe_bases
+                .insert(storage_id.clone(), pre_wipe_base.clone());
+            Ok(())
+        })
+        .unwrap();
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let live_head = engine.inspect(&project.bundle_id).unwrap().head;
+        assert_eq!(
+            get_push_destination_status_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap(),
+            PushDestinationStatus::RemoteHistoryReplaced {
+                base_generation: 1,
+                remote_generation: 2,
+                base_manifest_sha256: pre_wipe_base.manifest_sha256.clone(),
+                remote_manifest_sha256: live_head.manifest_sha256.clone(),
+            }
+        );
+
+        // A base from the live lineage: the probe finds its manifest still
+        // present ⇒ an ordinary advance that a pull fast-forwards.
+        repo.mutate_config(|config| {
+            config
+                .projects
+                .iter_mut()
+                .find(|candidate| candidate.local_project_id == project.local_project_id)
+                .unwrap()
+                .recipe_bases
+                .insert(storage_id.clone(), new_lineage_base.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            get_push_destination_status_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap(),
+            PushDestinationStatus::RequiresPull {
+                reason: PushDestinationPullReason::RemoteAdvanced,
+                remote_generation: 2,
+                base_generation: Some(1),
+            }
+        );
     }
 
     /// Timestamps differ between two builds of the same section; everything

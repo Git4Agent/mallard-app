@@ -1425,6 +1425,13 @@ export default function ProjectLinksWorkspace({
               refreshEpoch={historyRefreshEpoch}
               activeStorageId={activeStorageId}
               activeStorageName={storages.find((storage) => storage.id === activeStorageId)?.name ?? null}
+              onUnlinkStorage={activeStorageId ? () => {
+                void run(
+                  `unlink:${activeProject.local_project_id}:${activeStorageId}`,
+                  () => onUnlinkStorage(activeProject.local_project_id, activeStorageId),
+                );
+              } : undefined}
+              continuityActionBusy={busy || !!runningAction}
             />
           </div>
         )}

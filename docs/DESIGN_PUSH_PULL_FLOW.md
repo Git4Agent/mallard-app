@@ -16,6 +16,9 @@
     as flow steps
   - [DESIGN_PULL_FIRST_CODEX_DIVERGENCE_RESOLUTION.md](DESIGN_PULL_FIRST_CODEX_DIVERGENCE_RESOLUTION.md)
     — owns the fork workload that pull step 5b routes divergent items into
+  - [DESIGN_REMOTE_HISTORY_CONTINUITY.md](DESIGN_REMOTE_HISTORY_CONTINUITY.md)
+    — extends plan step 1 with repository-level base-continuity
+    classification (replaced-history detection)
 
 ## Decision
 

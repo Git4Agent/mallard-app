@@ -632,6 +632,13 @@ export type PushDestinationStatus =
     base_generation: number;
   }
   | {
+    state: "remote_history_replaced";
+    base_generation: number;
+    remote_generation: number;
+    base_manifest_sha256: string;
+    remote_manifest_sha256: string;
+  }
+  | {
     state: "requires_pull";
     reason: "remote_without_base" | "binding_changed" | "remote_advanced";
     remote_generation: number;
@@ -641,6 +648,20 @@ export type PushDestinationStatus =
     state: "unavailable";
     message: string;
   };
+
+/**
+ * Repository-level continuity between this replica's recorded sync base and
+ * the observed bundle head (DESIGN_REMOTE_HISTORY_CONTINUITY.md). Advisory:
+ * it gates and explains, never mutates.
+ */
+export type RemoteContinuity =
+  | { state: "fresh" }
+  | { state: "remote_missing"; base_generation: number }
+  | { state: "unreviewed"; remote_generation: number }
+  | { state: "in_sync"; generation: number }
+  | { state: "advanced"; base_generation: number; remote_generation: number }
+  | { state: "replaced"; base_generation: number; remote_generation: number }
+  | { state: "unknown"; message: string };
 
 /**
  * Composite payload of `prepare_push_review`: one discovery pass and one
@@ -801,6 +822,7 @@ export interface RestorePlan {
   actions: RestoreAction[];
   conversation_actions: ConversationPlanAction[];
   project_content_eligibility?: ProjectFileSyncEligibility | null;
+  remote_continuity?: RemoteContinuity | null;
 }
 
 export type RestoreApplyStatus = "complete" | "awaiting_manual_fork" | "recovery_required";
@@ -1015,6 +1037,7 @@ export interface ThreadSyncComparison {
   entries: ThreadSyncEntry[];
   counts: ThreadSyncCounts;
   warnings: string[];
+  remote_continuity: RemoteContinuity;
 }
 
 export interface GitCommitSummary {

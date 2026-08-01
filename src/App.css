@@ -9431,6 +9431,26 @@ div.storage-link-main {
   flex-shrink: 0;
 }
 
+.sync-history-continuity {
+  align-items: center;
+}
+
+.sync-history-continuity > svg {
+  flex: 0 0 auto;
+}
+
+.sync-history-continuity-copy {
+  min-width: 0;
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  line-height: 1.45;
+}
+
+.sync-history-continuity .sync-sync-review-recovery-actions .btn {
+  white-space: nowrap;
+}
+
 .sync-history-profile-state {
   justify-content: flex-start;
   border-style: solid;
@@ -10589,6 +10609,14 @@ button.sync-project-file-expand { cursor: pointer; }
 }
 
 @media (max-width: 680px) {
+  .sync-history-continuity {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .sync-history-continuity .sync-sync-review-recovery-actions {
+    width: 100%;
+    margin-left: 23px;
+  }
   .sync-history-commit-heading { grid-template-columns: 70px minmax(0, 1fr); }
   .sync-history-commit-heading time { display: none; }
   .sync-history-thread-topline { align-items: flex-start; flex-direction: column; }

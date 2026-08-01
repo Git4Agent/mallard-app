@@ -67,13 +67,8 @@ impl std::fmt::Display for CodexStructureError {
 
 impl std::error::Error for CodexStructureError {}
 
-/// Validate the structural identity, ancestry, and cwd records in one Codex
-/// rollout. Identity fields are read only from declared structural records;
-/// message content is never recursively searched.
-pub fn analyze_codex_rollout_structure(
-    bytes: &[u8],
-    expected_active_id: Option<&str>,
-) -> Result<CodexRolloutStructure, CodexStructureError> {
+/// Byte-level bounds shared by every rollout scan.
+pub(crate) fn check_rollout_bounds(bytes: &[u8]) -> Result<(), CodexStructureError> {
     if bytes.is_empty() {
         return Err(error(
             CodexStructureErrorKind::Empty,
@@ -86,54 +81,74 @@ pub fn analyze_codex_rollout_structure(
             "Codex rollout exceeds the bounded transcript limit",
         ));
     }
+    Ok(())
+}
 
-    let mut current = None;
-    let mut metadata = Vec::new();
-    let mut structural_cwds = BTreeSet::new();
-    let mut record_count = 0_usize;
-    let mut conversation_item_seen = false;
+/// Streaming form of the structural analysis: `feed` one parsed record at a
+/// time in file order, then `finalize` for the whole-file ancestry checks.
+/// `analyze_codex_rollout_structure` drives it standalone; the fused
+/// transcript analysis in `conversation_codec` feeds it from the same single
+/// parse that builds the canonical chain, so no caller parses a record
+/// twice. This is the only implementation of the structural semantics.
+pub struct CodexStructureAccumulator<'a> {
+    expected_active_id: Option<&'a str>,
+    current: Option<CodexSessionMetaRecord>,
+    metadata: Vec<CodexSessionMetaRecord>,
+    structural_cwds: BTreeSet<String>,
+    record_count: usize,
+    conversation_item_seen: bool,
+}
 
-    for raw in bytes.split(|byte| *byte == b'\n') {
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        if raw.is_empty() {
-            continue;
+impl<'a> CodexStructureAccumulator<'a> {
+    pub fn new(expected_active_id: Option<&'a str>) -> Self {
+        Self {
+            expected_active_id,
+            current: None,
+            metadata: Vec::new(),
+            structural_cwds: BTreeSet::new(),
+            record_count: 0,
+            conversation_item_seen: false,
         }
-        record_count = record_count.saturating_add(1);
-        if record_count > MAX_CODEX_RECORDS {
+    }
+
+    /// Non-empty records fed so far.
+    pub fn record_count(&self) -> usize {
+        self.record_count
+    }
+
+    /// The authoritative session metadata, available as soon as it is fed —
+    /// which is before any conversation item in every accepted rollout.
+    pub fn current_meta(&self) -> Option<&CodexSessionMetaRecord> {
+        self.current.as_ref()
+    }
+
+    pub fn feed(&mut self, value: &Value) -> Result<(), CodexStructureError> {
+        self.record_count = self.record_count.saturating_add(1);
+        if self.record_count > MAX_CODEX_RECORDS {
             return Err(error(
                 CodexStructureErrorKind::TooManyRecords,
                 "Codex rollout has too many records",
             ));
         }
-        // Codex compaction and tool-result records can legitimately occupy
-        // several MiB on one JSONL line. The transcript-wide byte and record
-        // limits above provide the bounded-read contract; applying a smaller
-        // per-line limit would reject otherwise valid conversations.
-        let value: Value = serde_json::from_slice(raw).map_err(|_| {
-            error(
-                CodexStructureErrorKind::MalformedJson,
-                "Codex rollout contains malformed JSON",
-            )
-        })?;
-        let record_type = structural_record_type(&value);
-        if current.is_none()
+        let record_type = structural_record_type(value);
+        if self.current.is_none()
             && record_type
                 .is_some_and(|kind| matches!(kind, "response_item" | "event_msg" | "compacted"))
         {
-            conversation_item_seen = true;
+            self.conversation_item_seen = true;
         }
         match record_type {
             Some("session_meta") => {
-                if current.is_none() && conversation_item_seen {
+                if self.current.is_none() && self.conversation_item_seen {
                     return Err(error(
                         CodexStructureErrorKind::MissingSessionMetadata,
                         "Codex rollout contains conversation items before its authoritative session_meta",
                     ));
                 }
-                let record = parse_session_meta(&value, record_count - 1)?;
-                structural_cwds.insert(record.cwd.clone());
-                if current.is_none() {
-                    if let Some(expected) = expected_active_id {
+                let record = parse_session_meta(value, self.record_count - 1)?;
+                self.structural_cwds.insert(record.cwd.clone());
+                if self.current.is_none() {
+                    if let Some(expected) = self.expected_active_id {
                         if record.id != expected {
                             return Err(error(
                                 CodexStructureErrorKind::ActiveIdentityMismatch,
@@ -144,107 +159,149 @@ pub fn analyze_codex_rollout_structure(
                             ));
                         }
                     }
-                    current = Some(record.clone());
+                    self.current = Some(record.clone());
                 }
-                metadata.push(record);
+                self.metadata.push(record);
             }
             Some("turn_context") => {
-                if let Some(cwd) = structural_cwd(&value)? {
-                    structural_cwds.insert(cwd);
+                if let Some(cwd) = structural_cwd(value)? {
+                    self.structural_cwds.insert(cwd);
                 }
             }
             _ => {}
         }
+        Ok(())
     }
 
-    let current = current.ok_or_else(|| {
-        error(
-            CodexStructureErrorKind::MissingSessionMetadata,
-            "Codex rollout has no session_meta record",
-        )
-    })?;
+    /// Whole-file checks: an authoritative session_meta exists and the fork
+    /// ancestry is acyclic, bounded, and fully related.
+    pub fn finalize(self) -> Result<CodexRolloutStructure, CodexStructureError> {
+        let Self {
+            current,
+            metadata,
+            structural_cwds,
+            record_count,
+            ..
+        } = self;
+        let current = current.ok_or_else(|| {
+            error(
+                CodexStructureErrorKind::MissingSessionMetadata,
+                "Codex rollout has no session_meta record",
+            )
+        })?;
 
-    let mut parents = BTreeMap::<String, Option<String>>::new();
-    for record in &metadata {
-        if record.forked_from_id.as_deref() == Some(record.id.as_str()) {
-            return Err(error(
-                CodexStructureErrorKind::SelfParent,
-                format!("Codex thread '{}' forks from itself", record.id),
-            ));
-        }
-        match parents.entry(record.id.clone()) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(record.forked_from_id.clone());
+        let mut parents = BTreeMap::<String, Option<String>>::new();
+        for record in &metadata {
+            if record.forked_from_id.as_deref() == Some(record.id.as_str()) {
+                return Err(error(
+                    CodexStructureErrorKind::SelfParent,
+                    format!("Codex thread '{}' forks from itself", record.id),
+                ));
             }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                match (entry.get(), &record.forked_from_id) {
-                    (Some(existing), Some(candidate)) if existing != candidate => {
-                        return Err(error(
-                            CodexStructureErrorKind::ConflictingParent,
-                            format!(
-                                "Codex thread '{}' claims conflicting fork parents",
-                                record.id
-                            ),
-                        ));
+            match parents.entry(record.id.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(record.forked_from_id.clone());
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    match (entry.get(), &record.forked_from_id) {
+                        (Some(existing), Some(candidate)) if existing != candidate => {
+                            return Err(error(
+                                CodexStructureErrorKind::ConflictingParent,
+                                format!(
+                                    "Codex thread '{}' claims conflicting fork parents",
+                                    record.id
+                                ),
+                            ));
+                        }
+                        (None, Some(candidate)) => {
+                            entry.insert(Some(candidate.clone()));
+                        }
+                        _ => {}
                     }
-                    (None, Some(candidate)) => {
-                        entry.insert(Some(candidate.clone()));
-                    }
-                    _ => {}
                 }
             }
         }
-    }
 
-    let mut reachable = BTreeSet::from([current.id.clone()]);
-    let mut ancestry = Vec::new();
-    let mut cursor = current.id.clone();
-    for _ in 0..MAX_CODEX_FORK_DEPTH {
-        let Some(parent) = parents.get(&cursor).and_then(Clone::clone) else {
-            break;
-        };
-        if !reachable.insert(parent.clone()) {
+        let mut reachable = BTreeSet::from([current.id.clone()]);
+        let mut ancestry = Vec::new();
+        let mut cursor = current.id.clone();
+        for _ in 0..MAX_CODEX_FORK_DEPTH {
+            let Some(parent) = parents.get(&cursor).and_then(Clone::clone) else {
+                break;
+            };
+            if !reachable.insert(parent.clone()) {
+                return Err(error(
+                    CodexStructureErrorKind::AncestryCycle,
+                    "Codex fork ancestry contains a cycle",
+                ));
+            }
+            ancestry.push(parent.clone());
+            cursor = parent;
+        }
+        if parents.get(&cursor).and_then(Clone::clone).is_some() {
             return Err(error(
-                CodexStructureErrorKind::AncestryCycle,
-                "Codex fork ancestry contains a cycle",
+                CodexStructureErrorKind::ForkDepthExceeded,
+                format!(
+                    "Codex fork ancestry exceeds the supported depth of {}",
+                    MAX_CODEX_FORK_DEPTH
+                ),
             ));
         }
-        ancestry.push(parent.clone());
-        cursor = parent;
-    }
-    if parents.get(&cursor).and_then(Clone::clone).is_some() {
-        return Err(error(
-            CodexStructureErrorKind::ForkDepthExceeded,
-            format!(
-                "Codex fork ancestry exceeds the supported depth of {}",
-                MAX_CODEX_FORK_DEPTH
-            ),
-        ));
-    }
-    if metadata.len() > MAX_CODEX_RECORDS || parents.len() > MAX_CODEX_FORK_DEPTH.saturating_add(1)
-    {
-        return Err(error(
-            CodexStructureErrorKind::ForkDepthExceeded,
-            "Codex rollout contains too many distinct metadata identities",
-        ));
-    }
-    if let Some(unrelated) = parents.keys().find(|id| !reachable.contains(*id)) {
-        return Err(error(
-            CodexStructureErrorKind::UnrelatedMetadata,
-            format!(
-                "Codex rollout contains unrelated session_meta thread '{}'",
-                unrelated
-            ),
-        ));
-    }
+        if metadata.len() > MAX_CODEX_RECORDS
+            || parents.len() > MAX_CODEX_FORK_DEPTH.saturating_add(1)
+        {
+            return Err(error(
+                CodexStructureErrorKind::ForkDepthExceeded,
+                "Codex rollout contains too many distinct metadata identities",
+            ));
+        }
+        if let Some(unrelated) = parents.keys().find(|id| !reachable.contains(*id)) {
+            return Err(error(
+                CodexStructureErrorKind::UnrelatedMetadata,
+                format!(
+                    "Codex rollout contains unrelated session_meta thread '{}'",
+                    unrelated
+                ),
+            ));
+        }
 
-    Ok(CodexRolloutStructure {
-        current,
-        fork_ancestry: ancestry,
-        accepted_metadata_ids: reachable,
-        structural_cwds,
-        record_count,
-    })
+        Ok(CodexRolloutStructure {
+            current,
+            fork_ancestry: ancestry,
+            accepted_metadata_ids: reachable,
+            structural_cwds,
+            record_count,
+        })
+    }
+}
+
+/// Validate the structural identity, ancestry, and cwd records in one Codex
+/// rollout. Identity fields are read only from declared structural records;
+/// message content is never recursively searched.
+pub fn analyze_codex_rollout_structure(
+    bytes: &[u8],
+    expected_active_id: Option<&str>,
+) -> Result<CodexRolloutStructure, CodexStructureError> {
+    check_rollout_bounds(bytes)?;
+    let mut structure = CodexStructureAccumulator::new(expected_active_id);
+    for raw in bytes.split(|byte| *byte == b'\n') {
+        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+        if raw.is_empty() {
+            continue;
+        }
+        // Codex compaction and tool-result records can legitimately occupy
+        // several MiB on one JSONL line. The transcript-wide byte and record
+        // limits provide the bounded-read contract; a smaller per-line limit
+        // would reject otherwise valid conversations.
+        let value: Value = serde_json::from_slice(raw).map_err(|_| {
+            error(
+                CodexStructureErrorKind::MalformedJson,
+                "Codex rollout contains malformed JSON",
+            )
+        })?;
+        structure.feed(&value)?;
+    }
+    structure.finalize()
 }
 
 pub(crate) fn structural_record_type(value: &Value) -> Option<&str> {

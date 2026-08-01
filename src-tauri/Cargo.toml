@@ -51,3 +51,10 @@ tauri = { version = "2", features = ["test"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+
+# Optimize dependencies only: the wildcard excludes this crate, so app edits
+# keep opt-level 0 incremental builds while serde_json/sha2/aws-* run
+# optimized (~3.9× on transcript analysis). Deps compile once; the cost is a
+# single full rebuild when this setting first lands.
+[profile.dev.package."*"]
+opt-level = 1

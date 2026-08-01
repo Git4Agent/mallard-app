@@ -1462,6 +1462,42 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         Ok(manifest)
     }
 
+    /// Continuity probe (DESIGN_REMOTE_HISTORY_CONTINUITY.md): report whether
+    /// the immutable manifest named by a reviewed base is still present in
+    /// the store with exactly the recorded digest. This reads the store
+    /// directly — never an object cache — because the answer must witness the
+    /// remote repository, not a local copy of bytes it once held. `Ok(None)`
+    /// covers both an absent key and bytes that no longer reproduce the
+    /// digest; transport failures stay errors so the caller classifies
+    /// continuity as unknown instead of guessing.
+    pub fn fetch_manifest_version_optional(
+        &self,
+        bundle_id: &BundleId,
+        generation: u64,
+        commit_id: &str,
+        manifest_sha256: &str,
+    ) -> Result<Option<BundleManifest>, String> {
+        domain::validate_sha256("historical manifest", manifest_sha256)?;
+        let relative_key = format!("_manifests/{generation}-{commit_id}.json");
+        validate_bundle_relative_object_key(&relative_key)?;
+        let key = repository_object_key(bundle_id, &relative_key)?;
+        let Some(stored) = self.store.get(&key)? else {
+            return Ok(None);
+        };
+        if sha256(&stored.bytes) != manifest_sha256 {
+            return Ok(None);
+        }
+        let manifest: BundleManifest = parse_bounded_json(&stored.bytes, "bundle manifest")?;
+        manifest.validate()?;
+        if &manifest.bundle.bundle_id != bundle_id
+            || manifest.generation != generation
+            || manifest.commit_id != commit_id
+        {
+            return Err("historical manifest coordinates do not match its contents".to_string());
+        }
+        Ok(Some(manifest))
+    }
+
     /// Explicit durability audit: download every object the current manifest
     /// references and verify each against its recorded digest and size. This
     /// is the read-back publish deliberately does not perform; it runs only
@@ -1940,6 +1976,9 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             actions,
             conversation_actions: Vec::new(),
             project_content_eligibility: None,
+            // Continuity is a plan-phase input the command layer supplies;
+            // the engine builds the plan from the snapshot alone.
+            remote_continuity: None,
         };
         plan.validate()?;
         Ok(plan)
@@ -2617,6 +2656,105 @@ mod tests {
             first.snapshot.manifest.files[&stable_path],
             "the unchanged entry carries over verbatim, object key included"
         );
+    }
+
+    /// The continuity probe answers from the store on every call — a local
+    /// cache hit would witness nothing about a wiped remote
+    /// (DESIGN_REMOTE_HISTORY_CONTINUITY.md, warm-cache tripwire).
+    #[test]
+    fn manifest_presence_probe_reads_the_store_every_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        fs::create_dir_all(&source).unwrap();
+        write(&source.join("stable.md"), b"stable contents");
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(&request).unwrap();
+        let recipe = recipe_for(
+            inventory
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id.clone()),
+        );
+        let id = bundle_id(77);
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let published = engine
+            .publish_test_resources(CapturedResourcesPublishRequest {
+                identity: identity(id.clone(), "Probe"),
+                recipe: recipe.clone(),
+                captured_with: captured_with(),
+                captured: capture_recipe(&request, &recipe).unwrap(),
+                observed_head: None,
+                updated_at: 10,
+            })
+            .unwrap();
+        let head = published.snapshot.head.clone();
+        let manifest_key_reads = |store: &CountingStore| {
+            store
+                .keys
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|key| key.contains("/_manifests/"))
+                .count()
+        };
+
+        store.reset();
+        let hit = engine
+            .fetch_manifest_version_optional(
+                &id,
+                head.generation,
+                &head.commit_id,
+                &head.manifest_sha256,
+            )
+            .unwrap();
+        assert_eq!(hit.map(|manifest| manifest.generation), Some(1));
+        assert_eq!(manifest_key_reads(&store), 1);
+
+        // A second identical call reads the store again: presence answers
+        // are always live, never remembered.
+        assert!(engine
+            .fetch_manifest_version_optional(
+                &id,
+                head.generation,
+                &head.commit_id,
+                &head.manifest_sha256,
+            )
+            .unwrap()
+            .is_some());
+        assert_eq!(manifest_key_reads(&store), 2);
+
+        // Bytes that no longer reproduce the recorded digest are absence,
+        // not an error — row 8 treats them exactly like a missing key.
+        assert!(engine
+            .fetch_manifest_version_optional(&id, head.generation, &head.commit_id, &"f".repeat(64))
+            .unwrap()
+            .is_none());
+        assert!(engine
+            .fetch_manifest_version_optional(&id, 99, "commit-nowhere", &head.manifest_sha256)
+            .unwrap()
+            .is_none());
+
+        // A wiped repository answers absent although nothing local changed:
+        // the verdict comes from the store alone.
+        fs::remove_dir_all(
+            store
+                .local_root()
+                .unwrap()
+                .join(REPOSITORY_PREFIX)
+                .join(id.as_str()),
+        )
+        .unwrap();
+        assert!(engine
+            .fetch_manifest_version_optional(
+                &id,
+                head.generation,
+                &head.commit_id,
+                &head.manifest_sha256,
+            )
+            .unwrap()
+            .is_none());
     }
 
     #[test]
