@@ -320,6 +320,7 @@ fn local_bindings_reject_duplicate_provider_thread_ownership_profile_wide() {
         provider_profile_id: scope.profile_id.clone(),
         thread_id: ThreadId::parse(thread).unwrap(),
         forked_from: None,
+        fork_stamp: None,
         provider_thread_id: Some("same-provider-thread".to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
         last_observed_file_sha256: None,

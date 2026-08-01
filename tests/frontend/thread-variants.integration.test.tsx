@@ -340,3 +340,69 @@ test("the retired review-list vocabulary stays out of the sources", () => {
   assert.doesNotMatch(types, /ConversationMaterializationState|materialization_state/);
   assert.doesNotMatch(types, /resumable\??:/);
 });
+
+const divergedForkedEntry = entry({
+  thread_id: REPLACE_ID,
+  display_name: "Force-replace candidate",
+  state: "diverged_forked",
+  storage_present: true,
+  local_updated_at: WINDOW_START + 2_000,
+  storage_updated_at: WINDOW_START + 1_500,
+  fork_preservation: {
+    fork_thread_id: "thread-preserved",
+    fork_display_name: "Force-replace candidate — fork · 2026-08-01 09:00Z",
+    forked_at: WINDOW_START + 1_800,
+  },
+  push_decision: decision("require_pull", "diverged"),
+  pull_decision: decision("resolve_divergence", "diverged"),
+});
+
+function renderWithFork(selectionMode?: "push" | "pull") {
+  return renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      embedded
+      project={project}
+      binding={binding}
+      history={history}
+      comparison={comparisonOf([divergedForkedEntry])}
+      activeStorageName="Local storage 1"
+      selectionMode={selectionMode}
+      selectableResourceIds={selectionMode ? new Set([divergedForkedEntry.resource_id]) : undefined}
+      selectedResourceIds={new Set()}
+      loading={false}
+      loadingMore={false}
+      actionError={null}
+      actionBusyThreadId={null}
+      onBranchChange={() => undefined}
+      onRefresh={() => undefined}
+      onLoadMore={() => undefined}
+      onOpenCodex={() => undefined}
+      onOpenTerminal={() => undefined}
+      onFork={() => undefined}
+      forkBusyThreadId={null}
+      onReviewPull={() => undefined}
+    />,
+  );
+}
+
+test("browse mode offers the fork action and names the preserving fork", () => {
+  const html = renderWithFork();
+  assert.match(html, /Fork in Codex/, "every local thread row offers the fork action");
+  assert.match(
+    html,
+    /already preserved in the fork/,
+    "the diverged-forked indicator explains the preservation",
+  );
+  assert.match(html, /diverged-forked/, "the indicator uses the preserved-divergence class");
+});
+
+test("selection mode hides the fork action and holds diverged-forked rows on Pull", () => {
+  const html = renderWithFork("push");
+  assert.doesNotMatch(html, /Fork in Codex/, "review mode offers no fork action");
+  assert.match(html, /Pull required/);
+  assert.match(
+    html,
+    /already preserved in a fork/,
+    "the push hold explains the branch is already preserved",
+  );
+});

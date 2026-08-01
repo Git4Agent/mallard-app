@@ -260,10 +260,14 @@ pub(super) fn reviewed_action(
                 crate::project_sync::domain::ConversationDivergenceResolution::PreserveLocalWithNativeFork,
                 crate::project_sync::domain::ConversationDivergenceResolution::UseCloudOnly,
             ],
+            recommended_resolution:
+                crate::project_sync::domain::ConversationDivergenceResolution::PreserveLocalWithNativeFork,
+            local_branch_preserved: false,
             preserved_thread_id: ThreadId::parse("thread-preserved").unwrap(),
             source_provider_thread_id: "source-native".to_string(),
             local_lineage_digest: "b".repeat(64),
             local_semantic_digest: "c".repeat(64),
+            local_message_count: 3,
             pinned_local_title: Some("Local title".to_string()),
             pinned_cloud_title: Some("Cloud title".to_string()),
             desired_fork_name:

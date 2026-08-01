@@ -184,10 +184,13 @@ function divergenceAction(): ConversationPlanAction {
         "preserve_local_with_native_fork",
         "use_cloud_only",
       ],
+      recommended_resolution: "preserve_local_with_native_fork",
+      local_branch_preserved: false,
       preserved_thread_id: "thread-preserved",
       source_provider_thread_id: "019fac21-4aba-7fc2-bb7d-df711c950987",
       local_lineage_digest: "e".repeat(64),
       local_semantic_digest: "f".repeat(64),
+      local_message_count: 3,
       pinned_local_title: "Analyze codebase knowledge graph",
       pinned_cloud_title: "Analyze codebase knowledge graph",
       desired_fork_name: "Analyze codebase knowledge graph — local before Pull · 2026-07-29 18:42Z",
@@ -253,6 +256,64 @@ test("conversation divergence defaults to keep-both and renders the reviewed for
   );
 });
 
+test("a preserved divergence recommends cloud adoption and waives the destructive acknowledgement", () => {
+  const action = divergenceAction();
+  action.divergence = {
+    ...action.divergence!,
+    recommended_resolution: "use_cloud_only",
+    local_branch_preserved: true,
+  };
+  const conflictPlan: RestorePlan = {
+    ...restorePlan,
+    actions: [],
+    conversation_actions: [action],
+  };
+  const items = buildPullReviewItems(conflictPlan);
+  const selected = new Set(items.filter((item) => item.conversationActions.length > 0).map((item) => item.resourceId));
+  const selection = buildPullReviewSelection(
+    items,
+    selected,
+    new Set(),
+    new Set(),
+  );
+  assert.deepEqual(selection.conversationResolutions, [{
+    action_id: "conversation-divergence",
+    resolution: "use_cloud_only",
+    destructive_approved: false,
+  }], "the plan-recommended cloud adoption is the default selection");
+
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      profileLabel="myconf2"
+      plan={conflictPlan}
+      binding={binding}
+      readiness={null}
+      restoreResult={null}
+      phase="idle"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="history"
+      onApply={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.match(html, /Adopt cloud version <em>Recommended<\/em>/);
+  assert.match(html, /already preserved in a Codex fork/);
+  assert.match(html, /Fork again/);
+  assert.doesNotMatch(
+    html,
+    /I understand the divergent local branch/,
+    "the witnessed overwrite renders no destructive acknowledgement",
+  );
+  assert.doesNotMatch(html, /Keep both branches <em>Recommended<\/em>/);
+});
+
 test("manual fork checkpoints expose only verify and cancel continuation actions", () => {
   const action = divergenceAction();
   const conflictPlan: RestorePlan = {
@@ -270,6 +331,7 @@ test("manual fork checkpoints expose only verify and cancel continuation actions
     codex_divergences: [],
     codex_fork_checkpoints: [{
       operation_id: "operation-divergence",
+      origin: "pull_preserve",
       plan_id: conflictPlan.plan_id,
       action_id: action.action_id,
       thread_id: action.thread_id,
@@ -930,6 +992,7 @@ test("a manual fork checkpoint defers only its thread while verification proceed
     codex_divergences: [],
     codex_fork_checkpoints: [{
       operation_id: "operation-divergence",
+      origin: "pull_preserve",
       plan_id: conflictPlan.plan_id,
       action_id: action.action_id,
       thread_id: action.thread_id,

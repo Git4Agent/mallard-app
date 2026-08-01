@@ -228,7 +228,7 @@ function DivergenceResolutionCards({
         if (!plan) return null;
         const selection = resolutions.get(action.action_id) ?? {
           action_id: action.action_id,
-          resolution: "preserve_local_with_native_fork" as const,
+          resolution: plan.recommended_resolution,
           destructive_approved: false,
         };
         const selected = selectedActionIds.has(action.action_id);
@@ -236,6 +236,7 @@ function DivergenceResolutionCards({
         const conflictTitle = plan.pinned_local_title
           ?? plan.pinned_cloud_title
           ?? plan.source_provider_thread_id;
+        const preserved = plan.local_branch_preserved;
         return (
           <fieldset key={action.action_id} className="sync-divergence-card" disabled={controlsDisabled}>
             <legend>Conversation conflict — {conflictTitle}</legend>
@@ -251,8 +252,17 @@ function DivergenceResolutionCards({
                 })}
               />
               <span>
-                <strong>Keep both branches <em>Recommended</em></strong>
-                <small>Preserve the current local conversation as a Codex fork, then restore the cloud conversation into the original thread.</small>
+                {preserved ? (
+                  <>
+                    <strong>Fork again</strong>
+                    <small>Keep another copy of the local branch as a new Codex fork before restoring the cloud conversation.</small>
+                  </>
+                ) : (
+                  <>
+                    <strong>Keep both branches <em>Recommended</em></strong>
+                    <small>Preserve the current local conversation as a Codex fork, then restore the cloud conversation into the original thread.</small>
+                  </>
+                )}
               </span>
             </label>
             <label className="sync-divergence-option">
@@ -267,11 +277,20 @@ function DivergenceResolutionCards({
                 })}
               />
               <span>
-                <strong>Use cloud version only</strong>
-                <small>Replace the original local conversation. The divergent local branch will not remain as a Codex conversation.</small>
+                {preserved ? (
+                  <>
+                    <strong>Adopt cloud version <em>Recommended</em></strong>
+                    <small>Your local branch is already preserved in a Codex fork. Restore the cloud conversation into the original thread; nothing is lost.</small>
+                  </>
+                ) : (
+                  <>
+                    <strong>Use cloud version only</strong>
+                    <small>Replace the original local conversation. The divergent local branch will not remain as a Codex conversation.</small>
+                  </>
+                )}
               </span>
             </label>
-            {selection.resolution === "use_cloud_only" && (
+            {selection.resolution === "use_cloud_only" && !preserved && (
               <label className="sync-divergence-confirm">
                 <input
                   type="checkbox"
@@ -458,7 +477,7 @@ export default function RestorePlanView({
     action.action_id,
     {
       action_id: action.action_id,
-      resolution: "preserve_local_with_native_fork",
+      resolution: action.divergence?.recommended_resolution ?? "preserve_local_with_native_fork",
       destructive_approved: false,
     },
   ])));
@@ -492,7 +511,7 @@ export default function RestorePlanView({
       action.action_id,
       current.get(action.action_id) ?? {
         action_id: action.action_id,
-        resolution: "preserve_local_with_native_fork",
+        resolution: action.divergence?.recommended_resolution ?? "preserve_local_with_native_fork",
         destructive_approved: false,
       },
     ])));
@@ -533,10 +552,21 @@ export default function RestorePlanView({
   );
   const selectedCount = selection.resourceIds.length;
   const selectedRestoreActionIds = new Set(selection.restoreActionIds);
+  const preservedDivergenceActionIds = useMemo(() => new Set(
+    divergenceActions
+      .filter((action) => action.divergence?.local_branch_preserved)
+      .map((action) => action.action_id),
+  ), [divergenceActions]);
   const hasUnconfirmedCloudOnly = selection.conversationResolutions.some((resolution) => (
-    resolution.resolution === "use_cloud_only" && !resolution.destructive_approved
+    resolution.resolution === "use_cloud_only"
+    && !resolution.destructive_approved
+    && !preservedDivergenceActionIds.has(resolution.action_id)
   ));
-  const forkCheckpoints = restoreResult?.codex_fork_checkpoints ?? [];
+  // Manual-fork checkpoints are resolved from the Activity page; the Pull
+  // review drives only the checkpoints its own plan created.
+  const forkCheckpoints = (restoreResult?.codex_fork_checkpoints ?? []).filter(
+    (checkpoint) => checkpoint.origin !== "manual",
+  );
   const forkCheckpoint = forkCheckpoints[0] ?? null;
   const appRefresh = restoreResult?.codex_app_refresh ?? null;
   const forkCheckpointActive = Boolean(

@@ -253,6 +253,12 @@ export const projectSyncApi = {
   cancelCodexDivergence: (operationId: string) =>
     invoke<RestoreResult>("cancel_codex_divergence", { operationId }),
 
+  forkCodexThread: (localProjectId: string, providerThreadId: string) =>
+    invoke<RestoreResult>("fork_codex_thread", {
+      localProjectId,
+      providerThreadId,
+    }),
+
   restartCodexAppAfterPull: (
     operationId: string,
     appKind: "codex" | "codex_plus_plus",

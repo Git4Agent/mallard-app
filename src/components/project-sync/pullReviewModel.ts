@@ -331,7 +331,8 @@ export function buildPullReviewSelection(
       .filter((action) => action.action === "resolve_divergence")
       .map((action) => conversationResolutions.get(action.action_id) ?? {
         action_id: action.action_id,
-        resolution: "preserve_local_with_native_fork",
+        resolution: action.divergence?.recommended_resolution
+          ?? "preserve_local_with_native_fork",
         destructive_approved: false,
       }),
   };

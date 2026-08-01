@@ -1,6 +1,6 @@
 # Design: Manual thread fork and the diverged-forked state
 
-- Status: Proposed
+- Status: Implemented
 - Last reviewed: August 1, 2026
 - Scope: a per-thread fork action on the Activity list, the fork stamp
   recorded on the source thread's binding at every Mallard-driven fork
@@ -105,7 +105,7 @@ pub struct ForkStamp {
     pub lineage_digest: String,          // source chain digests at fork time
     pub semantic_digest: String,
     pub message_count: u64,              // source chain length at fork time
-    pub forked_at: DateTime<Utc>,        // display only, never a witness
+    pub forked_at: u64,                  // display only, never a witness
 }
 
 // on LocalConversationBinding:
@@ -192,6 +192,18 @@ than `Diverged` never read the stamp.**
   carries no restore targets; finish, resume, and recovery use the origin
   to know that no cloud restore, index payload, or baseline step follows
   fork adoption.
+- As implemented, the journal's five cloud-commit fields
+  (`storage_id`/`bundle_id`/`generation`/`commit_id`/`manifest_sha256`)
+  grouped into `ConversationSyncOperation.cloud:
+  Option<ConversationCloudAnchor>` — present on every push and pull
+  operation, `None` only for `Manual` origin, which must not fabricate a
+  commit it never touched. Adoption of a manual fork returns a dedicated
+  `CodexDivergenceApplyOutcome::ManualForkCommitted` (no
+  `ConversationApplyReceipt` exists to return), `CodexForkCheckpoint`
+  carries `origin` with `plan_id`/`action_id` optional, and
+  `RestoreResult.plan_id` is optional for manual-fork results. Pull
+  surfaces filter checkpoints to `pull_preserve`; the Activity page owns
+  `manual` ones.
 
 ## The manual fork flow
 
@@ -201,12 +213,15 @@ New Tauri command, mirroring the existing fork-related commands:
 fork_codex_thread(app, local_project_id, thread_id) -> RestoreResult-shaped
 ```
 
-1. **Preconditions** — same contract the pull fork requires: bound provider
-   thread id, capturable canonical chain, resolvable `codex` binary,
-   provider quiescent, and no pending journal operation on the thread
-   (single-operation invariant, reason `resolution_pending`). A failed
-   precondition returns a typed error; the row action disables with the
-   reason as tooltip where it is known up front.
+1. **Preconditions** — same contract the pull fork requires: capturable
+   canonical chain, resolvable `codex` binary, provider quiescent, and no
+   pending journal operation on the thread (single-operation invariant,
+   reason `resolution_pending`). A binding is *not* required up front: a
+   never-synced local thread has no binding row to carry the stamp, so the
+   command mints its canonical binding first — the same deterministic
+   logical id (`initial_conversation_thread_id`) classification already
+   uses for unbound threads — making every local thread forkable and
+   stampable. A failed precondition returns a typed error.
 2. **Plan** — `build_divergence_plan` gains an origin/naming input. The
    pull call site keeps its `"<base> — local before Pull · <ts>"` name;
    manual passes the same builder `"<base> — fork · <ts>"`. Same

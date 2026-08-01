@@ -9669,6 +9669,7 @@ div.storage-link-main {
 .sync-thread-sync-indicator.local,
 .sync-thread-sync-indicator.storage { color: var(--blue); }
 .sync-thread-sync-indicator.diverged { color: var(--yellow); }
+.sync-thread-sync-indicator.diverged-forked { color: var(--blue); }
 .sync-thread-sync-indicator.unavailable,
 .sync-thread-sync-error { color: var(--red); }
 
@@ -10355,6 +10356,10 @@ div.storage-link-main {
   color: var(--yellow);
 }
 
+.sync-sync-review-state.state-diverged_forked {
+  color: var(--blue);
+}
+
 .sync-sync-review-state.state-unavailable {
   color: var(--red);
 }
@@ -10858,6 +10863,35 @@ button.sync-project-file-expand { cursor: pointer; }
 
 .sync-fork-checkpoint input[type="text"] {
   width: 100%;
+}
+
+.sync-fork-checkpoint h4 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: var(--text-0);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.sync-fork-checkpoint p {
+  margin: 0;
+  color: var(--text-1);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.sync-fork-checkpoint-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.sync-history-content > .sync-fork-checkpoint {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
 }
 
 .sync-app-refresh {

@@ -1,13 +1,15 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { TbRefresh } from "react-icons/tb";
 import type {
+  CodexForkCheckpoint,
   CodexThreadDetailsPage,
   CodexThreadSummary,
   GitBranchSummary,
   LocalProjectSummary,
   ProjectBinding,
   ProjectChatHistory,
+  RestoreResult,
   ThreadSyncComparison,
   ThreadSyncEntry,
 } from "../../types";
@@ -54,6 +56,9 @@ interface ContentProps {
   onLoadMore: () => void;
   onOpenCodex: (threadId: string) => void;
   onOpenTerminal: (threadId: string) => void;
+  onFork?: (threadId: string) => void;
+  forkBusyThreadId?: string | null;
+  forkPanel?: ReactNode;
   onToggleDetails?: (threadId: string, occurrenceKey: string) => void;
   onLoadMoreDetails?: (threadId: string) => void;
   embedded?: boolean;
@@ -256,7 +261,7 @@ function githubCommitUrl(repositoryUrl: string | null | undefined, sha: string):
 }
 
 type ThreadSyncPresentation = {
-  icon: "badge-check" | "cloud-off" | "download" | "git-compare-arrows" | "octagon-x" | "upload";
+  icon: "badge-check" | "cloud-off" | "download" | "git-compare-arrows" | "git-fork" | "octagon-x" | "upload";
   className: string;
   label: string;
 };
@@ -284,6 +289,14 @@ export function threadSyncPresentation(entry: ThreadSyncEntry, storageName: stri
       return { icon: "download", className: "storage", label: `Newer in ${storageName}. Pull to update this computer.` };
     case "diverged":
       return { icon: "git-compare-arrows", className: "diverged", label: `Changed here and in ${storageName}. Review before syncing.` };
+    case "diverged_forked": {
+      const forkName = entry.fork_preservation?.fork_display_name;
+      return {
+        icon: "git-fork",
+        className: "diverged-forked",
+        label: `Changed here and in ${storageName}; your local branch is already preserved in ${forkName ? `the fork “${forkName}”` : "a fork"}. Pull to adopt the ${storageName} version.`,
+      };
+    }
     case "unavailable":
       return {
         icon: "octagon-x",
@@ -351,6 +364,8 @@ interface ThreadCardProps {
   detailsOpen?: boolean;
   onOpenCodex: (threadId: string) => void;
   onOpenTerminal: (threadId: string) => void;
+  onFork?: (threadId: string) => void;
+  forkBusy?: boolean;
   onToggleDetails?: (threadId: string, occurrenceKey: string) => void;
   onLoadMoreDetails?: (threadId: string) => void;
   syncEntry?: ThreadSyncEntry;
@@ -602,7 +617,9 @@ function syncReviewStateLabel(
       case "fast_forward_local": return selected ? "Update this thread" : "Keep local";
       case "keep_local": return "Keep local";
       case "require_pull": return "Pull required";
-      case "resolve_divergence": return selected ? "Keep both branches" : "Not selected";
+      case "resolve_divergence":
+        if (!selected) return "Not selected";
+        return entry.state === "diverged_forked" ? "Adopt storage version" : "Keep both branches";
       case "create_cloud": return selected ? "Publish new thread" : "Not selected";
       case "create_local": return selected ? "Restore new conversation" : "Not selected";
       case "store_only": return "Backup only";
@@ -613,12 +630,12 @@ function syncReviewStateLabel(
     }
   }
   if (mode === "push") {
-    if (entry.state === "storage_only" || entry.state === "storage_ahead" || entry.state === "diverged") {
+    if (entry.state === "storage_only" || entry.state === "storage_ahead" || entry.state === "diverged" || entry.state === "diverged_forked") {
       return "Pull required";
     }
     return entry.state === "unknown" ? "Review status" : null;
   }
-  if (entry.state === "diverged") return selected ? "Use storage version" : "Keep local";
+  if (entry.state === "diverged" || entry.state === "diverged_forked") return selected ? "Use storage version" : "Keep local";
   if (entry.state === "storage_only" || entry.state === "storage_ahead") {
     return selected ? "Restore from storage" : "Keep local";
   }
@@ -663,6 +680,9 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
       : "Pulling saves a backup copy that can't be opened on this computer.";
   }
   if (mode === "push" && decision.action === "require_pull") {
+    if (entry.state === "diverged_forked") {
+      return "Local and stored history have diverged, but the local branch is already preserved in a fork. Pull to adopt the stored version.";
+    }
     return entry.state === "diverged"
       ? "Local and stored history have diverged. Pull and choose how to preserve the local branch before pushing."
       : "The stored thread has newer messages. Pull them before pushing.";
@@ -671,7 +691,7 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
 }
 
 function ThreadCard({
-  thread, occurrenceKey, workingDirectory, codexHome, busy = false, details, detailsOpen = false, onOpenCodex, onOpenTerminal, onToggleDetails, onLoadMoreDetails,
+  thread, occurrenceKey, workingDirectory, codexHome, busy = false, details, detailsOpen = false, onOpenCodex, onOpenTerminal, onFork, forkBusy = false, onToggleDetails, onLoadMoreDetails,
   syncEntry, storageName, resourceId, selectionMode, selected = false, selectable = false,
   selectionDisabled = false, onToggleResource, onReviewPull,
 }: ThreadCardProps) {
@@ -739,6 +759,13 @@ function ThreadCard({
             onClick={() => onOpenTerminal(thread.thread_id)} title="Open in Terminal" aria-label="Open in Terminal">
             <Icon name="terminal" size={14} />
           </button>
+          {!selectionMode && onFork && (
+            <button type="button" className="btn btn-ghost sync-history-launch-action" disabled={!launchable || busy || forkBusy}
+              onClick={() => onFork(thread.thread_id)} title={forkBusy ? "Forking in Codex…" : "Fork in Codex"}
+              aria-label={forkBusy ? "Forking in Codex" : "Fork in Codex"}>
+              <Icon name={forkBusy ? "refresh" : "git-fork"} size={14} className={forkBusy ? "icon-spin" : undefined} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -874,7 +901,7 @@ function SyncEntryCard({
 export function ProjectChatHistoryContent({
   project, binding, history, loading, loadingMore, actionError, actionBusyThreadId,
   detailsByThread = {}, openDetailOccurrences = new Set(), onBranchChange, onRefresh, onLoadMore, onOpenCodex,
-  onOpenTerminal, onToggleDetails, onLoadMoreDetails, embedded = false, comparison = null,
+  onOpenTerminal, onFork, forkBusyThreadId = null, forkPanel = null, onToggleDetails, onLoadMoreDetails, embedded = false, comparison = null,
   comparisonLoading = false, comparisonError = null, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
   selectionDisabled = false, onToggleResource, onReviewPull, onUnlinkStorage,
@@ -922,7 +949,7 @@ export function ProjectChatHistoryContent({
       } else if (entry.state === "storage_only" || entry.state === "storage_ahead") {
         if (entry.pull_decision?.action === "blocked") counts.unavailable += 1;
         else counts.storage += 1;
-      } else if (entry.state === "diverged") counts.diverged += 1;
+      } else if (entry.state === "diverged" || entry.state === "diverged_forked") counts.diverged += 1;
       else if (entry.state === "unavailable" || entry.state === "unknown") counts.unavailable += 1;
     }
 
@@ -952,6 +979,7 @@ export function ProjectChatHistoryContent({
     <ThreadCard key={key} thread={thread} occurrenceKey={key} workingDirectory={workingDirectory}
       codexHome={history?.codex_home ?? "Not configured"} busy={actionBusyThreadId === thread.thread_id}
       details={detailsByThread[thread.thread_id]} detailsOpen={openDetailOccurrences.has(key)} onOpenCodex={onOpenCodex} onOpenTerminal={onOpenTerminal}
+      onFork={onFork} forkBusy={forkBusyThreadId === thread.thread_id}
       onToggleDetails={onToggleDetails} onLoadMoreDetails={onLoadMoreDetails}
       syncEntry={entry} storageName={comparison ? comparisonStorageName : null}
       resourceId={resourceId} selectionMode={selectionMode} selected={selectedResourceIds.has(resourceId)}
@@ -1069,6 +1097,7 @@ export function ProjectChatHistoryContent({
         </header>}
 
         {actionError && <div className="sync-callout error sync-history-error" role="alert"><Icon name="alert-triangle" size={15} /><span>{actionError}</span></div>}
+        {forkPanel}
         {comparison?.remote_continuity?.state === "replaced" && (
           <div className="sync-callout warning sync-history-continuity" role="status">
             <Icon name="alert-triangle" size={15} />
@@ -1274,6 +1303,11 @@ export default function ProjectChatHistoryPage({
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusyThreadId, setActionBusyThreadId] = useState<string | null>(null);
+  const [forkBusyThreadId, setForkBusyThreadId] = useState<string | null>(null);
+  const [forkCheckpoint, setForkCheckpoint] = useState<CodexForkCheckpoint | null>(null);
+  const [forkNotice, setForkNotice] = useState<string | null>(null);
+  const [forkVerifyThreadId, setForkVerifyThreadId] = useState("");
+  const [forkResolving, setForkResolving] = useState(false);
   const [detailsByThread, setDetailsByThread] = useState<Record<string, ThreadDetailsState>>({});
   const [openDetailOccurrences, setOpenDetailOccurrences] = useState<Set<string>>(new Set());
   const requestRef = useRef(0);
@@ -1346,6 +1380,31 @@ export default function ProjectChatHistoryPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.local_project_id, binding?.revision, activeStorageId, refreshEpoch, comparisonOverride]);
 
+  // Rehydrate a pending manual-fork checkpoint (for example after an app
+  // restart mid-fork). Pull-origin checkpoints stay with the Pull review.
+  useEffect(() => {
+    let cancelled = false;
+    setForkCheckpoint(null);
+    setForkNotice(null);
+    if (!binding?.profile_ids?.codex) return;
+    void (async () => {
+      try {
+        const pending = await projectSyncApi.getPendingCodexDivergence(project.local_project_id);
+        if (cancelled) return;
+        const manual = pending?.codex_fork_checkpoints.find(
+          (checkpoint) => checkpoint.origin === "manual",
+        ) ?? null;
+        setForkCheckpoint(manual);
+        if (manual) setForkNotice(manual.message);
+      } catch {
+        // Rehydration is best-effort; the checkpoint re-surfaces on the next
+        // fork action or refresh.
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.local_project_id, binding?.revision, refreshEpoch]);
+
   const changeBranch = (nextBranch: string) => { setBranch(nextBranch); setHistory(null); setDetailsByThread({}); setOpenDetailOccurrences(new Set()); void load(null, nextBranch); };
   const openCodex = async (threadId: string) => {
     setActionError(null);
@@ -1360,6 +1419,43 @@ export default function ProjectChatHistoryPage({
     try { await projectSyncApi.openCodexThreadInTerminal(project.local_project_id, threadId); }
     catch (reason) { setActionError(errorMessage(reason)); }
     finally { setActionBusyThreadId(null); }
+  };
+  const refreshAfterFork = async () => {
+    await Promise.all([load(null, branch, true), loadComparison()]);
+  };
+  const consumeForkResult = (result: RestoreResult) => {
+    const manualCheckpoint = result.codex_fork_checkpoints.find(
+      (checkpoint) => checkpoint.origin === "manual",
+    ) ?? null;
+    setForkCheckpoint(result.status === "complete" ? null : manualCheckpoint);
+    setForkNotice(result.message);
+    setForkVerifyThreadId("");
+    return result.status === "complete" || manualCheckpoint == null;
+  };
+  const forkThread = async (threadId: string) => {
+    setActionError(null);
+    setForkNotice(null);
+    setForkBusyThreadId(threadId);
+    try {
+      const result = await projectSyncApi.forkCodexThread(project.local_project_id, threadId);
+      if (consumeForkResult(result)) await refreshAfterFork();
+    } catch (reason) { setActionError(errorMessage(reason)); }
+    finally { setForkBusyThreadId(null); }
+  };
+  const resolveForkCheckpoint = async (verify: boolean) => {
+    if (!forkCheckpoint) return;
+    setActionError(null);
+    setForkResolving(true);
+    try {
+      const result = verify
+        ? await projectSyncApi.resumeCodexDivergence(
+          forkCheckpoint.operation_id,
+          forkVerifyThreadId.trim() || null,
+        )
+        : await projectSyncApi.cancelCodexDivergence(forkCheckpoint.operation_id);
+      if (consumeForkResult(result)) await refreshAfterFork();
+    } catch (reason) { setActionError(errorMessage(reason)); }
+    finally { setForkResolving(false); }
   };
   const loadDetails = async (threadId: string, cursor?: number | null) => {
     const projectId = project.local_project_id;
@@ -1390,5 +1486,50 @@ export default function ProjectChatHistoryPage({
     if (!wasOpen && !detailsByThread[threadId]?.page && !detailsByThread[threadId]?.loading) void loadDetails(threadId);
   };
 
-  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void load(null, branch, true); void loadComparison(); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
+  const forkPanel = (forkNotice || forkCheckpoint) ? (
+    <>
+      {forkNotice && !forkCheckpoint && (
+        <div className="sync-callout" role="status">
+          <Icon name="git-fork" size={15} />
+          <span>{forkNotice}</span>
+        </div>
+      )}
+      {forkCheckpoint && !selectionMode && (
+        <section className="sync-fork-checkpoint" aria-live="polite">
+          <h4>
+            <Icon name="git-branch" size={15} />
+            {forkCheckpoint.status === "awaiting_manual_fork"
+              ? "Create the fork in Codex"
+              : "Verify the recovered Codex fork"}
+          </h4>
+          <p>{forkCheckpoint.message}</p>
+          <dl>
+            <div><dt>Source thread</dt><dd>{forkCheckpoint.source_provider_thread_id}</dd></div>
+            <div><dt>Suggested name</dt><dd>{forkCheckpoint.suggested_fork_name}</dd></div>
+          </dl>
+          <label className="sync-fork-checkpoint-id">
+            Forked thread ID (optional)
+            <input
+              type="text"
+              value={forkVerifyThreadId}
+              disabled={forkResolving}
+              onChange={(event) => setForkVerifyThreadId(event.target.value)}
+              placeholder="Detected automatically when only one fork exists"
+            />
+          </label>
+          <div className="sync-fork-checkpoint-actions">
+            <button type="button" className="btn btn-primary" disabled={forkResolving}
+              onClick={() => void resolveForkCheckpoint(true)}>
+              {forkResolving ? "Verifying…" : "Verify fork"}
+            </button>
+            <button type="button" className="btn btn-ghost" disabled={forkResolving}
+              onClick={() => void resolveForkCheckpoint(false)}>
+              Cancel
+            </button>
+          </div>
+        </section>
+      )}
+    </>
+  ) : null;
+  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void load(null, branch, true); void loadComparison(); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onFork={(id) => void forkThread(id)} forkBusyThreadId={forkBusyThreadId} forkPanel={forkPanel} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
 }

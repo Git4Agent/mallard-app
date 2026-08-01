@@ -760,10 +760,16 @@ export type CodexInventoryRefreshStatus =
 
 export interface ConversationDivergencePlan {
   available_resolutions: ConversationDivergenceResolution[];
+  /** Review default. `use_cloud_only` exactly when `local_branch_preserved`. */
+  recommended_resolution: ConversationDivergenceResolution;
+  /** The local branch is already held by a verified Mallard fork; the
+   * cloud-overwrite choice needs no destructive acknowledgement. */
+  local_branch_preserved: boolean;
   preserved_thread_id: string;
   source_provider_thread_id: string;
   local_lineage_digest: string;
   local_semantic_digest: string;
+  local_message_count: number;
   pinned_local_title?: string | null;
   pinned_cloud_title?: string | null;
   desired_fork_name: string;
@@ -827,10 +833,13 @@ export interface RestorePlan {
 
 export type RestoreApplyStatus = "complete" | "awaiting_manual_fork" | "recovery_required";
 
+export type ForkOrigin = "pull_preserve" | "manual";
+
 export interface CodexForkCheckpoint {
   operation_id: string;
-  plan_id: string;
-  action_id: string;
+  origin: ForkOrigin;
+  plan_id?: string | null;
+  action_id?: string | null;
   thread_id: string;
   source_provider_thread_id: string;
   suggested_fork_name: string;
@@ -842,7 +851,8 @@ export interface RestoreResult {
   success: boolean;
   status: RestoreApplyStatus;
   message: string;
-  plan_id: string;
+  /** Absent for manual-fork results, which belong to no restore plan. */
+  plan_id?: string | null;
   applied_action_ids: string[];
   failed_actions: Array<{ action_id: string; display_name?: string | null; message: string }>;
   codex_fork_checkpoints: CodexForkCheckpoint[];
@@ -943,6 +953,7 @@ export type ThreadSyncState =
   | "storage_only"
   | "storage_ahead"
   | "diverged"
+  | "diverged_forked"
   | "unavailable"
   | "unknown";
 
@@ -1011,11 +1022,20 @@ export interface ThreadSyncEntry {
   storage_updated_at?: number | null;
   cloud_thread_id?: string | null;
   forked_from?: string | null;
+  fork_preservation?: ThreadForkPreservation | null;
   provider_thread_id?: string | null;
   relation?: ConversationRelation | null;
   push_decision: ThreadSyncDecision;
   pull_decision: ThreadSyncDecision;
   origin_label?: string | null;
+}
+
+/** Names the fork that preserves a diverged thread's local branch. Present
+ * exactly when the entry's state is `diverged_forked`. */
+export interface ThreadForkPreservation {
+  fork_thread_id: string;
+  fork_display_name?: string | null;
+  forked_at: number;
 }
 
 export interface ThreadSyncCounts {

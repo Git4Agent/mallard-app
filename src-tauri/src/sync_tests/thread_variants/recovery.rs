@@ -1,34 +1,40 @@
 use super::harness::{sha256, TranscriptBuilder, VariantWorld};
 use super::relation_matrix::reviewed_action;
 use crate::project_sync::codex_native_fork::CodexForkExecutionRequest;
-use crate::project_sync::commands::pending_codex_divergence_with_repository;
+use crate::project_sync::commands::{
+    diverged_fork_preservation, pending_codex_divergence_with_repository, LocalThreadReview,
+};
 use crate::project_sync::conversation_codec::{
     analyze_codex_transcript, rewrite_codex_transcript, CodecLineage,
 };
 use crate::project_sync::conversation_materialization::{
     apply_codex_divergence_locked, apply_conversation_cloud_publication,
-    apply_conversation_materialization, recover_conversation_cloud_publications,
-    recover_conversation_materializations, resume_codex_divergence_locked,
-    CodexDivergenceApplyOutcome, CodexDivergenceMaterializationRequest,
-    ConversationCloudPublication, ConversationFailpoint, ConversationFailpoints,
-    ConversationMaterializationRequest, ConversationTargetPayload, NoConversationFailpoints,
+    apply_conversation_materialization, cancel_codex_divergence_locked,
+    recover_conversation_cloud_publications, recover_conversation_materializations,
+    resume_codex_divergence_locked, CodexDivergenceApplyOutcome,
+    CodexDivergenceMaterializationRequest, ConversationCloudPublication, ConversationFailpoint,
+    ConversationFailpoints, ConversationMaterializationRequest, ConversationTargetPayload,
+    NoConversationFailpoints,
 };
 use crate::project_sync::conversation_sync::{
-    validate_conversation_action_pins, ConversationStalePin,
+    validate_conversation_action_pins, BindingResolution, ConversationStalePin,
 };
 use crate::project_sync::domain::{
-    ActionId, BindingState, BundleId, BundleRecipe, CodexDivergenceOperation, CodexForkAttempt,
-    CodexForkAttemptStatus, CodexForkExecutor, CodexInventoryRefreshStatus,
-    ConversationDivergenceResolution, ConversationFileRole, ConversationJournalTarget,
-    ConversationMaterializationState, ConversationNameStatus, ConversationOperationId,
-    ConversationPlanActionType, ConversationPlanDirection, ConversationPushPlan,
-    ConversationReasonCode, ConversationRelation, ConversationSyncOperation,
-    ConversationSyncOperationKind, ConversationSyncPhase, LocalConversationBinding, LocalProjectId,
-    LocalProjectRegistration, LocalProviderProfileId, PlanId, ProjectBinding, Provider,
-    ProviderProfile, ReplicaId, StorageId, TargetExpectation, ThreadId, PUSH_PLAN_SCHEMA,
+    conversation_resource_id, ActionId, BindingState, BundleId, BundleRecipe,
+    CodexDivergenceOperation, CodexForkAttempt, CodexForkAttemptStatus, CodexForkExecutor,
+    CodexInventoryRefreshStatus, ConversationDivergenceResolution, ConversationFileRole,
+    ConversationJournalTarget, ConversationMaterializationState, ConversationNameStatus,
+    ConversationOperationId, ConversationPlanActionType, ConversationPlanDirection,
+    ConversationPushPlan, ConversationCloudAnchor, ConversationReasonCode, ConversationRelation,
+    ForkOrigin, ForkStamp, ConversationSyncOperation, ConversationSyncOperationKind,
+    ConversationSyncPhase, LocalConversationBinding, LocalProjectId, LocalProjectRegistration,
+    LocalProviderProfileId, PlanId, ProjectBinding, Provider, ProviderProfile, ReplicaId,
+    StorageId, TargetExpectation, ThreadId, PUSH_PLAN_SCHEMA,
 };
 use crate::project_sync::persistence::LocalStateRepository;
-use crate::project_sync::provider_capture::{capture_selected, discover_project, CaptureRequest};
+use crate::project_sync::provider_capture::{
+    self, capture_selected, discover_project, CaptureRequest,
+};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -293,11 +299,13 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
         plan_action_id: None,
         direction: ConversationPlanDirection::Pull,
         phase: ConversationSyncPhase::Prepared,
-        storage_id: world.storage_id.clone(),
-        bundle_id: world.bundle_id.clone(),
-        generation: 1,
-        commit_id: "commit-a".to_string(),
-        manifest_sha256: "a".repeat(64),
+        cloud: Some(ConversationCloudAnchor {
+            storage_id: world.storage_id.clone(),
+            bundle_id: world.bundle_id.clone(),
+            generation: 1,
+            commit_id: "commit-a".to_string(),
+            manifest_sha256: "a".repeat(64),
+        }),
         host_id: identity.host_id,
         replica_id: crate::project_sync::domain::ReplicaId::parse("replica-a").unwrap(),
         local_project_id: crate::project_sync::domain::LocalProjectId::parse("project-a").unwrap(),
@@ -362,11 +370,13 @@ fn journal_rejects_duplicate_operation_ids() {
         plan_action_id: None,
         direction: ConversationPlanDirection::Push,
         phase: ConversationSyncPhase::CloudPublished,
-        storage_id: world.storage_id.clone(),
-        bundle_id: world.bundle_id.clone(),
-        generation: 2,
-        commit_id: "commit-a".to_string(),
-        manifest_sha256: "a".repeat(64),
+        cloud: Some(ConversationCloudAnchor {
+            storage_id: world.storage_id.clone(),
+            bundle_id: world.bundle_id.clone(),
+            generation: 2,
+            commit_id: "commit-a".to_string(),
+            manifest_sha256: "a".repeat(64),
+        }),
         host_id: identity.host_id,
         replica_id: crate::project_sync::domain::ReplicaId::parse("replica-a").unwrap(),
         local_project_id: crate::project_sync::domain::LocalProjectId::parse("project-a").unwrap(),
@@ -651,6 +661,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                     provider_profile_id: scope.profile_id.clone(),
                     thread_id: thread_id.clone(),
                     forked_from: None,
+                    fork_stamp: None,
                     provider_thread_id: Some("source-thread".to_string()),
                     materialization_state: ConversationMaterializationState::Resumable,
                     last_observed_file_sha256: Some(sha256(&initial_thread.transcript)),
@@ -1026,14 +1037,11 @@ fn pending_manual_codex_checkpoint_is_rehydrated_after_reopening() {
         pending.status,
         crate::project_sync::commands::RestoreApplyStatus::AwaitingManualFork
     ));
-    assert_eq!(pending.plan_id, fixture.operation.plan_id.clone().unwrap());
+    assert_eq!(pending.plan_id, fixture.operation.plan_id.clone());
     assert_eq!(pending.codex_fork_checkpoints.len(), 1);
     let checkpoint = &pending.codex_fork_checkpoints[0];
     assert_eq!(checkpoint.operation_id, fixture.operation.operation_id);
-    assert_eq!(
-        checkpoint.plan_id,
-        fixture.operation.plan_id.clone().unwrap()
-    );
+    assert_eq!(checkpoint.plan_id, fixture.operation.plan_id.clone());
     assert_eq!(checkpoint.thread_id, fixture.operation.thread_id);
     assert!(matches!(
         checkpoint.status,
@@ -1747,6 +1755,7 @@ impl CodexDivergenceFixture {
                     provider_profile_id: scope.profile_id.clone(),
                     thread_id: source_thread_id.clone(),
                     forked_from: None,
+                    fork_stamp: None,
                     provider_thread_id: Some(source_provider_id.clone()),
                     materialization_state: ConversationMaterializationState::Resumable,
                     last_observed_file_sha256: Some(source_sha256.clone()),
@@ -1779,11 +1788,13 @@ impl CodexDivergenceFixture {
             plan_action_id: Some(ActionId::parse("action-codex-divergence").unwrap()),
             direction: ConversationPlanDirection::Pull,
             phase: ConversationSyncPhase::Prepared,
-            storage_id: StorageId::parse("storage-codex-divergence").unwrap(),
-            bundle_id,
-            generation: 7,
-            commit_id: "commit-codex-divergence".to_string(),
-            manifest_sha256: "a".repeat(64),
+            cloud: Some(ConversationCloudAnchor {
+                storage_id: StorageId::parse("storage-codex-divergence").unwrap(),
+                bundle_id,
+                generation: 7,
+                commit_id: "commit-codex-divergence".to_string(),
+                manifest_sha256: "a".repeat(64),
+            }),
             host_id: scope.host_id.clone(),
             replica_id: scope.replica_id.clone(),
             local_project_id: scope.project_id.clone(),
@@ -1791,11 +1802,15 @@ impl CodexDivergenceFixture {
             provider: Provider::Codex,
             thread_id: source_thread_id.clone(),
             operation: ConversationSyncOperationKind::CodexDivergence(CodexDivergenceOperation {
+                origin: ForkOrigin::PullPreserve,
                 resolution: ConversationDivergenceResolution::PreserveLocalWithNativeFork,
                 available_resolutions: vec![
                     ConversationDivergenceResolution::PreserveLocalWithNativeFork,
                     ConversationDivergenceResolution::UseCloudOnly,
                 ],
+                recommended_resolution:
+                    ConversationDivergenceResolution::PreserveLocalWithNativeFork,
+                local_branch_preserved: false,
                 preserved_thread_id: preserved_thread_id.clone(),
                 source_provider_thread_id: source_provider_id.clone(),
                 fork_provider_thread_id: None,
@@ -1803,6 +1818,7 @@ impl CodexDivergenceFixture {
                 fork_transcript_sha256: None,
                 local_lineage_digest: local_lineage_digest.clone(),
                 local_semantic_digest: local_semantic_digest.clone(),
+                local_message_count: 3,
                 pinned_local_title: None,
                 pinned_cloud_title: None,
                 desired_fork_name: "Local chat — local before Pull · 2026-07-29 18:42Z".to_string(),
@@ -2253,11 +2269,13 @@ fn push_operation(
         plan_action_id: None,
         direction: ConversationPlanDirection::Push,
         phase: ConversationSyncPhase::Prepared,
-        storage_id: world.storage_id.clone(),
-        bundle_id: world.bundle_id.clone(),
-        generation,
-        commit_id,
-        manifest_sha256,
+        cloud: Some(ConversationCloudAnchor {
+            storage_id: world.storage_id.clone(),
+            bundle_id: world.bundle_id.clone(),
+            generation,
+            commit_id,
+            manifest_sha256,
+        }),
         host_id: scope.host_id.clone(),
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
@@ -2406,12 +2424,14 @@ impl MaterializationFixture {
             plan_action_id: None,
             direction: ConversationPlanDirection::Pull,
             phase: ConversationSyncPhase::Prepared,
-            storage_id: crate::project_sync::domain::StorageId::parse("storage-materialize")
-                .unwrap(),
-            bundle_id,
-            generation: 7,
-            commit_id: "commit-materialize".to_string(),
-            manifest_sha256: "a".repeat(64),
+            cloud: Some(ConversationCloudAnchor {
+                storage_id: crate::project_sync::domain::StorageId::parse("storage-materialize")
+                    .unwrap(),
+                bundle_id,
+                generation: 7,
+                commit_id: "commit-materialize".to_string(),
+                manifest_sha256: "a".repeat(64),
+            }),
             host_id: identity.host_id,
             replica_id,
             local_project_id,
@@ -2502,4 +2522,497 @@ fn assert_materialization_fixed_point(
         .root()
         .join("conversation_operations/operation-materialize")
         .exists());
+}
+
+fn manual_origin_operation(fixture: &CodexDivergenceFixture) -> ConversationSyncOperation {
+    let mut operation = fixture.operation.clone();
+    operation.operation_id = ConversationOperationId::parse("operation-manual-fork").unwrap();
+    operation.plan_id = None;
+    operation.plan_action_id = None;
+    operation.cloud = None;
+    operation.lineage_digest = Some(fixture.local_lineage_digest.clone());
+    operation.semantic_digest = Some(fixture.local_semantic_digest.clone());
+    match &mut operation.operation {
+        ConversationSyncOperationKind::CodexDivergence(divergence) => {
+            divergence.origin = ForkOrigin::Manual;
+        }
+        _ => unreachable!("divergence fixture carries a divergence operation"),
+    }
+    operation.validate().unwrap();
+    operation
+}
+
+#[test]
+fn pull_keep_both_adoption_stamps_the_source_binding() {
+    let fixture = CodexDivergenceFixture::new();
+    fixture.begin_manual_checkpoint();
+    fixture.write_exact_child();
+    let mut failpoints = NoConversationFailpoints;
+    let outcome = resume_codex_divergence_locked(
+        &fixture.repository,
+        &fixture.operation.operation_id,
+        Some(&fixture.child_provider_id),
+        fixture.fork.clone(),
+        &mut failpoints,
+        &mut |_, _| {},
+    )
+    .unwrap();
+    let CodexDivergenceApplyOutcome::Committed(_) = outcome else {
+        panic!("manual fork verification did not commit the divergence");
+    };
+    let document = fixture.repository.load_conversation_bindings().unwrap();
+    let source = document
+        .bindings
+        .iter()
+        .find(|binding| binding.thread_id == fixture.source_thread_id)
+        .unwrap();
+    let stamp = source
+        .fork_stamp
+        .as_ref()
+        .expect("fork adoption stamps the source binding");
+    assert_eq!(stamp.fork_thread_id, fixture.preserved_thread_id);
+    assert_eq!(stamp.fork_provider_thread_id, fixture.child_provider_id);
+    assert_eq!(stamp.lineage_digest, fixture.local_lineage_digest);
+    assert_eq!(stamp.semantic_digest, fixture.local_semantic_digest);
+    assert_eq!(stamp.message_count, 3);
+    // The pull then restored the cloud branch into the source; the stamp
+    // records the pre-pull pair and is inert against the new content.
+    assert_eq!(
+        source.last_observed_lineage_digest.as_deref(),
+        Some(fixture.cloud_lineage_digest.as_str())
+    );
+    assert_eq!(
+        source.last_observed_semantic_digest.as_deref(),
+        Some(fixture.cloud_semantic_digest.as_str())
+    );
+}
+
+#[test]
+fn manual_fork_adopts_stamps_and_leaves_the_source_untouched() {
+    let fixture = CodexDivergenceFixture::new();
+    let operation = manual_origin_operation(&fixture);
+    let mut failpoints = NoConversationFailpoints;
+    let outcome = apply_codex_divergence_locked(
+        &fixture.repository,
+        CodexDivergenceMaterializationRequest {
+            operation: operation.clone(),
+            targets: Vec::new(),
+            fork: fixture.fork.clone(),
+        },
+        &mut failpoints,
+        &mut |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        CodexDivergenceApplyOutcome::AwaitingManualFork {
+            operation_id: operation.operation_id.clone(),
+        }
+    );
+    fixture.write_exact_child();
+    let outcome = resume_codex_divergence_locked(
+        &fixture.repository,
+        &operation.operation_id,
+        Some(&fixture.child_provider_id),
+        fixture.fork.clone(),
+        &mut failpoints,
+        &mut |_, _| {},
+    )
+    .unwrap();
+    let CodexDivergenceApplyOutcome::ManualForkCommitted {
+        operation_id,
+        preserved_thread_id,
+        preserved_provider_thread_id,
+        desired_fork_name,
+        executor,
+    } = outcome
+    else {
+        panic!("manual-origin fork must produce a manual outcome, got {outcome:?}");
+    };
+    assert_eq!(operation_id, operation.operation_id);
+    assert_eq!(preserved_thread_id, fixture.preserved_thread_id);
+    assert_eq!(preserved_provider_thread_id, fixture.child_provider_id);
+    assert_eq!(desired_fork_name, fixture.fork.desired_fork_name);
+    assert_eq!(executor, Some(CodexForkExecutor::Manual));
+
+    // The source rollout is byte-for-byte untouched and its sync pins are
+    // unmoved — a manual fork is not a sync.
+    assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.local_bytes);
+    let document = fixture.repository.load_conversation_bindings().unwrap();
+    let source = document
+        .bindings
+        .iter()
+        .find(|binding| binding.thread_id == fixture.source_thread_id)
+        .unwrap();
+    assert_eq!(
+        source.last_observed_lineage_digest.as_deref(),
+        Some(fixture.local_lineage_digest.as_str())
+    );
+    assert_eq!(source.source_generation, Some(6));
+    let stamp = source
+        .fork_stamp
+        .as_ref()
+        .expect("manual adoption stamps the source binding");
+    assert_eq!(stamp.fork_thread_id, fixture.preserved_thread_id);
+    assert_eq!(stamp.fork_provider_thread_id, fixture.child_provider_id);
+    assert_eq!(stamp.lineage_digest, fixture.local_lineage_digest);
+    assert_eq!(stamp.semantic_digest, fixture.local_semantic_digest);
+    assert_eq!(stamp.message_count, 3);
+    let fork_binding = document
+        .bindings
+        .iter()
+        .find(|binding| binding.thread_id == fixture.preserved_thread_id)
+        .expect("the adopted fork is bound");
+    assert_eq!(
+        fork_binding.forked_from.as_ref(),
+        Some(&fixture.source_thread_id)
+    );
+    assert_eq!(
+        fork_binding.provider_thread_id.as_deref(),
+        Some(fixture.child_provider_id.as_str())
+    );
+    assert!(fork_binding.fork_stamp.is_none());
+
+    // The operation retired and no materialization receipt exists: a manual
+    // fork belongs to no restore plan.
+    assert!(fixture
+        .repository
+        .load_conversation_sync_journal()
+        .unwrap()
+        .operations
+        .is_empty());
+    assert!(fixture
+        .repository
+        .load_materializations()
+        .unwrap()
+        .records
+        .is_empty());
+    let pending =
+        pending_codex_divergence_with_repository(&fixture.repository, &fixture.operation.local_project_id)
+            .unwrap();
+    assert!(pending.is_none(), "no checkpoint remains after adoption");
+}
+
+#[test]
+fn canceled_manual_fork_writes_no_stamp() {
+    let fixture = CodexDivergenceFixture::new();
+    let operation = manual_origin_operation(&fixture);
+    let mut failpoints = NoConversationFailpoints;
+    let outcome = apply_codex_divergence_locked(
+        &fixture.repository,
+        CodexDivergenceMaterializationRequest {
+            operation: operation.clone(),
+            targets: Vec::new(),
+            fork: fixture.fork.clone(),
+        },
+        &mut failpoints,
+        &mut |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        CodexDivergenceApplyOutcome::AwaitingManualFork {
+            operation_id: operation.operation_id.clone(),
+        }
+    );
+    cancel_codex_divergence_locked(&fixture.repository, &operation.operation_id).unwrap();
+    assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.local_bytes);
+    let document = fixture.repository.load_conversation_bindings().unwrap();
+    let source = document
+        .bindings
+        .iter()
+        .find(|binding| binding.thread_id == fixture.source_thread_id)
+        .unwrap();
+    assert!(source.fork_stamp.is_none(), "a canceled fork writes no stamp");
+    assert!(document
+        .bindings
+        .iter()
+        .all(|binding| binding.thread_id != fixture.preserved_thread_id));
+    assert!(fixture
+        .repository
+        .load_conversation_sync_journal()
+        .unwrap()
+        .operations
+        .is_empty());
+}
+
+#[test]
+fn manual_fork_journal_rejects_cloud_state_and_pull_journal_requires_it() {
+    let fixture = CodexDivergenceFixture::new();
+    let mut manual = manual_origin_operation(&fixture);
+    manual.cloud = fixture.operation.cloud.clone();
+    let error = manual.validate().unwrap_err();
+    assert!(
+        error.contains("manual fork operation carries no cloud anchor"),
+        "{error}"
+    );
+
+    let mut pull = fixture.operation.clone();
+    pull.cloud = None;
+    let error = pull.validate().unwrap_err();
+    assert!(error.contains("cloud anchor"), "{error}");
+}
+
+#[cfg(test)]
+fn preservation_review(bytes: &[u8], provider_thread_id: &str) -> LocalThreadReview {
+    let analysis = analyze_codex_transcript(bytes);
+    let logical_path = format!("state/codex/{provider_thread_id}.jsonl");
+    LocalThreadReview {
+        binding: None,
+        binding_resolution: BindingResolution::Bound,
+        resource_id: conversation_resource_id(
+            Provider::Codex,
+            &ThreadId::parse("thread-preservation-review").unwrap(),
+        )
+        .unwrap(),
+        descriptor: None,
+        conversation: provider_capture::CapturedConversation {
+            provider: provider_capture::Provider::Codex,
+            lineage_codec: "codex-jsonl".to_string(),
+            source_thread_id: Some(provider_thread_id.to_string()),
+            source_cwd: analysis.source_cwd.clone(),
+            transcript_logical_path: logical_path.clone(),
+            record_count: analysis.record_count,
+            lineage: analysis.lineage,
+        },
+        transcript: provider_capture::CapturedFile {
+            logical_path,
+            resource_id: format!("codex:session:{provider_thread_id}"),
+            bytes: bytes.to_vec(),
+            source_mtime: 0,
+            mode: 0o600,
+        },
+    }
+}
+
+#[test]
+fn diverged_forked_witness_requires_stamp_pair_fork_and_prefix() {
+    let cwd = PathBuf::from("/tmp/preservation-project");
+    let source_provider_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
+    let fork_provider_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
+    let preserved_thread_id = ThreadId::parse("thread-preserved").unwrap();
+    let source_bytes = codex_divergence_rollout(source_provider_id, None, &cwd, "m3", "local branch");
+    let fork_bytes = codex_fork_of(&source_bytes, fork_provider_id, source_provider_id);
+    let (lineage, semantic) = complete_digests(&source_bytes);
+    let stamp = ForkStamp {
+        fork_thread_id: preserved_thread_id.clone(),
+        fork_provider_thread_id: fork_provider_id.to_string(),
+        lineage_digest: lineage.clone(),
+        semantic_digest: semantic.clone(),
+        message_count: 3,
+        forked_at: 40,
+    };
+    let binding = LocalConversationBinding {
+        host_id: crate::project_sync::domain::HostId::parse(&"1".repeat(32)).unwrap(),
+        replica_id: ReplicaId::parse("replica-preservation").unwrap(),
+        local_project_id: LocalProjectId::parse("project-preservation").unwrap(),
+        provider_profile_id: LocalProviderProfileId::parse("profile-preservation").unwrap(),
+        thread_id: ThreadId::parse("thread-divergent").unwrap(),
+        forked_from: None,
+        fork_stamp: Some(stamp),
+        provider_thread_id: Some(source_provider_id.to_string()),
+        materialization_state: ConversationMaterializationState::Resumable,
+        last_observed_file_sha256: None,
+        last_observed_head_message_id: None,
+        last_observed_lineage_digest: None,
+        last_observed_semantic_digest: None,
+        source_generation: None,
+        source_manifest_sha256: None,
+        revision: 1,
+        created_at: 10,
+        updated_at: 40,
+    };
+    let source_review = preservation_review(&source_bytes, source_provider_id);
+    let mut local_threads = BTreeMap::new();
+
+    // Fork untouched since adoption: the full witness holds.
+    local_threads.insert(
+        preserved_thread_id.clone(),
+        preservation_review(&fork_bytes, fork_provider_id),
+    );
+    let preservation =
+        diverged_fork_preservation(Some(&binding), Some(&source_review), &local_threads)
+            .expect("an exact fork satisfies the witness");
+    assert_eq!(preservation.fork_thread_id, preserved_thread_id);
+    assert_eq!(preservation.forked_at, 40);
+
+    // A continued fork still carries the stamped chain as a prefix.
+    let mut continued = fork_bytes.clone();
+    continued.extend_from_slice(
+        json!({
+            "timestamp": "2026-07-29T13:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "m4",
+                "parent_id": "m3",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "continued in the fork"}],
+            },
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    continued.push(b'\n');
+    local_threads.insert(
+        preserved_thread_id.clone(),
+        preservation_review(&continued, fork_provider_id),
+    );
+    assert!(
+        diverged_fork_preservation(Some(&binding), Some(&source_review), &local_threads).is_some(),
+        "a continued fork preserves the stamped prefix"
+    );
+
+    // A fork whose early history was rewritten no longer preserves the branch.
+    let rewritten_origin =
+        codex_divergence_rollout(source_provider_id, None, &cwd, "m9", "different branch");
+    let rewritten = codex_fork_of(&rewritten_origin, fork_provider_id, source_provider_id);
+    local_threads.insert(
+        preserved_thread_id.clone(),
+        preservation_review(&rewritten, fork_provider_id),
+    );
+    assert!(
+        diverged_fork_preservation(Some(&binding), Some(&source_review), &local_threads).is_none(),
+        "a rewritten fork fails the prefix condition"
+    );
+
+    // A deleted fork fails the presence condition.
+    local_threads.remove(&preserved_thread_id);
+    assert!(
+        diverged_fork_preservation(Some(&binding), Some(&source_review), &local_threads).is_none(),
+        "a missing fork fails the witness"
+    );
+
+    // A source that moved past the stamp fails the pair condition.
+    local_threads.insert(
+        preserved_thread_id.clone(),
+        preservation_review(&fork_bytes, fork_provider_id),
+    );
+    let moved_bytes =
+        codex_divergence_rollout(source_provider_id, None, &cwd, "m5", "new local work");
+    let moved_review = preservation_review(&moved_bytes, source_provider_id);
+    assert!(
+        diverged_fork_preservation(Some(&binding), Some(&moved_review), &local_threads).is_none(),
+        "a moved source fails the pair condition"
+    );
+
+    // A stamp longer than the fork chain fails the length condition.
+    let mut short_binding = binding.clone();
+    short_binding.fork_stamp.as_mut().unwrap().message_count = 4;
+    assert!(
+        diverged_fork_preservation(Some(&short_binding), Some(&source_review), &local_threads)
+            .is_none(),
+        "a fork shorter than the stamped chain fails the witness"
+    );
+
+    // No stamp, no witness.
+    let mut unstamped = binding.clone();
+    unstamped.fork_stamp = None;
+    assert!(
+        diverged_fork_preservation(Some(&unstamped), Some(&source_review), &local_threads)
+            .is_none()
+    );
+}
+
+#[test]
+fn archived_session_copies_do_not_block_forking() {
+    let fixture = CodexDivergenceFixture::new();
+    // Mirror the incident: an unrelated thread's rollout exists in the live
+    // tree and, byte-identical, under archived_sessions — the settle state
+    // Codex's archive operation leaves behind.
+    let unrelated_id = "019f8305-a963-7602-81e1-cd3f38fe8051";
+    let unrelated = codex_divergence_rollout(
+        unrelated_id,
+        None,
+        &fixture.fork.project_directory,
+        "m3",
+        "unrelated thread",
+    );
+    let live_dir = fixture.fork.codex_home.join("sessions/2026/07/20");
+    let archived_dir = fixture.fork.codex_home.join("archived_sessions");
+    fs::create_dir_all(&live_dir).unwrap();
+    fs::create_dir_all(&archived_dir).unwrap();
+    let file_name = format!("rollout-2026-07-20T21-53-34-{unrelated_id}.jsonl");
+    fs::write(live_dir.join(&file_name), &unrelated).unwrap();
+    fs::write(archived_dir.join(&file_name), &unrelated).unwrap();
+
+    fixture.begin_manual_checkpoint();
+    fixture.write_exact_child();
+    let mut failpoints = NoConversationFailpoints;
+    let outcome = resume_codex_divergence_locked(
+        &fixture.repository,
+        &fixture.operation.operation_id,
+        Some(&fixture.child_provider_id),
+        fixture.fork.clone(),
+        &mut failpoints,
+        &mut |_, _| {},
+    )
+    .unwrap();
+    let CodexDivergenceApplyOutcome::Committed(_) = outcome else {
+        panic!("an archived duplicate of an unrelated thread must not block the fork");
+    };
+}
+
+#[test]
+fn duplicate_rollouts_within_the_sessions_tree_still_error() {
+    let fixture = CodexDivergenceFixture::new();
+    let unrelated_id = "019f8305-a963-7602-81e1-cd3f38fe8051";
+    let unrelated = codex_divergence_rollout(
+        unrelated_id,
+        None,
+        &fixture.fork.project_directory,
+        "m3",
+        "unrelated thread",
+    );
+    let file_name = format!("rollout-2026-07-20T21-53-34-{unrelated_id}.jsonl");
+    for day in ["sessions/2026/07/20", "sessions/2026/07/21"] {
+        let directory = fixture.fork.codex_home.join(day);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(&file_name), &unrelated).unwrap();
+    }
+
+    let mut failpoints = NoConversationFailpoints;
+    let error = apply_codex_divergence_locked(
+        &fixture.repository,
+        CodexDivergenceMaterializationRequest {
+            operation: fixture.operation.clone(),
+            targets: vec![fixture.target.clone()],
+            fork: fixture.fork.clone(),
+        },
+        &mut failpoints,
+        &mut |_, _| {},
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("multiple rollout files"),
+        "a duplicate inside one tree keeps the hard error: {error}"
+    );
+}
+
+#[test]
+fn archived_child_copy_yields_one_pre_existing_child_pin() {
+    let fixture = CodexDivergenceFixture::new();
+    let child_id = "019f8305-a963-7602-81e1-cd3f38fe8052";
+    let child = codex_divergence_rollout(
+        child_id,
+        Some(&fixture.source_provider_id),
+        &fixture.fork.project_directory,
+        "m3",
+        "existing child",
+    );
+    let live_dir = fixture.fork.codex_home.join("sessions/2026/07/20");
+    let archived_dir = fixture.fork.codex_home.join("archived_sessions");
+    fs::create_dir_all(&live_dir).unwrap();
+    fs::create_dir_all(&archived_dir).unwrap();
+    let file_name = format!("rollout-2026-07-20T21-53-34-{child_id}.jsonl");
+    fs::write(live_dir.join(&file_name), &child).unwrap();
+    fs::write(archived_dir.join(&file_name), &child).unwrap();
+
+    let pins = crate::project_sync::codex_native_fork::native_child_pins(
+        &fixture.fork.codex_home,
+        &fixture.source_provider_id,
+    )
+    .unwrap();
+    assert_eq!(pins.len(), 1, "the shadowed archived copy pins once");
+    assert_eq!(pins[0].provider_thread_id, child_id);
 }

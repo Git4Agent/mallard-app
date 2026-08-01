@@ -1697,8 +1697,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         targetBinding.local_project_id,
       );
       if (restoreRequest.current !== requestId) return null;
-      const pendingCheckpoint = pendingDivergence?.codex_fork_checkpoints[0];
-      if (pendingDivergence && pendingCheckpoint) {
+      // Manual-fork checkpoints belong to the Activity page, not to a Pull
+      // review; only a pull-origin checkpoint carries the plan this flow
+      // resumes.
+      const pullCheckpoints = (pendingDivergence?.codex_fork_checkpoints ?? []).filter(
+        (checkpoint) => checkpoint.origin === "pull_preserve" && checkpoint.plan_id != null,
+      );
+      const pendingCheckpoint = pullCheckpoints[0];
+      if (pendingDivergence && pendingCheckpoint && pendingCheckpoint.plan_id) {
         const pendingPlan = await projectSyncApi.getRestorePlan(pendingCheckpoint.plan_id);
         if (restoreRequest.current !== requestId) return null;
         const pendingAction = pendingPlan.conversation_actions.find(
@@ -1717,9 +1723,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         setRestoreResult(pendingDivergence);
         setPullApplyPhase("complete");
         setReviewSupportLoading(false);
-        setNotice(pendingDivergence.codex_fork_checkpoints.length === 1
+        setNotice(pullCheckpoints.length === 1
           ? `Resume the pending Codex fork for ${displayName}. The original conversation has not been replaced.`
-          : `Resume ${pendingDivergence.codex_fork_checkpoints.length} pending Codex forks for ${displayName}. No original conversation has been replaced.`);
+          : `Resume ${pullCheckpoints.length} pending Codex forks for ${displayName}. No original conversation has been replaced.`);
         return null;
       }
       // The project-data review is the primary Pull surface. Render it as soon as it
@@ -2236,7 +2242,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         });
       }
       setHistoryRefreshEpoch((epoch) => epoch + 1);
-      const remaining = result.codex_fork_checkpoints.length;
+      const remaining = result.codex_fork_checkpoints
+        .filter((checkpoint) => checkpoint.origin !== "manual").length;
       if (remaining > 0) {
         setNotice(`Codex fork verified. ${remaining} more fork checkpoint${remaining === 1 ? "" : "s"} to resolve.`);
         return;
@@ -2260,7 +2267,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     try {
       const result = await projectSyncApi.cancelCodexDivergence(operationId);
       if (restoreRequest.current !== requestId) return;
-      const remaining = result.codex_fork_checkpoints.length;
+      const remaining = result.codex_fork_checkpoints
+        .filter((checkpoint) => checkpoint.origin !== "manual").length;
       if (remaining > 0) {
         setRestoreResult(result);
         setPullApplyPhase("complete");

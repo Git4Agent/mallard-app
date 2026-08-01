@@ -19,6 +19,7 @@ type IconName =
   | "external-link"
   | "git-branch"
   | "git-compare-arrows"
+  | "git-fork"
   | "git-folder"
   | "help-circle"
   | "info"
@@ -195,6 +196,15 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           <circle cx="19" cy="18" r="3" />
           <path d="M12 18H7a2 2 0 0 1-2-2V9" />
           <path d="m9 15 3 3-3 3" />
+        </>
+      )}
+      {name === "git-fork" && (
+        <>
+          <circle cx="12" cy="18" r="2.2" />
+          <circle cx="6" cy="6" r="2.2" />
+          <circle cx="18" cy="6" r="2.2" />
+          <path d="M6 8.2v1.3a2.5 2.5 0 0 0 2.5 2.5h7a2.5 2.5 0 0 0 2.5-2.5V8.2" />
+          <path d="M12 12v3.8" />
         </>
       )}
       {name === "git-folder" && (
