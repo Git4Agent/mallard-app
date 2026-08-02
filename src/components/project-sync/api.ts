@@ -244,14 +244,8 @@ export const projectSyncApi = {
     conversationResolutions,
   }),
 
-  resumeCodexDivergence: (operationId: string, providerThreadId?: string | null) =>
-    invoke<RestoreResult>("resume_codex_divergence", {
-      operationId,
-      providerThreadId: providerThreadId ?? null,
-    }),
-
-  cancelCodexDivergence: (operationId: string) =>
-    invoke<RestoreResult>("cancel_codex_divergence", { operationId }),
+  retryCodexDivergence: (operationId: string) =>
+    invoke<RestoreResult>("retry_codex_divergence", { operationId }),
 
   forkCodexThread: (localProjectId: string, providerThreadId: string) =>
     invoke<RestoreResult>("fork_codex_thread", {

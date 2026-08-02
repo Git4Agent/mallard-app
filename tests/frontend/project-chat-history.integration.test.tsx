@@ -5,8 +5,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import Icon from "../../src/components/Icons";
 import ProjectChatHistoryPage, {
   BranchPicker,
+  ForkActivityPanel,
   ProjectChatHistoryContent,
   ThreadMetrics,
+  refreshActivityAndHandleForkFeedback,
   threadDebugCopyText,
   threadSyncPresentation,
 } from "../../src/components/project-sync/ProjectChatHistoryPage";
@@ -75,6 +77,91 @@ const history = {
     last_push_at: 1_752_800_000,
   }],
 };
+
+test("manual fork completion feedback keeps success neutral and preserves retry details", () => {
+  const successHtml = renderToStaticMarkup(
+    <ForkActivityPanel
+      feedback={{
+        message: "Created the Codex fork 'Fork title'",
+        success: true,
+      }}
+      checkpoint={null}
+      resolving={false}
+      onRetry={() => undefined}
+    />,
+  );
+  assert.match(successHtml, /class="sync-callout"/);
+  assert.match(successHtml, /role="status"/);
+  assert.match(successHtml, /Created the Codex fork/);
+  assert.doesNotMatch(successHtml, /sync-callout success/);
+  assert.doesNotMatch(successHtml, /sync-callout error/);
+
+  const failureHtml = renderToStaticMarkup(
+    <ForkActivityPanel
+      feedback={{
+        message: "Mallard did not acknowledge the Codex fork.",
+        success: false,
+      }}
+      checkpoint={{
+        operation_id: "operation-manual-fork",
+        origin: "manual",
+        plan_id: null,
+        action_id: null,
+        thread_id: "thread-manual-fork",
+        source_provider_thread_id: history.threads[0].thread_id,
+        suggested_fork_name: "Fork title",
+        status: "fork_unacknowledged",
+        message: "Mallard did not acknowledge the Codex fork.",
+      }}
+      resolving={false}
+      onRetry={() => undefined}
+    />,
+  );
+  assert.match(failureHtml, /class="sync-callout error"/);
+  assert.match(failureHtml, /role="alert"/);
+  assert.match(failureHtml, /sync-fork-checkpoint/);
+  assert.match(failureHtml, /Fork not acknowledged/);
+  assert.match(failureHtml, /Retry fork/);
+
+  const css = readFileSync("src/App.css", "utf8");
+  assert.doesNotMatch(css, /\.sync-callout\.success\s*\{/);
+  assert.match(
+    css,
+    /\.sync-callout\.error\s*\{[^}]*color:\s*var\(--red\);[^}]*background:\s*var\(--danger-soft\)/s,
+  );
+});
+
+test("the forced post-fork refresh preserves feedback until a later refresh finishes", async () => {
+  let finishHistory: (() => void) | null = null;
+  let finishComparison: (() => void) | null = null;
+  let dismissed = false;
+  const historyRefresh = new Promise<void>((resolve) => { finishHistory = resolve; });
+  const comparisonRefresh = new Promise<void>((resolve) => { finishComparison = resolve; });
+
+  const forcedRefresh = refreshActivityAndHandleForkFeedback(
+    () => historyRefresh,
+    () => comparisonRefresh,
+    () => { dismissed = true; },
+    false,
+  );
+  assert.equal(dismissed, false);
+
+  finishHistory?.();
+  await Promise.resolve();
+  assert.equal(dismissed, false);
+
+  finishComparison?.();
+  await forcedRefresh;
+  assert.equal(dismissed, false);
+
+  await refreshActivityAndHandleForkFeedback(
+    async () => undefined,
+    async () => undefined,
+    () => { dismissed = true; },
+    true,
+  );
+  assert.equal(dismissed, true);
+});
 
 test("the branch picker exposes branch state without using the native select menu", () => {
   const html = renderToStaticMarkup(

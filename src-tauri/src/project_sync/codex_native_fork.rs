@@ -6,41 +6,47 @@
 //! replace the original rollout.
 
 use chrono::{TimeZone, Utc};
+use notify::event::{ModifyKind, RenameMode};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use walkdir::WalkDir;
 
 use super::codex_rollout::analyze_codex_rollout_structure;
 use super::conversation_codec::{analyze_codex_transcript, CodecLineage};
 use super::domain::{
-    CodexForkAttemptStatus, CodexForkExecutor, CodexNativeChildPin, ConversationDivergencePlan,
-    ForkOrigin, ThreadId, MAX_CONVERSATION_FILE_BYTES,
+    CodexForkAttemptStatus, CodexForkExecutor, ConversationDivergencePlan, ForkOrigin, ThreadId,
+    MAX_CONVERSATION_FILE_BYTES,
 };
 
-const MAX_SESSION_FILES: usize = 20_000;
-const MAX_EXISTING_CHILDREN: usize = 1_024;
 const MAX_APP_SERVER_LINE_BYTES: usize = 1024 * 1024;
 const MAX_APP_SERVER_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_APP_SERVER_MESSAGES: usize = 4_096;
 const APP_SERVER_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const APP_SERVER_FORK_OBSERVATION_INTERVAL: Duration = Duration::from_millis(200);
-const FORK_PERSIST_TIMEOUT: Duration = Duration::from_secs(10);
 const LOGIN_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const NATIVE_PTY_TIMEOUT: Duration = Duration::from_secs(60);
-const NATIVE_PTY_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const NATIVE_PTY_EVENT_INTERVAL: Duration = Duration::from_millis(100);
 const NATIVE_PTY_STABILITY_INTERVAL: Duration = Duration::from_millis(400);
 const NATIVE_PTY_COMPOSER_GRACE: Duration = Duration::from_millis(400);
+const NATIVE_PTY_EXIT_OBSERVATION_GRACE: Duration = Duration::from_secs(2);
 const NATIVE_PTY_EXIT_GRACE: Duration = Duration::from_secs(3);
 const NATIVE_PTY_INTERRUPT_GRACE: Duration = Duration::from_secs(2);
+const NATIVE_PTY_DRAIN_GRACE: Duration = Duration::from_secs(1);
+const NATIVE_PTY_WATCH_QUEUE: usize = 256;
+const NATIVE_PTY_MAX_CANDIDATES: usize = 16;
+const NATIVE_PTY_MAX_EVENT_PATHS: usize = 64;
+const NATIVE_PTY_MAX_VERIFY_RETRIES: u8 = 8;
+const NATIVE_PTY_VERIFY_RETRY_BASE: Duration = Duration::from_millis(100);
 const FORK_NAME_LIMIT: usize = 180;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,13 +69,15 @@ pub struct CodexForkExecutionRequest {
     pub codex_executable: PathBuf,
     pub codex_executable_sha256: String,
     pub source_provider_thread_id: String,
+    /// Exact machine-local rollout path captured during review and persisted
+    /// in the operation journal. Fork execution never discovers it by scanning.
+    pub source_transcript_path: PathBuf,
     pub source_transcript_sha256: String,
     pub local_lineage_digest: String,
     pub local_semantic_digest: String,
     pub pinned_local_title: Option<String>,
     pub desired_fork_name: String,
     pub available_executors: Vec<CodexForkExecutor>,
-    pub pre_existing_children: Vec<CodexNativeChildPin>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,11 +124,10 @@ pub struct CodexPostCommitPresentationOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodexForkCoordinatorOutcome {
     Verified(VerifiedNativeFork),
-    AwaitingManualFork,
     AbortedBeforeInvocation {
         message: String,
     },
-    RecoveryRequired {
+    Unacknowledged {
         executor: CodexForkExecutor,
         message: String,
     },
@@ -130,7 +137,7 @@ pub enum CodexForkCoordinatorOutcome {
 enum ExecutorOutcome {
     Verified(VerifiedNativeFork),
     DefinitiveNoFork,
-    Ambiguous(String),
+    Unacknowledged(String),
 }
 
 #[derive(Debug)]
@@ -140,11 +147,6 @@ enum AppServerMessage {
     StderrOversized,
     Io,
     Eof,
-}
-
-enum AppServerRequestOutcome<T> {
-    Response(Value),
-    Observed(T),
 }
 
 struct AppServerClient {
@@ -238,6 +240,9 @@ impl AppServerClient {
                     "name": "mallard",
                     "title": "Mallard",
                     "version": env!("CARGO_PKG_VERSION")
+                },
+                "capabilities": {
+                    "experimentalApi": true
                 }
             }),
             APP_SERVER_REQUEST_TIMEOUT,
@@ -250,40 +255,20 @@ impl AppServerClient {
     }
 
     fn request(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
-        match self.request_observing(method, params, timeout, timeout, || {
-            Ok(None::<std::convert::Infallible>)
-        })? {
-            AppServerRequestOutcome::Response(response) => Ok(response),
-            AppServerRequestOutcome::Observed(never) => match never {},
-        }
-    }
-
-    fn request_observing<T>(
-        &mut self,
-        method: &str,
-        params: Value,
-        timeout: Duration,
-        observation_interval: Duration,
-        mut observe: impl FnMut() -> Result<Option<T>, String>,
-    ) -> Result<AppServerRequestOutcome<T>, String> {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         self.write_json(&json!({ "method": method, "id": id, "params": params }))?;
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(observed) = observe()? {
-                return Ok(AppServerRequestOutcome::Observed(observed));
-            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(format!("Codex app-server {method} timed out"));
             }
-            let message = match self
-                .stdout
-                .recv_timeout(remaining.min(observation_interval))
-            {
+            let message = match self.stdout.recv_timeout(remaining) {
                 Ok(message) => message,
-                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!("Codex app-server {method} timed out"))
+                }
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(format!("Codex app-server closed during {method}"))
                 }
@@ -314,7 +299,7 @@ impl AppServerClient {
                 .map_err(|_| "Codex app-server emitted malformed JSON".to_string())?;
             if let Some(response_id) = value.get("id") {
                 if response_id.as_u64() == Some(id) {
-                    return Ok(AppServerRequestOutcome::Response(value));
+                    return Ok(value);
                 }
                 return Err(format!(
                     "Codex app-server {method} returned an unexpected response id"
@@ -353,18 +338,11 @@ impl AppServerClient {
             .ok_or_else(|| app_server_error("thread/read", &response))
     }
 
-    fn fork_thread_observing<T>(
-        &mut self,
-        thread_id: &str,
-        project_directory: &Path,
-        observe: impl FnMut() -> Result<Option<T>, String>,
-    ) -> Result<AppServerRequestOutcome<T>, String> {
-        self.request_observing(
+    fn fork_thread(&mut self, thread_id: &str, project_directory: &Path) -> Result<Value, String> {
+        self.request(
             "thread/fork",
             app_server_fork_params(thread_id, project_directory)?,
             APP_SERVER_REQUEST_TIMEOUT,
-            APP_SERVER_FORK_OBSERVATION_INTERVAL,
-            observe,
         )
     }
 
@@ -403,7 +381,11 @@ fn app_server_fork_params(thread_id: &str, project_directory: &Path) -> Result<V
     let cwd = project_directory
         .to_str()
         .ok_or_else(|| "project directory is not valid UTF-8".to_string())?;
-    Ok(json!({ "threadId": thread_id, "cwd": cwd }))
+    Ok(json!({
+        "threadId": thread_id,
+        "cwd": cwd,
+        "excludeTurns": true
+    }))
 }
 
 impl Drop for AppServerClient {
@@ -471,7 +453,6 @@ fn app_server_error(method: &str, response: &Value) -> String {
 }
 
 pub fn build_divergence_plan(
-    _source_thread_id: &ThreadId,
     source_provider_thread_id: &str,
     local_lineage_digest: &str,
     local_semantic_digest: &str,
@@ -482,8 +463,6 @@ pub fn build_divergence_plan(
     cloud_title: Option<&str>,
     local_summary: Option<&str>,
     created_at: u64,
-    codex_home: &Path,
-    _project_directory: &Path,
 ) -> Result<ConversationDivergencePlan, String> {
     let codex_executable = crate::codex_binary::find_binary("codex")?;
     let codex_executable = fs::canonicalize(&codex_executable)
@@ -503,11 +482,9 @@ pub fn build_divergence_plan(
         source_provider_thread_id,
     );
     let desired_fork_name = planned_fork_name(&base, created_at, origin)?;
-    let pre_existing_children = native_child_pins(codex_home, source_provider_thread_id)?;
     let available_executors = vec![
         CodexForkExecutor::AppServerStdio,
         CodexForkExecutor::NativePty,
-        CodexForkExecutor::Manual,
     ];
     let recommended_resolution = if local_branch_preserved {
         super::domain::ConversationDivergenceResolution::UseCloudOnly
@@ -536,7 +513,6 @@ pub fn build_divergence_plan(
         codex_executable: codex_executable.to_string_lossy().into_owned(),
         codex_executable_sha256: executable_sha256,
         available_executors,
-        pre_existing_children,
     })
 }
 
@@ -562,7 +538,11 @@ fn fork_base_title(
         .unwrap_or_else(|| "Untitled conversation".to_string())
 }
 
-pub fn planned_fork_name(base: &str, created_at: u64, origin: ForkOrigin) -> Result<String, String> {
+pub fn planned_fork_name(
+    base: &str,
+    created_at: u64,
+    origin: ForkOrigin,
+) -> Result<String, String> {
     if base.chars().any(char::is_control) {
         return Err("Codex fork-name base contains control characters".to_string());
     }
@@ -597,123 +577,142 @@ fn truncate_with_ellipsis(value: &str, limit: usize) -> String {
     result
 }
 
-pub fn native_child_pins(
+pub(crate) fn native_thread_at_path(
     codex_home: &Path,
-    source_provider_thread_id: &str,
-) -> Result<Vec<CodexNativeChildPin>, String> {
-    let mut children = scan_native_threads(codex_home)?
-        .into_values()
-        .filter(|thread| thread.forked_from_id.as_deref() == Some(source_provider_thread_id))
-        .map(|thread| CodexNativeChildPin {
-            provider_thread_id: thread.provider_thread_id,
-            transcript_sha256: thread.transcript_sha256,
-        })
-        .collect::<Vec<_>>();
-    if children.len() > MAX_EXISTING_CHILDREN {
-        return Err("Codex source has too many native children to review safely".to_string());
-    }
-    children.sort_by(|left, right| left.provider_thread_id.cmp(&right.provider_thread_id));
-    Ok(children)
-}
-
-pub fn find_native_thread(
-    codex_home: &Path,
-    provider_thread_id: &str,
+    transcript_path: &Path,
+    expected_provider_thread_id: &str,
 ) -> Result<NativeCodexThread, String> {
-    scan_native_threads(codex_home)?
-        .remove(provider_thread_id)
-        .ok_or_else(|| format!("Codex thread '{provider_thread_id}' was not found"))
+    let thread = native_thread_from_path(codex_home, transcript_path)?;
+    if thread.provider_thread_id != expected_provider_thread_id {
+        return Err("Codex rollout identity does not match the expected thread".to_string());
+    }
+    Ok(thread)
 }
 
-fn scan_native_threads(codex_home: &Path) -> Result<BTreeMap<String, NativeCodexThread>, String> {
+pub(crate) fn verify_native_thread_prefix_at_path(
+    codex_home: &Path,
+    transcript_path: &Path,
+    expected_provider_thread_id: &str,
+    expected_message_count: usize,
+    expected_lineage_digest: &str,
+    expected_semantic_digest: &str,
+) -> Result<(), String> {
+    let (thread, bytes) = native_thread_with_bytes_from_path(codex_home, transcript_path)?;
+    if thread.provider_thread_id != expected_provider_thread_id {
+        return Err("Codex rollout identity does not match the expected thread".to_string());
+    }
+    if thread.lineage_digest == expected_lineage_digest
+        && thread.semantic_digest == expected_semantic_digest
+    {
+        return Ok(());
+    }
+    let analysis = analyze_codex_transcript(&bytes);
+    let chain = analysis
+        .lineage
+        .chain()
+        .ok_or_else(|| "Codex rollout lineage is no longer readable".to_string())?;
+    if chain.len() < expected_message_count {
+        return Err("Codex rollout no longer contains the expected prefix".to_string());
+    }
+    let (prefix_lineage, prefix_semantic) =
+        super::domain::conversation_chain_digests(&chain[..expected_message_count])?;
+    if prefix_lineage != expected_lineage_digest || prefix_semantic != expected_semantic_digest {
+        return Err("Codex rollout rewrote the expected prefix".to_string());
+    }
+    Ok(())
+}
+
+fn native_thread_from_path(
+    codex_home: &Path,
+    transcript_path: &Path,
+) -> Result<NativeCodexThread, String> {
+    native_thread_with_bytes_from_path(codex_home, transcript_path).map(|(thread, _)| thread)
+}
+
+fn native_thread_with_bytes_from_path(
+    codex_home: &Path,
+    transcript_path: &Path,
+) -> Result<(NativeCodexThread, Vec<u8>), String> {
     let canonical_home =
         fs::canonicalize(codex_home).map_err(|error| format!("resolve Codex home: {error}"))?;
     if canonical_home != codex_home {
         return Err("Codex home is not canonical".to_string());
     }
-    let root_metadata = fs::symlink_metadata(&canonical_home)
-        .map_err(|error| format!("inspect Codex home: {error}"))?;
-    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
-        return Err("Codex home is not a real directory".to_string());
+    let canonical_path = fs::canonicalize(transcript_path)
+        .map_err(|error| format!("resolve Codex rollout: {error}"))?;
+    if canonical_path != transcript_path {
+        return Err("Codex rollout path is not canonical".to_string());
     }
-    let mut threads = BTreeMap::new();
-    let mut visited = 0_usize;
+    if !is_rollout_jsonl(&canonical_path) {
+        return Err("Codex rollout path is not a rollout JSONL file".to_string());
+    }
+    let metadata = fs::symlink_metadata(&canonical_path)
+        .map_err(|error| format!("inspect Codex rollout: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("Codex rollout is not a regular no-follow file".to_string());
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_CONVERSATION_FILE_BYTES {
+        return Err("Codex rollout is empty or exceeds its read limit".to_string());
+    }
+
+    let mut contained = false;
     for directory in ["sessions", "archived_sessions"] {
         let root = canonical_home.join(directory);
-        if !root.exists() {
+        if !canonical_path.starts_with(&root) {
             continue;
         }
-        let metadata = fs::symlink_metadata(&root)
+        let root_metadata = fs::symlink_metadata(&root)
             .map_err(|error| format!("inspect Codex {directory}: {error}"))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
             return Err(format!("Codex {directory} is not a real directory"));
         }
-        for entry in WalkDir::new(&root).follow_links(false).max_depth(8) {
-            let entry = entry.map_err(|error| format!("scan Codex {directory}: {error}"))?;
-            if entry.file_type().is_symlink() || !entry.file_type().is_file() {
-                continue;
-            }
-            if !is_rollout_jsonl(entry.path()) {
-                continue;
-            }
-            visited = visited.saturating_add(1);
-            if visited > MAX_SESSION_FILES {
-                return Err("Codex profile has too many session files to scan safely".to_string());
-            }
-            let file_metadata = entry
-                .metadata()
-                .map_err(|error| format!("inspect Codex rollout: {error}"))?;
-            if file_metadata.len() == 0 || file_metadata.len() > MAX_CONVERSATION_FILE_BYTES {
-                continue;
-            }
-            let canonical_path = fs::canonicalize(entry.path())
-                .map_err(|error| format!("resolve Codex rollout: {error}"))?;
-            if !canonical_path.starts_with(&root) {
-                return Err("Codex rollout resolves outside its session tree".to_string());
-            }
-            let bytes = read_bounded_file(&canonical_path, MAX_CONVERSATION_FILE_BYTES)?;
-            let Ok(structure) = analyze_codex_rollout_structure(&bytes, None) else {
-                continue;
-            };
-            let analysis = analyze_codex_transcript(&bytes);
-            let (lineage_digest, semantic_digest) = match analysis.lineage {
-                CodecLineage::Complete {
-                    lineage_digest,
-                    semantic_digest,
-                    ..
-                } => (lineage_digest, semantic_digest),
-                CodecLineage::Unknown { .. } => continue,
-            };
-            let (history_record_digest, history_record_count) = non_metadata_record_digest(&bytes)?;
-            let thread = NativeCodexThread {
-                provider_thread_id: structure.current.id.clone(),
-                transcript_path: canonical_path,
-                transcript_sha256: hex_digest(Sha256::digest(&bytes).as_slice()),
-                cwd: PathBuf::from(&structure.current.cwd),
-                forked_from_id: structure.current.forked_from_id.clone(),
-                lineage_digest,
-                semantic_digest,
-                history_record_digest,
-                history_record_count,
-            };
-            if threads.contains_key(&thread.provider_thread_id) {
-                // Codex's archive operation can leave the same transcript in
-                // both `sessions` and `archived_sessions`, and after an
-                // unarchive the live `sessions` copy is the one Codex
-                // resumes. The active tree is walked first and stays
-                // authoritative — the same rule provider discovery applies —
-                // so an archived copy never shadows or vetoes it. A duplicate
-                // id inside one tree has no legitimate producer and still
-                // fails the scan.
-                if directory == "archived_sessions" {
-                    continue;
-                }
-                return Err("Codex provider thread has multiple rollout files".to_string());
-            }
-            threads.insert(thread.provider_thread_id.clone(), thread);
+        let canonical_root = fs::canonicalize(&root)
+            .map_err(|error| format!("resolve Codex {directory}: {error}"))?;
+        if canonical_root != root || !canonical_path.starts_with(&canonical_root) {
+            return Err("Codex rollout resolves outside its session tree".to_string());
         }
+        contained = true;
+        break;
     }
-    Ok(threads)
+    if !contained {
+        return Err("Codex rollout is outside the active and archived session trees".to_string());
+    }
+
+    let bytes = read_bounded_file(&canonical_path, MAX_CONVERSATION_FILE_BYTES)?;
+    let thread = derive_native_thread(&canonical_path, &bytes)?
+        .ok_or_else(|| "Codex rollout does not contain a complete native thread".to_string())?;
+    Ok((thread, bytes))
+}
+
+/// Derive one exact rollout from bytes obtained by bounded verification.
+fn derive_native_thread(
+    canonical_path: &Path,
+    bytes: &[u8],
+) -> Result<Option<NativeCodexThread>, String> {
+    let Ok(structure) = analyze_codex_rollout_structure(bytes, None) else {
+        return Ok(None);
+    };
+    let analysis = analyze_codex_transcript(bytes);
+    let (lineage_digest, semantic_digest) = match analysis.lineage {
+        CodecLineage::Complete {
+            lineage_digest,
+            semantic_digest,
+            ..
+        } => (lineage_digest, semantic_digest),
+        CodecLineage::Unknown { .. } => return Ok(None),
+    };
+    let (history_record_digest, history_record_count) = non_metadata_record_digest(bytes)?;
+    Ok(Some(NativeCodexThread {
+        provider_thread_id: structure.current.id.clone(),
+        transcript_path: canonical_path.to_path_buf(),
+        transcript_sha256: hex_digest(Sha256::digest(bytes).as_slice()),
+        cwd: PathBuf::from(&structure.current.cwd),
+        forked_from_id: structure.current.forked_from_id.clone(),
+        lineage_digest,
+        semantic_digest,
+        history_record_digest,
+        history_record_count,
+    }))
 }
 
 /// Sink for fork sub-phase timings, mirroring the Pull `on_phase` callback.
@@ -735,7 +734,7 @@ pub fn coordinate_native_fork(
     on_phase: ForkPhaseObserver<'_>,
 ) -> Result<CodexForkCoordinatorOutcome, String> {
     if let Err(message) = timed(on_phase, "fork: validate request", || {
-        validate_execution_request(request)
+        validate_execution_artifacts_and_source(request)
     }) {
         return Ok(CodexForkCoordinatorOutcome::AbortedBeforeInvocation { message });
     }
@@ -745,7 +744,6 @@ pub fn coordinate_native_fork(
         |executor| match executor {
             CodexForkExecutor::AppServerStdio => try_app_server_fork(request, on_phase),
             CodexForkExecutor::NativePty => try_native_pty_fork(request, on_phase),
-            CodexForkExecutor::Manual => unreachable!("manual is handled by the coordinator"),
         },
     )
 }
@@ -758,7 +756,7 @@ pub fn preflight_native_fork(
     on_phase: ForkPhaseObserver<'_>,
 ) -> Result<(), String> {
     timed(on_phase, "fork: preflight", || {
-        validate_execution_request(request)
+        validate_execution_artifacts_and_source(request)
     })
 }
 
@@ -770,9 +768,6 @@ fn run_executor_sequence(
     for executor in executors {
         if let Err(message) = record_attempt(*executor, CodexForkAttemptStatus::Pending) {
             return Ok(CodexForkCoordinatorOutcome::AbortedBeforeInvocation { message });
-        }
-        if *executor == CodexForkExecutor::Manual {
-            return Ok(CodexForkCoordinatorOutcome::AwaitingManualFork);
         }
         let outcome = match invoke(*executor) {
             Ok(outcome) => outcome,
@@ -799,54 +794,17 @@ fn run_executor_sequence(
                     return Ok(CodexForkCoordinatorOutcome::AbortedBeforeInvocation { message });
                 }
             }
-            ExecutorOutcome::Ambiguous(message) => {
-                record_attempt(*executor, CodexForkAttemptStatus::Ambiguous)?;
-                return Ok(CodexForkCoordinatorOutcome::RecoveryRequired {
+            ExecutorOutcome::Unacknowledged(message) => {
+                record_attempt(*executor, CodexForkAttemptStatus::Unacknowledged)?;
+                return Ok(CodexForkCoordinatorOutcome::Unacknowledged {
                     executor: *executor,
                     message,
                 });
             }
         }
     }
-    Ok(CodexForkCoordinatorOutcome::AwaitingManualFork)
-}
-
-pub fn verify_manual_fork(
-    request: &CodexForkExecutionRequest,
-    provider_thread_id: Option<&str>,
-    on_phase: ForkPhaseObserver<'_>,
-) -> Result<VerifiedNativeFork, String> {
-    timed(on_phase, "verify: validate artifacts and source", || {
-        validate_execution_artifacts_and_source(request)
-    })?;
-    let candidate = timed(
-        on_phase,
-        "verify: locate candidate",
-        || match provider_thread_id {
-            Some(thread_id) => {
-                let candidate = find_native_thread(&request.codex_home, thread_id)?;
-                if pre_existing_map(&request.pre_existing_children).contains_key(thread_id) {
-                    return Err(
-                        "the selected Codex fork existed before this Pull review".to_string()
-                    );
-                }
-                Ok(candidate)
-            }
-            None => exact_new_child(request),
-        },
-    )?;
-    timed(on_phase, "verify: candidate ancestry and content", || {
-        verify_candidate(request, &candidate)
-    })?;
-    timed(on_phase, "verify: source unchanged", || {
-        verify_source_unchanged(request)
-    })?;
-    Ok(VerifiedNativeFork {
-        provider_thread_id: candidate.provider_thread_id,
-        transcript_path: candidate.transcript_path,
-        transcript_sha256: candidate.transcript_sha256,
-        executor: CodexForkExecutor::Manual,
-        name_status: CodexNameStatus::Deferred,
+    Ok(CodexForkCoordinatorOutcome::AbortedBeforeInvocation {
+        message: "Codex fork could not be invoked by an available executor".to_string(),
     })
 }
 
@@ -857,18 +815,17 @@ pub fn verify_recorded_fork(
     transcript_sha256: &str,
 ) -> Result<(), String> {
     validate_execution_artifacts_and_source(request)?;
-    let candidate = find_native_thread(&request.codex_home, provider_thread_id)?;
-    if candidate.transcript_path != transcript_path
-        || candidate.transcript_sha256 != transcript_sha256
-    {
+    let candidate =
+        native_thread_at_path(&request.codex_home, transcript_path, provider_thread_id)?;
+    if candidate.transcript_sha256 != transcript_sha256 {
         return Err("verified Codex fork changed before local preservation".to_string());
     }
-    verify_candidate(request, &candidate)?;
-    verify_source_unchanged(request)
+    let source = source_native_thread(request)?;
+    verify_candidate_against_source(request, &candidate, &source)
 }
 
 pub fn verify_source_idle_and_title(request: &CodexForkExecutionRequest) -> Result<(), String> {
-    validate_execution_request(request)?;
+    validate_execution_artifacts_and_source(request)?;
     if !probe_source_idle_and_title(request)? {
         return Err("Codex source thread status is unavailable".to_string());
     }
@@ -1021,144 +978,66 @@ fn try_app_server_fork(
     timed(on_phase, "app-server: verify source unchanged", || {
         verify_source_unchanged(request)
     })?;
-    let baseline = timed(on_phase, "app-server: scan baseline", || {
-        Ok::<_, String>(NativeForkBaseline {
-            threads: scan_native_threads(&request.codex_home)?,
-            rollout_paths: scan_rollout_paths(&request.codex_home)?,
-        })
-    })?;
-    // Each observation tick rescans the whole profile, so the poll count is
-    // the multiplier on that cost — report it alongside the elapsed time.
-    let mut polls = 0_usize;
-    let observation_started = Instant::now();
-    let mut stable_candidate: Option<(String, String, Instant)> = None;
-    let fork_outcome = match client.fork_thread_observing(
-        &request.source_provider_thread_id,
-        &request.project_directory,
-        || {
-            polls = polls.saturating_add(1);
-            let observation = observe_native_pty_fork(request, &baseline)?;
-            match observation {
-                NativePtyObservation::NoChild => {
-                    if stable_candidate.is_some() {
-                        return Err(
-                            "Codex app-server fork disappeared during verification".to_string()
-                        );
-                    }
-                    Ok(None)
-                }
-                NativePtyObservation::Persisting => {
-                    if stable_candidate.is_some() {
-                        return Err("Codex app-server fork changed during verification".to_string());
-                    }
-                    Ok(None)
-                }
-                NativePtyObservation::Exact {
-                    provider_thread_id,
-                    transcript_sha256,
-                } => {
-                    let now = Instant::now();
-                    let observed_at = match &stable_candidate {
-                        Some((existing_id, existing_digest, observed_at))
-                            if existing_id == &provider_thread_id
-                                && existing_digest == &transcript_sha256 =>
-                        {
-                            *observed_at
-                        }
-                        Some(_) => {
-                            return Err(
-                                "Codex app-server fork identity changed during verification"
-                                    .to_string(),
-                            )
-                        }
-                        None => {
-                            stable_candidate =
-                                Some((provider_thread_id.clone(), transcript_sha256, now));
-                            now
-                        }
-                    };
-                    if now.saturating_duration_since(observed_at) < NATIVE_PTY_STABILITY_INTERVAL {
-                        return Ok(None);
-                    }
-                    exact_profile_delta_candidate(request, &baseline, Some(&provider_thread_id))
-                }
-                NativePtyObservation::Unsafe => {
-                    Err("Codex app-server changed unexpected rollout state".to_string())
-                }
-            }
-        },
-    ) {
-        Ok(outcome) => {
-            on_phase(
-                &format!("app-server: fork and observe ({polls} profile rescans)"),
-                observation_started.elapsed(),
-            );
-            outcome
-        }
+    let response = match timed(on_phase, "app-server: fork metadata only", || {
+        client.fork_thread(
+            &request.source_provider_thread_id,
+            &request.project_directory,
+        )
+    }) {
+        Ok(response) => response,
         Err(error) => {
-            on_phase(
-                &format!("app-server: fork and observe, failed ({polls} profile rescans)"),
-                observation_started.elapsed(),
-            );
-            return classify_app_server_result(request, &baseline, error, false);
-        }
-    };
-    let response = match fork_outcome {
-        AppServerRequestOutcome::Observed(candidate) => {
             client.terminate_now();
-            return Ok(ExecutorOutcome::Verified(VerifiedNativeFork {
-                provider_thread_id: candidate.provider_thread_id,
-                transcript_path: candidate.transcript_path,
-                transcript_sha256: candidate.transcript_sha256,
-                executor: CodexForkExecutor::AppServerStdio,
-                name_status: CodexNameStatus::Deferred,
-            }));
+            return Ok(ExecutorOutcome::Unacknowledged(error));
         }
-        AppServerRequestOutcome::Response(response) => response,
     };
     if response.get("error").is_some() {
-        return classify_app_server_result(
-            request,
-            &baseline,
-            app_server_error("thread/fork", &response),
-            true,
-        );
+        client.terminate_now();
+        return Ok(ExecutorOutcome::Unacknowledged(app_server_error(
+            "thread/fork",
+            &response,
+        )));
     }
     let Some(candidate_id) = response
         .pointer("/result/thread/id")
         .and_then(Value::as_str)
         .map(str::to_string)
     else {
-        return classify_app_server_result(
-            request,
-            &baseline,
+        client.terminate_now();
+        return Ok(ExecutorOutcome::Unacknowledged(
             "Codex app-server fork response lacked a thread id".to_string(),
-            false,
-        );
+        ));
     };
     if let Some(parent) = response
         .pointer("/result/thread/forkedFromId")
         .and_then(Value::as_str)
     {
         if parent != request.source_provider_thread_id {
-            return Ok(ExecutorOutcome::Ambiguous(
+            client.terminate_now();
+            return Ok(ExecutorOutcome::Unacknowledged(
                 "Codex app-server returned a fork with the wrong parent".to_string(),
             ));
         }
     }
-    if let Err(error) = wait_for_candidate(&request.codex_home, &candidate_id) {
-        return classify_app_server_result(request, &baseline, error, false);
-    }
-    let candidate = match exact_profile_delta_candidate(request, &baseline, Some(&candidate_id)) {
-        Ok(Some(candidate)) => candidate,
-        Ok(None) => {
-            return Ok(ExecutorOutcome::Ambiguous(
-                "Codex app-server fork was not persisted".to_string(),
+
+    let candidate_path = response
+        .pointer("/result/thread/path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    client.terminate_now();
+    let candidate = match candidate_path {
+        Some(path) => match timed(on_phase, "app-server: verify returned path", || {
+            verify_app_server_candidate_path(request, &candidate_id, &path)
+        }) {
+            Ok(candidate) => candidate,
+            Err(error) => return Ok(ExecutorOutcome::Unacknowledged(error)),
+        },
+        None => {
+            return Ok(ExecutorOutcome::Unacknowledged(
+                "Codex app-server fork response lacked an exact rollout path".to_string(),
             ))
         }
-        Err(error) => return Ok(ExecutorOutcome::Ambiguous(error)),
     };
-    client.terminate_now();
     Ok(ExecutorOutcome::Verified(VerifiedNativeFork {
         provider_thread_id: candidate.provider_thread_id,
         transcript_path: candidate.transcript_path,
@@ -1168,21 +1047,150 @@ fn try_app_server_fork(
     }))
 }
 
-#[derive(Clone, Debug)]
-struct NativeForkBaseline {
-    threads: BTreeMap<String, NativeCodexThread>,
-    rollout_paths: BTreeSet<PathBuf>,
+fn verify_app_server_candidate_path(
+    request: &CodexForkExecutionRequest,
+    candidate_id: &str,
+    candidate_path: &Path,
+) -> Result<NativeCodexThread, String> {
+    let candidate = native_thread_at_path(&request.codex_home, candidate_path, candidate_id)?;
+    let source = source_native_thread(request)?;
+    if source.transcript_sha256 != request.source_transcript_sha256
+        || source.lineage_digest != request.local_lineage_digest
+        || source.semantic_digest != request.local_semantic_digest
+    {
+        return Err("Codex source thread changed during native fork".to_string());
+    }
+    verify_candidate_against_source(request, &candidate, &source)?;
+    Ok(candidate)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum NativePtyObservation {
-    NoChild,
-    Persisting,
-    Exact {
-        provider_thread_id: String,
-        transcript_sha256: String,
-    },
-    Unsafe,
+enum ForkWatchSignal {
+    Created(Vec<PathBuf>),
+    Changed(Vec<PathBuf>),
+    Lost,
+}
+
+struct ForkRolloutWatcher {
+    watcher: RecommendedWatcher,
+    receiver: Receiver<ForkWatchSignal>,
+    sessions_root: PathBuf,
+    watching_sessions: bool,
+    lost: Arc<AtomicBool>,
+}
+
+impl ForkRolloutWatcher {
+    fn start(codex_home: &Path) -> Result<Self, String> {
+        validate_canonical_directory(codex_home, "Codex home")?;
+        let sessions_root = codex_home.join("sessions");
+        let watching_sessions = sessions_root.exists();
+        let (watch_root, recursive_mode) = if watching_sessions {
+            validate_canonical_directory(&sessions_root, "Codex sessions")?;
+            (sessions_root.clone(), RecursiveMode::Recursive)
+        } else {
+            // Observe only the home directory entry until Codex creates its
+            // sessions tree. Do not recursively watch the whole profile.
+            (codex_home.to_path_buf(), RecursiveMode::NonRecursive)
+        };
+        let (sender, receiver) = mpsc::sync_channel(NATIVE_PTY_WATCH_QUEUE);
+        let lost = Arc::new(AtomicBool::new(false));
+        let callback_lost = Arc::clone(&lost);
+        let callback_sessions_root = sessions_root.clone();
+        let mut watcher = RecommendedWatcher::new(
+            move |result| {
+                let signal = match result {
+                    Ok(event) => classify_fork_watch_event(event).and_then(|signal| {
+                        scope_fork_watch_signal(&callback_sessions_root, signal)
+                    }),
+                    Err(_) => Some(ForkWatchSignal::Lost),
+                };
+                if let Some(signal) = signal {
+                    send_fork_watch_signal(&sender, &callback_lost, signal);
+                }
+            },
+            Config::default().with_follow_symlinks(false),
+        )
+        .map_err(|_| "Codex session watcher could not be created".to_string())?;
+        watcher
+            .watch(&watch_root, recursive_mode)
+            .map_err(|_| "Codex session tree could not be watched".to_string())?;
+        Ok(Self {
+            watcher,
+            receiver,
+            sessions_root,
+            watching_sessions,
+            lost,
+        })
+    }
+
+    fn watch_sessions_if_created(&mut self) -> Result<(), String> {
+        if self.watching_sessions || !self.sessions_root.exists() {
+            return Ok(());
+        }
+        validate_canonical_directory(&self.sessions_root, "Codex sessions")?;
+        self.watcher
+            .watch(&self.sessions_root, RecursiveMode::Recursive)
+            .map_err(|_| "Codex session tree could not be watched".to_string())?;
+        self.watching_sessions = true;
+        Ok(())
+    }
+}
+
+fn send_fork_watch_signal(
+    sender: &SyncSender<ForkWatchSignal>,
+    lost: &AtomicBool,
+    signal: ForkWatchSignal,
+) {
+    match sender.try_send(signal) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => lost.store(true, Ordering::Release),
+        Err(TrySendError::Disconnected(_)) => {}
+    }
+}
+
+fn classify_fork_watch_event(event: Event) -> Option<ForkWatchSignal> {
+    if event.need_rescan() || event.paths.len() > NATIVE_PTY_MAX_EVENT_PATHS {
+        return Some(ForkWatchSignal::Lost);
+    }
+    match event.kind {
+        EventKind::Create(_) => Some(ForkWatchSignal::Created(event.paths)),
+        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+            Some(ForkWatchSignal::Created(event.paths))
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => event
+            .paths
+            .last()
+            .cloned()
+            .map(|path| ForkWatchSignal::Created(vec![path])),
+        EventKind::Modify(ModifyKind::Name(_)) => None,
+        EventKind::Modify(_) => Some(ForkWatchSignal::Changed(event.paths)),
+        _ => None,
+    }
+}
+
+fn scope_fork_watch_signal(
+    sessions_root: &Path,
+    signal: ForkWatchSignal,
+) -> Option<ForkWatchSignal> {
+    match signal {
+        ForkWatchSignal::Created(paths) => {
+            let paths = paths
+                .into_iter()
+                .filter(|path| {
+                    path == sessions_root || is_watched_rollout_path(sessions_root, path)
+                })
+                .collect::<Vec<_>>();
+            (!paths.is_empty()).then_some(ForkWatchSignal::Created(paths))
+        }
+        ForkWatchSignal::Changed(paths) => {
+            let paths = paths
+                .into_iter()
+                .filter(|path| is_watched_rollout_path(sessions_root, path))
+                .collect::<Vec<_>>();
+            (!paths.is_empty()).then_some(ForkWatchSignal::Changed(paths))
+        }
+        ForkWatchSignal::Lost => Some(ForkWatchSignal::Lost),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1194,8 +1202,137 @@ enum NativePtyShutdown {
 
 #[derive(Clone, Copy, Debug)]
 struct NativePtyDrainReport {
-    discarded_bytes: u64,
     io_failed: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ObservedForkCandidate {
+    dirty: bool,
+    retry_at: Option<Instant>,
+    retry_count: u8,
+}
+
+impl ObservedForkCandidate {
+    fn created() -> Self {
+        Self {
+            dirty: true,
+            retry_at: None,
+            retry_count: 0,
+        }
+    }
+
+    fn changed(&mut self) {
+        self.dirty = true;
+        self.retry_at = None;
+        self.retry_count = 0;
+    }
+
+    fn schedule_retry(&mut self, now: Instant) {
+        if self.retry_count >= NATIVE_PTY_MAX_VERIFY_RETRIES {
+            return;
+        }
+        let multiplier = 1_u32 << u32::from(self.retry_count.min(5));
+        self.retry_at = Some(now + NATIVE_PTY_VERIFY_RETRY_BASE.saturating_mul(multiplier));
+        self.retry_count = self.retry_count.saturating_add(1);
+    }
+}
+
+fn observe_fork_candidates(
+    request: &CodexForkExecutionRequest,
+    watcher: &mut ForkRolloutWatcher,
+    candidate_paths: &mut BTreeMap<PathBuf, ObservedForkCandidate>,
+    matched_candidate: &mut Option<(PathBuf, String)>,
+    stable_candidate: &mut Option<(VerifiedNativeFork, Instant)>,
+    now: Instant,
+) -> Result<Option<VerifiedNativeFork>, String> {
+    collect_fork_watch_signals(watcher, candidate_paths)?;
+    let stable_due_path = stable_candidate
+        .as_ref()
+        .filter(|(_, observed_at)| {
+            now.saturating_duration_since(*observed_at)
+                >= NATIVE_PTY_STABILITY_INTERVAL + NATIVE_PTY_COMPOSER_GRACE
+        })
+        .map(|(candidate, _)| candidate.transcript_path.clone());
+    let paths_to_verify = candidate_paths
+        .iter_mut()
+        .filter_map(|(path, candidate)| {
+            if candidate.dirty
+                || candidate.retry_at.is_some_and(|retry_at| now >= retry_at)
+                || stable_due_path.as_ref() == Some(path)
+            {
+                candidate.dirty = false;
+                candidate.retry_at = None;
+                Some(path.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let attempted_stable_path = stable_candidate
+        .as_ref()
+        .is_some_and(|(candidate, _)| paths_to_verify.contains(&candidate.transcript_path));
+    let mut verified = Vec::new();
+    for path in paths_to_verify {
+        match verify_watched_candidate_path(request, &path) {
+            Ok(candidate) => {
+                if let Some(observed) = candidate_paths.get_mut(&path) {
+                    observed.retry_count = 0;
+                }
+                verified.push(VerifiedNativeFork {
+                    provider_thread_id: candidate.provider_thread_id,
+                    transcript_path: candidate.transcript_path,
+                    transcript_sha256: candidate.transcript_sha256,
+                    executor: CodexForkExecutor::NativePty,
+                    name_status: CodexNameStatus::Deferred,
+                });
+            }
+            Err(_) => {
+                if let Some(observed) = candidate_paths.get_mut(&path) {
+                    observed.schedule_retry(now);
+                }
+            }
+        }
+    }
+    if verified.len() > 1 {
+        return Err(
+            "multiple matching Codex rollout events arrived during the PTY fork".to_string(),
+        );
+    }
+    if let Some(candidate) = verified.into_iter().next() {
+        if matched_candidate.as_ref().is_some_and(|(path, thread_id)| {
+            path != &candidate.transcript_path || thread_id != &candidate.provider_thread_id
+        }) {
+            return Err("the matching Codex rollout changed during PTY verification".to_string());
+        }
+        matched_candidate.get_or_insert_with(|| {
+            (
+                candidate.transcript_path.clone(),
+                candidate.provider_thread_id.clone(),
+            )
+        });
+        let observed_at = match stable_candidate.as_ref() {
+            Some((existing, observed_at))
+                if existing.provider_thread_id == candidate.provider_thread_id
+                    && existing.transcript_path == candidate.transcript_path
+                    && existing.transcript_sha256 == candidate.transcript_sha256 =>
+            {
+                *observed_at
+            }
+            _ => {
+                *stable_candidate = Some((candidate.clone(), now));
+                now
+            }
+        };
+        if stable_due_path.as_ref() == Some(&candidate.transcript_path)
+            && now.saturating_duration_since(observed_at)
+                >= NATIVE_PTY_STABILITY_INTERVAL + NATIVE_PTY_COMPOSER_GRACE
+        {
+            return Ok(Some(candidate));
+        }
+    } else if attempted_stable_path {
+        *stable_candidate = None;
+    }
+    Ok(None)
 }
 
 fn try_native_pty_fork(
@@ -1203,33 +1340,13 @@ fn try_native_pty_fork(
     on_phase: ForkPhaseObserver<'_>,
 ) -> Result<ExecutorOutcome, String> {
     timed(on_phase, "pty: validate request", || {
-        validate_execution_request(request)
+        validate_execution_artifacts_and_source(request)
     })?;
-    let baseline = timed(on_phase, "pty: scan baseline", || {
-        Ok::<_, String>(NativeForkBaseline {
-            threads: scan_native_threads(&request.codex_home)?,
-            rollout_paths: scan_rollout_paths(&request.codex_home)?,
-        })
-    })?;
-    if !timed(on_phase, "pty: probe source idle and title", || {
-        probe_source_idle_and_title(request)
-    })? {
-        return classify_native_pty_without_spawn(
-            request,
-            &baseline,
-            "Codex source status is unavailable for native PTY fork",
-        );
-    }
     if !timed(on_phase, "pty: login status preflight", || {
         codex_login_status_ready(request)
     })? {
-        return classify_native_pty_without_spawn(
-            request,
-            &baseline,
-            "Codex login status preflight did not complete successfully",
-        );
+        return Ok(ExecutorOutcome::DefinitiveNoFork);
     }
-    let spawn_started = Instant::now();
     let pty_system = native_pty_system();
     let pair = match pty_system.openpty(PtySize {
         rows: 40,
@@ -1238,58 +1355,38 @@ fn try_native_pty_fork(
         pixel_height: 0,
     }) {
         Ok(pair) => pair,
-        Err(_) => {
-            return classify_native_pty_without_spawn(
-                request,
-                &baseline,
-                "native PTY is unavailable",
-            )
-        }
+        Err(_) => return Ok(ExecutorOutcome::DefinitiveNoFork),
     };
     let portable_pty::PtyPair { slave, master } = pair;
     let reader = match master.try_clone_reader() {
         Ok(reader) => reader,
-        Err(_) => {
-            return classify_native_pty_without_spawn(
-                request,
-                &baseline,
-                "native PTY output could not be opened",
-            )
-        }
+        Err(_) => return Ok(ExecutorOutcome::DefinitiveNoFork),
     };
     let writer = match master.take_writer() {
         Ok(writer) => writer,
-        Err(_) => {
-            return classify_native_pty_without_spawn(
-                request,
-                &baseline,
-                "native PTY input could not be opened",
-            )
-        }
+        Err(_) => return Ok(ExecutorOutcome::DefinitiveNoFork),
     };
+    let watcher = match timed(on_phase, "pty: start rollout watcher", || {
+        ForkRolloutWatcher::start(&request.codex_home)
+    }) {
+        Ok(watcher) => watcher,
+        Err(_) => return Ok(ExecutorOutcome::DefinitiveNoFork),
+    };
+    let spawn_started = Instant::now();
     let command = build_native_pty_command(request);
     let child = match slave.spawn_command(command) {
         Ok(child) => child,
-        Err(_) => {
-            return classify_native_pty_without_spawn(
-                request,
-                &baseline,
-                "Codex could not be spawned in the native PTY",
-            )
-        }
+        Err(_) => return Ok(ExecutorOutcome::DefinitiveNoFork),
     };
     drop(slave);
     on_phase("pty: spawn codex fork", spawn_started.elapsed());
     let session_started = Instant::now();
-    let session = run_native_pty_session(request, baseline, child, reader, writer, master);
-    // The session polls a full profile rescan every NATIVE_PTY_POLL_INTERVAL
-    // until it observes a stable child or hits NATIVE_PTY_TIMEOUT, so this
-    // phase alone can account for the whole timeout budget.
+    let session = run_native_pty_session(request, watcher, child, reader, writer, master);
     on_phase("pty: run session and observe", session_started.elapsed());
     match session {
         Ok(outcome) => Ok(outcome),
-        Err(_) => Ok(ExecutorOutcome::Ambiguous(
-            "native PTY fork completion could not be verified safely".to_string(),
+        Err(_) => Ok(ExecutorOutcome::Unacknowledged(
+            "Mallard did not acknowledge the native PTY fork".to_string(),
         )),
     }
 }
@@ -1349,24 +1446,9 @@ fn codex_login_status_ready(request: &CodexForkExecutionRequest) -> Result<bool,
     }
 }
 
-fn classify_native_pty_without_spawn(
-    request: &CodexForkExecutionRequest,
-    baseline: &NativeForkBaseline,
-    message: &str,
-) -> Result<ExecutorOutcome, String> {
-    verify_source_unchanged(request)?;
-    let current_paths = scan_rollout_paths(&request.codex_home)?;
-    let current_threads = scan_native_threads(&request.codex_home)?;
-    if current_paths == baseline.rollout_paths && current_threads == baseline.threads {
-        Ok(ExecutorOutcome::DefinitiveNoFork)
-    } else {
-        Ok(ExecutorOutcome::Ambiguous(message.to_string()))
-    }
-}
-
 fn run_native_pty_session(
     request: &CodexForkExecutionRequest,
-    baseline: NativeForkBaseline,
+    mut watcher: ForkRolloutWatcher,
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     mut reader: Box<dyn Read + Send>,
     mut writer: Box<dyn Write + Send>,
@@ -1375,134 +1457,134 @@ fn run_native_pty_session(
     let (drain_sender, drain_receiver) = mpsc::channel();
     let drain_worker = thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
-        let mut discarded_bytes = 0_u64;
         let io_failed = loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break false,
-                Ok(count) => {
-                    discarded_bytes = discarded_bytes.saturating_add(count as u64);
-                }
+                Ok(_) => {}
                 Err(_) => break true,
             }
         };
-        let report = NativePtyDrainReport {
-            discarded_bytes,
-            io_failed,
-        };
+        let report = NativePtyDrainReport { io_failed };
         let _ = drain_sender.send(report);
         report
     });
 
     let operation_deadline = Instant::now() + NATIVE_PTY_TIMEOUT;
     let mut shutdown = NativePtyShutdown::Observing;
-    let mut stable_candidate: Option<(String, String, Instant)> = None;
-    let mut lifecycle_uncertainty = None;
+    let mut candidate_paths = BTreeMap::<PathBuf, ObservedForkCandidate>::new();
+    let mut matched_candidate: Option<(PathBuf, String)> = None;
+    let mut stable_candidate: Option<(VerifiedNativeFork, Instant)> = None;
+    let mut acknowledged = None;
+    let mut unacknowledged = None;
     let mut drain_report = None;
 
     loop {
+        let now = Instant::now();
+        if shutdown == NativePtyShutdown::Observing {
+            match observe_fork_candidates(
+                request,
+                &mut watcher,
+                &mut candidate_paths,
+                &mut matched_candidate,
+                &mut stable_candidate,
+                now,
+            ) {
+                Ok(Some(candidate)) => {
+                    acknowledged = Some(candidate);
+                    if writer
+                        .write_all(b"/exit\r")
+                        .and_then(|_| writer.flush())
+                        .is_err()
+                    {
+                        if !terminate_native_pty_child(&mut *child) {
+                            unacknowledged = Some(
+                                "native PTY cleanup was uncertain after fork verification"
+                                    .to_string(),
+                            );
+                        }
+                        break;
+                    }
+                    shutdown = NativePtyShutdown::ExitSent(now + NATIVE_PTY_EXIT_GRACE);
+                }
+                Ok(None) => {}
+                Err(message) => {
+                    unacknowledged = Some(message);
+                    let _ = terminate_native_pty_child(&mut *child);
+                    break;
+                }
+            }
+        }
+
         match child.try_wait() {
             Ok(Some(_)) => {
                 if child.wait().is_err() {
-                    lifecycle_uncertainty =
-                        Some("native PTY child could not be reaped".to_string());
+                    let terminated = terminate_native_pty_child(&mut *child);
+                    if acknowledged.is_none() || !terminated {
+                        unacknowledged = Some("native PTY child could not be reaped".to_string());
+                    }
+                } else if acknowledged.is_none() {
+                    let final_deadline = Instant::now() + NATIVE_PTY_EXIT_OBSERVATION_GRACE;
+                    loop {
+                        let observed_at = Instant::now();
+                        match observe_fork_candidates(
+                            request,
+                            &mut watcher,
+                            &mut candidate_paths,
+                            &mut matched_candidate,
+                            &mut stable_candidate,
+                            observed_at,
+                        ) {
+                            Ok(Some(candidate)) => {
+                                acknowledged = Some(candidate);
+                                break;
+                            }
+                            Ok(None) if observed_at < final_deadline => {
+                                thread::sleep(NATIVE_PTY_EVENT_INTERVAL);
+                            }
+                            Ok(None) => {
+                                unacknowledged = Some(
+                                    "native PTY exited before Mallard acknowledged its fork"
+                                        .to_string(),
+                                );
+                                break;
+                            }
+                            Err(message) => {
+                                unacknowledged = Some(message);
+                                break;
+                            }
+                        }
+                    }
                 }
                 break;
             }
             Ok(None) => {}
             Err(_) => {
-                lifecycle_uncertainty =
-                    Some("native PTY child status became uncertain".to_string());
-                let _ = terminate_native_pty_child(&mut *child);
+                let terminated = terminate_native_pty_child(&mut *child);
+                if acknowledged.is_none() || !terminated {
+                    unacknowledged = Some("native PTY child status became uncertain".to_string());
+                }
                 break;
             }
         }
 
         if drain_report.is_none() && drain_worker.is_finished() {
             drain_report = drain_receiver.try_recv().ok();
-            lifecycle_uncertainty = Some(match drain_report {
+            let message = match drain_report {
                 Some(_) => "native PTY output drain ended before Codex exited".to_string(),
                 None => "native PTY output drain worker failed".to_string(),
-            });
-            let _ = terminate_native_pty_child(&mut *child);
+            };
+            let terminated = terminate_native_pty_child(&mut *child);
+            if acknowledged.is_none() || !terminated {
+                unacknowledged = Some(message);
+            }
             break;
         }
 
-        let now = Instant::now();
         match shutdown {
             NativePtyShutdown::Observing => {
-                let observation = match observe_native_pty_fork(request, &baseline) {
-                    Ok(observation) => observation,
-                    Err(_) => {
-                        lifecycle_uncertainty =
-                            Some("native PTY fork state could not be scanned safely".to_string());
-                        let _ = terminate_native_pty_child(&mut *child);
-                        break;
-                    }
-                };
-                match observation {
-                    NativePtyObservation::NoChild => {
-                        stable_candidate = None;
-                    }
-                    NativePtyObservation::Persisting => {
-                        if stable_candidate.is_some() {
-                            lifecycle_uncertainty =
-                                Some("native PTY fork changed while being verified".to_string());
-                            let _ = terminate_native_pty_child(&mut *child);
-                            break;
-                        }
-                    }
-                    NativePtyObservation::Unsafe => {
-                        lifecycle_uncertainty =
-                            Some("native PTY changed unexpected Codex rollout state".to_string());
-                        let _ = terminate_native_pty_child(&mut *child);
-                        break;
-                    }
-                    NativePtyObservation::Exact {
-                        provider_thread_id,
-                        transcript_sha256,
-                    } => {
-                        let observed_at = match &stable_candidate {
-                            Some((existing_id, existing_digest, observed_at))
-                                if existing_id == &provider_thread_id
-                                    && existing_digest == &transcript_sha256 =>
-                            {
-                                *observed_at
-                            }
-                            Some(_) => {
-                                lifecycle_uncertainty = Some(
-                                    "native PTY fork identity changed during verification"
-                                        .to_string(),
-                                );
-                                let _ = terminate_native_pty_child(&mut *child);
-                                break;
-                            }
-                            None => {
-                                stable_candidate =
-                                    Some((provider_thread_id, transcript_sha256, now));
-                                now
-                            }
-                        };
-                        if now.saturating_duration_since(observed_at)
-                            >= NATIVE_PTY_STABILITY_INTERVAL + NATIVE_PTY_COMPOSER_GRACE
-                        {
-                            if writer
-                                .write_all(b"/exit\r")
-                                .and_then(|_| writer.flush())
-                                .is_err()
-                            {
-                                lifecycle_uncertainty = Some(
-                                    "native PTY could not request a graceful exit".to_string(),
-                                );
-                                let _ = terminate_native_pty_child(&mut *child);
-                                break;
-                            }
-                            shutdown = NativePtyShutdown::ExitSent(now + NATIVE_PTY_EXIT_GRACE);
-                        }
-                    }
-                }
                 if now >= operation_deadline {
-                    lifecycle_uncertainty =
-                        Some("native PTY fork exceeded its bounded runtime".to_string());
+                    unacknowledged =
+                        Some("native PTY fork was not acknowledged before timeout".to_string());
                     if writer
                         .write_all(&[0x03])
                         .and_then(|_| writer.flush())
@@ -1520,46 +1602,122 @@ fn run_native_pty_session(
                     .and_then(|_| writer.flush())
                     .is_err()
                 {
-                    lifecycle_uncertainty = Some(
-                        "native PTY could not interrupt Codex after graceful exit".to_string(),
-                    );
-                    let _ = terminate_native_pty_child(&mut *child);
+                    if !terminate_native_pty_child(&mut *child) {
+                        unacknowledged = Some(
+                            "native PTY cleanup was uncertain after fork verification".to_string(),
+                        );
+                    }
                     break;
                 }
                 shutdown = NativePtyShutdown::InterruptSent(now + NATIVE_PTY_INTERRUPT_GRACE);
             }
             NativePtyShutdown::InterruptSent(deadline) if now >= deadline => {
-                if !terminate_native_pty_child(&mut *child) {
-                    lifecycle_uncertainty =
-                        Some("native PTY Codex process could not be reaped".to_string());
+                if !terminate_native_pty_child(&mut *child) && acknowledged.is_some() {
+                    unacknowledged = Some(
+                        "native PTY cleanup was uncertain after fork verification".to_string(),
+                    );
                 }
                 break;
             }
             NativePtyShutdown::ExitSent(_) | NativePtyShutdown::InterruptSent(_) => {}
         }
-        thread::sleep(NATIVE_PTY_POLL_INTERVAL);
+        thread::sleep(NATIVE_PTY_EVENT_INTERVAL);
     }
 
     drop(writer);
     drop(master);
-    match drain_worker.join() {
-        Ok(report) => {
-            debug_assert!(drain_report.is_none_or(|early| {
-                early.discarded_bytes == report.discarded_bytes
-                    && early.io_failed == report.io_failed
-            }));
-            let _discarded_bytes = report.discarded_bytes;
-            if report.io_failed {
-                lifecycle_uncertainty =
-                    Some("native PTY output drain failed before cleanup".to_string());
-            }
+    if drain_report.is_none() {
+        drain_report = drain_receiver.recv_timeout(NATIVE_PTY_DRAIN_GRACE).ok();
+    }
+    // Dropping a JoinHandle detaches it. Never let a failed child termination
+    // turn the bounded fork attempt into an unbounded wait on a blocked PTY
+    // read.
+    drop(drain_worker);
+    match drain_report {
+        Some(report) if report.io_failed && acknowledged.is_none() => {
+            unacknowledged = Some("native PTY output drain failed before cleanup".to_string());
         }
-        Err(_) => {
-            lifecycle_uncertainty = Some("native PTY output drain worker failed".to_string());
+        None if acknowledged.is_none() => {
+            unacknowledged =
+                Some("native PTY output drain did not finish during cleanup".to_string());
         }
+        Some(_) | None => {}
     }
 
-    classify_native_pty_completion(request, &baseline, lifecycle_uncertainty)
+    Ok(match (acknowledged, unacknowledged) {
+        (Some(fork), None) => ExecutorOutcome::Verified(fork),
+        (_, Some(message)) => ExecutorOutcome::Unacknowledged(message),
+        (None, None) => ExecutorOutcome::Unacknowledged(
+            "Mallard did not acknowledge the native PTY fork".to_string(),
+        ),
+    })
+}
+
+fn collect_fork_watch_signals(
+    watcher: &mut ForkRolloutWatcher,
+    candidates: &mut BTreeMap<PathBuf, ObservedForkCandidate>,
+) -> Result<(), String> {
+    watcher.watch_sessions_if_created()?;
+    if watcher.lost.load(Ordering::Acquire) {
+        return Err("Codex session watcher lost events".to_string());
+    }
+    loop {
+        match watcher.receiver.try_recv() {
+            Ok(ForkWatchSignal::Lost) => {
+                return Err("Codex session watcher lost events".to_string())
+            }
+            Ok(ForkWatchSignal::Created(paths)) => {
+                for path in paths {
+                    if is_watched_rollout_path(&watcher.sessions_root, &path) {
+                        candidates
+                            .entry(path)
+                            .or_insert_with(ObservedForkCandidate::created)
+                            .changed();
+                        if candidates.len() > NATIVE_PTY_MAX_CANDIDATES {
+                            return Err("Codex session watcher saw too many candidates".to_string());
+                        }
+                    }
+                }
+            }
+            Ok(ForkWatchSignal::Changed(paths)) => {
+                // A change can complete a rollout first reported by Create or
+                // rename-to. It never promotes an old file into a candidate.
+                for path in paths {
+                    if let Some(candidate) = candidates.get_mut(&path) {
+                        candidate.changed();
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                return Err("Codex session watcher disconnected".to_string())
+            }
+        }
+    }
+    if watcher.lost.load(Ordering::Acquire) {
+        return Err("Codex session watcher lost events".to_string());
+    }
+    Ok(())
+}
+
+fn is_watched_rollout_path(sessions_root: &Path, path: &Path) -> bool {
+    path.is_absolute() && path.starts_with(sessions_root) && is_rollout_jsonl(path)
+}
+
+fn verify_watched_candidate_path(
+    request: &CodexForkExecutionRequest,
+    candidate_path: &Path,
+) -> Result<NativeCodexThread, String> {
+    let candidate = native_thread_from_path(&request.codex_home, candidate_path)?;
+    let source = source_native_thread(request)?;
+    if source.transcript_sha256 != request.source_transcript_sha256
+        || source.lineage_digest != request.local_lineage_digest
+        || source.semantic_digest != request.local_semantic_digest
+    {
+        return Err("Codex source thread changed during native fork".to_string());
+    }
+    verify_candidate_against_source(request, &candidate, &source)?;
+    Ok(candidate)
 }
 
 fn terminate_native_pty_child(child: &mut (dyn portable_pty::Child + Send + Sync)) -> bool {
@@ -1570,233 +1728,6 @@ fn terminate_native_pty_child(child: &mut (dyn portable_pty::Child + Send + Sync
             _ => false,
         },
     }
-}
-
-fn observe_native_pty_fork(
-    request: &CodexForkExecutionRequest,
-    baseline: &NativeForkBaseline,
-) -> Result<NativePtyObservation, String> {
-    let current_paths = scan_rollout_paths(&request.codex_home)?;
-    if !baseline.rollout_paths.is_subset(&current_paths) {
-        return Ok(NativePtyObservation::Unsafe);
-    }
-    let new_paths = current_paths
-        .difference(&baseline.rollout_paths)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if new_paths.len() > 1 {
-        return Ok(NativePtyObservation::Unsafe);
-    }
-    let current_threads = scan_native_threads(&request.codex_home)?;
-    if baseline.threads.iter().any(|(thread_id, before)| {
-        current_threads.get(thread_id).is_none_or(|after| {
-            before.transcript_path != after.transcript_path
-                || before.transcript_sha256 != after.transcript_sha256
-        })
-    }) {
-        return Ok(NativePtyObservation::Unsafe);
-    }
-    let mut new_threads = current_threads
-        .values()
-        .filter(|thread| !baseline.threads.contains_key(&thread.provider_thread_id));
-    let candidate = new_threads.next();
-    if new_threads.next().is_some() {
-        return Ok(NativePtyObservation::Unsafe);
-    }
-    let Some(candidate) = candidate else {
-        return Ok(if new_paths.is_empty() {
-            NativePtyObservation::NoChild
-        } else {
-            NativePtyObservation::Persisting
-        });
-    };
-    if new_paths.len() != 1 || !new_paths.contains(&candidate.transcript_path) {
-        return Ok(NativePtyObservation::Unsafe);
-    }
-    if verify_candidate(request, candidate).is_err() || verify_source_unchanged(request).is_err() {
-        return Ok(NativePtyObservation::Unsafe);
-    }
-    Ok(NativePtyObservation::Exact {
-        provider_thread_id: candidate.provider_thread_id.clone(),
-        transcript_sha256: candidate.transcript_sha256.clone(),
-    })
-}
-
-fn classify_native_pty_completion(
-    request: &CodexForkExecutionRequest,
-    baseline: &NativeForkBaseline,
-    lifecycle_uncertainty: Option<String>,
-) -> Result<ExecutorOutcome, String> {
-    let current_paths = scan_rollout_paths(&request.codex_home)?;
-    let current_threads = scan_native_threads(&request.codex_home)?;
-    let existing_changed = baseline
-        .rollout_paths
-        .iter()
-        .any(|path| !current_paths.contains(path))
-        || baseline.threads.iter().any(|(thread_id, before)| {
-            current_threads.get(thread_id).is_none_or(|after| {
-                before.transcript_path != after.transcript_path
-                    || before.transcript_sha256 != after.transcript_sha256
-            })
-        });
-    let new_paths = current_paths
-        .difference(&baseline.rollout_paths)
-        .collect::<BTreeSet<_>>();
-    let new_threads = current_threads
-        .values()
-        .filter(|thread| !baseline.threads.contains_key(&thread.provider_thread_id))
-        .collect::<Vec<_>>();
-    if existing_changed || new_threads.len() > 1 || new_paths.len() > 1 {
-        return Ok(ExecutorOutcome::Ambiguous(
-            lifecycle_uncertainty
-                .unwrap_or_else(|| "native PTY changed unexpected Codex rollout state".to_string()),
-        ));
-    }
-    if let Some(candidate) = new_threads.first() {
-        if new_paths.len() != 1
-            || !new_paths.contains(&candidate.transcript_path)
-            || verify_candidate(request, candidate).is_err()
-            || verify_source_unchanged(request).is_err()
-        {
-            return Ok(ExecutorOutcome::Ambiguous(
-                "native PTY fork failed final ancestry or content verification".to_string(),
-            ));
-        }
-        return Ok(ExecutorOutcome::Verified(VerifiedNativeFork {
-            provider_thread_id: candidate.provider_thread_id.clone(),
-            transcript_path: candidate.transcript_path.clone(),
-            transcript_sha256: candidate.transcript_sha256.clone(),
-            executor: CodexForkExecutor::NativePty,
-            name_status: CodexNameStatus::Deferred,
-        }));
-    }
-    if !new_paths.is_empty() {
-        return Ok(ExecutorOutcome::Ambiguous(
-            "native PTY left an unverified Codex rollout".to_string(),
-        ));
-    }
-    match lifecycle_uncertainty {
-        Some(message) => Ok(ExecutorOutcome::Ambiguous(message)),
-        None => Ok(ExecutorOutcome::DefinitiveNoFork),
-    }
-}
-
-fn scan_rollout_paths(codex_home: &Path) -> Result<BTreeSet<PathBuf>, String> {
-    let canonical_home =
-        fs::canonicalize(codex_home).map_err(|error| format!("resolve Codex home: {error}"))?;
-    if canonical_home != codex_home {
-        return Err("Codex home is not canonical".to_string());
-    }
-    let mut paths = BTreeSet::new();
-    let mut visited = 0_usize;
-    for directory in ["sessions", "archived_sessions"] {
-        let root = canonical_home.join(directory);
-        if !root.exists() {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&root)
-            .map_err(|error| format!("inspect Codex {directory}: {error}"))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(format!("Codex {directory} is not a real directory"));
-        }
-        for entry in WalkDir::new(&root).follow_links(false).max_depth(8) {
-            let entry = entry.map_err(|error| format!("scan Codex {directory}: {error}"))?;
-            if entry.file_type().is_symlink() || !entry.file_type().is_file() {
-                continue;
-            }
-            if !is_rollout_jsonl(entry.path()) {
-                continue;
-            }
-            visited = visited.saturating_add(1);
-            if visited > MAX_SESSION_FILES {
-                return Err("Codex profile has too many session files to scan safely".to_string());
-            }
-            let canonical_path = fs::canonicalize(entry.path())
-                .map_err(|error| format!("resolve Codex rollout: {error}"))?;
-            if !canonical_path.starts_with(&root) {
-                return Err("Codex rollout resolves outside its session tree".to_string());
-            }
-            paths.insert(canonical_path);
-        }
-    }
-    Ok(paths)
-}
-
-fn classify_app_server_result(
-    request: &CodexForkExecutionRequest,
-    baseline: &NativeForkBaseline,
-    error: String,
-    definitively_rejected: bool,
-) -> Result<ExecutorOutcome, String> {
-    match exact_profile_delta_candidate(request, baseline, None) {
-        Ok(Some(candidate)) => Ok(ExecutorOutcome::Verified(VerifiedNativeFork {
-            provider_thread_id: candidate.provider_thread_id,
-            transcript_path: candidate.transcript_path,
-            transcript_sha256: candidate.transcript_sha256,
-            executor: CodexForkExecutor::AppServerStdio,
-            name_status: CodexNameStatus::Deferred,
-        })),
-        Ok(None) if definitively_rejected => Ok(ExecutorOutcome::DefinitiveNoFork),
-        Ok(None) | Err(_) => Ok(ExecutorOutcome::Ambiguous(error)),
-    }
-}
-
-fn exact_profile_delta_candidate(
-    request: &CodexForkExecutionRequest,
-    baseline: &NativeForkBaseline,
-    expected_provider_thread_id: Option<&str>,
-) -> Result<Option<NativeCodexThread>, String> {
-    let current_paths = scan_rollout_paths(&request.codex_home)?;
-    let current_threads = scan_native_threads(&request.codex_home)?;
-    if !baseline.rollout_paths.is_subset(&current_paths)
-        || baseline.threads.iter().any(|(thread_id, before)| {
-            current_threads.get(thread_id).is_none_or(|after| {
-                before.transcript_path != after.transcript_path
-                    || before.transcript_sha256 != after.transcript_sha256
-            })
-        })
-    {
-        return Err("Codex rollout state changed during native fork".to_string());
-    }
-    let new_paths = current_paths
-        .difference(&baseline.rollout_paths)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let new_threads = current_threads
-        .values()
-        .filter(|thread| !baseline.threads.contains_key(&thread.provider_thread_id))
-        .collect::<Vec<_>>();
-    if new_paths.is_empty() && new_threads.is_empty() {
-        return Ok(None);
-    }
-    if new_paths.len() != 1 || new_threads.len() != 1 {
-        return Err("native fork changed unexpected Codex rollout state".to_string());
-    }
-    let candidate = new_threads[0];
-    if !new_paths.contains(&candidate.transcript_path)
-        || expected_provider_thread_id
-            .is_some_and(|expected| candidate.provider_thread_id != expected)
-    {
-        return Err("native fork returned an unexpected Codex thread".to_string());
-    }
-    verify_candidate(request, candidate)?;
-    verify_source_unchanged(request)?;
-    Ok(Some(candidate.clone()))
-}
-
-fn validate_execution_request(request: &CodexForkExecutionRequest) -> Result<(), String> {
-    validate_execution_artifacts_and_source(request)?;
-    let current_children =
-        native_child_pins(&request.codex_home, &request.source_provider_thread_id)?;
-    let expected = pre_existing_map(&request.pre_existing_children);
-    if current_children
-        .iter()
-        .any(|child| expected.get(&child.provider_thread_id) != Some(&child.transcript_sha256))
-        || current_children.len() != expected.len()
-    {
-        return Err("Codex native children changed after Pull review".to_string());
-    }
-    Ok(())
 }
 
 fn validate_execution_artifacts_and_source(
@@ -1810,6 +1741,9 @@ fn validate_execution_artifacts_and_source(
         if !path.is_absolute() {
             return Err("Codex fork execution path is not absolute".to_string());
         }
+    }
+    if !request.source_transcript_path.is_absolute() {
+        return Err("Codex source transcript path is not absolute".to_string());
     }
     validate_canonical_directory(&request.codex_home, "Codex home")?;
     validate_canonical_directory(&request.project_directory, "project directory")?;
@@ -1867,8 +1801,16 @@ fn ensure_thread_idle(thread: &Value) -> Result<(), String> {
     }
 }
 
+fn source_native_thread(request: &CodexForkExecutionRequest) -> Result<NativeCodexThread, String> {
+    native_thread_at_path(
+        &request.codex_home,
+        &request.source_transcript_path,
+        &request.source_provider_thread_id,
+    )
+}
+
 fn verify_source_unchanged(request: &CodexForkExecutionRequest) -> Result<(), String> {
-    let source = find_native_thread(&request.codex_home, &request.source_provider_thread_id)?;
+    let source = source_native_thread(request)?;
     if source.transcript_sha256 != request.source_transcript_sha256
         || source.lineage_digest != request.local_lineage_digest
         || source.semantic_digest != request.local_semantic_digest
@@ -1878,35 +1820,20 @@ fn verify_source_unchanged(request: &CodexForkExecutionRequest) -> Result<(), St
     Ok(())
 }
 
-fn verify_candidate(
+fn verify_candidate_against_source(
     request: &CodexForkExecutionRequest,
     candidate: &NativeCodexThread,
+    source: &NativeCodexThread,
 ) -> Result<(), String> {
     verify_candidate_workspace(request, candidate)?;
-    let source = find_native_thread(&request.codex_home, &request.source_provider_thread_id)?;
     if candidate.provider_thread_id == request.source_provider_thread_id
         || candidate.forked_from_id.as_deref() != Some(&request.source_provider_thread_id)
         || candidate.lineage_digest != request.local_lineage_digest
         || candidate.semantic_digest != request.local_semantic_digest
         || candidate.history_record_digest != source.history_record_digest
         || candidate.history_record_count != source.history_record_count
-        || pre_existing_map(&request.pre_existing_children)
-            .contains_key(&candidate.provider_thread_id)
     {
         return Err("Codex fork candidate failed ancestry or content verification".to_string());
-    }
-    let before = pre_existing_map(&request.pre_existing_children);
-    let current = native_child_pins(&request.codex_home, &request.source_provider_thread_id)?
-        .into_iter()
-        .map(|child| (child.provider_thread_id, child.transcript_sha256))
-        .collect::<BTreeMap<_, _>>();
-    if current.len() != before.len().saturating_add(1)
-        || current.get(&candidate.provider_thread_id) != Some(&candidate.transcript_sha256)
-        || before
-            .iter()
-            .any(|(thread_id, digest)| current.get(thread_id) != Some(digest))
-    {
-        return Err("Codex native child inventory changed during fork verification".to_string());
     }
     Ok(())
 }
@@ -1980,57 +1907,6 @@ fn non_metadata_record_digest(bytes: &[u8]) -> Result<(String, usize), String> {
     Ok((hex_digest(hasher.finalize().as_slice()), count))
 }
 
-fn wait_for_candidate(
-    codex_home: &Path,
-    provider_thread_id: &str,
-) -> Result<NativeCodexThread, String> {
-    let deadline = Instant::now() + FORK_PERSIST_TIMEOUT;
-    loop {
-        match find_native_thread(codex_home, provider_thread_id) {
-            Ok(candidate) => return Ok(candidate),
-            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-fn exact_new_child(request: &CodexForkExecutionRequest) -> Result<NativeCodexThread, String> {
-    let mut delta = new_children(request)?;
-    if delta.len() != 1 {
-        return Err(if delta.is_empty() {
-            "no new Codex native fork was found".to_string()
-        } else {
-            "multiple new Codex native forks require recovery".to_string()
-        });
-    }
-    Ok(delta.remove(0))
-}
-
-fn new_children(request: &CodexForkExecutionRequest) -> Result<Vec<NativeCodexThread>, String> {
-    let before = pre_existing_map(&request.pre_existing_children);
-    let mut children = scan_native_threads(&request.codex_home)?
-        .into_values()
-        .filter(|thread| {
-            thread.forked_from_id.as_deref() == Some(&request.source_provider_thread_id)
-                && !before.contains_key(&thread.provider_thread_id)
-        })
-        .collect::<Vec<_>>();
-    children.sort_by(|left, right| left.provider_thread_id.cmp(&right.provider_thread_id));
-    Ok(children)
-}
-
-fn pre_existing_map(children: &[CodexNativeChildPin]) -> BTreeMap<String, String> {
-    children
-        .iter()
-        .map(|child| {
-            (
-                child.provider_thread_id.clone(),
-                child.transcript_sha256.clone(),
-            )
-        })
-        .collect()
-}
-
 fn name_with_app_server_client(
     client: &mut AppServerClient,
     thread_id: &str,
@@ -2054,20 +1930,86 @@ fn name_with_app_server_client(
 }
 
 fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
-    let metadata = fs::symlink_metadata(path)
+    let path_metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("inspect bounded Codex file: {error}"))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
+    if !path_metadata.is_file()
+        || path_metadata.file_type().is_symlink()
+        || path_metadata.len() > limit
+    {
         return Err("Codex file is not a bounded regular file".to_string());
     }
-    let file = File::open(path).map_err(|error| format!("open bounded Codex file: {error}"))?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(limit + 1)
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("open bounded Codex file: {error}"))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect opened Codex file: {error}"))?;
+    if !opened_metadata.is_file()
+        || opened_metadata.len() > limit
+        || !same_file_identity(&path_metadata, &opened_metadata)
+    {
+        return Err("Codex file is not a bounded regular file".to_string());
+    }
+    let post_open_metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("reinspect bounded Codex file: {error}"))?;
+    if !post_open_metadata.is_file()
+        || post_open_metadata.file_type().is_symlink()
+        || !same_file_identity(&opened_metadata, &post_open_metadata)
+    {
+        return Err("Codex file changed during no-follow open".to_string());
+    }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    Read::by_ref(&mut file)
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read bounded Codex file: {error}"))?;
     if bytes.len() as u64 > limit {
         return Err("Codex file exceeds its read limit".to_string());
     }
+    let final_opened_metadata = file
+        .metadata()
+        .map_err(|error| format!("reinspect opened Codex file: {error}"))?;
+    let final_path_metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("reinspect bounded Codex path: {error}"))?;
+    if !same_file_identity(&opened_metadata, &final_opened_metadata)
+        || !same_file_identity(&final_opened_metadata, &final_path_metadata)
+        || final_path_metadata.file_type().is_symlink()
+        || final_opened_metadata.len() != bytes.len() as u64
+    {
+        return Err("Codex file changed during bounded read".to_string());
+    }
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    left.volume_serial_number()
+        .zip(left.file_index())
+        .zip(right.volume_serial_number().zip(right.file_index()))
+        .is_some_and(|((left_volume, left_index), (right_volume, right_index))| {
+            left_volume == right_volume && left_index == right_index
+        })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file_identity(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
+    false
 }
 
 fn sha256_file(path: &Path, limit: u64) -> Result<String, String> {
@@ -2087,21 +2029,14 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notify::event::{CreateKind, DataChange, Flag};
     use serde_json::json;
     use std::ffi::OsString;
     use std::io::IsTerminal;
 
     fn test_rollout(thread_id: &str, parent: Option<&str>, cwd: &Path) -> Vec<u8> {
-        test_rollout_with_parent_metadata(thread_id, parent, cwd, None)
-    }
-
-    fn test_rollout_with_parent_metadata(
-        thread_id: &str,
-        parent: Option<&str>,
-        cwd: &Path,
-        parent_cwd: Option<&Path>,
-    ) -> Vec<u8> {
-        let mut records = vec![json!({
+        let records = [
+            json!({
             "timestamp": "2026-07-29T00:00:00Z",
             "type": "session_meta",
             "payload": {
@@ -2109,19 +2044,7 @@ mod tests {
                 "forked_from_id": parent,
                 "cwd": cwd.to_str().unwrap(),
             },
-        })];
-        if let (Some(parent), Some(parent_cwd)) = (parent, parent_cwd) {
-            records.push(json!({
-                "timestamp": "2026-07-29T00:00:00Z",
-                "type": "session_meta",
-                "payload": {
-                    "id": parent,
-                    "forked_from_id": null,
-                    "cwd": parent_cwd.to_str().unwrap(),
-                },
-            }));
-        }
-        records.extend([
+            }),
             json!({
                 "timestamp": "2026-07-29T00:00:01Z",
                 "type": "response_item",
@@ -2144,7 +2067,7 @@ mod tests {
                     "content": [{"type": "output_text", "text": "answer"}],
                 },
             }),
-        ]);
+        ];
         let mut bytes = records
             .into_iter()
             .map(|record| record.to_string())
@@ -2168,18 +2091,18 @@ mod tests {
         path
     }
 
-    fn manual_test_request(root: &Path, source_id: &str) -> (CodexForkExecutionRequest, PathBuf) {
+    fn test_request(root: &Path, source_id: &str) -> (CodexForkExecutionRequest, PathBuf) {
         let home = root.join("codex");
         let project = root.join("project");
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(&project).unwrap();
         let home = fs::canonicalize(home).unwrap();
         let project = fs::canonicalize(project).unwrap();
-        write_test_rollout(&home, source_id, None, &project);
+        let source_path = write_test_rollout(&home, source_id, None, &project);
         let executable = root.join("codex-test-bin");
         fs::write(&executable, b"not an executable").unwrap();
         let executable = fs::canonicalize(executable).unwrap();
-        let source = find_native_thread(&home, source_id).unwrap();
+        let source = native_thread_at_path(&home, &source_path, source_id).unwrap();
         (
             CodexForkExecutionRequest {
                 codex_home: home.clone(),
@@ -2187,13 +2110,16 @@ mod tests {
                 codex_executable: executable.clone(),
                 codex_executable_sha256: sha256_file(&executable, 1024).unwrap(),
                 source_provider_thread_id: source_id.to_string(),
+                source_transcript_path: source.transcript_path,
                 source_transcript_sha256: source.transcript_sha256,
                 local_lineage_digest: source.lineage_digest,
                 local_semantic_digest: source.semantic_digest,
                 pinned_local_title: None,
                 desired_fork_name: "Question — local before Pull · 2026-07-29 18:42Z".to_string(),
-                available_executors: vec![CodexForkExecutor::Manual],
-                pre_existing_children: Vec::new(),
+                available_executors: vec![
+                    CodexForkExecutor::AppServerStdio,
+                    CodexForkExecutor::NativePty,
+                ],
             },
             home,
         )
@@ -2272,7 +2198,7 @@ mod tests {
     fn native_pty_command_uses_exact_argv_cwd_and_reviewed_home() {
         let temp = tempfile::tempdir().unwrap();
         let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
-        let (mut request, _) = manual_test_request(temp.path(), source_id);
+        let (mut request, _) = test_request(temp.path(), source_id);
         request.project_directory = PathBuf::from("/tmp/project with spaces/知识图");
         request.codex_home = PathBuf::from("/tmp/codex home/配置");
 
@@ -2303,13 +2229,14 @@ mod tests {
     }
 
     #[test]
-    fn app_server_fork_params_include_the_reviewed_project_cwd() {
+    fn app_server_fork_params_request_metadata_only_with_the_reviewed_project_cwd() {
         let project = Path::new("/tmp/project with spaces/知识图");
         assert_eq!(
             app_server_fork_params("thread-a", project).unwrap(),
             json!({
                 "threadId": "thread-a",
                 "cwd": "/tmp/project with spaces/知识图",
+                "excludeTurns": true,
             })
         );
     }
@@ -2338,36 +2265,52 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn app_server_adopts_a_verified_rollout_before_the_fork_response() {
+    fn app_server_verifies_the_returned_rollout_path_without_scanning_the_profile() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
         let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
         let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
-        let (mut request, home) = manual_test_request(temp.path(), source_id);
+        let (mut request, home) = test_request(temp.path(), source_id);
+        let child_path = home
+            .join("sessions/2026/07/29")
+            .join(format!("rollout-{child_id}.jsonl"));
         fs::write(
             home.join("fork-template.jsonl"),
             test_rollout(child_id, Some(source_id), &request.project_directory),
         )
         .unwrap();
+        // A whole-profile scan would reject this tree. The response-path path
+        // verifies only the pinned source and the returned child.
+        fs::write(home.join("archived_sessions"), b"must not be scanned").unwrap();
         let script = r#"#!/bin/sh
 while IFS= read -r line
 do
   case "$line" in
     *'"method":"initialize"'*)
-      printf '%s\n' '{"id":1,"result":{}}'
+      case "$line" in
+        *'"experimentalApi":true'*)
+          printf '%s\n' '{"id":1,"result":{}}'
+          ;;
+      esac
       ;;
     *'"method":"thread/read"'*)
       printf '%s\n' '{"id":2,"result":{"thread":{"id":"__SOURCE_ID__","name":null,"status":{"type":"idle"}}}}'
       ;;
     *'"method":"thread/fork"'*)
-      cp "$CODEX_HOME/fork-template.jsonl" "$CODEX_HOME/sessions/2026/07/29/rollout-__CHILD_ID__.jsonl"
+      case "$line" in
+        *'"excludeTurns":true'*)
+          cp "$CODEX_HOME/fork-template.jsonl" "__CHILD_PATH__"
+          printf '%s\n' '{"id":3,"result":{"thread":{"id":"__CHILD_ID__","forkedFromId":"__SOURCE_ID__","path":"__CHILD_PATH__","turns":[]}}}'
+          ;;
+      esac
       ;;
   esac
 done
 "#
         .replace("__SOURCE_ID__", source_id)
-        .replace("__CHILD_ID__", child_id);
+        .replace("__CHILD_ID__", child_id)
+        .replace("__CHILD_PATH__", child_path.to_str().unwrap());
         let executable = temp.path().join("fake-codex");
         fs::write(&executable, script).unwrap();
         let mut permissions = fs::metadata(&executable).unwrap().permissions();
@@ -2384,11 +2327,12 @@ done
             panic!("persisted fork was not adopted");
         };
         assert_eq!(verified.provider_thread_id, child_id);
+        assert_eq!(verified.transcript_path, child_path);
         assert_eq!(verified.executor, CodexForkExecutor::AppServerStdio);
         assert_eq!(verified.name_status, CodexNameStatus::Deferred);
         assert!(
             started.elapsed() < Duration::from_secs(5),
-            "fork waited for the missing app-server response"
+            "fork did not use the returned rollout path"
         );
     }
 
@@ -2475,192 +2419,188 @@ done
     }
 
     #[test]
-    fn manual_verifier_accepts_only_one_exact_new_native_child() {
+    fn bounded_file_identity_distinguishes_a_replacement_inode() {
         let temp = tempfile::tempdir().unwrap();
-        let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
-        let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
-        let (request, home) = manual_test_request(temp.path(), source_id);
-        write_test_rollout(&home, child_id, Some(source_id), &request.project_directory);
+        let original = temp.path().join("original");
+        let replacement = temp.path().join("replacement");
+        fs::write(&original, b"same size").unwrap();
+        fs::write(&replacement, b"same size").unwrap();
+        let original_metadata = fs::metadata(&original).unwrap();
+        let same_metadata = fs::metadata(&original).unwrap();
+        let replacement_metadata = fs::metadata(&replacement).unwrap();
 
-        let verified = verify_manual_fork(&request, Some(child_id), &mut |_, _| {}).unwrap();
-        assert_eq!(verified.provider_thread_id, child_id);
-        assert_eq!(verified.executor, CodexForkExecutor::Manual);
-        assert_eq!(verified.name_status, CodexNameStatus::Deferred);
+        assert!(same_file_identity(&original_metadata, &same_metadata));
+        assert!(!same_file_identity(
+            &original_metadata,
+            &replacement_metadata
+        ));
     }
 
     #[test]
-    fn manual_verifier_accepts_a_child_workspace_below_the_project_root() {
+    fn direct_rollout_lookup_rejects_a_matching_thread_outside_the_provider_trees() {
         let temp = tempfile::tempdir().unwrap();
         let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
         let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
-        let (request, home) = manual_test_request(temp.path(), source_id);
-        let child_cwd = request.project_directory.join("apps/web");
-        fs::create_dir_all(&child_cwd).unwrap();
-        let child_cwd = fs::canonicalize(child_cwd).unwrap();
-        write_test_rollout(&home, child_id, Some(source_id), &child_cwd);
-
-        let verified = verify_manual_fork(&request, Some(child_id), &mut |_, _| {}).unwrap();
-        assert_eq!(verified.provider_thread_id, child_id);
-        assert_eq!(find_native_thread(&home, child_id).unwrap().cwd, child_cwd);
-    }
-
-    #[test]
-    fn app_server_bad_workspace_child_requires_recovery_instead_of_fallback() {
-        let temp = tempfile::tempdir().unwrap();
-        let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
-        let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
-        let (request, home) = manual_test_request(temp.path(), source_id);
-        let baseline = NativeForkBaseline {
-            threads: scan_native_threads(&request.codex_home).unwrap(),
-            rollout_paths: scan_rollout_paths(&request.codex_home).unwrap(),
-        };
-
-        assert_eq!(
-            classify_app_server_result(
-                &request,
-                &baseline,
-                "app-server rejected the fork".to_string(),
-                true,
-            )
-            .unwrap(),
-            ExecutorOutcome::DefinitiveNoFork
-        );
-
-        let outside_cwd = temp.path().join("project-elsewhere");
-        fs::create_dir_all(&outside_cwd).unwrap();
-        let outside_cwd = fs::canonicalize(outside_cwd).unwrap();
-        let directory = home.join("sessions/2026/07/29");
-        let candidate_path = directory.join(format!("rollout-{child_id}.jsonl"));
+        let (request, _) = test_request(temp.path(), source_id);
+        let outside = temp.path().join(format!("rollout-{child_id}.jsonl"));
         fs::write(
-            candidate_path,
-            test_rollout_with_parent_metadata(
-                child_id,
-                Some(source_id),
-                &outside_cwd,
-                Some(&request.project_directory),
-            ),
+            &outside,
+            test_rollout(child_id, Some(source_id), &request.project_directory),
         )
         .unwrap();
+        let outside = fs::canonicalize(outside).unwrap();
 
-        let candidate = find_native_thread(&home, child_id).unwrap();
-        assert_eq!(candidate.cwd, outside_cwd);
-        let error = exact_profile_delta_candidate(&request, &baseline, Some(child_id)).unwrap_err();
-        assert!(error.contains("outside the reviewed project"), "{error}");
+        let error = native_thread_at_path(&request.codex_home, &outside, child_id).unwrap_err();
+        assert!(error.contains("outside"), "{error}");
+    }
+
+    #[test]
+    fn watch_event_classifier_promotes_create_and_rename_to() {
+        let created_path = PathBuf::from("/tmp/rollout-created.jsonl");
+        let created =
+            Event::new(EventKind::Create(CreateKind::File)).add_path(created_path.clone());
         assert_eq!(
-            classify_app_server_result(
-                &request,
-                &baseline,
-                "app-server rejected the fork".to_string(),
-                true,
-            )
-            .unwrap(),
-            ExecutorOutcome::Ambiguous("app-server rejected the fork".to_string())
+            classify_fork_watch_event(created),
+            Some(ForkWatchSignal::Created(vec![created_path]))
+        );
+
+        let renamed_path = PathBuf::from("/tmp/rollout-renamed.jsonl");
+        let renamed = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+            .add_path(renamed_path.clone());
+        assert_eq!(
+            classify_fork_watch_event(renamed),
+            Some(ForkWatchSignal::Created(vec![renamed_path]))
         );
     }
 
     #[test]
-    fn manual_verifier_rejects_multiple_new_children_without_guessing() {
-        let temp = tempfile::tempdir().unwrap();
-        let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
-        let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
-        let other_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644d";
-        let (request, home) = manual_test_request(temp.path(), source_id);
-        write_test_rollout(&home, child_id, Some(source_id), &request.project_directory);
-        write_test_rollout(&home, other_id, Some(source_id), &request.project_directory);
+    fn watch_event_classifier_does_not_promote_modify_and_marks_rescan_lost() {
+        let modified_path = PathBuf::from("/tmp/rollout-existing.jsonl");
+        let modified = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+            .add_path(modified_path.clone());
+        let modified_signal = classify_fork_watch_event(modified);
+        assert_eq!(
+            modified_signal,
+            Some(ForkWatchSignal::Changed(vec![modified_path]))
+        );
 
-        let error = verify_manual_fork(&request, Some(child_id), &mut |_, _| {}).unwrap_err();
-        assert!(error.contains("inventory changed"), "{error}");
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let backend =
+            RecommendedWatcher::new(|_result: notify::Result<Event>| {}, Config::default())
+                .unwrap();
+        let mut watcher = ForkRolloutWatcher {
+            watcher: backend,
+            receiver,
+            sessions_root: PathBuf::from("/tmp"),
+            watching_sessions: true,
+            lost: Arc::new(AtomicBool::new(false)),
+        };
+        sender.send(modified_signal.unwrap()).unwrap();
+        let mut candidates = BTreeMap::new();
+        collect_fork_watch_signals(&mut watcher, &mut candidates).unwrap();
+        assert!(candidates.is_empty());
+
+        let rescan = Event::new(EventKind::Any).set_flag(Flag::Rescan);
+        let rescan_signal = classify_fork_watch_event(rescan);
+        assert_eq!(rescan_signal, Some(ForkWatchSignal::Lost));
+        sender.send(rescan_signal.unwrap()).unwrap();
+        let error = collect_fork_watch_signals(&mut watcher, &mut candidates).unwrap_err();
+        assert!(error.contains("lost events"), "{error}");
     }
 
     #[test]
-    fn native_pty_final_scan_accepts_one_exact_child_even_after_lifecycle_uncertainty() {
+    fn exact_watched_candidate_verification_ignores_unrelated_rollouts() {
         let temp = tempfile::tempdir().unwrap();
         let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
         let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
-        let (request, home) = manual_test_request(temp.path(), source_id);
-        let baseline = NativeForkBaseline {
-            threads: scan_native_threads(&request.codex_home).unwrap(),
-            rollout_paths: scan_rollout_paths(&request.codex_home).unwrap(),
-        };
-        write_test_rollout(&home, child_id, Some(source_id), &request.project_directory);
+        let unrelated_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644d";
+        let (request, home) = test_request(temp.path(), source_id);
+        let directory = home.join("sessions/2026/07/29");
+        fs::write(directory.join("rollout-malformed.jsonl"), b"{").unwrap();
+        write_test_rollout(
+            &home,
+            unrelated_id,
+            Some(source_id),
+            &request.project_directory,
+        );
+        fs::write(home.join("archived_sessions"), b"must not be scanned").unwrap();
+        let child_path =
+            write_test_rollout(&home, child_id, Some(source_id), &request.project_directory);
 
-        let outcome = classify_native_pty_completion(
+        let candidate = verify_watched_candidate_path(&request, &child_path).unwrap();
+
+        assert_eq!(candidate.provider_thread_id, child_id);
+        assert_eq!(candidate.transcript_path, child_path);
+    }
+
+    #[test]
+    fn observed_create_is_retried_without_a_modify_event_until_exact_verification_is_stable() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
+        let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
+        let (request, home) = test_request(temp.path(), source_id);
+        let child_path = home
+            .join("sessions/2026/07/29")
+            .join(format!("rollout-{child_id}.jsonl"));
+        fs::write(&child_path, b"{").unwrap();
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let backend =
+            RecommendedWatcher::new(|_result: notify::Result<Event>| {}, Config::default())
+                .unwrap();
+        let mut watcher = ForkRolloutWatcher {
+            watcher: backend,
+            receiver,
+            sessions_root: home.join("sessions"),
+            watching_sessions: true,
+            lost: Arc::new(AtomicBool::new(false)),
+        };
+        sender
+            .send(ForkWatchSignal::Created(vec![child_path.clone()]))
+            .unwrap();
+        let mut candidates = BTreeMap::new();
+        let mut matched = None;
+        let mut stable = None;
+        let first_observation = Instant::now();
+        assert!(observe_fork_candidates(
             &request,
-            &baseline,
-            Some("forced termination".to_string()),
+            &mut watcher,
+            &mut candidates,
+            &mut matched,
+            &mut stable,
+            first_observation,
         )
-        .unwrap();
-        let ExecutorOutcome::Verified(verified) = outcome else {
-            panic!("expected an exact fork to be adopted");
-        };
-        assert_eq!(verified.provider_thread_id, child_id);
-        assert_eq!(verified.executor, CodexForkExecutor::NativePty);
-    }
+        .unwrap()
+        .is_none());
 
-    #[test]
-    fn native_pty_final_scan_rejects_an_unverified_new_rollout() {
-        let temp = tempfile::tempdir().unwrap();
-        let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
-        let (request, home) = manual_test_request(temp.path(), source_id);
-        let baseline = NativeForkBaseline {
-            threads: scan_native_threads(&request.codex_home).unwrap(),
-            rollout_paths: scan_rollout_paths(&request.codex_home).unwrap(),
-        };
-        let directory = home.join("sessions/2026/07/29");
-        fs::write(directory.join("rollout-partial.jsonl"), b"{").unwrap();
-
-        let outcome = classify_native_pty_completion(&request, &baseline, None).unwrap();
-        assert!(matches!(outcome, ExecutorOutcome::Ambiguous(_)));
-    }
-
-    #[test]
-    fn native_pty_pre_spawn_failure_requires_an_unchanged_complete_profile() {
-        let temp = tempfile::tempdir().unwrap();
-        let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
-        let (request, home) = manual_test_request(temp.path(), source_id);
-        let baseline = NativeForkBaseline {
-            threads: scan_native_threads(&request.codex_home).unwrap(),
-            rollout_paths: scan_rollout_paths(&request.codex_home).unwrap(),
-        };
-
-        assert_eq!(
-            classify_native_pty_without_spawn(&request, &baseline, "PTY unavailable").unwrap(),
-            ExecutorOutcome::DefinitiveNoFork
-        );
-
-        let directory = home.join("sessions/2026/07/29");
-        fs::write(directory.join("rollout-incomplete.jsonl"), b"{").unwrap();
-        assert_eq!(
-            classify_native_pty_without_spawn(&request, &baseline, "PTY unavailable").unwrap(),
-            ExecutorOutcome::Ambiguous("PTY unavailable".to_string())
-        );
-    }
-
-    #[test]
-    fn rollout_scan_ignores_non_rollout_jsonl_files() {
-        let temp = tempfile::tempdir().unwrap();
-        let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
-        let (request, home) = manual_test_request(temp.path(), source_id);
-        let before = scan_rollout_paths(&request.codex_home).unwrap();
         fs::write(
-            home.join("sessions/2026/07/29/unrelated.jsonl"),
-            test_rollout(
-                "019fac73-c1ff-79b3-bb8e-1673ed0d644c",
-                Some(source_id),
-                &request.project_directory,
-            ),
+            &child_path,
+            test_rollout(child_id, Some(source_id), &request.project_directory),
         )
         .unwrap();
-
-        assert_eq!(scan_rollout_paths(&request.codex_home).unwrap(), before);
-        assert_eq!(
-            scan_native_threads(&request.codex_home)
-                .unwrap()
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>(),
-            vec![source_id.to_string()]
-        );
+        let parsed_at = first_observation + NATIVE_PTY_VERIFY_RETRY_BASE;
+        assert!(observe_fork_candidates(
+            &request,
+            &mut watcher,
+            &mut candidates,
+            &mut matched,
+            &mut stable,
+            parsed_at,
+        )
+        .unwrap()
+        .is_none());
+        let verified = observe_fork_candidates(
+            &request,
+            &mut watcher,
+            &mut candidates,
+            &mut matched,
+            &mut stable,
+            parsed_at + NATIVE_PTY_STABILITY_INTERVAL + NATIVE_PTY_COMPOSER_GRACE,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(verified.provider_thread_id, child_id);
+        assert_eq!(verified.transcript_path, child_path);
     }
 
     #[test]
@@ -2711,14 +2651,30 @@ done
         let temp = tempfile::tempdir().unwrap();
         let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
         let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
-        let (mut request, home) = manual_test_request(temp.path(), source_id);
+        let (mut request, home) = test_request(temp.path(), source_id);
         let executable = std::env::current_exe().unwrap();
         request.codex_executable = executable.clone();
         request.codex_executable_sha256 = sha256_file(&executable, 512 * 1024 * 1024).unwrap();
-        let baseline = NativeForkBaseline {
-            threads: scan_native_threads(&request.codex_home).unwrap(),
-            rollout_paths: scan_rollout_paths(&request.codex_home).unwrap(),
-        };
+        let mut watcher = ForkRolloutWatcher::start(&request.codex_home).unwrap();
+        // Keep the production watcher alive, but inject the exact create signal
+        // deterministically so this unit test does not depend on host event
+        // delivery. The worker probes only the expected path.
+        let (test_event_sender, test_event_receiver) = mpsc::sync_channel(1);
+        let test_event_guard = test_event_sender.clone();
+        watcher.receiver = test_event_receiver;
+        let observed_child_path = home
+            .join("sessions/2026/07/29")
+            .join(format!("rollout-{child_id}.jsonl"));
+        let event_worker = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline && !observed_child_path.exists() {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(observed_child_path.exists());
+            test_event_sender
+                .send(ForkWatchSignal::Created(vec![observed_child_path]))
+                .unwrap();
+        });
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 40,
@@ -2744,7 +2700,9 @@ done
         drop(slave);
 
         let outcome =
-            run_native_pty_session(&request, baseline, child, reader, writer, master).unwrap();
+            run_native_pty_session(&request, watcher, child, reader, writer, master).unwrap();
+        drop(test_event_guard);
+        event_worker.join().unwrap();
         let debug = format!("{outcome:?}");
         let ExecutorOutcome::Verified(verified) = outcome else {
             panic!("fake Codex PTY did not produce an exact verified child: {debug}");
@@ -2752,6 +2710,101 @@ done
         assert_eq!(verified.provider_thread_id, child_id);
         assert_eq!(verified.executor, CodexForkExecutor::NativePty);
         assert!(!debug.contains("MALLARD-PTY-OUTPUT-MUST-NOT-BE-RETAINED"));
+    }
+
+    #[derive(Debug)]
+    struct UnkillableTestChild;
+
+    impl portable_pty::ChildKiller for UnkillableTestChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected kill failure"))
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self)
+        }
+    }
+
+    impl portable_pty::Child for UnkillableTestChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Err(std::io::Error::other("injected wait failure"))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    struct DelayedEofReader;
+
+    impl Read for DelayedEofReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            thread::sleep(Duration::from_secs(2));
+            Ok(0)
+        }
+    }
+
+    struct FailingTestWriter;
+
+    impl Write for FailingTestWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("injected write failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn verified_candidate_with_uncertain_pty_cleanup_is_unacknowledged() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
+        let child_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
+        let (request, home) = test_request(temp.path(), source_id);
+        let child_path =
+            write_test_rollout(&home, child_id, Some(source_id), &request.project_directory);
+        let mut watcher = ForkRolloutWatcher::start(&request.codex_home).unwrap();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        watcher.receiver = receiver;
+        sender
+            .send(ForkWatchSignal::Created(vec![child_path]))
+            .unwrap();
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let portable_pty::PtyPair { slave, master } = pair;
+        drop(slave);
+
+        let outcome = run_native_pty_session(
+            &request,
+            watcher,
+            Box::new(UnkillableTestChild),
+            Box::new(DelayedEofReader),
+            Box::new(FailingTestWriter),
+            master,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            ExecutorOutcome::Unacknowledged(message)
+                if message.contains("cleanup was uncertain")
+        ));
     }
 
     fn test_verified_fork(executor: CodexForkExecutor) -> VerifiedNativeFork {
@@ -2772,7 +2825,6 @@ done
             &[
                 CodexForkExecutor::AppServerStdio,
                 CodexForkExecutor::NativePty,
-                CodexForkExecutor::Manual,
             ],
             |executor, status| {
                 attempts.push((executor, status));
@@ -2802,18 +2854,22 @@ done
     }
 
     #[test]
-    fn executor_sequence_falls_through_only_after_definitive_no_fork() {
+    fn executor_sequence_falls_through_to_pty_only_after_definitive_no_fork() {
         let mut invoked = Vec::new();
         let outcome = run_executor_sequence(
             &[
                 CodexForkExecutor::AppServerStdio,
                 CodexForkExecutor::NativePty,
-                CodexForkExecutor::Manual,
             ],
             |_, _| Ok(()),
             |executor| {
                 invoked.push(executor);
-                Ok(ExecutorOutcome::DefinitiveNoFork)
+                Ok(match executor {
+                    CodexForkExecutor::AppServerStdio => ExecutorOutcome::DefinitiveNoFork,
+                    CodexForkExecutor::NativePty => {
+                        ExecutorOutcome::Verified(test_verified_fork(executor))
+                    }
+                })
             },
         )
         .unwrap();
@@ -2824,31 +2880,67 @@ done
                 CodexForkExecutor::NativePty,
             ]
         );
-        assert_eq!(outcome, CodexForkCoordinatorOutcome::AwaitingManualFork);
+        assert!(matches!(outcome, CodexForkCoordinatorOutcome::Verified(_)));
     }
 
     #[test]
-    fn executor_sequence_never_falls_through_after_ambiguity() {
+    fn executor_unacknowledged_stops_fallthrough() {
         let mut invoked = Vec::new();
+        let mut attempts = Vec::new();
         let outcome = run_executor_sequence(
             &[
                 CodexForkExecutor::AppServerStdio,
                 CodexForkExecutor::NativePty,
-                CodexForkExecutor::Manual,
+                CodexForkExecutor::AppServerStdio,
             ],
-            |_, _| Ok(()),
+            |executor, status| {
+                attempts.push((executor, status));
+                Ok(())
+            },
             |executor| {
                 invoked.push(executor);
-                Ok(ExecutorOutcome::Ambiguous("uncertain".to_string()))
+                Ok(match executor {
+                    CodexForkExecutor::AppServerStdio => ExecutorOutcome::DefinitiveNoFork,
+                    CodexForkExecutor::NativePty => {
+                        ExecutorOutcome::Unacknowledged("not observed".to_string())
+                    }
+                })
             },
         )
         .unwrap();
-        assert_eq!(invoked, vec![CodexForkExecutor::AppServerStdio]);
+        assert_eq!(
+            invoked,
+            vec![
+                CodexForkExecutor::AppServerStdio,
+                CodexForkExecutor::NativePty,
+            ]
+        );
+        assert_eq!(
+            attempts,
+            vec![
+                (
+                    CodexForkExecutor::AppServerStdio,
+                    CodexForkAttemptStatus::Pending,
+                ),
+                (
+                    CodexForkExecutor::AppServerStdio,
+                    CodexForkAttemptStatus::DefinitiveNoFork,
+                ),
+                (
+                    CodexForkExecutor::NativePty,
+                    CodexForkAttemptStatus::Pending,
+                ),
+                (
+                    CodexForkExecutor::NativePty,
+                    CodexForkAttemptStatus::Unacknowledged,
+                ),
+            ]
+        );
         assert_eq!(
             outcome,
-            CodexForkCoordinatorOutcome::RecoveryRequired {
-                executor: CodexForkExecutor::AppServerStdio,
-                message: "uncertain".to_string(),
+            CodexForkCoordinatorOutcome::Unacknowledged {
+                executor: CodexForkExecutor::NativePty,
+                message: "not observed".to_string(),
             }
         );
     }
@@ -2861,7 +2953,6 @@ done
             &[
                 CodexForkExecutor::AppServerStdio,
                 CodexForkExecutor::NativePty,
-                CodexForkExecutor::Manual,
             ],
             |executor, status| {
                 attempts.push((executor, status));

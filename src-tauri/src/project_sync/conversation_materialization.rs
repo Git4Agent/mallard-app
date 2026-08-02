@@ -13,10 +13,9 @@ use std::path::{Path, PathBuf};
 
 use super::codex_native_fork::{
     complete_codex_post_commit_presentation, coordinate_native_fork, preflight_native_fork,
-    verify_manual_fork, verify_recorded_fork, verify_source_idle_and_title,
-    CodexForkCoordinatorOutcome, CodexForkExecutionRequest, CodexNameStatus,
-    CodexPostCommitPresentationRequest, CodexThreadRenameRequest, ForkPhaseObserver,
-    VerifiedNativeFork,
+    verify_recorded_fork, verify_source_idle_and_title, CodexForkCoordinatorOutcome,
+    CodexForkExecutionRequest, CodexNameStatus, CodexPostCommitPresentationRequest,
+    CodexThreadRenameRequest, ForkPhaseObserver, VerifiedNativeFork,
 };
 use super::conversation_codec::{analyze_codex_transcript, CodecLineage};
 use super::domain::{
@@ -76,10 +75,7 @@ pub enum CodexDivergenceApplyOutcome {
         desired_fork_name: String,
         executor: Option<CodexForkExecutor>,
     },
-    AwaitingManualFork {
-        operation_id: ConversationOperationId,
-    },
-    RecoveryRequired {
+    ForkUnacknowledged {
         operation_id: ConversationOperationId,
         message: String,
     },
@@ -552,39 +548,19 @@ pub(crate) fn apply_codex_divergence_locked(
     if resolution == ConversationDivergenceResolution::PreserveLocalWithNativeFork {
         match continue_fork_attempts(repository, operation, &request.fork, on_phase)? {
             ForkAttemptContinuation::Verified(updated) => operation = updated,
-            ForkAttemptContinuation::AwaitingManual(updated) => {
-                return Ok(CodexDivergenceApplyOutcome::AwaitingManualFork {
-                    operation_id: updated.operation_id,
-                });
-            }
             ForkAttemptContinuation::AbortedBeforeFork { operation, message } => {
                 rollback_prepared(repository, &operation)?;
                 return Err(message);
             }
-            ForkAttemptContinuation::RecoveryRequired { operation, message } => {
-                return Ok(CodexDivergenceApplyOutcome::RecoveryRequired {
+            ForkAttemptContinuation::Unacknowledged { operation, message } => {
+                return Ok(CodexDivergenceApplyOutcome::ForkUnacknowledged {
                     operation_id: operation.operation_id,
                     message,
                 });
             }
         }
         failpoints.hit(&ConversationFailpoint::AfterForkVerified)?;
-        operation = set_phase(
-            repository,
-            &operation.operation_id,
-            ConversationSyncPhase::ForkNamingRecorded,
-            operation.updated_at,
-        )?;
-        failpoints.hit(&ConversationFailpoint::AfterForkNamingRecorded)?;
-        verify_journaled_fork(&operation, &request.fork)?;
-        operation = commit_preserved_fork_binding(repository, &operation)?;
-        operation = set_phase(
-            repository,
-            &operation.operation_id,
-            ConversationSyncPhase::LocalForkBound,
-            operation.updated_at,
-        )?;
-        failpoints.hit(&ConversationFailpoint::AfterLocalForkBound)?;
+        return finish_verified_codex_divergence(repository, operation, &request.fork, failpoints);
     } else {
         if let Err(error) = verify_source_idle_and_title(&request.fork) {
             rollback_prepared(repository, &operation)?;
@@ -595,109 +571,108 @@ pub(crate) fn apply_codex_divergence_locked(
     finish_codex_divergence(repository, operation, &request.fork, failpoints)
 }
 
-pub(crate) fn resume_codex_divergence_locked(
+pub(crate) fn retry_codex_divergence_locked(
     repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
-    provider_thread_id: Option<&str>,
-    fork: CodexForkExecutionRequest,
+    mut fork: CodexForkExecutionRequest,
     failpoints: &mut impl ConversationFailpoints,
     on_phase: ForkPhaseObserver<'_>,
 ) -> Result<CodexDivergenceApplyOutcome, String> {
     let mut operation = load_operation(repository, operation_id)?;
     validate_operation_scope_for_resume(repository, &operation)?;
     validate_fork_request(&operation, &fork)?;
-    let resolution = operation
+    let divergence = operation
         .divergence()
-        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?
-        .resolution;
-    if resolution == ConversationDivergenceResolution::PreserveLocalWithNativeFork {
-        if matches!(
-            operation.phase,
-            ConversationSyncPhase::ReplacementStaged | ConversationSyncPhase::ForkAttemptPending
-        ) {
-            match continue_fork_attempts(repository, operation, &fork, on_phase)? {
-                ForkAttemptContinuation::Verified(updated) => operation = updated,
-                ForkAttemptContinuation::AwaitingManual(updated) => {
-                    return Ok(CodexDivergenceApplyOutcome::AwaitingManualFork {
-                        operation_id: updated.operation_id,
-                    });
-                }
-                ForkAttemptContinuation::AbortedBeforeFork { operation, message } => {
-                    rollback_prepared(repository, &operation)?;
-                    return Err(message);
-                }
-                ForkAttemptContinuation::RecoveryRequired { operation, message } => {
-                    return Ok(CodexDivergenceApplyOutcome::RecoveryRequired {
-                        operation_id: operation.operation_id,
-                        message,
-                    });
-                }
-            }
-        }
-        if matches!(
-            operation.phase,
-            ConversationSyncPhase::AwaitingManualFork | ConversationSyncPhase::RecoveryRequired
-        ) {
-            let recovered_executor = operation
-                .divergence()
-                .and_then(|divergence| divergence.current_executor);
-            let mut verified = match verify_manual_fork(&fork, provider_thread_id, on_phase) {
-                Ok(verified) => verified,
-                Err(error) if operation.phase == ConversationSyncPhase::RecoveryRequired => {
-                    return Ok(CodexDivergenceApplyOutcome::RecoveryRequired {
-                        operation_id: operation.operation_id,
-                        message: format!(
-                            "The uncertain Codex fork still cannot be proven safely: {error}"
-                        ),
-                    });
-                }
-                Err(error) => return Err(error),
-            };
-            if operation.phase == ConversationSyncPhase::RecoveryRequired {
-                if let Some(executor) = recovered_executor {
-                    verified.executor = executor;
-                }
-            }
-            operation = record_verified_fork(repository, &operation, &verified)?;
-            failpoints.hit(&ConversationFailpoint::AfterForkVerified)?;
-        }
-        if operation.phase == ConversationSyncPhase::ForkVerified {
-            operation = set_phase(
-                repository,
-                operation_id,
-                ConversationSyncPhase::ForkNamingRecorded,
-                operation.updated_at,
-            )?;
-            failpoints.hit(&ConversationFailpoint::AfterForkNamingRecorded)?;
-        }
-        if operation.phase == ConversationSyncPhase::ForkNamingRecorded {
-            verify_journaled_fork(&operation, &fork)?;
-            operation = commit_preserved_fork_binding(repository, &operation)?;
-            operation = set_phase(
-                repository,
-                operation_id,
-                ConversationSyncPhase::LocalForkBound,
-                operation.updated_at,
-            )?;
-            failpoints.hit(&ConversationFailpoint::AfterLocalForkBound)?;
-        }
-    } else if operation.phase == ConversationSyncPhase::ReplacementStaged {
-        // A failed cloud-only Apply can leave a safe staged replacement.
-        // Recovery must repeat the provider-idle/title precondition rather
-        // than treating staging itself as authority to overwrite the source.
-        verify_source_idle_and_title(&fork)?;
+        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
+    if divergence.resolution != ConversationDivergenceResolution::PreserveLocalWithNativeFork
+        || operation.phase != ConversationSyncPhase::ForkUnacknowledged
+    {
+        return Err("only an unacknowledged Codex fork can be retried".to_string());
     }
-    finish_codex_divergence(repository, operation, &fork, failpoints)
+    let executor = divergence
+        .attempts
+        .last()
+        .filter(|attempt| attempt.status == CodexForkAttemptStatus::Unacknowledged)
+        .map(|attempt| attempt.executor)
+        .ok_or_else(|| "Codex fork retry lacks an unacknowledged attempt".to_string())?;
+    let retry_start = divergence
+        .available_executors
+        .iter()
+        .position(|available| *available == executor)
+        .ok_or_else(|| "Codex fork retry executor is no longer available".to_string())?;
+    let prior_attempts = divergence.attempts.clone();
+    // The user-authorized retry starts again at the unacknowledged executor.
+    // A definitive no-fork result may then use a later executor, while another
+    // unacknowledged result still stops the sequence immediately.
+    fork.available_executors = divergence.available_executors[retry_start..].to_vec();
+    match coordinate_native_fork(
+        &fork,
+        |executor, status| record_fork_attempt(repository, operation_id, executor, status),
+        on_phase,
+    )? {
+        CodexForkCoordinatorOutcome::Verified(verified) => {
+            operation = record_verified_fork(repository, &operation, &verified)?;
+        }
+        CodexForkCoordinatorOutcome::Unacknowledged { message, .. } => {
+            operation = load_operation(repository, operation_id)?;
+            return Ok(CodexDivergenceApplyOutcome::ForkUnacknowledged {
+                operation_id: operation.operation_id,
+                message,
+            });
+        }
+        CodexForkCoordinatorOutcome::AbortedBeforeInvocation { message } => {
+            restore_unacknowledged_retry_checkpoint(
+                repository,
+                operation_id,
+                executor,
+                prior_attempts,
+            )?;
+            return Ok(CodexDivergenceApplyOutcome::ForkUnacknowledged {
+                operation_id: operation_id.clone(),
+                message: format!("The fork retry was not invoked: {message}"),
+            });
+        }
+    }
+    failpoints.hit(&ConversationFailpoint::AfterForkVerified)?;
+    finish_verified_codex_divergence(repository, operation, &fork, failpoints)
+}
+
+fn finish_verified_codex_divergence(
+    repository: &LocalStateRepository,
+    mut operation: ConversationSyncOperation,
+    fork: &CodexForkExecutionRequest,
+    failpoints: &mut impl ConversationFailpoints,
+) -> Result<CodexDivergenceApplyOutcome, String> {
+    if operation.phase == ConversationSyncPhase::ForkVerified {
+        operation = set_phase(
+            repository,
+            &operation.operation_id,
+            ConversationSyncPhase::ForkNamingRecorded,
+            operation.updated_at,
+        )?;
+        failpoints.hit(&ConversationFailpoint::AfterForkNamingRecorded)?;
+    }
+    if operation.phase == ConversationSyncPhase::ForkNamingRecorded {
+        verify_journaled_fork(&operation, fork)?;
+        operation = commit_preserved_fork_binding(repository, &operation)?;
+        operation = set_phase(
+            repository,
+            &operation.operation_id,
+            ConversationSyncPhase::LocalForkBound,
+            operation.updated_at,
+        )?;
+        failpoints.hit(&ConversationFailpoint::AfterLocalForkBound)?;
+    }
+    finish_codex_divergence(repository, operation, fork, failpoints)
 }
 
 enum ForkAttemptContinuation {
     Verified(ConversationSyncOperation),
-    AwaitingManual(ConversationSyncOperation),
     AbortedBeforeFork {
         operation: ConversationSyncOperation,
         message: String,
     },
-    RecoveryRequired {
+    Unacknowledged {
         operation: ConversationSyncOperation,
         message: String,
     },
@@ -705,35 +680,36 @@ enum ForkAttemptContinuation {
 
 fn continue_fork_attempts(
     repository: &LocalStateRepository,
-    mut operation: ConversationSyncOperation,
+    operation: ConversationSyncOperation,
     fork: &CodexForkExecutionRequest,
     on_phase: ForkPhaseObserver<'_>,
 ) -> Result<ForkAttemptContinuation, String> {
-    if operation.phase == ConversationSyncPhase::ReplacementStaged {
-        operation = set_divergence_attempt_pending(repository, &operation)?;
-    }
     let divergence = operation
         .divergence()
         .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
     if let Some(attempt) = divergence.attempts.last() {
         if attempt.status == CodexForkAttemptStatus::Pending {
-            return match verify_manual_fork(fork, None, on_phase) {
-                Ok(mut verified) => {
-                    verified.executor = attempt.executor;
-                    record_verified_fork(repository, &operation, &verified)
-                        .map(ForkAttemptContinuation::Verified)
-                }
-                Err(error) => {
-                    let operation =
-                        record_ambiguous_fork(repository, &operation, attempt.executor)?;
-                    Ok(ForkAttemptContinuation::RecoveryRequired {
-                        operation,
-                        message: format!(
-                            "Codex fork execution may have completed, but its result could not be proven: {error}"
-                        ),
-                    })
-                }
-            };
+            record_fork_attempt(
+                repository,
+                &operation.operation_id,
+                attempt.executor,
+                CodexForkAttemptStatus::Unacknowledged,
+            )?;
+            let operation = load_operation(repository, &operation.operation_id)?;
+            return Ok(ForkAttemptContinuation::Unacknowledged {
+                operation,
+                message:
+                    "Mallard restarted before acknowledging the Codex fork; the result was ignored"
+                        .to_string(),
+            });
+        }
+        if attempt.status == CodexForkAttemptStatus::Unacknowledged {
+            return Ok(ForkAttemptContinuation::Unacknowledged {
+                operation,
+                message:
+                    "Mallard did not acknowledge the Codex fork; retrying may create another fork"
+                        .to_string(),
+            });
         }
         if attempt.status != CodexForkAttemptStatus::DefinitiveNoFork {
             return Err("Codex fork attempt journal cannot be continued safely".to_string());
@@ -761,36 +737,15 @@ fn continue_fork_attempts(
             record_verified_fork(repository, &operation, &verified)
                 .map(ForkAttemptContinuation::Verified)
         }
-        CodexForkCoordinatorOutcome::AwaitingManualFork => {
-            record_manual_wait(repository, &operation).map(ForkAttemptContinuation::AwaitingManual)
-        }
         CodexForkCoordinatorOutcome::AbortedBeforeInvocation { message } => {
             let operation = load_operation(repository, &operation_id)?;
             Ok(ForkAttemptContinuation::AbortedBeforeFork { operation, message })
         }
-        CodexForkCoordinatorOutcome::RecoveryRequired { executor, message } => {
-            let operation = record_ambiguous_fork(repository, &operation, executor)?;
-            Ok(ForkAttemptContinuation::RecoveryRequired { operation, message })
+        CodexForkCoordinatorOutcome::Unacknowledged { message, .. } => {
+            let operation = load_operation(repository, &operation_id)?;
+            Ok(ForkAttemptContinuation::Unacknowledged { operation, message })
         }
     }
-}
-
-pub(crate) fn cancel_codex_divergence_locked(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-) -> Result<(), String> {
-    let operation = load_operation(repository, operation_id)?;
-    if operation.phase != ConversationSyncPhase::AwaitingManualFork {
-        return Err("only a manual Codex fork checkpoint can be canceled".to_string());
-    }
-    if operation
-        .targets
-        .iter()
-        .any(|target| target.commit_started || target.committed)
-    {
-        return Err("Codex divergence replacement already started".to_string());
-    }
-    rollback_prepared(repository, &operation)
 }
 
 fn finish_codex_divergence(
@@ -864,7 +819,7 @@ fn finish_codex_divergence(
         cleanup_and_retire(repository, &operation.operation_id)?;
         failpoints.hit(&ConversationFailpoint::AfterCleanup)?;
         if let Some(task) = presentation_task {
-            schedule_post_commit_presentation(repository.clone(), task);
+            dispatch_post_commit_presentation(repository.clone(), task);
         }
         return Ok(outcome);
     }
@@ -880,7 +835,7 @@ fn finish_codex_divergence(
         let presentation_task = post_commit_presentation_task(&operation, fork)?;
         cleanup_and_retire(repository, &operation.operation_id)?;
         if let Some(task) = presentation_task {
-            schedule_post_commit_presentation(repository.clone(), task);
+            dispatch_post_commit_presentation(repository.clone(), task);
         }
         return Ok(outcome);
     }
@@ -918,6 +873,7 @@ fn validate_fork_request(
         .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
     if operation.provider_thread_id.as_deref() != Some(&divergence.source_provider_thread_id)
         || fork.source_provider_thread_id != divergence.source_provider_thread_id
+        || fork.source_transcript_path != PathBuf::from(&divergence.source_transcript_path)
         || fork.source_transcript_sha256 != operation.expected_local_digest.as_deref().unwrap_or("")
         || fork.local_lineage_digest != divergence.local_lineage_digest
         || fork.local_semantic_digest != divergence.local_semantic_digest
@@ -926,7 +882,6 @@ fn validate_fork_request(
         || fork.codex_executable.to_string_lossy() != divergence.codex_executable
         || fork.codex_executable_sha256 != divergence.codex_executable_sha256
         || fork.available_executors != divergence.available_executors
-        || fork.pre_existing_children != divergence.pre_existing_children
     {
         return Err("Codex fork executor inputs differ from the reviewed journal".to_string());
     }
@@ -1012,6 +967,7 @@ pub(crate) fn codex_fork_request_for_operation(
         codex_executable: PathBuf::from(&divergence.codex_executable),
         codex_executable_sha256: divergence.codex_executable_sha256.clone(),
         source_provider_thread_id: divergence.source_provider_thread_id.clone(),
+        source_transcript_path: PathBuf::from(&divergence.source_transcript_path),
         source_transcript_sha256: operation
             .expected_local_digest
             .clone()
@@ -1021,7 +977,6 @@ pub(crate) fn codex_fork_request_for_operation(
         pinned_local_title: divergence.pinned_local_title.clone(),
         desired_fork_name: divergence.desired_fork_name.clone(),
         available_executors: divergence.available_executors.clone(),
-        pre_existing_children: divergence.pre_existing_children.clone(),
     })
 }
 
@@ -1034,30 +989,16 @@ fn divergence_mut(
     }
 }
 
-fn set_divergence_attempt_pending(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-) -> Result<ConversationSyncOperation, String> {
-    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
-        let divergence = divergence_mut(journaled)?;
-        divergence.current_executor = None;
-        divergence.attempts.clear();
-        journaled.phase = ConversationSyncPhase::ForkAttemptPending;
-        Ok(())
-    })?;
-    Ok(updated)
-}
-
 fn record_fork_attempt(
     repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
     executor: CodexForkExecutor,
     status: CodexForkAttemptStatus,
 ) -> Result<(), String> {
-    // A verified executor result is not durable until its provider ID, path,
-    // digest, and naming outcome can be committed in the same journal
-    // mutation. Leave the preceding Pending marker in place so a crash in
-    // that narrow window is recovered by scanning for one exact child.
+    // A verified executor result is not durable until its exact provider ID,
+    // path, digest, and naming outcome can be committed in one mutation. If
+    // Mallard stops in that narrow window, startup marks Pending as
+    // Unacknowledged and deliberately does not discover or adopt a child.
     if status == CodexForkAttemptStatus::Verified {
         return Ok(());
     }
@@ -1076,12 +1017,34 @@ fn record_fork_attempt(
         }
         divergence.current_executor = matches!(
             status,
-            CodexForkAttemptStatus::Pending | CodexForkAttemptStatus::Ambiguous
+            CodexForkAttemptStatus::Pending | CodexForkAttemptStatus::Unacknowledged
         )
         .then_some(executor);
-        if status == CodexForkAttemptStatus::Ambiguous {
-            journaled.phase = ConversationSyncPhase::RecoveryRequired;
+        match status {
+            CodexForkAttemptStatus::Pending => {
+                journaled.phase = ConversationSyncPhase::ForkAttemptPending
+            }
+            CodexForkAttemptStatus::Unacknowledged => {
+                journaled.phase = ConversationSyncPhase::ForkUnacknowledged
+            }
+            CodexForkAttemptStatus::DefinitiveNoFork | CodexForkAttemptStatus::Verified => {}
         }
+        Ok(())
+    })
+    .map(|_| ())
+}
+
+fn restore_unacknowledged_retry_checkpoint(
+    repository: &LocalStateRepository,
+    operation_id: &ConversationOperationId,
+    executor: CodexForkExecutor,
+    prior_attempts: Vec<CodexForkAttempt>,
+) -> Result<(), String> {
+    mutate_operation(repository, operation_id, |journaled| {
+        let divergence = divergence_mut(journaled)?;
+        divergence.attempts = prior_attempts.clone();
+        divergence.current_executor = Some(executor);
+        journaled.phase = ConversationSyncPhase::ForkUnacknowledged;
         Ok(())
     })
     .map(|_| ())
@@ -1116,60 +1079,6 @@ fn record_verified_fork(
         divergence.fork_transcript_sha256 = Some(fork.transcript_sha256.clone());
         divergence.fork_name_status = Some(map_name_status(&fork.name_status));
         journaled.phase = ConversationSyncPhase::ForkVerified;
-        Ok(())
-    })?;
-    Ok(updated)
-}
-
-fn record_manual_wait(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-) -> Result<ConversationSyncOperation, String> {
-    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
-        let divergence = divergence_mut(journaled)?;
-        divergence.attempts = divergence
-            .available_executors
-            .iter()
-            .map(|executor| CodexForkAttempt {
-                executor: *executor,
-                status: if *executor == CodexForkExecutor::Manual {
-                    CodexForkAttemptStatus::Pending
-                } else {
-                    CodexForkAttemptStatus::DefinitiveNoFork
-                },
-            })
-            .collect();
-        divergence.current_executor = Some(CodexForkExecutor::Manual);
-        journaled.phase = ConversationSyncPhase::AwaitingManualFork;
-        Ok(())
-    })?;
-    Ok(updated)
-}
-
-fn record_ambiguous_fork(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-    ambiguous_executor: CodexForkExecutor,
-) -> Result<ConversationSyncOperation, String> {
-    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
-        let divergence = divergence_mut(journaled)?;
-        let mut attempts = Vec::new();
-        for executor in &divergence.available_executors {
-            attempts.push(CodexForkAttempt {
-                executor: *executor,
-                status: if *executor == ambiguous_executor {
-                    CodexForkAttemptStatus::Ambiguous
-                } else {
-                    CodexForkAttemptStatus::DefinitiveNoFork
-                },
-            });
-            if *executor == ambiguous_executor {
-                break;
-            }
-        }
-        divergence.attempts = attempts;
-        divergence.current_executor = Some(ambiguous_executor);
-        journaled.phase = ConversationSyncPhase::RecoveryRequired;
         Ok(())
     })?;
     Ok(updated)
@@ -1219,6 +1128,10 @@ fn commit_preserved_fork_binding(
         .fork_provider_thread_id
         .as_ref()
         .ok_or_else(|| "verified Codex fork lacks a provider thread id".to_string())?;
+    let fork_transcript_path = divergence
+        .fork_transcript_path
+        .as_ref()
+        .ok_or_else(|| "verified Codex fork lacks a transcript path".to_string())?;
     let fork_sha256 = divergence
         .fork_transcript_sha256
         .as_ref()
@@ -1226,6 +1139,7 @@ fn commit_preserved_fork_binding(
     let expected_stamp = ForkStamp {
         fork_thread_id: divergence.preserved_thread_id.clone(),
         fork_provider_thread_id: fork_provider_thread_id.clone(),
+        fork_transcript_path: fork_transcript_path.clone(),
         lineage_digest: divergence.local_lineage_digest.clone(),
         semantic_digest: divergence.local_semantic_digest.clone(),
         message_count: divergence.local_message_count,
@@ -1235,6 +1149,7 @@ fn commit_preserved_fork_binding(
         stamp.is_some_and(|stamp| {
             stamp.fork_thread_id == expected_stamp.fork_thread_id
                 && stamp.fork_provider_thread_id == expected_stamp.fork_provider_thread_id
+                && stamp.fork_transcript_path == expected_stamp.fork_transcript_path
                 && stamp.lineage_digest == expected_stamp.lineage_digest
                 && stamp.semantic_digest == expected_stamp.semantic_digest
                 && stamp.message_count == expected_stamp.message_count
@@ -1436,10 +1351,18 @@ fn complete_post_commit_presentation_task(
     })
 }
 
-fn schedule_post_commit_presentation(
+fn dispatch_post_commit_presentation(
     repository: LocalStateRepository,
     task: CodexPostCommitPresentationTask,
 ) {
+    // Activity reloads immediately after a manual fork command returns. Finish
+    // its best-effort rename and inventory refresh first so that reload cannot
+    // race the inherited title. Pull presentation remains detached because its
+    // durable receipt records the eventual outcome.
+    if !task.records_receipt {
+        let _ = complete_post_commit_presentation_task(&repository, &task);
+        return;
+    }
     #[cfg(not(test))]
     {
         let _ = std::thread::Builder::new()
@@ -1464,15 +1387,16 @@ pub fn recover_conversation_materializations(
     let operations = repository.load_conversation_sync_journal()?.operations;
     for mut operation in operations {
         let operation_id = operation.operation_id.clone();
+        let is_codex_divergence = matches!(
+            &operation.operation,
+            ConversationSyncOperationKind::CodexDivergence(_)
+        );
         let result = (|| -> Result<RecoveryOutcome, String> {
             if operation.direction == ConversationPlanDirection::Push {
                 mark_recovery_required(repository, &operation_id)?;
                 return Ok(RecoveryOutcome::RecoveryRequired);
             }
-            if matches!(
-                operation.operation,
-                ConversationSyncOperationKind::CodexDivergence(_)
-            ) {
+            if is_codex_divergence {
                 if operation.phase == ConversationSyncPhase::Prepared {
                     if operation.targets.iter().all(staged_target_is_valid) {
                         operation = set_phase(
@@ -1490,7 +1414,7 @@ pub fn recover_conversation_materializations(
                 }
                 if matches!(
                     operation.phase,
-                    ConversationSyncPhase::AwaitingManualFork
+                    ConversationSyncPhase::ForkUnacknowledged
                         | ConversationSyncPhase::RecoveryRequired
                 ) {
                     return Ok(RecoveryOutcome::RecoveryRequired);
@@ -1500,7 +1424,7 @@ pub fn recover_conversation_materializations(
                     let presentation_task = post_commit_presentation_task(&operation, &fork)?;
                     cleanup_and_retire(repository, &operation_id)?;
                     if let Some(task) = presentation_task {
-                        schedule_post_commit_presentation(repository.clone(), task);
+                        dispatch_post_commit_presentation(repository.clone(), task);
                     }
                     return Ok(RecoveryOutcome::Completed);
                 }
@@ -1515,25 +1439,63 @@ pub fn recover_conversation_materializations(
                     return Ok(RecoveryOutcome::RolledBack);
                 }
                 let mut no_failpoints = NoConversationFailpoints;
-                return match resume_codex_divergence_locked(
-                    repository,
-                    &operation_id,
-                    None,
-                    fork,
-                    &mut no_failpoints,
-                    // Startup recovery has no log scope; timings are only
-                    // reported for user-initiated Pull and verify.
-                    &mut |_, _| {},
-                )? {
-                    CodexDivergenceApplyOutcome::Committed(_)
-                    | CodexDivergenceApplyOutcome::ManualForkCommitted { .. } => {
-                        Ok(RecoveryOutcome::Completed)
-                    }
-                    CodexDivergenceApplyOutcome::AwaitingManualFork { .. }
-                    | CodexDivergenceApplyOutcome::RecoveryRequired { .. } => {
-                        Ok(RecoveryOutcome::RecoveryRequired)
-                    }
-                };
+                if operation.phase == ConversationSyncPhase::ForkAttemptPending {
+                    let attempt = operation
+                        .divergence()
+                        .and_then(|divergence| divergence.attempts.last())
+                        .ok_or_else(|| {
+                            "pending Codex fork lacks its durable executor attempt".to_string()
+                        })?;
+                    return match attempt.status {
+                        CodexForkAttemptStatus::Pending => {
+                            record_fork_attempt(
+                                repository,
+                                &operation_id,
+                                attempt.executor,
+                                CodexForkAttemptStatus::Unacknowledged,
+                            )?;
+                            Ok(RecoveryOutcome::RecoveryRequired)
+                        }
+                        CodexForkAttemptStatus::DefinitiveNoFork => {
+                            rollback_prepared(repository, &operation)?;
+                            Ok(RecoveryOutcome::RolledBack)
+                        }
+                        _ => Err("pending Codex fork has an invalid durable executor outcome"
+                            .to_string()),
+                    };
+                }
+                if operation.phase == ConversationSyncPhase::ReplacementStaged {
+                    // No executor was durably marked Pending, so no fork was
+                    // invoked. Startup recovery is deliberately inert: roll
+                    // back staging and let a user start a fresh operation.
+                    rollback_prepared(repository, &operation)?;
+                    return Ok(RecoveryOutcome::RolledBack);
+                }
+                if matches!(
+                    operation.phase,
+                    ConversationSyncPhase::ForkVerified
+                        | ConversationSyncPhase::ForkNamingRecorded
+                        | ConversationSyncPhase::LocalForkBound
+                        | ConversationSyncPhase::ProviderCommitted
+                        | ConversationSyncPhase::BindingsCommitted
+                        | ConversationSyncPhase::OriginalNamingRecorded
+                        | ConversationSyncPhase::LocalCommitted
+                ) {
+                    return match finish_verified_codex_divergence(
+                        repository,
+                        operation,
+                        &fork,
+                        &mut no_failpoints,
+                    )? {
+                        CodexDivergenceApplyOutcome::Committed(_)
+                        | CodexDivergenceApplyOutcome::ManualForkCommitted { .. } => {
+                            Ok(RecoveryOutcome::Completed)
+                        }
+                        CodexDivergenceApplyOutcome::ForkUnacknowledged { .. } => {
+                            Ok(RecoveryOutcome::RecoveryRequired)
+                        }
+                    };
+                }
             }
             match operation.phase {
                 ConversationSyncPhase::Prepared => {
@@ -1608,12 +1570,7 @@ pub fn recover_conversation_materializations(
                     report.rolled_back.push(operation_id);
                     continue;
                 }
-                if !matches!(
-                    operation.operation,
-                    ConversationSyncOperationKind::CodexDivergence(_)
-                ) {
-                    let _ = mark_recovery_required(repository, &operation_id);
-                }
+                let _ = mark_recovery_required(repository, &operation_id);
                 report.recovery_required.push(operation_id);
                 if error.contains("different host") {
                     continue;
@@ -1919,7 +1876,7 @@ fn insert_operations(
             {
                 return Err(format!(
                     "conversation thread '{}' already has a pending sync operation; \
-                     verify or cancel it before syncing this conversation again",
+                     resolve or retry it before syncing this conversation again",
                     operation.thread_id
                 ));
             }
@@ -2521,8 +2478,7 @@ fn binding_commit_is_complete(
             && binding.last_observed_file_sha256 == transcript_target_digest(operation)
             && binding.last_observed_lineage_digest == operation.lineage_digest
             && binding.last_observed_semantic_digest == operation.semantic_digest
-            && binding.source_generation
-                == operation.cloud.as_ref().map(|anchor| anchor.generation)
+            && binding.source_generation == operation.cloud.as_ref().map(|anchor| anchor.generation)
             && binding.source_manifest_sha256.as_deref()
                 == operation
                     .cloud
@@ -2988,4 +2944,67 @@ fn sha256(bytes: &[u8]) -> String {
 
 fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn manual_post_commit_presentation_finishes_before_dispatch_returns() {
+        let temp = tempfile::tempdir().unwrap();
+        let mallard_home = temp.path().join("mallard");
+        let codex_home = temp.path().join("codex");
+        let project = temp.path().join("project");
+        fs::create_dir(&mallard_home).unwrap();
+        fs::create_dir(&codex_home).unwrap();
+        fs::create_dir(&project).unwrap();
+        let repository = LocalStateRepository::from_home_dir(&mallard_home).unwrap();
+        let executable = temp.path().join("fake-codex");
+        let script = r#"#!/bin/sh
+while IFS= read -r line
+do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"id":1,"result":{}}'
+      ;;
+    *'"method":"thread/read"'*)
+      printf '%s\n' '{"id":2,"result":{"thread":{"name":null}}}'
+      ;;
+    *'"method":"thread/name/set"'*)
+      printf '%s\n' '{"id":3,"result":{}}'
+      ;;
+    *'"method":"thread/list"'*)
+      printf '%s\n' complete > "$CODEX_HOME/manual-presentation-complete"
+      printf '%s\n' '{"id":4,"result":{"data":[],"nextCursor":null}}'
+      ;;
+  esac
+done
+"#;
+        fs::write(&executable, script).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let task = CodexPostCommitPresentationTask {
+            operation_id: ConversationOperationId::parse("operation-manual-presentation").unwrap(),
+            request: CodexPostCommitPresentationRequest {
+                codex_executable: executable,
+                codex_home: codex_home.clone(),
+                project_directory: project,
+                fork_rename: Some(CodexThreadRenameRequest {
+                    thread_id: "fork-thread".to_string(),
+                    expected_current: None,
+                    desired: "Fork title".to_string(),
+                }),
+                original_rename: None,
+            },
+            records_receipt: false,
+        };
+
+        dispatch_post_commit_presentation(repository, task);
+
+        assert_eq!(
+            fs::read_to_string(codex_home.join("manual-presentation-complete")).unwrap(),
+            "complete\n"
+        );
+    }
 }

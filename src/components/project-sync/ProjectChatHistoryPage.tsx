@@ -79,6 +79,79 @@ interface ContentProps {
 const THREAD_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CHAT_HISTORY_PAGE_SIZE = 10;
 
+export interface ForkCompletionFeedback {
+  message: string;
+  success: boolean;
+}
+
+export function ForkCompletionBanner({ feedback }: { feedback: ForkCompletionFeedback }) {
+  return (
+    <div className={`sync-callout${feedback.success ? "" : " error"}`}
+      role={feedback.success ? "status" : "alert"}>
+      <Icon name={feedback.success ? "git-fork" : "alert-triangle"} size={15} />
+      <span>{feedback.message}</span>
+    </div>
+  );
+}
+
+interface ForkActivityPanelProps {
+  feedback: ForkCompletionFeedback | null;
+  checkpoint: CodexForkCheckpoint | null;
+  selectionMode?: "push" | "pull";
+  resolving: boolean;
+  onRetry: () => void;
+}
+
+export function ForkActivityPanel({
+  feedback,
+  checkpoint,
+  selectionMode,
+  resolving,
+  onRetry,
+}: ForkActivityPanelProps) {
+  const retryable = checkpoint?.status === "fork_unacknowledged";
+  if (!feedback && !checkpoint) return null;
+  return (
+    <>
+      {feedback && <ForkCompletionBanner feedback={feedback} />}
+      {checkpoint && !selectionMode && (
+        <section className="sync-fork-checkpoint" aria-live="polite">
+          <h4>
+            <Icon name="git-branch" size={15} />
+            {retryable ? "Fork not acknowledged" : "Fork recovery needs attention"}
+          </h4>
+          <p>{checkpoint.message}</p>
+          {retryable && (
+            <p>A fork may already exist in Codex. Retrying may create another fork.</p>
+          )}
+          <dl>
+            <div><dt>Source thread</dt><dd>{checkpoint.source_provider_thread_id}</dd></div>
+            <div><dt>Suggested name</dt><dd>{checkpoint.suggested_fork_name}</dd></div>
+          </dl>
+          {retryable && (
+            <div className="sync-fork-checkpoint-actions">
+              <button type="button" className="btn btn-primary" disabled={resolving}
+                onClick={onRetry}>
+                {resolving ? "Retrying…" : "Retry fork"}
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+    </>
+  );
+}
+
+export async function refreshActivityAndHandleForkFeedback(
+  refreshHistory: () => Promise<void>,
+  refreshComparison: () => Promise<void>,
+  dismiss: () => void,
+  dismissForkFeedback: boolean,
+) {
+  await Promise.all([refreshHistory(), refreshComparison()]);
+  if (dismissForkFeedback) dismiss();
+}
+
 interface BranchPickerProps {
   branches: GitBranchSummary[];
   selectedBranch: string;
@@ -668,7 +741,7 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
       case "stale_plan":
         return "The comparison is out of date. Refresh and review again.";
       case "resolution_pending":
-        return "A Codex fork checkpoint from an earlier Pull is pending. Verify or cancel it in the Pull review.";
+        return "A Codex fork checkpoint from an earlier Pull is pending. Retry it in the Pull review.";
       default:
         return "Can't sync — this session can't be changed safely right now.";
     }
@@ -1305,8 +1378,7 @@ export default function ProjectChatHistoryPage({
   const [actionBusyThreadId, setActionBusyThreadId] = useState<string | null>(null);
   const [forkBusyThreadId, setForkBusyThreadId] = useState<string | null>(null);
   const [forkCheckpoint, setForkCheckpoint] = useState<CodexForkCheckpoint | null>(null);
-  const [forkNotice, setForkNotice] = useState<string | null>(null);
-  const [forkVerifyThreadId, setForkVerifyThreadId] = useState("");
+  const [forkNotice, setForkNotice] = useState<ForkCompletionFeedback | null>(null);
   const [forkResolving, setForkResolving] = useState(false);
   const [detailsByThread, setDetailsByThread] = useState<Record<string, ThreadDetailsState>>({});
   const [openDetailOccurrences, setOpenDetailOccurrences] = useState<Set<string>>(new Set());
@@ -1380,7 +1452,7 @@ export default function ProjectChatHistoryPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.local_project_id, binding?.revision, activeStorageId, refreshEpoch, comparisonOverride]);
 
-  // Rehydrate a pending manual-fork checkpoint (for example after an app
+  // Rehydrate a pending Activity-page fork checkpoint (for example after an app
   // restart mid-fork). Pull-origin checkpoints stay with the Pull review.
   useEffect(() => {
     let cancelled = false;
@@ -1391,11 +1463,10 @@ export default function ProjectChatHistoryPage({
       try {
         const pending = await projectSyncApi.getPendingCodexDivergence(project.local_project_id);
         if (cancelled) return;
-        const manual = pending?.codex_fork_checkpoints.find(
+        const activityCheckpoint = pending?.codex_fork_checkpoints.find(
           (checkpoint) => checkpoint.origin === "manual",
         ) ?? null;
-        setForkCheckpoint(manual);
-        if (manual) setForkNotice(manual.message);
+        setForkCheckpoint(activityCheckpoint);
       } catch {
         // Rehydration is best-effort; the checkpoint re-surfaces on the next
         // fork action or refresh.
@@ -1420,17 +1491,24 @@ export default function ProjectChatHistoryPage({
     catch (reason) { setActionError(errorMessage(reason)); }
     finally { setActionBusyThreadId(null); }
   };
-  const refreshAfterFork = async () => {
-    await Promise.all([load(null, branch, true), loadComparison()]);
+  const refreshActivity = async (dismissForkFeedback: boolean) => {
+    await refreshActivityAndHandleForkFeedback(
+      () => load(null, branch, true),
+      loadComparison,
+      () => setForkNotice(null),
+      dismissForkFeedback,
+    );
   };
   const consumeForkResult = (result: RestoreResult) => {
-    const manualCheckpoint = result.codex_fork_checkpoints.find(
+    const activityCheckpoint = result.codex_fork_checkpoints.find(
       (checkpoint) => checkpoint.origin === "manual",
     ) ?? null;
-    setForkCheckpoint(result.status === "complete" ? null : manualCheckpoint);
-    setForkNotice(result.message);
-    setForkVerifyThreadId("");
-    return result.status === "complete" || manualCheckpoint == null;
+    setForkCheckpoint(result.status === "complete" ? null : activityCheckpoint);
+    setForkNotice({
+      message: result.message,
+      success: result.success,
+    });
+    return result.status === "complete" || activityCheckpoint == null;
   };
   const forkThread = async (threadId: string) => {
     setActionError(null);
@@ -1438,22 +1516,18 @@ export default function ProjectChatHistoryPage({
     setForkBusyThreadId(threadId);
     try {
       const result = await projectSyncApi.forkCodexThread(project.local_project_id, threadId);
-      if (consumeForkResult(result)) await refreshAfterFork();
+      if (consumeForkResult(result)) await refreshActivity(false);
     } catch (reason) { setActionError(errorMessage(reason)); }
     finally { setForkBusyThreadId(null); }
   };
-  const resolveForkCheckpoint = async (verify: boolean) => {
+  const retryForkCheckpoint = async () => {
     if (!forkCheckpoint) return;
     setActionError(null);
+    setForkNotice(null);
     setForkResolving(true);
     try {
-      const result = verify
-        ? await projectSyncApi.resumeCodexDivergence(
-          forkCheckpoint.operation_id,
-          forkVerifyThreadId.trim() || null,
-        )
-        : await projectSyncApi.cancelCodexDivergence(forkCheckpoint.operation_id);
-      if (consumeForkResult(result)) await refreshAfterFork();
+      const result = await projectSyncApi.retryCodexDivergence(forkCheckpoint.operation_id);
+      if (consumeForkResult(result)) await refreshActivity(false);
     } catch (reason) { setActionError(errorMessage(reason)); }
     finally { setForkResolving(false); }
   };
@@ -1486,50 +1560,14 @@ export default function ProjectChatHistoryPage({
     if (!wasOpen && !detailsByThread[threadId]?.page && !detailsByThread[threadId]?.loading) void loadDetails(threadId);
   };
 
-  const forkPanel = (forkNotice || forkCheckpoint) ? (
-    <>
-      {forkNotice && !forkCheckpoint && (
-        <div className="sync-callout" role="status">
-          <Icon name="git-fork" size={15} />
-          <span>{forkNotice}</span>
-        </div>
-      )}
-      {forkCheckpoint && !selectionMode && (
-        <section className="sync-fork-checkpoint" aria-live="polite">
-          <h4>
-            <Icon name="git-branch" size={15} />
-            {forkCheckpoint.status === "awaiting_manual_fork"
-              ? "Create the fork in Codex"
-              : "Verify the recovered Codex fork"}
-          </h4>
-          <p>{forkCheckpoint.message}</p>
-          <dl>
-            <div><dt>Source thread</dt><dd>{forkCheckpoint.source_provider_thread_id}</dd></div>
-            <div><dt>Suggested name</dt><dd>{forkCheckpoint.suggested_fork_name}</dd></div>
-          </dl>
-          <label className="sync-fork-checkpoint-id">
-            Forked thread ID (optional)
-            <input
-              type="text"
-              value={forkVerifyThreadId}
-              disabled={forkResolving}
-              onChange={(event) => setForkVerifyThreadId(event.target.value)}
-              placeholder="Detected automatically when only one fork exists"
-            />
-          </label>
-          <div className="sync-fork-checkpoint-actions">
-            <button type="button" className="btn btn-primary" disabled={forkResolving}
-              onClick={() => void resolveForkCheckpoint(true)}>
-              {forkResolving ? "Verifying…" : "Verify fork"}
-            </button>
-            <button type="button" className="btn btn-ghost" disabled={forkResolving}
-              onClick={() => void resolveForkCheckpoint(false)}>
-              Cancel
-            </button>
-          </div>
-        </section>
-      )}
-    </>
-  ) : null;
-  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void load(null, branch, true); void loadComparison(); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onFork={(id) => void forkThread(id)} forkBusyThreadId={forkBusyThreadId} forkPanel={forkPanel} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
+  const forkPanel = (
+    <ForkActivityPanel
+      feedback={forkNotice}
+      checkpoint={forkCheckpoint}
+      selectionMode={selectionMode}
+      resolving={forkResolving}
+      onRetry={() => void retryForkCheckpoint()}
+    />
+  );
+  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void refreshActivity(true); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onFork={(id) => void forkThread(id)} forkBusyThreadId={forkBusyThreadId} forkPanel={forkPanel} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
 }

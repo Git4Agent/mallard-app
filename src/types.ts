@@ -737,13 +737,7 @@ export interface ConversationResolutionSelection {
 
 export type CodexForkExecutor =
   | "app_server_stdio"
-  | "native_pty"
-  | "manual";
-
-export interface CodexNativeChildPin {
-  provider_thread_id: string;
-  transcript_sha256: string;
-}
+  | "native_pty";
 
 export type ConversationNameStatus =
   | "applied"
@@ -777,7 +771,6 @@ export interface ConversationDivergencePlan {
   codex_executable: string;
   codex_executable_sha256: string;
   available_executors: CodexForkExecutor[];
-  pre_existing_children: CodexNativeChildPin[];
 }
 
 export interface ConversationPlanAction {
@@ -831,7 +824,7 @@ export interface RestorePlan {
   remote_continuity?: RemoteContinuity | null;
 }
 
-export type RestoreApplyStatus = "complete" | "awaiting_manual_fork" | "recovery_required";
+export type RestoreApplyStatus = "complete" | "fork_unacknowledged" | "recovery_required";
 
 export type ForkOrigin = "pull_preserve" | "manual";
 

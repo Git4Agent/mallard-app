@@ -56,6 +56,42 @@ test("log exposes retained-history pagination", () => {
   assert.match(html, />Load older logs</);
 });
 
+test("fork completion log levels render green for success and red for failure", () => {
+  const html = renderToStaticMarkup(
+    <LogPanel
+      lines={[
+        {
+          schema: 1,
+          id: "event-fork-success",
+          ts: 2,
+          level: "success",
+          type: "pull",
+          event: "fork.completed",
+          message: "Created the Codex fork 'Fork title'",
+        },
+        {
+          schema: 1,
+          id: "event-fork-failure",
+          ts: 1,
+          level: "error",
+          type: "pull",
+          event: "fork.failed",
+          message: "Mallard did not acknowledge the Codex fork",
+        },
+      ]}
+      onClose={() => undefined}
+    />,
+  );
+  assert.match(html, /log-line log-success/);
+  assert.match(html, /Created the Codex fork/);
+  assert.match(html, /log-line log-error/);
+  assert.match(html, /Mallard did not acknowledge the Codex fork/);
+
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.log-success \.log-msg \{ color: var\(--green\); \}/);
+  assert.match(css, /\.log-error \.log-msg \{ color: var\(--red\); \}/);
+});
+
 test("Push and Pull open the activity log at its live tail", () => {
   const logSource = readFileSync("src/components/LogPanel.tsx", "utf8");
   const syncSource = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");

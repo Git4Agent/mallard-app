@@ -10848,21 +10848,9 @@ button.sync-project-file-expand { cursor: pointer; }
   gap: 3px;
 }
 
-.sync-fork-checkpoint small,
-.sync-fork-checkpoint label span {
+.sync-fork-checkpoint small {
   color: var(--text-2);
   font-size: 10.5px;
-}
-
-.sync-fork-checkpoint label {
-  display: grid;
-  gap: 5px;
-  color: var(--text-1);
-  font-size: 11px;
-}
-
-.sync-fork-checkpoint input[type="text"] {
-  width: 100%;
 }
 
 .sync-fork-checkpoint h4 {

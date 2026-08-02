@@ -51,8 +51,7 @@ interface Props {
   embedded?: boolean;
   initialStep?: SyncReviewStep;
   onApply: (selection: PullReviewSelection) => void;
-  onVerifyCodexFork?: (operationId: string, providerThreadId: string | null) => void;
-  onCancelCodexFork?: (operationId: string) => void;
+  onRetryCodexFork?: (operationId: string) => void;
   onRestartCodexApp?: (
     operationId: string,
     appKind: "codex" | "codex_plus_plus",
@@ -459,8 +458,7 @@ export default function RestorePlanView({
   embedded = false,
   initialStep = "history",
   onApply,
-  onVerifyCodexFork,
-  onCancelCodexFork,
+  onRetryCodexFork,
   onRestartCodexApp,
   onRefresh,
   onBack,
@@ -481,7 +479,6 @@ export default function RestorePlanView({
       destructive_approved: false,
     },
   ])));
-  const [manualForkProviderThreadId, setManualForkProviderThreadId] = useState("");
   const [restartChatsComplete, setRestartChatsComplete] = useState(false);
   const conversationItems = useMemo(
     () => items.filter((item) => itemKindLabel(item) === "Conversation"),
@@ -516,10 +513,6 @@ export default function RestorePlanView({
       },
     ])));
   }, [divergenceActions]);
-
-  useEffect(() => {
-    setManualForkProviderThreadId("");
-  }, [restoreResult?.codex_fork_checkpoints?.[0]?.operation_id]);
 
   useEffect(() => {
     setRestartChatsComplete(false);
@@ -562,7 +555,7 @@ export default function RestorePlanView({
     && !resolution.destructive_approved
     && !preservedDivergenceActionIds.has(resolution.action_id)
   ));
-  // Manual-fork checkpoints are resolved from the Activity page; the Pull
+  // Activity-page fork checkpoints stay on the Activity page; the Pull
   // review drives only the checkpoints its own plan created.
   const forkCheckpoints = (restoreResult?.codex_fork_checkpoints ?? []).filter(
     (checkpoint) => checkpoint.origin !== "manual",
@@ -572,6 +565,7 @@ export default function RestorePlanView({
   const forkCheckpointActive = Boolean(
     forkCheckpoint && restoreResult?.status !== "complete",
   );
+  const forkRetryable = forkCheckpoint?.status === "fork_unacknowledged";
   const pendingProjectContentDecisionCount = projectContentItems.filter((item) => (
     pendingIds(item, completedActionIds).length > 0 && !completedResourceIds.has(item.resourceId)
   )).length;
@@ -606,9 +600,9 @@ export default function RestorePlanView({
   const completedProjectItems = projectItems.filter((item) => completedResourceIds.has(item.resourceId));
   const failedProjectItems = projectItems.filter((item) => failedResourceIds.has(item.resourceId));
   const outcomeTitle = forkCheckpointActive
-    ? forkCheckpoint?.status === "awaiting_manual_fork"
-      ? "Waiting for a Codex fork"
-      : "Fork recovery needs verification"
+    ? forkRetryable
+      ? "Fork not acknowledged"
+      : "Fork recovery needs attention"
     : error && hasResult
     ? "Pull needs attention"
     : failureCount > 0
@@ -623,7 +617,9 @@ export default function RestorePlanView({
       ? "Verifying readiness…"
       : "Restoring selected changes…"
     : forkCheckpointActive
-      ? "Complete the fork checkpoint above"
+      ? forkRetryable
+        ? "Complete the fork checkpoint above"
+        : "Recovery required"
       : reviewCanClose
         ? "Done"
         : hasResult && selectedCount > 0
@@ -892,13 +888,13 @@ export default function RestorePlanView({
                   <div>
                     <Icon name="git-branch" size={18} />
                     <span>
-                      <strong>{forkCheckpoint.status === "awaiting_manual_fork" ? "Create the local fork in Codex" : "Verify the recovered Codex fork"}</strong>
+                      <strong>{forkRetryable ? "Fork not acknowledged" : "Fork recovery needs attention"}</strong>
                       {forkCheckpoints.length > 1 && (
                         <small>Fork checkpoint 1 of {forkCheckpoints.length} — the rest of this Pull is already applied.</small>
                       )}
                       <small>{forkCheckpoint.message}</small>
-                      {forkCheckpoint.status === "awaiting_manual_fork" && (
-                        <small>Finish any active turn first. Fork the source thread without sending a new message in the fork.</small>
+                      {forkRetryable && (
+                        <small>A fork may already exist in Codex. Retrying may create another fork.</small>
                       )}
                     </span>
                   </div>
@@ -906,37 +902,18 @@ export default function RestorePlanView({
                     <div><dt>Source thread</dt><dd><code>{forkCheckpoint.source_provider_thread_id}</code></dd></div>
                     <div><dt>Suggested name</dt><dd>{forkCheckpoint.suggested_fork_name}</dd></div>
                   </dl>
-                  <label>
-                    Forked thread ID <span>(optional; leave blank for a bounded scan)</span>
-                    <input
-                      type="text"
-                      value={manualForkProviderThreadId}
-                      disabled={busy}
-                      onChange={(event) => setManualForkProviderThreadId(event.target.value)}
-                      placeholder="019f…"
-                    />
-                  </label>
-                  <div>
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      disabled={busy || !onVerifyCodexFork}
-                      onClick={() => onVerifyCodexFork?.(
-                        forkCheckpoint.operation_id,
-                        manualForkProviderThreadId.trim() || null,
-                      )}
-                    >
-                      Verify fork
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      disabled={busy || !onCancelCodexFork || forkCheckpoint.status !== "awaiting_manual_fork"}
-                      onClick={() => onCancelCodexFork?.(forkCheckpoint.operation_id)}
-                    >
-                      Cancel
-                    </button>
-                  </div>
+                  {forkRetryable && (
+                    <div>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={busy || !onRetryCodexFork}
+                        onClick={() => onRetryCodexFork?.(forkCheckpoint.operation_id)}
+                      >
+                        {busy ? "Retrying…" : "Retry fork"}
+                      </button>
+                    </div>
+                  )}
                 </section>
               )}
               {!hasResult && hasUnconfirmedCloudOnly && (
@@ -1033,10 +1010,10 @@ export default function RestorePlanView({
                 <div className="sync-callout warning sync-sync-review-blocker">
                   <Icon name="alert-triangle" size={15} />
                   <span>
-                    <strong>{keptLocalConversationItems.length === 1 ? "1 conversation differs" : `${keptLocalConversationItems.length} conversations differ`}</strong>
-                    {`Apply will keep the local ${keptLocalConversationItems.length === 1 ? "version" : "versions"} and establish a comparison baseline for ${storageName || "storage"}. ${keptLocalConversationItems.length === 1 ? "It" : "They"} can be pushed later.`}
+                    <strong>{keptLocalConversationItems.length === 1 ? "1 conversation has local changes" : `${keptLocalConversationItems.length} conversations have local changes`}</strong>
+                    {`Your local ${keptLocalConversationItems.length === 1 ? "version will" : "versions will"} stay unchanged. ${keptLocalConversationItems.length === 1 ? "You can push it" : "You can push them"} later.`}
                   </span>
-                  <button type="button" className="btn btn-ghost" onClick={() => setActiveStep("history")}>Review local</button>
+                  <button type="button" className="btn btn-ghost" onClick={() => setActiveStep("history")}>Review</button>
                 </div>
               )}
               {!hasResult && manualItems.length > 0 && (

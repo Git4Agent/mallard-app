@@ -1480,6 +1480,7 @@ pub enum ConversationMaterializationState {
 pub struct ForkStamp {
     pub fork_thread_id: ThreadId,
     pub fork_provider_thread_id: String,
+    pub fork_transcript_path: String,
     pub lineage_digest: String,
     pub semantic_digest: String,
     pub message_count: u64,
@@ -1494,6 +1495,10 @@ impl ForkStamp {
         validate_provider_thread_id(
             "conversation fork stamp provider thread",
             &self.fork_provider_thread_id,
+        )?;
+        validate_absolute_clean_path(
+            "conversation fork stamp transcript",
+            &self.fork_transcript_path,
         )?;
         validate_sha256("conversation fork stamp lineage", &self.lineage_digest)?;
         validate_sha256("conversation fork stamp semantics", &self.semantic_digest)?;
@@ -1737,7 +1742,7 @@ pub enum ConversationSyncPhase {
     Prepared,
     ReplacementStaged,
     ForkAttemptPending,
-    AwaitingManualFork,
+    ForkUnacknowledged,
     ForkVerified,
     ForkNamingRecorded,
     LocalForkBound,
@@ -1755,7 +1760,7 @@ pub enum CodexForkAttemptStatus {
     Pending,
     DefinitiveNoFork,
     Verified,
-    Ambiguous,
+    Unacknowledged,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1785,7 +1790,7 @@ pub enum CodexInventoryRefreshStatus {
 
 /// Which entry point created a fork-carrying divergence operation. The
 /// executor ladder, verification, and checkpoints are identical for both;
-/// origin decides what follows fork adoption — a Pull restores the cloud
+/// origin decides what follows fork acknowledgment — a Pull restores the cloud
 /// branch into the source, a manual fork stops with the source untouched.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1803,6 +1808,7 @@ pub struct CodexDivergenceOperation {
     pub local_branch_preserved: bool,
     pub preserved_thread_id: ThreadId,
     pub source_provider_thread_id: String,
+    pub source_transcript_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_provider_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1822,7 +1828,6 @@ pub struct CodexDivergenceOperation {
     pub codex_executable: String,
     pub codex_executable_sha256: String,
     pub available_executors: Vec<CodexForkExecutor>,
-    pub pre_existing_children: Vec<CodexNativeChildPin>,
     pub attempts: Vec<CodexForkAttempt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_executor: Option<CodexForkExecutor>,
@@ -1857,9 +1862,12 @@ impl CodexDivergenceOperation {
             codex_executable: self.codex_executable.clone(),
             codex_executable_sha256: self.codex_executable_sha256.clone(),
             available_executors: self.available_executors.clone(),
-            pre_existing_children: self.pre_existing_children.clone(),
         };
         plan.validate(source_thread_id)?;
+        validate_absolute_clean_path(
+            "Codex divergence source transcript",
+            &self.source_transcript_path,
+        )?;
         if self.origin == ForkOrigin::Manual {
             if self.resolution != ConversationDivergenceResolution::PreserveLocalWithNativeFork {
                 return Err("manual fork operation must preserve the local branch".to_string());
@@ -1904,7 +1912,7 @@ impl CodexDivergenceOperation {
         if let Some(digest) = &self.fork_transcript_sha256 {
             validate_sha256("Codex divergence fork transcript", digest)?;
         }
-        if self.attempts.len() > 3 {
+        if self.attempts.len() > self.available_executors.len() {
             return Err("Codex divergence has too many executor attempts".to_string());
         }
         for (index, attempt) in self.attempts.iter().enumerate() {
@@ -1920,7 +1928,7 @@ impl CodexDivergenceOperation {
         let expected_current = self.attempts.last().and_then(|attempt| {
             matches!(
                 attempt.status,
-                CodexForkAttemptStatus::Pending | CodexForkAttemptStatus::Ambiguous
+                CodexForkAttemptStatus::Pending | CodexForkAttemptStatus::Unacknowledged
             )
             .then_some(attempt.executor)
         });
@@ -1965,20 +1973,36 @@ impl CodexDivergenceOperation {
                         | ConversationSyncPhase::BindingsCommitted
                         | ConversationSyncPhase::OriginalNamingRecorded
                         | ConversationSyncPhase::LocalCommitted
+                        | ConversationSyncPhase::RecoveryRequired
                 );
                 if phase_requires_verified_fork != has_verified_fork {
                     return Err(
                         "Codex divergence phase disagrees with verified fork state".to_string()
                     );
                 }
-                if phase == ConversationSyncPhase::AwaitingManualFork
-                    && (self.current_executor != Some(CodexForkExecutor::Manual)
-                        || self.attempts.last().is_none_or(|attempt| {
-                            attempt.executor != CodexForkExecutor::Manual
-                                || attempt.status != CodexForkAttemptStatus::Pending
-                        }))
+                if phase == ConversationSyncPhase::ForkUnacknowledged
+                    && self.attempts.last().is_none_or(|attempt| {
+                        attempt.status != CodexForkAttemptStatus::Unacknowledged
+                    })
                 {
-                    return Err("manual fork checkpoint has invalid executor state".to_string());
+                    return Err(
+                        "unacknowledged Codex fork checkpoint has invalid executor state"
+                            .to_string(),
+                    );
+                }
+                if phase == ConversationSyncPhase::ForkAttemptPending
+                    && self.attempts.last().is_none_or(|attempt| {
+                        !matches!(
+                            attempt.status,
+                            CodexForkAttemptStatus::Pending
+                                | CodexForkAttemptStatus::DefinitiveNoFork
+                        )
+                    })
+                {
+                    return Err(
+                        "pending Codex fork phase lacks an active or definitive executor attempt"
+                            .to_string(),
+                    );
                 }
                 if matches!(
                     phase,
@@ -1989,17 +2013,6 @@ impl CodexDivergenceOperation {
                 {
                     return Err(
                         "Codex divergence has executor state before fork execution".to_string()
-                    );
-                }
-                if phase == ConversationSyncPhase::RecoveryRequired
-                    && !has_verified_fork
-                    && self
-                        .attempts
-                        .last()
-                        .is_none_or(|attempt| attempt.status != CodexForkAttemptStatus::Ambiguous)
-                {
-                    return Err(
-                        "pre-verification Codex recovery lacks an ambiguous executor".to_string(),
                     );
                 }
             }
@@ -2264,10 +2277,8 @@ impl ConversationSyncOperation {
                     }
                     ForkOrigin::Manual => {
                         if self.cloud.is_some() || !self.targets.is_empty() {
-                            return Err(
-                                "manual fork operation carries no cloud anchor or targets"
-                                    .to_string(),
-                            );
+                            return Err("manual fork operation carries no cloud anchor or targets"
+                                .to_string());
                         }
                     }
                 }
@@ -2826,23 +2837,6 @@ pub struct ConversationResolutionSelection {
 pub enum CodexForkExecutor {
     AppServerStdio,
     NativePty,
-    Manual,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct CodexNativeChildPin {
-    pub provider_thread_id: String,
-    pub transcript_sha256: String,
-}
-
-impl CodexNativeChildPin {
-    fn validate(&self) -> Result<(), String> {
-        validate_provider_thread_id(
-            "Codex native child provider thread",
-            &self.provider_thread_id,
-        )?;
-        validate_sha256("Codex native child transcript", &self.transcript_sha256)
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -2868,7 +2862,6 @@ pub struct ConversationDivergencePlan {
     pub codex_executable: String,
     pub codex_executable_sha256: String,
     pub available_executors: Vec<CodexForkExecutor>,
-    pub pre_existing_children: Vec<CodexNativeChildPin>,
 }
 
 impl ConversationDivergencePlan {
@@ -2948,25 +2941,11 @@ impl ConversationDivergencePlan {
         let expected = [
             CodexForkExecutor::AppServerStdio,
             CodexForkExecutor::NativePty,
-            CodexForkExecutor::Manual,
         ];
         if self.available_executors != expected {
             return Err(
-                "conversation divergence executors must be app-server, native PTY, then manual"
-                    .to_string(),
+                "conversation divergence executors must be app-server then native PTY".to_string(),
             );
-        }
-        if self.pre_existing_children.len() > 1_024 {
-            return Err("conversation divergence has too many existing children".to_string());
-        }
-        let mut child_ids = BTreeSet::new();
-        for child in &self.pre_existing_children {
-            child.validate()?;
-            if child.provider_thread_id == self.source_provider_thread_id
-                || !child_ids.insert(child.provider_thread_id.clone())
-            {
-                return Err("conversation divergence has invalid existing child pins".to_string());
-            }
         }
         Ok(())
     }

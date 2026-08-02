@@ -2206,10 +2206,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  const verifyCodexFork = async (
-    operationId: string,
-    providerThreadId: string | null,
-  ) => {
+  const retryCodexFork = async (operationId: string) => {
     if (!restorePlan) return;
     const requestId = restoreRequest.current;
     const checkpointActionId = restoreResult?.codex_fork_checkpoints
@@ -2217,10 +2214,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setBusy(true);
     setRestoreError(null);
     try {
-      const result = await projectSyncApi.resumeCodexDivergence(
-        operationId,
-        providerThreadId,
-      );
+      const result = await projectSyncApi.retryCodexDivergence(operationId);
       if (restoreRequest.current !== requestId) return;
       setRestoreResult(result);
       setPullApplyPhase("complete");
@@ -2245,42 +2239,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const remaining = result.codex_fork_checkpoints
         .filter((checkpoint) => checkpoint.origin !== "manual").length;
       if (remaining > 0) {
-        setNotice(`Codex fork verified. ${remaining} more fork checkpoint${remaining === 1 ? "" : "s"} to resolve.`);
+        setNotice(`Codex fork acknowledged. ${remaining} more fork checkpoint${remaining === 1 ? "" : "s"} can be retried.`);
         return;
       }
-      setNotice("Codex fork verified. The cloud conversation was restored into the original thread.");
+      setNotice("Codex fork acknowledged. The cloud conversation was restored into the original thread.");
       await refreshReviewAfterForkQueue(requestId, "The conversation conflict is resolved");
     } catch (reason) {
       if (restoreRequest.current === requestId) {
         setRestoreError(errorMessage(reason));
         setPullApplyPhase("complete");
       }
-    } finally {
-      if (restoreRequest.current === requestId) setBusy(false);
-    }
-  };
-
-  const cancelCodexFork = async (operationId: string) => {
-    const requestId = restoreRequest.current;
-    setBusy(true);
-    setRestoreError(null);
-    try {
-      const result = await projectSyncApi.cancelCodexDivergence(operationId);
-      if (restoreRequest.current !== requestId) return;
-      const remaining = result.codex_fork_checkpoints
-        .filter((checkpoint) => checkpoint.origin !== "manual").length;
-      if (remaining > 0) {
-        setRestoreResult(result);
-        setPullApplyPhase("complete");
-        setNotice(`Codex fork checkpoint canceled. ${remaining} more fork checkpoint${remaining === 1 ? "" : "s"} to resolve.`);
-        return;
-      }
-      setRestoreResult(null);
-      setPullApplyPhase("idle");
-      setNotice("Codex fork checkpoint canceled. The original conversation was not replaced.");
-      await refreshReviewAfterForkQueue(requestId, "The fork checkpoint is canceled");
-    } catch (reason) {
-      if (restoreRequest.current === requestId) setRestoreError(errorMessage(reason));
     } finally {
       if (restoreRequest.current === requestId) setBusy(false);
     }
@@ -2615,11 +2583,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         busy={busy}
         error={restoreError}
         onApply={(selection) => void applyReview(selection)}
-        onVerifyCodexFork={(operationId, providerThreadId) => {
-          void verifyCodexFork(operationId, providerThreadId);
-        }}
-        onCancelCodexFork={(operationId) => {
-          void cancelCodexFork(operationId);
+        onRetryCodexFork={(operationId) => {
+          void retryCodexFork(operationId);
         }}
         onRestartCodexApp={(operationId, appKind) => {
           void restartCodexAppAfterPull(operationId, appKind);

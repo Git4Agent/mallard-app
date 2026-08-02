@@ -236,7 +236,7 @@ fn blocked_reason(reason: ConversationReasonCode) -> &'static str {
         }
         ConversationReasonCode::ResolutionPending => {
             "A Codex fork checkpoint from an earlier Pull is still pending. \
-             Verify or cancel it in the Pull review first."
+             Retry it in the Pull review first."
         }
         _ => "This conversation cannot be changed safely.",
     }

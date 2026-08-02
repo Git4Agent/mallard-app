@@ -71,7 +71,7 @@ happened, and Mallard never force-kills or silently retargets the app.
 
 ### Checkpoint queue
 
-Verify and cancel stay in the same review page. The checkpoint panel shows
+Explicit retry stays in the same review page. The checkpoint panel shows
 the first pending fork ("Fork checkpoint 1 of N — the rest of this Pull is
 already applied"), and every backend reply — apply, resume, cancel, and the
 pending rehydration on reopen — carries the full remaining queue:

@@ -197,8 +197,7 @@ function divergenceAction(): ConversationPlanAction {
       desired_original_name: "Analyze codebase knowledge graph",
       codex_executable: "/usr/local/bin/codex",
       codex_executable_sha256: "1".repeat(64),
-      available_executors: ["app_server_stdio", "native_pty", "manual"],
-      pre_existing_children: [],
+      available_executors: ["app_server_stdio", "native_pty"],
     },
   };
 }
@@ -247,7 +246,7 @@ test("conversation divergence defaults to keep-both and renders the reviewed for
   assert.match(html, /Conversation conflict/);
   assert.match(html, /Keep both branches <em>Recommended<\/em>/);
   assert.match(html, /Use cloud version only/);
-  assert.match(html, /app-server → native PTY → manual/);
+  assert.match(html, /app-server → native PTY/);
   assert.match(html, /local before Pull/);
   assert.match(
     html,
@@ -314,7 +313,7 @@ test("a preserved divergence recommends cloud adoption and waives the destructiv
   assert.doesNotMatch(html, /Keep both branches <em>Recommended<\/em>/);
 });
 
-test("manual fork checkpoints expose only verify and cancel continuation actions", () => {
+test("unacknowledged fork checkpoints expose only an explicit retry", () => {
   const action = divergenceAction();
   const conflictPlan: RestorePlan = {
     ...restorePlan,
@@ -323,8 +322,8 @@ test("manual fork checkpoints expose only verify and cancel continuation actions
   };
   const checkpoint: RestoreResult = {
     success: false,
-    status: "awaiting_manual_fork",
-    message: "Create the reviewed fork in Codex.",
+    status: "fork_unacknowledged",
+    message: "Mallard did not acknowledge a fork from this attempt.",
     plan_id: conflictPlan.plan_id,
     applied_action_ids: [],
     failed_actions: [],
@@ -337,8 +336,8 @@ test("manual fork checkpoints expose only verify and cancel continuation actions
       thread_id: action.thread_id,
       source_provider_thread_id: action.divergence!.source_provider_thread_id,
       suggested_fork_name: action.divergence!.desired_fork_name,
-      status: "awaiting_manual_fork",
-      message: "Create the reviewed fork in Codex, then verify it here",
+      status: "fork_unacknowledged",
+      message: "Mallard did not acknowledge a fork from this attempt.",
     }],
   };
   const html = renderToStaticMarkup(
@@ -358,19 +357,55 @@ test("manual fork checkpoints expose only verify and cancel continuation actions
       error={null}
       initialStep="review"
       onApply={() => undefined}
-      onVerifyCodexFork={() => undefined}
-      onCancelCodexFork={() => undefined}
+      onRetryCodexFork={() => undefined}
       onRefresh={() => undefined}
       onBack={() => undefined}
     />,
   );
-  assert.match(html, /Create the local fork in Codex/);
-  assert.match(html, /Finish any active turn first/);
-  assert.match(html, /without sending a new message/);
-  assert.match(html, /Verify fork/);
-  assert.match(html, />Cancel</);
+  assert.match(html, /Fork not acknowledged/);
+  assert.match(html, /A fork may already exist in Codex/);
+  assert.match(html, /Retrying may create another fork/);
+  assert.match(html, /Retry fork/);
+  assert.doesNotMatch(html, /Forked thread ID/);
+  assert.doesNotMatch(html, /Verify fork/);
+  assert.doesNotMatch(html, />Cancel</);
   assert.doesNotMatch(html, /Use cloud version only/);
   assert.doesNotMatch(html, /Force/);
+
+  const recoveryRequired: RestoreResult = {
+    ...checkpoint,
+    status: "recovery_required",
+    codex_fork_checkpoints: checkpoint.codex_fork_checkpoints.map((item) => ({
+      ...item,
+      status: "recovery_required",
+      message: "The acknowledged fork needs recovery.",
+    })),
+  };
+  const recoveryHtml = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      profileLabel="myconf2"
+      plan={conflictPlan}
+      binding={binding}
+      readiness={null}
+      restoreResult={recoveryRequired}
+      phase="complete"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="review"
+      onApply={() => undefined}
+      onRetryCodexFork={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.match(recoveryHtml, /Fork recovery needs attention/);
+  assert.doesNotMatch(recoveryHtml, /Retry fork/);
+  assert.doesNotMatch(recoveryHtml, /Retrying may create another fork/);
 });
 
 function secondDivergenceAction(): ConversationPlanAction {
@@ -392,7 +427,7 @@ function secondDivergenceAction(): ConversationPlanAction {
   };
 }
 
-test("a fork checkpoint queue verifies one fork at a time in the same review", () => {
+test("a fork checkpoint queue retries one fork at a time in the same review", () => {
   const first = divergenceAction();
   const second = secondDivergenceAction();
   const conflictPlan: RestorePlan = {
@@ -402,8 +437,8 @@ test("a fork checkpoint queue verifies one fork at a time in the same review", (
   };
   const queued: RestoreResult = {
     success: true,
-    status: "awaiting_manual_fork",
-    message: "Applied 0 restore actions; 2 Codex fork checkpoint(s) need verification",
+    status: "fork_unacknowledged",
+    message: "Applied 0 restore actions; 2 Codex fork attempts were not acknowledged",
     plan_id: conflictPlan.plan_id,
     applied_action_ids: [],
     failed_actions: [],
@@ -411,23 +446,25 @@ test("a fork checkpoint queue verifies one fork at a time in the same review", (
     codex_fork_checkpoints: [
       {
         operation_id: "operation-divergence-first",
+        origin: "pull_preserve",
         plan_id: conflictPlan.plan_id,
         action_id: first.action_id,
         thread_id: first.thread_id,
         source_provider_thread_id: first.divergence!.source_provider_thread_id,
         suggested_fork_name: first.divergence!.desired_fork_name,
-        status: "awaiting_manual_fork",
-        message: "Create the reviewed fork in Codex, then verify it here",
+        status: "fork_unacknowledged",
+        message: "Mallard did not acknowledge a fork from this attempt.",
       },
       {
         operation_id: "operation-divergence-second",
+        origin: "pull_preserve",
         plan_id: conflictPlan.plan_id,
         action_id: second.action_id,
         thread_id: second.thread_id,
         source_provider_thread_id: second.divergence!.source_provider_thread_id,
         suggested_fork_name: second.divergence!.desired_fork_name,
-        status: "awaiting_manual_fork",
-        message: "Create the reviewed fork in Codex, then verify it here",
+        status: "fork_unacknowledged",
+        message: "Mallard did not acknowledge a fork from this attempt.",
       },
     ],
   };
@@ -448,8 +485,7 @@ test("a fork checkpoint queue verifies one fork at a time in the same review", (
       error={null}
       initialStep="review"
       onApply={() => undefined}
-      onVerifyCodexFork={() => undefined}
-      onCancelCodexFork={() => undefined}
+      onRetryCodexFork={() => undefined}
       onRefresh={() => undefined}
       onBack={() => undefined}
     />,
@@ -462,8 +498,9 @@ test("a fork checkpoint queue verifies one fork at a time in the same review", (
     /019fac21-4aba-7fc2-bb7d-df711c950988/,
     "only the first checkpoint of the queue is actionable at a time",
   );
-  assert.match(html, /Verify fork/);
-  assert.match(html, />Cancel</);
+  assert.match(html, /Retry fork/);
+  assert.doesNotMatch(html, /Verify fork/);
+  assert.doesNotMatch(html, />Cancel</);
 });
 
 test("multiple conversation conflicts stay distinguishable by title", () => {
@@ -782,9 +819,10 @@ test("conversation conflicts become one-time keep-local decisions without blocki
   );
 
   assert.match(html, /aria-label="Git &amp; sessions, 1 selected, needs attention/);
-  assert.match(html, /1 conversation differs/);
-  assert.match(html, /establish a comparison baseline/);
-  assert.match(html, /It can be pushed later/);
+  assert.match(html, /1 conversation has local changes/);
+  assert.match(html, /Your local version will stay unchanged/);
+  assert.match(html, /You can push it later/);
+  assert.match(html, />Review</);
   assert.match(html, />Optional change not selected</);
   assert.match(html, /Apply will skip agents\.md and leave it unchanged/);
   assert.doesNotMatch(html, /resolve.*separately/i);
@@ -975,7 +1013,7 @@ test("the Apply coordinator restores then verifies, rejecting selections outside
   assert.doesNotMatch(calls.join(","), /unexpected-restore/);
 });
 
-test("a manual fork checkpoint defers only its thread while verification proceeds", async () => {
+test("an unacknowledged fork checkpoint defers only its thread while readiness proceeds", async () => {
   const action = divergenceAction();
   const conflictPlan: RestorePlan = {
     ...restorePlan,
@@ -984,8 +1022,8 @@ test("a manual fork checkpoint defers only its thread while verification proceed
   };
   const checkpoint: RestoreResult = {
     success: true,
-    status: "awaiting_manual_fork",
-    message: "Applied 0 restore actions; 1 Codex fork checkpoint(s) need verification",
+    status: "fork_unacknowledged",
+    message: "Applied 0 restore actions; the Codex fork was not acknowledged",
     plan_id: conflictPlan.plan_id,
     applied_action_ids: [],
     failed_actions: [],
@@ -998,8 +1036,8 @@ test("a manual fork checkpoint defers only its thread while verification proceed
       thread_id: action.thread_id,
       source_provider_thread_id: action.divergence!.source_provider_thread_id,
       suggested_fork_name: action.divergence!.desired_fork_name,
-      status: "awaiting_manual_fork",
-      message: "Create the reviewed fork in Codex, then verify it here",
+      status: "fork_unacknowledged",
+      message: "Mallard did not acknowledge a fork from this attempt.",
     }],
   };
   const calls: string[] = [];

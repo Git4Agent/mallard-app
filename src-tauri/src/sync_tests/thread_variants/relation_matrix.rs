@@ -278,9 +278,7 @@ pub(super) fn reviewed_action(
             available_executors: vec![
                 CodexForkExecutor::AppServerStdio,
                 CodexForkExecutor::NativePty,
-                CodexForkExecutor::Manual,
             ],
-            pre_existing_children: Vec::new(),
         }
     });
     let host_id = HostId::parse("11111111111111111111111111111111").unwrap();

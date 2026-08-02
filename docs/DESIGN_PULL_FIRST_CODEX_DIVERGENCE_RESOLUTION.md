@@ -10,6 +10,10 @@
   [DESIGN_PULL_FIRST_CODEX_DIVERGENCE_RESOLUTION_READABLE.md](DESIGN_PULL_FIRST_CODEX_DIVERGENCE_RESOLUTION_READABLE.md)
 - Native PTY implementation plan:
   [PLAN_CODEX_PORTABLE_PTY_FORK.md](PLAN_CODEX_PORTABLE_PTY_FORK.md)
+- Current fork observation and recovery contract:
+  [DESIGN_FORK_OBSERVATION_WATCHER.md](DESIGN_FORK_OBSERVATION_WATCHER.md).
+  That document supersedes this design's older manual fallback,
+  profile-scanning recovery, and ambiguous-attempt sections.
 
 ## Decision
 

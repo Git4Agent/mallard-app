@@ -14,6 +14,9 @@
     — owns the fork workload (executor ladder, verification, journal,
     checkpoints); this design adds a second entry point and one write, and
     changes nothing about how a fork is created or proven
+  - [DESIGN_FORK_OBSERVATION_WATCHER.md](DESIGN_FORK_OBSERVATION_WATCHER.md)
+    — supersedes the older manual-verification and profile-discovery recovery
+    flow with event-located, exact-file acknowledgment and explicit retry
   - [DESIGN_MANIFEST_ONLY_THREAD_REFRESH.md](DESIGN_MANIFEST_ONLY_THREAD_REFRESH.md)
     — owns the classification decision table; the table is unchanged, and
     the refinement here runs strictly after its `Diverged` verdict
@@ -232,12 +235,12 @@ fork_codex_thread(app, local_project_id, thread_id) -> RestoreResult-shaped
    `apply_codex_divergence_locked`
    ([conversation_materialization.rs:501](../src-tauri/src/project_sync/conversation_materialization.rs#L501))
    with an empty restore-target set. The executor ladder, attempt
-   journaling, verification (`verify_candidate`, `verify_source_unchanged`,
-   exact-new-child), and adoption rules run unmodified.
-4. **Pause** — a manual-method pause yields the same `CodexForkCheckpoint`
-   and surfaces through `get_pending_codex_divergence`. Verify and cancel
-   are the existing `resume_codex_divergence` / `cancel_codex_divergence`
-   commands, origin-aware only at finish.
+   journaling and exact-file verification rules run unmodified.
+4. **Pause** — an unacknowledged attempt yields the same
+   `CodexForkCheckpoint` and surfaces through
+   `get_pending_codex_divergence`. The only action is an explicit
+   `retry_codex_divergence`; Mallard does not discover or adopt a possible
+   fork from the prior attempt.
 5. **Finish** — adoption commits the fork binding **and the stamp** in one
    mutation, records naming, refreshes the inventory, and stops. No cloud
    read or write, no pin movement, no Codex App restart offer. The source
