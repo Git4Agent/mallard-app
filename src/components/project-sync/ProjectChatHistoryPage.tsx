@@ -1,19 +1,21 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { TbRefresh } from "react-icons/tb";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
+  CodexForkCheckpoint,
   CodexThreadDetailsPage,
   CodexThreadSummary,
   GitBranchSummary,
   LocalProjectSummary,
   ProjectBinding,
   ProjectChatHistory,
+  RestoreResult,
   ThreadSyncComparison,
   ThreadSyncEntry,
 } from "../../types";
 import Icon from "../Icons";
 import { projectSyncApi } from "./api";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
+import ThreadStatusIcon, { type ThreadStatusIconName } from "./ThreadStatusIcon";
 
 interface PageProps {
   project: LocalProjectSummary;
@@ -54,6 +56,9 @@ interface ContentProps {
   onLoadMore: () => void;
   onOpenCodex: (threadId: string) => void;
   onOpenTerminal: (threadId: string) => void;
+  onFork?: (threadId: string) => void;
+  forkBusyThreadId?: string | null;
+  forkPanel?: ReactNode;
   onToggleDetails?: (threadId: string, occurrenceKey: string) => void;
   onLoadMoreDetails?: (threadId: string) => void;
   embedded?: boolean;
@@ -212,7 +217,7 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
               }}
             >
               <span className="sync-history-branch-check" aria-hidden="true">
-                {branch.name === selectedBranch ? "✓" : ""}
+                {branch.name === selectedBranch && <Icon name="check-circle" size={12} />}
               </span>
               <span className="sync-history-branch-option-copy">
                 <strong>{branch.name}</strong>
@@ -237,9 +242,55 @@ function formatDate(value?: number | null): string {
   }).format(new Date(value * 1_000));
 }
 
+function formatCalendarDate(value: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short", day: "numeric", year: "numeric",
+  }).format(new Date(value * 1_000));
+}
+
+function formatClockTime(value: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric", minute: "2-digit",
+  }).format(new Date(value * 1_000));
+}
+
+function formatFullDateTime(value: number): string {
+  return `${formatCalendarDate(value)} at ${formatClockTime(value)}`;
+}
+
+function sameCalendarDay(a: number, b: number): boolean {
+  const left = new Date(a * 1_000);
+  const right = new Date(b * 1_000);
+  return left.getFullYear() === right.getFullYear()
+    && left.getMonth() === right.getMonth()
+    && left.getDate() === right.getDate();
+}
+
+/**
+ * Start and end are one interval, not two facts, so whatever the two stamps
+ * share is printed once. A same-day session drops the repeated date; a session
+ * that begins and ends inside the same minute shows the elapsed seconds rather
+ * than the same clock time twice. Sessions that cross midnight keep both dates
+ * in full — that is the one case where the second date carries real news.
+ * Returns null when the two stamps are genuinely identical.
+ */
+function formatSessionEnd(startedAt: number, endedAt: number): string | null {
+  if (!sameCalendarDay(startedAt, endedAt)) return formatFullDateTime(endedAt);
+  if (formatClockTime(startedAt) !== formatClockTime(endedAt)) return formatClockTime(endedAt);
+  const seconds = Math.max(0, Math.round(endedAt - startedAt));
+  return seconds > 0 ? `+${seconds}s` : null;
+}
+
 function formatCount(value?: number | null): string {
   if (value == null) return "Not reported";
   return new Intl.NumberFormat(undefined, { notation: value >= 1_000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value);
+}
+
+function compactThreadTitle(value: string): string {
+  return value.replace(
+    /\s*·\s*\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?Z?)?\s*$/,
+    "",
+  );
 }
 
 async function openExternalUrl(url: string) {
@@ -256,46 +307,84 @@ function githubCommitUrl(repositoryUrl: string | null | undefined, sha: string):
 }
 
 type ThreadSyncPresentation = {
-  icon: "badge-check" | "cloud-off" | "download" | "git-compare-arrows" | "octagon-x" | "upload";
+  status: ThreadStatusIconName;
   className: string;
   label: string;
 };
 
 export function threadSyncPresentation(entry: ThreadSyncEntry, storageName: string): ThreadSyncPresentation {
+  type ReasonCode = ThreadSyncEntry["push_decision"]["reason_code"];
+  const decisionWithReason = (reasons: readonly ReasonCode[]) => {
+    if (entry.push_decision && reasons.includes(entry.push_decision.reason_code)) {
+      return { mode: "push" as const };
+    }
+    if (entry.pull_decision && reasons.includes(entry.pull_decision.reason_code)) {
+      return { mode: "pull" as const };
+    }
+    return null;
+  };
+  const pending = decisionWithReason(["resolution_pending", "provider_not_quiescent", "stale_plan"]);
+  if (pending) {
+    return {
+      status: "pending",
+      className: "pending",
+      label: syncHoldDetail(pending.mode, entry)
+        ?? entry.status_detail
+        ?? "Sync is waiting for this conversation to become ready.",
+    };
+  }
+  const conflict = decisionWithReason(["unknown_lineage", "ambiguous_binding", "missing_binding"]);
+  if (conflict) {
+    return {
+      status: "conflict",
+      className: "conflict",
+      label: syncHoldDetail(conflict.mode, entry)
+        ?? entry.status_detail
+        ?? "Mallard could not safely match the local and stored conversation.",
+    };
+  }
   const blocked = (mode: "push" | "pull"): ThreadSyncPresentation => ({
-    icon: "octagon-x",
+    status: "unavailable",
     className: "unavailable",
     label: syncHoldDetail(mode, entry) ?? "This thread can't be synced safely right now.",
   });
   switch (entry.state) {
     case "synced":
-      return { icon: "badge-check", className: "synced", label: `Up to date here and in ${storageName}.` };
+      return { status: "synced", className: "synced", label: `Up to date here and in ${storageName}.` };
     case "local_only":
       if (entry.push_decision?.action === "blocked") return blocked("push");
-      return { icon: "upload", className: "local", label: `Only on this computer. Push to save it in ${storageName}.` };
+      return { status: "local-outstanding", className: "local", label: `Only on this computer. Push to save it in ${storageName}.` };
     case "local_ahead":
       if (entry.push_decision?.action === "blocked") return blocked("push");
-      return { icon: "upload", className: "local", label: `Newer on this computer. Push to update ${storageName}.` };
+      return { status: "local-outstanding", className: "local", label: `Newer on this computer. Push to update ${storageName}.` };
     case "storage_only":
       if (entry.pull_decision?.action === "blocked") return blocked("pull");
-      return { icon: "download", className: "storage", label: `Only in ${storageName}. Pull to download it here.` };
+      return { status: "cloud-outstanding", className: "storage", label: `Only in ${storageName}. Pull to download it here.` };
     case "storage_ahead":
       if (entry.pull_decision?.action === "blocked") return blocked("pull");
-      return { icon: "download", className: "storage", label: `Newer in ${storageName}. Pull to update this computer.` };
+      return { status: "cloud-outstanding", className: "storage", label: `Newer in ${storageName}. Pull to update this computer.` };
     case "diverged":
-      return { icon: "git-compare-arrows", className: "diverged", label: `Changed here and in ${storageName}. Review before syncing.` };
+      return { status: "divergent", className: "diverged", label: `Changed here and in ${storageName}. Review before syncing.` };
+    case "diverged_forked": {
+      const forkName = entry.fork_preservation?.fork_display_name;
+      return {
+        status: "divergent-forked",
+        className: "diverged-forked",
+        label: `Changed here and in ${storageName}; your local branch is already preserved in ${forkName ? `the fork “${forkName}”` : "a fork"}. Pull to adopt the ${storageName} version.`,
+      };
+    }
     case "unavailable":
       return {
-        icon: "octagon-x",
+        status: "unavailable",
         className: "unavailable",
         label: `Unavailable for sync. ${entry.status_detail ?? "Mallard could not safely read this session."}`,
       };
     case "unknown":
     default:
       return {
-        icon: "octagon-x",
-        className: "unavailable",
-        label: `Comparison unavailable. ${entry.status_detail ?? "Mallard could not prove this thread's ancestry safely."}`,
+        status: "conflict",
+        className: "conflict",
+        label: `Comparison needs attention. ${entry.status_detail ?? "Mallard could not prove this thread's ancestry safely."}`,
       };
   }
 }
@@ -309,7 +398,7 @@ function ThreadSyncIndicator({ entry, storageName }: { entry: ThreadSyncEntry; s
       aria-label={presentation.label}
       tabIndex={0}
     >
-      <Icon name={presentation.icon} size={13} />
+      <ThreadStatusIcon status={presentation.status} size={16} />
     </span>
   );
 }
@@ -323,16 +412,35 @@ export function ThreadMetrics({
   id?: string;
   debugInfo?: ThreadDebugMenuProps;
 }) {
-  const startedLabel = `Started ${formatDate(thread.started_at)}`;
-  const endedLabel = `${thread.is_active ? "Last activity" : "Ended"} ${formatDate(thread.ended_at)}${thread.is_active ? ", active" : ""}`;
+  const startedLabel = `Started ${formatFullDateTime(thread.started_at)}`;
+  const endedLabel = `${thread.is_active ? "Last activity" : "Ended"} ${formatFullDateTime(thread.ended_at)}${thread.is_active ? ", active" : ""}`;
+
+  const endText = formatSessionEnd(thread.started_at, thread.ended_at);
+  // An elapsed-seconds reading is not a datetime, so it is not marked up as one.
+  const endIsClockTime = endText != null && !endText.startsWith("+");
 
   return <div id={id} className="sync-history-thread-meta" aria-label="Session details">
-    <span className="sync-history-thread-metric" data-tooltip={startedLabel} aria-label={startedLabel} tabIndex={0}><Icon name="play" size={12} /><time>{formatDate(thread.started_at)}</time></span>
-    <span className="sync-history-thread-metric" data-tooltip={endedLabel} aria-label={endedLabel} tabIndex={0}><Icon name={thread.is_active ? "activity" : "check-circle"} size={12} /><time>{formatDate(thread.ended_at)}</time></span>
+    <span className="sync-history-thread-range">
+      <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-start" data-tooltip={startedLabel} aria-label={startedLabel} tabIndex={0}>
+        <Icon name="play" size={11} />
+        <time dateTime={new Date(thread.started_at * 1_000).toISOString()}>{formatFullDateTime(thread.started_at)}</time>
+      </span>
+      {endText != null && (
+        <>
+          <span className="sync-history-range-arrow" aria-hidden="true">→</span>
+          <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end" data-tooltip={endedLabel} aria-label={endedLabel} tabIndex={0}>
+            <Icon name={thread.is_active ? "activity" : "check-circle"} size={11} />
+            {endIsClockTime
+              ? <time dateTime={new Date(thread.ended_at * 1_000).toISOString()}>{endText}</time>
+              : <span className="sync-history-thread-elapsed">{endText}</span>}
+          </span>
+        </>
+      )}
+    </span>
     <span className="sync-history-thread-metric" data-tooltip={`User turns · ${thread.user_round_count}`} aria-label={`User turns: ${thread.user_round_count}`} tabIndex={0}><Icon name="user" size={12} /><b>{thread.user_round_count}</b></span>
     <span className="sync-history-thread-metric" data-tooltip={`Total tokens · ${formatCount(thread.total_tokens)}`} aria-label={`Total tokens: ${formatCount(thread.total_tokens)}`} tabIndex={0}><Icon name="token" size={12} /><b>{formatCount(thread.total_tokens)}</b></span>
     <span className="sync-history-thread-metric" data-tooltip={`Agent messages · ${thread.agent_message_count}`} aria-label={`Agent messages: ${thread.agent_message_count}`} tabIndex={0}><Icon name="message" size={12} /><b>{thread.agent_message_count}</b></span>
-    <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${thread.tool_call_count}`} aria-label={`Tool calls: ${thread.tool_call_count}`} tabIndex={0}><Icon name="tool" size={12} /><b>{thread.tool_call_count}</b></span>
+    {thread.tool_call_count > 0 && <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${thread.tool_call_count}`} aria-label={`Tool calls: ${thread.tool_call_count}`} tabIndex={0}><Icon name="tool" size={12} /><b>{thread.tool_call_count}</b></span>}
     {debugInfo && <ThreadDebugMenu {...debugInfo} />}
     {thread.commit_occurrence_count > 1 && (
       <span className="sync-history-thread-metric" data-tooltip={`Commit appearances · ${thread.commit_occurrence_count}`} aria-label={`Appears under ${thread.commit_occurrence_count} commits`} tabIndex={0}><Icon name="git-branch" size={12} /><b>{thread.commit_occurrence_count}</b></span>
@@ -351,6 +459,8 @@ interface ThreadCardProps {
   detailsOpen?: boolean;
   onOpenCodex: (threadId: string) => void;
   onOpenTerminal: (threadId: string) => void;
+  onFork?: (threadId: string) => void;
+  forkBusy?: boolean;
   onToggleDetails?: (threadId: string, occurrenceKey: string) => void;
   onLoadMoreDetails?: (threadId: string) => void;
   syncEntry?: ThreadSyncEntry;
@@ -602,7 +712,9 @@ function syncReviewStateLabel(
       case "fast_forward_local": return selected ? "Update this thread" : "Keep local";
       case "keep_local": return "Keep local";
       case "require_pull": return "Pull required";
-      case "resolve_divergence": return selected ? "Keep both branches" : "Not selected";
+      case "resolve_divergence":
+        if (!selected) return "Not selected";
+        return entry.state === "diverged_forked" ? "Adopt storage version" : "Keep both branches";
       case "create_cloud": return selected ? "Publish new thread" : "Not selected";
       case "create_local": return selected ? "Restore new conversation" : "Not selected";
       case "store_only": return "Backup only";
@@ -613,12 +725,12 @@ function syncReviewStateLabel(
     }
   }
   if (mode === "push") {
-    if (entry.state === "storage_only" || entry.state === "storage_ahead" || entry.state === "diverged") {
+    if (entry.state === "storage_only" || entry.state === "storage_ahead" || entry.state === "diverged" || entry.state === "diverged_forked") {
       return "Pull required";
     }
     return entry.state === "unknown" ? "Review status" : null;
   }
-  if (entry.state === "diverged") return selected ? "Use storage version" : "Keep local";
+  if (entry.state === "diverged" || entry.state === "diverged_forked") return selected ? "Use storage version" : "Keep local";
   if (entry.state === "storage_only" || entry.state === "storage_ahead") {
     return selected ? "Restore from storage" : "Keep local";
   }
@@ -663,6 +775,9 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
       : "Pulling saves a backup copy that can't be opened on this computer.";
   }
   if (mode === "push" && decision.action === "require_pull") {
+    if (entry.state === "diverged_forked") {
+      return "Local and stored history have diverged, but the local branch is already preserved in a fork. Pull to adopt the stored version.";
+    }
     return entry.state === "diverged"
       ? "Local and stored history have diverged. Pull and choose how to preserve the local branch before pushing."
       : "The stored thread has newer messages. Pull them before pushing.";
@@ -671,11 +786,13 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
 }
 
 function ThreadCard({
-  thread, occurrenceKey, workingDirectory, codexHome, busy = false, details, detailsOpen = false, onOpenCodex, onOpenTerminal, onToggleDetails, onLoadMoreDetails,
+  thread, occurrenceKey, workingDirectory, codexHome, busy = false, details, detailsOpen = false, onOpenCodex, onOpenTerminal, onFork, forkBusy = false, onToggleDetails, onLoadMoreDetails,
   syncEntry, storageName, resourceId, selectionMode, selected = false, selectable = false,
   selectionDisabled = false, onToggleResource, onReviewPull,
 }: ThreadCardProps) {
   const launchable = THREAD_UUID.test(thread.thread_id);
+  const fullTitle = thread.title || "Untitled Codex session";
+  const visibleTitle = compactThreadTitle(fullTitle);
   const chatDetailsId = `thread-chat-${occurrenceKey.replace(/[^a-z0-9_-]/gi, "-")}`;
   const chatDetailsLabel = detailsOpen
     ? "Hide chat history"
@@ -687,35 +804,41 @@ function ThreadCard({
     ? (selectionMode === "push" ? syncEntry.push_decision : syncEntry.pull_decision)
     : null;
   const holdDetail = selectionMode && syncEntry ? syncHoldDetail(selectionMode, syncEntry) : null;
+  const uncommitted = occurrenceKey.startsWith("uncommitted:");
   return (
     <article className={`sync-history-thread-card${selectionMode && selectable ? " sync-sync-selectable-row" : ""}${selected ? " selected" : ""}`}>
       <div className="sync-history-thread-topline">
-        {selectionMode && selectable && (
-          <label
-            className="sync-sync-row-choice"
-            title={`${selected ? "Exclude" : "Include"} ${thread.title || "this session"}`}
-          >
-            <input
-              type="checkbox"
-              checked={selected}
-              disabled={selectionDisabled}
-              aria-label={`${selected ? "Exclude" : "Include"} ${thread.title || "Untitled Codex session"}`}
-              onChange={() => onToggleResource?.(resourceId)}
-            />
-          </label>
-        )}
-        {selectionMode && !selectable && activeDecision?.action === "blocked" && (
-          <span
-            className="sync-sync-row-choice sync-sync-row-blocked"
-            title={holdDetail ?? "Can't sync"}
-            aria-label={holdDetail ?? "Can't sync"}
-          >
-            <Icon name="octagon-x" size={14} />
-          </span>
-        )}
         <div className="sync-history-thread-title">
+          {selectionMode && selectable && (
+            <label
+              className="sync-sync-row-choice"
+              title={`${selected ? "Exclude" : "Include"} ${thread.title || "this session"}`}
+            >
+              <input
+                type="checkbox"
+                checked={selected}
+                disabled={selectionDisabled}
+                aria-label={`${selected ? "Exclude" : "Include"} ${thread.title || "Untitled Codex session"}`}
+                onChange={() => onToggleResource?.(resourceId)}
+              />
+            </label>
+          )}
+          {selectionMode && !selectable && activeDecision?.action === "blocked" && (
+            <span
+              className="sync-sync-row-choice sync-sync-row-blocked"
+              title={holdDetail ?? "Can't sync"}
+              aria-label={holdDetail ?? "Can't sync"}
+            >
+              <Icon name="octagon-x" size={14} />
+            </span>
+          )}
           {syncEntry && storageName && <ThreadSyncIndicator entry={syncEntry} storageName={storageName} />}
-          <strong>{thread.title || "Untitled Codex session"}</strong>
+          {uncommitted && !(syncEntry && storageName) && (
+            <span className="sync-history-thread-kind uncommitted" aria-hidden="true">
+              <Icon name="edit" size={13} />
+            </span>
+          )}
+          <strong title={visibleTitle === fullTitle ? undefined : fullTitle}>{visibleTitle}</strong>
           {reviewStateLabel && (
             <span className={`sync-sync-review-state state-${syncEntry?.state ?? "local_only"}${activeDecision?.action === "blocked" ? " action-blocked" : ""}`}>{reviewStateLabel}</span>
           )}
@@ -730,10 +853,17 @@ function ThreadCard({
           />
         </div>
         <div className="sync-history-thread-actions">
+          {!selectionMode && onFork && (
+            <button type="button" className="btn btn-ghost sync-history-launch-action" disabled={!launchable || busy || forkBusy}
+              onClick={() => onFork(thread.thread_id)} title={forkBusy ? "Forking in Codex…" : "Fork in Codex"}
+              aria-label={forkBusy ? "Forking in Codex" : "Fork in Codex"}>
+              <Icon name={forkBusy ? "refresh" : "git-fork"} size={14} className={forkBusy ? "icon-spin" : undefined} />
+            </button>
+          )}
           <button type="button" className="btn btn-ghost sync-history-launch-action" disabled={!launchable || busy}
             onClick={() => onOpenCodex(thread.thread_id)} title={busy ? "Opening in Codex…" : "Open in Codex"}
             aria-label={busy ? "Opening in Codex" : "Open in Codex"}>
-            <Icon name={busy ? "refresh" : "openai"} size={15} className={busy ? "icon-spin" : "sync-openai-icon"} />
+            <Icon name={busy ? "refresh" : "openai"} size={14} className={busy ? "icon-spin" : "sync-openai-icon"} />
           </button>
           <button type="button" className="btn btn-ghost sync-history-launch-action" disabled={!launchable || busy}
             onClick={() => onOpenTerminal(thread.thread_id)} title="Open in Terminal" aria-label="Open in Terminal">
@@ -787,6 +917,7 @@ function ThreadCard({
 function SyncEntryCard({
   entry,
   storageName,
+  scopeStated = false,
   selectionMode,
   selected = false,
   selectable = false,
@@ -796,6 +927,9 @@ function SyncEntryCard({
 }: {
   entry: ThreadSyncEntry;
   storageName: string;
+  /** Set when the surrounding section heading already names the storage, so the
+   *  row does not repeat it on every card. */
+  scopeStated?: boolean;
   selectionMode?: "push" | "pull";
   selected?: boolean;
   selectable?: boolean;
@@ -804,9 +938,12 @@ function SyncEntryCard({
   onReviewPull?: () => void;
 }) {
   const shortId = entry.thread_id.length > 12 ? entry.thread_id.slice(0, 8) : entry.thread_id;
-  const title = entry.display_name.trim() && entry.display_name !== entry.thread_id
+  const fullTitle = entry.display_name.trim() && entry.display_name !== entry.thread_id
     ? entry.display_name
     : "Untitled thread";
+  // Local threads already drop the provenance timestamp their title carries;
+  // stored threads get the same treatment so both lists read alike.
+  const title = compactThreadTitle(fullTitle);
   const identityLabel = `${title}, Codex thread ${entry.thread_id}`;
   const location = entry.local_present && entry.storage_present
     ? `On this Mac · In ${storageName}`
@@ -814,11 +951,10 @@ function SyncEntryCard({
       ? "On this Mac"
       : `In ${storageName} · Pull to open`;
   const updatedAt = entry.storage_updated_at ?? entry.local_updated_at;
-  const metadata = [
-    location,
-    updatedAt ? `Updated ${formatDate(updatedAt)}` : null,
-    `Codex thread ${shortId}`,
-  ].filter((item): item is string => item !== null).join(" · ");
+  // Where the section heading already names the storage, repeating it on every
+  // card says nothing; elsewhere the row is the only thing that can say where
+  // the thread lives and how to get it, so it keeps the full phrase.
+  const visibleLocation = scopeStated ? null : location;
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, entry, selected) : null;
   const activeDecision = selectionMode
     ? (selectionMode === "push" ? entry.push_decision : entry.pull_decision)
@@ -827,32 +963,41 @@ function SyncEntryCard({
   return (
     <article className={`sync-history-thread-card sync-history-stored-thread${selectionMode && selectable ? " sync-sync-selectable-row" : ""}${selected ? " selected" : ""}`}>
       <div className="sync-history-thread-topline">
-        {selectionMode && selectable && (
-          <label className="sync-sync-row-choice" title={`${selected ? "Exclude" : "Include"} ${identityLabel}`}>
-            <input
-              type="checkbox"
-              checked={selected}
-              disabled={selectionDisabled}
-              aria-label={`${selected ? "Exclude" : "Include"} ${identityLabel}`}
-              onChange={() => onToggleResource?.(entry.resource_id)}
-            />
-          </label>
-        )}
-        {selectionMode && !selectable && activeDecision?.action === "blocked" && (
-          <span
-            className="sync-sync-row-choice sync-sync-row-blocked"
-            title={holdDetail ?? "Can't sync"}
-            aria-label={holdDetail ?? "Can't sync"}
-          >
-            <Icon name="octagon-x" size={14} />
-          </span>
-        )}
-        <div className="sync-history-thread-title" title={entry.thread_id}>
+        {/* No native title here: the status badge inside carries its own CSS
+            tooltip, and a title on the wrapper fires a second, overlapping
+            OS tooltip on the same hover. The id lives on the sha chip. */}
+        <div className="sync-history-thread-title">
+          {selectionMode && selectable && (
+            <label className="sync-sync-row-choice" title={`${selected ? "Exclude" : "Include"} ${identityLabel}`}>
+              <input
+                type="checkbox"
+                checked={selected}
+                disabled={selectionDisabled}
+                aria-label={`${selected ? "Exclude" : "Include"} ${identityLabel}`}
+                onChange={() => onToggleResource?.(entry.resource_id)}
+              />
+            </label>
+          )}
+          {selectionMode && !selectable && activeDecision?.action === "blocked" && (
+            <span
+              className="sync-sync-row-choice sync-sync-row-blocked"
+              title={holdDetail ?? "Can't sync"}
+              aria-label={holdDetail ?? "Can't sync"}
+            >
+              <Icon name="octagon-x" size={14} />
+            </span>
+          )}
           <ThreadSyncIndicator entry={entry} storageName={storageName} />
           <div className="sync-history-stored-thread-copy">
-            <strong>{title}</strong>
-            <span className="sync-history-stored-thread-meta">{metadata}</span>
+            <strong title={title === fullTitle ? undefined : fullTitle}>{title}</strong>
+            {visibleLocation && <span className="sync-history-stored-thread-location">{visibleLocation}</span>}
           </div>
+          <span className="sync-history-stored-thread-meta">
+            <code title={entry.thread_id}>{shortId}</code>
+            {updatedAt != null && (
+              <time dateTime={new Date(updatedAt * 1_000).toISOString()}>{formatDate(updatedAt)}</time>
+            )}
+          </span>
           {reviewStateLabel && (
             <span className={`sync-sync-review-state state-${entry.state}${activeDecision?.action === "blocked" ? " action-blocked" : ""}`}>{reviewStateLabel}</span>
           )}
@@ -874,12 +1019,13 @@ function SyncEntryCard({
 export function ProjectChatHistoryContent({
   project, binding, history, loading, loadingMore, actionError, actionBusyThreadId,
   detailsByThread = {}, openDetailOccurrences = new Set(), onBranchChange, onRefresh, onLoadMore, onOpenCodex,
-  onOpenTerminal, onToggleDetails, onLoadMoreDetails, embedded = false, comparison = null,
+  onOpenTerminal, onFork, forkBusyThreadId = null, forkPanel = null, onToggleDetails, onLoadMoreDetails, embedded = false, comparison = null,
   comparisonLoading = false, comparisonError = null, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
   selectionDisabled = false, onToggleResource, onReviewPull, onUnlinkStorage,
   continuityActionBusy = false,
 }: ContentProps) {
+  const [collapsedCommitShas, setCollapsedCommitShas] = useState<Set<string>>(new Set());
   const label = projectLabel(project);
   const aliased = label !== project.display_name;
   const threads = useMemo(() => new Map((history?.threads ?? []).map((thread) => [thread.thread_id, thread])), [history?.threads]);
@@ -912,25 +1058,30 @@ export function ProjectChatHistoryContent({
   const visibleComparisonCounts = useMemo(() => {
     const visibleThreadIds = new Set(threads.keys());
     storedOnlyEntries.forEach((entry) => visibleThreadIds.add(entry.thread_id));
-    const counts = { local: 0, storage: 0, diverged: 0, unavailable: 0 };
+    const counts: Record<ThreadStatusIconName, number> = {
+      synced: 0,
+      "cloud-outstanding": 0,
+      "local-outstanding": 0,
+      divergent: 0,
+      "divergent-forked": 0,
+      pending: 0,
+      conflict: 0,
+      unavailable: 0,
+    };
 
     for (const entry of comparison?.entries ?? []) {
       if (!visibleThreadIds.has(entry.thread_id)) continue;
-      if (entry.state === "local_only" || entry.state === "local_ahead") {
-        if (entry.push_decision?.action === "blocked") counts.unavailable += 1;
-        else counts.local += 1;
-      } else if (entry.state === "storage_only" || entry.state === "storage_ahead") {
-        if (entry.pull_decision?.action === "blocked") counts.unavailable += 1;
-        else counts.storage += 1;
-      } else if (entry.state === "diverged") counts.diverged += 1;
-      else if (entry.state === "unavailable" || entry.state === "unknown") counts.unavailable += 1;
+      counts[threadSyncPresentation(entry, comparisonStorageName).status] += 1;
     }
 
     return counts;
-  }, [comparison?.entries, storedOnlyEntries, threads]);
-  const visibleComparisonChangeCount = visibleComparisonCounts.local
-    + visibleComparisonCounts.storage
-    + visibleComparisonCounts.diverged
+  }, [comparison?.entries, comparisonStorageName, storedOnlyEntries, threads]);
+  const visibleComparisonChangeCount = visibleComparisonCounts["local-outstanding"]
+    + visibleComparisonCounts["cloud-outstanding"]
+    + visibleComparisonCounts.divergent
+    + visibleComparisonCounts["divergent-forked"]
+    + visibleComparisonCounts.pending
+    + visibleComparisonCounts.conflict
     + visibleComparisonCounts.unavailable;
   const refreshing = loading || comparisonLoading;
   const refreshStatus = comparisonLoading
@@ -952,6 +1103,7 @@ export function ProjectChatHistoryContent({
     <ThreadCard key={key} thread={thread} occurrenceKey={key} workingDirectory={workingDirectory}
       codexHome={history?.codex_home ?? "Not configured"} busy={actionBusyThreadId === thread.thread_id}
       details={detailsByThread[thread.thread_id]} detailsOpen={openDetailOccurrences.has(key)} onOpenCodex={onOpenCodex} onOpenTerminal={onOpenTerminal}
+      onFork={onFork} forkBusy={forkBusyThreadId === thread.thread_id}
       onToggleDetails={onToggleDetails} onLoadMoreDetails={onLoadMoreDetails}
       syncEntry={entry} storageName={comparison ? comparisonStorageName : null}
       resourceId={resourceId} selectionMode={selectionMode} selected={selectedResourceIds.has(resourceId)}
@@ -968,6 +1120,14 @@ export function ProjectChatHistoryContent({
       || leftThread.started_at - rightThread.started_at
       || left.thread_id.localeCompare(right.thread_id);
   });
+  const toggleCommit = (sha: string) => {
+    setCollapsedCommitShas((current) => {
+      const next = new Set(current);
+      if (next.has(sha)) next.delete(sha);
+      else next.add(sha);
+      return next;
+    });
+  };
   const flatThreadRows: Array<
     | { kind: "local"; id: string; updatedAt: number; thread: CodexThreadSummary }
     | { kind: "stored"; id: string; updatedAt: number; entry: ThreadSyncEntry }
@@ -1014,7 +1174,7 @@ export function ProjectChatHistoryContent({
                 title={`Comparing threads with ${activeStorageName}`}
                 aria-label={`Comparing threads with ${activeStorageName}`}
               >
-                <Icon name="link" size={12} />
+                <Icon name="drive" size={13} />
                 <span>{activeStorageName}</span>
               </span>
             )}
@@ -1039,15 +1199,18 @@ export function ProjectChatHistoryContent({
                 )}
                 {showComparisonSummary && (
                   <span className="sync-thread-sync-summary" aria-label={`Visible thread comparison with ${comparisonStorageName}`}>
-                    {visibleComparisonCounts.local > 0 && <span className="local" title={`${visibleComparisonCounts.local} local thread change${visibleComparisonCounts.local === 1 ? "" : "s"}`}><Icon name="upload" size={12} />{visibleComparisonCounts.local}</span>}
-                    {visibleComparisonCounts.storage > 0 && <span className="storage" title={`${visibleComparisonCounts.storage} thread change${visibleComparisonCounts.storage === 1 ? "" : "s"} in ${comparisonStorageName}`}><Icon name="download" size={12} />{visibleComparisonCounts.storage}</span>}
-                    {visibleComparisonCounts.diverged > 0 && <span className="diverged" title={`${visibleComparisonCounts.diverged} diverged thread${visibleComparisonCounts.diverged === 1 ? "" : "s"}`}><Icon name="git-compare-arrows" size={12} />{visibleComparisonCounts.diverged}</span>}
-                    {visibleComparisonCounts.unavailable > 0 && <span className="unavailable" title={`${visibleComparisonCounts.unavailable} thread${visibleComparisonCounts.unavailable === 1 ? " is" : "s are"} unavailable for sync`}><Icon name="octagon-x" size={12} />{visibleComparisonCounts.unavailable}</span>}
+                    {visibleComparisonCounts["local-outstanding"] > 0 && <span className="local" title={`${visibleComparisonCounts["local-outstanding"]} local thread change${visibleComparisonCounts["local-outstanding"] === 1 ? "" : "s"}`}><ThreadStatusIcon status="local-outstanding" size={12} />{visibleComparisonCounts["local-outstanding"]}</span>}
+                    {visibleComparisonCounts["cloud-outstanding"] > 0 && <span className="storage" title={`${visibleComparisonCounts["cloud-outstanding"]} thread change${visibleComparisonCounts["cloud-outstanding"] === 1 ? "" : "s"} in ${comparisonStorageName}`}><ThreadStatusIcon status="cloud-outstanding" size={12} />{visibleComparisonCounts["cloud-outstanding"]}</span>}
+                    {visibleComparisonCounts.divergent > 0 && <span className="diverged" title={`${visibleComparisonCounts.divergent} divergent thread${visibleComparisonCounts.divergent === 1 ? "" : "s"}`}><ThreadStatusIcon status="divergent" size={12} />{visibleComparisonCounts.divergent}</span>}
+                    {visibleComparisonCounts["divergent-forked"] > 0 && <span className="diverged-forked" title={`${visibleComparisonCounts["divergent-forked"]} divergent thread${visibleComparisonCounts["divergent-forked"] === 1 ? "" : "s"} already preserved as a fork`}><ThreadStatusIcon status="divergent-forked" size={12} />{visibleComparisonCounts["divergent-forked"]}</span>}
+                    {visibleComparisonCounts.pending > 0 && <span className="pending" title={`${visibleComparisonCounts.pending} thread${visibleComparisonCounts.pending === 1 ? " is" : "s are"} waiting to sync`}><ThreadStatusIcon status="pending" size={12} />{visibleComparisonCounts.pending}</span>}
+                    {visibleComparisonCounts.conflict > 0 && <span className="conflict" title={`${visibleComparisonCounts.conflict} thread conflict${visibleComparisonCounts.conflict === 1 ? "" : "s"} need attention`}><ThreadStatusIcon status="conflict" size={12} />{visibleComparisonCounts.conflict}</span>}
+                    {visibleComparisonCounts.unavailable > 0 && <span className="unavailable" title={`${visibleComparisonCounts.unavailable} thread${visibleComparisonCounts.unavailable === 1 ? " is" : "s are"} unavailable for sync`}><ThreadStatusIcon status="unavailable" size={12} />{visibleComparisonCounts.unavailable}</span>}
                   </span>
                 )}
               </span>
             )}
-            {comparisonError && <span className="sync-thread-sync-error" tabIndex={0} data-tooltip={comparisonError} aria-label={`Storage comparison failed: ${comparisonError}`}><Icon name="octagon-x" size={13} /></span>}
+            {comparisonError && <span className="sync-thread-sync-error" tabIndex={0} data-tooltip={comparisonError} aria-label={`Storage comparison failed: ${comparisonError}`}><ThreadStatusIcon status="conflict" size={16} /></span>}
             <button
               type="button"
               className={`sync-history-icon-action sync-history-refresh${refreshing ? " loading" : ""}`}
@@ -1061,7 +1224,7 @@ export function ProjectChatHistoryContent({
                 aria-hidden="true"
                 className={`icon-spin-frame${refreshing ? " spinning" : ""}`}
               >
-                <TbRefresh data-icon="refresh" size={16} />
+                <Icon name="refresh" size={16} />
               </span>
             </button>
             {refreshStatus && <span className="sync-visually-hidden" role="status">{refreshStatus}</span>}
@@ -1069,6 +1232,7 @@ export function ProjectChatHistoryContent({
         </header>}
 
         {actionError && <div className="sync-callout error sync-history-error" role="alert"><Icon name="alert-triangle" size={15} /><span>{actionError}</span></div>}
+        {forkPanel}
         {comparison?.remote_continuity?.state === "replaced" && (
           <div className="sync-callout warning sync-history-continuity" role="status">
             <Icon name="alert-triangle" size={15} />
@@ -1115,11 +1279,11 @@ export function ProjectChatHistoryContent({
                 {storedOnlyEntries.length > 0 && (
                   <section className="sync-history-storage-only" aria-labelledby="storage-only-heading">
                     <div className="sync-history-section-heading">
-                      <h2 id="storage-only-heading">Only in {comparisonStorageName}</h2>
-                      <span className="sync-history-heading-count" title="Threads not available on this machine"><Icon name="download" size={12} />{storedOnlyEntries.length}</span>
+                      <h2 id="storage-only-heading"><Icon name="cloud" size={13} />Only in {comparisonStorageName}</h2>
+                      <span className="sync-history-heading-count" title="Threads not available on this machine"><Icon name="message" size={12} />{storedOnlyEntries.length}</span>
                     </div>
                     <div className="sync-history-thread-list flat">
-                      {storedOnlyEntries.map((entry) => <SyncEntryCard key={`stored:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName}
+                      {storedOnlyEntries.map((entry) => <SyncEntryCard key={`stored:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName} scopeStated
                         selectionMode={selectionMode} selected={selectedResourceIds.has(entry.resource_id)}
                         selectable={selectableResourceIds?.has(entry.resource_id) ?? !!selectionMode}
                         selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
@@ -1127,35 +1291,78 @@ export function ProjectChatHistoryContent({
                     </div>
                   </section>
                 )}
-                {history.unmapped.length > 0 && (
-                  <section className="sync-history-uncommitted" aria-labelledby="uncommitted-heading">
-                    <div className="sync-history-section-heading"><h2 id="uncommitted-heading">Uncommitted</h2></div>
-                    <div className="sync-history-thread-list flat">{history.unmapped.map((reference) => { const thread = threads.get(reference.thread_id); return thread ? renderThread(thread, `uncommitted:${thread.thread_id}`) : null; })}</div>
-                  </section>
-                )}
-                <section className="sync-history-commit-section" aria-label={`First-parent commits on ${history.git.selected_branch}`}>
-                  {!embedded && <div className="sync-history-section-heading"><h2>Commit history</h2><span className="sync-history-heading-count" title={`${history.git.reference_count} commit occurrences`} aria-label={`${history.git.reference_count} commit occurrences`}><Icon name="git-branch" size={12} />{history.git.reference_count}</span></div>}
-                  {history.git.commits.length === 0 ? <div className="sync-history-state">No commits are available in this 30-day window.</div> : (
-                    <ol className="sync-history-commit-rail">{history.git.commits.map((commit) => {
-                      const commitUrl = githubCommitUrl(history.git?.github_repository_url, commit.sha);
-                      return (
-                        <li key={commit.sha} className="sync-history-commit"><span className="sync-history-commit-node" aria-hidden="true" />
-                          <div className="sync-history-commit-heading">
-                            {commitUrl ? (
-                              <a className="sync-history-commit-link" href={commitUrl} target="_blank" rel="noopener noreferrer"
-                                title={`Open ${commit.sha} on GitHub`} aria-label={`Open commit ${commit.short_sha} on GitHub`}
-                                onClick={(event) => { event.preventDefault(); void openExternalUrl(commitUrl); }}>
-                                <code>{commit.short_sha}</code>
-                              </a>
-                            ) : <code title={commit.sha}>{commit.short_sha}</code>}
-                            <time dateTime={new Date(commit.committed_at * 1_000).toISOString()}>{formatDate(commit.committed_at)}</time><strong>{commit.subject}</strong>
-                          </div>
-                          {commit.thread_refs.length > 0 && <div className="sync-history-thread-list">{orderedReferences(commit.thread_refs).map((reference) => { const thread = threads.get(reference.thread_id); return thread ? renderThread(thread, `${commit.sha}:${thread.thread_id}`) : null; })}</div>}
-                        </li>
-                      );
-                    })}</ol>
+                <div className={`sync-history-timeline${history.unmapped.length > 0 ? " has-uncommitted" : ""}`}>
+                  {history.unmapped.length > 0 && (
+                    <section className="sync-history-uncommitted" aria-labelledby="uncommitted-heading">
+                      <div className="sync-history-section-heading">
+                        <h2 id="uncommitted-heading"><Icon name="edit" size={13} />Uncommitted</h2>
+                        <span
+                          className="sync-history-heading-count"
+                          title={`${history.unmapped.length} session${history.unmapped.length === 1 ? "" : "s"} not linked to a commit`}
+                          aria-label={`${history.unmapped.length} session${history.unmapped.length === 1 ? "" : "s"} not linked to a commit`}
+                        >
+                          <Icon name="message" size={12} />{history.unmapped.length}
+                        </span>
+                      </div>
+                      <div className="sync-history-thread-list flat">{history.unmapped.map((reference) => { const thread = threads.get(reference.thread_id); return thread ? renderThread(thread, `uncommitted:${thread.thread_id}`) : null; })}</div>
+                    </section>
                   )}
-                </section>
+                  <section className="sync-history-commit-section" aria-label={`First-parent commits on ${history.git.selected_branch}`}>
+                    {!embedded && <div className="sync-history-section-heading"><h2>Commit history</h2><span className="sync-history-heading-count" title={`${history.git.reference_count} commit occurrences`} aria-label={`${history.git.reference_count} commit occurrences`}><Icon name="git-branch" size={12} />{history.git.reference_count}</span></div>}
+                    {history.git.commits.length === 0 ? <div className="sync-history-state">No commits are available in this 30-day window.</div> : (
+                      <ol className="sync-history-commit-rail">{history.git.commits.map((commit) => {
+                        const commitUrl = githubCommitUrl(history.git?.github_repository_url, commit.sha);
+                        const references = orderedReferences(commit.thread_refs);
+                        const collapsed = collapsedCommitShas.has(commit.sha);
+                        const displaySha = commit.short_sha.slice(0, 7);
+                        const threadListId = `commit-threads-${commit.short_sha}`;
+                        return (
+                          <li key={commit.sha} className={`sync-history-commit${collapsed ? " collapsed" : ""}`}><span className="sync-history-commit-node" aria-hidden="true" />
+                            <div className="sync-history-commit-heading">
+                              <span className="sync-history-commit-title">
+                                <span className="sync-history-commit-icon" aria-hidden="true">
+                                  <Icon name="git-commit" size={14} />
+                                </span>
+                                <strong title={commit.subject}>{commit.subject}</strong>
+                              </span>
+                              <span className="sync-history-commit-meta">
+                                <time dateTime={new Date(commit.committed_at * 1_000).toISOString()}>{formatDate(commit.committed_at)}</time>
+                                {commitUrl ? (
+                                  <a className="sync-history-commit-link" href={commitUrl} target="_blank" rel="noopener noreferrer"
+                                    title={`Open ${commit.sha} on GitHub`} aria-label={`Open commit ${displaySha} on GitHub`}
+                                    onClick={(event) => { event.preventDefault(); void openExternalUrl(commitUrl); }}>
+                                    <code>{displaySha}</code>
+                                  </a>
+                                ) : <code title={commit.sha}>{displaySha}</code>}
+                              </span>
+                              <span className="sync-history-commit-actions">
+                                <button
+                                  type="button"
+                                  className="sync-history-commit-toggle"
+                                  aria-label={`${collapsed ? "Expand" : "Collapse"} commit ${displaySha}`}
+                                  aria-expanded={!collapsed}
+                                  aria-controls={threadListId}
+                                  disabled={references.length === 0}
+                                  onClick={() => toggleCommit(commit.sha)}
+                                >
+                                  <Icon name={collapsed ? "chevron-down" : "chevron-up"} size={12} />
+                                </button>
+                              </span>
+                            </div>
+                            {!collapsed && references.length > 0 && (
+                              <div id={threadListId} className="sync-history-thread-list">
+                                {references.map((reference) => {
+                                  const thread = threads.get(reference.thread_id);
+                                  return thread ? renderThread(thread, `${commit.sha}:${thread.thread_id}`) : null;
+                                })}
+                              </div>
+                            )}
+                          </li>
+                        );
+                      })}</ol>
+                    )}
+                  </section>
+                </div>
               </>
             ) : (
               <section
@@ -1274,6 +1481,11 @@ export default function ProjectChatHistoryPage({
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusyThreadId, setActionBusyThreadId] = useState<string | null>(null);
+  const [forkBusyThreadId, setForkBusyThreadId] = useState<string | null>(null);
+  const [forkCheckpoint, setForkCheckpoint] = useState<CodexForkCheckpoint | null>(null);
+  const [forkNotice, setForkNotice] = useState<string | null>(null);
+  const [forkVerifyThreadId, setForkVerifyThreadId] = useState("");
+  const [forkResolving, setForkResolving] = useState(false);
   const [detailsByThread, setDetailsByThread] = useState<Record<string, ThreadDetailsState>>({});
   const [openDetailOccurrences, setOpenDetailOccurrences] = useState<Set<string>>(new Set());
   const requestRef = useRef(0);
@@ -1346,6 +1558,31 @@ export default function ProjectChatHistoryPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.local_project_id, binding?.revision, activeStorageId, refreshEpoch, comparisonOverride]);
 
+  // Rehydrate a pending manual-fork checkpoint (for example after an app
+  // restart mid-fork). Pull-origin checkpoints stay with the Pull review.
+  useEffect(() => {
+    let cancelled = false;
+    setForkCheckpoint(null);
+    setForkNotice(null);
+    if (!binding?.profile_ids?.codex) return;
+    void (async () => {
+      try {
+        const pending = await projectSyncApi.getPendingCodexDivergence(project.local_project_id);
+        if (cancelled) return;
+        const manual = pending?.codex_fork_checkpoints.find(
+          (checkpoint) => checkpoint.origin === "manual",
+        ) ?? null;
+        setForkCheckpoint(manual);
+        if (manual) setForkNotice(manual.message);
+      } catch {
+        // Rehydration is best-effort; the checkpoint re-surfaces on the next
+        // fork action or refresh.
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.local_project_id, binding?.revision, refreshEpoch]);
+
   const changeBranch = (nextBranch: string) => { setBranch(nextBranch); setHistory(null); setDetailsByThread({}); setOpenDetailOccurrences(new Set()); void load(null, nextBranch); };
   const openCodex = async (threadId: string) => {
     setActionError(null);
@@ -1360,6 +1597,43 @@ export default function ProjectChatHistoryPage({
     try { await projectSyncApi.openCodexThreadInTerminal(project.local_project_id, threadId); }
     catch (reason) { setActionError(errorMessage(reason)); }
     finally { setActionBusyThreadId(null); }
+  };
+  const refreshAfterFork = async () => {
+    await Promise.all([load(null, branch, true), loadComparison()]);
+  };
+  const consumeForkResult = (result: RestoreResult) => {
+    const manualCheckpoint = result.codex_fork_checkpoints.find(
+      (checkpoint) => checkpoint.origin === "manual",
+    ) ?? null;
+    setForkCheckpoint(result.status === "complete" ? null : manualCheckpoint);
+    setForkNotice(result.message);
+    setForkVerifyThreadId("");
+    return result.status === "complete" || manualCheckpoint == null;
+  };
+  const forkThread = async (threadId: string) => {
+    setActionError(null);
+    setForkNotice(null);
+    setForkBusyThreadId(threadId);
+    try {
+      const result = await projectSyncApi.forkCodexThread(project.local_project_id, threadId);
+      if (consumeForkResult(result)) await refreshAfterFork();
+    } catch (reason) { setActionError(errorMessage(reason)); }
+    finally { setForkBusyThreadId(null); }
+  };
+  const resolveForkCheckpoint = async (verify: boolean) => {
+    if (!forkCheckpoint) return;
+    setActionError(null);
+    setForkResolving(true);
+    try {
+      const result = verify
+        ? await projectSyncApi.resumeCodexDivergence(
+          forkCheckpoint.operation_id,
+          forkVerifyThreadId.trim() || null,
+        )
+        : await projectSyncApi.cancelCodexDivergence(forkCheckpoint.operation_id);
+      if (consumeForkResult(result)) await refreshAfterFork();
+    } catch (reason) { setActionError(errorMessage(reason)); }
+    finally { setForkResolving(false); }
   };
   const loadDetails = async (threadId: string, cursor?: number | null) => {
     const projectId = project.local_project_id;
@@ -1390,5 +1664,50 @@ export default function ProjectChatHistoryPage({
     if (!wasOpen && !detailsByThread[threadId]?.page && !detailsByThread[threadId]?.loading) void loadDetails(threadId);
   };
 
-  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void load(null, branch, true); void loadComparison(); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
+  const forkPanel = (forkNotice || forkCheckpoint) ? (
+    <>
+      {forkNotice && !forkCheckpoint && (
+        <div className="sync-callout" role="status">
+          <Icon name="git-fork" size={15} />
+          <span>{forkNotice}</span>
+        </div>
+      )}
+      {forkCheckpoint && !selectionMode && (
+        <section className="sync-fork-checkpoint" aria-live="polite">
+          <h4>
+            <Icon name="git-branch" size={15} />
+            {forkCheckpoint.status === "awaiting_manual_fork"
+              ? "Create the fork in Codex"
+              : "Verify the recovered Codex fork"}
+          </h4>
+          <p>{forkCheckpoint.message}</p>
+          <dl>
+            <div><dt>Source thread</dt><dd>{forkCheckpoint.source_provider_thread_id}</dd></div>
+            <div><dt>Suggested name</dt><dd>{forkCheckpoint.suggested_fork_name}</dd></div>
+          </dl>
+          <label className="sync-fork-checkpoint-id">
+            Forked thread ID (optional)
+            <input
+              type="text"
+              value={forkVerifyThreadId}
+              disabled={forkResolving}
+              onChange={(event) => setForkVerifyThreadId(event.target.value)}
+              placeholder="Detected automatically when only one fork exists"
+            />
+          </label>
+          <div className="sync-fork-checkpoint-actions">
+            <button type="button" className="btn btn-primary" disabled={forkResolving}
+              onClick={() => void resolveForkCheckpoint(true)}>
+              {forkResolving ? "Verifying…" : "Verify fork"}
+            </button>
+            <button type="button" className="btn btn-ghost" disabled={forkResolving}
+              onClick={() => void resolveForkCheckpoint(false)}>
+              Cancel
+            </button>
+          </div>
+        </section>
+      )}
+    </>
+  ) : null;
+  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void load(null, branch, true); void loadComparison(); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onFork={(id) => void forkThread(id)} forkBusyThreadId={forkBusyThreadId} forkPanel={forkPanel} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
 }

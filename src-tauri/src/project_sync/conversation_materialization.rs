@@ -22,12 +22,12 @@ use super::conversation_codec::{analyze_codex_transcript, CodecLineage};
 use super::domain::{
     conversation_resource_id, ActionId, ActionStatus, ApplyReceipt, CodexDivergenceReceipt,
     CodexForkAttempt, CodexForkAttemptStatus, CodexForkExecutor, CodexInventoryRefreshStatus,
-    ConversationApplyReceipt, ConversationDivergenceResolution, ConversationFileRole,
-    ConversationJournalTarget, ConversationMaterializationState, ConversationNameStatus,
-    ConversationOperationId, ConversationPlanDirection, ConversationSyncOperation,
-    ConversationSyncOperationKind, ConversationSyncPhase, LocalConversationBinding,
-    MaterializationId, MaterializationRecord, MaterializationStatus, RestoreActionType,
-    TargetExpectation, LOCAL_SCHEMA,
+    ConversationApplyReceipt, ConversationCloudAnchor, ConversationDivergenceResolution,
+    ConversationFileRole, ConversationJournalTarget, ConversationMaterializationState,
+    ConversationNameStatus, ConversationOperationId, ConversationPlanDirection,
+    ConversationSyncOperation, ConversationSyncOperationKind, ConversationSyncPhase, ForkOrigin,
+    ForkStamp, LocalConversationBinding, MaterializationId, MaterializationRecord,
+    MaterializationStatus, RestoreActionType, TargetExpectation, ThreadId, LOCAL_SCHEMA,
 };
 use super::persistence::LocalStateRepository;
 
@@ -37,6 +37,10 @@ const MAX_PROVIDER_TARGET_BYTES: u64 = 512 * 1024 * 1024;
 struct CodexPostCommitPresentationTask {
     operation_id: ConversationOperationId,
     request: CodexPostCommitPresentationRequest,
+    /// Pull operations record the deferred naming outcome into their
+    /// materialization receipt. A manual fork has no receipt to update; its
+    /// task still performs the rename and inventory refresh.
+    records_receipt: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +67,15 @@ pub struct CodexDivergenceMaterializationRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodexDivergenceApplyOutcome {
     Committed(ConversationApplyReceipt),
+    /// A manual-origin fork adopted and stamped; no cloud state, binding pin,
+    /// or materialization receipt exists to report.
+    ManualForkCommitted {
+        operation_id: ConversationOperationId,
+        preserved_thread_id: ThreadId,
+        preserved_provider_thread_id: String,
+        desired_fork_name: String,
+        executor: Option<CodexForkExecutor>,
+    },
     AwaitingManualFork {
         operation_id: ConversationOperationId,
     },
@@ -186,9 +199,7 @@ pub fn apply_conversation_cloud_publication(
     failpoints.hit(&ConversationFailpoint::AfterCloudHeadCas)?;
     failpoints.hit(&ConversationFailpoint::BeforeCloudPublished)?;
     let (_, updated) = mutate_operation(repository, &operation.operation_id, |operation| {
-        operation.generation = publication.generation;
-        operation.commit_id = publication.commit_id.clone();
-        operation.manifest_sha256 = publication.manifest_sha256.clone();
+        record_publication_anchor(operation, &publication)?;
         operation.phase = ConversationSyncPhase::CloudPublished;
         Ok(())
     })?;
@@ -245,11 +256,7 @@ pub(crate) fn apply_conversation_cloud_publications_locked(
         operation.validate()?;
         validate_operation_scope(repository, operation)?;
         if operation.plan_id != first.plan_id
-            || operation.storage_id != first.storage_id
-            || operation.bundle_id != first.bundle_id
-            || operation.generation != first.generation
-            || operation.commit_id != first.commit_id
-            || operation.manifest_sha256 != first.manifest_sha256
+            || operation.cloud != first.cloud
             || operation.host_id != first.host_id
             || operation.replica_id != first.replica_id
             || operation.local_project_id != first.local_project_id
@@ -291,9 +298,7 @@ pub(crate) fn apply_conversation_cloud_publications_locked(
                 .iter_mut()
                 .find(|operation| &operation.operation_id == operation_id)
                 .ok_or_else(|| format!("conversation operation '{}' disappeared", operation_id))?;
-            operation.generation = publication.generation;
-            operation.commit_id = publication.commit_id.clone();
-            operation.manifest_sha256 = publication.manifest_sha256.clone();
+            record_publication_anchor(operation, &publication)?;
             operation.phase = ConversationSyncPhase::CloudPublished;
         }
         Ok(())
@@ -358,9 +363,7 @@ pub fn recover_conversation_cloud_publications(
             match inspect(&operation)? {
                 Some(publication) => {
                     let (_, updated) = mutate_operation(repository, &operation_id, |operation| {
-                        operation.generation = publication.generation;
-                        operation.commit_id = publication.commit_id.clone();
-                        operation.manifest_sha256 = publication.manifest_sha256.clone();
+                        record_publication_anchor(operation, &publication)?;
                         operation.phase = ConversationSyncPhase::CloudPublished;
                         Ok(())
                     })?;
@@ -376,9 +379,7 @@ pub fn recover_conversation_cloud_publications(
         if operation.phase == ConversationSyncPhase::RecoveryRequired {
             if let Some(publication) = inspect(&operation)? {
                 let (_, updated) = mutate_operation(repository, &operation_id, |operation| {
-                    operation.generation = publication.generation;
-                    operation.commit_id = publication.commit_id.clone();
-                    operation.manifest_sha256 = publication.manifest_sha256.clone();
+                    record_publication_anchor(operation, &publication)?;
                     operation.phase = ConversationSyncPhase::CloudPublished;
                     Ok(())
                 })?;
@@ -798,11 +799,19 @@ fn finish_codex_divergence(
     fork: &CodexForkExecutionRequest,
     failpoints: &mut impl ConversationFailpoints,
 ) -> Result<CodexDivergenceApplyOutcome, String> {
-    let may_commit_provider = operation.phase == ConversationSyncPhase::LocalForkBound
-        || (operation.phase == ConversationSyncPhase::ReplacementStaged
-            && operation.divergence().is_some_and(|divergence| {
-                divergence.resolution == ConversationDivergenceResolution::UseCloudOnly
-            }));
+    let origin = operation.fork_origin();
+    if origin == Some(ForkOrigin::Manual)
+        && operation.phase == ConversationSyncPhase::LocalForkBound
+    {
+        operation = record_post_commit_presentation(repository, &operation)?;
+        failpoints.hit(&ConversationFailpoint::AfterOriginalNamingRecorded)?;
+    }
+    let may_commit_provider = origin != Some(ForkOrigin::Manual)
+        && (operation.phase == ConversationSyncPhase::LocalForkBound
+            || (operation.phase == ConversationSyncPhase::ReplacementStaged
+                && operation.divergence().is_some_and(|divergence| {
+                    divergence.resolution == ConversationDivergenceResolution::UseCloudOnly
+                })));
     if may_commit_provider {
         commit_provider_targets(repository, &operation.operation_id, failpoints)?;
         failpoints.hit(&ConversationFailpoint::BeforeProviderCommitted)?;
@@ -835,9 +844,14 @@ fn finish_codex_divergence(
 
     if operation.phase == ConversationSyncPhase::OriginalNamingRecorded {
         let presentation_task = post_commit_presentation_task(&operation, fork)?;
-        failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
-        let receipt = commit_receipt(repository, &operation)?;
-        failpoints.hit(&ConversationFailpoint::AfterReceipt)?;
+        let outcome = if origin == Some(ForkOrigin::Manual) {
+            manual_fork_outcome(&operation)?
+        } else {
+            failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
+            let receipt = commit_receipt(repository, &operation)?;
+            failpoints.hit(&ConversationFailpoint::AfterReceipt)?;
+            CodexDivergenceApplyOutcome::Committed(receipt)
+        };
         failpoints.hit(&ConversationFailpoint::BeforeLocalCommitted)?;
         operation = set_phase(
             repository,
@@ -852,21 +866,47 @@ fn finish_codex_divergence(
         if let Some(task) = presentation_task {
             schedule_post_commit_presentation(repository.clone(), task);
         }
-        return Ok(CodexDivergenceApplyOutcome::Committed(receipt));
+        return Ok(outcome);
     }
     if operation.phase == ConversationSyncPhase::LocalCommitted {
-        let receipt = conversation_receipt(&operation);
+        let outcome = if origin == Some(ForkOrigin::Manual) {
+            manual_fork_outcome(&operation)?
+        } else {
+            CodexDivergenceApplyOutcome::Committed(conversation_receipt(
+                &operation,
+                operation.cloud_anchor()?,
+            ))
+        };
         let presentation_task = post_commit_presentation_task(&operation, fork)?;
         cleanup_and_retire(repository, &operation.operation_id)?;
         if let Some(task) = presentation_task {
             schedule_post_commit_presentation(repository.clone(), task);
         }
-        return Ok(CodexDivergenceApplyOutcome::Committed(receipt));
+        return Ok(outcome);
     }
     return Err(format!(
         "Codex divergence cannot continue safely from phase '{:?}'",
         operation.phase
     ));
+}
+
+fn manual_fork_outcome(
+    operation: &ConversationSyncOperation,
+) -> Result<CodexDivergenceApplyOutcome, String> {
+    let divergence = operation
+        .divergence()
+        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
+    let preserved_provider_thread_id = divergence
+        .fork_provider_thread_id
+        .clone()
+        .ok_or_else(|| "manual fork outcome lacks a verified fork".to_string())?;
+    Ok(CodexDivergenceApplyOutcome::ManualForkCommitted {
+        operation_id: operation.operation_id.clone(),
+        preserved_thread_id: divergence.preserved_thread_id.clone(),
+        preserved_provider_thread_id,
+        desired_fork_name: divergence.desired_fork_name.clone(),
+        executor: divergence.successful_executor,
+    })
 }
 
 fn validate_fork_request(
@@ -1183,7 +1223,31 @@ fn commit_preserved_fork_binding(
         .fork_transcript_sha256
         .as_ref()
         .ok_or_else(|| "verified Codex fork lacks a transcript digest".to_string())?;
+    let expected_stamp = ForkStamp {
+        fork_thread_id: divergence.preserved_thread_id.clone(),
+        fork_provider_thread_id: fork_provider_thread_id.clone(),
+        lineage_digest: divergence.local_lineage_digest.clone(),
+        semantic_digest: divergence.local_semantic_digest.clone(),
+        message_count: divergence.local_message_count,
+        forked_at: operation.updated_at,
+    };
+    let stamp_matches = |stamp: Option<&ForkStamp>| {
+        stamp.is_some_and(|stamp| {
+            stamp.fork_thread_id == expected_stamp.fork_thread_id
+                && stamp.fork_provider_thread_id == expected_stamp.fork_provider_thread_id
+                && stamp.lineage_digest == expected_stamp.lineage_digest
+                && stamp.semantic_digest == expected_stamp.semantic_digest
+                && stamp.message_count == expected_stamp.message_count
+        })
+    };
     let current = repository.load_conversation_bindings()?;
+    let source_scope = |binding: &LocalConversationBinding| {
+        binding.host_id == operation.host_id
+            && binding.replica_id == operation.replica_id
+            && binding.local_project_id == operation.local_project_id
+            && binding.provider_profile_id == operation.provider_profile_id
+            && binding.thread_id == operation.thread_id
+    };
     let existing = current.bindings.iter().find(|binding| {
         binding.host_id == operation.host_id
             && binding.replica_id == operation.replica_id
@@ -1202,7 +1266,11 @@ fn commit_preserved_fork_binding(
                 == Some(&divergence.local_semantic_digest)
             && binding.source_generation.is_none()
             && binding.source_manifest_sha256.is_none()
-    });
+    }) && current
+        .bindings
+        .iter()
+        .find(|binding| source_scope(binding))
+        .is_some_and(|source| stamp_matches(source.fork_stamp.as_ref()));
     if existing.is_some() && !exact_existing {
         return Err("preserved conversation binding is occupied".to_string());
     }
@@ -1211,17 +1279,12 @@ fn commit_preserved_fork_binding(
             return Err("conversation bindings changed after review".to_string());
         }
         repository.mutate_conversation_bindings(|document| {
-            let source = document
+            let source_index = document
                 .bindings
                 .iter()
-                .find(|binding| {
-                    binding.host_id == operation.host_id
-                        && binding.replica_id == operation.replica_id
-                        && binding.local_project_id == operation.local_project_id
-                        && binding.provider_profile_id == operation.provider_profile_id
-                        && binding.thread_id == operation.thread_id
-                })
+                .position(|binding| source_scope(binding))
                 .ok_or_else(|| "conversation divergence source binding disappeared".to_string())?;
+            let source = &document.bindings[source_index];
             if source.revision != operation.expected_binding_revision.unwrap_or(u64::MAX)
                 || source.provider_thread_id.as_deref()
                     != Some(&divergence.source_provider_thread_id)
@@ -1235,6 +1298,7 @@ fn commit_preserved_fork_binding(
                 provider_profile_id: operation.provider_profile_id.clone(),
                 thread_id: divergence.preserved_thread_id.clone(),
                 forked_from: Some(operation.thread_id.clone()),
+                fork_stamp: None,
                 provider_thread_id: Some(fork_provider_thread_id.clone()),
                 materialization_state: ConversationMaterializationState::Resumable,
                 last_observed_file_sha256: Some(fork_sha256.clone()),
@@ -1247,12 +1311,24 @@ fn commit_preserved_fork_binding(
                 created_at: operation.updated_at,
                 updated_at: operation.updated_at,
             });
+            let source = &mut document.bindings[source_index];
+            source.fork_stamp = Some(expected_stamp.clone());
+            source.revision = source.revision.saturating_add(1);
+            source.updated_at = operation.updated_at;
             Ok(())
         })?;
     }
     let document = repository.load_conversation_bindings()?;
+    let source_revision = document
+        .bindings
+        .iter()
+        .find(|binding| source_scope(binding))
+        .map(|binding| binding.revision);
     let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
         journaled.expected_bindings_document_revision = document.revision;
+        if let Some(revision) = source_revision {
+            journaled.expected_binding_revision = Some(revision);
+        }
         Ok(())
     })?;
     Ok(updated)
@@ -1323,6 +1399,7 @@ fn post_commit_presentation_task(
             fork_rename,
             original_rename,
         },
+        records_receipt: operation.fork_origin() != Some(ForkOrigin::Manual),
     }))
 }
 
@@ -1331,6 +1408,9 @@ fn complete_post_commit_presentation_task(
     task: &CodexPostCommitPresentationTask,
 ) -> Result<(), String> {
     let outcome = complete_codex_post_commit_presentation(&task.request);
+    if !task.records_receipt {
+        return Ok(());
+    }
     repository.mutate_materializations(|_, materializations| {
         let conversation = materializations
             .records
@@ -1445,7 +1525,10 @@ pub fn recover_conversation_materializations(
                     // reported for user-initiated Pull and verify.
                     &mut |_, _| {},
                 )? {
-                    CodexDivergenceApplyOutcome::Committed(_) => Ok(RecoveryOutcome::Completed),
+                    CodexDivergenceApplyOutcome::Committed(_)
+                    | CodexDivergenceApplyOutcome::ManualForkCommitted { .. } => {
+                        Ok(RecoveryOutcome::Completed)
+                    }
                     CodexDivergenceApplyOutcome::AwaitingManualFork { .. }
                     | CodexDivergenceApplyOutcome::RecoveryRequired { .. } => {
                         Ok(RecoveryOutcome::RecoveryRequired)
@@ -1570,6 +1653,7 @@ fn prepare_operation(
     }
     if operation.materialization_state == ConversationMaterializationState::Resumable
         && request.targets.is_empty()
+        && operation.fork_origin() != Some(ForkOrigin::Manual)
     {
         return Err("resumable conversation materialization has no provider files".to_string());
     }
@@ -1988,6 +2072,12 @@ fn verify_target_role_set(
         }
         return Ok(());
     }
+    if operation.fork_origin() == Some(ForkOrigin::Manual) {
+        if !targets.is_empty() {
+            return Err("manual fork operation writes no provider files".to_string());
+        }
+        return Ok(());
+    }
     if operation.materialization_state != ConversationMaterializationState::Resumable {
         return Err(
             "new conversation materialization must resolve to resumable or stored-only".to_string(),
@@ -2335,10 +2425,25 @@ fn commit_one_target(target: &ConversationJournalTarget) -> Result<(), String> {
     )
 }
 
+fn record_publication_anchor(
+    operation: &mut ConversationSyncOperation,
+    publication: &ConversationCloudPublication,
+) -> Result<(), String> {
+    let anchor = operation
+        .cloud
+        .as_mut()
+        .ok_or_else(|| "conversation operation lacks a cloud anchor".to_string())?;
+    anchor.generation = publication.generation;
+    anchor.commit_id = publication.commit_id.clone();
+    anchor.manifest_sha256 = publication.manifest_sha256.clone();
+    Ok(())
+}
+
 fn commit_binding(
     repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
 ) -> Result<(), String> {
+    let anchor = operation.cloud_anchor()?.clone();
     let current = repository.load_conversation_bindings()?;
     if binding_commit_is_complete(&current, operation) {
         return Ok(());
@@ -2367,8 +2472,8 @@ fn commit_binding(
             binding.last_observed_file_sha256 = transcript_target_digest(operation);
             binding.last_observed_lineage_digest = operation.lineage_digest.clone();
             binding.last_observed_semantic_digest = operation.semantic_digest.clone();
-            binding.source_generation = Some(operation.generation);
-            binding.source_manifest_sha256 = Some(operation.manifest_sha256.clone());
+            binding.source_generation = Some(anchor.generation);
+            binding.source_manifest_sha256 = Some(anchor.manifest_sha256.clone());
             binding.revision = binding.revision.saturating_add(1);
             binding.updated_at = operation.updated_at;
         } else {
@@ -2379,14 +2484,15 @@ fn commit_binding(
                 provider_profile_id: operation.provider_profile_id.clone(),
                 thread_id: binding_target_thread_id.clone(),
                 forked_from: operation.binding_forked_from.clone(),
+                fork_stamp: None,
                 provider_thread_id: operation.provider_thread_id.clone(),
                 materialization_state: operation.materialization_state,
                 last_observed_file_sha256: transcript_target_digest(operation),
                 last_observed_head_message_id: None,
                 last_observed_lineage_digest: operation.lineage_digest.clone(),
                 last_observed_semantic_digest: operation.semantic_digest.clone(),
-                source_generation: Some(operation.generation),
-                source_manifest_sha256: Some(operation.manifest_sha256.clone()),
+                source_generation: Some(anchor.generation),
+                source_manifest_sha256: Some(anchor.manifest_sha256.clone()),
                 revision: 0,
                 created_at: operation.updated_at,
                 updated_at: operation.updated_at,
@@ -2415,8 +2521,13 @@ fn binding_commit_is_complete(
             && binding.last_observed_file_sha256 == transcript_target_digest(operation)
             && binding.last_observed_lineage_digest == operation.lineage_digest
             && binding.last_observed_semantic_digest == operation.semantic_digest
-            && binding.source_generation == Some(operation.generation)
-            && binding.source_manifest_sha256.as_deref() == Some(&operation.manifest_sha256)
+            && binding.source_generation
+                == operation.cloud.as_ref().map(|anchor| anchor.generation)
+            && binding.source_manifest_sha256.as_deref()
+                == operation
+                    .cloud
+                    .as_ref()
+                    .map(|anchor| anchor.manifest_sha256.as_str())
     });
     materialized_exists
 }
@@ -2434,7 +2545,8 @@ fn commit_receipt(
     repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
 ) -> Result<ConversationApplyReceipt, String> {
-    let receipt = conversation_receipt(operation);
+    let anchor = operation.cloud_anchor()?.clone();
+    let receipt = conversation_receipt(operation, &anchor);
     let plan_id = operation
         .plan_id
         .clone()
@@ -2482,11 +2594,11 @@ fn commit_receipt(
             if record.host_id != operation.host_id
                 || record.replica_id != operation.replica_id
                 || record.local_project_id != operation.local_project_id
-                || record.storage_id != operation.storage_id
-                || record.bundle_id != operation.bundle_id
-                || record.generation != operation.generation
-                || record.commit_id != operation.commit_id
-                || record.manifest_sha256 != operation.manifest_sha256
+                || record.storage_id != anchor.storage_id
+                || record.bundle_id != anchor.bundle_id
+                || record.generation != anchor.generation
+                || record.commit_id != anchor.commit_id
+                || record.manifest_sha256 != anchor.manifest_sha256
             {
                 return Err(
                     "conversation receipt plan scope disagrees with materialization".to_string(),
@@ -2501,11 +2613,11 @@ fn commit_receipt(
                 host_id: operation.host_id.clone(),
                 replica_id: operation.replica_id.clone(),
                 local_project_id: operation.local_project_id.clone(),
-                storage_id: operation.storage_id.clone(),
-                bundle_id: operation.bundle_id.clone(),
-                generation: operation.generation,
-                commit_id: operation.commit_id.clone(),
-                manifest_sha256: operation.manifest_sha256.clone(),
+                storage_id: anchor.storage_id.clone(),
+                bundle_id: anchor.bundle_id.clone(),
+                generation: anchor.generation,
+                commit_id: anchor.commit_id.clone(),
+                manifest_sha256: anchor.manifest_sha256.clone(),
                 binding_revision: operation.expected_project_binding_revision,
                 status: MaterializationStatus::Complete,
                 applied_at: operation.updated_at,
@@ -2518,7 +2630,10 @@ fn commit_receipt(
     Ok(receipt)
 }
 
-fn conversation_receipt(operation: &ConversationSyncOperation) -> ConversationApplyReceipt {
+fn conversation_receipt(
+    operation: &ConversationSyncOperation,
+    anchor: &ConversationCloudAnchor,
+) -> ConversationApplyReceipt {
     ConversationApplyReceipt {
         host_id: operation.host_id.clone(),
         replica_id: operation.replica_id.clone(),
@@ -2529,9 +2644,9 @@ fn conversation_receipt(operation: &ConversationSyncOperation) -> ConversationAp
         lineage_digest: operation.lineage_digest.clone(),
         semantic_digest: operation.semantic_digest.clone(),
         local_file_sha256_after: transcript_target_digest(operation),
-        cloud_generation: operation.generation,
-        cloud_commit_id: operation.commit_id.clone(),
-        cloud_manifest_sha256: operation.manifest_sha256.clone(),
+        cloud_generation: anchor.generation,
+        cloud_commit_id: anchor.commit_id.clone(),
+        cloud_manifest_sha256: anchor.manifest_sha256.clone(),
         published_origin_host_token: None,
         published_origin_replica_token: None,
         journal_operation_id: operation.operation_id.clone(),

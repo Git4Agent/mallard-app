@@ -86,6 +86,7 @@ pub fn run() {
             project_sync::commands::get_pending_codex_divergence,
             project_sync::commands::resume_codex_divergence,
             project_sync::commands::cancel_codex_divergence,
+            project_sync::commands::fork_codex_thread,
             project_sync::commands::restart_codex_app_after_pull,
             project_sync::commands::get_bundle_readiness,
             project_sync::commands::get_restore_readiness,

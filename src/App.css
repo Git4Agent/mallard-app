@@ -59,6 +59,15 @@
   --yellow: #fbbf24;
   --blue: #86bdfb;
   --purple: #a78bfa;
+  --thread-status-glyph: #fffaf1;
+  --thread-status-synced: #32b86b;
+  --thread-status-cloud: #55749a;
+  --thread-status-local: #20a6c8;
+  --thread-status-divergent: #7657cc;
+  --thread-status-forked: #5548b8;
+  --thread-status-pending: #e9a11d;
+  --thread-status-conflict: #ea514e;
+  --thread-status-unavailable: #7f828a;
   --font: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif;
   --font-mono: 'SF Mono', 'JetBrains Mono', 'Menlo', 'Cascadia Code', 'Consolas', monospace;
   --r-lg: 22px;
@@ -2999,7 +3008,7 @@ summary:focus-visible {
   position: absolute;
   z-index: 12;
   top: 14px;
-  left: 87px;
+  left: 86px;
   width: 28px;
   height: 24px;
   padding: 0;
@@ -4662,7 +4671,6 @@ summary:focus-visible {
 .sync-pull-outcome p { margin-top: 2px; color: var(--text-2); font-size: 10.5px; }
 .sync-pull-outcome ul { margin: 5px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 3px 14px; list-style: none; }
 .sync-pull-outcome li { color: var(--text-2); font-size: 10.5px; }
-.sync-pull-outcome li::before { content: "✓"; margin-right: 5px; color: currentColor; }
 
 .sync-pull-error { max-width: none; margin: 14px 0; }
 
@@ -9148,10 +9156,13 @@ div.storage-link-main {
   gap: 3px;
 }
 
-.sync-thread-sync-summary .local,
-.sync-thread-sync-summary .storage { color: var(--blue); }
-.sync-thread-sync-summary .diverged { color: var(--yellow); }
-.sync-thread-sync-summary .unavailable { color: var(--red); }
+.sync-thread-sync-summary .local { color: var(--thread-status-local); }
+.sync-thread-sync-summary .storage { color: var(--thread-status-cloud); }
+.sync-thread-sync-summary .diverged { color: var(--thread-status-divergent); }
+.sync-thread-sync-summary .diverged-forked { color: var(--thread-status-forked); }
+.sync-thread-sync-summary .pending { color: var(--thread-status-pending); }
+.sync-thread-sync-summary .conflict { color: var(--thread-status-conflict); }
+.sync-thread-sync-summary .unavailable { color: var(--thread-status-unavailable); }
 
 .sync-history-branch-select {
   position: relative;
@@ -9665,12 +9676,30 @@ div.storage-link-main {
   flex: 0 0 auto;
 }
 
-.sync-thread-sync-indicator.synced { color: var(--text-2); }
-.sync-thread-sync-indicator.local,
-.sync-thread-sync-indicator.storage { color: var(--blue); }
-.sync-thread-sync-indicator.diverged { color: var(--yellow); }
-.sync-thread-sync-indicator.unavailable,
-.sync-thread-sync-error { color: var(--red); }
+.thread-status-icon {
+  display: block;
+  flex: 0 0 auto;
+  color: var(--thread-status-unavailable);
+}
+
+.thread-status-icon[data-thread-status="synced"] { color: var(--thread-status-synced); }
+.thread-status-icon[data-thread-status="cloud-outstanding"] { color: var(--thread-status-cloud); }
+.thread-status-icon[data-thread-status="local-outstanding"] { color: var(--thread-status-local); }
+.thread-status-icon[data-thread-status="divergent"] { color: var(--thread-status-divergent); }
+.thread-status-icon[data-thread-status="divergent-forked"] { color: var(--thread-status-forked); }
+.thread-status-icon[data-thread-status="pending"] { color: var(--thread-status-pending); }
+.thread-status-icon[data-thread-status="conflict"] { color: var(--thread-status-conflict); }
+.thread-status-icon[data-thread-status="unavailable"] { color: var(--thread-status-unavailable); }
+
+.sync-thread-sync-indicator.synced { color: var(--thread-status-synced); }
+.sync-thread-sync-indicator.local { color: var(--thread-status-local); }
+.sync-thread-sync-indicator.storage { color: var(--thread-status-cloud); }
+.sync-thread-sync-indicator.diverged { color: var(--thread-status-divergent); }
+.sync-thread-sync-indicator.diverged-forked { color: var(--thread-status-forked); }
+.sync-thread-sync-indicator.pending { color: var(--thread-status-pending); }
+.sync-thread-sync-indicator.conflict { color: var(--thread-status-conflict); }
+.sync-thread-sync-indicator.unavailable { color: var(--thread-status-unavailable); }
+.sync-thread-sync-error { color: var(--thread-status-conflict); }
 
 .sync-thread-sync-indicator::after,
 .sync-thread-sync-error::after {
@@ -9770,6 +9799,18 @@ div.storage-link-main {
   border-radius: 4px;
   cursor: help;
   outline: none;
+}
+
+.sync-history-thread-time {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.sync-history-thread-time time {
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 540;
 }
 
 .sync-history-thread-metric::after {
@@ -10355,6 +10396,10 @@ div.storage-link-main {
   color: var(--yellow);
 }
 
+.sync-sync-review-state.state-diverged_forked {
+  color: var(--blue);
+}
+
 .sync-sync-review-state.state-unavailable {
   color: var(--red);
 }
@@ -10858,6 +10903,35 @@ button.sync-project-file-expand { cursor: pointer; }
 
 .sync-fork-checkpoint input[type="text"] {
   width: 100%;
+}
+
+.sync-fork-checkpoint h4 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: var(--text-0);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.sync-fork-checkpoint p {
+  margin: 0;
+  color: var(--text-1);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.sync-fork-checkpoint-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.sync-history-content > .sync-fork-checkpoint {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
 }
 
 .sync-app-refresh {

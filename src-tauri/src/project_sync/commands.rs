@@ -42,7 +42,8 @@ use super::domain::{
     ApplyPolicy, ApplyReceipt, BindingState, BundleDirectoryEntry, BundleHead, BundleId,
     BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleSnapshot, CapturedWith,
     CodexDivergenceOperation, CodexForkExecutor, CodexInventoryRefreshStatus,
-    ConversationDivergencePlan, ConversationDivergenceResolution, ConversationFileRef,
+    ConversationCloudAnchor, ConversationDivergencePlan, ConversationDivergenceResolution,
+    ConversationFileRef, ForkOrigin,
     ConversationFileRole, ConversationLineageStatus, ConversationMaterializationState,
     ConversationNameStatus, ConversationOperationId, ConversationPlanAction,
     ConversationPlanActionType, ConversationPlanDirection, ConversationPushPlan,
@@ -429,6 +430,11 @@ pub enum ThreadSyncState {
     StorageOnly,
     StorageAhead,
     Diverged,
+    /// `Diverged`, refined: the thread's current digest pair equals its fork
+    /// stamp and the stamped fork still carries that chain as a verified
+    /// prefix — the local branch is already preserved. Directional policy is
+    /// identical to `Diverged`; only review defaults and display differ.
+    DivergedForked,
     Unavailable,
     Unknown,
 }
@@ -476,6 +482,8 @@ pub struct ThreadSyncEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_preservation: Option<ThreadForkPreservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relation: Option<ConversationRelation>,
@@ -483,6 +491,16 @@ pub struct ThreadSyncEntry {
     pub pull_decision: ThreadSyncDecision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_label: Option<String>,
+}
+
+/// Names the fork that preserves a diverged thread's local branch. Present
+/// exactly when the entry's state is `DivergedForked`.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ThreadForkPreservation {
+    pub fork_thread_id: ThreadId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork_display_name: Option<String>,
+    pub forked_at: u64,
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -596,8 +614,11 @@ pub enum RestoreApplyStatus {
 #[derive(Serialize, Clone, Debug)]
 pub struct CodexForkCheckpoint {
     pub operation_id: ConversationOperationId,
-    pub plan_id: PlanId,
-    pub action_id: ActionId,
+    pub origin: ForkOrigin,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<PlanId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<ActionId>,
     pub thread_id: ThreadId,
     pub source_provider_thread_id: String,
     pub suggested_fork_name: String,
@@ -649,7 +670,8 @@ pub struct RestoreResult {
     pub success: bool,
     pub status: RestoreApplyStatus,
     pub message: String,
-    pub plan_id: PlanId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<PlanId>,
     #[serde(default)]
     pub applied_action_ids: Vec<ActionId>,
     #[serde(default)]
@@ -2393,17 +2415,21 @@ fn pending_checkpoints_from_journal(
 fn pending_checkpoint_for_operation(
     operation: &ConversationSyncOperation,
 ) -> Result<CodexForkCheckpoint, String> {
-    let plan_id = operation
-        .plan_id
-        .clone()
-        .ok_or_else(|| "Codex divergence operation lacks a restore plan".to_string())?;
-    let action_id = operation
-        .plan_action_id
-        .clone()
-        .ok_or_else(|| "Codex divergence operation lacks a plan action".to_string())?;
     let divergence = operation
         .divergence()
         .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
+    let (plan_id, action_id) = if divergence.origin == ForkOrigin::Manual {
+        (None, None)
+    } else {
+        (
+            Some(operation.plan_id.clone().ok_or_else(|| {
+                "Codex divergence operation lacks a restore plan".to_string()
+            })?),
+            Some(operation.plan_action_id.clone().ok_or_else(|| {
+                "Codex divergence operation lacks a plan action".to_string()
+            })?),
+        )
+    };
     let (status, message) = if operation.phase == ConversationSyncPhase::AwaitingManualFork {
         (
             RestoreApplyStatus::AwaitingManualFork,
@@ -2417,6 +2443,7 @@ fn pending_checkpoint_for_operation(
     };
     Ok(CodexForkCheckpoint {
         operation_id: operation.operation_id.clone(),
+        origin: divergence.origin,
         plan_id,
         action_id,
         thread_id: operation.thread_id.clone(),
@@ -2444,14 +2471,19 @@ pub async fn resume_codex_divergence(
             .into_iter()
             .find(|operation| operation.operation_id == operation_id)
             .ok_or_else(|| format!("conversation operation '{}' does not exist", operation_id))?;
-        let plan_id = operation
-            .plan_id
-            .clone()
-            .ok_or_else(|| "Codex divergence operation lacks a restore plan".to_string())?;
-        let action_id = operation
-            .plan_action_id
-            .clone()
-            .ok_or_else(|| "Codex divergence operation lacks a plan action".to_string())?;
+        let origin = operation.fork_origin();
+        let (plan_id, action_id) = if origin == Some(ForkOrigin::Manual) {
+            (None, None)
+        } else {
+            (
+                Some(operation.plan_id.clone().ok_or_else(|| {
+                    "Codex divergence operation lacks a restore plan".to_string()
+                })?),
+                Some(operation.plan_action_id.clone().ok_or_else(|| {
+                    "Codex divergence operation lacks a plan action".to_string()
+                })?),
+            )
+        };
         let local_project_id = operation.local_project_id.clone();
         let fork = codex_fork_request_for_operation(&repository, &operation)?;
         let resumed_codex_home = fork.codex_home.clone();
@@ -2475,6 +2507,8 @@ pub async fn resume_codex_divergence(
             },
         )? {
             CodexDivergenceApplyOutcome::Committed(receipt) => {
+                let action_id = action_id
+                    .ok_or_else(|| "Codex divergence operation lacks a plan action".to_string())?;
                 let codex_divergences = codex_divergence_result(action_id.clone(), &receipt)
                     .into_iter()
                     .collect();
@@ -2503,6 +2537,31 @@ pub async fn resume_codex_divergence(
                     codex_divergences,
                 })
             }
+            CodexDivergenceApplyOutcome::ManualForkCommitted {
+                desired_fork_name, ..
+            } => {
+                let remaining = pending_checkpoints_from_journal(&repository, &local_project_id)?;
+                let message = if remaining.is_empty() {
+                    format!("Created the Codex fork '{desired_fork_name}'")
+                } else {
+                    format!(
+                        "Created the Codex fork '{desired_fork_name}'; \
+                         {} more checkpoint(s) need attention",
+                        remaining.len()
+                    )
+                };
+                Ok(RestoreResult {
+                    success: true,
+                    status: restore_status_for_checkpoints(&remaining),
+                    message,
+                    plan_id: None,
+                    applied_action_ids: Vec::new(),
+                    failed_actions: Vec::new(),
+                    codex_fork_checkpoints: remaining,
+                    codex_app_refresh: None,
+                    codex_divergences: Vec::new(),
+                })
+            }
             CodexDivergenceApplyOutcome::AwaitingManualFork { operation_id } => {
                 pending_queue_result(&repository, &local_project_id, plan_id, &operation_id, None)
             }
@@ -2527,7 +2586,7 @@ pub async fn resume_codex_divergence(
 fn pending_queue_result(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
-    plan_id: PlanId,
+    plan_id: Option<PlanId>,
     pending_operation_id: &ConversationOperationId,
     pending_message: Option<String>,
 ) -> Result<RestoreResult, String> {
@@ -2572,10 +2631,13 @@ pub async fn cancel_codex_divergence(
             .into_iter()
             .find(|operation| operation.operation_id == operation_id)
             .ok_or_else(|| format!("conversation operation '{}' does not exist", operation_id))?;
-        let plan_id = operation
-            .plan_id
-            .clone()
-            .ok_or_else(|| "Codex divergence operation lacks a restore plan".to_string())?;
+        let plan_id = if operation.fork_origin() == Some(ForkOrigin::Manual) {
+            None
+        } else {
+            Some(operation.plan_id.clone().ok_or_else(|| {
+                "Codex divergence operation lacks a restore plan".to_string()
+            })?)
+        };
         let local_project_id = operation.local_project_id.clone();
         cancel_codex_divergence_locked(&repository, &operation_id)?;
         let remaining = pending_checkpoints_from_journal(&repository, &local_project_id)?;
@@ -2601,6 +2663,316 @@ pub async fn cancel_codex_divergence(
         })
     })
     .await
+}
+
+/// Fork one local Codex thread through the unchanged fork workload — plan,
+/// journaled Manual-origin operation, executor ladder, verification, adoption,
+/// stamp — with no restore step: the source thread stays byte-for-byte
+/// untouched and the adopted fork becomes an ordinary local-only thread.
+#[tauri::command]
+pub async fn fork_codex_thread(
+    app: tauri::AppHandle,
+    local_project_id: LocalProjectId,
+    provider_thread_id: String,
+) -> Result<RestoreResult, String> {
+    let repository = repository(&app)?;
+    let phase_app = app.clone();
+    let phase_log = ActivityLogScope::new(ActivityLogType::Pull);
+    run_blocking(move || {
+        let _host_operation = repository.acquire_host_operation()?;
+        fork_codex_thread_with_repository(
+            &repository,
+            &local_project_id,
+            &provider_thread_id,
+            &mut |phase, elapsed| {
+                phase_log.emit(
+                    &phase_app,
+                    "info",
+                    "fork.phase_timing",
+                    &format!("   Fork phase — {phase}: {:.3}s", elapsed.as_secs_f64()),
+                );
+            },
+        )
+    })
+    .await
+}
+
+pub(crate) fn fork_codex_thread_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    provider_thread_id: &str,
+    on_phase: &mut dyn FnMut(&str, Duration),
+) -> Result<RestoreResult, String> {
+    let identity = repository.load_or_create_host_identity()?;
+    let machine = repository.load_bindings()?;
+    let project_binding = machine
+        .active_for(local_project_id)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "project '{}' is not mapped on this machine",
+                local_project_id
+            )
+        })?;
+    let binding = resolve_project_binding(repository, &project_binding)?;
+    let provider_profile_id = binding
+        .profile_ids
+        .get(&Provider::Codex)
+        .cloned()
+        .ok_or_else(|| "the project has no bound Codex profile".to_string())?;
+    let profile = machine
+        .profiles
+        .iter()
+        .find(|profile| profile.profile_id == provider_profile_id)
+        .ok_or_else(|| "the bound Codex profile disappeared".to_string())?;
+    let codex_home = binding
+        .codex_home
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| "forking requires a bound Codex home".to_string())?;
+    let find_source = |document: &super::domain::ConversationBindings| {
+        document
+            .bindings
+            .iter()
+            .find(|candidate| {
+                candidate.host_id == binding.host_id
+                    && candidate.replica_id == binding.replica_id
+                    && candidate.local_project_id == binding.local_project_id
+                    && candidate.provider_profile_id == provider_profile_id
+                    && candidate.provider_thread_id.as_deref() == Some(provider_thread_id)
+            })
+            .cloned()
+    };
+    let mut document = repository.load_conversation_bindings()?;
+    let source_binding = match find_source(&document) {
+        Some(existing) => existing,
+        None => {
+            // A never-synced local thread has no binding row to carry the
+            // stamp. Mint its canonical binding — the same deterministic
+            // logical id classification uses for unbound threads — so any
+            // local thread can be forked and stamped.
+            let minted_thread_id = initial_conversation_thread_id(
+                &binding.bundle_id,
+                Provider::Codex,
+                provider_thread_id,
+            )?;
+            let minted_at = now_secs();
+            repository.mutate_conversation_bindings(|document| {
+                if document.bindings.iter().any(|candidate| {
+                    candidate.host_id == binding.host_id
+                        && candidate.replica_id == binding.replica_id
+                        && candidate.local_project_id == binding.local_project_id
+                        && candidate.provider_profile_id == provider_profile_id
+                        && candidate.thread_id == minted_thread_id
+                }) {
+                    return Err(
+                        "the thread's canonical binding identity is occupied".to_string()
+                    );
+                }
+                document.bindings.push(LocalConversationBinding {
+                    host_id: binding.host_id.clone(),
+                    replica_id: binding.replica_id.clone(),
+                    local_project_id: binding.local_project_id.clone(),
+                    provider_profile_id: provider_profile_id.clone(),
+                    thread_id: minted_thread_id.clone(),
+                    forked_from: None,
+                    fork_stamp: None,
+                    provider_thread_id: Some(provider_thread_id.to_string()),
+                    materialization_state: ConversationMaterializationState::Resumable,
+                    last_observed_file_sha256: None,
+                    last_observed_head_message_id: None,
+                    last_observed_lineage_digest: None,
+                    last_observed_semantic_digest: None,
+                    source_generation: None,
+                    source_manifest_sha256: None,
+                    revision: 0,
+                    created_at: minted_at,
+                    updated_at: minted_at,
+                });
+                Ok(())
+            })?;
+            document = repository.load_conversation_bindings()?;
+            find_source(&document)
+                .ok_or_else(|| "the minted conversation binding disappeared".to_string())?
+        }
+    };
+    let thread_id = source_binding.thread_id.clone();
+    if repository
+        .load_conversation_sync_journal()?
+        .operations
+        .iter()
+        .any(|operation| operation.thread_id == thread_id)
+    {
+        return Err(
+            "this thread already has a pending sync operation; verify or cancel it first"
+                .to_string(),
+        );
+    }
+    let captured = capture_local_codex_conversations(repository, &binding)?;
+    let (resource_id_text, conversation) = captured
+        .conversations
+        .iter()
+        .find(|(_, conversation)| {
+            conversation.source_thread_id.as_deref() == Some(provider_thread_id)
+        })
+        .map(|(resource_id, conversation)| (resource_id.clone(), conversation.clone()))
+        .ok_or_else(|| "the thread's local transcript could not be captured".to_string())?;
+    let transcript = captured
+        .files
+        .get(&conversation.transcript_logical_path)
+        .cloned()
+        .ok_or_else(|| "the captured conversation has no transcript payload".to_string())?;
+    let domain_resources = provider_capture::domain_resources(&captured)?;
+    let resource_id = ResourceId::parse(resource_id_text)?;
+    let descriptor = domain_resources
+        .get(&resource_id)
+        .cloned()
+        .ok_or_else(|| "the captured conversation has no descriptor".to_string())?;
+    let source_transcript_sha256 = hex_digest(Sha256::digest(&transcript.bytes).as_slice());
+    let local_review = LocalThreadReview {
+        binding: Some(source_binding.clone()),
+        binding_resolution: BindingResolution::Bound,
+        resource_id,
+        descriptor: Some(descriptor.clone()),
+        conversation,
+        transcript,
+    };
+    let created_at = now_secs();
+    let plan = prebuild_thread_divergence_plan(
+        &thread_id,
+        Some(&local_review),
+        &descriptor,
+        None,
+        false,
+        ForkOrigin::Manual,
+        created_at,
+        &codex_home,
+        &binding,
+    )?;
+    let operation = ConversationSyncOperation {
+        operation_id: ConversationOperationId::parse(generated_named_id("operation")?)?,
+        plan_id: None,
+        plan_action_id: None,
+        direction: ConversationPlanDirection::Pull,
+        phase: ConversationSyncPhase::Prepared,
+        cloud: None,
+        host_id: binding.host_id.clone(),
+        replica_id: binding.replica_id.clone(),
+        local_project_id: binding.local_project_id.clone(),
+        provider_profile_id: provider_profile_id.clone(),
+        provider: Provider::Codex,
+        thread_id: thread_id.clone(),
+        operation: ConversationSyncOperationKind::CodexDivergence(CodexDivergenceOperation {
+            origin: ForkOrigin::Manual,
+            resolution: ConversationDivergenceResolution::PreserveLocalWithNativeFork,
+            available_resolutions: plan.available_resolutions.clone(),
+            recommended_resolution: plan.recommended_resolution,
+            local_branch_preserved: plan.local_branch_preserved,
+            preserved_thread_id: plan.preserved_thread_id.clone(),
+            source_provider_thread_id: plan.source_provider_thread_id.clone(),
+            fork_provider_thread_id: None,
+            fork_transcript_path: None,
+            fork_transcript_sha256: None,
+            local_lineage_digest: plan.local_lineage_digest.clone(),
+            local_semantic_digest: plan.local_semantic_digest.clone(),
+            local_message_count: plan.local_message_count,
+            pinned_local_title: plan.pinned_local_title.clone(),
+            pinned_cloud_title: plan.pinned_cloud_title.clone(),
+            desired_fork_name: plan.desired_fork_name.clone(),
+            desired_original_name: plan.desired_original_name.clone(),
+            codex_executable: plan.codex_executable.clone(),
+            codex_executable_sha256: plan.codex_executable_sha256.clone(),
+            available_executors: plan.available_executors.clone(),
+            pre_existing_children: plan.pre_existing_children.clone(),
+            attempts: Vec::new(),
+            current_executor: None,
+            successful_executor: None,
+            fork_name_status: None,
+            original_name_status: None,
+            inventory_refresh_status: CodexInventoryRefreshStatus::NotAttempted,
+        }),
+        binding_forked_from: source_binding.forked_from.clone(),
+        provider_thread_id: Some(provider_thread_id.to_string()),
+        materialization_state: ConversationMaterializationState::Resumable,
+        lineage_digest: Some(plan.local_lineage_digest.clone()),
+        semantic_digest: Some(plan.local_semantic_digest.clone()),
+        expected_host_identity_revision: identity.revision,
+        expected_bindings_document_revision: document.revision,
+        expected_binding_revision: Some(source_binding.revision),
+        expected_profile_revision: profile.revision,
+        expected_project_binding_revision: project_binding.revision,
+        expected_local_digest: Some(source_transcript_sha256.clone()),
+        targets: Vec::new(),
+        created_at,
+        updated_at: created_at,
+    };
+    let fork = CodexForkExecutionRequest {
+        codex_home,
+        project_directory: PathBuf::from(&binding.project_root),
+        codex_executable: PathBuf::from(&plan.codex_executable),
+        codex_executable_sha256: plan.codex_executable_sha256.clone(),
+        source_provider_thread_id: plan.source_provider_thread_id.clone(),
+        source_transcript_sha256,
+        local_lineage_digest: plan.local_lineage_digest.clone(),
+        local_semantic_digest: plan.local_semantic_digest.clone(),
+        pinned_local_title: plan.pinned_local_title.clone(),
+        desired_fork_name: plan.desired_fork_name.clone(),
+        available_executors: plan.available_executors.clone(),
+        pre_existing_children: plan.pre_existing_children.clone(),
+    };
+    let mut failpoints = NoConversationFailpoints;
+    match apply_codex_divergence_locked(
+        repository,
+        CodexDivergenceMaterializationRequest {
+            operation,
+            targets: Vec::new(),
+            fork,
+        },
+        &mut failpoints,
+        on_phase,
+    )? {
+        CodexDivergenceApplyOutcome::ManualForkCommitted {
+            desired_fork_name, ..
+        } => {
+            let remaining = pending_checkpoints_from_journal(repository, local_project_id)?;
+            let message = if remaining.is_empty() {
+                format!("Created the Codex fork '{desired_fork_name}'")
+            } else {
+                format!(
+                    "Created the Codex fork '{desired_fork_name}'; \
+                     {} more checkpoint(s) need attention",
+                    remaining.len()
+                )
+            };
+            Ok(RestoreResult {
+                success: true,
+                status: restore_status_for_checkpoints(&remaining),
+                message,
+                plan_id: None,
+                applied_action_ids: Vec::new(),
+                failed_actions: Vec::new(),
+                codex_fork_checkpoints: remaining,
+                codex_app_refresh: None,
+                codex_divergences: Vec::new(),
+            })
+        }
+        CodexDivergenceApplyOutcome::Committed(_) => {
+            Err("manual fork produced a pull receipt".to_string())
+        }
+        CodexDivergenceApplyOutcome::AwaitingManualFork { operation_id } => {
+            pending_queue_result(repository, local_project_id, None, &operation_id, None)
+        }
+        CodexDivergenceApplyOutcome::RecoveryRequired {
+            operation_id,
+            message,
+        } => pending_queue_result(
+            repository,
+            local_project_id,
+            None,
+            &operation_id,
+            Some(message),
+        ),
+    }
 }
 
 #[tauri::command]
@@ -4309,7 +4681,7 @@ fn count_thread_sync_state(counts: &mut ThreadSyncCounts, state: ThreadSyncState
         ThreadSyncState::Synced => counts.synced += 1,
         ThreadSyncState::LocalOnly | ThreadSyncState::LocalAhead => counts.local += 1,
         ThreadSyncState::StorageOnly | ThreadSyncState::StorageAhead => counts.storage += 1,
-        ThreadSyncState::Diverged => counts.diverged += 1,
+        ThreadSyncState::Diverged | ThreadSyncState::DivergedForked => counts.diverged += 1,
         ThreadSyncState::Unavailable => counts.unavailable += 1,
         ThreadSyncState::Unknown => counts.unknown += 1,
     }
@@ -4347,13 +4719,13 @@ impl BundleBytes for EmptyBundleBytes {
 }
 
 #[derive(Clone)]
-struct LocalThreadReview {
-    binding: Option<LocalConversationBinding>,
-    binding_resolution: BindingResolution,
-    resource_id: ResourceId,
-    descriptor: Option<ResourceDescriptor>,
-    conversation: provider_capture::CapturedConversation,
-    transcript: provider_capture::CapturedFile,
+pub(crate) struct LocalThreadReview {
+    pub(crate) binding: Option<LocalConversationBinding>,
+    pub(crate) binding_resolution: BindingResolution,
+    pub(crate) resource_id: ResourceId,
+    pub(crate) descriptor: Option<ResourceDescriptor>,
+    pub(crate) conversation: provider_capture::CapturedConversation,
+    pub(crate) transcript: provider_capture::CapturedFile,
 }
 
 fn bounded_file_expectation(path: &Path) -> Result<TargetExpectation, String> {
@@ -4432,6 +4804,48 @@ fn codec_digests(lineage: &CodecLineage) -> (Option<String>, Option<String>) {
         } => (Some(lineage_digest.clone()), Some(semantic_digest.clone())),
         CodecLineage::Unknown { .. } => (None, None),
     }
+}
+
+fn codec_chain_len(lineage: &CodecLineage) -> Option<u64> {
+    lineage.chain().map(|chain| chain.len() as u64)
+}
+
+/// The `DivergedForked` witness, evaluated only for a thread that already
+/// classified `Diverged`: the source's current digest pair equals its fork
+/// stamp, and the stamped fork is still locally capturable with the stamped
+/// chain as a digest-verified prefix. Every input comes from the walk this
+/// review already performed — no cloud read, no file read.
+pub(crate) fn diverged_fork_preservation(
+    local_binding: Option<&LocalConversationBinding>,
+    local: Option<&LocalThreadReview>,
+    local_threads: &BTreeMap<ThreadId, LocalThreadReview>,
+) -> Option<ThreadForkPreservation> {
+    let stamp = local_binding?.fork_stamp.as_ref()?;
+    let (local_lineage, local_semantic) = codec_digests(&local?.conversation.lineage);
+    if local_lineage.as_deref() != Some(stamp.lineage_digest.as_str())
+        || local_semantic.as_deref() != Some(stamp.semantic_digest.as_str())
+    {
+        return None;
+    }
+    let fork = local_threads.get(&stamp.fork_thread_id)?;
+    let fork_chain = fork.conversation.lineage.chain()?;
+    let count = usize::try_from(stamp.message_count).ok()?;
+    if fork_chain.len() < count {
+        return None;
+    }
+    let (prefix_lineage, prefix_semantic) =
+        super::domain::conversation_chain_digests(&fork_chain[..count]).ok()?;
+    if prefix_lineage != stamp.lineage_digest || prefix_semantic != stamp.semantic_digest {
+        return None;
+    }
+    Some(ThreadForkPreservation {
+        fork_thread_id: stamp.fork_thread_id.clone(),
+        fork_display_name: fork
+            .descriptor
+            .as_ref()
+            .map(|descriptor| descriptor.display_name.clone()),
+        forked_at: stamp.forked_at,
+    })
 }
 
 fn thread_review(
@@ -4706,6 +5120,11 @@ fn thread_review(
                 }),
             )
         };
+        let fork_preservation = if relation == ConversationRelation::Diverged {
+            diverged_fork_preservation(local_binding, local, &local_threads)
+        } else {
+            None
+        };
         let local_capturable = local.is_some_and(|local| local.conversation.lineage.is_complete());
         // Manifest validation admits only proven-lineage conversations, so
         // the manifest claim substitutes for payload analysis; apply-time
@@ -4791,6 +5210,8 @@ fn thread_review(
                 local,
                 descriptor,
                 thread,
+                fork_preservation.is_some(),
+                ForkOrigin::PullPreserve,
                 created_at,
                 &codex_home,
                 binding,
@@ -4823,7 +5244,11 @@ fn thread_review(
                 None => conversation_resource_id(Provider::Codex, &thread_id)?,
             },
             display_name,
-            state: relation_sync_state(relation),
+            state: if fork_preservation.is_some() {
+                ThreadSyncState::DivergedForked
+            } else {
+                relation_sync_state(relation)
+            },
             local_present: local.is_some(),
             storage_present: thread.is_some(),
             status_detail: capabilities
@@ -4848,6 +5273,7 @@ fn thread_review(
             forked_from: thread
                 .and_then(|thread| thread.forked_from.clone())
                 .or_else(|| local_binding.and_then(|binding| binding.forked_from.clone())),
+            fork_preservation,
             provider_thread_id: provider_thread_id.clone(),
             relation: Some(relation),
             push_decision: push.clone().into(),
@@ -5042,6 +5468,8 @@ fn prebuild_thread_divergence_plan(
     local: Option<&LocalThreadReview>,
     descriptor: &ResourceDescriptor,
     thread: Option<&ConversationThread>,
+    local_branch_preserved: bool,
+    origin: ForkOrigin,
     created_at: u64,
     codex_home: &Path,
     binding: &ProjectBinding,
@@ -5054,6 +5482,8 @@ fn prebuild_thread_divergence_plan(
         .as_deref()
         .ok_or_else(|| "captured Codex conversation lacks a provider id".to_string())?;
     let (local_lineage, local_semantic) = codec_digests(&local.conversation.lineage);
+    let local_message_count = codec_chain_len(&local.conversation.lineage)
+        .ok_or_else(|| "conversation divergence lacks a complete local chain".to_string())?;
     let local_display_name = local
         .descriptor
         .as_ref()
@@ -5071,6 +5501,9 @@ fn prebuild_thread_divergence_plan(
         local_semantic
             .as_deref()
             .ok_or_else(|| "conversation divergence lacks local semantics".to_string())?,
+        local_message_count,
+        local_branch_preserved,
+        origin,
         explicit_local_title,
         thread.and_then(|thread| thread.display_title.as_deref()),
         local_summary.as_deref(),
@@ -5292,6 +5725,7 @@ fn build_thread_sync_comparison(
             storage_updated_at: None,
             cloud_thread_id: None,
             forked_from: None,
+            fork_preservation: None,
             provider_thread_id: Some(provider_thread_id),
             relation: Some(ConversationRelation::Unknown),
             push_decision: blocked.clone(),
@@ -6491,11 +6925,13 @@ fn build_publish_request(
             plan_action_id: Some(action.action_id.clone()),
             direction: ConversationPlanDirection::Push,
             phase: ConversationSyncPhase::Prepared,
-            storage_id: storage_id.clone(),
-            bundle_id: project.bundle_id.clone(),
-            generation: action.pinned_generation,
-            commit_id: action.pinned_commit_id.clone(),
-            manifest_sha256: action.pinned_manifest_sha256.clone(),
+            cloud: Some(ConversationCloudAnchor {
+                storage_id: storage_id.clone(),
+                bundle_id: project.bundle_id.clone(),
+                generation: action.pinned_generation,
+                commit_id: action.pinned_commit_id.clone(),
+                manifest_sha256: action.pinned_manifest_sha256.clone(),
+            }),
             host_id: binding.host_id.clone(),
             replica_id: binding.replica_id.clone(),
             local_project_id: binding.local_project_id.clone(),
@@ -7798,6 +8234,74 @@ enum PreparedPullConversationOutcome {
     Checkpoint(CodexForkCheckpoint),
 }
 
+/// Apply-time re-proof of the `DivergedForked` witness, run before a
+/// waived-confirmation cloud overwrite writes anything: the source binding
+/// still carries a stamp matching the reviewed local pair, and the stamped
+/// fork still holds the stamped chain as a digest-verified prefix. Any miss
+/// fails this one item closed — the source is untouched and the thread is
+/// re-offered as a plain divergence on the next review.
+fn reprove_fork_preservation(
+    document: &super::domain::ConversationBindings,
+    binding: &ProjectBinding,
+    provider_profile_id: &LocalProviderProfileId,
+    source_thread_id: &ThreadId,
+    divergence: &ConversationDivergencePlan,
+    codex_home: &Path,
+) -> Result<(), String> {
+    let source = document
+        .bindings
+        .iter()
+        .find(|candidate| {
+            candidate.host_id == binding.host_id
+                && candidate.replica_id == binding.replica_id
+                && candidate.local_project_id == binding.local_project_id
+                && candidate.provider_profile_id == *provider_profile_id
+                && candidate.thread_id == *source_thread_id
+        })
+        .ok_or_else(|| "preserved divergence source binding disappeared".to_string())?;
+    let stamp = source
+        .fork_stamp
+        .as_ref()
+        .ok_or_else(|| "the fork stamp disappeared after review".to_string())?;
+    if stamp.lineage_digest != divergence.local_lineage_digest
+        || stamp.semantic_digest != divergence.local_semantic_digest
+    {
+        return Err("the fork stamp no longer matches the reviewed local branch".to_string());
+    }
+    let native = super::codex_native_fork::find_native_thread(
+        codex_home,
+        &stamp.fork_provider_thread_id,
+    )
+    .map_err(|error| format!("the preserving Codex fork is unavailable: {error}"))?;
+    if native.lineage_digest == stamp.lineage_digest
+        && native.semantic_digest == stamp.semantic_digest
+    {
+        return Ok(());
+    }
+    let count = usize::try_from(stamp.message_count)
+        .map_err(|_| "the fork stamp chain length is out of range".to_string())?;
+    let bytes = fs::read(&native.transcript_path).map_err(|error| {
+        format!(
+            "read the preserving fork transcript '{}': {error}",
+            native.transcript_path.display()
+        )
+    })?;
+    let analysis = super::conversation_codec::analyze_codex_transcript(&bytes);
+    let chain = analysis
+        .lineage
+        .chain()
+        .ok_or_else(|| "the preserving fork chain is no longer readable".to_string())?;
+    if chain.len() < count {
+        return Err("the preserving fork no longer contains the local branch".to_string());
+    }
+    let (prefix_lineage, prefix_semantic) =
+        super::domain::conversation_chain_digests(&chain[..count])?;
+    if prefix_lineage != stamp.lineage_digest || prefix_semantic != stamp.semantic_digest {
+        return Err("the preserving fork rewrote the stamped local branch".to_string());
+    }
+    Ok(())
+}
+
 fn apply_prepared_pull_conversation(
     repository: &LocalStateRepository,
     plan: &RestorePlan,
@@ -7888,8 +8392,11 @@ fn apply_prepared_pull_conversation(
     let operation_kind = match (&divergence_plan, prepared.resolution) {
         (Some(divergence), Some(resolution)) => {
             ConversationSyncOperationKind::CodexDivergence(CodexDivergenceOperation {
+                origin: ForkOrigin::PullPreserve,
                 resolution,
                 available_resolutions: divergence.available_resolutions.clone(),
+                recommended_resolution: divergence.recommended_resolution,
+                local_branch_preserved: divergence.local_branch_preserved,
                 preserved_thread_id: divergence.preserved_thread_id.clone(),
                 source_provider_thread_id: divergence.source_provider_thread_id.clone(),
                 fork_provider_thread_id: None,
@@ -7897,6 +8404,7 @@ fn apply_prepared_pull_conversation(
                 fork_transcript_sha256: None,
                 local_lineage_digest: divergence.local_lineage_digest.clone(),
                 local_semantic_digest: divergence.local_semantic_digest.clone(),
+                local_message_count: divergence.local_message_count,
                 pinned_local_title: divergence.pinned_local_title.clone(),
                 pinned_cloud_title: divergence.pinned_cloud_title.clone(),
                 desired_fork_name: divergence.desired_fork_name.clone(),
@@ -7927,11 +8435,13 @@ fn apply_prepared_pull_conversation(
         plan_action_id: Some(action.action_id.clone()),
         direction: ConversationPlanDirection::Pull,
         phase: ConversationSyncPhase::Prepared,
-        storage_id: plan.storage_id.clone(),
-        bundle_id: plan.bundle_id.clone(),
-        generation: plan.generation,
-        commit_id: plan.commit_id.clone(),
-        manifest_sha256: plan.manifest_sha256.clone(),
+        cloud: Some(ConversationCloudAnchor {
+            storage_id: plan.storage_id.clone(),
+            bundle_id: plan.bundle_id.clone(),
+            generation: plan.generation,
+            commit_id: plan.commit_id.clone(),
+            manifest_sha256: plan.manifest_sha256.clone(),
+        }),
         host_id: binding.host_id.clone(),
         replica_id: binding.replica_id.clone(),
         local_project_id: binding.local_project_id.clone(),
@@ -7970,6 +8480,18 @@ fn apply_prepared_pull_conversation(
                 return Err("Codex divergence source transcript is absent".to_string())
             }
         };
+        if prepared.resolution == Some(ConversationDivergenceResolution::UseCloudOnly)
+            && divergence.local_branch_preserved
+        {
+            reprove_fork_preservation(
+                &current_document,
+                binding,
+                &action.provider_profile_id,
+                &action.thread_id,
+                &divergence,
+                &codex_home,
+            )?;
+        }
         let fork = CodexForkExecutionRequest {
             codex_home,
             project_directory: PathBuf::from(&binding.project_root),
@@ -7995,12 +8517,16 @@ fn apply_prepared_pull_conversation(
             on_phase,
         )? {
             CodexDivergenceApplyOutcome::Committed(conversation) => conversation,
+            CodexDivergenceApplyOutcome::ManualForkCommitted { .. } => {
+                return Err("pull divergence produced a manual fork outcome".to_string());
+            }
             CodexDivergenceApplyOutcome::AwaitingManualFork { operation_id } => {
                 return Ok(PreparedPullConversationOutcome::Checkpoint(
                     CodexForkCheckpoint {
                         operation_id,
-                        plan_id: plan.plan_id.clone(),
-                        action_id,
+                        origin: ForkOrigin::PullPreserve,
+                        plan_id: Some(plan.plan_id.clone()),
+                        action_id: Some(action_id),
                         thread_id: action_thread_id,
                         source_provider_thread_id: divergence.source_provider_thread_id,
                         suggested_fork_name: divergence.desired_fork_name,
@@ -8016,8 +8542,9 @@ fn apply_prepared_pull_conversation(
                 return Ok(PreparedPullConversationOutcome::Checkpoint(
                     CodexForkCheckpoint {
                         operation_id,
-                        plan_id: plan.plan_id.clone(),
-                        action_id,
+                        origin: ForkOrigin::PullPreserve,
+                        plan_id: Some(plan.plan_id.clone()),
+                        action_id: Some(action_id),
                         thread_id: action_thread_id,
                         source_provider_thread_id: divergence.source_provider_thread_id,
                         suggested_fork_name: divergence.desired_fork_name,
@@ -8387,7 +8914,7 @@ fn apply_bundle_restore_with_progress(
         success,
         status: restore_status_for_checkpoints(&fork_checkpoints),
         message,
-        plan_id: plan.plan_id,
+        plan_id: Some(plan.plan_id),
         applied_action_ids,
         failed_actions,
         // Every committed conversation materialization — not just a
@@ -8926,7 +9453,12 @@ fn split_approved_restore_actions(
                 selection.action_id
             ));
         }
+        // The witnessed-preservation overwrite destroys nothing: the local
+        // branch is already held by the stamped fork, and apply re-proves
+        // that witness before writing. Only an unpreserved divergence keeps
+        // the explicit destructive acknowledgement.
         if selection.resolution == ConversationDivergenceResolution::UseCloudOnly
+            && !divergence.local_branch_preserved
             && !selection.destructive_approved
         {
             return Err(format!(
@@ -12878,6 +13410,7 @@ mod tests {
                 provider_profile_id: profile_id,
                 thread_id: logical_thread_id.clone(),
                 forked_from: logical_parent,
+                fork_stamp: None,
                 provider_thread_id: Some(provider_thread_id.to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
                 last_observed_file_sha256: Some(hex_digest(Sha256::digest(transcript).as_slice())),
@@ -12926,10 +13459,14 @@ mod tests {
                     ConversationDivergenceResolution::PreserveLocalWithNativeFork,
                     ConversationDivergenceResolution::UseCloudOnly,
                 ],
+                recommended_resolution:
+                    ConversationDivergenceResolution::PreserveLocalWithNativeFork,
+                local_branch_preserved: false,
                 preserved_thread_id: ThreadId::parse("thread-preserved").unwrap(),
                 source_provider_thread_id: "source-native".to_string(),
                 local_lineage_digest: "b".repeat(64),
                 local_semantic_digest: "c".repeat(64),
+                local_message_count: 3,
                 pinned_local_title: Some("Local title".to_string()),
                 pinned_cloud_title: Some("Cloud title".to_string()),
                 desired_fork_name: "Local title — local before Pull · 2026-07-29 18:42Z"
@@ -13054,6 +13591,47 @@ mod tests {
             selected[0].resolution,
             Some(ConversationDivergenceResolution::UseCloudOnly)
         );
+    }
+
+    #[test]
+    fn preserved_divergence_waives_the_destructive_acknowledgement() {
+        let mut plan = divergence_selection_test_plan();
+        {
+            let divergence = plan.conversation_actions[0].divergence.as_mut().unwrap();
+            divergence.local_branch_preserved = true;
+            divergence.recommended_resolution = ConversationDivergenceResolution::UseCloudOnly;
+        }
+        let action_id = plan.conversation_actions[0].action_id.clone();
+        let approved = vec![action_id.clone()];
+
+        // The witnessed overwrite needs no acknowledgement…
+        let (_, selected) = split_approved_restore_actions(
+            &approved,
+            &[ConversationResolutionSelection {
+                action_id: action_id.clone(),
+                resolution: ConversationDivergenceResolution::UseCloudOnly,
+                destructive_approved: false,
+            }],
+            &plan,
+        )
+        .unwrap();
+        assert_eq!(
+            selected[0].resolution,
+            Some(ConversationDivergenceResolution::UseCloudOnly)
+        );
+
+        // …while fork-again still rejects a stray destructive flag.
+        let error = split_approved_restore_actions(
+            &approved,
+            &[ConversationResolutionSelection {
+                action_id,
+                resolution: ConversationDivergenceResolution::PreserveLocalWithNativeFork,
+                destructive_approved: true,
+            }],
+            &plan,
+        )
+        .unwrap_err();
+        assert!(error.contains("must not carry destructive approval"), "{error}");
     }
 
     #[test]
@@ -16075,6 +16653,7 @@ mod tests {
                 provider_profile_id: profile_id,
                 thread_id: ThreadId::parse("thread-phantom").unwrap(),
                 forked_from: None,
+                fork_stamp: None,
                 provider_thread_id: Some("019f7500-0000-7000-8000-0000000000a1".to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
                 last_observed_file_sha256: Some("a".repeat(64)),

@@ -1,0 +1,2393 @@
+/*
+ * Mallard retro desktop skin
+ *
+ * This file intentionally sits after App.css. It changes presentation only:
+ * the production DOM, Tauri command surface, review gates, and keyboard
+ * behavior remain owned by the existing components.
+ */
+
+@font-face {
+  font-family: "Pixelify Sans";
+  src: url("/fonts/PixelifySans-Variable.ttf") format("truetype-variations");
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: block;
+}
+
+:root,
+:root[data-theme="dark"] {
+  --color-scheme: dark;
+  --bg-0: #101010;
+  --bg-1: #0b0b0b;
+  --bg-2: #171717;
+  --bg-3: #242424;
+  --bg-4: #121212;
+  --bg-hover: rgba(255, 255, 255, 0.065);
+  --bg-active: rgba(255, 255, 255, 0.11);
+  --border: #292929;
+  --border-mid: #3d3d3d;
+  --border-strong: #707070;
+  --button-bg: #151515;
+  --button-bg-hover: #232323;
+  --button-bg-active: #303030;
+  --button-border: #626262;
+  --button-primary-bg: #f2f2f2;
+  --button-primary-hover: #ffffff;
+  --button-primary-border: #ffffff;
+  --button-radius: 4px;
+  --app-shell: #080808;
+  --surface-card: #141414;
+  --surface-row: #121212;
+  --surface-row-hover: #1c1c1c;
+  --surface-row-active: #232323;
+  --surface-popover: #181818;
+  --surface-footer: #0d0d0d;
+  --surface-subtle: rgba(255, 255, 255, 0.035);
+  --surface-subtle-hover: rgba(255, 255, 255, 0.06);
+  --surface-overlay: rgba(18, 18, 18, 0.97);
+  --surface-muted: rgba(0, 0, 0, 0.24);
+  --surface-raised: var(--surface-card);
+  --chip-bg: rgba(255, 255, 255, 0.08);
+  --chip-strong-bg: rgba(255, 255, 255, 0.13);
+  --loader-track: rgba(255, 255, 255, 0.2);
+  --danger-soft: rgba(255, 102, 118, 0.11);
+  --warning-soft: rgba(244, 185, 79, 0.11);
+  --accent-soft: rgba(255, 255, 255, 0.1);
+  --accent-contrast: #0d0d0d;
+  --switch-off: #505050;
+  --switch-thumb: #f6f2df;
+  --editor-active-line: rgba(255, 255, 255, 0.055);
+  --text-0: #f5f5f2;
+  --text-1: #d7d7d4;
+  --text-2: #a3a3a0;
+  --text-3: #737370;
+  --accent: #f0f0ed;
+  --accent-glow: rgba(255, 255, 255, 0.15);
+  --primary: #f0f0ed;
+  --primary-text: #111111;
+  --green: #54d59a;
+  --red: #ff6676;
+  --yellow: #f4b94f;
+  --amber: var(--yellow);
+  --blue: #69c6f4;
+  --purple: #c59bff;
+  --focus-ring: var(--accent);
+  --font: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Roboto Mono",
+    "Liberation Mono", Menlo, Consolas, monospace;
+  --font-pixel: "Pixelify Sans", var(--font);
+  --font-mono: var(--font);
+  --r-lg: 9px;
+  --r: 6px;
+  --r-sm: 4px;
+  --r-pill: 4px;
+  --shadow-card: 2px 2px 0 rgba(3, 5, 17, 0.3);
+  --shadow-overlay: 4px 4px 0 rgba(3, 5, 17, 0.38);
+  --shadow-popover: 4px 4px 0 rgba(3, 5, 17, 0.44);
+  --sync-history-thread-range-column: 38ch;
+  /* Shell frame: every region is a rounded tile floating on a uniform gutter,
+     so horizontal and vertical separators meet in rounded corners instead of
+     square T-joints. */
+  --retro-gutter: 3px;
+  --retro-panel-radius: 10px;
+  --retro-panel-radius-inner: 9px;
+  /* A square with its four corner blocks removed — the pixel-art stand-in for
+     a circle. Applied to any node that would otherwise be antialiased. */
+  --retro-pixel-ring: polygon(
+    25% 0,
+    75% 0,
+    75% 25%,
+    100% 25%,
+    100% 75%,
+    75% 75%,
+    75% 100%,
+    25% 100%,
+    25% 75%,
+    0 75%,
+    0 25%,
+    25% 25%
+  );
+  --retro-rule: #8a8a8a;
+  --retro-bevel-highlight: #343434;
+  --retro-bevel-shadow: #080808;
+  --retro-divider-shell: #181818;
+  --retro-divider-fill: #3a302b;
+  --retro-frame-edge: #8a8a8a;
+  --retro-frame-highlight: #242424;
+  --retro-frame-gutter: #030303;
+  --retro-scroll-thumb: #55575a;
+  --retro-scroll-thumb-highlight: #686a6d;
+  --retro-scroll-thumb-hover: #66686b;
+  --retro-scroll-thumb-shadow: rgba(0, 0, 0, 0.3);
+  --retro-grid: rgba(255, 255, 255, 0.02);
+}
+
+:root[data-theme="light"] {
+  --color-scheme: light;
+  --bg-0: #fefbf6;
+  --bg-1: #fdf9f4;
+  --bg-2: #faf3eb;
+  --bg-3: #f2e8dd;
+  --bg-4: #fffdf9;
+  --bg-hover: rgba(82, 58, 43, 0.045);
+  --bg-active: #f0e3d5;
+  --border: #d8cec4;
+  --border-mid: #aa998d;
+  --border-strong: #66574f;
+  --button-bg: #fdf8f1;
+  --button-bg-hover: #f5eadf;
+  --button-bg-active: #eee0d3;
+  --button-border: #9d8b7f;
+  --button-primary-bg: #241c18;
+  --button-primary-hover: #17110e;
+  --button-primary-border: #17110e;
+  --app-shell: #f6eee5;
+  --surface-card: #fcf7f0;
+  --surface-row: #fdf9f3;
+  --surface-row-hover: #faf2e9;
+  --surface-row-active: #f0e3d5;
+  --surface-popover: #fffaf4;
+  --surface-footer: #faf3eb;
+  --surface-subtle: rgba(82, 58, 43, 0.025);
+  --surface-subtle-hover: rgba(82, 58, 43, 0.055);
+  --surface-overlay: rgba(254, 251, 246, 0.97);
+  --surface-muted: rgba(82, 58, 43, 0.045);
+  --surface-raised: var(--surface-card);
+  --chip-bg: rgba(82, 58, 43, 0.065);
+  --chip-strong-bg: rgba(82, 58, 43, 0.12);
+  --loader-track: rgba(82, 58, 43, 0.18);
+  --danger-soft: rgba(205, 69, 49, 0.09);
+  --warning-soft: rgba(192, 124, 12, 0.1);
+  --accent-soft: rgba(82, 58, 43, 0.075);
+  --accent-contrast: #fffaf4;
+  --switch-off: #ad9e92;
+  --switch-thumb: #fffaf4;
+  --editor-active-line: rgba(82, 58, 43, 0.045);
+  --text-0: #1e1817;
+  --text-1: #3d332e;
+  --text-2: #6f6159;
+  --text-3: #96877d;
+  --accent: #2a211d;
+  --accent-glow: rgba(82, 58, 43, 0.12);
+  --primary: #2a211d;
+  --primary-text: #fffaf4;
+  --green: #4b9661;
+  --red: #d8523e;
+  --yellow: #d99609;
+  --amber: var(--yellow);
+  --blue: #2f88b4;
+  --purple: #765ba7;
+  --focus-ring: var(--accent);
+  --shadow-card: 2px 2px 0 rgba(82, 58, 43, 0.07);
+  --shadow-overlay: 4px 4px 0 rgba(82, 58, 43, 0.11);
+  --shadow-popover: 4px 4px 0 rgba(82, 58, 43, 0.14);
+  --retro-rule: #8f7f74;
+  --retro-bevel-highlight: #fffdf9;
+  --retro-bevel-shadow: #6f6057;
+  --retro-divider-shell: #eee2d6;
+  --retro-divider-fill: #dcc5b2;
+  --retro-frame-edge: #8f7f74;
+  --retro-frame-highlight: #fffdf9;
+  --retro-frame-gutter: #dfd1c4;
+  --retro-scroll-thumb: #d3d4d7;
+  --retro-scroll-thumb-highlight: #dcdddf;
+  --retro-scroll-thumb-hover: #c3c5c8;
+  --retro-scroll-thumb-shadow: rgba(61, 50, 44, 0.18);
+  --retro-grid: rgba(82, 58, 43, 0.012);
+}
+
+/* Pixel type only stays square if glyphs land on whole pixels: fractional
+   tracking pushes every advance off the grid, and geometricPrecision asks the
+   rasteriser to skip grid-fitting entirely. Both are dropped. */
+body {
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.35;
+  font-variant-ligatures: none;
+  letter-spacing: 0;
+  text-rendering: auto;
+  -webkit-font-smoothing: antialiased;
+  font-synthesis: none;
+}
+
+/* The pixel face is drawn as hard blocks, so grayscale antialiasing only
+   rounds off the corners it was designed to have. */
+.btn,
+.sync-sidebar-brand strong,
+.sync-primary-nav button,
+.sidebar-nav-badge,
+.sync-primary-nav button > .sync-activity-badge,
+.sidebar-settings-sections .sidebar-section-title,
+.sync-project-combined-page .storage-link-sync,
+.sync-history-embedded-title,
+.sync-history-branch-trigger,
+.sync-history-section-heading h2 {
+  -webkit-font-smoothing: none;
+}
+
+button,
+input,
+select,
+textarea,
+summary {
+  font-family: inherit;
+  font-variant-ligatures: none;
+}
+
+::selection {
+  color: var(--primary-text);
+  background: var(--primary);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+  box-shadow: none;
+}
+
+::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  min-width: 28px;
+  border: 0;
+  border-radius: 3px;
+  background: var(--retro-scroll-thumb);
+}
+
+::-webkit-scrollbar-thumb:vertical {
+  box-shadow:
+    inset -1px 0 0 var(--retro-scroll-thumb-highlight),
+    0 1px 2px var(--retro-scroll-thumb-shadow);
+}
+
+::-webkit-scrollbar-thumb:horizontal {
+  box-shadow:
+    inset 0 -1px 0 var(--retro-scroll-thumb-highlight),
+    0 1px 2px var(--retro-scroll-thumb-shadow);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--retro-scroll-thumb-hover);
+}
+
+::-webkit-scrollbar-thumb:vertical:hover {
+  box-shadow:
+    inset -1px 0 0 var(--retro-scroll-thumb-highlight),
+    0 1px 3px var(--retro-scroll-thumb-shadow);
+}
+
+::-webkit-scrollbar-thumb:horizontal:hover {
+  box-shadow:
+    inset 0 -1px 0 var(--retro-scroll-thumb-highlight),
+    0 1px 3px var(--retro-scroll-thumb-shadow);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+  box-shadow: none;
+}
+
+.sync-app {
+  padding: var(--retro-gutter);
+  border: 0;
+  border-radius: 0;
+  background: var(--retro-frame-gutter);
+  box-shadow: none;
+}
+
+.sync-app svg {
+  shape-rendering: crispEdges;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+}
+
+.sync-app .icon-git-branch-mark,
+.sync-app .icon-git-folder-mark {
+  color: var(--text-1);
+}
+
+.sync-workspace {
+  background: var(--bg-0);
+}
+
+.sync-main {
+  color: var(--text-1);
+}
+
+.btn,
+.sync-app button {
+  letter-spacing: 0;
+}
+
+.btn {
+  border-color: var(--button-border);
+  border-radius: var(--button-radius);
+  background: var(--button-bg);
+  box-shadow: none;
+  font-family: var(--font-pixel);
+  font-weight: 600;
+  transition:
+    color 90ms steps(2, end),
+    background 90ms steps(2, end),
+    border-color 90ms steps(2, end),
+    transform 70ms steps(1, end);
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--button-bg-hover);
+}
+
+.btn:active:not(:disabled) {
+  box-shadow: none;
+  transform: translate(1px, 1px);
+}
+
+.btn.btn-primary,
+.sync-app .btn-primary {
+  border-color: var(--button-primary-border);
+  background: var(--button-primary-bg);
+  color: var(--primary-text);
+}
+
+.btn.btn-primary:hover:not(:disabled),
+.sync-app .btn-primary:hover:not(:disabled) {
+  background: var(--button-primary-hover);
+}
+
+.sync-app button:focus-visible,
+.sync-app input:focus-visible,
+.sync-app select:focus-visible,
+.sync-app textarea:focus-visible,
+.sync-app summary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.sync-app input:not([type="checkbox"]):not([type="radio"]),
+.sync-app select,
+.sync-app textarea,
+.sync-modal input:not([type="checkbox"]):not([type="radio"]),
+.sync-modal select,
+.sync-modal textarea {
+  border-color: var(--button-border);
+  border-radius: 4px;
+  background: var(--bg-4);
+  color: var(--text-0);
+  box-shadow: inset 1px 1px 0 var(--surface-muted);
+}
+
+.sync-app input::placeholder,
+.sync-app textarea::placeholder {
+  color: var(--text-3);
+}
+
+/* Desktop shell */
+
+/* The sidebar and the workspace are gutter-coloured trays; the regions inside
+   them are the tiles that carry the frame edge and the corner radius. */
+.sync-sidebar {
+  overflow: visible;
+  gap: var(--retro-gutter);
+  border: 0;
+  border-radius: 0;
+  background: var(--retro-frame-gutter);
+  box-shadow: none;
+}
+
+.sync-workspace {
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: var(--retro-frame-gutter);
+  box-shadow: none;
+}
+
+.sync-sidebar-head,
+.sidebar-project-pane,
+.sidebar-storage-pane,
+.sync-sidebar-product-mark,
+.sync-titlebar,
+.sync-workspace > .sync-main,
+.sync-log-drawer.open {
+  border: 1px solid var(--retro-frame-edge);
+  border-radius: var(--retro-panel-radius);
+}
+
+.sync-sidebar-head {
+  display: flex;
+  overflow: hidden;
+  flex: 0 0 auto;
+  flex-direction: column;
+  background: var(--bg-1);
+}
+
+.sync-sidebar-drag {
+  height: 46px;
+  flex-basis: 46px;
+}
+
+.sync-sidebar-brand {
+  height: 72px;
+  flex-basis: 72px;
+  gap: 11px;
+  padding: 0 22px;
+}
+
+.sync-brand-logo {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.sync-brand-logo,
+.sync-sidebar-product-mark img {
+  image-rendering: pixelated;
+}
+
+.sync-startup-mark img {
+  image-rendering: auto;
+}
+
+:root[data-theme="dark"] .sync-brand-logo,
+:root[data-theme="dark"] .sync-sidebar-product-mark img,
+:root[data-theme="dark"] .sync-startup-mark img {
+  filter: brightness(0) invert(1);
+}
+
+.sync-sidebar-brand strong {
+  font-family: var(--font-pixel);
+  color: var(--text-0);
+  font-size: 26px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.sync-primary-nav {
+  position: relative;
+  gap: 3px;
+  padding: 8px 10px 11px;
+  border-bottom: 0;
+}
+
+/* The gutter between the head tile and the section tiles replaces the painted
+   rule that used to run into the frame edge at a square corner. */
+.sync-primary-nav::after {
+  display: none;
+}
+
+.sync-primary-nav button {
+  font-family: var(--font-pixel);
+  height: 45px;
+  gap: 12px;
+  padding: 0 13px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-0);
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.sync-primary-nav button > svg {
+  width: 20px;
+  height: 20px;
+}
+
+.sync-primary-nav button:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.sync-primary-nav button.active {
+  border-color: var(--border-mid);
+  background: var(--surface-row-active);
+  box-shadow: none;
+}
+
+.sidebar-nav-badge,
+.sync-primary-nav button > .sync-activity-badge {
+  min-width: 28px;
+  padding: 2px 5px;
+  border: 1px solid var(--border-mid);
+  border-radius: 3px;
+  background: var(--surface-card);
+  color: var(--accent);
+  font-family: var(--font-pixel);
+}
+
+.sync-sidebar-sections {
+  overflow: visible;
+  padding-top: 0;
+  background: transparent;
+}
+
+.sidebar-project-pane {
+  background: var(--bg-1);
+}
+
+.sidebar-storage-pane {
+  background: var(--bg-1);
+}
+
+.sidebar-settings-sections .sidebar-section-heading {
+  min-height: 45px;
+  padding: 8px 12px 4px 20px;
+}
+
+.sidebar-settings-sections .sidebar-section-title {
+  font-family: var(--font-pixel);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 500;
+  /* Whole pixels, so the uppercase label keeps its air without drifting the
+     glyphs off the grid the way 0.04em (half a pixel) did. */
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.sidebar-section-action,
+.sidebar-add-action {
+  width: 28px;
+  height: 28px;
+  border-color: var(--button-border);
+  border-radius: 4px;
+  background: var(--button-bg);
+  box-shadow: none;
+}
+
+.sidebar-profile-list,
+.sidebar-settings-sections .sidebar-links-list {
+  padding-right: 9px;
+  padding-left: 9px;
+}
+
+.sidebar-profile-item {
+  min-height: 39px;
+  padding: 2px 4px 2px 10px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+}
+
+.sidebar-profile-item:hover {
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.sidebar-profile-item.active {
+  border-color: var(--border-mid);
+  background: var(--surface-row-active);
+  box-shadow: none;
+}
+
+.sidebar-profile-main {
+  gap: 10px;
+}
+
+.sidebar-profile-main span {
+  font-family: var(--font);
+  color: currentColor;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sidebar-profile-main svg {
+  color: var(--text-1);
+}
+
+.sidebar-profile-main > svg {
+  width: 19px;
+  height: 19px;
+}
+
+.sidebar-profile-actions button {
+  border: 0;
+  border-radius: 2px;
+}
+
+.sidebar-profile-actions .sidebar-profile-remove {
+  opacity: 0;
+  transition: opacity 80ms steps(1, end);
+}
+
+.sidebar-profile-item:hover .sidebar-profile-remove,
+.sidebar-profile-item:focus-within .sidebar-profile-remove {
+  opacity: 1;
+}
+
+.sidebar-profile-actions button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+/* Both resize handles straddle a real gutter now, so they only tint it on
+   hover; the rounded tile corners keep the junction shape. */
+.sidebar-section-divider {
+  height: 9px;
+  margin: -3px 0;
+  align-self: center;
+  background: transparent;
+}
+
+.sidebar-section-divider::before {
+  display: none;
+}
+
+.sidebar-section-divider::after {
+  z-index: 3;
+  top: 3px;
+  right: var(--retro-panel-radius);
+  left: var(--retro-panel-radius);
+  width: auto;
+  height: var(--retro-gutter);
+  border-radius: 1px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.sidebar-section-divider:hover::after,
+.sidebar-section-divider:active::after,
+.sidebar-section-divider:focus-visible::after,
+.sidebar-settings-sections.resizing .sidebar-section-divider::after {
+  background: var(--border-strong);
+  box-shadow: none;
+}
+
+.sync-sidebar-resizer {
+  width: 7px;
+  margin-right: -2px;
+  margin-left: -2px;
+  flex: 0 0 7px;
+  background: transparent;
+}
+
+.sync-sidebar-resizer::before {
+  display: none;
+}
+
+.sync-sidebar-resizer::after {
+  inset: var(--retro-panel-radius) auto var(--retro-panel-radius) 2px;
+  width: var(--retro-gutter);
+  border-radius: 1px;
+  background: transparent;
+}
+
+.sync-titlebar {
+  height: 52px;
+  min-height: 52px;
+  flex-basis: 52px;
+  margin-bottom: var(--retro-gutter);
+  padding-right: 10px;
+  background: var(--bg-2);
+}
+
+.sync-titlebar-context {
+  min-width: min(240px, 46vw);
+  height: auto;
+  gap: 17px;
+  align-self: stretch;
+  margin-left: -20px;
+  padding: 0 22px;
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-radius: var(--retro-panel-radius-inner) 0 0 var(--retro-panel-radius-inner);
+  background: var(--surface-card);
+  color: var(--text-0);
+}
+
+.sync-app.sidebar-hidden .sync-titlebar-context {
+  border-radius: var(--retro-panel-radius-inner);
+}
+
+.sync-workspace > .sync-main {
+  background: var(--bg-0);
+}
+
+.sync-titlebar-context > svg {
+  width: 22px;
+  height: 22px;
+  color: var(--text-1);
+}
+
+.sync-titlebar-context strong {
+  font-family: var(--font);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.sync-theme-button {
+  width: 34px;
+  height: 32px;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+.sync-theme-button > svg {
+  flex: 0 0 auto;
+}
+
+.sync-titlebar-actions {
+  gap: 2px;
+}
+
+.sync-titlebar-actions .storage-link-more {
+  width: 34px;
+  height: 32px;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--accent);
+}
+
+.sync-sidebar-toggle {
+  color: var(--text-2);
+}
+
+.sync-sidebar-product-mark {
+  min-height: 44px;
+  display: flex;
+  overflow: hidden;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 7px;
+  padding: 6px 20px;
+  background: var(--bg-1);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.sync-sidebar-product-mark img {
+  width: 25px;
+  height: 25px;
+  object-fit: contain;
+}
+
+/* Project identity and storage control strip */
+
+.sync-project-links-page {
+  padding: 18px clamp(36px, 3.5vw, 58px) 52px clamp(30px, 2.8vw, 42px);
+}
+
+.sync-project-links-page .profile-links-section,
+.sync-project-combined-page .profile-links-section {
+  max-width: none;
+}
+
+.sync-project-workspace-page .profile-links-heading {
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+}
+
+.sync-project-workspace-page.sync-project-combined-page .sync-combined-project-heading {
+  min-height: 70px;
+  margin-bottom: 10px;
+  padding-bottom: 0;
+}
+
+.sync-project-heading-name h1 {
+  font-family: var(--font);
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.sync-project-heading-name .btn {
+  border: 0;
+  box-shadow: none;
+  color: var(--accent);
+}
+
+.sync-project-heading-meta {
+  gap: 0;
+  color: var(--text-2);
+  font: 400 13px/18px var(--font);
+  font-kerning: none;
+  font-synthesis: none;
+  font-variant-ligatures: none;
+  letter-spacing: 0;
+  overflow: hidden;
+}
+
+.sync-project-heading-meta-item {
+  position: relative;
+  color: inherit;
+  font: 400 13px/18px var(--font);
+  font-kerning: none;
+  font-synthesis: none;
+  font-variant-ligatures: none;
+  letter-spacing: 0;
+}
+
+.sync-project-heading-repository {
+  max-width: min(220px, 22vw);
+  color: inherit;
+}
+
+.sync-project-heading-path {
+  max-width: min(520px, 48vw);
+  flex: 1 1 auto;
+  color: inherit;
+}
+
+.sync-project-heading-agent {
+  max-width: min(210px, 22vw);
+  flex: 0 1 auto;
+  color: inherit;
+}
+
+.sync-project-heading-meta-item > span {
+  display: block;
+  color: inherit;
+  font: 400 13px/18px var(--font);
+  font-kerning: none;
+  font-synthesis: none;
+  font-variant-ligatures: none;
+  letter-spacing: 0;
+}
+
+.sync-project-heading-meta-item + .sync-project-heading-meta-item {
+  margin-left: 22px;
+}
+
+.sync-project-heading-meta-item + .sync-project-heading-meta-item::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: -12px;
+  width: 1px;
+  height: 14px;
+  margin: 0;
+  transform: translateY(-50%);
+  background: var(--border-mid);
+}
+
+.sync-project-heading-meta-item svg {
+  color: var(--text-2);
+}
+
+.sync-project-combined-page .project-storage-group {
+  margin-bottom: 6px;
+  border: 1px solid var(--border-mid);
+  border-radius: 6px;
+  background: var(--surface-card);
+  box-shadow: none;
+}
+
+.sync-project-workspace-page.sync-project-combined-page .profile-link-connections {
+  padding-bottom: 4px;
+}
+
+.sync-project-combined-page .project-profile-storage-list .storage-link-block.selected {
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.sync-project-combined-page .project-profile-storage-list .storage-link-block:last-child {
+  border-bottom: 0;
+}
+
+.sync-project-combined-page .project-profile-storage-list .storage-link-row,
+.sync-project-combined-page .project-profile-storage-list .storage-link-identity {
+  min-height: 72px;
+}
+
+.storage-link-icon {
+  width: 33px;
+  height: 33px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-0);
+}
+
+.sync-project-combined-page .storage-link-copy strong {
+  font-family: var(--font);
+  color: var(--text-0);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.sync-project-combined-page .storage-link-copy span {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.sync-project-combined-page .storage-link-more {
+  border: 1px solid var(--button-border);
+  border-radius: 4px;
+  background: var(--button-bg);
+  box-shadow: none;
+}
+
+.sync-project-combined-page .storage-link-action-group {
+  gap: 8px;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.sync-project-combined-page .storage-link-actions {
+  padding-right: 12px;
+  border-left: 0;
+}
+
+.sync-project-combined-page .storage-link-sync {
+  font-family: var(--font-pixel);
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid var(--button-border);
+  border-radius: 4px;
+  background: var(--button-bg);
+  box-shadow: none;
+  color: var(--text-0);
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.sync-project-combined-page .storage-link-sync + .storage-link-sync {
+  border-left: 1px solid var(--button-border);
+}
+
+.sync-project-combined-page .storage-link-sync:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--button-bg-hover);
+  color: var(--accent);
+}
+
+.storage-link-actions-menu,
+.storage-link-menu,
+.sync-history-branch-menu {
+  border-color: var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface-popover);
+  box-shadow: var(--shadow-popover);
+}
+
+.storage-link-actions-menu-item,
+.storage-link-menu-option,
+.sync-history-branch-option {
+  border-radius: 3px;
+}
+
+/* Git and conversation history */
+
+.sync-history-embedded {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.sync-project-combined-page .sync-history-embedded {
+  margin-top: 0;
+}
+
+.sync-project-combined-page .sync-project-tab-panel .sync-history-embedded {
+  padding-top: 0;
+}
+
+.sync-history-embedded .sync-history-header {
+  min-height: 50px;
+  margin-bottom: 10px;
+  padding: 0 2px;
+  border-bottom: 0;
+}
+
+.sync-history-embedded-title {
+  font-family: var(--font-pixel);
+  color: var(--text-0);
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.sync-history-embedded-title > svg {
+  color: var(--text-1);
+}
+
+.sync-history-toolbar {
+  gap: 4px;
+}
+
+.sync-history-storage-lens {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.sync-history-storage-lens > svg,
+.sync-history-branch-select > svg {
+  color: var(--text-1);
+}
+
+.sync-history-storage-lens::after {
+  content: "›";
+  margin-left: 7px;
+  color: var(--text-3);
+  font-family: var(--font);
+}
+
+/* The branch name is the control, so it sits in the box rather than floating
+   beside one. No reserved width — it hugs the branch name. */
+.sync-history-branch-trigger {
+  font-family: var(--font-pixel);
+  min-width: 0;
+  height: 30px;
+  padding: 0 6px 0 9px;
+  border: 1px solid var(--button-border);
+  border-radius: 4px;
+  background: var(--button-bg);
+  color: var(--text-0);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.sync-history-branch-trigger:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--button-bg-hover);
+}
+
+.sync-history-branch-state {
+  border: 1px solid var(--border-mid);
+  border-radius: 3px;
+  background: var(--surface-card);
+  color: var(--accent);
+}
+
+/* Inside the trigger's own box the state is a label, not a second nested box. */
+.sync-history-branch-trigger .sync-history-branch-state {
+  border: 0;
+  background: var(--chip-bg);
+  color: var(--text-2);
+}
+
+.sync-history-icon-action {
+  width: 30px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+.sync-history-icon-action:hover:not(:disabled) {
+  border-color: var(--border);
+}
+
+.sync-history-section-heading {
+  margin: 18px 0 6px;
+}
+
+/* A pixel face needs a whole-pixel size and whole-pixel tracking; 12.5px and
+   0.02em (a quarter pixel) both land glyph origins between pixels and smudge
+   the blocks no matter what the smoothing setting is. */
+.sync-history-section-heading h2 {
+  font-family: var(--font-pixel);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+/* The storage-only section is a sibling of the timeline, so it does not inherit
+   these and its rows rendered with no title gap and no icon size. It gets the
+   same row tokens rather than hoisting them to a scope that would also re-lay
+   out the review screens and flat lists, which never had them. */
+.sync-history-timeline,
+.sync-history-storage-only {
+  --sync-history-row-actions-column: 80px;
+  --sync-history-commit-actions-column: 26px;
+  --sync-history-commit-date-column: 26ch;
+  --sync-history-row-column-gap: 12px;
+  --sync-history-row-icon-size: 18px;
+  --sync-history-row-title-gap: 8px;
+  --sync-history-row-text-offset: 26px;
+  --sync-history-row-anchor-y: 15px;
+  --sync-history-rail-x: 8px;
+  --sync-history-card-offset: 26px;
+  --sync-history-node-size: 12px;
+  --sync-history-node-half: 6px;
+  position: relative;
+}
+
+.sync-history-content {
+  container: sync-history-layout / inline-size;
+}
+
+.sync-history-timeline.has-uncommitted {
+  padding-top: 12px;
+}
+
+.sync-history-timeline.has-uncommitted::before {
+  display: none;
+}
+
+.sync-history-timeline.has-uncommitted::after {
+  content: "";
+  position: absolute;
+  z-index: 4;
+  top: calc(12px + var(--sync-history-row-anchor-y) - var(--sync-history-node-half));
+  left: calc(var(--sync-history-rail-x) - var(--sync-history-node-half));
+  width: var(--sync-history-node-size);
+  height: var(--sync-history-node-size);
+  border: 0;
+  border-radius: 0;
+  background: var(--bg-0);
+  box-shadow: inset 0 0 0 3px var(--text-2);
+  clip-path: var(--retro-pixel-ring);
+  pointer-events: none;
+}
+
+.sync-history-uncommitted {
+  position: relative;
+  overflow: visible;
+  margin: 0 0 10px var(--sync-history-card-offset);
+  border: 1px solid var(--border-mid);
+  border-radius: 4px;
+  background: var(--surface-row);
+}
+
+.sync-history-uncommitted::before {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  top: var(--sync-history-row-anchor-y);
+  left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset));
+  width: calc(var(--sync-history-card-offset) - var(--sync-history-rail-x));
+  height: 1px;
+  background: repeating-linear-gradient(
+    to right,
+    color-mix(in srgb, var(--border-mid) 76%, transparent) 0 4px,
+    transparent 4px 8px
+  );
+  pointer-events: none;
+}
+
+.sync-history-uncommitted::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  top: var(--sync-history-row-anchor-y);
+  bottom: -10px;
+  left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset));
+  width: 1px;
+  background: repeating-linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--border-mid) 78%, transparent) 0 4px,
+    transparent 4px 8px
+  );
+  pointer-events: none;
+}
+
+.sync-history-uncommitted .sync-history-section-heading {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--sync-history-row-actions-column);
+  grid-template-areas: "title count";
+  align-items: center;
+  gap: var(--sync-history-row-column-gap);
+  margin: 0;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border-mid);
+}
+
+.sync-history-uncommitted .sync-history-section-heading h2 {
+  min-width: 0;
+  display: inline-flex;
+  grid-area: title;
+  align-items: center;
+  gap: var(--sync-history-row-title-gap);
+}
+
+.sync-history-uncommitted .sync-history-section-heading h2 > svg {
+  width: var(--sync-history-row-icon-size);
+  height: var(--sync-history-row-icon-size);
+  flex: 0 0 var(--sync-history-row-icon-size);
+  color: var(--text-2);
+}
+
+.sync-history-uncommitted .sync-history-section-heading .sync-history-heading-count {
+  grid-area: count;
+  justify-self: end;
+}
+
+.sync-history-uncommitted .sync-history-thread-list.flat {
+  gap: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.sync-history-uncommitted .sync-history-thread-card {
+  border: 0;
+  border-radius: 0;
+}
+
+.sync-history-uncommitted .sync-history-thread-card + .sync-history-thread-card {
+  border-top: 1px solid var(--border-mid);
+}
+
+.sync-history-commit-rail {
+  isolation: isolate;
+  gap: 0;
+}
+
+.sync-history-commit-rail::before {
+  display: none;
+}
+
+.sync-history-commit {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  margin: 0 0 10px var(--sync-history-card-offset);
+  padding: 0;
+  border: 1px solid var(--border-mid);
+  border-radius: 4px;
+  background: var(--surface-row);
+}
+
+.sync-history-commit::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: var(--sync-history-row-anchor-y);
+  bottom: calc(-10px - var(--sync-history-row-anchor-y));
+  left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset));
+  width: 1px;
+  background: var(--border-mid);
+  pointer-events: none;
+}
+
+.sync-history-timeline.has-uncommitted .sync-history-commit:first-child::before {
+  top: 0;
+}
+
+.sync-history-commit:last-child::before {
+  display: none;
+}
+
+.sync-history-timeline.has-uncommitted .sync-history-commit:only-child::before {
+  top: 0;
+  bottom: auto;
+  height: var(--sync-history-row-anchor-y);
+  display: block;
+}
+
+.sync-history-commit::after {
+  display: none;
+}
+
+/* The rail node is the last antialiased shape in a pixel timeline, so it is
+   built as a stepped ring: a 3px inset frame with the four corner blocks
+   clipped away. The connector line lives on ::after, which clip-path would
+   also cut, so the ring is painted on ::before instead. */
+.sync-history-commit-node {
+  position: absolute;
+  z-index: 4;
+  top: calc(var(--sync-history-row-anchor-y) - var(--sync-history-node-half));
+  left: calc(
+    var(--sync-history-rail-x) - var(--sync-history-card-offset) -
+      var(--sync-history-node-half)
+  );
+  width: var(--sync-history-node-size);
+  height: var(--sync-history-node-size);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.sync-history-commit-node::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--bg-0);
+  box-shadow: inset 0 0 0 3px var(--text-2);
+  clip-path: var(--retro-pixel-ring);
+  pointer-events: none;
+}
+
+.sync-history-commit-node::after {
+  content: "";
+  position: absolute;
+  top: calc(var(--sync-history-node-half) - 1px);
+  left: calc(var(--sync-history-node-size) - 1px);
+  width: calc(
+    var(--sync-history-card-offset) - var(--sync-history-rail-x) -
+      var(--sync-history-node-half)
+  );
+  height: 1px;
+  background: var(--border-mid);
+  pointer-events: none;
+}
+
+.sync-history-commit-heading,
+.sync-history-thread-card {
+  min-width: 0;
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--sync-history-row-actions-column);
+  grid-template-areas:
+    "title actions"
+    "meta meta";
+  align-items: center;
+  gap: 3px var(--sync-history-row-column-gap);
+  padding: 6px 12px 7px;
+  background: transparent;
+}
+
+.sync-history-commit-heading {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr) var(--sync-history-commit-actions-column);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.sync-history-commit-heading::before {
+  display: none;
+}
+
+.sync-history-commit-heading:has(+ .sync-history-thread-list) {
+  border-bottom: 1px solid var(--border-mid);
+}
+
+.sync-history-commit-title,
+.sync-history-thread-title {
+  min-width: 0;
+  display: flex;
+  grid-area: title;
+  align-items: center;
+  gap: var(--sync-history-row-title-gap);
+}
+
+.sync-history-commit-icon,
+.sync-history-thread-kind,
+.sync-history-thread-title > .sync-thread-sync-indicator,
+.sync-history-thread-title > .sync-thread-sync-error {
+  position: relative;
+  z-index: 3;
+  width: var(--sync-history-row-icon-size);
+  height: var(--sync-history-row-icon-size);
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 var(--sync-history-row-icon-size);
+  border-radius: 2px;
+  line-height: 0;
+}
+
+/* That z-index opens a stacking context, so the badge's tooltip — whatever its
+   own z-index — cannot rise above the badge of the row beneath it. Lift the
+   whole badge while it is hovered or focused so its tooltip clears the rows. */
+.sync-history-thread-title > .sync-thread-sync-indicator:hover,
+.sync-history-thread-title > .sync-thread-sync-indicator:focus-visible,
+.sync-history-thread-title > .sync-thread-sync-error:hover,
+.sync-history-thread-title > .sync-thread-sync-error:focus-visible {
+  z-index: 46;
+}
+
+/* Every glyph is 24px pixel geometry, so timeline icons are drawn at an exact
+   2:1 downscale — any other size lands blocks on half pixels and blurs them. */
+.sync-history-commit-icon {
+  color: var(--text-2);
+}
+
+.sync-history-commit-icon > svg,
+.sync-history-thread-kind > svg,
+.sync-history-thread-title > .sync-thread-sync-indicator > svg,
+.sync-history-thread-title > .sync-thread-sync-error > svg,
+.sync-history-thread-meta > span > svg,
+.sync-history-thread-range > span > svg,
+.sync-history-debug-trigger > svg,
+.sync-history-chat-toggle > svg {
+  width: 12px;
+  height: 12px;
+}
+
+.sync-history-thread-title > .sync-thread-sync-indicator > .thread-status-icon,
+.sync-history-thread-title > .sync-thread-sync-error > .thread-status-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.sync-history-thread-kind {
+  color: var(--text-2);
+}
+
+.sync-history-commit-title > strong,
+.sync-history-thread-title > strong,
+.sync-history-stored-thread-copy > strong {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1;
+  color: var(--text-0);
+  font: 600 12.5px/1.35 var(--font);
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The subject is the row's headline: one step heavier than the session titles
+   nested underneath it, and free to use every pixel the metadata does not. */
+.sync-history-commit-title > strong {
+  font: 650 13px/1.35 var(--font);
+}
+
+.sync-history-commit-meta,
+.sync-history-session-details {
+  min-width: 0;
+  grid-area: meta;
+  padding-left: var(--sync-history-row-text-offset);
+}
+
+/* Date and sha right-align into a fixed gutter, so they stack into two clean
+   columns down the timeline instead of floating mid-row. */
+.sync-history-commit-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-left: 0;
+  overflow: hidden;
+}
+
+.sync-history-commit-meta > time {
+  min-width: 0;
+  overflow: hidden;
+  flex: 0 1 auto;
+  color: var(--text-2);
+  font: 500 11.5px/1.35 var(--font);
+  letter-spacing: 0;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-history-commit-meta > code,
+.sync-history-commit-meta > .sync-history-commit-link {
+  width: auto;
+  flex: 0 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The sha reads as an identifier rather than more prose — and as a target,
+   since it opens the commit on GitHub when the remote is known. */
+.sync-history-commit-heading code {
+  min-width: 7ch;
+  display: inline-block;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface-subtle);
+  color: var(--text-2);
+  font: 500 11.5px/1.35 var(--font-mono);
+  letter-spacing: 0;
+  text-align: center;
+}
+
+.sync-history-commit-link {
+  border-radius: 3px;
+  text-decoration: none;
+}
+
+.sync-history-commit-link:hover code,
+.sync-history-commit-link:focus-visible code {
+  border-color: var(--border-strong);
+  background: var(--surface-row-active);
+  color: var(--text-0);
+}
+
+.sync-history-commit-actions,
+.sync-history-thread-actions {
+  width: var(--sync-history-row-actions-column);
+  display: flex;
+  grid-area: actions;
+  align-items: center;
+  justify-content: flex-end;
+  justify-self: end;
+}
+
+.sync-history-commit-actions {
+  width: var(--sync-history-commit-actions-column);
+}
+
+.sync-history-commit-toggle {
+  width: var(--sync-history-commit-actions-column);
+  min-width: var(--sync-history-commit-actions-column);
+  height: var(--sync-history-commit-actions-column);
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-3);
+}
+
+.sync-history-commit-toggle:hover:not(:disabled),
+.sync-history-commit-toggle:focus-visible {
+  border-color: var(--border);
+  background: var(--bg-hover);
+  color: var(--text-1);
+}
+
+.sync-history-commit-toggle:disabled {
+  opacity: 0.35;
+}
+
+.sync-history-commit > .sync-history-thread-list {
+  position: relative;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.sync-history-commit > .sync-history-thread-list::after {
+  display: none;
+}
+
+.sync-history-thread-list.flat {
+  gap: 5px;
+}
+
+.sync-history-thread-card {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-row);
+  box-shadow: none;
+  transition:
+    border-color 100ms steps(2, end),
+    background 100ms steps(2, end);
+}
+
+.sync-history-thread-topline {
+  display: contents;
+}
+
+.sync-history-session-details {
+  display: grid;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.sync-history-session-summary,
+.sync-history-thread-meta {
+  min-width: 0;
+}
+
+.sync-history-session-summary {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.sync-history-thread-meta {
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.sync-history-thread-card:hover {
+  border-color: var(--border-mid);
+  background: var(--surface-row-hover);
+  transform: none;
+}
+
+.sync-history-commit > .sync-history-thread-list > .sync-history-thread-card {
+  border: 0;
+  border-radius: 0;
+}
+
+.sync-history-commit > .sync-history-thread-list > .sync-history-thread-card + .sync-history-thread-card {
+  border-top: 1px solid var(--border-mid);
+}
+
+.sync-history-commit > .sync-history-thread-list .sync-thread-sync-indicator,
+.sync-history-commit > .sync-history-thread-list .sync-thread-sync-error {
+  background: transparent;
+  box-shadow: none;
+}
+
+.sync-history-commit > .sync-history-thread-list .sync-history-thread-card:hover .sync-thread-sync-indicator,
+.sync-history-commit > .sync-history-thread-list .sync-history-thread-card:hover .sync-thread-sync-error {
+  background: transparent;
+  box-shadow: none;
+}
+
+.sync-history-stored-thread {
+  grid-template-areas:
+    "title title"
+    "meta meta";
+}
+
+/* Storage-only threads are one group, framed and hairline-separated like the
+   Uncommitted group and the commit cards, rather than five floating rows. */
+.sync-history-storage-only {
+  position: relative;
+  /* Visible, like the Uncommitted group: the rows carry status tooltips that
+     must escape the frame. The rows are transparent, so the group's own
+     rounded background is what shows at the corners. */
+  overflow: visible;
+  margin: 0 0 10px;
+  border: 1px solid var(--border-mid);
+  border-radius: 4px;
+  background: var(--surface-row);
+}
+
+.sync-history-storage-only .sync-history-section-heading {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "title count";
+  align-items: center;
+  gap: var(--sync-history-row-column-gap);
+  margin: 0;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border-mid);
+}
+
+.sync-history-storage-only .sync-history-section-heading h2 {
+  min-width: 0;
+  display: inline-flex;
+  grid-area: title;
+  align-items: center;
+  gap: var(--sync-history-row-title-gap);
+}
+
+.sync-history-storage-only .sync-history-section-heading h2 > svg {
+  width: var(--sync-history-row-icon-size);
+  height: var(--sync-history-row-icon-size);
+  flex: 0 0 var(--sync-history-row-icon-size);
+  color: var(--text-2);
+}
+
+.sync-history-storage-only .sync-history-section-heading .sync-history-heading-count {
+  grid-area: count;
+  justify-self: end;
+}
+
+.sync-history-storage-only .sync-history-thread-list.flat {
+  gap: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.sync-history-storage-only .sync-history-thread-card {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.sync-history-storage-only .sync-history-thread-card + .sync-history-thread-card {
+  border-top: 1px solid var(--border-mid);
+}
+
+.sync-history-stored-thread-location {
+  overflow: hidden;
+  color: var(--text-3);
+  font: 400 11.5px/1.35 var(--font);
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A stored thread reads like a commit: identity on the left, thread id and
+   freshness right-aligned into the same gutter the commit rows use. */
+.sync-history-stored-thread-meta {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 14px;
+  overflow: visible;
+}
+
+.sync-history-stored-thread-meta > time {
+  color: var(--text-2);
+  font: 500 11.5px/1.35 var(--font);
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.sync-history-stored-thread-meta > code {
+  min-width: 8ch;
+  display: inline-block;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface-subtle);
+  color: var(--text-2);
+  font: 500 11.5px/1.35 var(--font-mono);
+  letter-spacing: 0;
+  text-align: center;
+}
+
+.sync-history-thread-meta {
+  gap: 4px 10px;
+  font-size: 11.5px;
+}
+
+/* The range wrapper made the two time spans grandchildren, so they also need
+   the icon/label layout the direct children get. */
+.sync-history-thread-meta > span,
+.sync-history-thread-range > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* A translucent block is a smudge, not a pixel. The metrics are held back with
+   colour instead, so every block stays solid at its own value. */
+.sync-history-thread-metric svg {
+  opacity: 1;
+  color: var(--text-3);
+}
+
+.sync-history-thread-time > svg {
+  opacity: 1;
+}
+
+.sync-history-thread-time-start > svg {
+  color: var(--text-3);
+}
+
+.sync-history-thread-time-end > svg {
+  color: var(--text-1);
+}
+
+.sync-history-thread-time time {
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+/* The two stamps are one interval: they sit tighter to each other than to the
+   metrics beside them, joined by an arrow rather than floated apart. */
+.sync-history-thread-range {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.sync-history-range-arrow {
+  flex: 0 0 auto;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.sync-history-thread-elapsed {
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-history-thread-actions {
+  gap: 7px;
+}
+
+.sync-history-thread-actions .sync-history-launch-action {
+  width: 22px;
+  min-width: 22px;
+  min-height: 24px;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--accent);
+}
+
+.sync-history-thread-actions .sync-history-launch-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.sync-history-chat-toggle,
+.sync-history-debug-trigger {
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-3);
+}
+
+.sync-history-thread-card:hover .sync-history-launch-action,
+.sync-history-thread-card:hover .sync-history-chat-toggle,
+.sync-history-thread-card:hover .sync-history-debug-trigger {
+  color: var(--text-1);
+}
+
+.sync-history-thread-actions .sync-history-launch-action + .sync-history-launch-action {
+  margin-left: 0;
+}
+
+@container sync-history-layout (min-width: 700px) {
+  .sync-history-timeline {
+    --sync-history-row-anchor-y: 19px;
+  }
+
+  .sync-history-commit-heading,
+  .sync-history-uncommitted .sync-history-section-heading {
+    min-height: 38px;
+    grid-template-columns: minmax(0, 1fr) auto var(--sync-history-commit-actions-column);
+    grid-template-areas: "title meta actions";
+    column-gap: 18px;
+    row-gap: 0;
+    padding: 4px 12px;
+  }
+
+  .sync-history-commit-meta {
+    justify-content: flex-end;
+  }
+
+  .sync-history-commit-meta > time {
+    min-width: var(--sync-history-commit-date-column);
+  }
+
+  .sync-history-uncommitted .sync-history-section-heading {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .sync-history-thread-card {
+    min-height: 52px;
+    grid-template-columns: minmax(0, 1fr) var(--sync-history-row-actions-column);
+    grid-template-areas:
+      "title actions"
+      "meta meta";
+    column-gap: var(--sync-history-row-column-gap);
+    row-gap: 2px;
+    padding: 5px 12px 6px;
+  }
+
+  .sync-history-uncommitted .sync-history-section-heading {
+    grid-template-areas: "title meta count";
+  }
+
+  .sync-history-commit-meta {
+    padding-left: 0;
+  }
+
+  .sync-history-session-details {
+    padding-left: var(--sync-history-row-text-offset);
+    gap: 0;
+  }
+
+  .sync-history-session-summary {
+    gap: 5px;
+  }
+
+  /* Reserving the widest same-day range keeps the counters that follow in one
+     column down the list instead of stepping in and out with the clock text.
+     A session that crosses midnight is wider and simply pushes past it — too
+     rare to pad every other row for. Only applied where there is room. */
+  .sync-history-thread-range {
+    min-width: var(--sync-history-thread-range-column);
+  }
+
+  .sync-history-stored-thread {
+    min-height: 48px;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "title";
+  }
+}
+
+.sync-history-debug-popover,
+.sync-thread-sync-indicator::after,
+.sync-thread-sync-error::after,
+.sync-history-thread-metric::after {
+  border-color: var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-popover);
+  box-shadow: var(--shadow-popover);
+}
+
+.sync-history-older-group,
+.sync-history-older-inert {
+  border-color: var(--border-mid);
+  border-radius: 4px;
+}
+
+.sync-history-turn {
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface-muted);
+}
+
+.sync-history-debug-popover,
+.sync-thread-sync-indicator::after,
+.sync-thread-sync-error::after,
+.sync-history-thread-metric::after {
+  border-color: var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-popover);
+  box-shadow: var(--shadow-popover);
+}
+
+.sync-history-older-group,
+.sync-history-older-inert {
+  border-color: var(--border-mid);
+  border-radius: 4px;
+}
+
+@container sync-history-layout (max-width: 760px) {
+  .sync-history-header {
+    position: static;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sync-history-toolbar {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+}
+
+.sync-pull-outcome li {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* Setup, storage, review, and resource surfaces */
+
+.sync-form-card,
+.sync-plan-section,
+.sync-storage-card,
+.sync-resource-group,
+.sync-pull-section,
+.sync-storage-details-panel,
+.sync-storage-repositories,
+.sync-setup-section,
+.sync-project-files-panel {
+  border-color: var(--border-mid);
+  border-radius: 5px;
+  background: var(--surface-card);
+  box-shadow: 1px 1px 0 color-mix(in srgb, var(--border-strong) 13%, transparent);
+}
+
+.sync-storage-card > header,
+.sync-card-heading,
+.sync-resource-group-header,
+.sync-pull-section-heading,
+.sync-storage-repositories-heading {
+  border-bottom-color: var(--border);
+  background: var(--surface-subtle);
+}
+
+.sync-resource-row,
+.sync-plan-action,
+.sync-pull-item,
+.sync-project-file-row,
+.sync-storage-repository-row {
+  border-color: var(--border);
+  background: var(--surface-row);
+}
+
+.sync-resource-row:hover,
+.sync-plan-action:hover,
+.sync-pull-item:hover,
+.sync-project-file-row:hover,
+.sync-storage-repository-row:hover {
+  background: var(--surface-row-hover);
+}
+
+.sync-resource-row.selected,
+.sync-plan-action.selected,
+.sync-pull-item.selected,
+.sync-project-file-row.selected,
+.sync-sync-selectable-row.selected {
+  border-color: var(--border-strong);
+  background: var(--surface-row-active);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.sync-callout,
+.sync-binding-safety,
+.conversation-path-repair-notice {
+  border-radius: 4px;
+  box-shadow: none;
+}
+
+.sync-callout.error {
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+}
+
+.sync-callout.warning {
+  border-color: color-mix(in srgb, var(--yellow) 45%, var(--border));
+}
+
+.sync-agent-choice,
+.sync-segmented,
+.sync-project-tabs {
+  border-color: var(--border-mid);
+  border-radius: 4px;
+  background: var(--surface-muted);
+}
+
+.sync-agent-choice button,
+.sync-segmented button,
+.sync-project-tabs button {
+  border-radius: 3px;
+}
+
+.sync-agent-choice button.active,
+.sync-segmented button.active,
+.sync-project-tabs button[aria-selected="true"] {
+  background: var(--surface-card);
+  box-shadow: 1px 1px 0 color-mix(in srgb, var(--border-strong) 18%, transparent);
+  color: var(--accent);
+}
+
+.sync-sync-review-header,
+.sync-inline-action-header {
+  border-bottom-color: var(--border-mid);
+  background: var(--surface-subtle);
+}
+
+.sync-sync-review-summary,
+.sync-pull-apply-bar,
+.sync-sticky-save,
+.sync-modal-footer {
+  border-color: var(--border-mid);
+  background: var(--surface-footer);
+}
+
+.sync-sync-review-stepper button,
+.sync-sync-review-tabs button {
+  border-radius: 3px;
+}
+
+.sync-folder-field,
+.sync-r2-guide,
+.sync-r2-fields,
+.sync-storage-checks label {
+  border-color: var(--border-mid);
+  border-radius: 4px;
+  background: var(--surface-row);
+}
+
+.sync-r2-guide ol li::marker {
+  color: var(--accent);
+}
+
+.sync-result-summary,
+.sync-fact-grid,
+.sync-scope-strip,
+.sync-project-summary {
+  border-color: var(--border-mid);
+  border-radius: 4px;
+}
+
+/* Logs, menus, dialogs, and transient states */
+
+.sync-log-drawer,
+.log-drawer {
+  margin-top: 0;
+  border: 0;
+  background: var(--bg-1);
+  box-shadow: none;
+  transition:
+    height 180ms ease,
+    margin-top 180ms ease;
+}
+
+/* Open: a tile in its own right, separated from the workspace by the gutter.
+   Closed: zero height, zero border, zero gutter — nothing left to see. */
+.sync-log-drawer.open {
+  overflow: visible;
+  margin-top: var(--retro-gutter);
+  padding-top: 0;
+}
+
+.sync-log-drawer .log-resizer {
+  top: calc(-1px - var(--retro-gutter) - 1px);
+  height: 9px;
+}
+
+.sync-log-drawer .log-resizer::before {
+  display: none;
+}
+
+.sync-log-drawer .log-resizer::after {
+  top: 0;
+  right: var(--retro-panel-radius);
+  left: var(--retro-panel-radius);
+  height: var(--retro-gutter);
+  border-radius: 1px;
+  background: transparent;
+}
+
+.sync-log-drawer .log-resizer:hover::after,
+.sync-log-drawer .log-resizer:active::after,
+.sync-workspace.resizing-log .sync-log-drawer .log-resizer::after {
+  background: var(--border-strong);
+}
+
+.sync-log-drawer.open::before,
+.sync-log-drawer.open::after {
+  display: none;
+}
+
+/* The drawer paints its own rounded background; the panel stays transparent so
+   nothing squares off the corners, and only the scroll body needs clipping. */
+.sync-log-drawer .log-panel {
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.sync-log-drawer .log-panel-body {
+  border-radius: 0 0 var(--retro-panel-radius-inner) var(--retro-panel-radius-inner);
+}
+
+.sync-log-drawer .log-panel-header {
+  padding-right: 16px;
+  padding-left: 16px;
+}
+
+.log-filter-control select {
+  box-shadow: none;
+}
+
+.log-header,
+.log-toolbar {
+  border-bottom-color: var(--border-mid);
+  background: var(--surface-footer);
+}
+
+.log-line,
+.log-entry {
+  border-bottom-color: var(--border);
+  font-family: var(--font-mono);
+}
+
+.log-line:hover,
+.log-entry:hover {
+  background: var(--surface-row-hover);
+}
+
+.sync-modal-backdrop {
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.2) 0,
+      rgba(0, 0, 0, 0.2) 1px,
+      rgba(0, 0, 0, 0.13) 1px,
+      rgba(0, 0, 0, 0.13) 3px
+    );
+}
+
+.sync-modal {
+  border-color: var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface-popover);
+  box-shadow: var(--shadow-overlay);
+}
+
+.sync-modal-header {
+  border-bottom-color: var(--border-mid);
+  background: var(--surface-subtle);
+}
+
+.sync-modal-header h1 {
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.sync-notice,
+.sync-backend-banner {
+  border-color: var(--border-mid);
+  background: var(--surface-card);
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--border-strong) 14%, transparent);
+}
+
+.sync-empty-state,
+.sync-history-state,
+.sync-pane-message {
+  border-color: var(--border-mid);
+  border-radius: 5px;
+  background:
+    linear-gradient(135deg, var(--surface-subtle) 25%, transparent 25%) 0 0 / 8px 8px,
+    var(--surface-card);
+}
+
+.sync-startup-screen,
+.sync-host-recovery {
+  font-family: var(--font);
+  background:
+    linear-gradient(var(--retro-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--retro-grid) 1px, transparent 1px),
+    var(--bg-0);
+  background-size: 4px 4px;
+}
+
+.sync-startup-mark {
+  border: 1px solid var(--border-mid);
+  border-radius: 5px;
+  background: var(--surface-card);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--border-strong) 18%, transparent);
+}
+
+.sync-startup-mark img {
+  border-radius: 0;
+}
+
+.sync-startup-brand h1 {
+  font-weight: 800;
+  letter-spacing: 0.045em;
+}
+
+.sync-startup-progress-track {
+  border: 1px solid var(--border-mid);
+  border-radius: 2px;
+  background: var(--surface-muted);
+}
+
+.sync-startup-progress-track > span {
+  border-radius: 0;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--accent) 0,
+    var(--accent) 6px,
+    color-mix(in srgb, var(--accent) 72%, var(--bg-0)) 6px,
+    color-mix(in srgb, var(--accent) 72%, var(--bg-0)) 9px
+  );
+}
+
+@keyframes retro-workspace-enter {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.sync-project-links-page > .profile-links-section,
+.sync-storage-settings-page > .profile-links-section {
+  animation: retro-workspace-enter 150ms steps(4, end) both;
+}
+
+@media (max-width: 1100px) {
+  .sync-project-heading-identity {
+    width: min(680px, calc(100vw - 370px));
+  }
+
+  .sync-history-thread-meta {
+    column-gap: 8px;
+  }
+}
+
+@media (max-width: 860px) {
+  .sync-sidebar-brand {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .sync-brand-logo {
+    width: 38px;
+    height: 38px;
+  }
+
+  .sync-sidebar-brand strong {
+    font-size: 23px;
+  }
+
+  .sync-project-links-page {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .sync-project-heading-identity {
+    width: min(600px, calc(100vw - 330px));
+  }
+
+  .sync-project-combined-page .storage-link-actions {
+    gap: 5px;
+  }
+
+  .sync-project-combined-page .storage-link-sync {
+    padding: 0 9px;
+  }
+}
+
+@media (max-width: 720px) {
+  .sync-sidebar-brand {
+    height: 60px;
+    flex-basis: 60px;
+  }
+
+  .sync-brand-logo {
+    width: 38px;
+    height: 38px;
+  }
+
+  .sync-titlebar-context {
+    min-width: 0;
+    max-width: 58vw;
+  }
+
+  .sync-project-heading-identity {
+    width: 100%;
+  }
+
+  .sync-project-combined-page .project-profile-storage-list .storage-link-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sync-project-combined-page .storage-link-actions {
+    width: 100%;
+    padding: 0 10px 9px;
+  }
+
+  .sync-project-combined-page .storage-link-action-group {
+    margin-left: auto;
+  }
+
+  .sync-history-commit-meta {
+    flex-wrap: wrap;
+  }
+
+  .sync-history-commit-meta > time {
+    display: inline;
+  }
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sync-app *,
+  .sync-app *::before,
+  .sync-app *::after,
+  .sync-startup-screen *,
+  .sync-startup-screen *::before,
+  .sync-startup-screen *::after {
+    scroll-behavior: auto;
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
+  }
+}

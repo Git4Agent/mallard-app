@@ -1471,6 +1471,39 @@ pub enum ConversationMaterializationState {
     StoredOnly,
 }
 
+/// Witness that this thread's branch was preserved by a Mallard-driven fork:
+/// the source chain's digest pair at fork time plus the adopted fork's
+/// identity. Written only after fork verification, overwritten by the next
+/// adoption, never cleared — it is consulted solely under a `Diverged`
+/// classification, where digest inequality self-invalidates a stale stamp.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ForkStamp {
+    pub fork_thread_id: ThreadId,
+    pub fork_provider_thread_id: String,
+    pub lineage_digest: String,
+    pub semantic_digest: String,
+    pub message_count: u64,
+    pub forked_at: u64,
+}
+
+impl ForkStamp {
+    fn validate(&self, source_thread_id: &ThreadId) -> Result<(), String> {
+        if &self.fork_thread_id == source_thread_id {
+            return Err("conversation fork stamp cannot name its own thread".to_string());
+        }
+        validate_provider_thread_id(
+            "conversation fork stamp provider thread",
+            &self.fork_provider_thread_id,
+        )?;
+        validate_sha256("conversation fork stamp lineage", &self.lineage_digest)?;
+        validate_sha256("conversation fork stamp semantics", &self.semantic_digest)?;
+        if self.message_count == 0 {
+            return Err("conversation fork stamp requires a nonzero message count".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct LocalConversationBinding {
     pub host_id: HostId,
@@ -1482,6 +1515,8 @@ pub struct LocalConversationBinding {
     /// This survives a Pull fork until a later Push publishes the branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_stamp: Option<ForkStamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
     pub materialization_state: ConversationMaterializationState,
@@ -1509,6 +1544,9 @@ impl LocalConversationBinding {
                 "local conversation thread '{}' cannot fork from itself",
                 self.thread_id
             ));
+        }
+        if let Some(stamp) = &self.fork_stamp {
+            stamp.validate(&self.thread_id)?;
         }
         let requires_provider_id = matches!(
             self.materialization_state,
@@ -1745,10 +1783,24 @@ pub enum CodexInventoryRefreshStatus {
     Failed,
 }
 
+/// Which entry point created a fork-carrying divergence operation. The
+/// executor ladder, verification, and checkpoints are identical for both;
+/// origin decides what follows fork adoption — a Pull restores the cloud
+/// branch into the source, a manual fork stops with the source untouched.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkOrigin {
+    PullPreserve,
+    Manual,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CodexDivergenceOperation {
+    pub origin: ForkOrigin,
     pub resolution: ConversationDivergenceResolution,
     pub available_resolutions: Vec<ConversationDivergenceResolution>,
+    pub recommended_resolution: ConversationDivergenceResolution,
+    pub local_branch_preserved: bool,
     pub preserved_thread_id: ThreadId,
     pub source_provider_thread_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1759,6 +1811,7 @@ pub struct CodexDivergenceOperation {
     pub fork_transcript_sha256: Option<String>,
     pub local_lineage_digest: String,
     pub local_semantic_digest: String,
+    pub local_message_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_local_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1790,10 +1843,13 @@ impl CodexDivergenceOperation {
     ) -> Result<(), String> {
         let plan = ConversationDivergencePlan {
             available_resolutions: self.available_resolutions.clone(),
+            recommended_resolution: self.recommended_resolution,
+            local_branch_preserved: self.local_branch_preserved,
             preserved_thread_id: self.preserved_thread_id.clone(),
             source_provider_thread_id: self.source_provider_thread_id.clone(),
             local_lineage_digest: self.local_lineage_digest.clone(),
             local_semantic_digest: self.local_semantic_digest.clone(),
+            local_message_count: self.local_message_count,
             pinned_local_title: self.pinned_local_title.clone(),
             pinned_cloud_title: self.pinned_cloud_title.clone(),
             desired_fork_name: self.desired_fork_name.clone(),
@@ -1804,6 +1860,20 @@ impl CodexDivergenceOperation {
             pre_existing_children: self.pre_existing_children.clone(),
         };
         plan.validate(source_thread_id)?;
+        if self.origin == ForkOrigin::Manual {
+            if self.resolution != ConversationDivergenceResolution::PreserveLocalWithNativeFork {
+                return Err("manual fork operation must preserve the local branch".to_string());
+            }
+            if matches!(
+                phase,
+                ConversationSyncPhase::ProviderCommitted | ConversationSyncPhase::BindingsCommitted
+            ) {
+                return Err("manual fork operation has no provider or binding commit".to_string());
+            }
+            if self.desired_original_name.is_some() {
+                return Err("manual fork operation cannot rename the source thread".to_string());
+            }
+        }
         if self.resolution == ConversationDivergenceResolution::UseCloudOnly
             && (self.fork_provider_thread_id.is_some()
                 || self.fork_transcript_path.is_some()
@@ -2015,6 +2085,25 @@ impl ConversationJournalTarget {
     }
 }
 
+/// The cloud commit a sync operation belongs to. Present on every push and
+/// pull operation; absent only on a manual-fork operation, which touches no
+/// storage and must not fabricate one.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationCloudAnchor {
+    pub storage_id: StorageId,
+    pub bundle_id: BundleId,
+    pub generation: u64,
+    pub commit_id: String,
+    pub manifest_sha256: String,
+}
+
+impl ConversationCloudAnchor {
+    fn validate(&self) -> Result<(), String> {
+        validate_named_id("conversation journal commit", &self.commit_id)?;
+        validate_sha256("conversation journal manifest", &self.manifest_sha256)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ConversationSyncOperation {
     pub operation_id: ConversationOperationId,
@@ -2024,11 +2113,8 @@ pub struct ConversationSyncOperation {
     pub plan_action_id: Option<ActionId>,
     pub direction: ConversationPlanDirection,
     pub phase: ConversationSyncPhase,
-    pub storage_id: StorageId,
-    pub bundle_id: BundleId,
-    pub generation: u64,
-    pub commit_id: String,
-    pub manifest_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<ConversationCloudAnchor>,
     pub host_id: HostId,
     pub replica_id: ReplicaId,
     pub local_project_id: LocalProjectId,
@@ -2070,12 +2156,26 @@ impl ConversationSyncOperation {
             _ => None,
         }
     }
+
+    pub fn fork_origin(&self) -> Option<ForkOrigin> {
+        self.divergence().map(|divergence| divergence.origin)
+    }
+
+    pub fn cloud_anchor(&self) -> Result<&ConversationCloudAnchor, String> {
+        self.cloud
+            .as_ref()
+            .ok_or_else(|| "conversation operation lacks a cloud anchor".to_string())
+    }
 }
 
 impl ConversationSyncOperation {
     pub fn validate(&self) -> Result<(), String> {
-        validate_named_id("conversation journal commit", &self.commit_id)?;
-        validate_sha256("conversation journal manifest", &self.manifest_sha256)?;
+        if let Some(anchor) = &self.cloud {
+            anchor.validate()?;
+        }
+        if self.cloud.is_none() && self.fork_origin() != Some(ForkOrigin::Manual) {
+            return Err("only a manual fork operation may omit its cloud anchor".to_string());
+        }
         if self.plan_action_id.is_some() && self.plan_id.is_none() {
             return Err("conversation journal action provenance requires a plan id".to_string());
         }
@@ -2153,6 +2253,23 @@ impl ConversationSyncOperation {
                     || self.provider != Provider::Codex
                 {
                     return Err("invalid Codex divergence journal scope".to_string());
+                }
+                match divergence.origin {
+                    ForkOrigin::PullPreserve => {
+                        if self.cloud.is_none() {
+                            return Err(
+                                "pull divergence operation requires a cloud anchor".to_string()
+                            );
+                        }
+                    }
+                    ForkOrigin::Manual => {
+                        if self.cloud.is_some() || !self.targets.is_empty() {
+                            return Err(
+                                "manual fork operation carries no cloud anchor or targets"
+                                    .to_string(),
+                            );
+                        }
+                    }
                 }
                 divergence.validate(&self.thread_id, self.phase)?;
             }
@@ -2731,10 +2848,16 @@ impl CodexNativeChildPin {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ConversationDivergencePlan {
     pub available_resolutions: Vec<ConversationDivergenceResolution>,
+    /// Advisory review default. `UseCloudOnly` exactly when
+    /// `local_branch_preserved` witnessed at plan time; apply re-proves the
+    /// witness before any waived-confirmation overwrite.
+    pub recommended_resolution: ConversationDivergenceResolution,
+    pub local_branch_preserved: bool,
     pub preserved_thread_id: ThreadId,
     pub source_provider_thread_id: String,
     pub local_lineage_digest: String,
     pub local_semantic_digest: String,
+    pub local_message_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_local_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2761,6 +2884,17 @@ impl ConversationDivergencePlan {
                     .to_string(),
             );
         }
+        let expected_recommended = if self.local_branch_preserved {
+            ConversationDivergenceResolution::UseCloudOnly
+        } else {
+            ConversationDivergenceResolution::PreserveLocalWithNativeFork
+        };
+        if self.recommended_resolution != expected_recommended {
+            return Err(
+                "conversation divergence recommendation disagrees with its preservation witness"
+                    .to_string(),
+            );
+        }
         if &self.preserved_thread_id == source_thread_id {
             return Err(
                 "conversation divergence must mint a distinct preserved thread".to_string(),
@@ -2774,6 +2908,9 @@ impl ConversationDivergencePlan {
             "conversation divergence local lineage",
             &self.local_lineage_digest,
         )?;
+        if self.local_message_count == 0 {
+            return Err("conversation divergence requires a nonzero local chain".to_string());
+        }
         validate_sha256(
             "conversation divergence local semantics",
             &self.local_semantic_digest,

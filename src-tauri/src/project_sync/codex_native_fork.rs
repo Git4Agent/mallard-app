@@ -23,7 +23,7 @@ use super::codex_rollout::analyze_codex_rollout_structure;
 use super::conversation_codec::{analyze_codex_transcript, CodecLineage};
 use super::domain::{
     CodexForkAttemptStatus, CodexForkExecutor, CodexNativeChildPin, ConversationDivergencePlan,
-    ThreadId, MAX_CONVERSATION_FILE_BYTES,
+    ForkOrigin, ThreadId, MAX_CONVERSATION_FILE_BYTES,
 };
 
 const MAX_SESSION_FILES: usize = 20_000;
@@ -475,6 +475,9 @@ pub fn build_divergence_plan(
     source_provider_thread_id: &str,
     local_lineage_digest: &str,
     local_semantic_digest: &str,
+    local_message_count: u64,
+    local_branch_preserved: bool,
+    origin: ForkOrigin,
     local_title: Option<&str>,
     cloud_title: Option<&str>,
     local_summary: Option<&str>,
@@ -499,26 +502,37 @@ pub fn build_divergence_plan(
         local_summary,
         source_provider_thread_id,
     );
-    let desired_fork_name = planned_fork_name(&base, created_at)?;
+    let desired_fork_name = planned_fork_name(&base, created_at, origin)?;
     let pre_existing_children = native_child_pins(codex_home, source_provider_thread_id)?;
     let available_executors = vec![
         CodexForkExecutor::AppServerStdio,
         CodexForkExecutor::NativePty,
         CodexForkExecutor::Manual,
     ];
+    let recommended_resolution = if local_branch_preserved {
+        super::domain::ConversationDivergenceResolution::UseCloudOnly
+    } else {
+        super::domain::ConversationDivergenceResolution::PreserveLocalWithNativeFork
+    };
     Ok(ConversationDivergencePlan {
         available_resolutions: vec![
             super::domain::ConversationDivergenceResolution::PreserveLocalWithNativeFork,
             super::domain::ConversationDivergenceResolution::UseCloudOnly,
         ],
+        recommended_resolution,
+        local_branch_preserved,
         preserved_thread_id: ThreadId::parse(super::domain::generated_named_id("thread")?)?,
         source_provider_thread_id: source_provider_thread_id.to_string(),
         local_lineage_digest: local_lineage_digest.to_string(),
         local_semantic_digest: local_semantic_digest.to_string(),
+        local_message_count,
         pinned_local_title,
         pinned_cloud_title: pinned_cloud_title.clone(),
         desired_fork_name,
-        desired_original_name: pinned_cloud_title,
+        desired_original_name: match origin {
+            ForkOrigin::PullPreserve => pinned_cloud_title,
+            ForkOrigin::Manual => None,
+        },
         codex_executable: codex_executable.to_string_lossy().into_owned(),
         codex_executable_sha256: executable_sha256,
         available_executors,
@@ -548,7 +562,7 @@ fn fork_base_title(
         .unwrap_or_else(|| "Untitled conversation".to_string())
 }
 
-pub fn planned_fork_name(base: &str, created_at: u64) -> Result<String, String> {
+pub fn planned_fork_name(base: &str, created_at: u64, origin: ForkOrigin) -> Result<String, String> {
     if base.chars().any(char::is_control) {
         return Err("Codex fork-name base contains control characters".to_string());
     }
@@ -556,9 +570,12 @@ pub fn planned_fork_name(base: &str, created_at: u64) -> Result<String, String> 
     let timestamp = Utc
         .timestamp_opt(created_at as i64, 0)
         .single()
-        .ok_or_else(|| "Pull plan timestamp is out of range".to_string())?
+        .ok_or_else(|| "fork plan timestamp is out of range".to_string())?
         .format("%Y-%m-%d %H:%MZ");
-    let suffix = format!(" — local before Pull · {timestamp}");
+    let suffix = match origin {
+        ForkOrigin::PullPreserve => format!(" — local before Pull · {timestamp}"),
+        ForkOrigin::Manual => format!(" — fork · {timestamp}"),
+    };
     let suffix_count = suffix.chars().count();
     if suffix_count >= FORK_NAME_LIMIT {
         return Err("Codex fork-name suffix exceeds its limit".to_string());
@@ -679,12 +696,21 @@ fn scan_native_threads(codex_home: &Path) -> Result<BTreeMap<String, NativeCodex
                 history_record_digest,
                 history_record_count,
             };
-            if threads
-                .insert(thread.provider_thread_id.clone(), thread)
-                .is_some()
-            {
+            if threads.contains_key(&thread.provider_thread_id) {
+                // Codex's archive operation can leave the same transcript in
+                // both `sessions` and `archived_sessions`, and after an
+                // unarchive the live `sessions` copy is the one Codex
+                // resumes. The active tree is walked first and stays
+                // authoritative — the same rule provider discovery applies —
+                // so an archived copy never shadows or vetoes it. A duplicate
+                // id inside one tree has no legitimate producer and still
+                // fails the scan.
+                if directory == "archived_sessions" {
+                    continue;
+                }
                 return Err("Codex provider thread has multiple rollout files".to_string());
             }
+            threads.insert(thread.provider_thread_id.clone(), thread);
         }
     }
     Ok(threads)
@@ -2175,22 +2201,39 @@ mod tests {
 
     #[test]
     fn planned_name_is_normalized_bounded_and_stable() {
-        let name =
-            planned_fork_name(&format!("  {}   graph  ", "界".repeat(200)), 1_775_000_000).unwrap();
+        let name = planned_fork_name(
+            &format!("  {}   graph  ", "界".repeat(200)),
+            1_775_000_000,
+            ForkOrigin::PullPreserve,
+        )
+        .unwrap();
         assert_eq!(name.chars().count(), FORK_NAME_LIMIT);
         assert!(name.contains("… — local before Pull · "));
         assert!(name.ends_with("Z"));
         assert!(!name.contains("  "));
         assert_eq!(
             name,
-            planned_fork_name(&format!("  {}   graph  ", "界".repeat(200)), 1_775_000_000,)
-                .unwrap()
+            planned_fork_name(
+                &format!("  {}   graph  ", "界".repeat(200)),
+                1_775_000_000,
+                ForkOrigin::PullPreserve,
+            )
+            .unwrap()
         );
     }
 
     #[test]
+    fn planned_name_marks_manual_forks_without_the_pull_phrase() {
+        let name = planned_fork_name("Analyze graph", 1_775_000_000, ForkOrigin::Manual).unwrap();
+        assert!(name.contains(" — fork · "), "{name}");
+        assert!(!name.contains("local before Pull"), "{name}");
+        assert!(name.ends_with("Z"));
+    }
+
+    #[test]
     fn planned_name_rejects_control_characters() {
-        let error = planned_fork_name("Unsafe\nname", 1_775_000_000).unwrap_err();
+        let error =
+            planned_fork_name("Unsafe\nname", 1_775_000_000, ForkOrigin::PullPreserve).unwrap_err();
         assert!(error.contains("control characters"), "{error}");
         assert_eq!(normalize_title(Some("Unsafe\nname")), None);
     }

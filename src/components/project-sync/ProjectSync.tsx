@@ -86,10 +86,10 @@ const EMPTY_CONFIG: SyncConfig = {
   links: [],
 };
 
-const PROJECT_SIDEBAR_WIDTH_KEY = "agent-sync.project-sidebar-width";
+const PROJECT_SIDEBAR_WIDTH_KEY = "mallard.project-sidebar-width";
 const PROJECT_SIDEBAR_VISIBILITY_KEY = "mallard.project-sidebar-visible";
 const ACTIVE_STORAGE_BY_PROJECT_KEY = "mallard.active-storage-by-project";
-const DEFAULT_PROJECT_SIDEBAR_WIDTH = 318;
+const DEFAULT_PROJECT_SIDEBAR_WIDTH = 298;
 const MIN_PROJECT_SIDEBAR_WIDTH = 220;
 const MAX_PROJECT_SIDEBAR_WIDTH = 560;
 const FOCUS_RECONCILE_MIN_AWAY_MS = 5000;
@@ -1697,8 +1697,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         targetBinding.local_project_id,
       );
       if (restoreRequest.current !== requestId) return null;
-      const pendingCheckpoint = pendingDivergence?.codex_fork_checkpoints[0];
-      if (pendingDivergence && pendingCheckpoint) {
+      // Manual-fork checkpoints belong to the Activity page, not to a Pull
+      // review; only a pull-origin checkpoint carries the plan this flow
+      // resumes.
+      const pullCheckpoints = (pendingDivergence?.codex_fork_checkpoints ?? []).filter(
+        (checkpoint) => checkpoint.origin === "pull_preserve" && checkpoint.plan_id != null,
+      );
+      const pendingCheckpoint = pullCheckpoints[0];
+      if (pendingDivergence && pendingCheckpoint && pendingCheckpoint.plan_id) {
         const pendingPlan = await projectSyncApi.getRestorePlan(pendingCheckpoint.plan_id);
         if (restoreRequest.current !== requestId) return null;
         const pendingAction = pendingPlan.conversation_actions.find(
@@ -1717,9 +1723,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         setRestoreResult(pendingDivergence);
         setPullApplyPhase("complete");
         setReviewSupportLoading(false);
-        setNotice(pendingDivergence.codex_fork_checkpoints.length === 1
+        setNotice(pullCheckpoints.length === 1
           ? `Resume the pending Codex fork for ${displayName}. The original conversation has not been replaced.`
-          : `Resume ${pendingDivergence.codex_fork_checkpoints.length} pending Codex forks for ${displayName}. No original conversation has been replaced.`);
+          : `Resume ${pullCheckpoints.length} pending Codex forks for ${displayName}. No original conversation has been replaced.`);
         return null;
       }
       // The project-data review is the primary Pull surface. Render it as soon as it
@@ -2236,7 +2242,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         });
       }
       setHistoryRefreshEpoch((epoch) => epoch + 1);
-      const remaining = result.codex_fork_checkpoints.length;
+      const remaining = result.codex_fork_checkpoints
+        .filter((checkpoint) => checkpoint.origin !== "manual").length;
       if (remaining > 0) {
         setNotice(`Codex fork verified. ${remaining} more fork checkpoint${remaining === 1 ? "" : "s"} to resolve.`);
         return;
@@ -2260,7 +2267,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     try {
       const result = await projectSyncApi.cancelCodexDivergence(operationId);
       if (restoreRequest.current !== requestId) return;
-      const remaining = result.codex_fork_checkpoints.length;
+      const remaining = result.codex_fork_checkpoints
+        .filter((checkpoint) => checkpoint.origin !== "manual").length;
       if (remaining > 0) {
         setRestoreResult(result);
         setPullApplyPhase("complete");
@@ -2737,7 +2745,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         onDoubleClick={() => setSidebarWidth(DEFAULT_PROJECT_SIDEBAR_WIDTH)}
       />
 
-      <div className={`sync-workspace${resizingLog ? " resizing-log" : ""}`}>
+      <div className={`sync-workspace${activityOpen ? " logs-open" : ""}${resizingLog ? " resizing-log" : ""}`}>
         <header className="sync-titlebar" data-tauri-drag-region>
           <div className="sync-titlebar-context" data-tauri-drag-region title={workspaceTitle}>
             <Icon name={workspaceIcon} size={16} />
@@ -2749,8 +2757,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
               type="button"
               className="sync-theme-button"
               onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
+              title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
             >
-              {theme === "dark" ? "Light" : "Dark"} theme
+              <Icon name={theme === "dark" ? "moon" : "sun"} size={18} />
             </button>
             <div ref={appMenuRef} className={`storage-link-overflow${appMenuOpen ? " open" : ""}`}>
               <button
@@ -2763,7 +2773,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                 aria-label="App actions"
                 onClick={() => setAppMenuOpen((current) => !current)}
               >
-                <Icon name="more" size={16} />
+                <Icon name="settings" size={16} />
               </button>
               <div
                 id="sync-app-actions-menu"

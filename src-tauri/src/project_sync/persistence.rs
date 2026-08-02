@@ -2303,6 +2303,7 @@ mod tests {
                 provider_profile_id: first_profile_id.clone(),
                 thread_id: ThreadId::parse("group-a.variant-a").unwrap(),
                 forked_from: None,
+                fork_stamp: None,
                 provider_thread_id: None,
                 materialization_state: ConversationMaterializationState::StoredOnly,
                 last_observed_file_sha256: None,
