@@ -73,7 +73,7 @@ Timestamp priority is:
 
 The scanner first filters sessions by `ended_at` into `[window_start, window_end)`. Git uses enumerated local branches, structured argv, first-parent/date-order logs, and a bounded 10,000-commit correlation rail. Session branch metadata prevents attaching a named session to a different branch.
 
-All inclusive overlaps are attached. With none, the chronologically first commit no more than 24 hours after session end is used once. Otherwise the session is uncommitted. Commit references are sorted by session end descending, then start ascending, then thread ID. Unique session and reference counts are separate.
+All inclusive overlaps are attached. With none, the session attaches once to its successor commit with no time cap: with the recorded SHA on the rail, the first of its first-parent descendants committed after session end (never a commit below the recorded checkout); otherwise the earliest commit after session end. With no successor the session is uncommitted and carries a reason the Uncommitted section displays. Commit references are sorted by session end descending, then start ascending, then thread ID. Unique session and reference counts are separate.
 
 The response normally exposes commits in the requested 30-day window, plus any boundary commit carrying a selected session reference. Frontend page merging unions commit references by SHA/thread ID, recalculates occurrence counts, and prevents cross-window loss.
 

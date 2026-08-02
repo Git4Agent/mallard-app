@@ -657,6 +657,7 @@ test("embedded history follows the project workspace without repeating project c
   assert.match(html, /sync-history-embedded/);
   assert.match(html, /<h2[^>]*sync-history-embedded-title[^>]*>.*Git history/s);
   assert.match(html, /<h2 id="uncommitted-heading">Uncommitted<\/h2>/);
+  assert.match(html, /<p class="sync-history-uncommitted-reason">No subsequent commit<\/p>/);
   assert.doesNotMatch(html, />Commit history</);
   assert.doesNotMatch(html, /aria-label="1 thread"/);
   assert.doesNotMatch(html, /Sessions not linked to a commit/);

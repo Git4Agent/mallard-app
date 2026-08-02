@@ -9486,6 +9486,12 @@ div.storage-link-main {
   font-weight: 680;
 }
 
+.sync-history-uncommitted-reason {
+  margin: 0 0 8px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
 .sync-history-codex-heading {
   display: inline-flex;
   align-items: center;

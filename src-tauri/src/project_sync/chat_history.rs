@@ -23,7 +23,6 @@ const MAX_GIT_COMMITS: usize = 10_000;
 const MAX_INDEX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SUMMARY_CHARS: usize = 180;
 const ACTIVE_WINDOW_SECS: u64 = 5 * 60;
-const AFTER_SESSION_WINDOW_SECS: u64 = 24 * 60 * 60;
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_ROLLOUT_IDENTITY_RECORDS: usize = 16;
 const DEFAULT_HISTORY_WINDOW_DAYS: u64 = 30;
@@ -2008,6 +2007,13 @@ fn map_threads_to_commits(
 ) -> MappingResult {
     let mut mapped_threads = BTreeSet::new();
     let mut unmapped = Vec::new();
+    // The rail arrives newest-first, so a commit's first-parent descendants
+    // sit at lower indices than the commit itself.
+    let rail_index = commits
+        .iter()
+        .enumerate()
+        .map(|(index, commit)| (commit.sha.clone(), index))
+        .collect::<BTreeMap<_, _>>();
     for thread in threads {
         // A recorded branch is authoritative routing metadata. Rollouts that
         // predate branch capture stay eligible as a best-effort fallback,
@@ -2027,24 +2033,36 @@ fn map_threads_to_commits(
             }
         }
         if matched.is_empty() {
-            if let Some((index, _)) = commits
-                .iter()
-                .enumerate()
-                .filter(|(_, commit)| {
-                    commit.committed_at > thread.ended_at
-                        && commit.committed_at.saturating_sub(thread.ended_at)
-                            <= AFTER_SESSION_WINDOW_SECS
-                })
-                .min_by_key(|(_, commit)| commit.committed_at)
+            // A session no commit overlapped attaches to the commit that
+            // captured its work afterwards, however long that took. When the
+            // session's recorded HEAD is on this rail only its first-parent
+            // descendants qualify, walking from the recorded commit toward
+            // the tip; a commit that predates the recorded checkout must not
+            // capture the session even if its timestamp is later. Without a
+            // usable recorded HEAD, the earliest later commit stands in.
+            let successor = match thread
+                .recorded_sha
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .and_then(|sha| rail_index.get(&sha).copied())
             {
-                matched.push(index);
-            }
+                Some(recorded_index) => (0..recorded_index)
+                    .rev()
+                    .find(|&index| commits[index].committed_at > thread.ended_at),
+                None => commits
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, commit)| commit.committed_at > thread.ended_at)
+                    .min_by_key(|(_, commit)| commit.committed_at)
+                    .map(|(index, _)| index),
+            };
+            matched.extend(successor);
         }
         if matched.is_empty() {
             let reason = if commits.is_empty() {
                 "The selected branch has no available first-parent commits"
             } else {
-                "No commit fell within the session window or its 24-hour follow-up"
+                "No commit has been made on this branch since the session ended"
             };
             unmapped.push(UnmappedThreadReference {
                 thread_id: thread.thread_id.clone(),
@@ -2673,27 +2691,83 @@ mod tests {
     }
 
     #[test]
-    fn mapping_uses_first_subsequent_commit_only_within_24_hours() {
-        let mut commits = vec![commit("a", 86_500), commit("b", 86_501)];
-        let near = thread("near", 1, 100);
+    fn mapping_attaches_the_earliest_later_commit_without_a_time_cap() {
+        let mut commits = vec![commit("b", 300_000), commit("a", 200_099)];
         let far = thread("far", 0, 99);
-        let result = map_threads_to_commits(&[near, far], &mut commits, "main");
+        let result = map_threads_to_commits(&[far], &mut commits, "main");
 
-        assert_eq!(commits[0].thread_refs.len(), 1);
-        assert_eq!(commits[0].thread_refs[0].thread_id, "near");
-        assert_eq!(result.unmapped[0].thread_id, "far");
+        assert!(result.unmapped.is_empty());
+        assert!(commits[0].thread_refs.is_empty());
+        assert_eq!(commits[1].thread_refs.len(), 1);
+        assert_eq!(commits[1].thread_refs[0].thread_id, "far");
     }
 
     #[test]
-    fn mapping_does_not_use_recorded_sha_as_an_attachment_rule() {
-        let mut base = thread("recorded", 1, 2);
-        base.recorded_sha = Some("a".repeat(40));
-        base.branch = Some("main".to_string());
-        let mut commits = vec![commit("a", 200_000)];
-        let result = map_threads_to_commits(&[base], &mut commits, "main");
+    fn mapping_walks_first_parent_descendants_of_the_recorded_head() {
+        let mut commits = vec![commit("c", 300), commit("b", 200), commit("a", 50)];
+        let mut recorded = thread("recorded", 60, 100);
+        recorded.recorded_sha = Some(commit("a", 50).sha.to_ascii_uppercase());
+        let result = map_threads_to_commits(&[recorded], &mut commits, "main");
 
-        assert_eq!(result.unmapped.len(), 1);
+        assert!(result.unmapped.is_empty());
         assert!(commits[0].thread_refs.is_empty());
+        assert_eq!(commits[1].thread_refs.len(), 1);
+        assert_eq!(commits[1].thread_refs[0].thread_id, "recorded");
+        assert!(commits[2].thread_refs.is_empty());
+    }
+
+    #[test]
+    fn mapping_leaves_a_session_at_the_recorded_tip_uncommitted_until_the_next_commit() {
+        let mut commits = vec![commit("a", 50)];
+        let mut at_tip = thread("at-tip", 60, 100);
+        at_tip.recorded_sha = Some(commit("a", 50).sha);
+        let result = map_threads_to_commits(&[at_tip], &mut commits, "main");
+
+        assert!(commits[0].thread_refs.is_empty());
+        assert_eq!(result.unmapped.len(), 1);
+        assert_eq!(
+            result.unmapped[0].reason,
+            "No commit has been made on this branch since the session ended"
+        );
+    }
+
+    #[test]
+    fn mapping_never_attaches_a_commit_below_the_recorded_head() {
+        // "b" sits below the recorded tip on the rail; its later timestamp
+        // (clock skew) must not capture the session.
+        let mut commits = vec![commit("a", 50), commit("b", 150)];
+        let mut skewed = thread("skewed", 60, 100);
+        skewed.recorded_sha = Some(commit("a", 50).sha);
+        let result = map_threads_to_commits(&[skewed], &mut commits, "main");
+
+        assert!(commits[0].thread_refs.is_empty());
+        assert!(commits[1].thread_refs.is_empty());
+        assert_eq!(result.unmapped.len(), 1);
+    }
+
+    #[test]
+    fn mapping_falls_back_to_time_when_the_recorded_head_is_not_on_the_rail() {
+        let mut commits = vec![commit("b", 200_000)];
+        let mut rewritten = thread("rewritten", 1, 2);
+        rewritten.recorded_sha = Some("f".repeat(40));
+        let result = map_threads_to_commits(&[rewritten], &mut commits, "main");
+
+        assert!(result.unmapped.is_empty());
+        assert_eq!(commits[0].thread_refs.len(), 1);
+        assert_eq!(commits[0].thread_refs[0].thread_id, "rewritten");
+    }
+
+    #[test]
+    fn mapping_attaches_a_fork_to_the_next_commit_after_its_recorded_base() {
+        let mut commits = vec![commit("b", 500_000), commit("a", 100)];
+        let mut fork = thread("fork", 200, 200);
+        fork.recorded_sha = Some(commit("a", 100).sha);
+        let result = map_threads_to_commits(&[fork], &mut commits, "main");
+
+        assert!(result.unmapped.is_empty());
+        assert_eq!(commits[0].thread_refs.len(), 1);
+        assert_eq!(commits[0].thread_refs[0].thread_id, "fork");
+        assert!(commits[1].thread_refs.is_empty());
     }
 
     #[test]

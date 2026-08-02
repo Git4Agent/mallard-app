@@ -33,10 +33,10 @@ Each rollout JSONL file is one Codex session. Mallard streams the complete file 
 For a selected first-parent branch:
 
 1. A session is attached to every commit timestamp inclusively inside its start/end range.
-2. With no overlap, it is attached once to the first commit within 24 hours after its end.
-3. Otherwise it appears under `Uncommitted Changes`.
+2. With no overlap, it is attached once to its successor commit, with no time cap. When the session's recorded SHA sits on the branch's first-parent rail, the successor is the first of that commit's first-parent descendants committed after the session ended — commits below the recorded checkout never qualify, whatever their timestamps. Without a usable recorded SHA, the successor is the earliest commit after session end.
+3. With no successor, it appears under `Uncommitted` together with the reason.
 
-Recorded SHA remains visible session context but is not an attachment rule. One session spanning three commits is one unique session and three commit occurrences. It intentionally renders under all three commits; all occurrences share metrics, launch target, and a frontend detail cache keyed by thread ID.
+One session spanning three commits is one unique session and three commit occurrences. It intentionally renders under all three commits; all occurrences share metrics, launch target, and a frontend detail cache keyed by thread ID.
 
 The initial response is the latest exclusive 30-day window. `Load previous 30 days` appends the next complete `[before − 30 days, before)` window. Boundary commits carrying a mapped session are returned as needed and merged by SHA/thread ID so cross-window sessions remain visible at every occurrence.
 

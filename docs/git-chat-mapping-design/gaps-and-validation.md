@@ -41,7 +41,7 @@ Focused Rust coverage includes:
 - malformed and oversized individual records continuing as partial;
 - injected context excluded from user metrics/details;
 - user, agent, tool, token, active-session, fallback, and summary behavior;
-- inclusive multi-commit attachment, 24-hour fallback, uncommitted classification, branch isolation, and no recorded-SHA attachment;
+- inclusive multi-commit attachment, uncapped successor attachment through the recorded SHA's first-parent descendants, time-based fallback without a usable recorded SHA, uncommitted classification, and branch isolation;
 - first-parent Git pagination and hostile input validation;
 - detail pagination and role filtering;
 - UUID, quoting, project-scoped `CODEX_HOME`, app command, and Terminal command construction;

@@ -1232,6 +1232,9 @@ export function ProjectChatHistoryContent({
                 {history.unmapped.length > 0 && (
                   <section className="sync-history-uncommitted" aria-labelledby="uncommitted-heading">
                     <div className="sync-history-section-heading"><h2 id="uncommitted-heading">Uncommitted</h2></div>
+                    {[...new Set(history.unmapped.map((reference) => reference.reason))].map((reason) => (
+                      <p key={reason} className="sync-history-uncommitted-reason">{reason}</p>
+                    ))}
                     <div className="sync-history-thread-list flat">{history.unmapped.map((reference) => { const thread = threads.get(reference.thread_id); return thread ? renderThread(thread, `uncommitted:${thread.thread_id}`) : null; })}</div>
                   </section>
                 )}
