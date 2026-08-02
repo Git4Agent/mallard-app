@@ -81,7 +81,8 @@ test("the desktop shell supports a persistent sidebar toggle and keyboard shortc
   assert.match(css, /\.sync-titlebar \{[^}]*height: 52px;[^}]*min-height: 52px;[^}]*flex: 0 0 52px;/);
   assert.match(css, /\.sync-sidebar-drag \{[^}]*height: 38px;/);
   assert.match(css, /\.sync-sidebar-brand \{[^}]*height: 52px;/);
-  assert.deepEqual(tauriConfig.app.windows[0].trafficLightPosition, { x: 8, y: 29 });
+  assert.match(css, /\.sync-sidebar-brand \{[^}]*padding: 0 14px 0 18px;/);
+  assert.deepEqual(tauriConfig.app.windows[0].trafficLightPosition, { x: 23, y: 29 });
 });
 
 test("the titlebar marks active Git projects with the Git folder icon", () => {

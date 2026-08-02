@@ -5096,7 +5096,7 @@ summary:focus-visible {
 .sync-sidebar-brand {
   height: 52px;
   flex: 0 0 52px;
-  padding: 0 14px;
+  padding: 0 14px 0 18px;
 }
 
 .sync-sidebar-brand strong {
