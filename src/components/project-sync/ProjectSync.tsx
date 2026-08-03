@@ -86,10 +86,10 @@ const EMPTY_CONFIG: SyncConfig = {
   links: [],
 };
 
-const PROJECT_SIDEBAR_WIDTH_KEY = "agent-sync.project-sidebar-width";
+const PROJECT_SIDEBAR_WIDTH_KEY = "mallard.project-sidebar-width";
 const PROJECT_SIDEBAR_VISIBILITY_KEY = "mallard.project-sidebar-visible";
 const ACTIVE_STORAGE_BY_PROJECT_KEY = "mallard.active-storage-by-project";
-const DEFAULT_PROJECT_SIDEBAR_WIDTH = 318;
+const DEFAULT_PROJECT_SIDEBAR_WIDTH = 298;
 const MIN_PROJECT_SIDEBAR_WIDTH = 220;
 const MAX_PROJECT_SIDEBAR_WIDTH = 560;
 const FOCUS_RECONCILE_MIN_AWAY_MS = 5000;
@@ -2710,7 +2710,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         onDoubleClick={() => setSidebarWidth(DEFAULT_PROJECT_SIDEBAR_WIDTH)}
       />
 
-      <div className={`sync-workspace${resizingLog ? " resizing-log" : ""}`}>
+      <div className={`sync-workspace${activityOpen ? " logs-open" : ""}${resizingLog ? " resizing-log" : ""}`}>
         <header className="sync-titlebar" data-tauri-drag-region>
           <div className="sync-titlebar-context" data-tauri-drag-region title={workspaceTitle}>
             <Icon name={workspaceIcon} size={16} />
@@ -2722,8 +2722,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
               type="button"
               className="sync-theme-button"
               onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
+              title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
             >
-              {theme === "dark" ? "Light" : "Dark"} theme
+              <Icon name={theme === "dark" ? "moon" : "sun"} size={18} />
             </button>
             <div ref={appMenuRef} className={`storage-link-overflow${appMenuOpen ? " open" : ""}`}>
               <button

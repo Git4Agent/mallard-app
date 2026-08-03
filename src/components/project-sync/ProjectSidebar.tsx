@@ -3,6 +3,7 @@ import type {
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
 } from "react";
+import packageMetadata from "../../../package.json";
 import type { LocalProjectSummary, SetupDraftSummary, StorageConfig } from "../../types";
 import Icon from "../Icons";
 import { projectLabel } from "./model";
@@ -131,47 +132,49 @@ export default function ProjectSidebar({
 
   return (
     <aside id="project-sidebar" className="sync-sidebar">
-      <div className="sync-sidebar-drag" data-tauri-drag-region />
-      <div className="sync-sidebar-brand" data-tauri-drag-region>
-        <img className="sync-brand-logo" src="/mallard-logo.svg" alt="" data-tauri-drag-region />
-        <strong>Mallard</strong>
-      </div>
+      <div className="sync-sidebar-head">
+        <div className="sync-sidebar-drag" data-tauri-drag-region />
+        <div className="sync-sidebar-brand" data-tauri-drag-region>
+          <img className="sync-brand-logo" src="/mallard-logo-pixel-ring.png" alt="" data-tauri-drag-region />
+          <strong>Mallard</strong>
+        </div>
 
-      <nav className="sync-primary-nav" aria-label="Project sync navigation">
-        <button
-          type="button"
-          className={!activeStorageId ? "active" : undefined}
-          onClick={() => activeProjectId && onSelectProject(activeProjectId)}
-          disabled={busy}
-        >
-          <Icon name="folder" size={15} /> Projects
-        </button>
-        <button
-          type="button"
-          className={activeStorageId ? "active" : undefined}
-          onClick={() => primaryStorageId && onOpenStorage(primaryStorageId, false)}
-          disabled={busy || !primaryStorageId}
-        >
-          <Icon name="drive" size={15} /> Storages
-        </button>
-        <button
-          type="button"
-          className={activityOpen ? "active" : undefined}
-          onClick={onToggleActivity}
-          aria-expanded={activityOpen}
-        >
-          <Icon name="activity" size={15} /> Logs
-          {unreadLogs > 0 && !activityOpen && (
-            <span className="sidebar-nav-badge sync-activity-badge">{unreadLogs}</span>
-          )}
-        </button>
-      </nav>
+        <nav className="sync-primary-nav" aria-label="Project sync navigation">
+          <button
+            type="button"
+            className={!activeStorageId ? "active" : undefined}
+            onClick={() => activeProjectId && onSelectProject(activeProjectId)}
+            disabled={busy}
+          >
+            <Icon name="folder" size={15} /> Projects
+          </button>
+          <button
+            type="button"
+            className={activeStorageId ? "active" : undefined}
+            onClick={() => primaryStorageId && onOpenStorage(primaryStorageId, false)}
+            disabled={busy || !primaryStorageId}
+          >
+            <Icon name="drive" size={15} /> Storages
+          </button>
+          <button
+            type="button"
+            className={activityOpen ? "active" : undefined}
+            onClick={onToggleActivity}
+            aria-expanded={activityOpen}
+          >
+            <Icon name="activity" size={15} /> Logs
+            {unreadLogs > 0 && !activityOpen && (
+              <span className="sidebar-nav-badge sync-activity-badge">{unreadLogs}</span>
+            )}
+          </button>
+        </nav>
+      </div>
 
       <div
         ref={sectionsRef}
         className={`sync-sidebar-sections sidebar-settings-sections${resizingSections ? " resizing" : ""}`}
         style={{
-          gridTemplateRows: `minmax(96px, ${projectShare}fr) 9px minmax(96px, ${1 - projectShare}fr)`,
+          gridTemplateRows: `minmax(96px, ${projectShare}fr) 3px minmax(96px, ${1 - projectShare}fr)`,
         }}
       >
         <section className="sidebar-split-pane sidebar-project-pane" aria-label="Projects">
@@ -384,6 +387,10 @@ export default function ProjectSidebar({
         </section>
       </div>
 
+      <footer className="sync-sidebar-product-mark" aria-label={`Mallard version ${packageMetadata.version}`}>
+        <img src="/mallard-logo-pixel-duck.png" alt="" />
+        <span>v{packageMetadata.version}</span>
+      </footer>
     </aside>
   );
 }

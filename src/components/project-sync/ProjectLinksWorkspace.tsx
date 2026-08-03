@@ -228,6 +228,7 @@ export default function ProjectLinksWorkspace({
   const storageActionsRef = useRef<HTMLDivElement>(null);
   const storageActionsMenuRef = useRef<HTMLDivElement>(null);
   const storageActionsTriggerRef = useRef<HTMLButtonElement>(null);
+  const workspaceScrollRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     if (!editingStorage) return;
@@ -249,6 +250,13 @@ export default function ProjectLinksWorkspace({
   useEffect(() => {
     setStoragePickerProjectId(null);
     setStorageActionsProjectId(null);
+  }, [activeProjectId, activeStorageId]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      workspaceScrollRef.current?.scrollTo({ top: 0, left: 0 });
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [activeProjectId, activeStorageId]);
 
   useEffect(() => {
@@ -538,13 +546,15 @@ export default function ProjectLinksWorkspace({
                       <button
                         type="button"
                         className="btn btn-ghost"
+                        aria-label="Rename storage"
+                        title="Rename storage"
                         disabled={busy}
                         onClick={() => {
                           setStorageNameDraft(storageDraft.name);
                           setRenamingStorageId(storageDraft.id);
                         }}
                       >
-                        Rename
+                        <Icon name="edit" size={13} />
                       </button>
                     </div>
                   )}
@@ -692,7 +702,7 @@ export default function ProjectLinksWorkspace({
   }
 
   return (
-    <main className={`sync-main sync-project-links-page${workspaceProject ? " sync-project-workspace-page sync-project-combined-page" : ""}${newProjectSetup ? " sync-project-setup-page" : ""}${inlineStorageReview ? " sync-sync-review-page" : ""}`}>
+    <main ref={workspaceScrollRef} className={`sync-main sync-project-links-page${workspaceProject ? " sync-project-workspace-page sync-project-combined-page" : ""}${newProjectSetup ? " sync-project-setup-page" : ""}${inlineStorageReview ? " sync-sync-review-page" : ""}`}>
       <section
         className="profile-links-section"
         aria-label={newProjectSetup
@@ -761,20 +771,22 @@ export default function ProjectLinksWorkspace({
                       <button
                         type="button"
                         className="btn btn-ghost"
+                        aria-label="Rename project"
+                        title="Rename project"
                         disabled={busy}
                         onClick={() => {
                           setProjectAliasDraft(workspaceProject.local_alias ?? workspaceProject.display_name);
                           setRenamingProjectId(workspaceProject.local_project_id);
                         }}
                       >
-                        Rename
+                        <Icon name="edit" size={13} />
                       </button>
                     </div>
                   )}
                   <div className="sync-project-heading-meta">
                     {workspaceProject.local_alias && (
                       <span
-                        className="sync-project-heading-meta-item"
+                        className="sync-project-heading-meta-item sync-project-heading-repository"
                         title={`Repository: ${workspaceProject.display_name}`}
                         aria-label={`Repository ${workspaceProject.display_name}`}
                       >
@@ -783,7 +795,7 @@ export default function ProjectLinksWorkspace({
                       </span>
                     )}
                     <span
-                      className="sync-project-heading-meta-item"
+                      className="sync-project-heading-meta-item sync-project-heading-path"
                       title={workspaceProject.project_root ?? undefined}
                       aria-label={`Project folder ${workspaceProject.project_root ?? "not configured"}`}
                     >

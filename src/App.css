@@ -59,6 +59,15 @@
   --yellow: #fbbf24;
   --blue: #86bdfb;
   --purple: #a78bfa;
+  --thread-status-glyph: #fffaf1;
+  --thread-status-synced: #31ae6b;
+  --thread-status-cloud: #e59b1b;
+  --thread-status-local: #4e5fe4;
+  --thread-status-divergent: #7655d6;
+  --thread-status-forked: #9a45c5;
+  --thread-status-pending: #3784df;
+  --thread-status-conflict: #e44649;
+  --thread-status-unavailable: #85878e;
   --font: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif;
   --font-mono: 'SF Mono', 'JetBrains Mono', 'Menlo', 'Cascadia Code', 'Consolas', monospace;
   --r-lg: 22px;
@@ -2999,7 +3008,7 @@ summary:focus-visible {
   position: absolute;
   z-index: 12;
   top: 14px;
-  left: 87px;
+  left: 86px;
   width: 28px;
   height: 24px;
   padding: 0;
@@ -3498,6 +3507,9 @@ summary:focus-visible {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  /* Reserve the scrollbar gutter so content never shifts sideways when the
+     scrollbar appears — visible on systems set to always-show scrollbars. */
+  scrollbar-gutter: stable;
   padding: 28px clamp(22px, 3.5vw, 52px) 64px;
 }
 
@@ -4662,7 +4674,6 @@ summary:focus-visible {
 .sync-pull-outcome p { margin-top: 2px; color: var(--text-2); font-size: 10.5px; }
 .sync-pull-outcome ul { margin: 5px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 3px 14px; list-style: none; }
 .sync-pull-outcome li { color: var(--text-2); font-size: 10.5px; }
-.sync-pull-outcome li::before { content: "✓"; margin-right: 5px; color: currentColor; }
 
 .sync-pull-error { max-width: none; margin: 14px 0; }
 
@@ -9148,10 +9159,13 @@ div.storage-link-main {
   gap: 3px;
 }
 
-.sync-thread-sync-summary .local,
-.sync-thread-sync-summary .storage { color: var(--blue); }
-.sync-thread-sync-summary .diverged { color: var(--yellow); }
-.sync-thread-sync-summary .unavailable { color: var(--red); }
+.sync-thread-sync-summary .local { color: var(--thread-status-local); }
+.sync-thread-sync-summary .storage { color: var(--thread-status-cloud); }
+.sync-thread-sync-summary .diverged { color: var(--thread-status-divergent); }
+.sync-thread-sync-summary .diverged-forked { color: var(--thread-status-forked); }
+.sync-thread-sync-summary .pending { color: var(--thread-status-pending); }
+.sync-thread-sync-summary .conflict { color: var(--thread-status-conflict); }
+.sync-thread-sync-summary .unavailable { color: var(--thread-status-unavailable); }
 
 .sync-history-branch-select {
   position: relative;
@@ -9296,7 +9310,7 @@ div.storage-link-main {
 
 .sync-history-branch-option {
   width: 100%;
-  min-height: 46px;
+  min-height: 34px;
   display: grid;
   grid-template-columns: 17px minmax(0, 1fr) auto;
   align-items: center;
@@ -9323,8 +9337,7 @@ div.storage-link-main {
 }
 
 .sync-history-branch-check {
-  align-self: start;
-  padding-top: 2px;
+  align-self: center;
   color: var(--text-2);
   font-size: 12px;
   font-weight: 760;
@@ -9652,8 +9665,8 @@ div.storage-link-main {
 .sync-thread-sync-indicator,
 .sync-thread-sync-error {
   position: relative;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -9671,13 +9684,30 @@ div.storage-link-main {
   flex: 0 0 auto;
 }
 
-.sync-thread-sync-indicator.synced { color: var(--text-2); }
-.sync-thread-sync-indicator.local,
-.sync-thread-sync-indicator.storage { color: var(--blue); }
-.sync-thread-sync-indicator.diverged { color: var(--yellow); }
-.sync-thread-sync-indicator.diverged-forked { color: var(--blue); }
-.sync-thread-sync-indicator.unavailable,
-.sync-thread-sync-error { color: var(--red); }
+.thread-status-icon {
+  display: block;
+  flex: 0 0 auto;
+  color: var(--thread-status-unavailable);
+}
+
+.thread-status-icon[data-thread-status="synced"] { color: var(--thread-status-synced); }
+.thread-status-icon[data-thread-status="cloud-outstanding"] { color: var(--thread-status-cloud); }
+.thread-status-icon[data-thread-status="local-outstanding"] { color: var(--thread-status-local); }
+.thread-status-icon[data-thread-status="divergent"] { color: var(--thread-status-divergent); }
+.thread-status-icon[data-thread-status="divergent-forked"] { color: var(--thread-status-forked); }
+.thread-status-icon[data-thread-status="pending"] { color: var(--thread-status-pending); }
+.thread-status-icon[data-thread-status="conflict"] { color: var(--thread-status-conflict); }
+.thread-status-icon[data-thread-status="unavailable"] { color: var(--thread-status-unavailable); }
+
+.sync-thread-sync-indicator.synced { color: var(--thread-status-synced); }
+.sync-thread-sync-indicator.local { color: var(--thread-status-local); }
+.sync-thread-sync-indicator.storage { color: var(--thread-status-cloud); }
+.sync-thread-sync-indicator.diverged { color: var(--thread-status-divergent); }
+.sync-thread-sync-indicator.diverged-forked { color: var(--thread-status-forked); }
+.sync-thread-sync-indicator.pending { color: var(--thread-status-pending); }
+.sync-thread-sync-indicator.conflict { color: var(--thread-status-conflict); }
+.sync-thread-sync-indicator.unavailable { color: var(--thread-status-unavailable); }
+.sync-thread-sync-error { color: var(--thread-status-conflict); }
 
 .sync-thread-sync-indicator::after,
 .sync-thread-sync-error::after {
@@ -9701,7 +9731,12 @@ div.storage-link-main {
   line-height: 1.3;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 100ms ease, visibility 100ms ease;
+  /* Shown instantly and deliberately unanimated. Fading opacity promotes the
+     tooltip to its own compositing layer, and text re-rasterised against a
+     layer origin can land a pixel off the page grid; with the pixel face
+     rendered unsmoothed that flips whole pixels, which reads as the row
+     twitching even though nothing moves — measured as zero geometry change
+     across 72 elements. Appearing at once avoids the promotion entirely. */
   visibility: hidden;
 }
 
@@ -9779,6 +9814,18 @@ div.storage-link-main {
   outline: none;
 }
 
+.sync-history-thread-time {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.sync-history-thread-time time {
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 540;
+}
+
 .sync-history-thread-metric::after {
   content: attr(data-tooltip);
   position: absolute;
@@ -9797,16 +9844,34 @@ div.storage-link-main {
   line-height: 1.2;
   opacity: 0;
   pointer-events: none;
-  transform: translateY(3px);
-  transition: opacity 100ms ease, transform 100ms ease, visibility 100ms ease;
+  /* Deliberately no transform here. Animating one promotes the tooltip to its
+     own compositing layer, which re-rasterises the surrounding text and reads
+     as the whole row — and the panel around it — twitching on hover. The status
+     tooltip had this removed for the same reason; this one was missed. */
+  /* Shown instantly and deliberately unanimated. Fading opacity promotes the
+     tooltip to its own compositing layer, and text re-rasterised against a
+     layer origin can land a pixel off the page grid; with the pixel face
+     rendered unsmoothed that flips whole pixels, which reads as the row
+     twitching even though nothing moves — measured as zero geometry change
+     across 72 elements. Appearing at once avoids the promotion entirely. */
   visibility: hidden;
-  white-space: nowrap;
+  /* pre, not nowrap: a tooltip carrying two facts separates them with a
+     newline, which nowrap collapsed into one run-on line. pre honours the
+     break without also soft-wrapping mid-sentence the way pre-line does when
+     the box sits near an edge. */
+  white-space: pre;
+}
+
+/* The stamp is pinned to the right edge, so its tooltip has to open inward or
+   it runs straight off the card. */
+.sync-history-thread-meta > .sync-history-thread-time-end::after {
+  right: -6px;
+  left: auto;
 }
 
 .sync-history-thread-metric:hover::after,
 .sync-history-thread-metric:focus-visible::after {
   opacity: 1;
-  transform: translateY(0);
   visibility: visible;
 }
 
@@ -9861,8 +9926,11 @@ div.storage-link-main {
   margin-left: 1px;
 }
 
+/* Static on purpose: the popover anchors to the row rather than to this 22px
+   trigger, so it cannot be pushed outside the card and clipped by the
+   workspace scroll container. */
 .sync-history-debug-menu {
-  position: relative;
+  position: static;
   display: inline-flex;
   flex: 0 0 auto;
 }
@@ -9885,14 +9953,31 @@ div.storage-link-main {
   position: absolute;
   z-index: 60;
   top: calc(100% + 6px);
-  right: 0;
-  width: min(380px, calc(100vw - 48px));
+  bottom: auto;
+  /* Aligned to the row's content edge, directly under the metrics it explains.
+     Anchoring it to the trigger instead puts it wherever that icon happens to
+     land — which is how it ended up outside the card and clipped. */
+  right: auto;
+  left: 12px;
+  /* Sized against the row rather than the viewport: the sidebar means viewport
+     width is not the space actually available here. */
+  width: min(380px, calc(100% - 24px));
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: var(--surface-popover);
   box-shadow: var(--shadow-popover);
   color: var(--text-1);
+}
+
+/* Flipped up for rows near the bottom of the list. Hanging below them extended
+   the workspace's scrollable height — measured at +29px to +137px depending on
+   how far down the row sat — which made the scrollbar jump on every click.
+   Overflow past the block-start edge is not scrollable, so opening up costs
+   nothing there, and rows higher up keep opening down so nothing is clipped. */
+.sync-history-debug-popover.drop-up {
+  top: auto;
+  bottom: calc(100% + 6px);
 }
 
 .sync-history-debug-popover > header {
@@ -10857,6 +10942,35 @@ button.sync-project-file-expand { cursor: pointer; }
 .sync-fork-checkpoint small {
   color: var(--text-2);
   font-size: 10.5px;
+}
+
+.sync-fork-checkpoint h4 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: var(--text-0);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.sync-fork-checkpoint p {
+  margin: 0;
+  color: var(--text-1);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.sync-fork-checkpoint-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.sync-history-content > .sync-fork-checkpoint {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
 }
 
 .sync-fork-checkpoint h4 {
