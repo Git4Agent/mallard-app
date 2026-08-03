@@ -2773,7 +2773,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                 aria-label="App actions"
                 onClick={() => setAppMenuOpen((current) => !current)}
               >
-                <Icon name="settings" size={16} />
+                <Icon name="more" size={16} />
               </button>
               <div
                 id="sync-app-actions-menu"

@@ -83,7 +83,6 @@
   --shadow-card: 2px 2px 0 rgba(3, 5, 17, 0.3);
   --shadow-overlay: 4px 4px 0 rgba(3, 5, 17, 0.38);
   --shadow-popover: 4px 4px 0 rgba(3, 5, 17, 0.44);
-  --sync-history-thread-range-column: 38ch;
   /* Shell frame: every region is a rounded tile floating on a uniform gutter,
      so horizontal and vertical separators meet in rounded corners instead of
      square T-joints. */
@@ -683,23 +682,20 @@ summary {
   background: var(--bg-2);
 }
 
+/* The titlebar is one surface. The context used to sit on its own lighter
+   panel, which ended mid-bar at a hard edge with no border — it read as a
+   rendering seam rather than a divider. */
 .sync-titlebar-context {
-  min-width: min(240px, 46vw);
+  min-width: 0;
   height: auto;
   gap: 17px;
   align-self: stretch;
-  margin-left: -20px;
-  padding: 0 22px;
-  border-right: 0;
-  border-bottom: 0;
-  border-left: 0;
-  border-radius: var(--retro-panel-radius-inner) 0 0 var(--retro-panel-radius-inner);
-  background: var(--surface-card);
+  margin-left: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--text-0);
-}
-
-.sync-app.sidebar-hidden .sync-titlebar-context {
-  border-radius: var(--retro-panel-radius-inner);
 }
 
 .sync-workspace > .sync-main {
@@ -740,11 +736,13 @@ summary {
   gap: 2px;
 }
 
+/* Two peer icon buttons — the rule between them implied a grouping that is not
+   there. */
 .sync-titlebar-actions .storage-link-more {
   width: 34px;
   height: 32px;
-  border-left: 1px solid var(--border);
-  border-radius: 0;
+  border: 0;
+  border-radius: 3px;
   color: var(--accent);
 }
 
@@ -1031,31 +1029,35 @@ summary {
   color: var(--text-1);
 }
 
+/* A rule divides the storage lens from the branch picker — the same separator
+   the project heading meta uses, rather than a chevron that reads as a step. */
 .sync-history-storage-lens::after {
-  content: "›";
-  margin-left: 7px;
-  color: var(--text-3);
-  font-family: var(--font);
+  content: "";
+  width: 1px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin-left: 5px;
+  background: var(--border-mid);
 }
 
-/* The branch name is the control, so it sits in the box rather than floating
-   beside one. No reserved width — it hugs the branch name. */
+/* The branch name is the control. No frame and no reserved width — it is plain
+   text that only picks up a hover wash, so the toolbar reads as one line. */
 .sync-history-branch-trigger {
   font-family: var(--font-pixel);
   min-width: 0;
   height: 30px;
-  padding: 0 6px 0 9px;
-  border: 1px solid var(--button-border);
+  padding: 0 4px 0 6px;
+  border: 0;
   border-radius: 4px;
-  background: var(--button-bg);
+  background: transparent;
   color: var(--text-0);
   font-size: 14px;
   font-weight: 500;
 }
 
 .sync-history-branch-trigger:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  background: var(--button-bg-hover);
+  border-color: transparent;
+  background: var(--bg-hover);
 }
 
 .sync-history-branch-state {
@@ -1096,6 +1098,13 @@ summary {
   font-size: 13px;
   font-weight: 500;
   letter-spacing: 0;
+}
+
+/* The pixel face is for chrome. A name that came out of the user's data reads
+   in the normal face even when a pixel-font label wraps it. */
+.sync-history-section-heading h2 .sync-history-storage-name {
+  font-family: var(--font);
+  font-weight: 600;
 }
 
 /* The storage-only section is a sibling of the timeline, so it does not inherit
@@ -1245,9 +1254,15 @@ summary {
   display: none;
 }
 
+/* Deliberately no z-index. It opened a stacking context that trapped the debug
+   popover below the following commit, and the obvious fix — raising the commit
+   while the popover is open — repaints the subtree on every click, which
+   visibly twitches the crisp-edged icons beside the trigger. Without a context
+   here the popover's own z-index clears the following commits on its own, so
+   nothing has to change when it opens. The rail node and connector keep their
+   own z-indexes and still draw correctly. */
 .sync-history-commit {
   position: relative;
-  z-index: 1;
   min-width: 0;
   margin: 0 0 10px var(--sync-history-card-offset);
   padding: 0;
@@ -1255,6 +1270,12 @@ summary {
   border-radius: 4px;
   background: var(--surface-row);
 }
+
+/* No :has() lift for an open debug popover. Toggling a z-index as the panel
+   opens reorders — and so repaints — the whole subtree, which visibly twitches
+   the crisp-edged icons sitting next to the trigger. The popover's own z-index
+   already paints it above the following commit without any of that, verified
+   by hit-testing three points through an overlapping commit. */
 
 .sync-history-commit::before {
   content: "";
@@ -1396,8 +1417,9 @@ summary {
   z-index: 46;
 }
 
-/* Every glyph is 24px pixel geometry, so timeline icons are drawn at an exact
-   2:1 downscale — any other size lands blocks on half pixels and blurs them. */
+/* Most timeline glyphs use a 24px grid at an exact 2:1 downscale. Status
+   badges stay at their native 24px size so the selected pixel coin remains
+   crisp and immediately distinguishable. */
 .sync-history-commit-icon {
   color: var(--text-2);
 }
@@ -1407,18 +1429,18 @@ summary {
 .sync-history-thread-title > .sync-thread-sync-indicator > svg,
 .sync-history-thread-title > .sync-thread-sync-error > svg,
 .sync-history-thread-meta > span > svg,
-.sync-history-thread-range > span > svg,
 .sync-history-debug-trigger > svg,
 .sync-history-chat-toggle > svg {
   width: 12px;
   height: 12px;
 }
 
-.sync-history-thread-title > .sync-thread-sync-indicator > .thread-status-icon,
-.sync-history-thread-title > .sync-thread-sync-error > .thread-status-icon {
-  width: 16px;
-  height: 16px;
-}
+/* The badge draws with crispEdges, so it never blurs at any scale — but a size
+   that is not a whole multiple of the 24-unit art makes its 1-unit steps land
+   on 1 device pixel in places and 2 in others, which shows as a ragged coin
+   edge. 12px and 24px are the even ones; 24px overflowed the 18px icon slot
+   and outweighed the 12.5px title, so the badge sits on the shared 12px rule
+   with every other row glyph. */
 
 .sync-history-thread-kind {
   color: var(--text-2);
@@ -1604,10 +1626,6 @@ summary {
   flex-wrap: nowrap;
 }
 
-.sync-history-thread-range {
-  flex: 0 1 auto;
-}
-
 .sync-history-thread-time {
   min-width: 0;
   flex: 0 1 auto;
@@ -1633,6 +1651,14 @@ summary {
 
 .sync-history-commit > .sync-history-thread-list > .sync-history-thread-card + .sync-history-thread-card {
   border-top: 1px solid var(--border-mid);
+}
+
+/* These cards cannot clip (the rail node and its connector live outside them),
+   so the last row would paint its square background over the card's rounded
+   bottom border. Give it the matching inner radius instead. */
+.sync-history-commit > .sync-history-thread-list > .sync-history-thread-card:last-child,
+.sync-history-uncommitted .sync-history-thread-card:last-child {
+  border-radius: 0 0 3px 3px;
 }
 
 .sync-history-commit > .sync-history-thread-list .sync-thread-sync-indicator,
@@ -1763,8 +1789,7 @@ summary {
 
 /* The range wrapper made the two time spans grandchildren, so they also need
    the icon/label layout the direct children get. */
-.sync-history-thread-meta > span,
-.sync-history-thread-range > span {
+.sync-history-thread-meta > span {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1781,40 +1806,26 @@ summary {
   opacity: 1;
 }
 
-.sync-history-thread-time-start > svg {
-  color: var(--text-3);
-}
-
-.sync-history-thread-time-end > svg {
-  color: var(--text-1);
-}
-
 .sync-history-thread-time time {
   color: var(--text-2);
   font-size: 11.5px;
   font-weight: 500;
 }
 
-/* The two stamps are one interval: they sit tighter to each other than to the
-   metrics beside them, joined by an arrow rather than floated apart. */
-.sync-history-thread-range {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
+/* The metric row spans the card so the stamp has room to reach the far edge;
+   the chat toggle still trails the metrics, just at the very end of the row. */
+.sync-history-session-summary .sync-history-thread-meta {
+  flex: 1;
 }
 
-.sync-history-range-arrow {
-  flex: 0 0 auto;
-  color: var(--text-3);
-  font-size: 11px;
-  line-height: 1;
+/* The stamp is pushed to the far edge so it forms a column down the list, with
+   the duration left beside the metrics it belongs with. */
+.sync-history-thread-meta > .sync-history-thread-time-end {
+  margin-left: auto;
+  padding-left: 14px;
 }
 
-.sync-history-thread-elapsed {
-  color: var(--text-2);
-  font-size: 11.5px;
-  font-weight: 500;
+.sync-history-thread-duration b {
   font-variant-numeric: tabular-nums;
 }
 
@@ -1844,6 +1855,62 @@ summary {
   background: transparent;
   box-shadow: none;
   color: var(--text-3);
+}
+
+/* Every menu and panel in the base sheet opens with a keyframe animation that
+   slides and scales it in. Animating a transform promotes the element to its
+   own compositing layer for the duration, and creating that layer
+   re-rasterises the text and icons around it — which is the twitch that shows
+   up in neighbouring elements the moment one opens. This skin is stepped and
+   pixel-crisp rather than eased, so the reveals are dropped outright instead
+   of being softened. Same reason the tooltips are unanimated. */
+.sync-history-branch-menu,
+.storage-link-menu,
+.storage-link-actions-menu,
+.sync-inline-new-project.sync-profile-picker-dialog,
+.sync-combined-settings-panel,
+.profile-link-card,
+.sync-project-tab-panel,
+.sync-capability-details {
+  animation: none;
+}
+
+/* Rotating a chevron through a transition promotes it to its own compositing
+   layer for the duration of the animation, and creating that layer
+   re-rasterises the text and icons around it — which is the twitch that shows
+   up in neighbouring elements when a menu or disclosure opens. The rotation
+   still happens; it just lands immediately instead of being animated. Same
+   reason the status and metric tooltips are unanimated. */
+.sync-history-branch-chevron,
+.sync-capability-chevron,
+.log-type-filter > summary svg,
+.sync-resource-details > summary > svg,
+.storage-link-switcher-affordance svg,
+.exclusion-summary::before,
+.storage-link-menu-arrow {
+  transition: color 120ms ease;
+}
+
+/* The retro press shifts a button a pixel while it is held. That reads as
+   tactile on a full-size button with a label, but an icon-only button has no
+   text to anchor the eye, so the glyph just jogs against whatever sits beside
+   it. Every icon-only clicker keeps the colour feedback and drops the
+   displacement; labelled buttons keep the press. */
+.sync-history-thread-actions .sync-history-launch-action:active:not(:disabled),
+.sync-history-chat-toggle:active:not(:disabled),
+.sync-history-debug-trigger:active:not(:disabled),
+.sync-history-commit-toggle:active:not(:disabled),
+.sync-history-icon-action:active:not(:disabled),
+.sync-history-debug-copy:active:not(:disabled),
+.sidebar-profile-actions button:active:not(:disabled),
+.sidebar-section-action:active:not(:disabled),
+.sync-inline-action-close:active:not(:disabled),
+.sync-storage-settings-icon:active:not(:disabled),
+.sync-setup-resource-toggle:active:not(:disabled),
+.log-panel-actions .btn:active:not(:disabled),
+.sync-modal-header .btn:active:not(:disabled),
+.sync-inline-action-header .btn:active:not(:disabled) {
+  transform: none;
 }
 
 .sync-history-thread-card:hover .sync-history-launch-action,
@@ -1909,14 +1976,6 @@ summary {
 
   .sync-history-session-summary {
     gap: 5px;
-  }
-
-  /* Reserving the widest same-day range keeps the counters that follow in one
-     column down the list instead of stepping in and out with the clock text.
-     A session that crosses midnight is wider and simply pushes past it — too
-     rare to pad every other row for. Only applied where there is room. */
-  .sync-history-thread-range {
-    min-width: var(--sync-history-thread-range-column);
   }
 
   .sync-history-stored-thread {

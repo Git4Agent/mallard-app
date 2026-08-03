@@ -60,14 +60,14 @@
   --blue: #86bdfb;
   --purple: #a78bfa;
   --thread-status-glyph: #fffaf1;
-  --thread-status-synced: #32b86b;
-  --thread-status-cloud: #55749a;
-  --thread-status-local: #20a6c8;
-  --thread-status-divergent: #7657cc;
-  --thread-status-forked: #5548b8;
-  --thread-status-pending: #e9a11d;
-  --thread-status-conflict: #ea514e;
-  --thread-status-unavailable: #7f828a;
+  --thread-status-synced: #31ae6b;
+  --thread-status-cloud: #e59b1b;
+  --thread-status-local: #4e5fe4;
+  --thread-status-divergent: #7655d6;
+  --thread-status-forked: #9a45c5;
+  --thread-status-pending: #3784df;
+  --thread-status-conflict: #e44649;
+  --thread-status-unavailable: #85878e;
   --font: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif;
   --font-mono: 'SF Mono', 'JetBrains Mono', 'Menlo', 'Cascadia Code', 'Consolas', monospace;
   --r-lg: 22px;
@@ -9310,7 +9310,7 @@ div.storage-link-main {
 
 .sync-history-branch-option {
   width: 100%;
-  min-height: 46px;
+  min-height: 34px;
   display: grid;
   grid-template-columns: 17px minmax(0, 1fr) auto;
   align-items: center;
@@ -9337,8 +9337,7 @@ div.storage-link-main {
 }
 
 .sync-history-branch-check {
-  align-self: start;
-  padding-top: 2px;
+  align-self: center;
   color: var(--text-2);
   font-size: 12px;
   font-weight: 760;
@@ -9660,8 +9659,8 @@ div.storage-link-main {
 .sync-thread-sync-indicator,
 .sync-thread-sync-error {
   position: relative;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -9850,7 +9849,18 @@ div.storage-link-main {
      twitching even though nothing moves — measured as zero geometry change
      across 72 elements. Appearing at once avoids the promotion entirely. */
   visibility: hidden;
-  white-space: nowrap;
+  /* pre, not nowrap: a tooltip carrying two facts separates them with a
+     newline, which nowrap collapsed into one run-on line. pre honours the
+     break without also soft-wrapping mid-sentence the way pre-line does when
+     the box sits near an edge. */
+  white-space: pre;
+}
+
+/* The stamp is pinned to the right edge, so its tooltip has to open inward or
+   it runs straight off the card. */
+.sync-history-thread-meta > .sync-history-thread-time-end::after {
+  right: -6px;
+  left: auto;
 }
 
 .sync-history-thread-metric:hover::after,
@@ -9910,8 +9920,11 @@ div.storage-link-main {
   margin-left: 1px;
 }
 
+/* Static on purpose: the popover anchors to the row rather than to this 22px
+   trigger, so it cannot be pushed outside the card and clipped by the
+   workspace scroll container. */
 .sync-history-debug-menu {
-  position: relative;
+  position: static;
   display: inline-flex;
   flex: 0 0 auto;
 }
@@ -9934,14 +9947,31 @@ div.storage-link-main {
   position: absolute;
   z-index: 60;
   top: calc(100% + 6px);
-  right: 0;
-  width: min(380px, calc(100vw - 48px));
+  bottom: auto;
+  /* Aligned to the row's content edge, directly under the metrics it explains.
+     Anchoring it to the trigger instead puts it wherever that icon happens to
+     land — which is how it ended up outside the card and clipped. */
+  right: auto;
+  left: 12px;
+  /* Sized against the row rather than the viewport: the sidebar means viewport
+     width is not the space actually available here. */
+  width: min(380px, calc(100% - 24px));
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: var(--surface-popover);
   box-shadow: var(--shadow-popover);
   color: var(--text-1);
+}
+
+/* Flipped up for rows near the bottom of the list. Hanging below them extended
+   the workspace's scrollable height — measured at +29px to +137px depending on
+   how far down the row sat — which made the scrollbar jump on every click.
+   Overflow past the block-start edge is not scrollable, so opening up costs
+   nothing there, and rows higher up keep opening down so nothing is clipped. */
+.sync-history-debug-popover.drop-up {
+  top: auto;
+  bottom: calc(100% + 6px);
 }
 
 .sync-history-debug-popover > header {

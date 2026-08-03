@@ -15,7 +15,7 @@ interface ThreadStatusIconProps extends Omit<SVGProps<SVGSVGElement>, "name"> {
   size?: number;
 }
 
-const badgePath = "M6 3H18V4H20V6H21V8H22V16H21V18H20V20H18V21H6V20H4V18H3V16H2V8H3V6H4V4H6Z";
+const badgePath = "M8 2H16V3H18V4H19V5H20V6H21V8H22V16H21V18H20V19H19V20H18V21H16V22H8V21H6V20H5V19H4V18H3V16H2V8H3V6H4V5H5V4H6V3H8Z";
 const glyphColor = "var(--thread-status-glyph, #fffaf1)";
 
 function StatusGlyph({ status }: { status: ThreadStatusIconName }) {
@@ -24,66 +24,54 @@ function StatusGlyph({ status }: { status: ThreadStatusIconName }) {
       return (
         <path
           fill={glyphColor}
-          d="M5 12H8V15H10V13H12V11H14V9H16V7H19V10H17V12H15V14H13V16H11V18H8V16H7V15H5Z"
+          d="M18 7H19V9H18V10H17V11H16V12H15V14H14V15H13V16H12V17H11V18H10V17H9V16H8V15H7V14H6V12H8V13H9V14H10V15H11V16H12V15H13V14H14V13H15V11H16V10H17V8H18Z"
         />
       );
     case "cloud-outstanding":
       return (
         <>
-          <path
-            fill="none"
-            stroke={glyphColor}
-            strokeWidth="2"
-            strokeLinejoin="miter"
-            d="M6 12V10H8V8H10V7H14V8H16V10H18V12H19V14H5V12Z"
-          />
-          <path fill={glyphColor} d="M11 14H13V17H15L12 20L9 17H11Z" />
+          <path fill={glyphColor} d="M11 6H14V13H18L12 18L6 13H11Z" />
+          <path fill={glyphColor} d="M7 19H18V21H7Z" />
         </>
       );
     case "local-outstanding":
       return (
         <>
-          <path fill={glyphColor} d="M11 17H13V9H16L12 5L8 9H11Z" />
-          <path fill={glyphColor} d="M7 17H9V19H15V17H17V20H7Z" />
+          <path fill={glyphColor} d="M11 18H14V11H18L12 6L6 11H11Z" />
+          <path fill={glyphColor} d="M7 19H18V21H7Z" />
         </>
       );
     case "divergent":
       return (
         <>
-          <path fill={glyphColor} d="M5 7H14V5L19 8L14 11V9H5Z" />
-          <path fill={glyphColor} d="M19 15H10V13L5 16L10 19V17H19Z" />
+          <path fill={glyphColor} d="M6 12L10 8V11H15V13H10V16Z" />
+          <path fill={glyphColor} d="M19 12L15 8V11H10V13H15V16Z" />
         </>
       );
     case "divergent-forked":
       return (
-        <>
-          <path fill={glyphColor} d="M5 4H9V8H8V10H16V8H15V4H19V8H18V11H17V12H8V17H9V21H5V17H6V8H5Z" />
-          <path fill={glyphColor} d="M13 15H15V17H16V16H18V18H17V19H15V18H14V17H13Z" />
-        </>
+        <path fill={glyphColor} d="M6 6H9V9H10V10H11V12H14V10H15V9H16V6H19V9H18V10H17V12H15V14H14V20H11V14H10V12H8V10H7V9H6Z" />
       );
     case "pending":
-      return (
-        <>
-          <path
-            fill="none"
-            stroke={glyphColor}
-            strokeWidth="2"
-            strokeLinejoin="miter"
-            d="M8 4H16V5H19V8H20V16H19V19H16V20H8V19H5V16H4V8H5V5H8Z"
-          />
-          <path fill={glyphColor} d="M11 7H13V12H17V14H11Z" />
-        </>
-      );
+      return <path fill={glyphColor} d="M11 6H14V12H18V15H11Z" />;
     case "conflict":
       return <path fill={glyphColor} d="M10 5H14V14H10ZM10 17H14V21H10Z" />;
     case "unavailable":
-      return <path fill={glyphColor} d="M6 11H18V14H6Z" />;
+      return (
+        <path
+          fill="none"
+          stroke={glyphColor}
+          strokeLinecap="square"
+          strokeWidth="2"
+          d="M7 18L18 7"
+        />
+      );
   }
 }
 
 export default function ThreadStatusIcon({
   status,
-  size = 16,
+  size = 24,
   className,
   ...props
 }: ThreadStatusIconProps) {

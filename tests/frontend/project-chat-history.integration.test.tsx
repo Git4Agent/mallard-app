@@ -93,9 +93,12 @@ test("the branch picker exposes branch state without using the native select men
 
   assert.match(html, /aria-haspopup="menu"/);
   assert.match(html, /aria-label="Branch: main, current branch"/);
-  assert.match(html, />Current</);
-  assert.match(html, /Recorded session history only/);
+  // The trigger is the branch name alone: "Current" belongs to the open menu,
+  // and the row subtitles are carried by the badges and the row title instead.
+  assert.equal(html.match(/>Current</g)?.length, 1);
+  assert.doesNotMatch(html, /Checked out locally|Local branch|Recorded session history only/);
   assert.match(html, />History only</);
+  assert.match(html, /This branch is no longer available locally/);
   assert.doesNotMatch(html, /<select/);
 });
 
@@ -166,49 +169,52 @@ test("thread indicators use the quiet desktop sync vocabulary", () => {
   assert.match(css, /\.sync-thread-sync-error \{ color: var\(--thread-status-conflict\); \}/);
 });
 
-test("thread status badges use the selected solid pixel family", () => {
+test("thread status badges use the filled Default 24px pixel family", () => {
   const expected: Record<ThreadStatusIconName, { color: string; glyph: string }> = {
     synced: {
-      color: "#32b86b",
-      glyph: "M5 12H8V15H10V13H12V11H14V9H16V7H19V10H17V12H15V14H13V16H11V18H8V16H7V15H5Z",
+      color: "#31ae6b",
+      glyph: "M18 7H19V9H18V10H17V11H16V12H15V14H14V15H13V16H12V17H11V18H10V17H9V16H8V15H7V14H6V12H8V13H9V14H10V15H11V16H12V15H13V14H14V13H15V11H16V10H17V8H18Z",
     },
     "cloud-outstanding": {
-      color: "#55749a",
-      glyph: "M11 14H13V17H15L12 20L9 17H11Z",
+      color: "#e59b1b",
+      glyph: "M11 6H14V13H18L12 18L6 13H11Z",
     },
     "local-outstanding": {
-      color: "#20a6c8",
-      glyph: "M11 17H13V9H16L12 5L8 9H11Z",
+      color: "#4e5fe4",
+      glyph: "M11 18H14V11H18L12 6L6 11H11Z",
     },
     divergent: {
-      color: "#7657cc",
-      glyph: "M5 7H14V5L19 8L14 11V9H5Z",
+      color: "#7655d6",
+      glyph: "M6 12L10 8V11H15V13H10V16Z",
     },
     "divergent-forked": {
-      color: "#5548b8",
-      glyph: "M5 4H9V8H8V10H16V8H15V4H19V8H18V11H17V12H8V17H9V21H5V17H6V8H5Z",
+      color: "#9a45c5",
+      glyph: "M6 6H9V9H10V10H11V12H14V10H15V9H16V6H19V9H18V10H17V12H15V14H14V20H11V14H10V12H8V10H7V9H6Z",
     },
     pending: {
-      color: "#e9a11d",
-      glyph: "M11 7H13V12H17V14H11Z",
+      color: "#3784df",
+      glyph: "M11 6H14V12H18V15H11Z",
     },
     conflict: {
-      color: "#ea514e",
+      color: "#e44649",
       glyph: "M10 5H14V14H10ZM10 17H14V21H10Z",
     },
     unavailable: {
-      color: "#7f828a",
-      glyph: "M6 11H18V14H6Z",
+      color: "#85878e",
+      glyph: "M7 18L18 7",
     },
   };
   const statuses = Object.keys(expected) as ThreadStatusIconName[];
 
   for (const status of statuses) {
-    const html = renderToStaticMarkup(<ThreadStatusIcon status={status} size={16} />);
+    const html = renderToStaticMarkup(<ThreadStatusIcon status={status} />);
     assert.match(html, new RegExp(`data-thread-status="${status}"`));
     assert.match(html, /thread-status-icon-badge/);
-    assert.match(html, /M6 3H18V4H20V6H21V8H22V16H21V18H20V20H18V21H6V20H4V18H3V16H2V8H3V6H4V4H6Z/);
+    assert.match(html, /M8 2H16V3H18V4H19V5H20V6H21V8H22V16H21V18H20V19H19V20H18V21H16V22H8V21H6V20H5V19H4V18H3V16H2V8H3V6H4V5H5V4H6V3H8Z/);
     assert.ok(html.includes(expected[status].glyph));
+    assert.match(html, /width="24"/);
+    assert.match(html, /height="24"/);
+    assert.match(html, /thread-status-icon-badge" fill="currentColor"/);
     assert.match(html, /shape-rendering="crispEdges"/);
     assert.doesNotMatch(html, /(?:linearGradient|filter|drop-shadow)/);
   }
@@ -282,6 +288,49 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   assert.match(metricTooltipRule, /position:\s*absolute/);
   assert.doesNotMatch(metricTooltipRule, /transform:/);
   assert.doesNotMatch(metricHoverRule, /transform:/);
+  // The stamp's tooltip carries two lines separated by a newline; nowrap
+  // collapsed them into one run-on line, and pre-line soft-wrapped mid-sentence.
+  assert.match(metricTooltipRule, /white-space: pre;/);
+  // Menus and panels in the base sheet open with a keyframe that slides and
+  // scales them in. Animating a transform promotes the element to its own
+  // compositing layer, and creating that layer re-rasterises the icons and
+  // text beside it — the twitch that shows when a menu opens. The skin drops
+  // the reveals and lets chevrons rotate instantly.
+  const retroCssMotion = readFileSync("src/RetroTheme.css", "utf8");
+  const revealsOff = retroCssMotion.match(/\.sync-history-branch-menu,[\s\S]*?\{[^}]*animation: none;[^}]*\}/)?.[0] ?? "";
+  for (const selector of ["\\.storage-link-menu", "\\.storage-link-actions-menu", "\\.sync-capability-details", "\\.sync-project-tab-panel"]) {
+    assert.match(revealsOff, new RegExp(selector), `${selector} reveal must be disabled`);
+  }
+  const chevrons = retroCssMotion.match(/\.sync-history-branch-chevron,[\s\S]*?\{[^}]*\}/)?.[0] ?? "";
+  assert.match(chevrons, /transition: color 120ms ease;/);
+  assert.doesNotMatch(chevrons, /transition:[^;]*\btransform\b/);
+
+  // The retro press shifts a button a pixel while held. On the timeline's
+  // 22-26px icon buttons that reads as the icon jogging against its
+  // neighbours on every click, so they keep the colour feedback and drop the
+  // displacement. Full-size buttons still get the press.
+  const retroCssPress = readFileSync("src/RetroTheme.css", "utf8");
+  assert.match(retroCssPress, /\.btn:active:not\(:disabled\)\s*\{[^}]*transform: translate\(1px, 1px\);/s);
+  const pressExempt = retroCssPress.match(/\.sync-history-thread-actions \.sync-history-launch-action:active[\s\S]*?\{[^}]*\}/)?.[0] ?? "";
+  assert.match(pressExempt, /transform: none;/);
+  for (const selector of [
+    "\\.sync-history-chat-toggle:active",
+    "\\.sync-history-debug-trigger:active",
+    "\\.sync-history-commit-toggle:active",
+    "\\.sync-history-icon-action:active",
+    // Icon-only clickers elsewhere in the app, found by cross-checking every
+    // \`.btn\` for a fixed square size or zero padding.
+    "\\.sync-inline-action-close:active",
+    "\\.sync-storage-settings-icon:active",
+    "\\.sync-setup-resource-toggle:active",
+    "\\.log-panel-actions \\.btn:active",
+    "\\.sync-modal-header \\.btn:active",
+  ]) {
+    assert.match(pressExempt, new RegExp(selector), `${selector} must be exempt from the press displacement`);
+  }
+
+  // It is pinned to the row's right edge, so its tooltip must open inward.
+  assert.match(css, /\.sync-history-thread-meta > \.sync-history-thread-time-end::after\s*\{[^}]*right: -6px;[^}]*left: auto;/s);
 
   // The tooltip is a pseudo-element sitting above its metric, so any clipping
   // ancestor renders it invisible — all that shows is a sliver at the clip
@@ -440,8 +489,8 @@ test("history content uses the local alias and renders commit/thread actions", (
   assert.doesNotMatch(html, /aria-label="Updated [^"]+"/);
   assert.doesNotMatch(html, /aria-label="Show session details"/);
   assert.doesNotMatch(html, /aria-label="Hide session details"/);
-  assert.match(html, /aria-label="Started [^"]+"/);
-  assert.match(html, /aria-label="Ended [^"]+"/);
+  // Both endpoints are announced together on the single visible stamp.
+  assert.match(html, /aria-label="Started [^"]+\. Ended [^"]+"/);
   assert.match(html, /aria-label="User turns: 3"/);
   assert.match(html, /data-tooltip="Total tokens · 24\.8K"/);
   assert.match(html, /Appears under 2 commits/);
@@ -572,45 +621,41 @@ test("commit hashes remain plain text without a GitHub remote", () => {
 
 test("permanent session summaries label every metric icon", () => {
   const html = renderToStaticMarkup(<ThreadMetrics thread={history.threads[0]} />);
-  const startedTime = html.match(/sync-history-thread-time-start[\s\S]*?<time[^>]*>([^<]+)<\/time>/)?.[1] ?? "";
   const endedTime = html.match(/sync-history-thread-time-end[\s\S]*?<time[^>]*>([^<]+)<\/time>/)?.[1] ?? "";
 
-  assert.match(html, /data-icon="play"/);
-  assert.match(html, /data-icon="check-circle"/);
-  assert.match(html, /aria-label="Started [^"]+"/);
-  assert.match(html, /aria-label="Ended [^"]+"/);
-  assert.match(html, new RegExp(`<time dateTime="${new Date(history.threads[0].started_at * 1_000).toISOString()}"`));
+  // The row anchors on the last activity — the more useful end of the interval
+  // — plus how long it ran. Start is that minus the duration, and both ends are
+  // spelled out in full in the accessible label and tooltip.
   assert.match(html, new RegExp(`<time dateTime="${new Date(history.threads[0].ended_at * 1_000).toISOString()}"`));
-  assert.match(startedTime, / at /);
-  assert.match(startedTime, /\d{4}/);
-  assert.match(startedTime, /\d{1,2}:\d{2}/);
-  assert.doesNotMatch(startedTime, /\d{1,2}:\d{2}:\d{2}/);
-  // The pair reads as one interval, so a same-day end drops the date the two
-  // stamps share and keeps only the clock time. Full precision stays in the
-  // accessible label and the tooltip, which are asserted above.
-  assert.match(endedTime, /^\d{1,2}:\d{2}\s?[AP]M$/i);
-  assert.doesNotMatch(endedTime, / at /);
+  assert.doesNotMatch(html, new RegExp(`<time dateTime="${new Date(history.threads[0].started_at * 1_000).toISOString()}"`));
+  assert.match(html, /aria-label="Started [^"]+\. (?:Ended|Last activity) [^"]+"/);
+  assert.match(endedTime, / at /);
+  assert.match(endedTime, /\d{4}/);
+  assert.match(endedTime, /\d{1,2}:\d{2}/);
   assert.doesNotMatch(endedTime, /\d{1,2}:\d{2}:\d{2}/);
-  assert.match(html, /class="sync-history-range-arrow"/);
+  assert.match(html, /class="sync-history-thread-metric sync-history-thread-duration"[^>]*aria-label="Ran for 1h"/);
+  assert.match(html, /data-icon="clock"/);
+  // Only one stamp, and none of the old paired-range markup.
+  assert.doesNotMatch(html, /sync-history-thread-time-start|sync-history-range-arrow/);
   assert.match(html, /data-tooltip="User turns · 3"/);
   assert.match(html, /data-tooltip="Total tokens · 24\.8K"/);
   assert.match(html, /data-tooltip="Agent messages · 5"/);
   assert.match(html, /data-tooltip="Tool calls · 8"/);
 });
 
-test("a session that starts and ends inside one minute reports elapsed time, not the same clock twice", () => {
+test("a sub-minute session still reports how long it ran", () => {
   const startedAt = Math.floor(new Date(2026, 7, 1, 18, 53, 0).getTime() / 1_000);
   const html = renderToStaticMarkup(
     <ThreadMetrics thread={{ ...history.threads[0], started_at: startedAt, ended_at: startedAt + 41 }} />,
   );
-  const started = html.match(/sync-history-thread-time-start[\s\S]*?<time[^>]*>([^<]+)<\/time>/)?.[1] ?? "";
+  const ended = html.match(/sync-history-thread-time-end[\s\S]*?<time[^>]*>([^<]+)<\/time>/)?.[1] ?? "";
 
-  assert.match(started, / at /);
-  assert.match(html, /class="sync-history-thread-elapsed">\+41s</);
-  // An elapsed reading is not a datetime, so it is not marked up as one.
-  assert.doesNotMatch(html, new RegExp(`<time dateTime="${new Date((startedAt + 41) * 1_000).toISOString()}"`));
+  assert.match(ended, / at /);
+  // Seconds, not a rounded-to-zero minute reading.
+  assert.match(html, /sync-history-thread-duration[^>]*aria-label="Ran for 41s"/);
+  assert.match(html, /<b>41s<\/b>/);
   // The full ending timestamp still reaches assistive tech and the tooltip.
-  assert.match(html, /aria-label="Ended [^"]+"/);
+  assert.match(html, /aria-label="Started [^"]+\. Ended [^"]+"/);
 });
 
 test("a session with no measurable duration renders a single timestamp", () => {
@@ -619,12 +664,13 @@ test("a session with no measurable duration renders a single timestamp", () => {
     <ThreadMetrics thread={{ ...history.threads[0], started_at: startedAt, ended_at: startedAt }} />,
   );
 
-  assert.match(html, /sync-history-thread-time-start/);
-  assert.doesNotMatch(html, /sync-history-thread-time-end/);
+  assert.match(html, /sync-history-thread-time-end/);
+  assert.doesNotMatch(html, /sync-history-thread-time-start/);
   assert.doesNotMatch(html, /sync-history-range-arrow/);
+  assert.doesNotMatch(html, /sync-history-thread-duration/);
 });
 
-test("session summaries keep the full ending date when the session crosses midnight", () => {
+test("a session that crosses midnight still resolves to an unambiguous end", () => {
   const startedAt = Math.floor(new Date(2026, 6, 30, 23, 55).getTime() / 1_000);
   const endedAt = Math.floor(new Date(2026, 6, 31, 0, 5).getTime() / 1_000);
   const html = renderToStaticMarkup(
@@ -632,8 +678,13 @@ test("session summaries keep the full ending date when the session crosses midni
   );
   const endedTime = html.match(/sync-history-thread-time-end[\s\S]*?<time[^>]*>([^<]+)<\/time>/)?.[1] ?? "";
 
+  // The visible stamp is the far side of the boundary; the duration walks back
+  // to the start, so the interval stays unambiguous with one date on screen.
+  assert.match(endedTime, /Jul 31, 2026/);
   assert.match(endedTime, / at /);
-  assert.match(endedTime, /\d{4}/);
+  assert.match(html, /sync-history-thread-duration[^>]*aria-label="Ran for 10m"/);
+  // The full ending date is still spelled out for assistive tech and the tooltip.
+  assert.match(html, /aria-label="Started [^"]+\. Ended [^"]+2026[^"]*"/);
 });
 
 test("thread icon actions stay compact and the chat action follows the metrics", () => {
@@ -649,8 +700,13 @@ test("thread icon actions stay compact and the chat action follows the metrics",
   assert.match(chatRule, /padding:\s*0/);
   assert.match(launchRule, /width:\s*28px/);
   assert.match(launchRule, /padding:\s*0/);
-  assert.match(debugMenuRule, /position:\s*relative/);
+  // The menu is deliberately static so the popover anchors to the row instead
+  // of to the 22px trigger — anchored to the trigger it was pushed outside the
+  // card and clipped by the workspace scroll container.
+  assert.match(debugMenuRule, /position:\s*static/);
   assert.match(debugPopoverRule, /position:\s*absolute/);
+  assert.match(debugPopoverRule, /width: min\(380px, calc\(100% - 24px\)\)/);
+  assert.doesNotMatch(debugPopoverRule, /100vw/);
 });
 
 test("thread debug copy text keeps complete local identifiers", () => {

@@ -168,8 +168,9 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
           openMenu(event.key === "ArrowDown" ? "first" : "last");
         }}
       >
+        {/* The trigger is just the branch name: it always shows the selected
+            branch, so "Current" belongs in the open menu, not here. */}
         <span className="sync-history-branch-name" title={selected.name}>{selected.name}</span>
-        {selected.is_current && <span className="sync-history-branch-state current">Current</span>}
         {!selected.available && <span className="sync-history-branch-state history-only">History only</span>}
         <Icon name="chevron-down" size={12} className="sync-history-branch-chevron" />
       </button>
@@ -219,11 +220,10 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
               <span className="sync-history-branch-check" aria-hidden="true">
                 {branch.name === selectedBranch && <Icon name="check-circle" size={12} />}
               </span>
+              {/* The badges already say what the second line used to; the full
+                  explanation stays on the row's title. */}
               <span className="sync-history-branch-option-copy">
                 <strong>{branch.name}</strong>
-                <span>
-                  {branch.is_current ? "Checked out locally" : branch.available ? "Local branch" : "Recorded session history only"}
-                </span>
               </span>
               {branch.is_current && <span className="sync-history-branch-state current">Current</span>}
               {!branch.available && <span className="sync-history-branch-state history-only">History only</span>}
@@ -258,27 +258,23 @@ function formatFullDateTime(value: number): string {
   return `${formatCalendarDate(value)} at ${formatClockTime(value)}`;
 }
 
-function sameCalendarDay(a: number, b: number): boolean {
-  const left = new Date(a * 1_000);
-  const right = new Date(b * 1_000);
-  return left.getFullYear() === right.getFullYear()
-    && left.getMonth() === right.getMonth()
-    && left.getDate() === right.getDate();
-}
-
 /**
- * Start and end are one interval, not two facts, so whatever the two stamps
- * share is printed once. A same-day session drops the repeated date; a session
- * that begins and ends inside the same minute shows the elapsed seconds rather
- * than the same clock time twice. Sessions that cross midnight keep both dates
- * in full — that is the one case where the second date carries real news.
- * Returns null when the two stamps are genuinely identical.
+ * How long the session ran, at one significant unit. The absolute start stamp
+ * plus this covers the same ground the old start→end pair did, in far less
+ * room. Returns null when the session has no measurable duration.
  */
-function formatSessionEnd(startedAt: number, endedAt: number): string | null {
-  if (!sameCalendarDay(startedAt, endedAt)) return formatFullDateTime(endedAt);
-  if (formatClockTime(startedAt) !== formatClockTime(endedAt)) return formatClockTime(endedAt);
+function formatDuration(startedAt: number, endedAt: number): string | null {
   const seconds = Math.max(0, Math.round(endedAt - startedAt));
-  return seconds > 0 ? `+${seconds}s` : null;
+  if (seconds === 0) return null;
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  if (hours < 24) return restMinutes ? `${hours}h ${restMinutes}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours ? `${days}d ${restHours}h` : `${days}d`;
 }
 
 function formatCount(value?: number | null): string {
@@ -398,7 +394,7 @@ function ThreadSyncIndicator({ entry, storageName }: { entry: ThreadSyncEntry; s
       aria-label={presentation.label}
       tabIndex={0}
     >
-      <ThreadStatusIcon status={presentation.status} size={16} />
+      <ThreadStatusIcon status={presentation.status} size={24} />
     </span>
   );
 }
@@ -414,29 +410,12 @@ export function ThreadMetrics({
 }) {
   const startedLabel = `Started ${formatFullDateTime(thread.started_at)}`;
   const endedLabel = `${thread.is_active ? "Last activity" : "Ended"} ${formatFullDateTime(thread.ended_at)}${thread.is_active ? ", active" : ""}`;
-
-  const endText = formatSessionEnd(thread.started_at, thread.ended_at);
-  // An elapsed-seconds reading is not a datetime, so it is not marked up as one.
-  const endIsClockTime = endText != null && !endText.startsWith("+");
+  const durationText = formatDuration(thread.started_at, thread.ended_at);
+  const durationLabel = durationText
+    ? `${thread.is_active ? "Active for" : "Ran for"} ${durationText}`
+    : "";
 
   return <div id={id} className="sync-history-thread-meta" aria-label="Session details">
-    <span className="sync-history-thread-range">
-      <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-start" data-tooltip={startedLabel} aria-label={startedLabel} tabIndex={0}>
-        <Icon name="play" size={11} />
-        <time dateTime={new Date(thread.started_at * 1_000).toISOString()}>{formatFullDateTime(thread.started_at)}</time>
-      </span>
-      {endText != null && (
-        <>
-          <span className="sync-history-range-arrow" aria-hidden="true">→</span>
-          <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end" data-tooltip={endedLabel} aria-label={endedLabel} tabIndex={0}>
-            <Icon name={thread.is_active ? "activity" : "check-circle"} size={11} />
-            {endIsClockTime
-              ? <time dateTime={new Date(thread.ended_at * 1_000).toISOString()}>{endText}</time>
-              : <span className="sync-history-thread-elapsed">{endText}</span>}
-          </span>
-        </>
-      )}
-    </span>
     <span className="sync-history-thread-metric" data-tooltip={`User turns · ${thread.user_round_count}`} aria-label={`User turns: ${thread.user_round_count}`} tabIndex={0}><Icon name="user" size={12} /><b>{thread.user_round_count}</b></span>
     <span className="sync-history-thread-metric" data-tooltip={`Total tokens · ${formatCount(thread.total_tokens)}`} aria-label={`Total tokens: ${formatCount(thread.total_tokens)}`} tabIndex={0}><Icon name="token" size={12} /><b>{formatCount(thread.total_tokens)}</b></span>
     <span className="sync-history-thread-metric" data-tooltip={`Agent messages · ${thread.agent_message_count}`} aria-label={`Agent messages: ${thread.agent_message_count}`} tabIndex={0}><Icon name="message" size={12} /><b>{thread.agent_message_count}</b></span>
@@ -446,6 +425,18 @@ export function ThreadMetrics({
       <span className="sync-history-thread-metric" data-tooltip={`Commit appearances · ${thread.commit_occurrence_count}`} aria-label={`Appears under ${thread.commit_occurrence_count} commits`} tabIndex={0}><Icon name="git-branch" size={12} /><b>{thread.commit_occurrence_count}</b></span>
     )}
     {!thread.metrics_complete && <span className="sync-history-thread-metric sync-history-partial" data-tooltip="Some session metrics are unavailable" aria-label="Some session metrics are unavailable" tabIndex={0}><Icon name="alert-triangle" size={12} /></span>}
+    {durationText && (
+      <span className="sync-history-thread-metric sync-history-thread-duration" data-tooltip={durationLabel} aria-label={durationLabel} tabIndex={0}>
+        <Icon name={thread.is_active ? "activity" : "clock"} size={12} /><b>{durationText}</b>
+      </span>
+    )}
+    {/* One absolute stamp, pushed to the far edge so it forms a column down the
+        list. It anchors on the last activity because that is the more useful
+        end of the interval; the start is that minus the duration sitting right
+        beside it. Both ends are spelled out in full in the label. */}
+    <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end" data-tooltip={`${startedLabel}\n${endedLabel}`} aria-label={`${startedLabel}. ${endedLabel}`} tabIndex={0}>
+      <time dateTime={new Date(thread.ended_at * 1_000).toISOString()}>{formatFullDateTime(thread.ended_at)}</time>
+    </span>
   </div>;
 }
 
@@ -526,8 +517,12 @@ async function writeClipboardText(value: string, fallbackRoot: HTMLElement | nul
   if (!copied) throw new Error("Clipboard access is unavailable");
 }
 
+/** Roughly the panel's rendered height; only used to pick which way it opens. */
+const THREAD_DEBUG_POPOVER_HEIGHT = 220;
+
 function ThreadDebugMenu({ threadId, workingDirectory, codexHome }: ThreadDebugMenuProps) {
   const [open, setOpen] = useState(false);
+  const [dropUp, setDropUp] = useState(false);
   const [copied, setCopied] = useState<ThreadDebugCopyTarget | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -554,6 +549,26 @@ function ThreadDebugMenu({ threadId, workingDirectory, codexHome }: ThreadDebugM
     setCopyError(null);
     if (restoreFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
   };
+
+  // Hanging the panel below a row near the end of the list grows the
+  // workspace's scrollable height, which makes the scrollbar jump the moment
+  // it opens. Overflow past the top of a scroller is not scrollable, so those
+  // rows open upward instead; rows with room below keep opening down.
+  useEffect(() => {
+    if (!open) {
+      setDropUp(false);
+      return;
+    }
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const scroller = trigger.closest<HTMLElement>(".sync-main")?.getBoundingClientRect();
+    const roomBelow = (scroller?.bottom ?? window.innerHeight) - rect.bottom;
+    const roomAbove = rect.top - (scroller?.top ?? 0);
+    // Only flip when down does not fit *and* up is the roomier side, so a row
+    // that fits neither way still opens toward whichever clips it less.
+    setDropUp(roomBelow < THREAD_DEBUG_POPOVER_HEIGHT && roomAbove > roomBelow);
+  }, [open]);
 
   const copyValue = async (target: ThreadDebugCopyTarget, value: string) => {
     try {
@@ -612,7 +627,7 @@ function ThreadDebugMenu({ threadId, workingDirectory, codexHome }: ThreadDebugM
       </button>
       <div
         id={menuId}
-        className="sync-history-debug-popover"
+        className={`sync-history-debug-popover${dropUp ? " drop-up" : ""}`}
         role="dialog"
         aria-label="Thread debug info"
         hidden={!open}
@@ -1210,7 +1225,7 @@ export function ProjectChatHistoryContent({
                 )}
               </span>
             )}
-            {comparisonError && <span className="sync-thread-sync-error" tabIndex={0} data-tooltip={comparisonError} aria-label={`Storage comparison failed: ${comparisonError}`}><ThreadStatusIcon status="conflict" size={16} /></span>}
+            {comparisonError && <span className="sync-thread-sync-error" tabIndex={0} data-tooltip={comparisonError} aria-label={`Storage comparison failed: ${comparisonError}`}><ThreadStatusIcon status="conflict" size={24} /></span>}
             <button
               type="button"
               className={`sync-history-icon-action sync-history-refresh${refreshing ? " loading" : ""}`}
@@ -1279,7 +1294,7 @@ export function ProjectChatHistoryContent({
                 {storedOnlyEntries.length > 0 && (
                   <section className="sync-history-storage-only" aria-labelledby="storage-only-heading">
                     <div className="sync-history-section-heading">
-                      <h2 id="storage-only-heading"><Icon name="cloud" size={13} />Only in {comparisonStorageName}</h2>
+                      <h2 id="storage-only-heading"><Icon name="cloud" size={13} />Only in <span className="sync-history-storage-name">{comparisonStorageName}</span></h2>
                       <span className="sync-history-heading-count" title="Threads not available on this machine"><Icon name="message" size={12} />{storedOnlyEntries.length}</span>
                     </div>
                     <div className="sync-history-thread-list flat">

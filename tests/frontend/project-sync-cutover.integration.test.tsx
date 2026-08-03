@@ -116,7 +116,8 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /\.sync-project-heading-meta-item > span\s*\{[^}]*display: block;[^}]*font: 400 13px\/18px var\(--font\);[^}]*font-kerning: none;[^}]*font-synthesis: none;[^}]*font-variant-ligatures: none;[^}]*letter-spacing: 0;/s);
   assert.match(retroCss, /\.sync-project-heading-meta-item \+ \.sync-project-heading-meta-item::before\s*\{[^}]*content: "";[^}]*width: 1px;[^}]*height: 14px;[^}]*background: var\(--border-mid\);/s);
   assert.match(retroCss, /\.sync-titlebar-context strong\s*\{[^}]*font-family: var\(--font\)/s);
-  assert.match(retroCss, /\.sync-titlebar-context\s*\{[^}]*border-right: 0;[^}]*border-bottom: 0;[^}]*border-left: 0;[^}]*border-radius: var\(--retro-panel-radius-inner\) 0 0 var\(--retro-panel-radius-inner\);/s);
+  // One surface across the bar: no second panel ending mid-titlebar.
+  assert.match(retroCss, /\.sync-titlebar-context\s*\{[^}]*border: 0;[^}]*border-radius: 0;[^}]*background: transparent;/s);
   assert.match(retroCss, /\.sidebar-profile-main span\s*\{[^}]*font-family: var\(--font\)/s);
   assert.match(retroCss, /:root\[data-theme="light"\]\s*\{[^}]*--bg-0: #fefbf6;/s);
   assert.match(retroCss, /:root\[data-theme="light"\]\s*\{[^}]*--bg-2: #faf3eb;/s);
@@ -257,7 +258,7 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(workspace, /<Icon name=\{theme === "dark" \? "moon" : "sun"\} size=\{18\} \/>/);
   assert.doesNotMatch(workspace, /\{theme === "dark" \? "Dark" : "Light"\} theme/);
   assert.match(retroCss, /\.sync-theme-button\s*\{[^}]*width: 34px;[^}]*height: 32px;[^}]*justify-content: center;[^}]*padding: 0;/s);
-  assert.match(workspace, /aria-label="App actions"[\s\S]*?<Icon name="settings" size=\{16\} \/>/);
+  assert.match(workspace, /aria-label="App actions"[\s\S]*?<Icon name="more" size=\{16\} \/>/);
 });
 
 test("the titlebar marks active Git projects with the Git folder icon", () => {
