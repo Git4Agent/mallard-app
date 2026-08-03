@@ -1582,7 +1582,6 @@ summary {
 .sync-history-session-details {
   display: grid;
   gap: 6px;
-  overflow: hidden;
 }
 
 .sync-history-session-summary,
@@ -1595,12 +1594,30 @@ summary {
   flex-wrap: nowrap;
   align-items: center;
   gap: 6px;
-  overflow: hidden;
 }
 
+/* No overflow clipping on this chain: the metric tooltips are pseudo-elements
+   that sit above their metric, so any clipping ancestor renders them invisible
+   — all that showed was a 1px sliver at the clip edge. The row is kept on one
+   line by letting the timestamp truncate instead. */
 .sync-history-thread-meta {
   flex-wrap: nowrap;
+}
+
+.sync-history-thread-range {
+  flex: 0 1 auto;
+}
+
+.sync-history-thread-time {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.sync-history-thread-time time {
+  min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sync-history-thread-card:hover {

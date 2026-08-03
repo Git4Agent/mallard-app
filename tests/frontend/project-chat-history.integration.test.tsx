@@ -274,6 +274,37 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
 
   assert.match(titleRule, /align-items:\s*center/);
   assert.doesNotMatch(tooltipRule, /transform:/);
+  // The metric tooltips need the same treatment: animating a transform promotes
+  // them to their own compositing layer, which re-rasterises the text around
+  // them and reads as the row — and the panel — twitching on hover.
+  const metricTooltipRule = css.match(/\.sync-history-thread-metric::after\s*\{[^}]+\}/s)?.[0] ?? "";
+  const metricHoverRule = css.match(/\.sync-history-thread-metric:hover::after,[\s\S]+?\n\}/)?.[0] ?? "";
+  assert.match(metricTooltipRule, /position:\s*absolute/);
+  assert.doesNotMatch(metricTooltipRule, /transform:/);
+  assert.doesNotMatch(metricHoverRule, /transform:/);
+
+  // The tooltip is a pseudo-element sitting above its metric, so any clipping
+  // ancestor renders it invisible — all that shows is a sliver at the clip
+  // edge. The row is held to one line by truncating the timestamp instead.
+  const retroCss = readFileSync("src/RetroTheme.css", "utf8");
+  for (const selector of [
+    "\\.sync-history-session-details",
+    "\\.sync-history-session-summary",
+    "\\.sync-history-thread-meta",
+  ]) {
+    const rule = retroCss.match(new RegExp(`\\n${selector} \\{[^}]*\\}`))?.[0] ?? "";
+    assert.doesNotMatch(rule, /overflow:\s*(hidden|clip|auto|scroll)/, `${selector} must not clip the metric tooltip`);
+  }
+  assert.match(retroCss, /\.sync-history-thread-time time\s*\{[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;/s);
+
+  // Neither tooltip animates. An opacity or transform transition promotes it to
+  // its own compositing layer, and text re-rasterised against a layer origin can
+  // land a pixel off the page grid — which the unsmoothed pixel face shows as a
+  // twitch even though no geometry changes.
+  assert.doesNotMatch(tooltipRule, /transition:/);
+  assert.doesNotMatch(metricTooltipRule, /transition:/);
+  // A scrollbar appearing must not push the workspace sideways.
+  assert.match(css, /\.sync-main\s*\{[^}]*overflow: auto;[^}]*scrollbar-gutter: stable;/s);
   assert.doesNotMatch(
     css,
     /\.sync-thread-sync-indicator:hover,\s*\n\.sync-thread-sync-indicator:focus-visible,\s*\n\.sync-thread-sync-error:hover/,
