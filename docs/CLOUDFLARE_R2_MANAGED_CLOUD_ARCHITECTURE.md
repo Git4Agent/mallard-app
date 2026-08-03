@@ -1,5 +1,10 @@
 # Managed Cloud Architecture: Cloudflare R2, CDN, and a Worker Reverse Proxy
 
+> [!IMPORTANT]
+> This is a historical proposal and is not the implementation target. See
+> [Mallard Managed Cloud v2](CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE_V2.md)
+> for the current production-foundation architecture.
+
 Status: Proposal
 Project: Agent Sync
 Last updated: 2026-07-19
