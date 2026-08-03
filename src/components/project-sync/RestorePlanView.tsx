@@ -928,10 +928,10 @@ export default function RestorePlanView({
                   <div>
                     <h2>{outcomeTitle}</h2>
                     <ul>
-                      {completedProjectItems.length > 0 && <li>{completedProjectItems.length} project data change{completedProjectItems.length === 1 ? "" : "s"} restored</li>}
-                      {keptLocalConversationItems.length > 0 && <li>{keptLocalConversationItems.length} conversation{keptLocalConversationItems.length === 1 ? "" : "s"} kept local</li>}
-                      {manualItems.length > 0 && <li>{manualItems.length} conflict{manualItems.length === 1 ? "" : "s"} left unchanged for manual resolution</li>}
-                      {finalReady && <li>Project is ready</li>}
+                      {completedProjectItems.length > 0 && <li><Icon name="check-circle" size={10} />{completedProjectItems.length} project data change{completedProjectItems.length === 1 ? "" : "s"} restored</li>}
+                      {keptLocalConversationItems.length > 0 && <li><Icon name="check-circle" size={10} />{keptLocalConversationItems.length} conversation{keptLocalConversationItems.length === 1 ? "" : "s"} kept local</li>}
+                      {manualItems.length > 0 && <li><Icon name="check-circle" size={10} />{manualItems.length} conflict{manualItems.length === 1 ? "" : "s"} left unchanged for manual resolution</li>}
+                      {finalReady && <li><Icon name="check-circle" size={10} />Project is ready</li>}
                     </ul>
                   </div>
                 </section>

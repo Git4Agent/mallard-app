@@ -1,6 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { TbRefresh } from "react-icons/tb";
 import type {
   CodexForkCheckpoint,
   CodexThreadDetailsPage,
@@ -16,6 +15,7 @@ import type {
 import Icon from "../Icons";
 import { projectSyncApi } from "./api";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
+import ThreadStatusIcon, { type ThreadStatusIconName } from "./ThreadStatusIcon";
 
 interface PageProps {
   project: LocalProjectSummary;
@@ -241,8 +241,9 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
           openMenu(event.key === "ArrowDown" ? "first" : "last");
         }}
       >
+        {/* The trigger is just the branch name: it always shows the selected
+            branch, so "Current" belongs in the open menu, not here. */}
         <span className="sync-history-branch-name" title={selected.name}>{selected.name}</span>
-        {selected.is_current && <span className="sync-history-branch-state current">Current</span>}
         {!selected.available && <span className="sync-history-branch-state history-only">History only</span>}
         <Icon name="chevron-down" size={12} className="sync-history-branch-chevron" />
       </button>
@@ -290,13 +291,12 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
               }}
             >
               <span className="sync-history-branch-check" aria-hidden="true">
-                {branch.name === selectedBranch ? "✓" : ""}
+                {branch.name === selectedBranch && <Icon name="check-circle" size={12} />}
               </span>
+              {/* The badges already say what the second line used to; the full
+                  explanation stays on the row's title. */}
               <span className="sync-history-branch-option-copy">
                 <strong>{branch.name}</strong>
-                <span>
-                  {branch.is_current ? "Checked out locally" : branch.available ? "Local branch" : "Recorded session history only"}
-                </span>
               </span>
               {branch.is_current && <span className="sync-history-branch-state current">Current</span>}
               {!branch.available && <span className="sync-history-branch-state history-only">History only</span>}
@@ -315,9 +315,51 @@ function formatDate(value?: number | null): string {
   }).format(new Date(value * 1_000));
 }
 
+function formatCalendarDate(value: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short", day: "numeric", year: "numeric",
+  }).format(new Date(value * 1_000));
+}
+
+function formatClockTime(value: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric", minute: "2-digit",
+  }).format(new Date(value * 1_000));
+}
+
+function formatFullDateTime(value: number): string {
+  return `${formatCalendarDate(value)} at ${formatClockTime(value)}`;
+}
+
+/**
+ * How long the session ran, at one significant unit. The absolute start stamp
+ * plus this covers the same ground the old start→end pair did, in far less
+ * room. Returns null when the session has no measurable duration.
+ */
+function formatDuration(startedAt: number, endedAt: number): string | null {
+  const seconds = Math.max(0, Math.round(endedAt - startedAt));
+  if (seconds === 0) return null;
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  if (hours < 24) return restMinutes ? `${hours}h ${restMinutes}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours ? `${days}d ${restHours}h` : `${days}d`;
+}
+
 function formatCount(value?: number | null): string {
   if (value == null) return "Not reported";
   return new Intl.NumberFormat(undefined, { notation: value >= 1_000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value);
+}
+
+function compactThreadTitle(value: string): string {
+  return value.replace(
+    /\s*·\s*\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?Z?)?\s*$/,
+    "",
+  );
 }
 
 async function openExternalUrl(url: string) {
@@ -334,54 +376,84 @@ function githubCommitUrl(repositoryUrl: string | null | undefined, sha: string):
 }
 
 type ThreadSyncPresentation = {
-  icon: "badge-check" | "cloud-off" | "download" | "git-compare-arrows" | "git-fork" | "octagon-x" | "upload";
+  status: ThreadStatusIconName;
   className: string;
   label: string;
 };
 
 export function threadSyncPresentation(entry: ThreadSyncEntry, storageName: string): ThreadSyncPresentation {
+  type ReasonCode = ThreadSyncEntry["push_decision"]["reason_code"];
+  const decisionWithReason = (reasons: readonly ReasonCode[]) => {
+    if (entry.push_decision && reasons.includes(entry.push_decision.reason_code)) {
+      return { mode: "push" as const };
+    }
+    if (entry.pull_decision && reasons.includes(entry.pull_decision.reason_code)) {
+      return { mode: "pull" as const };
+    }
+    return null;
+  };
+  const pending = decisionWithReason(["resolution_pending", "provider_not_quiescent", "stale_plan"]);
+  if (pending) {
+    return {
+      status: "pending",
+      className: "pending",
+      label: syncHoldDetail(pending.mode, entry)
+        ?? entry.status_detail
+        ?? "Sync is waiting for this conversation to become ready.",
+    };
+  }
+  const conflict = decisionWithReason(["unknown_lineage", "ambiguous_binding", "missing_binding"]);
+  if (conflict) {
+    return {
+      status: "conflict",
+      className: "conflict",
+      label: syncHoldDetail(conflict.mode, entry)
+        ?? entry.status_detail
+        ?? "Mallard could not safely match the local and stored conversation.",
+    };
+  }
   const blocked = (mode: "push" | "pull"): ThreadSyncPresentation => ({
-    icon: "octagon-x",
+    status: "unavailable",
     className: "unavailable",
     label: syncHoldDetail(mode, entry) ?? "This thread can't be synced safely right now.",
   });
   switch (entry.state) {
     case "synced":
-      return { icon: "badge-check", className: "synced", label: `Up to date here and in ${storageName}.` };
+      return { status: "synced", className: "synced", label: `Up to date here and in ${storageName}.` };
     case "local_only":
       if (entry.push_decision?.action === "blocked") return blocked("push");
-      return { icon: "upload", className: "local", label: `Only on this computer. Push to save it in ${storageName}.` };
+      return { status: "local-outstanding", className: "local", label: `Only on this computer. Push to save it in ${storageName}.` };
     case "local_ahead":
       if (entry.push_decision?.action === "blocked") return blocked("push");
-      return { icon: "upload", className: "local", label: `Newer on this computer. Push to update ${storageName}.` };
+      return { status: "local-outstanding", className: "local", label: `Newer on this computer. Push to update ${storageName}.` };
     case "storage_only":
       if (entry.pull_decision?.action === "blocked") return blocked("pull");
-      return { icon: "download", className: "storage", label: `Only in ${storageName}. Pull to download it here.` };
+      return { status: "cloud-outstanding", className: "storage", label: `Only in ${storageName}. Pull to download it here.` };
     case "storage_ahead":
       if (entry.pull_decision?.action === "blocked") return blocked("pull");
-      return { icon: "download", className: "storage", label: `Newer in ${storageName}. Pull to update this computer.` };
+      return { status: "cloud-outstanding", className: "storage", label: `Newer in ${storageName}. Pull to update this computer.` };
     case "diverged":
-      return { icon: "git-compare-arrows", className: "diverged", label: `Changed here and in ${storageName}. Review before syncing.` };
+      return { status: "divergent", className: "diverged", label: `Changed here and in ${storageName}. Review before syncing.` };
     case "diverged_forked": {
       const forkName = entry.fork_preservation?.fork_display_name;
       return {
-        icon: "git-fork",
+        status: "divergent-forked",
         className: "diverged-forked",
         label: `Changed here and in ${storageName}; your local branch is already preserved in ${forkName ? `the fork “${forkName}”` : "a fork"}. Pull to adopt the ${storageName} version.`,
       };
     }
     case "unavailable":
       return {
-        icon: "octagon-x",
+        status: "unavailable",
         className: "unavailable",
         label: `Unavailable for sync. ${entry.status_detail ?? "Mallard could not safely read this session."}`,
       };
     case "unknown":
     default:
       return {
-        icon: "octagon-x",
-        className: "unavailable",
-        label: `Comparison unavailable. ${entry.status_detail ?? "Mallard could not prove this thread's ancestry safely."}`,
+        status: "conflict",
+        className: "conflict",
+        label: `Comparison needs attention. ${entry.status_detail ?? "Mallard could not prove this thread's ancestry safely."}`,
       };
   }
 }
@@ -395,7 +467,7 @@ function ThreadSyncIndicator({ entry, storageName }: { entry: ThreadSyncEntry; s
       aria-label={presentation.label}
       tabIndex={0}
     >
-      <Icon name={presentation.icon} size={13} />
+      <ThreadStatusIcon status={presentation.status} size={24} />
     </span>
   );
 }
@@ -409,21 +481,35 @@ export function ThreadMetrics({
   id?: string;
   debugInfo?: ThreadDebugMenuProps;
 }) {
-  const startedLabel = `Started ${formatDate(thread.started_at)}`;
-  const endedLabel = `${thread.is_active ? "Last activity" : "Ended"} ${formatDate(thread.ended_at)}${thread.is_active ? ", active" : ""}`;
+  const startedLabel = `Started ${formatFullDateTime(thread.started_at)}`;
+  const endedLabel = `${thread.is_active ? "Last activity" : "Ended"} ${formatFullDateTime(thread.ended_at)}${thread.is_active ? ", active" : ""}`;
+  const durationText = formatDuration(thread.started_at, thread.ended_at);
+  const durationLabel = durationText
+    ? `${thread.is_active ? "Active for" : "Ran for"} ${durationText}`
+    : "";
 
   return <div id={id} className="sync-history-thread-meta" aria-label="Session details">
-    <span className="sync-history-thread-metric" data-tooltip={startedLabel} aria-label={startedLabel} tabIndex={0}><Icon name="play" size={12} /><time>{formatDate(thread.started_at)}</time></span>
-    <span className="sync-history-thread-metric" data-tooltip={endedLabel} aria-label={endedLabel} tabIndex={0}><Icon name={thread.is_active ? "activity" : "check-circle"} size={12} /><time>{formatDate(thread.ended_at)}</time></span>
     <span className="sync-history-thread-metric" data-tooltip={`User turns · ${thread.user_round_count}`} aria-label={`User turns: ${thread.user_round_count}`} tabIndex={0}><Icon name="user" size={12} /><b>{thread.user_round_count}</b></span>
     <span className="sync-history-thread-metric" data-tooltip={`Total tokens · ${formatCount(thread.total_tokens)}`} aria-label={`Total tokens: ${formatCount(thread.total_tokens)}`} tabIndex={0}><Icon name="token" size={12} /><b>{formatCount(thread.total_tokens)}</b></span>
     <span className="sync-history-thread-metric" data-tooltip={`Agent messages · ${thread.agent_message_count}`} aria-label={`Agent messages: ${thread.agent_message_count}`} tabIndex={0}><Icon name="message" size={12} /><b>{thread.agent_message_count}</b></span>
-    <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${thread.tool_call_count}`} aria-label={`Tool calls: ${thread.tool_call_count}`} tabIndex={0}><Icon name="tool" size={12} /><b>{thread.tool_call_count}</b></span>
+    {thread.tool_call_count > 0 && <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${thread.tool_call_count}`} aria-label={`Tool calls: ${thread.tool_call_count}`} tabIndex={0}><Icon name="tool" size={12} /><b>{thread.tool_call_count}</b></span>}
     {debugInfo && <ThreadDebugMenu {...debugInfo} />}
     {thread.commit_occurrence_count > 1 && (
       <span className="sync-history-thread-metric" data-tooltip={`Commit appearances · ${thread.commit_occurrence_count}`} aria-label={`Appears under ${thread.commit_occurrence_count} commits`} tabIndex={0}><Icon name="git-branch" size={12} /><b>{thread.commit_occurrence_count}</b></span>
     )}
     {!thread.metrics_complete && <span className="sync-history-thread-metric sync-history-partial" data-tooltip="Some session metrics are unavailable" aria-label="Some session metrics are unavailable" tabIndex={0}><Icon name="alert-triangle" size={12} /></span>}
+    {durationText && (
+      <span className="sync-history-thread-metric sync-history-thread-duration" data-tooltip={durationLabel} aria-label={durationLabel} tabIndex={0}>
+        <Icon name={thread.is_active ? "activity" : "clock"} size={12} /><b>{durationText}</b>
+      </span>
+    )}
+    {/* One absolute stamp, pushed to the far edge so it forms a column down the
+        list. It anchors on the last activity because that is the more useful
+        end of the interval; the start is that minus the duration sitting right
+        beside it. Both ends are spelled out in full in the label. */}
+    <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end" data-tooltip={`${startedLabel}\n${endedLabel}`} aria-label={`${startedLabel}. ${endedLabel}`} tabIndex={0}>
+      <time dateTime={new Date(thread.ended_at * 1_000).toISOString()}>{formatFullDateTime(thread.ended_at)}</time>
+    </span>
   </div>;
 }
 
@@ -504,8 +590,12 @@ async function writeClipboardText(value: string, fallbackRoot: HTMLElement | nul
   if (!copied) throw new Error("Clipboard access is unavailable");
 }
 
+/** Roughly the panel's rendered height; only used to pick which way it opens. */
+const THREAD_DEBUG_POPOVER_HEIGHT = 220;
+
 function ThreadDebugMenu({ threadId, workingDirectory, codexHome }: ThreadDebugMenuProps) {
   const [open, setOpen] = useState(false);
+  const [dropUp, setDropUp] = useState(false);
   const [copied, setCopied] = useState<ThreadDebugCopyTarget | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -532,6 +622,26 @@ function ThreadDebugMenu({ threadId, workingDirectory, codexHome }: ThreadDebugM
     setCopyError(null);
     if (restoreFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
   };
+
+  // Hanging the panel below a row near the end of the list grows the
+  // workspace's scrollable height, which makes the scrollbar jump the moment
+  // it opens. Overflow past the top of a scroller is not scrollable, so those
+  // rows open upward instead; rows with room below keep opening down.
+  useEffect(() => {
+    if (!open) {
+      setDropUp(false);
+      return;
+    }
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const scroller = trigger.closest<HTMLElement>(".sync-main")?.getBoundingClientRect();
+    const roomBelow = (scroller?.bottom ?? window.innerHeight) - rect.bottom;
+    const roomAbove = rect.top - (scroller?.top ?? 0);
+    // Only flip when down does not fit *and* up is the roomier side, so a row
+    // that fits neither way still opens toward whichever clips it less.
+    setDropUp(roomBelow < THREAD_DEBUG_POPOVER_HEIGHT && roomAbove > roomBelow);
+  }, [open]);
 
   const copyValue = async (target: ThreadDebugCopyTarget, value: string) => {
     try {
@@ -590,7 +700,7 @@ function ThreadDebugMenu({ threadId, workingDirectory, codexHome }: ThreadDebugM
       </button>
       <div
         id={menuId}
-        className="sync-history-debug-popover"
+        className={`sync-history-debug-popover${dropUp ? " drop-up" : ""}`}
         role="dialog"
         aria-label="Thread debug info"
         hidden={!open}
@@ -769,6 +879,8 @@ function ThreadCard({
   selectionDisabled = false, onToggleResource, onReviewPull,
 }: ThreadCardProps) {
   const launchable = THREAD_UUID.test(thread.thread_id);
+  const fullTitle = thread.title || "Untitled Codex session";
+  const visibleTitle = compactThreadTitle(fullTitle);
   const chatDetailsId = `thread-chat-${occurrenceKey.replace(/[^a-z0-9_-]/gi, "-")}`;
   const chatDetailsLabel = detailsOpen
     ? "Hide chat history"
@@ -780,35 +892,41 @@ function ThreadCard({
     ? (selectionMode === "push" ? syncEntry.push_decision : syncEntry.pull_decision)
     : null;
   const holdDetail = selectionMode && syncEntry ? syncHoldDetail(selectionMode, syncEntry) : null;
+  const uncommitted = occurrenceKey.startsWith("uncommitted:");
   return (
     <article className={`sync-history-thread-card${selectionMode && selectable ? " sync-sync-selectable-row" : ""}${selected ? " selected" : ""}`}>
       <div className="sync-history-thread-topline">
-        {selectionMode && selectable && (
-          <label
-            className="sync-sync-row-choice"
-            title={`${selected ? "Exclude" : "Include"} ${thread.title || "this session"}`}
-          >
-            <input
-              type="checkbox"
-              checked={selected}
-              disabled={selectionDisabled}
-              aria-label={`${selected ? "Exclude" : "Include"} ${thread.title || "Untitled Codex session"}`}
-              onChange={() => onToggleResource?.(resourceId)}
-            />
-          </label>
-        )}
-        {selectionMode && !selectable && activeDecision?.action === "blocked" && (
-          <span
-            className="sync-sync-row-choice sync-sync-row-blocked"
-            title={holdDetail ?? "Can't sync"}
-            aria-label={holdDetail ?? "Can't sync"}
-          >
-            <Icon name="octagon-x" size={14} />
-          </span>
-        )}
         <div className="sync-history-thread-title">
+          {selectionMode && selectable && (
+            <label
+              className="sync-sync-row-choice"
+              title={`${selected ? "Exclude" : "Include"} ${thread.title || "this session"}`}
+            >
+              <input
+                type="checkbox"
+                checked={selected}
+                disabled={selectionDisabled}
+                aria-label={`${selected ? "Exclude" : "Include"} ${thread.title || "Untitled Codex session"}`}
+                onChange={() => onToggleResource?.(resourceId)}
+              />
+            </label>
+          )}
+          {selectionMode && !selectable && activeDecision?.action === "blocked" && (
+            <span
+              className="sync-sync-row-choice sync-sync-row-blocked"
+              title={holdDetail ?? "Can't sync"}
+              aria-label={holdDetail ?? "Can't sync"}
+            >
+              <Icon name="octagon-x" size={14} />
+            </span>
+          )}
           {syncEntry && storageName && <ThreadSyncIndicator entry={syncEntry} storageName={storageName} />}
-          <strong>{thread.title || "Untitled Codex session"}</strong>
+          {uncommitted && !(syncEntry && storageName) && (
+            <span className="sync-history-thread-kind uncommitted" aria-hidden="true">
+              <Icon name="edit" size={13} />
+            </span>
+          )}
+          <strong title={visibleTitle === fullTitle ? undefined : fullTitle}>{visibleTitle}</strong>
           {reviewStateLabel && (
             <span className={`sync-sync-review-state state-${syncEntry?.state ?? "local_only"}${activeDecision?.action === "blocked" ? " action-blocked" : ""}`}>{reviewStateLabel}</span>
           )}
@@ -823,10 +941,17 @@ function ThreadCard({
           />
         </div>
         <div className="sync-history-thread-actions">
+          {!selectionMode && onFork && (
+            <button type="button" className="btn btn-ghost sync-history-launch-action" disabled={!launchable || busy || forkBusy}
+              onClick={() => onFork(thread.thread_id)} title={forkBusy ? "Forking in Codex…" : "Fork in Codex"}
+              aria-label={forkBusy ? "Forking in Codex" : "Fork in Codex"}>
+              <Icon name={forkBusy ? "refresh" : "git-fork"} size={14} className={forkBusy ? "icon-spin" : undefined} />
+            </button>
+          )}
           <button type="button" className="btn btn-ghost sync-history-launch-action" disabled={!launchable || busy}
             onClick={() => onOpenCodex(thread.thread_id)} title={busy ? "Opening in Codex…" : "Open in Codex"}
             aria-label={busy ? "Opening in Codex" : "Open in Codex"}>
-            <Icon name={busy ? "refresh" : "openai"} size={15} className={busy ? "icon-spin" : "sync-openai-icon"} />
+            <Icon name={busy ? "refresh" : "openai"} size={14} className={busy ? "icon-spin" : "sync-openai-icon"} />
           </button>
           <button type="button" className="btn btn-ghost sync-history-launch-action" disabled={!launchable || busy}
             onClick={() => onOpenTerminal(thread.thread_id)} title="Open in Terminal" aria-label="Open in Terminal">
@@ -887,6 +1012,7 @@ function ThreadCard({
 function SyncEntryCard({
   entry,
   storageName,
+  scopeStated = false,
   selectionMode,
   selected = false,
   selectable = false,
@@ -896,6 +1022,9 @@ function SyncEntryCard({
 }: {
   entry: ThreadSyncEntry;
   storageName: string;
+  /** Set when the surrounding section heading already names the storage, so the
+   *  row does not repeat it on every card. */
+  scopeStated?: boolean;
   selectionMode?: "push" | "pull";
   selected?: boolean;
   selectable?: boolean;
@@ -904,9 +1033,12 @@ function SyncEntryCard({
   onReviewPull?: () => void;
 }) {
   const shortId = entry.thread_id.length > 12 ? entry.thread_id.slice(0, 8) : entry.thread_id;
-  const title = entry.display_name.trim() && entry.display_name !== entry.thread_id
+  const fullTitle = entry.display_name.trim() && entry.display_name !== entry.thread_id
     ? entry.display_name
     : "Untitled thread";
+  // Local threads already drop the provenance timestamp their title carries;
+  // stored threads get the same treatment so both lists read alike.
+  const title = compactThreadTitle(fullTitle);
   const identityLabel = `${title}, Codex thread ${entry.thread_id}`;
   const location = entry.local_present && entry.storage_present
     ? `On this Mac · In ${storageName}`
@@ -914,11 +1046,10 @@ function SyncEntryCard({
       ? "On this Mac"
       : `In ${storageName} · Pull to open`;
   const updatedAt = entry.storage_updated_at ?? entry.local_updated_at;
-  const metadata = [
-    location,
-    updatedAt ? `Updated ${formatDate(updatedAt)}` : null,
-    `Codex thread ${shortId}`,
-  ].filter((item): item is string => item !== null).join(" · ");
+  // Where the section heading already names the storage, repeating it on every
+  // card says nothing; elsewhere the row is the only thing that can say where
+  // the thread lives and how to get it, so it keeps the full phrase.
+  const visibleLocation = scopeStated ? null : location;
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, entry, selected) : null;
   const activeDecision = selectionMode
     ? (selectionMode === "push" ? entry.push_decision : entry.pull_decision)
@@ -927,32 +1058,41 @@ function SyncEntryCard({
   return (
     <article className={`sync-history-thread-card sync-history-stored-thread${selectionMode && selectable ? " sync-sync-selectable-row" : ""}${selected ? " selected" : ""}`}>
       <div className="sync-history-thread-topline">
-        {selectionMode && selectable && (
-          <label className="sync-sync-row-choice" title={`${selected ? "Exclude" : "Include"} ${identityLabel}`}>
-            <input
-              type="checkbox"
-              checked={selected}
-              disabled={selectionDisabled}
-              aria-label={`${selected ? "Exclude" : "Include"} ${identityLabel}`}
-              onChange={() => onToggleResource?.(entry.resource_id)}
-            />
-          </label>
-        )}
-        {selectionMode && !selectable && activeDecision?.action === "blocked" && (
-          <span
-            className="sync-sync-row-choice sync-sync-row-blocked"
-            title={holdDetail ?? "Can't sync"}
-            aria-label={holdDetail ?? "Can't sync"}
-          >
-            <Icon name="octagon-x" size={14} />
-          </span>
-        )}
-        <div className="sync-history-thread-title" title={entry.thread_id}>
+        {/* No native title here: the status badge inside carries its own CSS
+            tooltip, and a title on the wrapper fires a second, overlapping
+            OS tooltip on the same hover. The id lives on the sha chip. */}
+        <div className="sync-history-thread-title">
+          {selectionMode && selectable && (
+            <label className="sync-sync-row-choice" title={`${selected ? "Exclude" : "Include"} ${identityLabel}`}>
+              <input
+                type="checkbox"
+                checked={selected}
+                disabled={selectionDisabled}
+                aria-label={`${selected ? "Exclude" : "Include"} ${identityLabel}`}
+                onChange={() => onToggleResource?.(entry.resource_id)}
+              />
+            </label>
+          )}
+          {selectionMode && !selectable && activeDecision?.action === "blocked" && (
+            <span
+              className="sync-sync-row-choice sync-sync-row-blocked"
+              title={holdDetail ?? "Can't sync"}
+              aria-label={holdDetail ?? "Can't sync"}
+            >
+              <Icon name="octagon-x" size={14} />
+            </span>
+          )}
           <ThreadSyncIndicator entry={entry} storageName={storageName} />
           <div className="sync-history-stored-thread-copy">
-            <strong>{title}</strong>
-            <span className="sync-history-stored-thread-meta">{metadata}</span>
+            <strong title={title === fullTitle ? undefined : fullTitle}>{title}</strong>
+            {visibleLocation && <span className="sync-history-stored-thread-location">{visibleLocation}</span>}
           </div>
+          <span className="sync-history-stored-thread-meta">
+            <code title={entry.thread_id}>{shortId}</code>
+            {updatedAt != null && (
+              <time dateTime={new Date(updatedAt * 1_000).toISOString()}>{formatDate(updatedAt)}</time>
+            )}
+          </span>
           {reviewStateLabel && (
             <span className={`sync-sync-review-state state-${entry.state}${activeDecision?.action === "blocked" ? " action-blocked" : ""}`}>{reviewStateLabel}</span>
           )}
@@ -980,6 +1120,7 @@ export function ProjectChatHistoryContent({
   selectionDisabled = false, onToggleResource, onReviewPull, onUnlinkStorage,
   continuityActionBusy = false,
 }: ContentProps) {
+  const [collapsedCommitShas, setCollapsedCommitShas] = useState<Set<string>>(new Set());
   const label = projectLabel(project);
   const aliased = label !== project.display_name;
   const threads = useMemo(() => new Map((history?.threads ?? []).map((thread) => [thread.thread_id, thread])), [history?.threads]);
@@ -1012,25 +1153,30 @@ export function ProjectChatHistoryContent({
   const visibleComparisonCounts = useMemo(() => {
     const visibleThreadIds = new Set(threads.keys());
     storedOnlyEntries.forEach((entry) => visibleThreadIds.add(entry.thread_id));
-    const counts = { local: 0, storage: 0, diverged: 0, unavailable: 0 };
+    const counts: Record<ThreadStatusIconName, number> = {
+      synced: 0,
+      "cloud-outstanding": 0,
+      "local-outstanding": 0,
+      divergent: 0,
+      "divergent-forked": 0,
+      pending: 0,
+      conflict: 0,
+      unavailable: 0,
+    };
 
     for (const entry of comparison?.entries ?? []) {
       if (!visibleThreadIds.has(entry.thread_id)) continue;
-      if (entry.state === "local_only" || entry.state === "local_ahead") {
-        if (entry.push_decision?.action === "blocked") counts.unavailable += 1;
-        else counts.local += 1;
-      } else if (entry.state === "storage_only" || entry.state === "storage_ahead") {
-        if (entry.pull_decision?.action === "blocked") counts.unavailable += 1;
-        else counts.storage += 1;
-      } else if (entry.state === "diverged" || entry.state === "diverged_forked") counts.diverged += 1;
-      else if (entry.state === "unavailable" || entry.state === "unknown") counts.unavailable += 1;
+      counts[threadSyncPresentation(entry, comparisonStorageName).status] += 1;
     }
 
     return counts;
-  }, [comparison?.entries, storedOnlyEntries, threads]);
-  const visibleComparisonChangeCount = visibleComparisonCounts.local
-    + visibleComparisonCounts.storage
-    + visibleComparisonCounts.diverged
+  }, [comparison?.entries, comparisonStorageName, storedOnlyEntries, threads]);
+  const visibleComparisonChangeCount = visibleComparisonCounts["local-outstanding"]
+    + visibleComparisonCounts["cloud-outstanding"]
+    + visibleComparisonCounts.divergent
+    + visibleComparisonCounts["divergent-forked"]
+    + visibleComparisonCounts.pending
+    + visibleComparisonCounts.conflict
     + visibleComparisonCounts.unavailable;
   const refreshing = loading || comparisonLoading;
   const refreshStatus = comparisonLoading
@@ -1069,6 +1215,14 @@ export function ProjectChatHistoryContent({
       || leftThread.started_at - rightThread.started_at
       || left.thread_id.localeCompare(right.thread_id);
   });
+  const toggleCommit = (sha: string) => {
+    setCollapsedCommitShas((current) => {
+      const next = new Set(current);
+      if (next.has(sha)) next.delete(sha);
+      else next.add(sha);
+      return next;
+    });
+  };
   const flatThreadRows: Array<
     | { kind: "local"; id: string; updatedAt: number; thread: CodexThreadSummary }
     | { kind: "stored"; id: string; updatedAt: number; entry: ThreadSyncEntry }
@@ -1115,7 +1269,7 @@ export function ProjectChatHistoryContent({
                 title={`Comparing threads with ${activeStorageName}`}
                 aria-label={`Comparing threads with ${activeStorageName}`}
               >
-                <Icon name="link" size={12} />
+                <Icon name="drive" size={13} />
                 <span>{activeStorageName}</span>
               </span>
             )}
@@ -1140,15 +1294,18 @@ export function ProjectChatHistoryContent({
                 )}
                 {showComparisonSummary && (
                   <span className="sync-thread-sync-summary" aria-label={`Visible thread comparison with ${comparisonStorageName}`}>
-                    {visibleComparisonCounts.local > 0 && <span className="local" title={`${visibleComparisonCounts.local} local thread change${visibleComparisonCounts.local === 1 ? "" : "s"}`}><Icon name="upload" size={12} />{visibleComparisonCounts.local}</span>}
-                    {visibleComparisonCounts.storage > 0 && <span className="storage" title={`${visibleComparisonCounts.storage} thread change${visibleComparisonCounts.storage === 1 ? "" : "s"} in ${comparisonStorageName}`}><Icon name="download" size={12} />{visibleComparisonCounts.storage}</span>}
-                    {visibleComparisonCounts.diverged > 0 && <span className="diverged" title={`${visibleComparisonCounts.diverged} diverged thread${visibleComparisonCounts.diverged === 1 ? "" : "s"}`}><Icon name="git-compare-arrows" size={12} />{visibleComparisonCounts.diverged}</span>}
-                    {visibleComparisonCounts.unavailable > 0 && <span className="unavailable" title={`${visibleComparisonCounts.unavailable} thread${visibleComparisonCounts.unavailable === 1 ? " is" : "s are"} unavailable for sync`}><Icon name="octagon-x" size={12} />{visibleComparisonCounts.unavailable}</span>}
+                    {visibleComparisonCounts["local-outstanding"] > 0 && <span className="local" title={`${visibleComparisonCounts["local-outstanding"]} local thread change${visibleComparisonCounts["local-outstanding"] === 1 ? "" : "s"}`}><ThreadStatusIcon status="local-outstanding" size={12} />{visibleComparisonCounts["local-outstanding"]}</span>}
+                    {visibleComparisonCounts["cloud-outstanding"] > 0 && <span className="storage" title={`${visibleComparisonCounts["cloud-outstanding"]} thread change${visibleComparisonCounts["cloud-outstanding"] === 1 ? "" : "s"} in ${comparisonStorageName}`}><ThreadStatusIcon status="cloud-outstanding" size={12} />{visibleComparisonCounts["cloud-outstanding"]}</span>}
+                    {visibleComparisonCounts.divergent > 0 && <span className="diverged" title={`${visibleComparisonCounts.divergent} divergent thread${visibleComparisonCounts.divergent === 1 ? "" : "s"}`}><ThreadStatusIcon status="divergent" size={12} />{visibleComparisonCounts.divergent}</span>}
+                    {visibleComparisonCounts["divergent-forked"] > 0 && <span className="diverged-forked" title={`${visibleComparisonCounts["divergent-forked"]} divergent thread${visibleComparisonCounts["divergent-forked"] === 1 ? "" : "s"} already preserved as a fork`}><ThreadStatusIcon status="divergent-forked" size={12} />{visibleComparisonCounts["divergent-forked"]}</span>}
+                    {visibleComparisonCounts.pending > 0 && <span className="pending" title={`${visibleComparisonCounts.pending} thread${visibleComparisonCounts.pending === 1 ? " is" : "s are"} waiting to sync`}><ThreadStatusIcon status="pending" size={12} />{visibleComparisonCounts.pending}</span>}
+                    {visibleComparisonCounts.conflict > 0 && <span className="conflict" title={`${visibleComparisonCounts.conflict} thread conflict${visibleComparisonCounts.conflict === 1 ? "" : "s"} need attention`}><ThreadStatusIcon status="conflict" size={12} />{visibleComparisonCounts.conflict}</span>}
+                    {visibleComparisonCounts.unavailable > 0 && <span className="unavailable" title={`${visibleComparisonCounts.unavailable} thread${visibleComparisonCounts.unavailable === 1 ? " is" : "s are"} unavailable for sync`}><ThreadStatusIcon status="unavailable" size={12} />{visibleComparisonCounts.unavailable}</span>}
                   </span>
                 )}
               </span>
             )}
-            {comparisonError && <span className="sync-thread-sync-error" tabIndex={0} data-tooltip={comparisonError} aria-label={`Storage comparison failed: ${comparisonError}`}><Icon name="octagon-x" size={13} /></span>}
+            {comparisonError && <span className="sync-thread-sync-error" tabIndex={0} data-tooltip={comparisonError} aria-label={`Storage comparison failed: ${comparisonError}`}><ThreadStatusIcon status="conflict" size={24} /></span>}
             <button
               type="button"
               className={`sync-history-icon-action sync-history-refresh${refreshing ? " loading" : ""}`}
@@ -1162,7 +1319,7 @@ export function ProjectChatHistoryContent({
                 aria-hidden="true"
                 className={`icon-spin-frame${refreshing ? " spinning" : ""}`}
               >
-                <TbRefresh data-icon="refresh" size={16} />
+                <Icon name="refresh" size={16} />
               </span>
             </button>
             {refreshStatus && <span className="sync-visually-hidden" role="status">{refreshStatus}</span>}
@@ -1217,11 +1374,11 @@ export function ProjectChatHistoryContent({
                 {storedOnlyEntries.length > 0 && (
                   <section className="sync-history-storage-only" aria-labelledby="storage-only-heading">
                     <div className="sync-history-section-heading">
-                      <h2 id="storage-only-heading">Only in {comparisonStorageName}</h2>
-                      <span className="sync-history-heading-count" title="Threads not available on this machine"><Icon name="download" size={12} />{storedOnlyEntries.length}</span>
+                      <h2 id="storage-only-heading"><Icon name="cloud" size={13} />Only in <span className="sync-history-storage-name">{comparisonStorageName}</span></h2>
+                      <span className="sync-history-heading-count" title="Threads not available on this machine"><Icon name="message" size={12} />{storedOnlyEntries.length}</span>
                     </div>
                     <div className="sync-history-thread-list flat">
-                      {storedOnlyEntries.map((entry) => <SyncEntryCard key={`stored:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName}
+                      {storedOnlyEntries.map((entry) => <SyncEntryCard key={`stored:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName} scopeStated
                         selectionMode={selectionMode} selected={selectedResourceIds.has(entry.resource_id)}
                         selectable={selectableResourceIds?.has(entry.resource_id) ?? !!selectionMode}
                         selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
@@ -1229,38 +1386,81 @@ export function ProjectChatHistoryContent({
                     </div>
                   </section>
                 )}
-                {history.unmapped.length > 0 && (
-                  <section className="sync-history-uncommitted" aria-labelledby="uncommitted-heading">
-                    <div className="sync-history-section-heading"><h2 id="uncommitted-heading">Uncommitted</h2></div>
-                    {[...new Set(history.unmapped.map((reference) => reference.reason))].map((reason) => (
-                      <p key={reason} className="sync-history-uncommitted-reason">{reason}</p>
-                    ))}
-                    <div className="sync-history-thread-list flat">{history.unmapped.map((reference) => { const thread = threads.get(reference.thread_id); return thread ? renderThread(thread, `uncommitted:${thread.thread_id}`) : null; })}</div>
-                  </section>
-                )}
-                <section className="sync-history-commit-section" aria-label={`First-parent commits on ${history.git.selected_branch}`}>
-                  {!embedded && <div className="sync-history-section-heading"><h2>Commit history</h2><span className="sync-history-heading-count" title={`${history.git.reference_count} commit occurrences`} aria-label={`${history.git.reference_count} commit occurrences`}><Icon name="git-branch" size={12} />{history.git.reference_count}</span></div>}
-                  {history.git.commits.length === 0 ? <div className="sync-history-state">No commits are available in this 30-day window.</div> : (
-                    <ol className="sync-history-commit-rail">{history.git.commits.map((commit) => {
-                      const commitUrl = githubCommitUrl(history.git?.github_repository_url, commit.sha);
-                      return (
-                        <li key={commit.sha} className="sync-history-commit"><span className="sync-history-commit-node" aria-hidden="true" />
-                          <div className="sync-history-commit-heading">
-                            {commitUrl ? (
-                              <a className="sync-history-commit-link" href={commitUrl} target="_blank" rel="noopener noreferrer"
-                                title={`Open ${commit.sha} on GitHub`} aria-label={`Open commit ${commit.short_sha} on GitHub`}
-                                onClick={(event) => { event.preventDefault(); void openExternalUrl(commitUrl); }}>
-                                <code>{commit.short_sha}</code>
-                              </a>
-                            ) : <code title={commit.sha}>{commit.short_sha}</code>}
-                            <time dateTime={new Date(commit.committed_at * 1_000).toISOString()}>{formatDate(commit.committed_at)}</time><strong>{commit.subject}</strong>
-                          </div>
-                          {commit.thread_refs.length > 0 && <div className="sync-history-thread-list">{orderedReferences(commit.thread_refs).map((reference) => { const thread = threads.get(reference.thread_id); return thread ? renderThread(thread, `${commit.sha}:${thread.thread_id}`) : null; })}</div>}
-                        </li>
-                      );
-                    })}</ol>
+                <div className={`sync-history-timeline${history.unmapped.length > 0 ? " has-uncommitted" : ""}`}>
+                  {history.unmapped.length > 0 && (
+                    <section className="sync-history-uncommitted" aria-labelledby="uncommitted-heading">
+                      <div className="sync-history-section-heading">
+                        <h2 id="uncommitted-heading"><Icon name="edit" size={13} />Uncommitted</h2>
+                        <span
+                          className="sync-history-heading-count"
+                          title={`${history.unmapped.length} session${history.unmapped.length === 1 ? "" : "s"} not linked to a commit`}
+                          aria-label={`${history.unmapped.length} session${history.unmapped.length === 1 ? "" : "s"} not linked to a commit`}
+                        >
+                          <Icon name="message" size={12} />{history.unmapped.length}
+                        </span>
+                      </div>
+                      {[...new Set(history.unmapped.map((reference) => reference.reason))].map((reason) => (
+                        <p key={reason} className="sync-history-uncommitted-reason">{reason}</p>
+                      ))}
+                      <div className="sync-history-thread-list flat">{history.unmapped.map((reference) => { const thread = threads.get(reference.thread_id); return thread ? renderThread(thread, `uncommitted:${thread.thread_id}`) : null; })}</div>
+                    </section>
                   )}
-                </section>
+                  <section className="sync-history-commit-section" aria-label={`First-parent commits on ${history.git.selected_branch}`}>
+                    {!embedded && <div className="sync-history-section-heading"><h2>Commit history</h2><span className="sync-history-heading-count" title={`${history.git.reference_count} commit occurrences`} aria-label={`${history.git.reference_count} commit occurrences`}><Icon name="git-branch" size={12} />{history.git.reference_count}</span></div>}
+                    {history.git.commits.length === 0 ? <div className="sync-history-state">No commits are available in this 30-day window.</div> : (
+                      <ol className="sync-history-commit-rail">{history.git.commits.map((commit) => {
+                        const commitUrl = githubCommitUrl(history.git?.github_repository_url, commit.sha);
+                        const references = orderedReferences(commit.thread_refs);
+                        const collapsed = collapsedCommitShas.has(commit.sha);
+                        const displaySha = commit.short_sha.slice(0, 7);
+                        const threadListId = `commit-threads-${commit.short_sha}`;
+                        return (
+                          <li key={commit.sha} className={`sync-history-commit${collapsed ? " collapsed" : ""}`}><span className="sync-history-commit-node" aria-hidden="true" />
+                            <div className="sync-history-commit-heading">
+                              <span className="sync-history-commit-title">
+                                <span className="sync-history-commit-icon" aria-hidden="true">
+                                  <Icon name="git-commit" size={14} />
+                                </span>
+                                <strong title={commit.subject}>{commit.subject}</strong>
+                              </span>
+                              <span className="sync-history-commit-meta">
+                                <time dateTime={new Date(commit.committed_at * 1_000).toISOString()}>{formatDate(commit.committed_at)}</time>
+                                {commitUrl ? (
+                                  <a className="sync-history-commit-link" href={commitUrl} target="_blank" rel="noopener noreferrer"
+                                    title={`Open ${commit.sha} on GitHub`} aria-label={`Open commit ${displaySha} on GitHub`}
+                                    onClick={(event) => { event.preventDefault(); void openExternalUrl(commitUrl); }}>
+                                    <code>{displaySha}</code>
+                                  </a>
+                                ) : <code title={commit.sha}>{displaySha}</code>}
+                              </span>
+                              <span className="sync-history-commit-actions">
+                                <button
+                                  type="button"
+                                  className="sync-history-commit-toggle"
+                                  aria-label={`${collapsed ? "Expand" : "Collapse"} commit ${displaySha}`}
+                                  aria-expanded={!collapsed}
+                                  aria-controls={threadListId}
+                                  disabled={references.length === 0}
+                                  onClick={() => toggleCommit(commit.sha)}
+                                >
+                                  <Icon name={collapsed ? "chevron-down" : "chevron-up"} size={12} />
+                                </button>
+                              </span>
+                            </div>
+                            {!collapsed && references.length > 0 && (
+                              <div id={threadListId} className="sync-history-thread-list">
+                                {references.map((reference) => {
+                                  const thread = threads.get(reference.thread_id);
+                                  return thread ? renderThread(thread, `${commit.sha}:${thread.thread_id}`) : null;
+                                })}
+                              </div>
+                            )}
+                          </li>
+                        );
+                      })}</ol>
+                    )}
+                  </section>
+                </div>
               </>
             ) : (
               <section
