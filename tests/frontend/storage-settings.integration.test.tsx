@@ -207,7 +207,13 @@ test("the storage sidebar opens the overview folded and the gear opens settings"
   assert.match(workspace, /\{showStorageDetails && \(/);
   assert.match(workspace, /setStorageDetailsExpanded\(false\);\s*await loadStorageBundles/);
   assert.match(workspace, /className="sync-project-heading-name"/);
-  assert.match(workspace, />\s*Rename\s*<\/button>/);
+  assert.match(workspace, /sync-project-heading-meta-item sync-project-heading-path/);
+  assert.match(workspace, /sync-project-heading-meta-item sync-project-heading-agent/);
+  assert.match(workspace, /<Icon name="folder" size=\{12\} \/>/);
+  assert.match(workspace, /<Icon name="terminal" size=\{12\} \/>/);
+  assert.match(workspace, /aria-label="Rename storage"/);
+  assert.match(workspace, /aria-label="Rename project"/);
+  assert.match(workspace, /<Icon name="edit" size=\{13\} \/>/);
   assert.match(workspace, /`rename-storage:\$\{storageDraft\.id\}`/);
   assert.match(workspace, /const renamedStorage = \{ \.\.\.editedStorageConfig, name \}/);
 });
