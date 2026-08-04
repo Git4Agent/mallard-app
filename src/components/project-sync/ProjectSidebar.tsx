@@ -135,7 +135,7 @@ export default function ProjectSidebar({
       <div className="sync-sidebar-head">
         <div className="sync-sidebar-drag" data-tauri-drag-region />
         <div className="sync-sidebar-brand" data-tauri-drag-region>
-          <img className="sync-brand-logo" src="/mallard-logo-pixel-ring.png" alt="" data-tauri-drag-region />
+          <img className="sync-brand-logo" src="/mallard-logo-duck.svg" alt="" data-tauri-drag-region />
           <strong>Mallard</strong>
         </div>
 
@@ -388,7 +388,7 @@ export default function ProjectSidebar({
       </div>
 
       <footer className="sync-sidebar-product-mark" aria-label={`Mallard version ${packageMetadata.version}`}>
-        <img src="/mallard-logo-pixel-duck.png" alt="" />
+        <img src="/mallard-logo-duck.svg" alt="" />
         <span>v{packageMetadata.version}</span>
       </footer>
     </aside>

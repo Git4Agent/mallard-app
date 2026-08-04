@@ -15,57 +15,49 @@ interface ThreadStatusIconProps extends Omit<SVGProps<SVGSVGElement>, "name"> {
   size?: number;
 }
 
-const badgePath = "M8 2H16V3H18V4H19V5H20V6H21V8H22V16H21V18H20V19H19V20H18V21H16V22H8V21H6V20H5V19H4V18H3V16H2V8H3V6H4V5H5V4H6V3H8Z";
-const glyphColor = "var(--thread-status-glyph, #fffaf1)";
+// Ring badge and glyphs share `currentColor`, so each status reads as a single
+// outlined mark in its own colour. Geometry is drawn on the 24 px pixel grid.
+// Outer radius 11 on the 24px grid: it steps down in 6px runs, which is what
+// reads as a circle. A wider radius flattens the cardinals and looks octagonal.
+const badgePath = "M9 1h6v1h3v1h1v1h1v1h1v1h1v3h1v6h-1v3h-1v1h-1v1h-1v1h-1v1h-3v1h-6v-1h-3v-1h-1v-1h-1v-1h-1v-1h-1v-3h-1v-6h1v-3h1v-1h1v-1h1v-1h1v-1h3ZM11 2v1h-3v1h-2v1h-1v1h-1v2h-1v3h-1v2h1v3h1v2h1v1h1v1h2v1h3v1h2v-1h3v-1h2v-1h1v-1h1v-2h1v-3h1v-2h-1v-3h-1v-2h-1v-1h-1v-1h-2v-1h-3v-1Z";
+// Synced and forked share the check; the status colour is what tells them apart.
+const checkPath = "M16 9h2v2h-1v1h-1v2h-1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h-1v-2h2v1h1v1h2v-1h1v-2h1v-1h1Z";
 
 function StatusGlyph({ status }: { status: ThreadStatusIconName }) {
   switch (status) {
     case "synced":
-      return (
-        <path
-          fill={glyphColor}
-          d="M18 7H19V9H18V10H17V11H16V12H15V14H14V15H13V16H12V17H11V18H10V17H9V16H8V15H7V14H6V12H8V13H9V14H10V15H11V16H12V15H13V14H14V13H15V11H16V10H17V8H18Z"
-        />
-      );
+      return <path fill="currentColor" d={checkPath} />;
+    // 1px outline to match the reference art. It needs room to read — below
+    // about 16px the rim starts dropping pixels and breaks up.
     case "cloud-outstanding":
       return (
-        <>
-          <path fill={glyphColor} d="M11 6H14V13H18L12 18L6 13H11Z" />
-          <path fill={glyphColor} d="M7 19H18V21H7Z" />
-        </>
+        <path
+          fill="currentColor"
+          d="M9 7h5v1h-5ZM9 8v2h-1v-2ZM14 8h1v2h-1ZM8 10v1h-2v-1ZM15 10h2v1h-2ZM6 11v3h-1v-3ZM17 11h1v5h-12v-2h1v1h10Z"
+        />
       );
     case "local-outstanding":
       return (
-        <>
-          <path fill={glyphColor} d="M11 18H14V11H18L12 6L6 11H11Z" />
-          <path fill={glyphColor} d="M7 19H18V21H7Z" />
-        </>
+        <path
+          fill="currentColor"
+          d="M11 8h3v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v7h-2v-6h-1v1h-2v-2h1v-1h1v-1h1Z"
+        />
       );
     case "divergent":
       return (
-        <>
-          <path fill={glyphColor} d="M6 12L10 8V11H15V13H10V16Z" />
-          <path fill={glyphColor} d="M19 12L15 8V11H10V13H15V16Z" />
-        </>
-      );
-    case "divergent-forked":
-      return (
-        <path fill={glyphColor} d="M6 6H9V9H10V10H11V12H14V10H15V9H16V6H19V9H18V10H17V12H15V14H14V20H11V14H10V12H8V10H7V9H6Z" />
-      );
-    case "pending":
-      return <path fill={glyphColor} d="M11 6H14V12H18V15H11Z" />;
-    case "conflict":
-      return <path fill={glyphColor} d="M10 5H14V14H10ZM10 17H14V21H10Z" />;
-    case "unavailable":
-      return (
         <path
-          fill="none"
-          stroke={glyphColor}
-          strokeLinecap="square"
-          strokeWidth="2"
-          d="M7 18L18 7"
+          fill="currentColor"
+          d="M6 6h4v5h1v1h1v2h1v-1h1v-2h1v-1h-1v-4h4v4h-1v2h-1v2h-1v1h-1v1h-1v2h-2v-3h-1v-2h-1v-1h-1v-2h-2ZM7 7v2h2v-2ZM15 7v2h2v-2Z"
         />
       );
+    case "divergent-forked":
+      return <path fill="currentColor" d={checkPath} />;
+    case "pending":
+      return <path fill="currentColor" d="M11 7h2v5h4v2h-6Z" />;
+    case "conflict":
+      return <path fill="currentColor" d="M11 6h3v9h-3ZM11 16h3v3h-3Z" />;
+    case "unavailable":
+      return <path fill="currentColor" d="M7 11h10v3h-10Z" />;
   }
 }
 

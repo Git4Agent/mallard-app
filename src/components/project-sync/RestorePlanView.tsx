@@ -732,7 +732,7 @@ export default function RestorePlanView({
       <header className={embedded ? "sync-inline-action-header sync-inline-pull-header sync-sync-review-header" : "sync-pull-review-header sync-sync-review-header"}>
         {!embedded && (
           <button type="button" className="btn btn-ghost sync-pull-back" onClick={onBack} disabled={busy}>
-            <Icon name="chevron-left" size={15} /> Back to {projectName}
+            <Icon name="chevron-left" size={15} /> Back to <span className="sync-btn-name">{projectName}</span>
           </button>
         )}
         <div className={embedded ? "sync-inline-action-heading" : "sync-pull-review-heading"}>

@@ -89,6 +89,12 @@ function storageSubtitle(storage: StorageConfig): string {
   return storage.s3_endpoint ? "S3 endpoint configured" : "S3 storage not configured";
 }
 
+// Only the local subtitle is a path; the rest are phrases. The component says
+// which one it handed over so the stylesheet reads a class instead of guessing.
+function storageSubtitleIsPath(storage: StorageConfig): boolean {
+  return storage.kind === "local";
+}
+
 export function StorageRepositoryRow({ bundle }: { bundle: RemoteBundleSummary }) {
   const name = bundle.display_name || "Unnamed repository";
   return (
@@ -565,7 +571,7 @@ export default function ProjectLinksWorkspace({
                     </span>
                     <span className="sync-project-heading-meta-item" title={storageLocation}>
                       <Icon name="folder" size={12} />
-                      <span>{storageLocation}</span>
+                      <span className={storageSubtitleIsPath(storageDraft) ? "is-path" : undefined}>{storageLocation}</span>
                     </span>
                   </div>
                   {renamingStorageId === storageDraft.id && error && (
@@ -1047,7 +1053,7 @@ export default function ProjectLinksWorkspace({
                         <span className="storage-link-copy">
                           <strong>{storage.name || "(unnamed)"}</strong>
                           <span className="storage-link-meta">
-                            <span title={storageSubtitle(storage)}>{storageSubtitle(storage)}</span>
+                            <span className={storageSubtitleIsPath(storage) ? "is-path" : undefined} title={storageSubtitle(storage)}>{storageSubtitle(storage)}</span>
                             <small>· {linkedStorageLabel}</small>
                           </span>
                         </span>
@@ -1276,7 +1282,7 @@ export default function ProjectLinksWorkspace({
                                   <Icon name="download" size={15} />
                                   {runningAction === `pull:${actionPrefix}`
                                     ? (fetchProgress && fetchProgress.phase === "plan"
-                                      ? `${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`
+                                      ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
                                       : "Reviewing…")
                                     : pullReviewOpen
                                       ? "View review"
@@ -1320,7 +1326,7 @@ export default function ProjectLinksWorkspace({
                                     size={15}
                                     className={pushProgress ? "icon-spin" : undefined}
                                   />
-                                  {pushUploadReadout ?? pushLabel}
+                                  {pushUploadReadout ? <span className="sync-btn-readout">{pushUploadReadout}</span> : pushLabel}
                                 </button>
                               </div>
                             </div>
@@ -1376,7 +1382,7 @@ export default function ProjectLinksWorkspace({
                                   </span>
                                   <span className="storage-link-menu-copy">
                                     <strong>{linkedStorage.name || "(unnamed)"}</strong>
-                                    <span title={storageSubtitle(linkedStorage)}>{storageSubtitle(linkedStorage)}</span>
+                                    <span className={storageSubtitleIsPath(linkedStorage) ? "is-path" : undefined} title={storageSubtitle(linkedStorage)}>{storageSubtitle(linkedStorage)}</span>
                                   </span>
                                   <Icon className="storage-link-menu-arrow" name="chevron-right" size={13} aria-hidden="true" />
                                 </button>

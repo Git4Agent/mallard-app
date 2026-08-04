@@ -84,12 +84,34 @@ export interface ForkCompletionFeedback {
   success: boolean;
 }
 
+// The backend hands the banner one string: a fixed phrase wrapped around a
+// thread title the user named. Split it at the quotes so the app's half can
+// speak in the pixel face while the title keeps the clean one. Only success
+// messages are templated this way — failures are prose, and prose that happens
+// to contain two apostrophes must not be torn apart — so they stay whole.
+function splitQuotedTitle(message: string, success: boolean) {
+  if (!success) return null;
+  const match = /^([^']*')([^']+)('.*)$/s.exec(message);
+  if (!match) return null;
+  const [, before, title, after] = match;
+  return { before, title, after };
+}
+
 export function ForkCompletionBanner({ feedback }: { feedback: ForkCompletionFeedback }) {
+  const parts = splitQuotedTitle(feedback.message, feedback.success);
   return (
     <div className={`sync-callout${feedback.success ? "" : " error"}`}
       role={feedback.success ? "status" : "alert"}>
       <Icon name={feedback.success ? "git-fork" : "alert-triangle"} size={15} />
-      <span>{feedback.message}</span>
+      <span>
+        {parts ? (
+          <>
+            <span className="sync-callout-label">{parts.before}</span>
+            <span className="sync-callout-title">{parts.title}</span>
+            <span className="sync-callout-label">{parts.after}</span>
+          </>
+        ) : feedback.message}
+      </span>
     </div>
   );
 }
@@ -467,7 +489,7 @@ function ThreadSyncIndicator({ entry, storageName }: { entry: ThreadSyncEntry; s
       aria-label={presentation.label}
       tabIndex={0}
     >
-      <ThreadStatusIcon status={presentation.status} size={24} />
+      <ThreadStatusIcon status={presentation.status} size={18} />
     </span>
   );
 }
@@ -494,9 +516,6 @@ export function ThreadMetrics({
     <span className="sync-history-thread-metric" data-tooltip={`Agent messages · ${thread.agent_message_count}`} aria-label={`Agent messages: ${thread.agent_message_count}`} tabIndex={0}><Icon name="message" size={12} /><b>{thread.agent_message_count}</b></span>
     {thread.tool_call_count > 0 && <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${thread.tool_call_count}`} aria-label={`Tool calls: ${thread.tool_call_count}`} tabIndex={0}><Icon name="tool" size={12} /><b>{thread.tool_call_count}</b></span>}
     {debugInfo && <ThreadDebugMenu {...debugInfo} />}
-    {thread.commit_occurrence_count > 1 && (
-      <span className="sync-history-thread-metric" data-tooltip={`Commit appearances · ${thread.commit_occurrence_count}`} aria-label={`Appears under ${thread.commit_occurrence_count} commits`} tabIndex={0}><Icon name="git-branch" size={12} /><b>{thread.commit_occurrence_count}</b></span>
-    )}
     {!thread.metrics_complete && <span className="sync-history-thread-metric sync-history-partial" data-tooltip="Some session metrics are unavailable" aria-label="Some session metrics are unavailable" tabIndex={0}><Icon name="alert-triangle" size={12} /></span>}
     {durationText && (
       <span className="sync-history-thread-metric sync-history-thread-duration" data-tooltip={durationLabel} aria-label={durationLabel} tabIndex={0}>
@@ -957,13 +976,6 @@ function ThreadCard({
             onClick={() => onOpenTerminal(thread.thread_id)} title="Open in Terminal" aria-label="Open in Terminal">
             <Icon name="terminal" size={14} />
           </button>
-          {!selectionMode && onFork && (
-            <button type="button" className="btn btn-ghost sync-history-launch-action" disabled={!launchable || busy || forkBusy}
-              onClick={() => onFork(thread.thread_id)} title={forkBusy ? "Forking in Codex…" : "Fork in Codex"}
-              aria-label={forkBusy ? "Forking in Codex" : "Fork in Codex"}>
-              <Icon name={forkBusy ? "refresh" : "git-fork"} size={14} className={forkBusy ? "icon-spin" : undefined} />
-            </button>
-          )}
         </div>
       </div>
 
@@ -1121,6 +1133,12 @@ export function ProjectChatHistoryContent({
   continuityActionBusy = false,
 }: ContentProps) {
   const [collapsedCommitShas, setCollapsedCommitShas] = useState<Set<string>>(new Set());
+  // Threads that exist only in storage cannot be pushed, so in a Push review the
+  // group is context rather than something to act on — it starts folded there and
+  // open everywhere else. Null means "follow that default"; toggling pins it.
+  const [storageOnlyOverride, setStorageOnlyOverride] = useState<boolean | null>(null);
+  const storageOnlyCollapsed = storageOnlyOverride ?? selectionMode === "push";
+  const [uncommittedCollapsed, setUncommittedCollapsed] = useState(false);
   const label = projectLabel(project);
   const aliased = label !== project.display_name;
   const threads = useMemo(() => new Map((history?.threads ?? []).map((thread) => [thread.thread_id, thread])), [history?.threads]);
@@ -1358,7 +1376,7 @@ export function ProjectChatHistoryContent({
                 <span className="sync-history-context-item" title={`Codex configuration: ${history.codex_home}`}>
                   <Icon name="terminal" size={14} /><span>{compactProjectPath(history.codex_home)}</span>
                 </span>
-                {aliased && <span className="sync-history-context-item" title={`Repository: ${project.display_name}`}><Icon name="git-branch" size={14} /><span>{project.display_name}</span></span>}
+                {aliased && <span className="sync-history-context-item" title={`Repository: ${project.display_name}`}><Icon name="git-branch" size={14} /><span className="sync-history-context-name">{project.display_name}</span></span>}
                 {history.storage_sync.length ? history.storage_sync.map((storage) => (
                   <span key={storage.storage_id} className="sync-history-context-item sync-history-storage-item" title={`Storage: ${storage.storage_name}`}>
                     <Icon name="cloud" size={14} /><strong>{storage.storage_name}</strong>
@@ -1372,41 +1390,54 @@ export function ProjectChatHistoryContent({
             {history.git ? (
               <>
                 {storedOnlyEntries.length > 0 && (
-                  <section className="sync-history-storage-only" aria-labelledby="storage-only-heading">
+                  <section className={`sync-history-storage-only${storageOnlyCollapsed ? " collapsed" : ""}`} aria-labelledby="storage-only-heading">
                     <div className="sync-history-section-heading">
                       <h2 id="storage-only-heading"><Icon name="cloud" size={13} />Only in <span className="sync-history-storage-name">{comparisonStorageName}</span></h2>
-                      <span className="sync-history-heading-count" title="Threads not available on this machine"><Icon name="message" size={12} />{storedOnlyEntries.length}</span>
+                      <button
+                        type="button"
+                        className="sync-history-commit-toggle sync-history-group-toggle"
+                        aria-label={`${storageOnlyCollapsed ? "Expand" : "Collapse"} ${storedOnlyEntries.length} thread${storedOnlyEntries.length === 1 ? "" : "s"} only in ${comparisonStorageName}`}
+                        aria-expanded={!storageOnlyCollapsed}
+                        aria-controls="storage-only-list"
+                        onClick={() => setStorageOnlyOverride(!storageOnlyCollapsed)}
+                      >
+                        <Icon name={storageOnlyCollapsed ? "chevron-down" : "chevron-up"} size={12} />
+                      </button>
                     </div>
-                    <div className="sync-history-thread-list flat">
-                      {storedOnlyEntries.map((entry) => <SyncEntryCard key={`stored:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName} scopeStated
-                        selectionMode={selectionMode} selected={selectedResourceIds.has(entry.resource_id)}
-                        selectable={selectableResourceIds?.has(entry.resource_id) ?? !!selectionMode}
-                        selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
-                        onReviewPull={onReviewPull} />)}
-                    </div>
+                    {!storageOnlyCollapsed && (
+                      <div id="storage-only-list" className="sync-history-thread-list flat">
+                        {storedOnlyEntries.map((entry) => <SyncEntryCard key={`stored:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName} scopeStated
+                          selectionMode={selectionMode} selected={selectedResourceIds.has(entry.resource_id)}
+                          selectable={selectableResourceIds?.has(entry.resource_id) ?? !!selectionMode}
+                          selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
+                          onReviewPull={onReviewPull} />)}
+                      </div>
+                    )}
                   </section>
                 )}
                 <div className={`sync-history-timeline${history.unmapped.length > 0 ? " has-uncommitted" : ""}`}>
                   {history.unmapped.length > 0 && (
-                    <section className="sync-history-uncommitted" aria-labelledby="uncommitted-heading">
+                    <section className={`sync-history-uncommitted${uncommittedCollapsed ? " collapsed" : ""}`} aria-labelledby="uncommitted-heading">
                       <div className="sync-history-section-heading">
                         <h2 id="uncommitted-heading"><Icon name="edit" size={13} />Uncommitted</h2>
-                        <span
-                          className="sync-history-heading-count"
-                          title={`${history.unmapped.length} session${history.unmapped.length === 1 ? "" : "s"} not linked to a commit`}
-                          aria-label={`${history.unmapped.length} session${history.unmapped.length === 1 ? "" : "s"} not linked to a commit`}
+                        <button
+                          type="button"
+                          className="sync-history-commit-toggle sync-history-group-toggle"
+                          aria-label={`${uncommittedCollapsed ? "Expand" : "Collapse"} ${history.unmapped.length} session${history.unmapped.length === 1 ? "" : "s"} not linked to a commit`}
+                          aria-expanded={!uncommittedCollapsed}
+                          aria-controls="uncommitted-list"
+                          onClick={() => setUncommittedCollapsed(!uncommittedCollapsed)}
                         >
-                          <Icon name="message" size={12} />{history.unmapped.length}
-                        </span>
+                          <Icon name={uncommittedCollapsed ? "chevron-down" : "chevron-up"} size={12} />
+                        </button>
                       </div>
-                      {[...new Set(history.unmapped.map((reference) => reference.reason))].map((reason) => (
-                        <p key={reason} className="sync-history-uncommitted-reason">{reason}</p>
-                      ))}
-                      <div className="sync-history-thread-list flat">{history.unmapped.map((reference) => { const thread = threads.get(reference.thread_id); return thread ? renderThread(thread, `uncommitted:${thread.thread_id}`) : null; })}</div>
+                      {!uncommittedCollapsed && (
+                        <div id="uncommitted-list" className="sync-history-thread-list flat">{history.unmapped.map((reference) => { const thread = threads.get(reference.thread_id); return thread ? renderThread(thread, `uncommitted:${thread.thread_id}`) : null; })}</div>
+                      )}
                     </section>
                   )}
                   <section className="sync-history-commit-section" aria-label={`First-parent commits on ${history.git.selected_branch}`}>
-                    {!embedded && <div className="sync-history-section-heading"><h2>Commit history</h2><span className="sync-history-heading-count" title={`${history.git.reference_count} commit occurrences`} aria-label={`${history.git.reference_count} commit occurrences`}><Icon name="git-branch" size={12} />{history.git.reference_count}</span></div>}
+                    {!embedded && <div className="sync-history-section-heading"><h2>Commit history</h2><span className="sync-history-heading-count" title={`${history.git.unique_thread_count} session${history.git.unique_thread_count === 1 ? "" : "s"} linked to commits`} aria-label={`${history.git.unique_thread_count} session${history.git.unique_thread_count === 1 ? "" : "s"} linked to commits`}><Icon name="message" size={12} />{history.git.unique_thread_count}</span></div>}
                     {history.git.commits.length === 0 ? <div className="sync-history-state">No commits are available in this 30-day window.</div> : (
                       <ol className="sync-history-commit-rail">{history.git.commits.map((commit) => {
                         const commitUrl = githubCommitUrl(history.git?.github_repository_url, commit.sha);
@@ -1545,12 +1576,8 @@ function mergePages(previous: ProjectChatHistory | null, next: ProjectChatHistor
     commits.set(commit.sha, { ...commit, thread_refs: [...references.values()] });
   });
   const mergedCommits = [...commits.values()].sort((left, right) => right.committed_at - left.committed_at);
-  const references = mergedCommits.reduce((count, commit) => count + commit.thread_refs.length, 0);
   const unique = new Set(mergedCommits.flatMap((commit) => commit.thread_refs.map((reference) => reference.thread_id))).size;
-  const occurrences = new Map<string, number>();
-  mergedCommits.forEach((commit) => commit.thread_refs.forEach((reference) => occurrences.set(reference.thread_id, (occurrences.get(reference.thread_id) ?? 0) + 1)));
-  const mergedThreads = [...threads.values()].map((thread) => ({ ...thread, commit_occurrence_count: occurrences.get(thread.thread_id) ?? 0 }));
-  return { ...next, threads: mergedThreads, unmapped: [...unmapped.values()], git: { ...next.git, commits: mergedCommits, reference_count: references, unique_thread_count: unique } };
+  return { ...next, threads: [...threads.values()], unmapped: [...unmapped.values()], git: { ...next.git, commits: mergedCommits, unique_thread_count: unique } };
 }
 
 export default function ProjectChatHistoryPage({

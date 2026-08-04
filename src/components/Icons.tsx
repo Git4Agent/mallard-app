@@ -311,12 +311,12 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
         </g>
       )}
       {name === "settings" && (
-        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
-          <path d="M18 2h2v2h-2ZM4 2h2v2H4ZM20 22h-2v-2h2ZM4 22h2v-2H4ZM20 4h2v2h-2ZM6 4h4v2H6ZM18 20h-4v-2h4ZM6 20h4v-2H6ZM18 6h2v4h-2ZM4 6h2v4H4ZM20 18h-2v-4h2ZM4 18h2v-4H4ZM14 4h4v2h-4ZM2 4h2v2H2ZM22 20h-2v-2h2ZM2 20h2v-2H2Z" />
-          <path d="M8 2h2v4H8ZM8 22h2v-4H8Z" />
-          <path d="M8 2h8v2H8ZM8 22h8v-2H8ZM2 8h2v8H2ZM22 16h-2V8h2Z" />
-          <path d="M20 8h2v4h-2ZM10 8h4v2h-4ZM8 10h2v4H8ZM10 14h4v2h-4ZM14 10h2v4h-2Z" />
-        </g>
+        <path
+          className="icon-pixel-fill"
+          fill="currentColor"
+          stroke="none"
+          d="M15 2h4v2h3v2h-3v2h-4v-2h-13v-2h13ZM5 9h4v2h13v2h-13v2h-4v-2h-3v-2h3ZM11 16h4v2h7v2h-7v2h-4v-2h-9v-2h9Z"
+        />
       )}
       {name === "sidebar-collapse" && (
         <g className="icon-pixel-fill" fill="currentColor" stroke="none">
@@ -362,12 +362,18 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           d="M18 22H6v-2h12ZM9 6h6V4h2v2h5v2h-2v12h-2V8H6v12H4V8H2V6h5V4h2ZM15 4H9V2h6Z"
         />
       )}
+      {/* Drawn in-house, so no provenance class. The sourced glyph framed the
+          prompt in a 2-unit window and left it three 2x2 blocks in the corner;
+          at the 12-14px this icon actually renders, a 24-unit grid gives half a
+          device pixel per unit, so the prompt sank into a smudge and the icon
+          read as an empty box. Dropping the frame buys the whole grid, and the
+          chevron and cursor bar are what identify a terminal anyway. */}
       {name === "terminal" && (
         <path
-          className="icon-pixel-fill icon-pixelarticons"
+          className="icon-pixel-fill"
           fill="currentColor"
           stroke="none"
-          d="M4 2h16v2H4ZM4 20h16v2H4ZM2 4h2v16H2ZM20 4h2v16h-2ZM6 16h2v2H6ZM8 14h2v2H8ZM6 12h2v2H6Z"
+          d="M4 6h2v2H4ZM6 8h2v2H6ZM8 10h2v2H8ZM10 12h2v2h-2ZM8 14h2v2H8ZM6 16h2v2H6ZM4 18h2v2H4ZM14 18h6v2h-6Z"
         />
       )}
       {name === "upload" && (

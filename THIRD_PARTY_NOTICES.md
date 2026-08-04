@@ -45,9 +45,9 @@ to identify actions that open a ChatGPT conversation. Wikimedia Commons
 describes the underlying geometric mark as public domain while noting that it
 remains a trademark of OpenAI.
 
-## Pixelify Sans
+## Departure Mono
 
-Mallard bundles Pixelify Sans from the
-[Google Fonts repository](https://github.com/google/fonts/tree/main/ofl/pixelifysans).
-It is licensed under the SIL Open Font License 1.1. The complete license text
-is included at `public/fonts/PixelifySans-OFL.txt`.
+Mallard bundles Departure Mono by Helena Zhang, from
+[departuremono.com](https://departuremono.com). It is licensed under the SIL
+Open Font License 1.1. The complete license text is included at
+`public/fonts/DepartureMono-OFL.txt`.

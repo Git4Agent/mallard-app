@@ -32,13 +32,12 @@ Each rollout JSONL file is one Codex session. Mallard streams the complete file 
 
 For a selected first-parent branch:
 
-1. A session is attached to every commit timestamp inclusively inside its start/end range.
-2. With no overlap, it is attached once to its successor commit, with no time cap. When the session's recorded SHA sits on the branch's first-parent rail, the successor is the first of that commit's first-parent descendants committed after the session ended — commits below the recorded checkout never qualify, whatever their timestamps. Without a usable recorded SHA, the successor is the earliest commit after session end.
-3. With no successor, it appears under `Uncommitted` together with the reason.
+1. A session is attached once, to the commit that captured its latest state: the earliest commit at or after the session's last activity, with no time cap. When the session's recorded SHA sits on the branch's first-parent rail, only that commit's first-parent descendants qualify — commits below the recorded checkout never capture the session, whatever their timestamps. Without a usable recorded SHA, time alone decides.
+2. With no such commit, it appears under `Uncommitted` together with the reason. Commits made while a session was still running never claim it, so a session resumed after the branch's newest commit returns to `Uncommitted` until the next commit lands.
 
-One session spanning three commits is one unique session and three commit occurrences. It intentionally renders under all three commits; all occurrences share metrics, launch target, and a frontend detail cache keyed by thread ID.
+A session therefore lives in exactly one place on the rail — one commit or `Uncommitted` — and only moves when new activity outruns the newest commit.
 
-The initial response is the latest exclusive 30-day window. `Load previous 30 days` appends the next complete `[before − 30 days, before)` window. Boundary commits carrying a mapped session are returned as needed and merged by SHA/thread ID so cross-window sessions remain visible at every occurrence.
+The initial response is the latest exclusive 30-day window. `Load previous 30 days` appends the next complete `[before − 30 days, before)` window. Boundary commits carrying a mapped session are returned as needed and merged by SHA/thread ID so cross-window sessions remain visible.
 
 ## Chat details and privacy
 
@@ -58,7 +57,6 @@ The work preserves the main changes already merged through `2edc284`, including 
 
 - Kept the existing dense desktop theme tokens and outline icons; added no gradients, badges, fonts, palettes, or icon dependencies.
 - Used a neutral metric grid and explicit Started/Ended values instead of prompt extracts or mapping-confidence labels.
-- Kept repeated cards visually identical and explained repetition with subdued occurrence text.
-- Used semantic disclosure buttons, visible focus rings, per-occurrence DOM IDs, and browser viewport containment for long lists.
+- Used semantic disclosure buttons, visible focus rings, per-occurrence DOM IDs, and browser viewport containment for long lists. (Repeated cards and their occurrence text were later removed when mapping became single-successor.)
 - Put scan diagnostics and exact launch commands in Sync Log instead of a page-wide technical warning.
 - Superdesign CLI 0.6.0 was reachable on 2026-07-19, but `auth status --json` returned `authenticated: false`; no unapproved substitute export was placed in `assets/`.

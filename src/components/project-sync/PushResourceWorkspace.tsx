@@ -105,6 +105,57 @@ function pushBlockerKind(
   return null;
 }
 
+export interface PullRequiredCopy {
+  title: string;
+  body: string;
+  /** Lineage numbers, kept for support and out of the leading sentence. */
+  detail: string;
+}
+
+/**
+ * Customer-facing copy for a destination that has to be pulled before it can
+ * accept a push. The reason codes are lineage vocabulary — generations, bases,
+ * replicas — and none of it means anything to the person holding a blocked
+ * Push. The callout says which storage moved, what a Pull would show, and why
+ * pushing first is unsafe; the numbers stay on the detail line so support can
+ * still read them off a screenshot.
+ */
+export function pullRequiredCopy(
+  reason: "remote_without_base" | "binding_changed" | "remote_advanced",
+  storageName: string | null | undefined,
+  remoteGeneration: number,
+  baseGeneration: number | null | undefined,
+  changedConversationCount = 0,
+): PullRequiredCopy {
+  const storage = storageName?.trim() || "this storage";
+  // Titles stay in the app's own voice so the pixel face can carry them; the
+  // storage the user named belongs in the sentence, which is set in the clean
+  // face. The button says what to do, so the sentence only has to say what is
+  // there and what pushing past it would cost.
+  const detail = `Storage generation ${remoteGeneration} · ${baseGeneration != null ? `last reviewed ${baseGeneration}` : "never reviewed here"}`;
+  if (reason === "remote_advanced") {
+    return {
+      title: "Storage has newer changes",
+      body: changedConversationCount > 0
+        ? `${changedConversationCount} conversation${changedConversationCount === 1 ? " is" : "s are"} newer in ${storage}. Pushing now could overwrite them.`
+        : `Changes were saved in ${storage} after this computer last synced. Pushing now could overwrite them.`,
+      detail,
+    };
+  }
+  if (reason === "remote_without_base") {
+    return {
+      title: "Storage has unreviewed data",
+      body: `${storage} holds data for this project that has never been reviewed on this computer.`,
+      detail,
+    };
+  }
+  return {
+    title: "This project changed since the last sync",
+    body: `The project folder or Codex profile is different now. Review what is stored in ${storage} first.`,
+    detail,
+  };
+}
+
 /**
  * Conversation threads that cannot push until a Pull resolves them
  * (diverged or behind storage). They hold back only themselves: the Push
@@ -411,6 +462,20 @@ export default function PushResourceWorkspace({
     ? destinationStatus
     : null;
   const remotePullRequired = requiresPullDestination !== null;
+  // The comparison counts conversations only, so the sentence names them
+  // specifically rather than implying it has counted every stored resource.
+  const storageChangedConversations = threadComparison
+    ? threadComparison.counts.storage + threadComparison.counts.diverged
+    : 0;
+  const pullRequired = requiresPullDestination
+    ? pullRequiredCopy(
+      requiresPullDestination.reason,
+      storageName,
+      requiresPullDestination.remote_generation,
+      requiresPullDestination.base_generation,
+      storageChangedConversations,
+    )
+    : null;
   const storageBlockingCount = blockers.filter((blocker) => blocker.kind === "storage").length;
   const localBlockingCount = blockingCount - storageBlockingCount;
   const warningSteps = new Set<SyncReviewStep>();
@@ -435,6 +500,19 @@ export default function PushResourceWorkspace({
       ? `${localBlockingCount} selected resource${localBlockingCount === 1 ? "" : "s"} need${localBlockingCount === 1 ? "s" : ""} attention`
       : null,
   ].filter((message): message is string => Boolean(message)).join(" · ");
+  // The destination states disable Push on their own, and the row-blocker
+  // footer never spoke for them: a clean selection against a moved storage
+  // left the button greyed out with nothing beside it saying why.
+  const destinationFooter = remotePullRequired
+    ? "Pull required before pushing"
+    : remoteHistoryMissing
+      ? "Storage history is missing"
+      : remoteHistoryReplaced
+        ? "Storage history changed"
+        : null;
+  const footerNote = [destinationFooter, blockerFooter]
+    .filter((message): message is string => Boolean(message))
+    .join(" · ");
 
   const commitSelection = (next: Set<string>) => {
     const safeNext = includeRequiredProjectContentDirectories(
@@ -689,22 +767,17 @@ export default function PushResourceWorkspace({
                   )}
                 </div>
               )}
-              {requiresPullDestination && (
-                <div className="sync-callout sync-sync-review-blocker" role="alert">
+              {pullRequired && (
+                /* Not an error: the push is intact, it just has one step in
+                   front of it. Announced politely, and the way forward is the
+                   only enabled button on the step, so it leads. */
+                <div className="sync-callout sync-sync-review-blocker sync-sync-review-pull-required" role="status">
                   <Icon name="git-compare-arrows" size={15} />
                   <span>
-                    <strong>Pull before pushing</strong>
-                    {requiresPullDestination.reason === "remote_advanced"
-                      ? `${storageName || "This storage"} advanced to generation ${requiresPullDestination.remote_generation}${requiresPullDestination.base_generation != null ? ` while this replica's base is generation ${requiresPullDestination.base_generation}` : ""}. Pull and review the newer history, then push.`
-                      : requiresPullDestination.reason === "remote_without_base"
-                        ? `${storageName || "This storage"} already has history this replica has not reviewed. Pull and review it before pushing.`
-                        : "The project checkout or provider profile changed after the last reviewed base. Pull and review before pushing."}
+                    <strong>{pullRequired.title}</strong>
+                    {pullRequired.body}
+                    <small className="sync-sync-review-blocker-detail">{pullRequired.detail}</small>
                   </span>
-                  {onPull && (
-                    <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>
-                      Review Pull
-                    </button>
-                  )}
                 </div>
               )}
               <button type="button" onClick={() => selectStep("history")}>
@@ -748,7 +821,7 @@ export default function PushResourceWorkspace({
       </div>
 
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
-        {blockingCount > 0 && <span><small>{blockerFooter}</small></span>}
+        {footerNote && <span><small>{footerNote}</small></span>}
         {stepIndex > 0 && (
           <button type="button" className="btn btn-secondary sync-sync-review-back" onClick={goBack} disabled={busy}>
             <Icon name="chevron-left" size={14} />
@@ -760,12 +833,22 @@ export default function PushResourceWorkspace({
             Next: {STEP_LABELS[nextStep]}
             <Icon name="chevron-right" size={14} />
           </button>
+        ) : remotePullRequired && onPull ? (
+          <button
+            type="button"
+            className="btn btn-primary sync-pull-apply-button sync-sync-review-pull-action"
+            onClick={onPull}
+            disabled={busy}
+          >
+            <Icon name="download" size={16} />
+            Review Pull
+          </button>
         ) : (
           <button type="button" className="btn btn-primary sync-pull-apply-button" onClick={onPush} disabled={busy || remoteHistoryMissing || remoteHistoryReplaced || remotePullRequired || (selectedCount === 0 && projectContentRemovals.size === 0) || blockingCount > 0}>
             <Icon name={busy ? "refresh" : "upload"} size={16} className={busy ? "icon-spin" : undefined} />
             {busy
               ? (fetchProgress && fetchProgress.phase === "push"
-                ? `${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`
+                ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
                 : "Pushing…")
               : "Push"}
           </button>

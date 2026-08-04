@@ -93,32 +93,100 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   const retroCss = readFileSync("src/RetroTheme.css", "utf8");
 
   assert.match(app, /import "\.\/App\.css";\s*import "\.\/RetroTheme\.css";/);
-  assert.equal(existsSync("public/mallard-logo-pixel.png"), true);
-  assert.equal(existsSync("public/mallard-logo-pixel-ring.png"), true);
-  assert.equal(existsSync("public/mallard-logo-pixel-duck.png"), true);
-  assert.equal(existsSync("public/fonts/PixelifySans-Variable.ttf"), true);
-  assert.equal(existsSync("public/fonts/PixelifySans-OFL.txt"), true);
+  // One mark, everywhere: brand, product footer, startup screen, favicon.
+  assert.equal(existsSync("public/mallard-logo-duck.svg"), true);
+  for (const retired of [
+    "public/mallard-logo-pixel.png",
+    "public/mallard-logo-pixel-ring.png",
+    "public/mallard-logo-pixel-duck.png",
+  ]) {
+    assert.equal(existsSync(retired), false, `${retired} must remain removed`);
+  }
+  const duck = readFileSync("public/mallard-logo-duck.svg", "utf8");
+  // An existence check cannot tell a valid mark from a broken one. "--" is
+  // illegal inside an XML comment and makes the whole file fail to parse, which
+  // shows up as a broken-image icon in every mark at once while the suite stays
+  // green — so the comment body is checked directly.
+  for (const [, body] of duck.matchAll(/<!--([\s\S]*?)-->/g)) {
+    assert.doesNotMatch(body, /--/, "an XML comment may not contain --");
+  }
+  assert.match(duck, /viewBox="0 0 20 20"/);
+  assert.match(duck, /shape-rendering="crispEdges"/);
+  // Loaded through <img>, so it has no CSS context and cannot use currentColor.
+  assert.match(duck, /fill="#050913"/);
+  assert.doesNotMatch(duck, /fill="currentColor"/);
+  assert.equal(existsSync("public/fonts/DepartureMono-Regular.woff2"), true);
+  assert.equal(existsSync("public/fonts/DepartureMono-OFL.txt"), true);
   assert.equal(existsSync("THIRD_PARTY_NOTICES.md"), true);
-  assert.match(sidebar, /className="sync-brand-logo" src="\/mallard-logo-pixel-ring\.png"/);
-  assert.match(sidebar, /className="sync-sidebar-product-mark"[\s\S]*src="\/mallard-logo-pixel-duck\.png"/);
-  assert.match(startup, /src="\/mallard-logo-pixel\.png"/);
-  assert.match(document, /href="\/mallard-logo-pixel\.png"/);
-  assert.match(retroCss, /@font-face\s*\{[\s\S]*font-family: "Pixelify Sans"/);
-  assert.match(retroCss, /--font-pixel: "Pixelify Sans", var\(--font\)/);
+  assert.match(sidebar, /className="sync-brand-logo" src="\/mallard-logo-duck\.svg"/);
+  assert.match(sidebar, /className="sync-sidebar-product-mark"[\s\S]*src="\/mallard-logo-duck\.svg"/);
+  assert.match(startup, /src="\/mallard-logo-duck\.svg"/);
+  assert.match(document, /rel="icon" type="image\/svg\+xml" href="\/mallard-logo-duck\.svg"/);
+  assert.match(retroCss, /@font-face\s*\{[\s\S]*font-family: "Departure Mono"/);
+  // Three faces, one rule each: pixel for chrome labels, sans for text that came
+  // out of the user's data, mono for machine identifiers.
+  assert.match(retroCss, /--font-sans: -apple-system, BlinkMacSystemFont/);
+  assert.match(retroCss, /--font-mono: "SFMono-Regular", "SF Mono"/);
+  assert.match(retroCss, /--font-pixel: "Departure Mono", var\(--font-mono\)/);
+  assert.match(retroCss, /--font: var\(--font-sans\);/);
+  // Whole-pixel scale: a fractional advance walks the pixel blocks off the grid.
+  assert.match(retroCss, /--type-3xs: 9px;[\s\S]*--type-3xl: 26px;/);
+  assert.match(retroCss, /--weight-regular: 400;[\s\S]*--weight-bold: 700;/);
   assert.match(retroCss, /:root\[data-theme="dark"\] \.sync-brand-logo,[\s\S]*:root\[data-theme="dark"\] \.sync-sidebar-product-mark img,[\s\S]*:root\[data-theme="dark"\] \.sync-startup-mark img\s*\{[^}]*filter: brightness\(0\) invert\(1\);/s);
-  assert.match(retroCss, /\.sync-brand-logo,\s*\.sync-sidebar-product-mark img\s*\{[^}]*image-rendering: pixelated;/s);
-  assert.match(retroCss, /\.sync-startup-mark img\s*\{[^}]*image-rendering: auto;/s);
-  assert.match(retroCss, /\.sync-sidebar-brand strong\s*\{[\s\S]*font-family: var\(--font-pixel\)/);
-  assert.match(retroCss, /\.btn\s*\{[^}]*font-family: var\(--font-pixel\)/s);
-  assert.match(retroCss, /\.sync-project-heading-name h1\s*\{[^}]*font-family: var\(--font\)/s);
-  assert.match(retroCss, /\.sync-project-heading-meta\s*\{[^}]*font: 400 13px\/18px var\(--font\);[^}]*font-kerning: none;[^}]*font-synthesis: none;[^}]*font-variant-ligatures: none;[^}]*letter-spacing: 0;[^}]*overflow: hidden;/s);
-  assert.match(retroCss, /\.sync-project-heading-meta-item\s*\{[^}]*font: 400 13px\/18px var\(--font\);[^}]*font-kerning: none;[^}]*font-synthesis: none;[^}]*font-variant-ligatures: none;[^}]*letter-spacing: 0;/s);
-  assert.match(retroCss, /\.sync-project-heading-meta-item > span\s*\{[^}]*display: block;[^}]*font: 400 13px\/18px var\(--font\);[^}]*font-kerning: none;[^}]*font-synthesis: none;[^}]*font-variant-ligatures: none;[^}]*letter-spacing: 0;/s);
+  // A vector mark rasterises itself, so image-rendering governs nothing here.
+  assert.doesNotMatch(retroCss, /image-rendering:/);
+  // Every mark is a whole multiple of the 20-unit grid, or the cells land on
+  // fractional device pixels and the silhouette goes ragged.
+  assert.match(retroCss, /\.sync-brand-logo\s*\{[^}]*width: 40px;[^}]*height: 40px;/s);
+  assert.match(retroCss, /\.sync-sidebar-product-mark img\s*\{[^}]*width: 20px;[^}]*height: 20px;/s);
+  assert.match(retroCss, /\.sync-startup-mark img\s*\{[^}]*width: 40px;[^}]*height: 40px;/s);
+  // The pixel face is declared exactly once, and that one rule also carries the
+  // unsmoothed rasterisation. Two parallel selector lists used to drift apart;
+  // counting the rules is what makes that impossible rather than merely visible.
+  const pixelRules = [...retroCss.matchAll(/([^{}]+)\{([^}]*font-family: var\(--font-pixel\)[^}]*)\}/g)];
+  assert.equal(pixelRules.length, 1, "the pixel face must be declared in exactly one rule");
+  const [, pixelSelectors, pixelBody] = pixelRules[0];
+  assert.match(pixelBody, /letter-spacing: 0;/);
+  // Single-weight face plus font-synthesis: none — anything heavier would be a
+  // declaration that quietly does nothing.
+  assert.match(pixelBody, /font-weight: var\(--weight-regular\);/);
+  assert.match(pixelBody, /font-synthesis: none;/);
+  for (const selector of [
+    ".btn",
+    ".sync-sidebar-brand strong",
+    ".sync-primary-nav button",
+    ".sidebar-settings-sections .sidebar-section-title",
+    ".sync-project-combined-page .storage-link-sync",
+    ".sync-history-embedded-title",
+    ".sync-history-section-heading h2",
+    ".sync-history-branch-state",
+    ".log-panel-title",
+    ".log-type",
+  ]) {
+    assert.ok(pixelSelectors.includes(selector), `${selector} must take the pixel face`);
+  }
+  // A count and a branch name are data, so neither speaks in the app's voice.
+  assert.ok(!pixelSelectors.includes(".sidebar-nav-badge"));
+  assert.ok(!pixelSelectors.includes(".sync-history-branch-trigger"));
+  assert.match(retroCss, /\.sync-project-heading-name h1\s*\{[^}]*font-family: var\(--font-sans\)/s);
+  // Longhands, not the font: shorthand — it resets the grid-fitting properties
+  // these rules go on to re-state, and one bad var() would unset all three.
+  assert.match(retroCss, /\.sync-project-heading-meta\s*\{[^}]*font-family: var\(--font-sans\);[^}]*font-size: var\(--type-md\);[^}]*font-weight: var\(--weight-regular\);[^}]*line-height: 18px;[^}]*font-kerning: none;[^}]*font-synthesis: none;[^}]*font-variant-ligatures: none;[^}]*letter-spacing: 0;[^}]*overflow: hidden;/s);
+  assert.match(retroCss, /\.sync-project-heading-meta-item\s*\{[^}]*font-family: var\(--font-sans\);[^}]*font-size: var\(--type-md\);[^}]*font-weight: var\(--weight-regular\);[^}]*line-height: 18px;[^}]*font-kerning: none;[^}]*font-synthesis: none;[^}]*font-variant-ligatures: none;[^}]*letter-spacing: 0;/s);
+  assert.match(retroCss, /\.sync-project-heading-meta-item > span\s*\{[^}]*display: block;[^}]*font-family: var\(--font-sans\);[^}]*font-size: var\(--type-md\);[^}]*font-weight: var\(--weight-regular\);[^}]*line-height: 18px;[^}]*font-kerning: none;[^}]*font-synthesis: none;[^}]*font-variant-ligatures: none;[^}]*letter-spacing: 0;/s);
+  // The root is the one identifier in a strip of display names, and it has to
+  // come after the rule above — same specificity, so source order decides.
+  assert.match(retroCss, /\.sync-project-heading-path > span\s*\{[^}]*font-family: var\(--font-mono\)/s);
   assert.match(retroCss, /\.sync-project-heading-meta-item \+ \.sync-project-heading-meta-item::before\s*\{[^}]*content: "";[^}]*width: 1px;[^}]*height: 14px;[^}]*background: var\(--border-mid\);/s);
-  assert.match(retroCss, /\.sync-titlebar-context strong\s*\{[^}]*font-family: var\(--font\)/s);
+  assert.match(retroCss, /\.sync-titlebar-context strong\s*\{[^}]*font-family: var\(--font-sans\)/s);
   // One surface across the bar: no second panel ending mid-titlebar.
   assert.match(retroCss, /\.sync-titlebar-context\s*\{[^}]*border: 0;[^}]*border-radius: 0;[^}]*background: transparent;/s);
-  assert.match(retroCss, /\.sidebar-profile-main span\s*\{[^}]*font-family: var\(--font\)/s);
+  assert.match(retroCss, /\.sidebar-profile-main span\s*\{[^}]*font-family: var\(--font-sans\)/s);
+  // A name out of the user's data reads in the clean face even when a pixel
+  // label wraps it, and a byte readout keeps the identifier face inside a
+  // pixel button. These two carve-outs are the pattern the rest copies.
+  assert.match(retroCss, /\.sync-history-section-heading h2 \.sync-history-storage-name\s*\{[^}]*font-family: var\(--font-sans\)/s);
+  assert.match(retroCss, /\.sync-btn-readout[^{]*\{[^}]*font-family: var\(--font-mono\)/s);
   assert.match(retroCss, /:root\[data-theme="light"\]\s*\{[^}]*--bg-0: #fefbf6;/s);
   assert.match(retroCss, /:root\[data-theme="light"\]\s*\{[^}]*--bg-2: #faf3eb;/s);
   assert.match(retroCss, /:root\[data-theme="light"\]\s*\{[^}]*--surface-row-active: #f0e3d5;/s);
@@ -181,8 +249,11 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /body\s*\{[^}]*letter-spacing: 0;[^}]*text-rendering: auto;/s);
   assert.doesNotMatch(retroCss, /letter-spacing: 0\.006em/);
   assert.doesNotMatch(retroCss, /text-rendering: geometricPrecision/);
-  // The pixel face is drawn as hard blocks, so it rasterises unsmoothed.
-  assert.match(retroCss, /\.btn,\s*\.sync-sidebar-brand strong,[\s\S]*?\.sync-history-section-heading h2\s*\{\s*-webkit-font-smoothing: none;\s*\}/s);
+  // Smoothing is never disabled. Thresholding the edges rounds any partial
+  // pixel coverage up to full ink, which thickens every stem and reads as a
+  // permanently bold UI at 9-17px. One antialiased declaration, on body.
+  assert.doesNotMatch(retroCss, /-webkit-font-smoothing: none;/);
+  assert.equal(retroCss.match(/-webkit-font-smoothing: antialiased/g)?.length, 1);
   assert.match(retroCss, /:root\[data-theme="light"\]/);
   assert.match(retroCss, /:root\[data-theme="dark"\]/);
   assert.match(retroCss, /\.sync-titlebar-context/);
@@ -204,13 +275,17 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.doesNotMatch(retroCss, /\.sync-history-commit-heading:has\(\+ \.sync-history-thread-list\)::after/);
   assert.match(retroCss, /\.sync-history-commit > \.sync-history-thread-list::after\s*\{[^}]*display: none;/s);
   assert.match(retroCss, /\.sync-history-commit > \.sync-history-thread-list \.sync-thread-sync-indicator,[^{]*\{[^}]*background: transparent;[^}]*box-shadow: none;/s);
-  assert.match(retroCss, /\.sync-history-commit-title > strong,[^}]*font: 600 12\.5px\/1\.35 var\(--font\);[^}]*letter-spacing: 0;/s);
-  assert.match(retroCss, /\.sync-history-commit-meta > time\s*\{[^}]*font: 500 11\.5px\/1\.35 var\(--font\);[^}]*letter-spacing: 0;/s);
+  // Titles are human text, so they read in the sans.
+  assert.match(retroCss, /\.sync-history-commit-title > strong,[^}]*font-family: var\(--font-sans\);[^}]*font-size: var\(--type-sm\);[^}]*font-weight: var\(--weight-semibold\);[^}]*letter-spacing: 0;/s);
+  // A date is scanned as a column, so it takes the identifier face and figures
+  // that hold their width.
+  assert.match(retroCss, /\.sync-history-commit-meta > time\s*\{[^}]*font-family: var\(--font-mono\);[^}]*font-size: var\(--type-xs\);[^}]*font-weight: var\(--weight-medium\);[^}]*font-variant-numeric: tabular-nums;[^}]*letter-spacing: 0;/s);
   // The sha reads as an identifier chip, not as more prose.
-  assert.match(retroCss, /\.sync-history-commit-heading code\s*\{[^}]*min-width: 7ch;[^}]*border: 1px solid var\(--border\);[^}]*font: 500 11\.5px\/1\.35 var\(--font-mono\);[^}]*letter-spacing: 0;[^}]*text-align: center;/s);
+  assert.match(retroCss, /\.sync-history-commit-heading code\s*\{[^}]*min-width: 7ch;[^}]*border: 1px solid var\(--border\);[^}]*font-family: var\(--font-mono\);[^}]*font-size: var\(--type-xs\);[^}]*font-weight: var\(--weight-medium\);[^}]*letter-spacing: 0;[^}]*text-align: center;/s);
   assert.match(retroCss, /\.sync-history-commit-link:hover code,\s*\.sync-history-commit-link:focus-visible code\s*\{[^}]*border-color: var\(--border-strong\);[^}]*color: var\(--text-0\);/s);
-  // The subject outranks the session titles nested under it.
-  assert.match(retroCss, /\.sync-history-commit-title > strong\s*\{[^}]*font: 650 13px\/1\.35 var\(--font\);/s);
+  // The subject outranks the session titles nested under it by one size step.
+  // It used to be a weight step too, but 650 over 600 was never drawn apart.
+  assert.match(retroCss, /\.sync-history-commit-title > strong\s*\{[^}]*font-size: var\(--type-md\);/s);
   // Pixel geometry only stays crisp at an exact 2:1 downscale of the 24px art.
   assert.match(retroCss, /\.sync-history-commit-icon > svg,[\s\S]*?\.sync-history-chat-toggle > svg\s*\{[^}]*width: 12px;[^}]*height: 12px;/s);
   // A translucent block is a smudge, not a pixel — metrics are held back with

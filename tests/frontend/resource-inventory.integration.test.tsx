@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import PushResourceWorkspace, {
   nextPushReviewStep,
   preserveSyncedPushRecipeEntries,
+  pullRequiredCopy,
   pushReviewBlockers,
   pushReviewPullHolds,
   recommendedPushSelection,
@@ -422,12 +423,82 @@ test("the push chooser gates an advanced remote at review time, not at preflight
     />,
   );
 
-  assert.match(html, />Pull before pushing</);
-  assert.match(html, /advanced to generation 4/);
-  assert.match(html, /base is generation 3/);
-  assert.match(html, />Review Pull<\/button>/);
-  const pushButton = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[^>]*>/)?.[0];
-  assert.match(pushButton ?? "", /disabled=""/);
+  // The reader gets the state and the cost of ignoring it; generations are
+  // support detail, so they sit on their own quiet line and never lead.
+  assert.match(html, />Storage has newer changes</);
+  assert.match(html, /Changes were saved in R2 storage 1 after this computer last synced\. Pushing now could overwrite them\./);
+  assert.match(html, /sync-sync-review-blocker-detail">Storage generation 4 · last reviewed 3</);
+  assert.doesNotMatch(html, /replica|advanced to generation|newer history/);
+  // The only way forward on a blocked step leads, and the disabled Push says
+  // why it is disabled instead of greying out in silence.
+  assert.match(
+    html,
+    /class="btn btn-primary sync-pull-apply-button sync-sync-review-pull-action"[^>]*>.*Review Pull<\/button>/,
+  );
+  assert.match(html, /sync-sync-review-pull-required/);
+  assert.match(html, /<small>Pull required before pushing<\/small>/);
+  assert.equal(html.match(/Review Pull/g)?.length, 1);
+  assert.doesNotMatch(html, />Push<\/button>/);
+});
+
+test("a blocked destination counts the conversations a Pull would bring", () => {
+  const resource = memoryResource("review");
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={[resource]}
+      selected={new Set([resource.resource_id])}
+      projectDefaults={new Set([resource.resource_id])}
+      busy={false}
+      error={null}
+      storageName="R2 storage 1"
+      threadComparison={{
+        project_id: "project-1",
+        storage_id: "storage-1",
+        storage_name: "R2 storage 1",
+        compared_at: 1,
+        entries: [],
+        counts: { synced: 4, local: 1, storage: 2, diverged: 1, unavailable: 0, unknown: 0 },
+        warnings: [],
+      }}
+      destinationStatus={{
+        state: "requires_pull",
+        reason: "remote_advanced",
+        remote_generation: 4,
+        base_generation: 3,
+      }}
+      initialStep="review"
+      onToggle={() => undefined}
+      onUseProjectDefaults={() => undefined}
+      onClear={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+      onPull={() => undefined}
+    />,
+  );
+
+  // storage (2) + diverged (1); the sentence names conversations because that
+  // is all the comparison counted.
+  assert.match(html, /3 conversations are newer in R2 storage 1\. Pushing now could overwrite them\./);
+});
+
+test("an unreviewed storage and a changed binding each get their own plain sentence", () => {
+  const unreviewed = pullRequiredCopy("remote_without_base", "R2 storage 1", 6, undefined);
+  assert.equal(unreviewed.title, "Storage has unreviewed data");
+  assert.equal(
+    unreviewed.body,
+    "R2 storage 1 holds data for this project that has never been reviewed on this computer.",
+  );
+  assert.equal(unreviewed.detail, "Storage generation 6 · never reviewed here");
+
+  const rebound = pullRequiredCopy("binding_changed", null, 6, 5);
+  assert.equal(rebound.title, "This project changed since the last sync");
+  assert.match(rebound.body, /Review what is stored in this storage first\./);
+
+  // One conversation reads as one, not as "1 conversations are".
+  assert.match(
+    pullRequiredCopy("remote_advanced", "R2 storage 1", 4, 3, 1).body,
+    /^1 conversation is newer in R2 storage 1\./,
+  );
 });
 
 test("the push chooser provides contextual back and next actions", () => {

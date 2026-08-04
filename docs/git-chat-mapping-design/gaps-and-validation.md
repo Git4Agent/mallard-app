@@ -41,13 +41,13 @@ Focused Rust coverage includes:
 - malformed and oversized individual records continuing as partial;
 - injected context excluded from user metrics/details;
 - user, agent, tool, token, active-session, fallback, and summary behavior;
-- inclusive multi-commit attachment, uncapped successor attachment through the recorded SHA's first-parent descendants, time-based fallback without a usable recorded SHA, uncommitted classification, and branch isolation;
+- single successor attachment (earliest commit at or after last activity) through the recorded SHA's first-parent descendants, time-based fallback without a usable recorded SHA, uncommitted classification (including sessions with activity after the newest commit), and branch isolation;
 - first-parent Git pagination and hostile input validation;
 - detail pagination and role filtering;
 - UUID, quoting, project-scoped `CODEX_HOME`, app command, and Terminal command construction;
 - backward-compatible RecipeBase sync timestamps.
 
-Frontend integration coverage includes alias/repository presentation, project/profile/storage metadata, neutral metrics, explicit dates, absence of mapping badges/raw extracts, Git/non-Git flows, launch actions, removal of the sidebar Git action, and the replacement non-interactive repository-type indicator. Repeated occurrences use stable SHA/thread keys and shared detail data in implementation.
+Frontend integration coverage includes alias/repository presentation, project/profile/storage metadata, neutral metrics, explicit dates, absence of mapping badges/raw extracts, Git/non-Git flows, launch actions, removal of the sidebar Git action, and the replacement non-interactive repository-type indicator. Rows use stable SHA/thread keys and shared detail data in implementation.
 
 Latest verified during implementation:
 

@@ -48,7 +48,7 @@ export default function StartupLoadingScreen({ stage }: Props) {
       <section className="sync-startup-content">
         <div className="sync-startup-brand">
           <div className="sync-startup-mark" aria-hidden="true">
-            <img src="/mallard-logo-pixel.png" alt="" />
+            <img src="/mallard-logo-duck.svg" alt="" />
           </div>
           <h1 id="sync-startup-title">Mallard</h1>
         </div>

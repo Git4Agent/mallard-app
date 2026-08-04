@@ -57,8 +57,6 @@ pub struct CodexThreadSummary {
     pub total_tokens: Option<u64>,
     #[serde(default)]
     pub metrics_complete: bool,
-    #[serde(default)]
-    pub commit_occurrence_count: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,7 +111,6 @@ pub struct GitHistoryPage {
     pub github_repository_url: Option<String>,
     pub next_cursor: Option<String>,
     pub unique_thread_count: usize,
-    pub reference_count: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -205,7 +202,6 @@ impl Default for ChatHistoryCache {
 struct MappingResult {
     unmapped: Vec<UnmappedThreadReference>,
     unique_thread_count: usize,
-    reference_count: usize,
 }
 
 #[derive(Debug)]
@@ -281,7 +277,7 @@ pub fn get_project_chat_history(
         .unwrap_or(DEFAULT_HISTORY_WINDOW_DAYS)
         .clamp(1, 90);
     let window_start = window_end.saturating_sub(window_days.saturating_mul(DAY_SECS));
-    let mut threads = all_threads
+    let threads = all_threads
         .iter()
         .filter(|thread| thread_in_window(thread, window_start, window_end))
         .cloned()
@@ -329,18 +325,6 @@ pub fn get_project_chat_history(
         let mapping = map_threads_to_commits(&threads, &mut all_commits, &selected_branch);
         unmapped = mapping.unmapped;
 
-        let occurrences = all_commits
-            .iter()
-            .flat_map(|commit| commit.thread_refs.iter())
-            .fold(BTreeMap::<String, usize>::new(), |mut counts, reference| {
-                *counts.entry(reference.thread_id.clone()).or_default() += 1;
-                counts
-            });
-        for thread in &mut threads {
-            thread.commit_occurrence_count =
-                occurrences.get(&thread.thread_id).copied().unwrap_or(0);
-        }
-
         let visible_commits = all_commits
             .iter()
             .filter(|commit| {
@@ -356,7 +340,6 @@ pub fn get_project_chat_history(
             github_repository_url,
             next_cursor: None,
             unique_thread_count: mapping.unique_thread_count,
-            reference_count: mapping.reference_count,
         })
     } else {
         None
@@ -1329,7 +1312,6 @@ impl RolloutParser {
                 metrics_complete: self.metrics_complete
                     && self.first_timestamp.is_some()
                     && self.last_timestamp.is_some(),
-                commit_occurrence_count: 0,
             },
             cwd,
             has_record_endpoints: self.first_timestamp.is_some() && self.last_timestamp.is_some(),
@@ -2026,56 +2008,47 @@ fn map_threads_to_commits(
         {
             continue;
         }
-        let mut matched = Vec::new();
-        for (index, commit) in commits.iter().enumerate() {
-            if commit.committed_at >= thread.started_at && commit.committed_at <= thread.ended_at {
-                matched.push(index);
-            }
-        }
-        if matched.is_empty() {
-            // A session no commit overlapped attaches to the commit that
-            // captured its work afterwards, however long that took. When the
-            // session's recorded HEAD is on this rail only its first-parent
-            // descendants qualify, walking from the recorded commit toward
-            // the tip; a commit that predates the recorded checkout must not
-            // capture the session even if its timestamp is later. Without a
-            // usable recorded HEAD, the earliest later commit stands in.
-            let successor = match thread
-                .recorded_sha
-                .as_deref()
-                .map(str::to_ascii_lowercase)
-                .and_then(|sha| rail_index.get(&sha).copied())
-            {
-                Some(recorded_index) => (0..recorded_index)
-                    .rev()
-                    .find(|&index| commits[index].committed_at > thread.ended_at),
-                None => commits
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, commit)| commit.committed_at > thread.ended_at)
-                    .min_by_key(|(_, commit)| commit.committed_at)
-                    .map(|(index, _)| index),
-            };
-            matched.extend(successor);
-        }
-        if matched.is_empty() {
+        // A session files under the commit that captured its latest state:
+        // the earliest commit at or after its last activity, however long
+        // that took. Until such a commit exists the session is uncommitted,
+        // no matter how many commits happened while it ran. When the
+        // session's recorded HEAD is on this rail only its first-parent
+        // descendants qualify, walking from the recorded commit toward the
+        // tip; a commit that predates the recorded checkout must not capture
+        // the session even if its timestamp is later. Without a usable
+        // recorded HEAD, time alone decides.
+        let successor = match thread
+            .recorded_sha
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .and_then(|sha| rail_index.get(&sha).copied())
+        {
+            Some(recorded_index) => (0..recorded_index)
+                .rev()
+                .find(|&index| commits[index].committed_at >= thread.ended_at),
+            None => commits
+                .iter()
+                .enumerate()
+                .filter(|(_, commit)| commit.committed_at >= thread.ended_at)
+                .min_by_key(|(_, commit)| commit.committed_at)
+                .map(|(index, _)| index),
+        };
+        let Some(index) = successor else {
             let reason = if commits.is_empty() {
                 "The selected branch has no available first-parent commits"
             } else {
-                "No commit has been made on this branch since the session ended"
+                "No commit has been made on this branch since the session's last activity"
             };
             unmapped.push(UnmappedThreadReference {
                 thread_id: thread.thread_id.clone(),
                 reason: reason.to_string(),
             });
             continue;
-        }
+        };
         mapped_threads.insert(thread.thread_id.clone());
-        for index in matched {
-            commits[index].thread_refs.push(CommitThreadReference {
-                thread_id: thread.thread_id.clone(),
-            });
-        }
+        commits[index].thread_refs.push(CommitThreadReference {
+            thread_id: thread.thread_id.clone(),
+        });
     }
     let thread_order = threads
         .iter()
@@ -2096,11 +2069,9 @@ fn map_threads_to_commits(
             }
         });
     }
-    let reference_count = commits.iter().map(|commit| commit.thread_refs.len()).sum();
     MappingResult {
         unmapped,
         unique_thread_count: mapped_threads.len(),
-        reference_count,
     }
 }
 
@@ -2674,20 +2645,40 @@ mod tests {
             tool_call_count: 0,
             total_tokens: None,
             metrics_complete: true,
-            commit_occurrence_count: 0,
         }
     }
 
     #[test]
-    fn mapping_attaches_all_inclusive_commits_and_counts_unique_threads() {
-        let mut commits = vec![commit("a", 100), commit("b", 150), commit("c", 200)];
-        let threads = vec![thread("one", 100, 200), thread("two", 150, 150)];
+    fn mapping_attaches_each_thread_to_the_first_commit_at_or_after_its_last_activity() {
+        let mut commits = vec![commit("c", 200), commit("b", 150), commit("a", 100)];
+        let threads = vec![thread("one", 100, 200), thread("two", 90, 120)];
         let result = map_threads_to_commits(&threads, &mut commits, "main");
 
         assert_eq!(result.unmapped, Vec::<UnmappedThreadReference>::new());
         assert_eq!(result.unique_thread_count, 2);
-        assert_eq!(result.reference_count, 4);
-        assert_eq!(commits[1].thread_refs.len(), 2);
+        // "one" ends the second commit "c" lands, so "c" captures it; commits
+        // made while a session was still running never claim it.
+        assert_eq!(commits[0].thread_refs.len(), 1);
+        assert_eq!(commits[0].thread_refs[0].thread_id, "one");
+        assert_eq!(commits[1].thread_refs.len(), 1);
+        assert_eq!(commits[1].thread_refs[0].thread_id, "two");
+        assert!(commits[2].thread_refs.is_empty());
+    }
+
+    #[test]
+    fn mapping_keeps_a_session_with_activity_after_the_newest_commit_uncommitted() {
+        // The resumed-session case: old commits landed while it ran, but its
+        // latest state postdates every commit, so it stays uncommitted until
+        // the next commit captures it.
+        let mut commits = vec![commit("b", 200), commit("a", 100)];
+        let resumed = thread("resumed", 50, 300);
+        let result = map_threads_to_commits(&[resumed], &mut commits, "main");
+
+        assert!(commits[0].thread_refs.is_empty());
+        assert!(commits[1].thread_refs.is_empty());
+        assert_eq!(result.unmapped.len(), 1);
+        assert_eq!(result.unmapped[0].thread_id, "resumed");
+        assert_eq!(result.unique_thread_count, 0);
     }
 
     #[test]
@@ -2727,8 +2718,19 @@ mod tests {
         assert_eq!(result.unmapped.len(), 1);
         assert_eq!(
             result.unmapped[0].reason,
-            "No commit has been made on this branch since the session ended"
+            "No commit has been made on this branch since the session's last activity"
         );
+    }
+
+    #[test]
+    fn mapping_lets_a_commit_at_the_exact_last_activity_second_capture_the_session() {
+        let mut commits = vec![commit("a", 100)];
+        let flush = thread("flush", 50, 100);
+        let result = map_threads_to_commits(&[flush], &mut commits, "main");
+
+        assert!(result.unmapped.is_empty());
+        assert_eq!(commits[0].thread_refs.len(), 1);
+        assert_eq!(commits[0].thread_refs[0].thread_id, "flush");
     }
 
     #[test]
@@ -2772,9 +2774,9 @@ mod tests {
 
     #[test]
     fn mapping_never_attaches_a_named_thread_to_another_branch() {
-        let mut other = thread("feature-thread", 1, 300);
+        let mut other = thread("feature-thread", 1, 150);
         other.branch = Some("feature/a".to_string());
-        let mut unknown = thread("unknown-thread", 1, 300);
+        let mut unknown = thread("unknown-thread", 1, 150);
         unknown.branch = None;
         let mut commits = vec![commit("a", 200)];
 

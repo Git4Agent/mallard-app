@@ -62,7 +62,6 @@ function localThread(threadId: string, title: string) {
     tool_call_count: 4,
     total_tokens: 1_200,
     metrics_complete: true,
-    commit_occurrence_count: 0,
   };
 }
 

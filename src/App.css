@@ -59,13 +59,12 @@
   --yellow: #fbbf24;
   --blue: #86bdfb;
   --purple: #a78bfa;
-  --thread-status-glyph: #fffaf1;
   --thread-status-synced: #31ae6b;
-  --thread-status-cloud: #e59b1b;
-  --thread-status-local: #4e5fe4;
+  --thread-status-cloud: #397dcc;
+  --thread-status-local: #16a7c9;
   --thread-status-divergent: #7655d6;
   --thread-status-forked: #9a45c5;
-  --thread-status-pending: #3784df;
+  --thread-status-pending: #e59b1b;
   --thread-status-conflict: #e44649;
   --thread-status-unavailable: #85878e;
   --font: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif;
@@ -2279,7 +2278,6 @@ summary:focus-visible {
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   padding: 8px 0;
-  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -9499,12 +9497,6 @@ div.storage-link-main {
   font-weight: 680;
 }
 
-.sync-history-uncommitted-reason {
-  margin: 0 0 8px;
-  color: var(--text-2);
-  font-size: 12px;
-}
-
 .sync-history-codex-heading {
   display: inline-flex;
   align-items: center;
@@ -10196,6 +10188,10 @@ div.storage-link-main {
   padding: 0 20px 8px;
 }
 
+.sync-inline-push-review .sync-sync-review-content {
+  padding-bottom: 2px;
+}
+
 .sync-sync-review-scroll {
   max-height: min(62vh, 720px);
   padding-bottom: 6px;
@@ -10240,8 +10236,8 @@ div.storage-link-main {
 }
 
 .sync-sync-review-footer {
-  min-height: 48px;
-  padding: 5px 20px;
+  min-height: 44px;
+  padding: 4px 20px;
   gap: 8px;
 }
 
@@ -10261,7 +10257,7 @@ div.storage-link-main {
   width: 100%;
   max-width: 900px;
   margin: 0;
-  padding: 14px 0 8px;
+  padding: 8px 0 2px;
   display: grid;
   gap: 0;
 }
@@ -10279,7 +10275,7 @@ div.storage-link-main {
 .sync-sync-review-summary > button,
 .sync-sync-review-other > summary {
   width: 100%;
-  min-height: 48px;
+  min-height: 44px;
   padding: 0 12px;
   display: flex;
   align-items: center;
@@ -10335,9 +10331,15 @@ div.storage-link-main {
 
 .sync-sync-review-derived svg { color: var(--green); }
 
+/* Top-aligned, not centered: once the body runs to two or three lines (the
+   pull-required copy routinely does), centering the icon and the action
+   against the full block height left both floating mid-paragraph with
+   visible dead space above and below — the "uneven spacing" look. Top
+   alignment pins them to the title's cap-height instead, the way the rest of
+   the app's icon+text rows work. */
 .sync-sync-review-blocker {
   margin: 10px 0 0;
-  align-items: center;
+  align-items: flex-start;
 }
 
 .sync-sync-review-blocker > span {
@@ -10350,9 +10352,53 @@ div.storage-link-main {
 
 .sync-sync-review-blocker .btn { margin-left: auto; }
 
+/* The lone action in a blocked-step callout is the only way forward on that
+   step, so it should read as a deliberate button, not the base .btn's
+   13px-padding default squeezed beside two or three lines of prose. Direct
+   children only, so the paired recovery buttons on remote-missing/replaced
+   (wrapped in .sync-sync-review-recovery-actions) keep their own compact,
+   side-by-side sizing. */
+.sync-sync-review-blocker > .btn {
+  margin-top: 1px;
+  padding: 0 20px;
+}
+
 .sync-sync-review-remote-missing > svg {
   flex: 0 0 auto;
   color: var(--yellow);
+}
+
+/* A destination waiting on a Pull is a step, not a failure: the push is
+   intact and one action clears it. It keeps the plain callout surface and
+   colours only its icon, the same way the remote-missing state does, so the
+   panel does not read as a second kind of alert — and it keeps the shared
+   icon | copy | action row, so the copy grows down the callout instead of
+   pushing the action onto a line of its own. */
+.sync-sync-review-pull-required > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--blue);
+}
+
+.sync-sync-review-pull-required {
+  margin: 6px 0 4px;
+  padding: 8px 10px;
+  gap: 10px;
+}
+
+.sync-sync-review-pull-action {
+  width: clamp(240px, 20vw, 320px);
+  min-width: 240px;
+  justify-content: center;
+}
+
+/* Lineage numbers ride along for support without competing with the sentence
+   that tells the reader what to do. The extra leading separates them from the
+   sentence rather than letting all three lines read as one dense block. */
+.sync-sync-review-blocker-detail {
+  margin-top: 3px;
+  color: var(--text-3);
+  font-size: 10px;
 }
 
 .sync-sync-review-recovery-actions {

@@ -6,12 +6,70 @@
  * behavior remain owned by the existing components.
  */
 
+/* Departure Mono ships a single weight. That is not the compromise it sounds
+   like: its regular already reads heavier and far cleaner at 9-14px than the
+   previous face did at 700, because every stem is one whole pixel wide and no
+   terminal is rounded. Weight is therefore not a hierarchy tool for the pixel
+   face — size and colour are. See --weight-* below. */
 @font-face {
-  font-family: "Pixelify Sans";
-  src: url("/fonts/PixelifySans-Variable.ttf") format("truetype-variations");
+  font-family: "Departure Mono";
+  src: url("/fonts/DepartureMono-Regular.woff2") format("woff2");
   font-style: normal;
-  font-weight: 400 700;
+  font-weight: 400;
   font-display: block;
+}
+
+/*
+ * Typography contract. Three faces, one rule each:
+ *
+ *   --font-pixel  static chrome labels drawn from a closed vocabulary
+ *   --font-sans   human-readable text that came out of the user's data, and prose
+ *   --font-mono   machine identifiers: shas, ids, paths, stamps, counts
+ *
+ * A mixed node keeps the face of its variable part and wraps the static half;
+ * where the string is assembled in TS or arrives through attr(), the whole node
+ * takes the clean face rather than the pixel one.
+ *
+ * The scale below is authoritative for every selector this theme styles. App.css
+ * still carries its own literal sizes, including fractional ones — those are
+ * legacy, not a second convention to follow.
+ *
+ * Faces and scale are not theme-dependent, so they sit outside the palette
+ * blocks that follow.
+ */
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+    "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Roboto Mono",
+    "Liberation Mono", Menlo, Consolas, monospace;
+  --font-pixel: "Departure Mono", var(--font-mono);
+  /* The name App.css was written against, where it meant "the default UI face".
+     Pointing it at the sans restores that reading; no new rule should use it. */
+  --font: var(--font-sans);
+
+  /* Whole pixels only. The pixel face is bitmap-derived, and any fractional
+     advance walks its blocks off the device grid. */
+  --type-3xs: 9px;
+  --type-2xs: 10px;
+  --type-xs: 11px;
+  --type-sm: 12px;
+  --type-md: 13px;
+  --type-lg: 14px;
+  --type-xl: 17px;
+  --type-2xl: 22px;
+  --type-3xl: 26px;
+
+  /* Four steps. The pixel face declares a 400-700 axis above and body sets
+     font-synthesis: none, so the 540/610/650/760/800 this theme used to carry
+     were never drawn distinctly — they read as noise, not hierarchy. */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --leading-flat: 1;
+  --leading-snug: 1.35;
+  --leading-prose: 1.5;
 }
 
 :root,
@@ -31,9 +89,15 @@
   --button-bg-hover: #232323;
   --button-bg-active: #303030;
   --button-border: #626262;
-  --button-primary-bg: #f2f2f2;
-  --button-primary-hover: #ffffff;
-  --button-primary-border: #ffffff;
+  /* Same construction as the light theme: the fill sits with the surrounding
+     surfaces rather than inverting against them, the strong border is what
+     makes it read as a button, and the label takes the body text colour.
+     Its own token rather than --primary-text — App.css also uses that one as a
+     background in three places, so it cannot follow the button's label. */
+  --button-primary-bg: #303030;
+  --button-primary-hover: #3b3b3b;
+  --button-primary-border: #707070;
+  --button-primary-text: #f5f5f2;
   --button-radius: 4px;
   --app-shell: #080808;
   --surface-card: #141414;
@@ -72,10 +136,6 @@
   --blue: #69c6f4;
   --purple: #c59bff;
   --focus-ring: var(--accent);
-  --font: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Roboto Mono",
-    "Liberation Mono", Menlo, Consolas, monospace;
-  --font-pixel: "Pixelify Sans", var(--font);
-  --font-mono: var(--font);
   --r-lg: 9px;
   --r: 6px;
   --r-sm: 4px;
@@ -89,6 +149,10 @@
   --retro-gutter: 3px;
   --retro-panel-radius: 10px;
   --retro-panel-radius-inner: 9px;
+  /* The chevron-down glyph from Icons.tsx, as a mask so it paints in
+     currentColor. Lets a control that cannot hold an <svg> child — a native
+     select — still draw the same arrow every other control in the app uses. */
+  --retro-chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M20 8v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-4v-1H9v-1H8v-1H7v-1H6v-1H5v-1H4V8h2v1h1v1h1v1h1v1h1v1h4v-1h1v-1h1v-1h1V9h1V8h2Z'/%3E%3C/svg%3E");
   /* A square with its four corner blocks removed — the pixel-art stand-in for
      a circle. Applied to any node that would otherwise be antialiased. */
   --retro-pixel-ring: polygon(
@@ -136,9 +200,14 @@
   --button-bg-hover: #f5eadf;
   --button-bg-active: #eee0d3;
   --button-border: #9d8b7f;
-  --button-primary-bg: #241c18;
-  --button-primary-hover: #17110e;
-  --button-primary-border: #17110e;
+  /* A warm beige fill rather than a dark block, so the primary control sits in
+     the same family as the cream surfaces. With so little contrast against the
+     card behind it, the strong border — not the fill — is what makes it read as
+     a button, and the label goes dark to stay legible. */
+  --button-primary-bg: #eee0d3;
+  --button-primary-hover: #e6d5c5;
+  --button-primary-border: #66574f;
+  --button-primary-text: #1e1817;
   --app-shell: #f6eee5;
   --surface-card: #fcf7f0;
   --surface-row: #fdf9f3;
@@ -198,7 +267,7 @@
    tracking pushes every advance off the grid, and geometricPrecision asks the
    rasteriser to skip grid-fitting entirely. Both are dropped. */
 body {
-  font-family: var(--font);
+  font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 400;
   line-height: 1.35;
@@ -209,19 +278,145 @@ body {
   font-synthesis: none;
 }
 
-/* The pixel face is drawn as hard blocks, so grayscale antialiasing only
-   rounds off the corners it was designed to have. */
+/* Every selector that speaks in the app's own voice, and nothing that carries a
+   value out of the user's data. One rule, so the face cannot drift away from
+   the properties that go with it. Nothing else in this file may declare
+   --font-pixel — there is a test that counts.
+
+   Rasterisation is deliberately left at the body's antialiased setting. The
+   previous face was drawn as hard blocks and wanted -webkit-font-smoothing:
+   none; this one does not. Disabling smoothing thresholds every edge, so any
+   partial pixel coverage rounds up to full ink and every stem gains weight —
+   which read as a permanently bold UI at 9-17px. */
 .btn,
 .sync-sidebar-brand strong,
 .sync-primary-nav button,
-.sidebar-nav-badge,
-.sync-primary-nav button > .sync-activity-badge,
 .sidebar-settings-sections .sidebar-section-title,
+.sync-draft-badge,
+.sync-eyebrow,
+.settings-section-title,
 .sync-project-combined-page .storage-link-sync,
 .sync-history-embedded-title,
-.sync-history-branch-trigger,
-.sync-history-section-heading h2 {
-  -webkit-font-smoothing: none;
+.sync-callout-label,
+.sync-sync-review-header h1,
+.sync-sync-review-header h2,
+.sync-history-section-heading h2,
+.sync-history-branch-state,
+.sync-history-continuity-copy > strong,
+.sync-sync-review-blocker > span > strong,
+.sync-sync-review-pull-holds > span > strong,
+.sync-sync-review-tabs > button,
+.sync-sync-review-state,
+.sync-modal-header h1,
+.log-panel-title,
+.log-type,
+.log-type-filter-key,
+.log-type-filter-value,
+.log-filter-control > span,
+.sync-log-storage-summary dt,
+.sync-log-policy-fields label > span {
+  font-family: var(--font-pixel);
+  /* One weight exists, and synthesis is off, so asking for anything heavier
+     here would be a declaration that quietly does nothing. Pixel hierarchy is
+     size and colour. */
+  font-weight: var(--weight-regular);
+  font-synthesis: none;
+  letter-spacing: 0;
+}
+
+/* Sizes and tracking for the chrome labels that App.css left on fractional
+   values. Uppercase micro-labels keep their air with whole-pixel tracking. */
+.sync-eyebrow,
+.sync-draft-badge,
+.sync-sync-review-state {
+  font-size: var(--type-3xs);
+  letter-spacing: 1px;
+}
+
+.settings-section-title {
+  font-size: var(--type-xl);
+}
+
+.sync-sync-review-tabs > button {
+  font-size: var(--type-md);
+}
+
+/* The review header names the page in the app's own voice, and the tabs directly
+   under it already speak in the pixel face — leaving the title in the sans split
+   one control across two voices. App.css also asked for 650, which this face
+   never drew apart from 600. */
+.sync-sync-review-header h1,
+.sync-sync-review-header h2 {
+  font-size: var(--type-lg);
+}
+
+/* The line under it is a sentence, and 10.5px is on no step of the scale. */
+.sync-sync-review-header p {
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+  line-height: var(--leading-prose);
+}
+
+/* The number on the recommend button is a count, not a label: it holds its
+   width as the selection changes rather than reflowing the button. */
+.sync-sync-review-icon-action > span {
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-sync-review-tabs > button > small {
+  font-family: var(--font-mono);
+  font-size: var(--type-3xs);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The lineage line under a blocked destination is figures, not a sentence:
+   it holds its width in the mono face while the sentence above it stays in
+   the clean one. App.css left it on a literal 10px. */
+.sync-sync-review-blocker-detail {
+  font-family: var(--font-mono);
+  font-size: var(--type-3xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Recovery copy is prose, not chrome. Keep it in the clean reading face even
+   though the surrounding review controls use the pixel label face. */
+.sync-sync-review-pull-required > span {
+  font-family: var(--font-sans);
+  font-size: var(--type-sm);
+  line-height: var(--leading-prose);
+}
+
+.sync-sync-review-pull-required > span > strong {
+  font-family: var(--font-sans);
+  font-size: var(--type-md);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
+  letter-spacing: 0;
+}
+
+/* Sentences the app wrote are still sentences: they read in the clean face at
+   prose leading, not in blocks. */
+.profile-links-subtitle,
+.sync-empty-state p,
+.sync-empty-state > span,
+.sync-pane-message,
+.sync-backend-banner span,
+.sync-callout,
+.sync-modal-footer span {
+  font-family: var(--font-sans);
+  line-height: var(--leading-prose);
+}
+
+/* Counts glued into an English phrase keep the surrounding face and only ask
+   for figures that hold their width. */
+.profile-links-counts {
+  font-family: var(--font-sans);
+  font-size: var(--type-md);
+  font-variant-numeric: tabular-nums;
 }
 
 button,
@@ -326,8 +521,8 @@ summary {
   border-radius: var(--button-radius);
   background: var(--button-bg);
   box-shadow: none;
-  font-family: var(--font-pixel);
-  font-weight: 600;
+  font-size: var(--type-sm);
+  line-height: var(--leading-flat);
   transition:
     color 90ms steps(2, end),
     background 90ms steps(2, end),
@@ -349,7 +544,7 @@ summary {
 .sync-app .btn-primary {
   border-color: var(--button-primary-border);
   background: var(--button-primary-bg);
-  color: var(--primary-text);
+  color: var(--button-primary-text);
 }
 
 .btn.btn-primary:hover:not(:disabled),
@@ -364,6 +559,24 @@ summary {
 .sync-app summary:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
+}
+
+/* Checked reads as a marked box, not a filled one. The base style inverts to a
+   solid --text-0 square, which stamps a hard dark block into every selected row
+   — the heaviest thing on the page, for the smallest control on it. Keeping the
+   box transparent and drawing the tick in the text colour says the same thing
+   at the weight the control deserves. */
+.sync-sync-row-choice input:checked,
+.sync-sync-review-workspace .sync-resource-select input:checked,
+.sync-sync-review-workspace .sync-pull-item-select input:checked {
+  border-color: var(--border-strong);
+  background: transparent;
+}
+
+.sync-sync-row-choice input:checked::before,
+.sync-sync-review-workspace .sync-resource-select input:checked::before,
+.sync-sync-review-workspace .sync-pull-item-select input:checked::before {
+  background: var(--text-0);
 }
 
 .sync-app input:not([type="checkbox"]):not([type="radio"]),
@@ -436,20 +649,27 @@ summary {
   padding: 0 22px;
 }
 
+/* 40, not 42: the mark is a 20-unit grid, so an even multiple puts every cell on
+   exactly 2 device pixels. At 42 the cells alternate 2px and 3px and the
+   silhouette picks up the ragged edge the pixel art exists to avoid. The narrow
+   breakpoints used to drop this to 38px, which has the same problem for the
+   sake of two pixels, so they no longer override it. */
 .sync-brand-logo {
-  width: 42px;
-  height: 42px;
+  width: 40px;
+  height: 40px;
   flex: 0 0 auto;
   object-fit: contain;
 }
 
-.sync-brand-logo,
-.sync-sidebar-product-mark img {
-  image-rendering: pixelated;
-}
-
+/* Every mark is now the same 20-unit vector, and an SVG rasterises itself at
+   its layout size — shape-rendering: crispEdges inside the file is what keeps
+   the cells square. image-rendering only governs bitmap scaling, so the
+   pixelated/auto split these marks used to need no longer applies to any of
+   them. What still matters is the size: whole multiples of 20 only, which is
+   set on each mark's own rule below. */
 .sync-startup-mark img {
-  image-rendering: auto;
+  width: 40px;
+  height: 40px;
 }
 
 :root[data-theme="dark"] .sync-brand-logo,
@@ -458,12 +678,12 @@ summary {
   filter: brightness(0) invert(1);
 }
 
+/* The sidebar carries the app's voice, and the pixel face reads thin at its
+   lighter weights — wordmark, nav, and section titles all sit at the top of
+   the axis so the rail holds together as one block. */
 .sync-sidebar-brand strong {
-  font-family: var(--font-pixel);
   color: var(--text-0);
-  font-size: 26px;
-  font-weight: 500;
-  letter-spacing: 0;
+  font-size: var(--type-3xl);
 }
 
 .sync-primary-nav {
@@ -480,15 +700,13 @@ summary {
 }
 
 .sync-primary-nav button {
-  font-family: var(--font-pixel);
   height: 45px;
   gap: 12px;
   padding: 0 13px;
   border: 1px solid transparent;
   border-radius: 5px;
   color: var(--text-0);
-  font-size: 16px;
-  font-weight: 500;
+  font-size: var(--type-lg);
 }
 
 .sync-primary-nav button > svg {
@@ -507,6 +725,8 @@ summary {
   box-shadow: none;
 }
 
+/* The badge holds a count, not a label, so it reads in the identifier face —
+   and tabular figures keep it from resizing as the number climbs. */
 .sidebar-nav-badge,
 .sync-primary-nav button > .sync-activity-badge {
   min-width: 28px;
@@ -515,7 +735,11 @@ summary {
   border-radius: 3px;
   background: var(--surface-card);
   color: var(--accent);
-  font-family: var(--font-pixel);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--leading-flat);
 }
 
 .sync-sidebar-sections {
@@ -538,10 +762,8 @@ summary {
 }
 
 .sidebar-settings-sections .sidebar-section-title {
-  font-family: var(--font-pixel);
   color: var(--accent);
-  font-size: 13px;
-  font-weight: 500;
+  font-size: var(--type-md);
   /* Whole pixels, so the uppercase label keeps its air without drifting the
      glyphs off the grid the way 0.04em (half a pixel) did. */
   letter-spacing: 1px;
@@ -587,10 +809,10 @@ summary {
 }
 
 .sidebar-profile-main span {
-  font-family: var(--font);
+  font-family: var(--font-sans);
   color: currentColor;
-  font-size: 13px;
-  font-weight: 500;
+  font-size: var(--type-md);
+  font-weight: var(--weight-medium);
 }
 
 .sidebar-profile-main svg {
@@ -709,9 +931,9 @@ summary {
 }
 
 .sync-titlebar-context strong {
-  font-family: var(--font);
-  font-size: 14px;
-  font-weight: 600;
+  font-family: var(--font-sans);
+  font-size: var(--type-lg);
+  font-weight: var(--weight-semibold);
   letter-spacing: 0;
 }
 
@@ -761,12 +983,13 @@ summary {
   background: var(--bg-1);
   color: var(--text-2);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .sync-sidebar-product-mark img {
-  width: 25px;
-  height: 25px;
+  width: 20px;
+  height: 20px;
   object-fit: contain;
 }
 
@@ -793,9 +1016,9 @@ summary {
 }
 
 .sync-project-heading-name h1 {
-  font-family: var(--font);
-  font-size: 22px;
-  font-weight: 650;
+  font-family: var(--font-sans);
+  font-size: var(--type-2xl);
+  font-weight: var(--weight-semibold);
   letter-spacing: 0;
 }
 
@@ -805,10 +1028,17 @@ summary {
   color: var(--accent);
 }
 
+/* Longhands rather than the font: shorthand. The shorthand resets six other
+   font properties to initial — which is why the grid-fitting trio has to be
+   re-stated under each one — and with var() a single bad token invalidates
+   family, size, and weight together instead of one at a time. */
 .sync-project-heading-meta {
   gap: 0;
   color: var(--text-2);
-  font: 400 13px/18px var(--font);
+  font-family: var(--font-sans);
+  font-size: var(--type-md);
+  font-weight: var(--weight-regular);
+  line-height: 18px;
   font-kerning: none;
   font-synthesis: none;
   font-variant-ligatures: none;
@@ -819,7 +1049,10 @@ summary {
 .sync-project-heading-meta-item {
   position: relative;
   color: inherit;
-  font: 400 13px/18px var(--font);
+  font-family: var(--font-sans);
+  font-size: var(--type-md);
+  font-weight: var(--weight-regular);
+  line-height: 18px;
   font-kerning: none;
   font-synthesis: none;
   font-variant-ligatures: none;
@@ -846,11 +1079,22 @@ summary {
 .sync-project-heading-meta-item > span {
   display: block;
   color: inherit;
-  font: 400 13px/18px var(--font);
+  font-family: var(--font-sans);
+  font-size: var(--type-md);
+  font-weight: var(--weight-regular);
+  line-height: 18px;
   font-kerning: none;
   font-synthesis: none;
   font-variant-ligatures: none;
   letter-spacing: 0;
+}
+
+/* The repository and agent names are display names; the root is a path you
+   would copy. Same strip, two categories. Ordered after the rule above because
+   both are (0,2,0) and source order is what decides. */
+.sync-project-heading-path > span {
+  font-family: var(--font-mono);
+  font-size: var(--type-sm);
 }
 
 .sync-project-heading-meta-item + .sync-project-heading-meta-item {
@@ -911,15 +1155,30 @@ summary {
 }
 
 .sync-project-combined-page .storage-link-copy strong {
-  font-family: var(--font);
+  font-family: var(--font-sans);
   color: var(--text-0);
-  font-size: 13px;
-  font-weight: 650;
+  font-size: var(--type-md);
+  font-weight: var(--weight-semibold);
 }
 
 .sync-project-combined-page .storage-link-copy span {
   color: var(--text-2);
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+}
+
+/* The subtitle is a path for a local storage and a phrase for the rest, so the
+   component tags which one it handed us rather than the CSS guessing. */
+.sync-project-combined-page .storage-link-copy .storage-link-meta > span.is-path {
+  font-family: var(--font-mono);
+}
+
+/* "· 1 linked" is a numeral inside an English phrase, not a column — it keeps
+   the surrounding face and only asks for figures that hold their width. */
+.sync-project-combined-page .storage-link-copy .storage-link-meta > small {
+  font-family: var(--font-sans);
+  font-size: var(--type-3xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .sync-project-combined-page .storage-link-more {
@@ -943,7 +1202,6 @@ summary {
 }
 
 .sync-project-combined-page .storage-link-sync {
-  font-family: var(--font-pixel);
   min-height: 34px;
   padding: 0 13px;
   border: 1px solid var(--button-border);
@@ -951,8 +1209,22 @@ summary {
   background: var(--button-bg);
   box-shadow: none;
   color: var(--text-0);
-  font-size: 15px;
-  font-weight: 500;
+  font-size: var(--type-lg);
+  line-height: var(--leading-flat);
+}
+
+/* A byte readout is a measurement, not a label — it holds its width while the
+   pixel word beside it keeps speaking in the app's voice. */
+.sync-project-combined-page .storage-link-sync .sync-btn-readout,
+.btn .sync-btn-readout {
+  font-family: var(--font-mono);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.btn .sync-btn-name {
+  font-family: var(--font-sans);
+  font-weight: var(--weight-medium);
 }
 
 .sync-project-combined-page .storage-link-sync + .storage-link-sync {
@@ -1004,11 +1276,8 @@ summary {
 }
 
 .sync-history-embedded-title {
-  font-family: var(--font-pixel);
   color: var(--text-0);
-  font-size: 17px;
-  font-weight: 500;
-  letter-spacing: 0;
+  font-size: var(--type-xl);
 }
 
 .sync-history-embedded-title > svg {
@@ -1041,18 +1310,33 @@ summary {
 }
 
 /* The branch name is the control. No frame and no reserved width — it is plain
-   text that only picks up a hover wash, so the toolbar reads as one line. */
+   text that only picks up a hover wash, so the toolbar reads as one line.
+
+   The button holds no text of its own: the name and the state pill are both
+   wrapped, so each picks its own face rather than inheriting one from here. */
+/* The mark, the name, and the chevron read as one control. The select's flex
+   gap and the trigger's own left padding were stacking into 12px between the
+   mark and the name, which broke it into three loose pieces. */
+.sync-history-branch-select {
+  gap: 2px;
+}
+
 .sync-history-branch-trigger {
-  font-family: var(--font-pixel);
   min-width: 0;
   height: 30px;
-  padding: 0 4px 0 6px;
+  gap: 4px;
+  padding: 0 4px;
   border: 0;
   border-radius: 4px;
   background: transparent;
   color: var(--text-0);
-  font-size: 14px;
-  font-weight: 500;
+}
+
+/* A branch name is an identifier: it gets typed, copied, and compared. */
+.sync-history-branch-name {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-semibold);
 }
 
 .sync-history-branch-trigger:hover:not(:disabled) {
@@ -1094,17 +1378,21 @@ summary {
    0.02em (a quarter pixel) both land glyph origins between pixels and smudge
    the blocks no matter what the smoothing setting is. */
 .sync-history-section-heading h2 {
-  font-family: var(--font-pixel);
-  font-size: 13px;
-  font-weight: 500;
-  letter-spacing: 0;
+  font-size: var(--type-md);
 }
 
 /* The pixel face is for chrome. A name that came out of the user's data reads
-   in the normal face even when a pixel-font label wraps it. */
+   in the normal face even when a pixel-font label wraps it. Ordered after the
+   heading so the carve-out wins on source order as well as specificity. */
 .sync-history-section-heading h2 .sync-history-storage-name {
-  font-family: var(--font);
-  font-weight: 600;
+  font-family: var(--font-sans);
+  font-weight: var(--weight-semibold);
+}
+
+/* The storage lens names a storage, so it is data too. */
+.sync-history-storage-lens > span {
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
 }
 
 /* The storage-only section is a sibling of the timeline, so it does not inherit
@@ -1200,13 +1488,24 @@ summary {
 .sync-history-uncommitted .sync-history-section-heading {
   min-height: 38px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--sync-history-row-actions-column);
-  grid-template-areas: "title count";
+  grid-template-columns: minmax(0, 1fr) var(--sync-history-commit-actions-column);
+  grid-template-areas: "title actions";
   align-items: center;
   gap: var(--sync-history-row-column-gap);
   margin: 0;
   padding: 4px 12px;
   border-bottom: 1px solid var(--border-mid);
+}
+
+/* Group folds sit in the same actions column as the commit folds, at the same
+   width, so every chevron in the timeline lines up on one edge. */
+.sync-history-group-toggle {
+  grid-area: actions;
+  justify-self: end;
+}
+
+.sync-history-uncommitted.collapsed .sync-history-section-heading {
+  border-bottom: 0;
 }
 
 .sync-history-uncommitted .sync-history-section-heading h2 {
@@ -1222,11 +1521,6 @@ summary {
   height: var(--sync-history-row-icon-size);
   flex: 0 0 var(--sync-history-row-icon-size);
   color: var(--text-2);
-}
-
-.sync-history-uncommitted .sync-history-section-heading .sync-history-heading-count {
-  grid-area: count;
-  justify-self: end;
 }
 
 .sync-history-uncommitted .sync-history-thread-list.flat {
@@ -1245,8 +1539,14 @@ summary {
   border-top: 1px solid var(--border-mid);
 }
 
+/* `isolation` keeps the rail's own node and line stacking self-contained, but
+   it also caps everything inside it — including the debug popover's z-index: 60
+   — at the rail's own level in the timeline. With no z-index the rail sat at 0,
+   so the uncommitted section's status badges (z-index 3) painted straight
+   through an open popover. Rank the rail above them and the node marker (4). */
 .sync-history-commit-rail {
   isolation: isolate;
+  z-index: 5;
   gap: 0;
 }
 
@@ -1426,7 +1726,6 @@ summary {
 
 .sync-history-commit-icon > svg,
 .sync-history-thread-kind > svg,
-.sync-history-thread-title > .sync-thread-sync-indicator > svg,
 .sync-history-thread-title > .sync-thread-sync-error > svg,
 .sync-history-thread-meta > span > svg,
 .sync-history-debug-trigger > svg,
@@ -1435,12 +1734,14 @@ summary {
   height: 12px;
 }
 
-/* The badge draws with crispEdges, so it never blurs at any scale — but a size
-   that is not a whole multiple of the 24-unit art makes its 1-unit steps land
-   on 1 device pixel in places and 2 in others, which shows as a ragged coin
-   edge. 12px and 24px are the even ones; 24px overflowed the 18px icon slot
-   and outweighed the 12.5px title, so the badge sits on the shared 12px rule
-   with every other row glyph. */
+/* The badge fills the shared row-icon slot. Note that slot is 18px, which is
+   0.75 of the 24-unit art: the 1-unit steps land on a whole device pixel in
+   some places and nothing in others, so the coin edge reads as dashed rather
+   than solid. Only whole ratios (12px, 24px, 48px) render the ring cleanly. */
+.sync-history-thread-title > .sync-thread-sync-indicator > svg {
+  width: var(--sync-history-row-icon-size);
+  height: var(--sync-history-row-icon-size);
+}
 
 .sync-history-thread-kind {
   color: var(--text-2);
@@ -1453,16 +1754,20 @@ summary {
   overflow: hidden;
   flex: 1;
   color: var(--text-0);
-  font: 600 12.5px/1.35 var(--font);
+  font-family: var(--font-sans);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
   letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* The subject is the row's headline: one step heavier than the session titles
-   nested underneath it, and free to use every pixel the metadata does not. */
+/* The subject is the row's headline: one size step above the session titles
+   nested underneath it, and free to use every pixel the metadata does not.
+   The step used to be weight as well, but 650 and 600 were never drawn apart. */
 .sync-history-commit-title > strong {
-  font: 650 13px/1.35 var(--font);
+  font-size: var(--type-md);
 }
 
 .sync-history-commit-meta,
@@ -1487,7 +1792,11 @@ summary {
   overflow: hidden;
   flex: 0 1 auto;
   color: var(--text-2);
-  font: 500 11.5px/1.35 var(--font);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-snug);
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0;
   text-align: right;
   text-overflow: ellipsis;
@@ -1513,7 +1822,10 @@ summary {
   border-radius: 3px;
   background: var(--surface-subtle);
   color: var(--text-2);
-  font: 500 11.5px/1.35 var(--font-mono);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-snug);
   letter-spacing: 0;
   text-align: center;
 }
@@ -1687,7 +1999,10 @@ summary {
      must escape the frame. The rows are transparent, so the group's own
      rounded background is what shows at the corners. */
   overflow: visible;
-  margin: 0 0 10px;
+  /* Top margin so the frame clears the tab strip above it rather than butting
+     into it — the group reads as its own block, not a continuation of the
+     chrome. Matched below so stacked groups sit evenly. */
+  margin: 12px 0;
   border: 1px solid var(--border-mid);
   border-radius: 4px;
   background: var(--surface-row);
@@ -1696,13 +2011,19 @@ summary {
 .sync-history-storage-only .sync-history-section-heading {
   min-height: 38px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas: "title count";
+  grid-template-columns: minmax(0, 1fr) var(--sync-history-commit-actions-column);
+  grid-template-areas: "title actions";
   align-items: center;
   gap: var(--sync-history-row-column-gap);
   margin: 0;
   padding: 4px 12px;
   border-bottom: 1px solid var(--border-mid);
+}
+
+/* Folded, the heading is the whole group — its bottom rule would draw a hairline
+   with nothing under it. */
+.sync-history-storage-only.collapsed .sync-history-section-heading {
+  border-bottom: 0;
 }
 
 .sync-history-storage-only .sync-history-section-heading h2 {
@@ -1718,11 +2039,6 @@ summary {
   height: var(--sync-history-row-icon-size);
   flex: 0 0 var(--sync-history-row-icon-size);
   color: var(--text-2);
-}
-
-.sync-history-storage-only .sync-history-section-heading .sync-history-heading-count {
-  grid-area: count;
-  justify-self: end;
 }
 
 .sync-history-storage-only .sync-history-thread-list.flat {
@@ -1742,10 +2058,15 @@ summary {
   border-top: 1px solid var(--border-mid);
 }
 
+/* "On this Mac · In {storage}" is one phrase assembled in TS, so it cannot be
+   split by face — it reads as prose. */
 .sync-history-stored-thread-location {
   overflow: hidden;
   color: var(--text-3);
-  font: 400 11.5px/1.35 var(--font);
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-snug);
   letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1764,7 +2085,11 @@ summary {
 
 .sync-history-stored-thread-meta > time {
   color: var(--text-2);
-  font: 500 11.5px/1.35 var(--font);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-snug);
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0;
   white-space: nowrap;
 }
@@ -1777,14 +2102,17 @@ summary {
   border-radius: 3px;
   background: var(--surface-subtle);
   color: var(--text-2);
-  font: 500 11.5px/1.35 var(--font-mono);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-snug);
   letter-spacing: 0;
   text-align: center;
 }
 
 .sync-history-thread-meta {
   gap: 4px 10px;
-  font-size: 11.5px;
+  font-size: var(--type-xs);
 }
 
 /* The range wrapper made the two time spans grandchildren, so they also need
@@ -1808,8 +2136,47 @@ summary {
 
 .sync-history-thread-time time {
   color: var(--text-2);
-  font-size: 11.5px;
-  font-weight: 500;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Counts and metrics form columns down the list, so they read as identifiers
+   and hold their width as the numbers change. */
+.sync-history-thread-meta b,
+.sync-history-heading-count,
+.sync-thread-sync-summary > span {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The context strip is mostly paths; the repository name beside them is not. */
+.sync-history-context-item > span {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+.sync-history-context-item > .sync-history-context-name {
+  font-family: var(--font-sans);
+}
+
+/* Sentences read in the clean face even when the app wrote them. */
+.sync-history-state,
+.sync-history-continuity-copy > span,
+.sync-history-detail-state {
+  font-family: var(--font-sans);
+  line-height: var(--leading-prose);
+}
+
+/* Built as one string in TS and delivered through content: attr(), so it can
+   only ever carry one face. It is a descriptive phrase, so it takes the sans. */
+.sync-history-thread-metric::after {
+  font-family: var(--font-sans);
+  font-size: var(--type-2xs);
+  font-variant-numeric: tabular-nums;
 }
 
 /* The metric row spans the card so the stamp has room to reach the far edge;
@@ -1947,7 +2314,7 @@ summary {
   }
 
   .sync-history-uncommitted .sync-history-section-heading {
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) var(--sync-history-commit-actions-column);
   }
 
   .sync-history-thread-card {
@@ -1962,7 +2329,7 @@ summary {
   }
 
   .sync-history-uncommitted .sync-history-section-heading {
-    grid-template-areas: "title meta count";
+    grid-template-areas: "title actions";
   }
 
   .sync-history-commit-meta {
@@ -2102,6 +2469,24 @@ summary {
 .conversation-path-repair-notice {
   border-radius: 4px;
   box-shadow: none;
+}
+
+/* App.css leaves this at 11.5px, a fractional legacy size that is on no step of
+   the scale. The node keeps the clean face because it carries a thread title the
+   user named; the fixed phrase around it is wrapped in .sync-callout-label and
+   takes the pixel face with the rest of the app's own voice. */
+.sync-callout {
+  font-size: var(--type-sm);
+}
+
+/* The quoted half names the same object the row headlines name, so it is set
+   like one rather than like the sentence carrying it. Longhands and a literal
+   size: it should follow the thread titles if the callout's own size moves. */
+.sync-callout-title {
+  font-family: var(--font-sans);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-0);
 }
 
 .sync-callout.error {
@@ -2252,15 +2637,59 @@ summary {
   background: var(--surface-footer);
 }
 
+/* A log line is a container of three categories, not one: a stamp, a type
+   label, and a message. Each child picks its own face. */
 .log-line,
 .log-entry {
   border-bottom-color: var(--border);
-  font-family: var(--font-mono);
 }
 
 .log-line:hover,
 .log-entry:hover {
   background: var(--surface-row-hover);
+}
+
+.log-ts {
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.log-type {
+  font-size: var(--type-3xs);
+  letter-spacing: 1px;
+}
+
+.log-msg {
+  font-family: var(--font-sans);
+  font-size: var(--type-sm);
+  line-height: var(--leading-snug);
+}
+
+/* A sentence that ends in a backend error is still a sentence. */
+.log-empty,
+.log-empty.log-load-error {
+  font-family: var(--font-sans);
+  font-size: var(--type-sm);
+  line-height: var(--leading-prose);
+}
+
+.log-panel-title {
+  font-size: var(--type-xs);
+  letter-spacing: 1px;
+}
+
+.log-type-filter-key,
+.log-filter-control > span,
+.log-type-filter-value {
+  font-size: var(--type-2xs);
+}
+
+/* Anything that can hold what you typed reads in the clean face, placeholder
+   included — a control must not change face as you type into it. */
+.log-search-control input {
+  font-family: var(--font-sans);
+  font-size: var(--type-2xs);
 }
 
 .sync-modal-backdrop {
@@ -2286,9 +2715,114 @@ summary {
   background: var(--surface-subtle);
 }
 
+/* 0.02em is a quarter pixel at this size — the same off-grid tracking the
+   section headings had to drop. 800 was outside the face's 400-700 axis. */
 .sync-modal-header h1 {
-  font-weight: 800;
-  letter-spacing: 0.02em;
+  font-size: var(--type-2xl);
+}
+
+.sync-modal-header p {
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+  line-height: var(--leading-prose);
+}
+
+/* A path inside a sentence is still a path. Tight side padding so the chip does
+   not push the sentence's full stop away from it. */
+.sync-modal-header p code {
+  padding: 1px 3px;
+  margin-right: -1px;
+  border-radius: 3px;
+  background: var(--chip-bg);
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+}
+
+/* Log manager
+   ---------------------------------------------------------------------------
+   The two policy controls were the last native macOS widgets in the app: a
+   platform select paints its own rounded stepper, which no amount of border
+   and background styling reaches. They are rebuilt here as ordinary boxes with
+   the app's own pixel chevron, so the dialog stops mixing two design languages.
+*/
+
+.sync-log-storage-summary {
+  padding: 2px 0 4px;
+  border-bottom-color: var(--border-mid);
+  gap: 16px;
+}
+
+/* Measured values are identifiers: they get the figure face, and tabular
+   figures so the three columns hold still while a cleanup runs. */
+.sync-log-storage-summary dd {
+  font-family: var(--font-mono);
+  font-size: var(--type-lg);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 0.04em is a third of a pixel at 9px. */
+.sync-log-storage-summary dt {
+  font-size: var(--type-3xs);
+  font-weight: var(--weight-regular);
+  letter-spacing: 1px;
+}
+
+.sync-log-policy-fields {
+  gap: 16px;
+}
+
+.sync-log-policy-fields label {
+  position: relative;
+  gap: 7px;
+}
+
+/* The field name speaks in the app's voice, like every other chrome label; the
+   face itself comes from the single pixel rule near the top of this file. */
+.sync-log-policy-fields label > span {
+  font-size: var(--type-2xs);
+  color: var(--text-2);
+}
+
+.sync-log-policy-fields select {
+  appearance: none;
+  min-height: 32px;
+  padding: 0 30px 0 10px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--type-sm);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+/* The app's own chevron-down geometry, masked so it takes currentColor and
+   therefore follows the theme instead of needing a second dark-mode asset. */
+.sync-log-policy-fields label::after {
+  content: "";
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 12px;
+  height: 12px;
+  background: currentColor;
+  color: var(--text-3);
+  pointer-events: none;
+  -webkit-mask: var(--retro-chevron-down) center / 12px 12px no-repeat;
+  mask: var(--retro-chevron-down) center / 12px 12px no-repeat;
+}
+
+.sync-log-policy-fields label:has(select:disabled)::after {
+  opacity: 0.4;
+}
+
+.sync-log-cleanup-actions {
+  gap: 8px;
+}
+
+.sync-log-manager-notice {
+  font-family: var(--font-sans);
+  line-height: var(--leading-prose);
 }
 
 .sync-notice,
@@ -2310,7 +2844,7 @@ summary {
 
 .sync-startup-screen,
 .sync-host-recovery {
-  font-family: var(--font);
+  font-family: var(--font-sans);
   background:
     linear-gradient(var(--retro-grid) 1px, transparent 1px),
     linear-gradient(90deg, var(--retro-grid) 1px, transparent 1px),
@@ -2330,8 +2864,8 @@ summary {
 }
 
 .sync-startup-brand h1 {
-  font-weight: 800;
-  letter-spacing: 0.045em;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0;
 }
 
 .sync-startup-progress-track {
@@ -2383,11 +2917,6 @@ summary {
     padding-left: 14px;
   }
 
-  .sync-brand-logo {
-    width: 38px;
-    height: 38px;
-  }
-
   .sync-sidebar-brand strong {
     font-size: 23px;
   }
@@ -2414,11 +2943,6 @@ summary {
   .sync-sidebar-brand {
     height: 60px;
     flex-basis: 60px;
-  }
-
-  .sync-brand-logo {
-    width: 38px;
-    height: 38px;
   }
 
   .sync-titlebar-context {

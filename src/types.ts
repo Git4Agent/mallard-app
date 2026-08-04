@@ -910,7 +910,6 @@ export interface CodexThreadSummary {
   tool_call_count: number;
   total_tokens?: number | null;
   metrics_complete: boolean;
-  commit_occurrence_count: number;
 }
 
 export interface CommitThreadReference {
@@ -1074,7 +1073,6 @@ export interface GitHistoryPage {
   github_repository_url?: string | null;
   next_cursor?: string | null;
   unique_thread_count: number;
-  reference_count: number;
 }
 
 export interface UnmappedThreadReference {

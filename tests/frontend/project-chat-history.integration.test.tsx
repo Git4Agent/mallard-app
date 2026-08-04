@@ -48,7 +48,6 @@ const history = {
     tool_call_count: 8,
     total_tokens: 24800,
     metrics_complete: true,
-    commit_occurrence_count: 2,
   }],
   git: {
     selected_branch: "main",
@@ -62,7 +61,6 @@ const history = {
       thread_refs: [{ thread_id: "019f7798-5437-7632-9dbc-5b589cf68bf0" }],
     }],
     unique_thread_count: 1,
-    reference_count: 1,
     next_cursor: null,
   },
   unmapped: [],
@@ -256,39 +254,41 @@ test("thread indicators use the quiet desktop sync vocabulary", () => {
   assert.match(css, /\.sync-thread-sync-error \{ color: var\(--thread-status-conflict\); \}/);
 });
 
-test("thread status badges use the filled Default 24px pixel family", () => {
+test("thread status badges use the outlined Default 24px pixel family", () => {
+  const badge = "M9 1h6v1h3v1h1v1h1v1h1v1h1v3h1v6h-1v3h-1v1h-1v1h-1v1h-1v1h-3v1h-6v-1h-3v-1h-1v-1h-1v-1h-1v-1h-1v-3h-1v-6h1v-3h1v-1h1v-1h1v-1h1v-1h3ZM11 2v1h-3v1h-2v1h-1v1h-1v2h-1v3h-1v2h1v3h1v2h1v1h1v1h2v1h3v1h2v-1h3v-1h2v-1h1v-1h1v-2h1v-3h1v-2h-1v-3h-1v-2h-1v-1h-1v-1h-2v-1h-3v-1Z";
   const expected: Record<ThreadStatusIconName, { color: string; glyph: string }> = {
     synced: {
       color: "#31ae6b",
-      glyph: "M18 7H19V9H18V10H17V11H16V12H15V14H14V15H13V16H12V17H11V18H10V17H9V16H8V15H7V14H6V12H8V13H9V14H10V15H11V16H12V15H13V14H14V13H15V11H16V10H17V8H18Z",
+      glyph: "M16 9h2v2h-1v1h-1v2h-1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h-1v-2h2v1h1v1h2v-1h1v-2h1v-1h1Z",
     },
     "cloud-outstanding": {
-      color: "#e59b1b",
-      glyph: "M11 6H14V13H18L12 18L6 13H11Z",
+      color: "#397dcc",
+      glyph: "M9 7h5v1h-5ZM9 8v2h-1v-2ZM14 8h1v2h-1ZM8 10v1h-2v-1ZM15 10h2v1h-2ZM6 11v3h-1v-3ZM17 11h1v5h-12v-2h1v1h10Z",
     },
     "local-outstanding": {
-      color: "#4e5fe4",
-      glyph: "M11 18H14V11H18L12 6L6 11H11Z",
+      color: "#16a7c9",
+      glyph: "M11 8h3v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v7h-2v-6h-1v1h-2v-2h1v-1h1v-1h1Z",
     },
     divergent: {
       color: "#7655d6",
-      glyph: "M6 12L10 8V11H15V13H10V16Z",
+      glyph: "M6 6h4v5h1v1h1v2h1v-1h1v-2h1v-1h-1v-4h4v4h-1v2h-1v2h-1v1h-1v1h-1v2h-2v-3h-1v-2h-1v-1h-1v-2h-2ZM7 7v2h2v-2ZM15 7v2h2v-2Z",
     },
+    // forked deliberately reuses the synced check; only the colour differs
     "divergent-forked": {
       color: "#9a45c5",
-      glyph: "M6 6H9V9H10V10H11V12H14V10H15V9H16V6H19V9H18V10H17V12H15V14H14V20H11V14H10V12H8V10H7V9H6Z",
+      glyph: "M16 9h2v2h-1v1h-1v2h-1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h-1v-2h2v1h1v1h2v-1h1v-2h1v-1h1Z",
     },
     pending: {
-      color: "#3784df",
-      glyph: "M11 6H14V12H18V15H11Z",
+      color: "#e59b1b",
+      glyph: "M11 7h2v5h4v2h-6Z",
     },
     conflict: {
       color: "#e44649",
-      glyph: "M10 5H14V14H10ZM10 17H14V21H10Z",
+      glyph: "M11 6h3v9h-3ZM11 16h3v3h-3Z",
     },
     unavailable: {
       color: "#85878e",
-      glyph: "M7 18L18 7",
+      glyph: "M7 11h10v3h-10Z",
     },
   };
   const statuses = Object.keys(expected) as ThreadStatusIconName[];
@@ -297,20 +297,21 @@ test("thread status badges use the filled Default 24px pixel family", () => {
     const html = renderToStaticMarkup(<ThreadStatusIcon status={status} />);
     assert.match(html, new RegExp(`data-thread-status="${status}"`));
     assert.match(html, /thread-status-icon-badge/);
-    assert.match(html, /M8 2H16V3H18V4H19V5H20V6H21V8H22V16H21V18H20V19H19V20H18V21H16V22H8V21H6V20H5V19H4V18H3V16H2V8H3V6H4V5H5V4H6V3H8Z/);
-    assert.ok(html.includes(expected[status].glyph));
+    assert.ok(html.includes(badge), `${status} must use the shared ring badge`);
+    assert.ok(html.includes(expected[status].glyph), `${status} glyph geometry`);
     assert.match(html, /width="24"/);
     assert.match(html, /height="24"/);
     assert.match(html, /thread-status-icon-badge" fill="currentColor"/);
     assert.match(html, /shape-rendering="crispEdges"/);
-    assert.doesNotMatch(html, /(?:linearGradient|filter|drop-shadow)/);
+    // ring and glyph both inherit the status colour, so nothing is knocked out
+    assert.doesNotMatch(html, /(?:linearGradient|filter|drop-shadow|stroke=)/);
+    assert.doesNotMatch(html, /--thread-status-glyph/);
   }
 
   const css = readFileSync("src/App.css", "utf8");
   for (const status of statuses) {
     assert.match(css, new RegExp(`\\.thread-status-icon\\[data-thread-status="${status}"\\]`));
   }
-  assert.match(css, /--thread-status-glyph: #fffaf1/);
   for (const { color } of Object.values(expected)) {
     assert.ok(css.includes(color));
   }
@@ -580,7 +581,10 @@ test("history content uses the local alias and renders commit/thread actions", (
   assert.match(html, /aria-label="Started [^"]+\. Ended [^"]+"/);
   assert.match(html, /aria-label="User turns: 3"/);
   assert.match(html, /data-tooltip="Total tokens · 24\.8K"/);
-  assert.match(html, /Appears under 2 commits/);
+  // A session lives in exactly one place on the rail now, so the old
+  // "appears under N commits" metric is gone.
+  assert.doesNotMatch(html, /Appears under|Commit appearances/);
+  assert.match(html, /aria-label="1 session linked to commits"/);
   assert.match(html, /aria-label="Load chat history"/);
   assert.doesNotMatch(html, /during session|after session|started from/);
   assert.doesNotMatch(html, /Map project-owned Codex sessions onto/);
@@ -909,11 +913,15 @@ test("embedded history follows the project workspace without repeating project c
   assert.match(html, /<h2[^>]*sync-history-embedded-title[^>]*>.*Git history/s);
   assert.match(html, /class="sync-history-timeline has-uncommitted"/);
   assert.match(html, /<h2 id="uncommitted-heading"><svg[^>]*data-icon="edit"[^>]*>.*<\/svg>Uncommitted<\/h2>/s);
-  assert.match(html, /No subsequent commit/);
+  // The unmapped reason is bookkeeping, not something the reader needs on screen.
+  assert.doesNotMatch(html, /No subsequent commit/);
   assert.match(html, /class="sync-history-thread-kind uncommitted"/);
   assert.match(html, /class="sync-history-thread-kind uncommitted"[^>]*>.*data-icon="edit"/s);
   assert.match(html, /<strong title="Test conversation — fork · 2026-08-01 09:00Z">Test conversation — fork<\/strong>/);
-  assert.match(html, /aria-label="1 session not linked to a commit"/);
+  // The count badge is gone from the heading; the fold control carries the
+  // count so the group is still announced with its size.
+  assert.match(html, /aria-label="Collapse 1 session not linked to a commit"/);
+  assert.match(html, /class="[^"]*sync-history-group-toggle"[^>]*aria-expanded="true"/);
   // The status legend is gone; the per-row tooltips carry the same meanings.
   assert.doesNotMatch(html, /sync-history-status-legend/);
   assert.doesNotMatch(html, /Cloud outstanding/);
@@ -1416,8 +1424,8 @@ test("storage overflow and sync actions use matching Pixelarticons silhouettes",
   }
 });
 
-test("sidebar utility controls use matching Pixelarticons and a pixel count badge", () => {
-  for (const name of ["plus", "settings", "trash"] as const) {
+test("sidebar utility controls use matching Pixelarticons and a monospace count badge", () => {
+  for (const name of ["plus", "trash"] as const) {
     const html = renderToStaticMarkup(<Icon name={name} size={16} />);
     assert.match(html, /icon-pixelarticons/, `${name} must match the sidebar utility icon family`);
     assert.match(html, /fill="currentColor"/);
@@ -1425,11 +1433,21 @@ test("sidebar utility controls use matching Pixelarticons and a pixel count badg
     assert.doesNotMatch(html, /<(?:circle|ellipse|line|polyline)\b/);
   }
 
+  // The settings cog is drawn in-house rather than sourced, so it carries no
+  // provenance class — it still has to share the utility glyphs' construction.
+  const settings = renderToStaticMarkup(<Icon name="settings" size={16} />);
+  assert.match(settings, /icon-pixel-fill/);
+  assert.doesNotMatch(settings, /icon-pixelarticons/);
+  assert.match(settings, /fill="currentColor"/);
+  assert.match(settings, /shape-rendering="crispEdges"/);
+  assert.doesNotMatch(settings, /<(?:circle|ellipse|line|polyline)\b/);
+
   const css = readFileSync("src/RetroTheme.css", "utf8");
   const badgeRule = css.match(
     /\.sidebar-nav-badge,\s*\n\.sync-primary-nav button > \.sync-activity-badge\s*\{[^}]+\}/s,
   )?.[0] ?? "";
-  assert.match(badgeRule, /font-family:\s*var\(--font-pixel\)/);
+  assert.match(badgeRule, /font-family:\s*var\(--font-mono\)/);
+  assert.match(badgeRule, /font-variant-numeric:\s*tabular-nums/);
 });
 
 test("theme controls use the compact Pixelarticons sun and moon pair", () => {
@@ -1442,14 +1460,28 @@ test("theme controls use the compact Pixelarticons sun and moon pair", () => {
   }
 });
 
-test("history launch actions use matching Pixelarticons silhouettes", () => {
+test("history launch actions share one pixel construction", () => {
   for (const name of ["git-fork", "terminal"] as const) {
     const html = renderToStaticMarkup(<Icon name={name} size={14} />);
-    assert.match(html, /icon-pixelarticons/, `${name} must match the history launch action family`);
+    assert.match(html, /icon-pixel-fill/, `${name} must match the history launch action family`);
     assert.match(html, /fill="currentColor"/);
     assert.match(html, /shape-rendering="crispEdges"/);
     assert.doesNotMatch(html, /<(?:circle|ellipse|line|polyline)\b/);
   }
+  // git-fork is still Pixelarticons geometry; terminal was redrawn in-house
+  // because the sourced one dissolved at 12-14px, so it carries no provenance.
+  assert.match(renderToStaticMarkup(<Icon name="git-fork" size={14} />), /icon-pixelarticons/);
+  assert.doesNotMatch(renderToStaticMarkup(<Icon name="terminal" size={14} />), /icon-pixelarticons/);
+});
+
+test("the terminal glyph survives the sizes it is rendered at", () => {
+  const html = renderToStaticMarkup(<Icon name="terminal" size={12} />);
+  const d = html.match(/ d="([^"]+)"/)?.[1] ?? "";
+  assert.ok(d.length > 0, "terminal must draw a path");
+  // A 24-unit grid at 12px is half a device pixel per unit, so every edge has
+  // to land on an even coordinate or the feature is lost to rounding.
+  const coords = [...d.matchAll(/-?\d+/g)].map((m) => Number(m[0]));
+  assert.ok(coords.every((n) => n % 2 === 0), `odd coordinate in terminal path: ${d}`);
 });
 
 test("ChatGPT actions use the recognizable knot mark with crisp pixel rendering", () => {
@@ -1576,10 +1608,10 @@ test("completed projects use their main row for history and only mark Git reposi
       onAddStorage={() => undefined}
     />,
   );
-  assert.match(html, /src="\/mallard-logo-pixel-ring\.png"/);
-  assert.match(html, /src="\/mallard-logo-pixel-duck\.png"/);
-  assert.doesNotMatch(html, /src="\/mallard-logo-pixel\.png"/);
-  assert.doesNotMatch(html, /src="\/mallard-logo\.png"/);
+  // The brand row and the product footer are the same mark now, so it appears
+  // twice and no raster logo appears at all.
+  assert.equal(html.match(/src="\/mallard-logo-duck\.svg"/g)?.length, 2);
+  assert.doesNotMatch(html, /\.png"/);
   assert.doesNotMatch(html, /aria-label="View history for Mallard local"/);
   assert.equal(html.match(/sync-project-git-icon/g)?.length, 1);
   assert.equal(html.match(/icon-git-folder-mark/g)?.length, 1);

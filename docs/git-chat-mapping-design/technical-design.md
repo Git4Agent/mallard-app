@@ -44,7 +44,7 @@ get_project_chat_thread_details(
 
 The history response contains `codex_home`, window bounds, `next_before`, storage activity, thread summaries, optional Git history, uncommitted references, and technical warnings. The command emits warnings to Sync Log. Display name, alias, and directory presentation remain in existing project/binding DTOs.
 
-`CodexThreadSummary` carries start/end/active state, branch and recorded SHA context, user rounds, agent messages, tool calls, maximum cumulative tokens, `metrics_complete`, and `commit_occurrence_count`. `CommitThreadReference` carries only a thread ID. `ThreadMatchKind` and confidence fields are removed.
+`CodexThreadSummary` carries start/end/active state, branch and recorded SHA context, user rounds, agent messages, tool calls, maximum cumulative tokens, and `metrics_complete`. `CommitThreadReference` carries only a thread ID. `ThreadMatchKind` and confidence fields are removed.
 
 ## Full-stream parser and cache
 
@@ -73,9 +73,9 @@ Timestamp priority is:
 
 The scanner first filters sessions by `ended_at` into `[window_start, window_end)`. Git uses enumerated local branches, structured argv, first-parent/date-order logs, and a bounded 10,000-commit correlation rail. Session branch metadata prevents attaching a named session to a different branch.
 
-All inclusive overlaps are attached. With none, the session attaches once to its successor commit with no time cap: with the recorded SHA on the rail, the first of its first-parent descendants committed after session end (never a commit below the recorded checkout); otherwise the earliest commit after session end. With no successor the session is uncommitted and carries a reason the Uncommitted section displays. Commit references are sorted by session end descending, then start ascending, then thread ID. Unique session and reference counts are separate.
+Each session attaches once, to its successor commit with no time cap: with the recorded SHA on the rail, the first of its first-parent descendants committed at or after the session's last activity (never a commit below the recorded checkout); otherwise the earliest commit at or after the last activity. With no successor the session is uncommitted and carries a reason the Uncommitted section displays — including a session resumed after the branch's newest commit, whose earlier overlapping commits never claim it. Commit references are sorted by session end descending, then start ascending, then thread ID.
 
-The response normally exposes commits in the requested 30-day window, plus any boundary commit carrying a selected session reference. Frontend page merging unions commit references by SHA/thread ID, recalculates occurrence counts, and prevents cross-window loss.
+The response normally exposes commits in the requested 30-day window, plus any boundary commit carrying a selected session reference. Frontend page merging unions commit references by SHA/thread ID, recalculates the unique session count, and prevents cross-window loss.
 
 ## Lazy details
 
@@ -83,7 +83,7 @@ Every detail request validates UUID, registered project, active binding, canonic
 
 The same filtering and pagination rules apply to text projected from oversized records. Images remain excluded; an image-bearing record contributes only its eligible text and metadata.
 
-The frontend holds message pages once per thread ID and expansion state once per visual occurrence. Thus expanding one occurrence loads shared data without expanding every repeated card. Per-occurrence `aria-controls` IDs and keys use commit SHA plus thread ID.
+The frontend holds message pages once per thread ID and expansion state once per visual row (a commit row or the Uncommitted row). Per-row `aria-controls` IDs and keys use commit SHA plus thread ID.
 
 ## Storage timestamps
 

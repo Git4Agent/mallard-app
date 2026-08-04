@@ -151,7 +151,7 @@ export default function LogManagerDialog({ onClose, onLogsChanged }: Props) {
           <div>
             <span className="sync-eyebrow">Local activity</span>
             <h1 id="sync-log-manager-title">Manage logs</h1>
-            <p>Logs stay on this machine in ~/.mallard/logs.</p>
+            <p>Logs stay on this machine in <code>~/.mallard/logs</code>.</p>
           </div>
           <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy} aria-label="Close log manager">
             <Icon name="x" size={17} />

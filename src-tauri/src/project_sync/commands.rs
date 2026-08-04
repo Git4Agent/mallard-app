@@ -6018,18 +6018,22 @@ fn push_destination_error(status: &PushDestinationStatus) -> Option<String> {
             base_generation,
             short_digest(base_manifest_sha256),
         )),
+        // These reach the user verbatim in the Push error banner when the head
+        // moves between the review's classification and the publish re-check,
+        // so they lead with what happened and what to do; the lineage numbers
+        // stay at the end for support and log greps.
         PushDestinationStatus::RequiresPull {
             reason: PushDestinationPullReason::RemoteWithoutBase,
             ..
         } => Some(
-            "remote bundle already exists and this replica has no reviewed base; pull and review it before pushing"
+            "this storage already holds data for this project that has never been reviewed on this computer; pull and review it before pushing"
                 .to_string(),
         ),
         PushDestinationStatus::RequiresPull {
             reason: PushDestinationPullReason::BindingChanged,
             ..
         } => Some(
-            "the project checkout or provider profile changed after the last reviewed base; pull and review before pushing"
+            "the project folder or Codex profile changed since this computer last synced with this storage; pull and review before pushing"
                 .to_string(),
         ),
         PushDestinationStatus::RequiresPull {
@@ -6037,7 +6041,7 @@ fn push_destination_error(status: &PushDestinationStatus) -> Option<String> {
             remote_generation,
             base_generation,
         } => Some(format!(
-            "remote bundle advanced since this replica's base (base generation {}, remote generation {}); pull and review before pushing",
+            "this storage has changes saved after this computer last synced; pull and review them before pushing (base generation {}, remote generation {})",
             base_generation
                 .map(|generation| generation.to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
