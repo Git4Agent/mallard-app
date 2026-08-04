@@ -10331,12 +10331,11 @@ div.storage-link-main {
 
 .sync-sync-review-derived svg { color: var(--green); }
 
-/* Top-aligned, not centered: once the body runs to two or three lines (the
-   pull-required copy routinely does), centering the icon and the action
-   against the full block height left both floating mid-paragraph with
-   visible dead space above and below — the "uneven spacing" look. Top
-   alignment pins them to the title's cap-height instead, the way the rest of
-   the app's icon+text rows work. */
+/* Top-aligned, not centered: once the body runs past one line, centering the
+   icon and any recovery buttons against the full block height left them
+   floating mid-paragraph with dead space above and below. Top alignment pins
+   them to the title's cap-height, the way the rest of the app's icon+text
+   rows work. */
 .sync-sync-review-blocker {
   margin: 10px 0 0;
   align-items: flex-start;
@@ -10352,17 +10351,6 @@ div.storage-link-main {
 
 .sync-sync-review-blocker .btn { margin-left: auto; }
 
-/* The lone action in a blocked-step callout is the only way forward on that
-   step, so it should read as a deliberate button, not the base .btn's
-   13px-padding default squeezed beside two or three lines of prose. Direct
-   children only, so the paired recovery buttons on remote-missing/replaced
-   (wrapped in .sync-sync-review-recovery-actions) keep their own compact,
-   side-by-side sizing. */
-.sync-sync-review-blocker > .btn {
-  margin-top: 1px;
-  padding: 0 20px;
-}
-
 .sync-sync-review-remote-missing > svg {
   flex: 0 0 auto;
   color: var(--yellow);
@@ -10371,19 +10359,19 @@ div.storage-link-main {
 /* A destination waiting on a Pull is a step, not a failure: the push is
    intact and one action clears it. It keeps the plain callout surface and
    colours only its icon, the same way the remote-missing state does, so the
-   panel does not read as a second kind of alert — and it keeps the shared
-   icon | copy | action row, so the copy grows down the callout instead of
-   pushing the action onto a line of its own. */
-.sync-sync-review-pull-required > svg {
-  flex: 0 0 auto;
-  margin-top: 1px;
-  color: var(--blue);
-}
-
+   panel does not read as a second kind of alert. It carries no action of its
+   own — the footer swaps Push for Review Pull, so the step has exactly one
+   primary action instead of a disabled button beside a live one. */
 .sync-sync-review-pull-required {
   margin: 6px 0 4px;
   padding: 8px 10px;
   gap: 10px;
+}
+
+.sync-sync-review-pull-required > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--blue);
 }
 
 .sync-sync-review-pull-action {
