@@ -4,7 +4,7 @@ import type { SVGProps } from "react";
 // Pixelarticons. The ChatGPT mark is a crisp-edge adaptation of its canonical
 // knot geometry. Semantic gaps follow the same construction; see
 // THIRD_PARTY_NOTICES.md.
-type IconName =
+export type IconName =
   | "activity"
   | "alert-triangle"
   | "badge-check"
@@ -205,11 +205,15 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"
         />
       )}
+      {/* Redrawn in-house on the even grid, so it carries no provenance class.
+          The sourced glyph stepped its diagonal one unit at a time; at the 12px
+          this renders at, a 24-unit grid is half a device pixel per unit, so the
+          shaft and the frame both dissolved. Every edge here lands on an even
+          coordinate: the box loses its top-right corner and the arrow leaves
+          through the gap. */}
       {name === "external-link" && (
-        <g className="icon-pixel-fill" fill="currentColor" stroke="none">
-          <path d="M20 15v7h-1v1H2v-1H1V5h1V4h9v2H3v15h15v-6h2Z" />
-          <path d="M23 1v8h-2V5h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H9v1H7v-2h1v-1h1v-1h1v-1h1v-1h1v-1h1V9h1V8h1V7h1V6h1V5h1V4h1V3h-4V1h8Z" />
-        </g>
+        <path className="icon-pixel-fill" fill="currentColor" stroke="none"
+          d="M2 6h8v2H2ZM2 6h2v16H2ZM2 20h18v2H2ZM18 12h2v10h-2ZM12 0h10v2H12ZM20 0h2v10h-2ZM18 2h2v2h-2ZM16 4h2v2h-2ZM14 6h2v2h-2ZM12 8h2v2h-2ZM10 10h2v2h-2Z" />
       )}
       {name === "git-branch" && (
         <path className="icon-git-branch-mark icon-pixel-fill" fill="currentColor" stroke="none" d="M20 2V1h-4v1h-1v4h1v1h1v4H7V7h1V6h1V2H8V1H4v1H3v4h1v1h1v10H4v1H3v4h1v1h4v-1h1v-4H8v-1H7v-4h12V7h1V6h1V2h-1ZM5 3h2v2H5Zm2 18H5v-2h2ZM19 5h-2V3h2Z" />

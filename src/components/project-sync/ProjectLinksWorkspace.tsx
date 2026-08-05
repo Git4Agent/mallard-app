@@ -19,6 +19,9 @@ import type {
 import Icon from "../Icons";
 import ProjectChatHistoryPage from "./ProjectChatHistoryPage";
 import ConversationPathRepairNotice from "./ConversationPathRepairNotice";
+import type { PullRequiredCopy } from "./PushResourceWorkspace";
+import SyncOutcomeNotice from "./SyncOutcomeNotice";
+import type { SyncOutcome } from "./syncOutcome";
 import { newStorage, storageConfigReady, StorageEditor } from "./StorageSettings";
 import { projectSyncApi } from "./api";
 import {
@@ -45,7 +48,26 @@ type InlineStorageReview = {
   onClose: () => void;
   onContinue?: () => void;
   continueDisabled?: boolean;
+  /** Why onContinue is withheld right now — surfaced as the button's title. */
+  continueTitle?: string | null;
 };
+
+/**
+ * A gate the push or pull flow cannot get past never opens a review; it lands
+ * here instead, as a banner inside the storage card with the way forward on
+ * it. Cleared by ProjectSync when a review opens or the workspace resets.
+ */
+export type StorageNotice = {
+  projectId: string;
+  storageId: string;
+} & (
+  | { kind: "requires_pull"; copy: PullRequiredCopy }
+  | { kind: "remote_missing"; baseGeneration: number | null }
+  | { kind: "remote_replaced"; baseGeneration: number | null }
+  | { kind: "action_failed"; action: "push" | "pull"; message: string }
+  /** A finished Push or Pull; the flow has already closed behind it. */
+  | { kind: "outcome"; outcome: SyncOutcome }
+);
 
 interface Props {
   projects: LocalProjectSummary[];
@@ -81,6 +103,9 @@ interface Props {
   newProjectSetup?: ReactNode;
   historyRefreshEpoch?: number;
   inlineStorageReview?: InlineStorageReview | null;
+  storageNotice?: StorageNotice | null;
+  onStorageNoticeAction?: (outcome: SyncOutcome) => void;
+  onDismissStorageNotice?: () => void;
 }
 
 function storageSubtitle(storage: StorageConfig): string {
@@ -156,17 +181,16 @@ export function conversationPathsBlockSync(
 }
 
 export function projectPushActionLabel({
-  reviewOpen,
   preparing,
   publishing,
 }: {
-  reviewOpen: boolean;
   preparing: boolean;
   publishing: boolean;
 }): string {
+  // With the wizard gone, the card button on an open review IS the push: the
+  // first click opens the review, the second publishes the selection.
   if (publishing) return "Pushing…";
   if (preparing) return "Preparing…";
-  if (reviewOpen) return "Continue push";
   return "Push";
 }
 
@@ -211,6 +235,9 @@ export default function ProjectLinksWorkspace({
   newProjectSetup,
   historyRefreshEpoch = 0,
   inlineStorageReview,
+  storageNotice,
+  onStorageNoticeAction,
+  onDismissStorageNotice,
 }: Props) {
   const [linkingProjectId, setLinkingProjectId] = useState<string | null>(null);
   const [runningAction, setRunningAction] = useState<string | null>(null);
@@ -1019,7 +1046,6 @@ export default function ProjectLinksWorkspace({
                       const storageActionsOpen = storageActionsProjectId === project.local_project_id;
                       const storageActionsMenuId = `storage-actions-${actionPrefix.replace(/[^a-z0-9_-]/gi, "-")}`;
                       const pushLabel = projectPushActionLabel({
-                        reviewOpen: pushReviewOpen,
                         preparing: pushPreparing,
                         publishing: pushPublishing,
                       });
@@ -1049,6 +1075,12 @@ export default function ProjectLinksWorkspace({
                           else options[options.length - 1]?.focus();
                         });
                       };
+                      const activeNotice = storageNotice
+                        && storageNotice.projectId === project.local_project_id
+                        && storageNotice.storageId === storage.id
+                        ? storageNotice
+                        : null;
+                      const noticeActionsDisabled = busy || !!runningAction;
                       const storageIdentityCopy = (
                         <span className="storage-link-copy">
                           <strong>{storage.name || "(unnamed)"}</strong>
@@ -1249,13 +1281,14 @@ export default function ProjectLinksWorkspace({
                                     || !!runningAction
                                     || conversationPathBlocked
                                     || (bindingActive && !canRestore)
-                                    || storageActionLockedForReview(activeReviewKind, "pull")}
+                                    || storageActionLockedForReview(activeReviewKind, "pull")
+                                    || (pullReviewOpen && inlineStorageReview?.continueDisabled)}
                                   onClick={() => {
                                     if (pullReviewOpen) {
-                                      document
-                                        .getElementById(reviewPanelId)
-                                        ?.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')
-                                        ?.focus({ preventScroll: true });
+                                      // The card button IS the review's primary: it applies
+                                      // the current selection — an empty one included, which
+                                      // is how a generation-only change is acknowledged.
+                                      inlineStorageReview?.onContinue?.();
                                       return;
                                     }
                                     setStoragePickerProjectId(null);
@@ -1268,27 +1301,28 @@ export default function ProjectLinksWorkspace({
                                     ?? (!bindingActive
                                       ? "Confirm project setup before pulling"
                                       : pullReviewOpen
-                                      ? "Return to the open Pull review"
+                                      ? (inlineStorageReview?.continueTitle
+                                        ?? "Pull the selected changes from this storage")
                                       : !profilesWritable
                                         ? "The selected agent profile is read only"
                                         : "Review the Pull actions before applying them")}
                                   aria-label={!bindingActive
                                     ? "Set up project before Pull"
                                     : pullReviewOpen
-                                    ? "Return to Pull review"
+                                    ? `Pull selected changes from ${storage.name || "storage"}`
                                     : `Pull from ${storage.name || "storage"}`}
                                   aria-expanded={pullReviewOpen}
+                                  aria-controls={pullReviewOpen ? reviewPanelId : undefined}
                                 >
                                   <Icon name="download" size={15} />
+                                  {/* The card says what the button does, never
+                                      which screen it lands on; setup prompts and
+                                      review focus live in the title and label. */}
                                   {runningAction === `pull:${actionPrefix}`
                                     ? (fetchProgress && fetchProgress.phase === "plan"
                                       ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
-                                      : "Reviewing…")
-                                    : pullReviewOpen
-                                      ? "View review"
-                                      : bindingActive
-                                        ? "Pull"
-                                        : "Set up"}
+                                      : "Preparing…")
+                                    : "Pull"}
                                 </button>
                                 <button
                                   type="button"
@@ -1312,10 +1346,10 @@ export default function ProjectLinksWorkspace({
                                   title={conversationPathTitle
                                     ?? profileIssue
                                     ?? (pushReviewOpen
-                                      ? "Continue reviewing resources for this push"
+                                      ? "Push the selected resources to this storage"
                                       : "Choose resources, then push them to this storage")}
                                   aria-label={pushReviewOpen
-                                    ? "Continue push"
+                                    ? `Push selected resources to ${storage.name || "storage"}`
                                     : `Push to ${storage.name || "storage"}`}
                                   aria-expanded={pushReviewOpen}
                                   aria-controls={pushReviewOpen ? reviewPanelId : undefined}
@@ -1390,8 +1424,114 @@ export default function ProjectLinksWorkspace({
                             </div>
                           )}
 
+                          {activeNotice && activeNotice.kind === "outcome" && (
+                            <SyncOutcomeNotice
+                              outcome={activeNotice.outcome}
+                              busy={noticeActionsDisabled}
+                              onAction={(outcome) => onStorageNoticeAction?.(outcome)}
+                              onDismiss={() => onDismissStorageNotice?.()}
+                            />
+                          )}
+                          {activeNotice && activeNotice.kind === "requires_pull" && (
+                            <div className="sync-callout sync-storage-notice sync-sync-review-pull-required" role="status">
+                              <Icon name="git-compare-arrows" size={15} />
+                              <span>
+                                <strong>{activeNotice.copy.title}</strong>
+                                {activeNotice.copy.body}
+                                <small className="sync-sync-review-pull-detail">{activeNotice.copy.detail}</small>
+                              </span>
+                              <div className="sync-sync-review-recovery-actions">
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  disabled={noticeActionsDisabled}
+                                  onClick={() => void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.id))}
+                                >
+                                  <Icon name="download" size={13} />
+                                  Open Pull review
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                          {activeNotice && activeNotice.kind === "remote_missing" && (
+                            <div className="sync-callout sync-storage-notice sync-sync-review-remote-missing" role="alert">
+                              <Icon name="alert-triangle" size={15} />
+                              <span>
+                                <strong>Remote history is missing</strong>
+                                {`${storage.name || "This storage"} no longer holds this project's sync history, so Push is paused. If this is expected, unlink and link the storage again.`}
+                              </span>
+                              <div className="sync-sync-review-recovery-actions">
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  disabled={noticeActionsDisabled}
+                                  onClick={() => onOpenStorageSettings(storage.id)}
+                                >
+                                  Storage settings
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost danger"
+                                  disabled={noticeActionsDisabled}
+                                  onClick={() => void run(`unlink:${actionPrefix}`, () => onUnlinkStorage(project.local_project_id, storage.id))}
+                                >
+                                  Unlink storage…
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                          {activeNotice && activeNotice.kind === "remote_replaced" && (
+                            <div className="sync-callout sync-storage-notice sync-sync-review-remote-missing" role="alert">
+                              <Icon name="alert-triangle" size={15} />
+                              <span>
+                                <strong>Storage history changed</strong>
+                                {`${storage.name || "This storage"} holds a different sync history than this project last synced${activeNotice.baseGeneration != null ? ` (generation ${activeNotice.baseGeneration})` : ""}. Review & adopt pulls the new history; unlinking doesn't delete files.`}
+                              </span>
+                              <div className="sync-sync-review-recovery-actions">
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost danger"
+                                  disabled={noticeActionsDisabled}
+                                  onClick={() => void run(`unlink:${actionPrefix}`, () => onUnlinkStorage(project.local_project_id, storage.id))}
+                                >
+                                  Unlink storage…
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  disabled={noticeActionsDisabled}
+                                  onClick={() => void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.id))}
+                                >
+                                  <Icon name="download" size={13} />
+                                  Review &amp; adopt
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                          {activeNotice && activeNotice.kind === "action_failed" && (
+                            <div className="sync-callout sync-storage-notice error" role="alert">
+                              <Icon name="alert-triangle" size={15} />
+                              <span>
+                                <strong>{activeNotice.action === "push" ? "Push couldn't start" : "Pull couldn't start"}</strong>
+                                {activeNotice.message}
+                              </span>
+                              <div className="sync-sync-review-recovery-actions">
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  disabled={noticeActionsDisabled}
+                                  onClick={() => void run(
+                                    `${activeNotice.action}:${actionPrefix}`,
+                                    () => (activeNotice.action === "push" ? onPush : onPull)(project.local_project_id, storage.id),
+                                  )}
+                                >
+                                  Retry
+                                </button>
+                              </div>
+                            </div>
+                          )}
                           {reviewOpen && (
-                            <div id={reviewPanelId} className="sync-storage-inline-review">
+                            <div id={reviewPanelId} className="sync-storage-inline-review" tabIndex={-1}>
                               {inlineStorageReview?.content}
                             </div>
                           )}

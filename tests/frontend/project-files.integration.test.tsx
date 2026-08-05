@@ -98,9 +98,12 @@ const inventory: ProjectContentInventory = {
   scanned_at: 1,
 };
 
-const emptyCounts = { history: 0, project_files: 0, review: 0 };
+const emptyCounts = { history: 0, project_files: 0 };
 
-test("eligible reviews put Project files directly between Sessions and Review", () => {
+test("eligible reviews put Project files directly after Git & sessions with no Review step", () => {
+  assert.deepEqual(syncReviewSteps(false), ["history"]);
+  assert.deepEqual(syncReviewSteps(true), ["history", "project_files"]);
+
   const eligible = renderToStaticMarkup(
     <SyncReviewTabs
       activeStep="project_files"
@@ -111,8 +114,13 @@ test("eligible reviews put Project files directly between Sessions and Review", 
   );
   const history = eligible.indexOf(">Git &amp; sessions<");
   const projectFiles = eligible.indexOf(">Project files<");
-  const review = eligible.indexOf(">Review<");
-  assert.ok(history >= 0 && history < projectFiles && projectFiles < review);
+  assert.ok(history >= 0 && history < projectFiles, "history renders before project files");
+  assert.equal(
+    (eligible.match(/role="tab"/g) ?? []).length,
+    2,
+    "the strip holds exactly the two remaining steps",
+  );
+  assert.doesNotMatch(eligible, />Review</);
 
   const git = renderToStaticMarkup(
     <SyncReviewTabs
@@ -122,7 +130,7 @@ test("eligible reviews put Project files directly between Sessions and Review", 
       onChange={() => undefined}
     />,
   );
-  assert.doesNotMatch(git, />Project files</);
+  assert.equal(git, "", "a single-step review renders no tab strip at all");
 });
 
 test("an explicit Push scan presents new entries selected and locks both directory ancestors", () => {
@@ -293,7 +301,7 @@ test("Pull project content starts as keep-local and selecting a nested file requ
   const selected = includeRequiredPullProjectDirectories(items, new Set(["file-a"]));
   assert.deepEqual([...selected].sort(), ["dir-docs", "dir-specs", "file-a"]);
 
-  const html = renderToStaticMarkup(
+  const render = (initialStep: "review" | "project_files") => renderToStaticMarkup(
     <RestorePlanView
       projectName="Project B"
       profileLabel="Profile"
@@ -308,15 +316,36 @@ test("Pull project content starts as keep-local and selecting a nested file requ
       failedResourceIds={new Set()}
       busy={false}
       error={null}
-      initialStep="review"
+      initialStep={initialStep}
       onApply={() => undefined}
       onRefresh={() => undefined}
       onBack={() => undefined}
     />,
   );
-  assert.match(html, /Git &amp; sessions[\s\S]*Project files[\s\S]*Review/);
-  assert.doesNotMatch(html, /<strong>Project files<\/strong>|0 apply · 3 keep local/);
-  assert.match(html, />Keep project entries local</);
+
+  // The retired "review" step falls back to history inside the two-tab strip.
+  const html = render("review");
+  assert.equal((html.match(/role="tab"/g) ?? []).length, 2);
+  const history = html.indexOf(">Git &amp; sessions<");
+  const projectFiles = html.indexOf(">Project files<");
+  assert.ok(history >= 0 && history < projectFiles, "history stays the first step");
+  assert.doesNotMatch(html, />Review</);
+  assert.match(html, /aria-selected="true"[^>]*aria-label="Git &amp; sessions, 0 selected"/);
+  assert.match(html, /id="sync-review-history-panel"/);
+  assert.match(html, />No session changes</);
+  assert.doesNotMatch(html, /sync-project-files-page/, "the file review stays on its own step");
+  assert.match(
+    html,
+    /class="btn btn-primary sync-pull-apply-button">/,
+    "undecided file entries keep Pull available so keep-local can advance the base",
+  );
+
+  const filesHtml = render("project_files");
+  assert.match(filesHtml, /svg> Select safe additions<\/button>/);
+  assert.match(filesHtml, /aria-label="Apply docs"/);
+  assert.match(filesHtml, /Create folder · 2 descendants/);
+  assert.match(filesHtml, /<strong>0 selected<\/strong>/);
+  assert.match(filesHtml, /<small>3 local<\/small>/, "every entry starts as keep-local");
 });
 
 test("confirming keep-local still submits an empty approved set so Pull can advance its base", async () => {

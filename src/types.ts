@@ -846,6 +846,12 @@ export interface RestoreResult {
   message: string;
   /** Absent for manual-fork results, which belong to no restore plan. */
   plan_id?: string | null;
+  /**
+   * Present only on restore applies. `false` means the reviewed baseline
+   * could not advance to the plan's generation because required changes
+   * were skipped — Push stays gated until they are pulled.
+   */
+  reviewed_base_advanced?: boolean;
   applied_action_ids: string[];
   failed_actions: Array<{ action_id: string; display_name?: string | null; message: string }>;
   codex_fork_checkpoints: CodexForkCheckpoint[];

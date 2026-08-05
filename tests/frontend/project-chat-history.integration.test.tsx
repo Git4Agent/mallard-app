@@ -418,7 +418,9 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   }
 
   // It is pinned to the row's right edge, so its tooltip must open inward.
-  assert.match(css, /\.sync-history-thread-meta > \.sync-history-thread-time-end::after\s*\{[^}]*right: -6px;[^}]*left: auto;/s);
+  // The stamp is a direct child of the summary row now (it trails the
+  // clickable pair), so the inward-opening tooltip targets it there.
+  assert.match(css, /\.sync-history-session-summary > \.sync-history-thread-time-end::after\s*\{[^}]*right: -6px;[^}]*left: auto;/s);
 
   // The tooltip is a pseudo-element sitting above its metric, so any clipping
   // ancestor renders it invisible — all that shows is a sliver at the clip
@@ -452,7 +454,7 @@ test("Push and Pull reviews use only the outer workspace scroll", () => {
   const css = readFileSync("src/App.css", "utf8");
   const workspaceRule = css.match(/\.sync-main\.sync-sync-review-page\s*\{[^}]+\}/s)?.[0] ?? "";
   const reviewScrollRule = css.match(/\.sync-sync-review-page \.sync-sync-review-scroll\s*\{[^}]+\}/s)?.[0] ?? "";
-  const reviewSummaryRule = css.match(/\.sync-sync-review-summary\s*\{[^}]+\}/s)?.[0] ?? "";
+  const bannerZoneRule = css.match(/\.sync-review-banners\s*\{[^}]+\}/s)?.[0] ?? "";
   const workspaceSource = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   const pushSource = readFileSync("src/components/project-sync/PushResourceWorkspace.tsx", "utf8");
   const pullSource = readFileSync("src/components/project-sync/RestorePlanView.tsx", "utf8");
@@ -463,7 +465,7 @@ test("Push and Pull reviews use only the outer workspace scroll", () => {
   assert.match(reviewScrollRule, /max-height:\s*none/);
   assert.match(reviewScrollRule, /overflow:\s*visible/);
   assert.doesNotMatch(reviewScrollRule, /overflow-y:\s*(auto|scroll)/);
-  assert.match(reviewSummaryRule, /margin:\s*0;/);
+  assert.match(bannerZoneRule, /display:\s*grid/, "the banner zone owns spacing at the top of the scroll");
   assert.match(workspaceSource, /sync-sync-review-page/);
   assert.doesNotMatch(pushSource, /useSyncReviewScroll|onScroll=|ref=\{scrollRef\}/);
   assert.doesNotMatch(pullSource, /useSyncReviewScroll|onScroll=|ref=\{scrollRef\}/);
@@ -570,7 +572,9 @@ test("history content uses the local alias and renders commit/thread actions", (
   assert.match(commitHeading, /sync-history-commit-toggle/);
   assert.doesNotMatch(commitHeading, /sync-history-commit-metrics/);
   assert.match(html, /aria-label="Collapse commit bbbbbbb"/);
-  assert.match(html, /<time dateTime=[^>]+>[^<]+<\/time><a class="sync-history-commit-link"[^>]+><code>bbbbbbb<\/code><\/a>/);
+  // Identifier before stamp: the linked sha chip leads with the external-link
+  // glyph, and the timestamp trails the row to join the session stamp column.
+  assert.match(html, /<a class="sync-history-commit-link"[^>]+><svg[^>]*data-icon="external-link"[\s\S]*?<code>bbbbbbb<\/code><\/a><time dateTime=/);
   assert.match(html, new RegExp(`href="https://github\\.com/Git4Agent/mallard/commit/${"b".repeat(40)}"`));
   assert.match(html, /aria-label="Open commit bbbbbbb on GitHub"/);
   assert.doesNotMatch(html, /sync-history-thread-updated/);
@@ -603,6 +607,22 @@ test("history content uses the local alias and renders commit/thread actions", (
     html.indexOf('data-tooltip="Tool calls · 8"')
       < html.indexOf('aria-label="Show thread debug info"'),
   );
+  // Line 2 order: readouts, the divider, the debug button, the stamp, and the
+  // disclosure chevron closing the row at the far edge.
+  {
+    const row = html.slice(html.indexOf('class="sync-history-session-summary"'));
+    const positions = [
+      row.indexOf('class="sync-history-thread-meta"'),
+      row.indexOf('class="sync-history-actions-divider"'),
+      row.indexOf('aria-label="Show thread debug info"'),
+      row.indexOf("sync-history-thread-time-end"),
+      row.indexOf('aria-label="Load chat history"'),
+    ];
+    assert.ok(positions.every((position) => position >= 0), `line-2 pieces missing: ${positions}`);
+    assert.deepEqual(positions, [...positions].sort((a, b) => a - b), "line-2 order is readouts, divider, debug, stamp, chevron");
+  }
+  assert.match(html, /aria-label="Load chat history"[^>]*aria-expanded="false"[^>]*>\s*<svg[^>]*data-icon="chevron-down"/);
+  assert.doesNotMatch(html, /aria-label="Load chat history"[^>]*>\s*<svg[^>]*data-icon="message"/);
   assert.match(html, /sync-openai-icon/);
   assert.doesNotMatch(html, /aria-label="1 sessions"/);
   assert.doesNotMatch(html, />Open in Codex</);
@@ -778,11 +798,13 @@ test("a session that crosses midnight still resolves to an unambiguous end", () 
   assert.match(html, /aria-label="Started [^"]+\. Ended [^"]+2026[^"]*"/);
 });
 
-test("thread icon actions stay compact and the chat action follows the metrics", () => {
+test("thread icon actions stay compact and the clickable pair trails the readouts", () => {
   const css = readFileSync("src/App.css", "utf8");
+  const retro = readFileSync("src/RetroTheme.css", "utf8");
   const metaRule = css.match(/\.sync-history-session-summary \.sync-history-thread-meta\s*\{[^}]+\}/s)?.[0] ?? "";
   const chatRule = css.match(/\.sync-history-chat-toggle\s*\{[^}]+\}/s)?.[0] ?? "";
   const launchRule = css.match(/\.sync-history-thread-actions \.sync-history-launch-action\s*\{[^}]+\}/s)?.[0] ?? "";
+  const dividerRule = css.match(/\.sync-history-actions-divider\s*\{[^}]+\}/s)?.[0] ?? "";
   const debugMenuRule = css.match(/\.sync-history-debug-menu\s*\{[^}]+\}/s)?.[0] ?? "";
   const debugPopoverRule = css.match(/\.sync-history-debug-popover\s*\{[^}]+\}/s)?.[0] ?? "";
 
@@ -791,6 +813,11 @@ test("thread icon actions stay compact and the chat action follows the metrics",
   assert.match(chatRule, /padding:\s*0/);
   assert.match(launchRule, /width:\s*28px/);
   assert.match(launchRule, /padding:\s*0/);
+  // The debug button sits behind a hairline rule, and the stamp — a direct
+  // child of the summary row — claims the remaining gap before the chevron.
+  assert.match(dividerRule, /width:\s*1px/);
+  assert.match(retro, /\.sync-history-session-summary > \.sync-history-thread-time-end\s*\{[^}]*margin-left: auto;/s);
+  assert.doesNotMatch(retro, /\.sync-history-session-summary \.sync-history-thread-meta\s*\{[^}]*flex:\s*1/s, "the readouts must not stretch into the clickables");
   // The menu is deliberately static so the popover anchors to the row instead
   // of to the 22px trigger — anchored to the trigger it was pushed outside the
   // card and clipped by the workspace scroll container.
@@ -915,8 +942,11 @@ test("embedded history follows the project workspace without repeating project c
   assert.match(html, /<h2 id="uncommitted-heading"><svg[^>]*data-icon="edit"[^>]*>.*<\/svg>Uncommitted<\/h2>/s);
   // The unmapped reason is bookkeeping, not something the reader needs on screen.
   assert.doesNotMatch(html, /No subsequent commit/);
-  assert.match(html, /class="sync-history-thread-kind uncommitted"/);
-  assert.match(html, /class="sync-history-thread-kind uncommitted"[^>]*>.*data-icon="edit"/s);
+  // The slot is reserved — an 18px box the status badge lands in without
+  // moving the title — but it draws nothing: the group heading carries the
+  // pencil, so the rows stay blank until statuses arrive.
+  assert.match(html, /class="sync-history-thread-kind uncommitted" aria-hidden="true"><\/span>/);
+  assert.doesNotMatch(html, /class="sync-history-thread-kind uncommitted"[^>]*>\s*<svg/s);
   assert.match(html, /<strong title="Test conversation — fork · 2026-08-01 09:00Z">Test conversation — fork<\/strong>/);
   // The count badge is gone from the heading; the fold control carries the
   // count so the group is still announced with its size.
@@ -1482,6 +1512,21 @@ test("the terminal glyph survives the sizes it is rendered at", () => {
   // to land on an even coordinate or the feature is lost to rounding.
   const coords = [...d.matchAll(/-?\d+/g)].map((m) => Number(m[0]));
   assert.ok(coords.every((n) => n % 2 === 0), `odd coordinate in terminal path: ${d}`);
+});
+
+test("the external-link glyph survives the size the commit chip renders it at", () => {
+  const html = renderToStaticMarkup(<Icon name="external-link" size={12} />);
+  const d = html.match(/ d="([^"]+)"/)?.[1] ?? "";
+  assert.ok(d.length > 0, "external-link must draw a path");
+  // Same rule as the terminal glyph: 24 units at 12px is half a device pixel
+  // each, so an odd edge paints grey instead of black. Rasterized, the sourced
+  // glyph came out a grey box with a smeared diagonal.
+  const coords = [...d.matchAll(/-?\d+/g)].map((m) => Number(m[0]));
+  assert.ok(coords.every((n) => n % 2 === 0), `odd coordinate in external-link path: ${d}`);
+  // Redrawn in-house, so it must not claim the sourced provenance.
+  assert.doesNotMatch(html, /icon-pixelarticons/);
+  assert.match(html, /icon-pixel-fill/);
+  assert.doesNotMatch(html, /<(?:circle|ellipse|line|polyline)\b/);
 });
 
 test("ChatGPT actions use the recognizable knot mark with crisp pixel rendering", () => {

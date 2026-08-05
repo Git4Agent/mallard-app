@@ -672,6 +672,12 @@ pub struct RestoreResult {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<PlanId>,
+    /// Whether this apply advanced the reviewed recipe base to the plan's
+    /// generation. `None` for results that never touch the baseline
+    /// (fork-checkpoint retries and manual forks). `Some(false)` means
+    /// required actions were skipped, so Push stays gated on this storage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewed_base_advanced: Option<bool>,
     #[serde(default)]
     pub applied_action_ids: Vec<ActionId>,
     #[serde(default)]
@@ -2377,6 +2383,7 @@ pub(crate) fn pending_codex_divergence_with_repository(
         status: restore_status_for_checkpoints(&checkpoints),
         message,
         plan_id: first.plan_id.clone(),
+        reviewed_base_advanced: None,
         applied_action_ids: Vec::new(),
         failed_actions: Vec::new(),
         codex_fork_checkpoints: checkpoints,
@@ -2533,6 +2540,7 @@ pub async fn retry_codex_divergence(
                     status: restore_status_for_checkpoints(&remaining),
                     message,
                     plan_id,
+                    reviewed_base_advanced: None,
                     applied_action_ids: vec![action_id],
                     failed_actions: Vec::new(),
                     codex_fork_checkpoints: remaining,
@@ -2561,6 +2569,7 @@ pub async fn retry_codex_divergence(
                     status: restore_status_for_checkpoints(&remaining),
                     message,
                     plan_id: None,
+                    reviewed_base_advanced: None,
                     applied_action_ids: Vec::new(),
                     failed_actions: Vec::new(),
                     codex_fork_checkpoints: remaining,
@@ -2620,6 +2629,7 @@ fn pending_queue_result(
         status: restore_status_for_checkpoints(&checkpoints),
         message,
         plan_id,
+        reviewed_base_advanced: None,
         applied_action_ids: Vec::new(),
         failed_actions: Vec::new(),
         codex_fork_checkpoints: checkpoints,
@@ -2930,6 +2940,7 @@ pub(crate) fn fork_codex_thread_with_repository(
                 status: restore_status_for_checkpoints(&remaining),
                 message,
                 plan_id: None,
+                reviewed_base_advanced: None,
                 applied_action_ids: Vec::new(),
                 failed_actions: Vec::new(),
                 codex_fork_checkpoints: remaining,
@@ -8672,28 +8683,8 @@ fn apply_bundle_restore_with_progress(
         .filter(|action| is_conversation_keep_local_action(action, &snapshot.manifest))
         .map(|action| action.action_id.clone())
         .collect::<BTreeSet<_>>();
-    let files_complete = applied
-        .receipts
-        .iter()
-        .all(|receipt| match receipt.action_type {
-            RestoreActionType::WriteProjectFile
-            | RestoreActionType::EnsureProjectDirectory
-            | RestoreActionType::DeleteProjectFile
-            | RestoreActionType::DeleteProjectDirectory => {
-                matches!(
-                    receipt.status,
-                    ActionStatus::Applied | ActionStatus::Skipped
-                )
-            }
-            RestoreActionType::WriteFile
-            | RestoreActionType::MergeFile
-            | RestoreActionType::MaterializeConversation => receipt.status == ActionStatus::Applied,
-            RestoreActionType::Manual => {
-                receipt.status == ActionStatus::Applied
-                    || (receipt.status == ActionStatus::Skipped
-                        && kept_local_conversation_actions.contains(&receipt.action_id))
-            }
-        });
+    let files_complete =
+        reviewed_files_complete(&applied.receipts, &kept_local_conversation_actions);
     let status = if files_complete {
         MaterializationStatus::Complete
     } else {
@@ -8852,6 +8843,7 @@ fn apply_bundle_restore_with_progress(
         status: restore_status_for_checkpoints(&fork_checkpoints),
         message,
         plan_id: Some(plan.plan_id),
+        reviewed_base_advanced: Some(files_complete),
         applied_action_ids,
         failed_actions,
         // Every committed conversation materialization — not just a
@@ -8957,6 +8949,43 @@ fn successful_pull_timestamp(
 /// Load the plan's binding and re-inspect the bundle head it pins. This is
 /// deliberately metadata-only — supporting views (dependencies, readiness)
 /// must never download payload objects.
+/// Whether this apply may advance the reviewed recipe base to its plan's
+/// generation. Declining a project-content decision (`Skipped`) settles the
+/// review, a `Manual` keep-local receipt is itself the decision, and a
+/// declined conversation materialization is the Claude spelling of an
+/// unapproved typed Codex action (which never produces a receipt): the
+/// thread stays in storage, Push carries it forward by reference, and the
+/// next Pull re-offers it. Only a skipped `WriteFile`/`MergeFile` leaves
+/// reviewed generic content behind that the baseline must not move past.
+/// An empty receipt set is a completed review of nothing: the
+/// acknowledge-only Pull that advances the baseline without materializing
+/// anything.
+fn reviewed_files_complete(
+    receipts: &[ApplyReceipt],
+    kept_local_conversation_actions: &BTreeSet<ActionId>,
+) -> bool {
+    receipts.iter().all(|receipt| match receipt.action_type {
+        RestoreActionType::WriteProjectFile
+        | RestoreActionType::EnsureProjectDirectory
+        | RestoreActionType::DeleteProjectFile
+        | RestoreActionType::DeleteProjectDirectory
+        | RestoreActionType::MaterializeConversation => {
+            matches!(
+                receipt.status,
+                ActionStatus::Applied | ActionStatus::Skipped
+            )
+        }
+        RestoreActionType::WriteFile | RestoreActionType::MergeFile => {
+            receipt.status == ActionStatus::Applied
+        }
+        RestoreActionType::Manual => {
+            receipt.status == ActionStatus::Applied
+                || (receipt.status == ActionStatus::Skipped
+                    && kept_local_conversation_actions.contains(&receipt.action_id))
+        }
+    })
+}
+
 fn restore_support_context(
     repository: &LocalStateRepository,
     restore_plan_id: &PlanId,
@@ -17134,6 +17163,7 @@ mod tests {
         assert!(partial.codex_fork_checkpoints.is_empty());
         assert_eq!(partial.applied_action_ids, vec![fresh_action.action_id]);
         assert!(partial.failed_actions.is_empty());
+        assert_eq!(partial.reviewed_base_advanced, Some(true));
 
         // The divergent local branch is untouched; the fresh thread landed.
         assert_eq!(
@@ -17175,6 +17205,81 @@ mod tests {
             .conversation_actions
             .iter()
             .any(|action| action.action == ConversationPlanActionType::CreateLocal));
+
+        // Acknowledge-only Pull: an empty apply is a real review — receipts
+        // write, the result reports the baseline as advanced, and the base
+        // stays pinned to the plan's generation. This is the path that lets a
+        // pusher catch up to a moved storage while taking none of it.
+        let acknowledged =
+            apply_bundle_restore_with_repository(&repo, &replanned.plan_id, vec![]).unwrap();
+        assert!(acknowledged.success, "{}", acknowledged.message);
+        assert_eq!(acknowledged.reviewed_base_advanced, Some(true));
+        let config = repo.load_config().unwrap();
+        let base = config
+            .project(&target.local_project_id)
+            .unwrap()
+            .recipe_bases
+            .get(&storage_id)
+            .unwrap();
+        assert_eq!(base.generation, replanned.generation);
+    }
+
+    fn receipt(action_type: RestoreActionType, status: ActionStatus, suffix: &str) -> ApplyReceipt {
+        ApplyReceipt {
+            action_id: ActionId::parse(format!("action-{:0>24}", suffix)).unwrap(),
+            resource_id: ResourceId::parse("codex:session-index").unwrap(),
+            action_type,
+            logical_path: None,
+            source_sha256: None,
+            target_path: None,
+            target_sha256_after: None,
+            status,
+            applied_at: 1,
+            error: None,
+            conversation: None,
+        }
+    }
+
+    #[test]
+    fn reviewed_files_complete_gates_the_baseline_on_skipped_content() {
+        let none = BTreeSet::new();
+        // A review of nothing is complete: the acknowledge-only Pull.
+        assert!(reviewed_files_complete(&[], &none));
+        // Declined project-content decisions still settle the review.
+        assert!(reviewed_files_complete(
+            &[
+                receipt(RestoreActionType::WriteProjectFile, ActionStatus::Skipped, "a1"),
+                receipt(RestoreActionType::EnsureProjectDirectory, ActionStatus::Skipped, "a2"),
+            ],
+            &none,
+        ));
+        // A skipped generic write leaves reviewed content behind: no advance.
+        assert!(!reviewed_files_complete(
+            &[receipt(RestoreActionType::WriteFile, ActionStatus::Skipped, "a3")],
+            &none,
+        ));
+        assert!(!reviewed_files_complete(
+            &[receipt(RestoreActionType::MergeFile, ActionStatus::Skipped, "a4")],
+            &none,
+        ));
+        assert!(reviewed_files_complete(
+            &[
+                receipt(RestoreActionType::WriteFile, ActionStatus::Applied, "a5"),
+                receipt(RestoreActionType::MaterializeConversation, ActionStatus::Applied, "a6"),
+            ],
+            &none,
+        ));
+        // A declined Claude materialization is a settled decision — parity
+        // with unapproved typed Codex actions, which produce no receipt.
+        assert!(reviewed_files_complete(
+            &[receipt(RestoreActionType::MaterializeConversation, ActionStatus::Skipped, "a8")],
+            &none,
+        ));
+        // A keep-local Manual skip is itself the reviewed decision.
+        let kept = receipt(RestoreActionType::Manual, ActionStatus::Skipped, "a7");
+        let kept_ids = BTreeSet::from([kept.action_id.clone()]);
+        assert!(reviewed_files_complete(&[kept.clone()], &kept_ids));
+        assert!(!reviewed_files_complete(&[kept], &BTreeSet::new()));
     }
 
     #[test]

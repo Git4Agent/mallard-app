@@ -780,6 +780,11 @@ enum PlannedOutcome {
     Manual(String),
     /// The local conversation diverged; the reviewed Pull keeps it.
     KeepLocal,
+    /// The local target already holds exactly the manifest bytes, so the
+    /// plan emits nothing: a review must not ask about a write that changes
+    /// nothing, and an all-deselected apply must not strand the reviewed
+    /// baseline behind a no-op.
+    UpToDate,
     /// Emit a restore action. Current-schema generic files materialize
     /// byte-for-byte, so the manifest digest is also the local digest.
     Action,
@@ -1792,6 +1797,14 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                     .is_some_and(|digest| digest != &entry.sha256)
             {
                 PlannedOutcome::KeepLocal
+            } else if !conversation_kind
+                && descriptor.kind != ResourceKind::ProjectContentFile
+                && target_digest.as_deref() == Some(entry.sha256.as_str())
+            {
+                // Generic files have no enforced mode, so byte identity is
+                // the whole restore; conversations and project files keep
+                // their own receipt semantics.
+                PlannedOutcome::UpToDate
             } else {
                 PlannedOutcome::Action
             };
@@ -1831,6 +1844,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                     )?);
                     continue;
                 }
+                PlannedOutcome::UpToDate => continue,
                 PlannedOutcome::Action => {}
             };
             let target = planned.target.as_ref().expect("file action has a target");
@@ -3056,6 +3070,92 @@ mod tests {
             fs::read(target.join("CLAUDE.md")).unwrap(),
             b"portable guidance"
         );
+    }
+
+    #[test]
+    fn restore_plan_skips_generic_files_already_matching_the_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let source_claude = temp.path().join("source-claude");
+        let target_claude = temp.path().join("target-claude");
+        for directory in [&source, &target, &source_claude, &target_claude] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        // Memories are only discovered from a bucket a session has proven to
+        // belong to the project, so the fixture needs one transcript beside
+        // the memory directory.
+        let transcript = format!(
+            "{{\"type\":\"system\",\"sessionId\":\"session-m\",\"cwd\":{}}}\n",
+            serde_json::to_string(source.to_str().unwrap()).unwrap()
+        );
+        write(
+            &source_claude.join("projects/memory-bucket/session-m.jsonl"),
+            transcript.as_bytes(),
+        );
+        write(
+            &source_claude.join("projects/memory-bucket/memory/MEMORY.md"),
+            b"remember the ducks",
+        );
+        let request = CaptureRequest {
+            project_root: source.clone(),
+            codex_home: None,
+            claude_home: Some(source_claude),
+            excluded_project_roots: Vec::new(),
+            include_project_content: false,
+            excluded_content_roots: Vec::new(),
+        };
+        let inventory = discover_project(&request).unwrap();
+        let resource = inventory
+            .resources
+            .iter()
+            .find(|resource| resource.resource_id.starts_with("claude:memory:"))
+            .unwrap();
+        let recipe = recipe_for([resource.resource_id.clone()]);
+        let id = bundle_id(98);
+        let engine = BundleEngine::open(
+            LocalBundleObjectStore::open(temp.path().join("store")).unwrap(),
+            storage_id(),
+        )
+        .unwrap();
+        engine
+            .publish_test_resources(CapturedResourcesPublishRequest {
+                identity: identity(id.clone(), "Memory project"),
+                recipe: recipe.clone(),
+                captured_with: captured_with(),
+                captured: capture_recipe(&request, &recipe).unwrap(),
+                observed_head: None,
+                updated_at: 10,
+            })
+            .unwrap();
+        let fetched = engine.fetch(&id).unwrap();
+        let binding = active_binding(id, &target, None, Some(&target_claude));
+
+        let is_generic_write = |action: &RestoreAction| {
+            matches!(
+                action.kind,
+                RestoreActionKind::WriteFile { .. } | RestoreActionKind::MergeFile { .. }
+            )
+        };
+        let plan = engine.build_restore_plan(&fetched, &binding, 100, 0).unwrap();
+        let action = plan.actions.iter().find(|action| is_generic_write(action)).unwrap();
+        let memory_target = PathBuf::from(action.target_path.clone().unwrap());
+
+        // The target already holds the manifest bytes: the plan stops asking,
+        // so an all-deselected apply cannot strand the reviewed baseline
+        // behind a write that would change nothing.
+        write(&memory_target, b"remember the ducks");
+        let plan = engine.build_restore_plan(&fetched, &binding, 101, 0).unwrap();
+        assert!(
+            !plan.actions.iter().any(|action| is_generic_write(action)),
+            "identical generic files must not re-enter review: {:?}",
+            plan.actions
+        );
+
+        // A drifted target is real work again.
+        write(&memory_target, b"remember the geese");
+        let plan = engine.build_restore_plan(&fetched, &binding, 102, 0).unwrap();
+        assert!(plan.actions.iter().any(|action| is_generic_write(action)));
     }
 
     #[test]

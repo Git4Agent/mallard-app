@@ -1,14 +1,12 @@
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import Icon from "../Icons";
 
-export type SyncReviewStep = "history" | "project_files" | "review";
+export type SyncReviewStep = "history" | "project_files";
 
 export type SyncReviewTabCounts = Record<SyncReviewStep, number>;
 
 export function syncReviewSteps(includeProjectFiles: boolean): SyncReviewStep[] {
-  return includeProjectFiles
-    ? ["history", "project_files", "review"]
-    : ["history", "review"];
+  return includeProjectFiles ? ["history", "project_files"] : ["history"];
 }
 
 interface Props {
@@ -23,11 +21,10 @@ interface Props {
 const STEP_DEFINITIONS: Record<SyncReviewStep, {
   id: SyncReviewStep;
   label: string;
-  icon: "git-branch" | "file" | "check-circle";
+  icon: "git-branch" | "file";
 }> = {
   history: { id: "history", label: "Git & sessions", icon: "git-branch" },
   project_files: { id: "project_files", label: "Project files", icon: "file" },
-  review: { id: "review", label: "Review", icon: "check-circle" },
 };
 
 export default function SyncReviewTabs({
@@ -38,6 +35,10 @@ export default function SyncReviewTabs({
   disabled = false,
   onChange,
 }: Props) {
+  // A single step is not a choice; the strip only renders when there are tabs
+  // to switch between.
+  if (steps.length < 2) return null;
+
   const selectFromKeyboard = (
     event: ReactKeyboardEvent<HTMLButtonElement>,
     step: SyncReviewStep,
@@ -80,7 +81,7 @@ export default function SyncReviewTabs({
             role="tab"
             aria-selected={active}
             aria-controls={`sync-review-${step.id}-panel`}
-            aria-label={`${step.label}${step.id === "review" ? "" : `, ${count} selected`}${warning ? ", needs attention" : ""}`}
+            aria-label={`${step.label}, ${count} selected${warning ? ", needs attention" : ""}`}
             tabIndex={active ? 0 : -1}
             className={`${active ? "active" : ""}${warning ? " warning" : ""}`}
             disabled={disabled}
@@ -89,7 +90,7 @@ export default function SyncReviewTabs({
           >
             <Icon name={step.icon} size={14} />
             <span>{step.label}</span>
-            {step.id !== "review" && <small>{count}</small>}
+            <small>{count}</small>
             {warning && <span className="sync-sync-review-warning-dot" aria-hidden="true" />}
           </button>
         );

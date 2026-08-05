@@ -53,16 +53,6 @@ export interface PullReviewApplyResult {
   failedPhase: "restoring" | "verifying" | null;
 }
 
-function hasKeepLocalConversationDecision(plan: RestorePlan): boolean {
-  return plan.actions.some((action) => (
-    action.kind.kind === "manual"
-    && /^(codex|claude):session:/.test(action.resource_id)
-    && Boolean(action.target_path)
-    && Boolean(action.source_sha256)
-    && Boolean(action.expected_target_sha256)
-  ));
-}
-
 /**
  * A post-checkpoint replan can contain only informational conversation rows
  * (`NoOp` for the restored original and `KeepLocal` for its new fork). In that
@@ -117,7 +107,15 @@ export function assertPullPlansAligned(
   }
 }
 
-/** Execute the one-button Pull workflow in the order presented by the UI. */
+/**
+ * Execute the one-button Pull workflow in the order presented by the UI.
+ *
+ * The apply is always sent, even for an empty selection: the backend writes
+ * receipts and advances the reviewed recipe base from the plan, which is the
+ * acknowledge-only Pull that unblocks Push when the storage is ahead and the
+ * user takes none of its changes. `hasPendingRestoreMutations` remains the
+ * single predicate for callers deciding whether a review is worth showing.
+ */
 export async function applyPullReview(
   api: PullReviewApplyApi,
   restorePlan: RestorePlan,
@@ -129,26 +127,17 @@ export async function applyPullReview(
   let readiness: BundleReadiness | null = null;
   let executionError: string | null = null;
   let failedPhase: PullReviewApplyResult["failedPhase"] = null;
-  const hasProjectContentDecisions = restorePlan.actions.some((action) => (
-    action.kind.kind === "write_project_file"
-    || action.kind.kind === "ensure_project_directory"
-    || action.kind.kind === "delete_project_file"
-    || action.kind.kind === "delete_project_directory"
-  ));
-  const hasConversationKeepLocalDecisions = hasKeepLocalConversationDecision(restorePlan);
 
   onPhase("restoring");
-  if (selection.restoreActionIds.length > 0 || hasProjectContentDecisions || hasConversationKeepLocalDecisions) {
-    try {
-      restoreResult = await api.applyRestore(
-        restorePlan.plan_id,
-        selection.restoreActionIds,
-        selection.conversationResolutions,
-      );
-    } catch (reason) {
-      executionError = `Restore failed: ${errorMessage(reason)}`;
-      failedPhase = "restoring";
-    }
+  try {
+    restoreResult = await api.applyRestore(
+      restorePlan.plan_id,
+      selection.restoreActionIds,
+      selection.conversationResolutions,
+    );
+  } catch (reason) {
+    executionError = `Restore failed: ${errorMessage(reason)}`;
+    failedPhase = "restoring";
   }
 
   onPhase("verifying");

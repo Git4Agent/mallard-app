@@ -53,10 +53,11 @@ test("provider selection keeps exactly one project profile", () => {
 });
 
 test("the project Push action describes its workflow state", () => {
-  assert.equal(projectPushActionLabel({ reviewOpen: false, preparing: false, publishing: false }), "Push");
-  assert.equal(projectPushActionLabel({ reviewOpen: false, preparing: true, publishing: false }), "Preparing…");
-  assert.equal(projectPushActionLabel({ reviewOpen: true, preparing: false, publishing: false }), "Continue push");
-  assert.equal(projectPushActionLabel({ reviewOpen: true, preparing: false, publishing: true }), "Pushing…");
+  // The card button on an open review IS the push — no wizard, no
+  // "Continue push" state.
+  assert.equal(projectPushActionLabel({ preparing: false, publishing: false }), "Push");
+  assert.equal(projectPushActionLabel({ preparing: true, publishing: false }), "Preparing…");
+  assert.equal(projectPushActionLabel({ preparing: false, publishing: true }), "Pushing…");
 
   const workspaceSource = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   assert.match(
@@ -407,8 +408,11 @@ test("a detached project can reopen setup without linked storage", () => {
   assert.ok(pullButton, "detached projects keep Pull available as a setup entry point");
   assert.doesNotMatch(pullButton, /disabled=""/);
   assert.match(pushButton, /disabled=""/);
-  assert.match(linkedDetachedHtml, />Set up<\/button>/);
-  assert.doesNotMatch(linkedDetachedHtml, />Confirm setup<\/button>/);
+  // The card buttons are always the plain verb; the setup detour is announced
+  // by the label and title, not by renaming the action.
+  assert.match(linkedDetachedHtml, />Pull<\/button>/);
+  assert.doesNotMatch(linkedDetachedHtml, />Set up<\/button>|>Confirm setup<\/button>/);
+  assert.match(pullButton, /title="Confirm project setup before pulling"/);
 
   const activeHtml = renderToStaticMarkup(
     <ProjectLinksWorkspace

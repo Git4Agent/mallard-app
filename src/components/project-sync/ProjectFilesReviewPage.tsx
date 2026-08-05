@@ -320,7 +320,7 @@ export default function ProjectFilesReviewPage({
                   </label>
                 )}
                 {mode === "push" && STORAGE_BLOCKING_STATES.has(row.state) && onReviewPull && (
-                  <div className="sync-project-file-conflict"><span>Pull required</span><button type="button" className="btn btn-ghost" onClick={onReviewPull}>Review Pull</button></div>
+                  <div className="sync-project-file-conflict"><span>Pull required</span><button type="button" className="btn btn-ghost" onClick={onReviewPull}>Open Pull review</button></div>
                 )}
               </div>
             );

@@ -12,7 +12,7 @@ import type {
   ThreadSyncComparison,
   ThreadSyncEntry,
 } from "../../types";
-import Icon from "../Icons";
+import Icon, { type IconName } from "../Icons";
 import { projectSyncApi } from "./api";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "./ThreadStatusIcon";
@@ -33,6 +33,15 @@ interface PageProps {
   onUnlinkStorage?: () => void;
   continuityActionBusy?: boolean;
   comparisonOverride?: ThreadSyncComparison | null;
+  /** Per-row conflict resolution control, rendered under the row title. */
+  rowResolution?: (resourceId: string) => ReactNode;
+  /**
+   * Fires with whether the review list is trustworthy: the timeline needs
+   * `history` and the storage rows ("Only in …") need the comparison, both
+   * fetched here asynchronously. A hosting review gates its primary action
+   * on this so nothing is applied sight unseen.
+   */
+  onReviewListReadyChange?: (ready: boolean) => void;
 }
 
 interface ThreadDetailsState {
@@ -74,6 +83,8 @@ interface ContentProps {
   onReviewPull?: () => void;
   onUnlinkStorage?: () => void;
   continuityActionBusy?: boolean;
+  /** Per-row conflict resolution control, rendered under the row title. */
+  rowResolution?: (resourceId: string) => ReactNode;
 }
 
 const THREAD_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -377,7 +388,7 @@ function formatCount(value?: number | null): string {
   return new Intl.NumberFormat(undefined, { notation: value >= 1_000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value);
 }
 
-function compactThreadTitle(value: string): string {
+export function compactThreadTitle(value: string): string {
   return value.replace(
     /\s*·\s*\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?Z?)?\s*$/,
     "",
@@ -494,17 +505,32 @@ function ThreadSyncIndicator({ entry, storageName }: { entry: ThreadSyncEntry; s
   );
 }
 
+/* One absolute stamp, pushed to the far edge so it forms a column down the
+   list. It anchors on the last activity because that is the more useful end of
+   the interval; the start is that minus the duration sitting beside the other
+   readouts. Both ends are spelled out in full in the label. */
+function ThreadTimestamp({ thread }: { thread: CodexThreadSummary }) {
+  const startedLabel = `Started ${formatFullDateTime(thread.started_at)}`;
+  const endedLabel = `${thread.is_active ? "Last activity" : "Ended"} ${formatFullDateTime(thread.ended_at)}${thread.is_active ? ", active" : ""}`;
+  return (
+    <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end" data-tooltip={`${startedLabel}\n${endedLabel}`} aria-label={`${startedLabel}. ${endedLabel}`} tabIndex={0}>
+      <time dateTime={new Date(thread.ended_at * 1_000).toISOString()}>{formatFullDateTime(thread.ended_at)}</time>
+    </span>
+  );
+}
+
+/** Readouts only — everything in here is hovered, nothing is clicked. The
+ *  card renders the stamp separately so it can trail the row's buttons; the
+ *  standalone renders keep it attached. */
 export function ThreadMetrics({
   thread,
   id,
-  debugInfo,
+  showTimestamp = true,
 }: {
   thread: CodexThreadSummary;
   id?: string;
-  debugInfo?: ThreadDebugMenuProps;
+  showTimestamp?: boolean;
 }) {
-  const startedLabel = `Started ${formatFullDateTime(thread.started_at)}`;
-  const endedLabel = `${thread.is_active ? "Last activity" : "Ended"} ${formatFullDateTime(thread.ended_at)}${thread.is_active ? ", active" : ""}`;
   const durationText = formatDuration(thread.started_at, thread.ended_at);
   const durationLabel = durationText
     ? `${thread.is_active ? "Active for" : "Ran for"} ${durationText}`
@@ -515,20 +541,13 @@ export function ThreadMetrics({
     <span className="sync-history-thread-metric" data-tooltip={`Total tokens · ${formatCount(thread.total_tokens)}`} aria-label={`Total tokens: ${formatCount(thread.total_tokens)}`} tabIndex={0}><Icon name="token" size={12} /><b>{formatCount(thread.total_tokens)}</b></span>
     <span className="sync-history-thread-metric" data-tooltip={`Agent messages · ${thread.agent_message_count}`} aria-label={`Agent messages: ${thread.agent_message_count}`} tabIndex={0}><Icon name="message" size={12} /><b>{thread.agent_message_count}</b></span>
     {thread.tool_call_count > 0 && <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${thread.tool_call_count}`} aria-label={`Tool calls: ${thread.tool_call_count}`} tabIndex={0}><Icon name="tool" size={12} /><b>{thread.tool_call_count}</b></span>}
-    {debugInfo && <ThreadDebugMenu {...debugInfo} />}
     {!thread.metrics_complete && <span className="sync-history-thread-metric sync-history-partial" data-tooltip="Some session metrics are unavailable" aria-label="Some session metrics are unavailable" tabIndex={0}><Icon name="alert-triangle" size={12} /></span>}
     {durationText && (
       <span className="sync-history-thread-metric sync-history-thread-duration" data-tooltip={durationLabel} aria-label={durationLabel} tabIndex={0}>
         <Icon name={thread.is_active ? "activity" : "clock"} size={12} /><b>{durationText}</b>
       </span>
     )}
-    {/* One absolute stamp, pushed to the far edge so it forms a column down the
-        list. It anchors on the last activity because that is the more useful
-        end of the interval; the start is that minus the duration sitting right
-        beside it. Both ends are spelled out in full in the label. */}
-    <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end" data-tooltip={`${startedLabel}\n${endedLabel}`} aria-label={`${startedLabel}. ${endedLabel}`} tabIndex={0}>
-      <time dateTime={new Date(thread.ended_at * 1_000).toISOString()}>{formatFullDateTime(thread.ended_at)}</time>
-    </span>
+    {showTimestamp && <ThreadTimestamp thread={thread} />}
   </div>;
 }
 
@@ -555,6 +574,7 @@ interface ThreadCardProps {
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
+  rowResolution?: (resourceId: string) => ReactNode;
 }
 
 type ThreadDebugCopyTarget = "thread-id" | "working-directory" | "codex-home" | "all";
@@ -771,7 +791,7 @@ function ThreadDebugMenu({ threadId, workingDirectory, codexHome }: ThreadDebugM
 }
 
 /**
- * Per-row "Review Pull" affordance for push rows held behind a Pull
+ * Per-row "Open Pull review" affordance for push rows held behind a Pull
  * (diverged or behind storage). The hold applies to this one thread; the
  * rest of the Push proceeds without it.
  */
@@ -796,10 +816,10 @@ function ReviewPullRowAction({
       className="btn btn-ghost sync-sync-review-pull-action"
       disabled={disabled}
       title={detail}
-      aria-label={`Review Pull — ${detail}`}
+      aria-label={`Open Pull review — ${detail}`}
       onClick={onReviewPull}
     >
-      Review Pull
+      Open Pull review
     </button>
   );
 }
@@ -892,10 +912,73 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
   return null;
 }
 
+// The row leads with an icon for how this thread stands against storage. It is
+// keyed off the entry state, never off the selection: an icon that swapped
+// glyphs when its own checkbox was ticked changed under the cursor doing the
+// ticking. What the selection would *do* is the phrase, and the phrase lives
+// in the tooltip and the accessibility label, where it costs no layout.
+const REVIEW_STATE_ICONS: Record<string, IconName> = {
+  synced: "check-circle",
+  local_only: "upload",
+  local_ahead: "upload",
+  storage_only: "download",
+  storage_ahead: "download",
+  diverged: "git-compare-arrows",
+  diverged_forked: "git-compare-arrows",
+  unavailable: "alert-triangle",
+  unknown: "help-circle",
+};
+
+const INDICATOR_STATE_CLASS: Record<string, string> = {
+  synced: "synced",
+  local_only: "local",
+  local_ahead: "local",
+  storage_only: "storage",
+  storage_ahead: "storage",
+  diverged: "diverged",
+  diverged_forked: "diverged-forked",
+  unavailable: "unavailable",
+  unknown: "pending",
+};
+
+function SyncDecisionBadge({ label, state, detail, blocked = false }: {
+  label: string;
+  state: string | undefined;
+  detail: string | null;
+  blocked?: boolean;
+}) {
+  return (
+    <span
+      className={`sync-thread-sync-indicator ${INDICATOR_STATE_CLASS[state ?? "unknown"] ?? "pending"}`}
+      data-tooltip={detail ? `${label}\n${detail}` : label}
+      aria-label={detail ? `${label}. ${detail}` : label}
+      tabIndex={0}
+    >
+      <Icon
+        name={blocked ? "octagon-x" : REVIEW_STATE_ICONS[state ?? "unknown"] ?? "help-circle"}
+        size={13}
+      />
+    </span>
+  );
+}
+
+function ReviewRequiredBadge() {
+  return (
+    <span
+      className="sync-thread-sync-error"
+      data-tooltip={"Review required\nThis change needs your explicit approval before it applies."}
+      aria-label="Review required. This change needs your explicit approval before it applies."
+      tabIndex={0}
+    >
+      <Icon name="alert-triangle" size={12} />
+    </span>
+  );
+}
+
 function ThreadCard({
   thread, occurrenceKey, workingDirectory, codexHome, busy = false, details, detailsOpen = false, onOpenCodex, onOpenTerminal, onFork, forkBusy = false, onToggleDetails, onLoadMoreDetails,
   syncEntry, storageName, resourceId, selectionMode, selected = false, selectable = false,
-  selectionDisabled = false, onToggleResource, onReviewPull,
+  selectionDisabled = false, onToggleResource, onReviewPull, rowResolution,
 }: ThreadCardProps) {
   const launchable = THREAD_UUID.test(thread.thread_id);
   const fullTitle = thread.title || "Untitled Codex session";
@@ -939,19 +1022,28 @@ function ThreadCard({
               <Icon name="octagon-x" size={14} />
             </span>
           )}
-          {syncEntry && storageName && <ThreadSyncIndicator entry={syncEntry} storageName={storageName} />}
-          {uncommitted && !(syncEntry && storageName) && (
-            <span className="sync-history-thread-kind uncommitted" aria-hidden="true">
-              <Icon name="edit" size={13} />
-            </span>
-          )}
+          {/* The blocked octagon in the choice slot already carries the whole
+              story; rows it marks render no second status icon. Rows with a
+              review decision lead with it; everything else keeps the plain
+              sync indicator (or the uncommitted mark). */}
+          {selectionMode && !selectable && activeDecision?.action === "blocked" ? null
+            : selectionMode && reviewStateLabel ? (
+              <SyncDecisionBadge
+                label={reviewStateLabel}
+                state={syncEntry?.state}
+                detail={holdDetail}
+                blocked={activeDecision?.action === "blocked"}
+              />
+            ) : syncEntry && storageName ? (
+              <ThreadSyncIndicator entry={syncEntry} storageName={storageName} />
+            ) : uncommitted ? (
+              // The slot without the glyph: the status badge that loads in
+              // must land where the title already sits, and the group heading
+              // carries the pencil, so the row-level copy of it said nothing.
+              <span className="sync-history-thread-kind uncommitted" aria-hidden="true" />
+            ) : null}
+          {activeDecision?.requires_explicit_approval && <ReviewRequiredBadge />}
           <strong title={visibleTitle === fullTitle ? undefined : fullTitle}>{visibleTitle}</strong>
-          {reviewStateLabel && (
-            <span className={`sync-sync-review-state state-${syncEntry?.state ?? "local_only"}${activeDecision?.action === "blocked" ? " action-blocked" : ""}`}>{reviewStateLabel}</span>
-          )}
-          {activeDecision?.requires_explicit_approval && (
-            <span className="sync-sync-review-flag">Review required</span>
-          )}
           <ReviewPullRowAction
             mode={selectionMode}
             entry={syncEntry}
@@ -979,21 +1071,26 @@ function ThreadCard({
         </div>
       </div>
 
+      {rowResolution?.(resourceId)}
+
+      {/* Line 2 reads left to right: readouts you hover, a hairline rule, the
+          debug button, then the stamp — and the disclosure chevron closes the
+          row at the far edge, where "expand this" belongs. */}
       <div className="sync-history-session-details">
         <div className="sync-history-session-summary">
-          <ThreadMetrics
-            thread={thread}
-            debugInfo={{
-              threadId: thread.thread_id,
-              workingDirectory,
-              codexHome,
-            }}
+          <ThreadMetrics thread={thread} showTimestamp={false} />
+          <span className="sync-history-actions-divider" aria-hidden="true" />
+          <ThreadDebugMenu
+            threadId={thread.thread_id}
+            workingDirectory={workingDirectory}
+            codexHome={codexHome}
           />
+          <ThreadTimestamp thread={thread} />
           {onToggleDetails && (
             <button type="button" className={`btn btn-ghost sync-history-chat-toggle${detailsOpen ? " active" : ""}`}
               aria-label={chatDetailsLabel} title={chatDetailsLabel} aria-expanded={detailsOpen} aria-controls={chatDetailsId}
               onClick={() => onToggleDetails(thread.thread_id, occurrenceKey)}>
-              <Icon name="message" size={13} />
+              <Icon name={detailsOpen ? "chevron-up" : "chevron-down"} size={13} />
             </button>
           )}
         </div>
@@ -1094,7 +1191,18 @@ function SyncEntryCard({
               <Icon name="octagon-x" size={14} />
             </span>
           )}
-          <ThreadSyncIndicator entry={entry} storageName={storageName} />
+          {selectionMode && !selectable && activeDecision?.action === "blocked" ? null
+            : selectionMode && reviewStateLabel ? (
+              <SyncDecisionBadge
+                label={reviewStateLabel}
+                state={entry.state}
+                detail={holdDetail}
+                blocked={activeDecision?.action === "blocked"}
+              />
+            ) : (
+              <ThreadSyncIndicator entry={entry} storageName={storageName} />
+            )}
+          {activeDecision?.requires_explicit_approval && <ReviewRequiredBadge />}
           <div className="sync-history-stored-thread-copy">
             <strong title={title === fullTitle ? undefined : fullTitle}>{title}</strong>
             {visibleLocation && <span className="sync-history-stored-thread-location">{visibleLocation}</span>}
@@ -1105,12 +1213,6 @@ function SyncEntryCard({
               <time dateTime={new Date(updatedAt * 1_000).toISOString()}>{formatDate(updatedAt)}</time>
             )}
           </span>
-          {reviewStateLabel && (
-            <span className={`sync-sync-review-state state-${entry.state}${activeDecision?.action === "blocked" ? " action-blocked" : ""}`}>{reviewStateLabel}</span>
-          )}
-          {activeDecision?.requires_explicit_approval && (
-            <span className="sync-sync-review-flag">Review required</span>
-          )}
           <ReviewPullRowAction
             mode={selectionMode}
             entry={entry}
@@ -1130,7 +1232,7 @@ export function ProjectChatHistoryContent({
   comparisonLoading = false, comparisonError = null, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
   selectionDisabled = false, onToggleResource, onReviewPull, onUnlinkStorage,
-  continuityActionBusy = false,
+  continuityActionBusy = false, rowResolution,
 }: ContentProps) {
   const [collapsedCommitShas, setCollapsedCommitShas] = useState<Set<string>>(new Set());
   // Threads that exist only in storage cannot be pushed, so in a Push review the
@@ -1222,7 +1324,7 @@ export function ProjectChatHistoryContent({
       resourceId={resourceId} selectionMode={selectionMode} selected={selectedResourceIds.has(resourceId)}
       selectable={selectableResourceIds?.has(resourceId) ?? !!selectionMode}
       selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
-      onReviewPull={onReviewPull} />
+      onReviewPull={onReviewPull} rowResolution={rowResolution} />
     );
   };
   const orderedReferences = (references: { thread_id: string }[]) => [...references].sort((left, right) => {
@@ -1454,15 +1556,20 @@ export function ProjectChatHistoryContent({
                                 </span>
                                 <strong title={commit.subject}>{commit.subject}</strong>
                               </span>
+                              {/* Identifier first, stamp last: the stamp holds the row's
+                                  right edge and forms one column with the session stamps
+                                  below. The external-link glyph marks the chip as an
+                                  off-app target, so it exists only when the remote does. */}
                               <span className="sync-history-commit-meta">
-                                <time dateTime={new Date(commit.committed_at * 1_000).toISOString()}>{formatDate(commit.committed_at)}</time>
                                 {commitUrl ? (
                                   <a className="sync-history-commit-link" href={commitUrl} target="_blank" rel="noopener noreferrer"
                                     title={`Open ${commit.sha} on GitHub`} aria-label={`Open commit ${displaySha} on GitHub`}
                                     onClick={(event) => { event.preventDefault(); void openExternalUrl(commitUrl); }}>
+                                    <Icon name="external-link" size={12} />
                                     <code>{displaySha}</code>
                                   </a>
                                 ) : <code title={commit.sha}>{displaySha}</code>}
+                                <time dateTime={new Date(commit.committed_at * 1_000).toISOString()}>{formatDate(commit.committed_at)}</time>
                               </span>
                               <span className="sync-history-commit-actions">
                                 <button
@@ -1596,6 +1703,8 @@ export default function ProjectChatHistoryPage({
   onUnlinkStorage,
   continuityActionBusy = false,
   comparisonOverride,
+  rowResolution,
+  onReviewListReadyChange,
 }: PageProps) {
   const [history, setHistory] = useState<ProjectChatHistory | null>(null);
   const [comparison, setComparison] = useState<ThreadSyncComparison | null>(null);
@@ -1681,6 +1790,11 @@ export default function ProjectChatHistoryPage({
     return () => { comparisonRequestRef.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.local_project_id, binding?.revision, activeStorageId, refreshEpoch, comparisonOverride]);
+
+  const reviewListReady = history !== null && !loading && comparison !== null && !comparisonLoading;
+  useEffect(() => {
+    onReviewListReadyChange?.(reviewListReady);
+  }, [reviewListReady, onReviewListReadyChange]);
 
   // Rehydrate a pending Activity-page fork checkpoint (for example after an app
   // restart mid-fork). Pull-origin checkpoints stay with the Pull review.
@@ -1799,5 +1913,5 @@ export default function ProjectChatHistoryPage({
       onRetry={() => void retryForkCheckpoint()}
     />
   );
-  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void refreshActivity(true); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onFork={(id) => void forkThread(id)} forkBusyThreadId={forkBusyThreadId} forkPanel={forkPanel} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
+  return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void refreshActivity(true); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onFork={(id) => void forkThread(id)} forkBusyThreadId={forkBusyThreadId} forkPanel={forkPanel} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} rowResolution={rowResolution} />;
 }

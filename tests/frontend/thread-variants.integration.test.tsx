@@ -232,13 +232,22 @@ test("selection mode folds decisions into the existing thread cards", () => {
   assert.match(html, /aria-label="Exclude Test task"/);
   assert.doesNotMatch(html, /aria-label="(Include|Exclude) Legacy pre-0\.146 session"/);
 
-  assert.match(html, />Can&#x27;t sync</);
-  assert.match(html, /sync-sync-review-state[^"]*action-blocked/);
+  // Decision phrases are icons now: the words live in aria-labels and the
+  // native tooltip bubbles, never as visible chip text.
+  assert.doesNotMatch(html, />Can&#x27;t sync</);
+  assert.doesNotMatch(html, /sync-sync-review-state/);
   assert.match(html, /sync-sync-row-blocked/, "blocked rows reuse the shared gutter marker");
+  assert.equal(
+    (html.match(/sync-sync-row-blocked/g) ?? []).length,
+    (html.match(/data-icon="octagon-x"/g) ?? []).length,
+    "a blocked row shows exactly one octagon — the gutter marker, no doubled badge",
+  );
   assert.match(html, /saved by an older Codex version\. It still opens on this computer\./);
   assert.doesNotMatch(html, /sync-history-sync-hold/, "the reason lives in the marker tooltip, not visible text");
   assert.doesNotMatch(html, /cannot be transformed safely by the active codec/);
-  assert.match(html, />Review required</);
+  assert.doesNotMatch(html, />Review required</);
+  assert.match(html, /aria-label="Review required\./, "the approval flag is an icon with the phrase in its label");
+  assert.match(html, /sync-thread-sync-indicator local[^"]*" data-tooltip="Publish new thread/, "decision icons lead the row with the phrase in the bubble");
 
   assert.equal((html.match(/aria-label="Open in Codex"/g) ?? []).length, 3, "blocked threads stay openable");
   assert.doesNotMatch(html, /Stored only|Not materialized|Resumable|materialization/);

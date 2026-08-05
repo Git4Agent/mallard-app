@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import type {
   BundleFetchProgress,
   BundleRecipe,
@@ -21,16 +21,11 @@ import SyncReviewTabs, {
 import { categoryFor } from "./model";
 
 const EMPTY_STATUSES = new Map<string, string>();
-const STEP_LABELS: Record<SyncReviewStep, string> = {
-  history: "Git & sessions",
-  project_files: "Project files",
-  review: "Review",
-};
 const STORAGE_BLOCKING_STATES = new Set(["storage_only", "storage_ahead", "diverged"]);
 
 export interface PushReviewBlocker {
   kind: "storage" | "local";
-  step: Exclude<SyncReviewStep, "review">;
+  step: SyncReviewStep;
   resourceId: string;
   state: string;
 }
@@ -64,12 +59,9 @@ interface Props {
   onScanProjectFiles?: () => void;
   onToggleProjectContentRemoval?: (resourceId: string) => void;
   onToggleProjectContentWarning?: (warningDigest: string) => void;
-  onUseProjectDefaults: () => void;
-  onClear: () => void;
   onClose: () => void;
   onPush: () => void;
   onPull?: () => void;
-  onOpenStorageSettings?: () => void;
   onUnlinkStorage?: () => void;
 }
 
@@ -78,17 +70,10 @@ function countSelected(items: ProjectResourceDescriptor[], selected: ReadonlySet
 }
 
 function groupForStep(step: SyncReviewStep, resources: ProjectResourceDescriptor[]): ProjectResourceDescriptor[] {
-  if (step === "history") return resources.filter((resource) => categoryFor(resource) === "conversations");
+  // The history step hosts every non-file resource: sessions in the list and
+  // the tools/requirements rows at the bottom of the same panel.
   if (step === "project_files") return resources.filter((resource) => categoryFor(resource) === "project_files");
-  return resources;
-}
-
-export function nextPushReviewStep(
-  step: SyncReviewStep,
-  steps: readonly SyncReviewStep[] = syncReviewSteps(false),
-): SyncReviewStep {
-  const stepIndex = steps.indexOf(step);
-  return steps[Math.min(steps.length - 1, Math.max(0, stepIndex) + 1)];
+  return resources.filter((resource) => categoryFor(resource) !== "project_files");
 }
 
 function pushBlockerKind(
@@ -128,30 +113,30 @@ export function pullRequiredCopy(
   changedConversationCount = 0,
 ): PullRequiredCopy {
   const storage = storageName?.trim() || "this storage";
-  // Titles stay in the app's own voice so the pixel face can carry them; the
-  // storage the user named belongs in the sentence, which is set in the clean
-  // face. The button says what to do, so the sentence only has to say what is
+  // The three fields stack as one banner: title, one sentence, and the lineage
+  // figures abbreviated to what support actually reads off a screenshot. The
+  // footer button says what to do, so the sentence only has to say what is
   // there and what pushing past it would cost.
-  const detail = `Storage generation ${remoteGeneration} · ${baseGeneration != null ? `last reviewed ${baseGeneration}` : "never reviewed here"}`;
+  const detail = `Generation ${remoteGeneration} · ${baseGeneration != null ? `reviewed ${baseGeneration}` : "never reviewed"}`;
   if (reason === "remote_advanced") {
     return {
       title: "Storage has newer changes",
       body: changedConversationCount > 0
-        ? `${changedConversationCount} conversation${changedConversationCount === 1 ? " is" : "s are"} newer in ${storage}. Pushing now could overwrite them.`
-        : `Changes were saved in ${storage} after this computer last synced. Pushing now could overwrite them.`,
+        ? `${changedConversationCount} conversation${changedConversationCount === 1 ? " is" : "s are"} newer in ${storage}. Pushing could overwrite them.`
+        : `${storage} changed after this computer last synced. Pushing could overwrite it.`,
       detail,
     };
   }
   if (reason === "remote_without_base") {
     return {
       title: "Storage has unreviewed data",
-      body: `${storage} holds data for this project that has never been reviewed on this computer.`,
+      body: `${storage} holds data never reviewed on this computer.`,
       detail,
     };
   }
   return {
-    title: "This project changed since the last sync",
-    body: `The project folder or Codex profile is different now. Review what is stored in ${storage} first.`,
+    title: "Project changed since last sync",
+    body: `The project folder or Codex profile is different now. Review ${storage} first.`,
     detail,
   };
 }
@@ -385,18 +370,15 @@ export default function PushResourceWorkspace({
   onScanProjectFiles,
   onToggleProjectContentRemoval,
   onToggleProjectContentWarning,
-  onUseProjectDefaults,
-  onClear,
   onClose,
   onPush,
   onPull,
-  onOpenStorageSettings,
   onUnlinkStorage,
 }: Props) {
   const steps = useMemo(() => syncReviewSteps(showProjectFiles), [showProjectFiles]);
   const [uncontrolledActiveStep, setUncontrolledActiveStep] = useState<SyncReviewStep>(initialStep);
   const requestedActiveStep = controlledActiveStep ?? uncontrolledActiveStep;
-  const activeStep = steps.includes(requestedActiveStep) ? requestedActiveStep : "review";
+  const activeStep = steps.includes(requestedActiveStep) ? requestedActiveStep : "history";
   const selectStep = (step: SyncReviewStep) => {
     if (controlledActiveStep === undefined) setUncontrolledActiveStep(step);
     onStepChange?.(step);
@@ -438,9 +420,8 @@ export default function PushResourceWorkspace({
   );
 
   const counts = {
-    history: countSelected(visibleConversations, effectiveSelected),
+    history: countSelected(visibleConversations, effectiveSelected) + countSelected(other, effectiveSelected),
     project_files: countSelected(projectFiles, effectiveSelected),
-    review: effectiveSelected.size,
   };
   const blockers = pushReviewBlockers(
     effectiveSelected,
@@ -450,69 +431,36 @@ export default function PushResourceWorkspace({
   );
   const blockingCount = blockers.length;
   const pullHolds = pushReviewPullHolds(threadComparison);
-  const missingDestination = destinationStatus?.state === "remote_history_missing"
-    ? destinationStatus
-    : null;
-  const remoteHistoryMissing = missingDestination !== null;
-  const replacedDestination = destinationStatus?.state === "remote_history_replaced"
-    ? destinationStatus
-    : null;
-  const remoteHistoryReplaced = replacedDestination !== null;
-  const requiresPullDestination = destinationStatus?.state === "requires_pull"
-    ? destinationStatus
-    : null;
-  const remotePullRequired = requiresPullDestination !== null;
-  // The comparison counts conversations only, so the sentence names them
-  // specifically rather than implying it has counted every stored resource.
-  const storageChangedConversations = threadComparison
-    ? threadComparison.counts.storage + threadComparison.counts.diverged
-    : 0;
-  const pullRequired = requiresPullDestination
-    ? pullRequiredCopy(
-      requiresPullDestination.reason,
-      storageName,
-      requiresPullDestination.remote_generation,
-      requiresPullDestination.base_generation,
-      storageChangedConversations,
-    )
-    : null;
+  // Gates on the destination close this workspace before it opens (they exit
+  // to the storage-card notice); the flags stay only as a defensive disable.
+  const remoteHistoryMissing = destinationStatus?.state === "remote_history_missing";
+  const remoteHistoryReplaced = destinationStatus?.state === "remote_history_replaced";
+  const remotePullRequired = destinationStatus?.state === "requires_pull";
   const storageBlockingCount = blockers.filter((blocker) => blocker.kind === "storage").length;
   const localBlockingCount = blockingCount - storageBlockingCount;
   const warningSteps = new Set<SyncReviewStep>();
   blockers.forEach((blocker) => warningSteps.add(blocker.step));
-  if (blockingCount > 0) warningSteps.add("review");
-  const blockerTitle = storageBlockingCount > 0
-    ? localBlockingCount > 0 ? "Review before pushing" : "Pull before pushing"
-    : "Resolve selected resources";
-  const blockerDetail = [
-    storageBlockingCount > 0
-      ? `${storageBlockingCount} storage change${storageBlockingCount === 1 ? "" : "s"} need${storageBlockingCount === 1 ? "s" : ""} review.`
-      : null,
-    localBlockingCount > 0
-      ? `${localBlockingCount} selected local resource${localBlockingCount === 1 ? "" : "s"} cannot be captured. Exclude ${localBlockingCount === 1 ? "it" : "them"} or fix the local issue.`
-      : null,
-  ].filter((message): message is string => Boolean(message)).join(" ");
-  const blockerFooter = [
-    storageBlockingCount > 0
-      ? `${storageBlockingCount} storage change${storageBlockingCount === 1 ? "" : "s"} need${storageBlockingCount === 1 ? "s" : ""} review`
-      : null,
-    localBlockingCount > 0
-      ? `${localBlockingCount} selected resource${localBlockingCount === 1 ? "" : "s"} need${localBlockingCount === 1 ? "s" : ""} attention`
-      : null,
-  ].filter((message): message is string => Boolean(message)).join(" · ");
-  // The destination states disable Push on their own, and the row-blocker
-  // footer never spoke for them: a clean selection against a moved storage
-  // left the button greyed out with nothing beside it saying why.
-  const destinationFooter = remotePullRequired
-    ? "Pull required before pushing"
-    : remoteHistoryMissing
-      ? "Storage history is missing"
-      : remoteHistoryReplaced
-        ? "Storage history changed"
-        : null;
-  const footerNote = [destinationFooter, blockerFooter]
-    .filter((message): message is string => Boolean(message))
-    .join(" · ");
+  // One banner covers everything a Pull would clear plus anything locally
+  // stuck: held threads and storage blockers describe the same situation, so
+  // they share a count instead of stacking two callouts that say Pull twice.
+  const heldConversationCount = new Set([
+    ...pullHolds.map((entry) => entry.resource_id),
+    ...blockers.filter((blocker) => blocker.kind === "storage").map((blocker) => blocker.resourceId),
+  ]).size;
+  // Selection-driven, so it reports in the footer rather than the banner zone
+  // above the list — see the banner comment.
+  const localBlockerSentence = localBlockingCount > 0
+    ? `${localBlockingCount} selected item${localBlockingCount === 1 ? "" : "s"} can't be captured — exclude ${localBlockingCount === 1 ? "it" : "them"} to push.`
+    : null;
+  const pushDisabledReason = remoteHistoryMissing || remoteHistoryReplaced || remotePullRequired
+    ? "Resolve the storage notice before pushing"
+    : localBlockingCount > 0
+      ? "Exclude the items that can't be captured"
+      : blockingCount > 0
+        ? "Resolve the held items above before pushing"
+        : effectiveSelected.size === 0 && projectContentRemovals.size === 0
+          ? "Nothing is selected"
+          : null;
 
   const commitSelection = (next: Set<string>) => {
     const safeNext = includeRequiredProjectContentDirectories(
@@ -543,11 +491,6 @@ export default function PushResourceWorkspace({
     commitSelection(next);
   };
   const useRecommendedForStep = () => {
-    if (activeStep === "review") {
-      if (safeProjectDefaults.size === projectDefaults.size) onUseProjectDefaults();
-      else commitSelection(new Set(safeProjectDefaults));
-      return;
-    }
     const group = groupForStep(activeStep, resources);
     const next = new Set(effectiveSelected);
     group.forEach((resource) => next.delete(resource.resource_id));
@@ -557,10 +500,6 @@ export default function PushResourceWorkspace({
     commitSelection(next);
   };
   const clearStep = () => {
-    if (activeStep === "review") {
-      onClear();
-      return;
-    }
     const group = groupForStep(activeStep, resources);
     const next = new Set(effectiveSelected);
     group.forEach((resource) => {
@@ -573,12 +512,6 @@ export default function PushResourceWorkspace({
     });
     commitSelection(next);
   };
-  const stepIndex = steps.indexOf(activeStep);
-  const previousStep = steps[Math.max(0, stepIndex - 1)];
-  const nextStep = nextPushReviewStep(activeStep, steps);
-  const goBack = () => selectStep(previousStep);
-  const goNext = () => selectStep(nextStep);
-  const selectedCount = effectiveSelected.size;
   const selectableConversationIds = new Set(visibleConversations
     .filter((resource) => selectableIds.has(resource.resource_id))
     .map((resource) => resource.resource_id));
@@ -604,13 +537,10 @@ export default function PushResourceWorkspace({
   }));
   const currentGroup = groupForStep(activeStep, resources);
   const currentDefaults = currentGroup.filter((resource) => safeProjectDefaults.has(resource.resource_id));
-  const currentMatchesDefaults = activeStep === "review"
-    ? effectiveSelected.size === safeProjectDefaults.size
-      && [...effectiveSelected].every((resourceId) => safeProjectDefaults.has(resourceId))
-    : currentGroup.every((resource) => (
-      effectiveSelected.has(resource.resource_id) === safeProjectDefaults.has(resource.resource_id)
-    ));
-  const recommendedCount = activeStep === "review" ? safeProjectDefaults.size : currentDefaults.length;
+  const currentMatchesDefaults = currentGroup.every((resource) => (
+    effectiveSelected.has(resource.resource_id) === safeProjectDefaults.has(resource.resource_id)
+  ));
+  const recommendedCount = currentDefaults.length;
 
   return (
     <section className="sync-inline-action-review sync-inline-push-review sync-sync-review-workspace" aria-labelledby="sync-push-resource-title">
@@ -619,16 +549,28 @@ export default function PushResourceWorkspace({
           <h2 id="sync-push-resource-title">Push review</h2>
         </div>
         <div className="sync-push-resource-actions">
+          {/* The recommend button's own count is a property of the resource set,
+              not of the selection, so it never moves when a row is ticked. Shown
+              as a bare number beside a tick it read as "N selected"; the live
+              count below is the one that answers that question. */}
+          <span
+            className="sync-sync-review-selected"
+            style={{ "--review-count-digits": String(currentGroup.length).length } as CSSProperties}
+            aria-live="polite"
+            aria-label={`${countSelected(currentGroup, effectiveSelected)} of ${currentGroup.length} selected`}
+            title={`${countSelected(currentGroup, effectiveSelected)} of ${currentGroup.length} selected`}
+          >
+            <b>{countSelected(currentGroup, effectiveSelected)}</b>/{currentGroup.length}
+          </span>
           <button
             type="button"
-            className="btn btn-ghost sync-sync-review-icon-action has-count"
+            className="btn btn-ghost sync-sync-review-icon-action"
             onClick={useRecommendedForStep}
             disabled={busy || safeProjectDefaults.size === 0 || currentMatchesDefaults}
-            title={`Use the recommended ${activeStep === "review" ? "selection" : `${activeStep} selection`}`}
+            title={`Use the recommended ${activeStep === "history" ? "session" : "project file"} selection (${recommendedCount})`}
             aria-label={`Use recommended selection (${recommendedCount})`}
           >
             <Icon name="check-circle" size={15} />
-            <span aria-hidden="true">{recommendedCount}</span>
           </button>
           <button
             type="button"
@@ -670,27 +612,62 @@ export default function PushResourceWorkspace({
         <div
           className="sync-inline-action-scroll sync-sync-review-scroll"
         >
-          {activeStep === "history" && project && binding?.profile_ids?.codex ? (
-            <ProjectChatHistoryPage
-              embedded
-              project={project}
-              binding={binding}
-              refreshEpoch={refreshEpoch}
-              activeStorageId={storageId}
-              activeStorageName={storageName}
-              selectionMode="push"
-              selectedResourceIds={effectiveSelected}
-              selectableResourceIds={selectableConversationIds}
-              selectionDisabled={busy}
-              onToggleResource={toggleResource}
-              onReviewPull={onPull}
-              onUnlinkStorage={onUnlinkStorage}
-              continuityActionBusy={busy}
-              comparisonOverride={threadComparison}
-            />
-          ) : activeStep === "history" ? (
-            <ResourceInventory resources={conversations} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectableConversationIds} disabled={busy} onToggle={toggleResource} />
-          ) : null}
+          {heldConversationCount > 0 && (
+            /* Held threads and storage blockers describe one situation, so one
+               banner speaks for both. Everything here is derived from the plan,
+               never from the selection: this zone sits above the list, so a
+               banner that appeared on a checkbox click would shove the row out
+               from under the cursor. Selection-driven problems report in the
+               footer, beside the button they block. */
+            <div className="sync-review-banners">
+              <div className="sync-callout sync-sync-review-pull-holds" role="status">
+                <Icon name="git-compare-arrows" size={15} />
+                <span>
+                  <strong>
+                    {`${heldConversationCount} conversation${heldConversationCount === 1 ? "" : "s"} held for Pull`}
+                  </strong>
+                  Storage has newer versions. Selected threads still push.
+                </span>
+                {onPull && (
+                  <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>Open Pull review</button>
+                )}
+              </div>
+            </div>
+          )}
+          {activeStep === "history" && (
+            <>
+              {project && binding?.profile_ids?.codex ? (
+                <ProjectChatHistoryPage
+                  embedded
+                  project={project}
+                  binding={binding}
+                  refreshEpoch={refreshEpoch}
+                  activeStorageId={storageId}
+                  activeStorageName={storageName}
+                  selectionMode="push"
+                  selectedResourceIds={effectiveSelected}
+                  selectableResourceIds={selectableConversationIds}
+                  selectionDisabled={busy}
+                  onToggleResource={toggleResource}
+                  onReviewPull={onPull}
+                  onUnlinkStorage={onUnlinkStorage}
+                  continuityActionBusy={busy}
+                  comparisonOverride={threadComparison}
+                />
+              ) : (
+                <ResourceInventory resources={conversations} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectableConversationIds} disabled={busy} onToggle={toggleResource} />
+              )}
+              {other.length > 0 && (
+                <details className="sync-sync-review-other">
+                  <summary>
+                    <span><Icon name="settings" size={15} /><strong>Requirements</strong></span>
+                    <span>{other.length} unavailable<Icon name="chevron-right" size={13} /></span>
+                  </summary>
+                  <ResourceInventory resources={other} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectableIds} disabled={busy} onToggle={toggleResource} />
+                </details>
+              )}
+            </>
+          )}
 
           {activeStep === "project_files" && (
             <ProjectFilesReviewPage
@@ -728,131 +705,29 @@ export default function PushResourceWorkspace({
             />
           )}
 
-          {activeStep === "review" && (
-            <div className="sync-sync-review-summary">
-              {missingDestination && (
-                <div className="sync-callout sync-sync-review-blocker sync-sync-review-remote-missing" role="alert">
-                  <Icon name="alert-triangle" size={15} />
-                  <span>
-                    <strong>Remote history is missing</strong>
-                    Mallard previously synced generation {missingDestination.base_generation} to {storageName || "this storage"}, but that repository is not present at the configured location. Mallard cannot determine why. If this is expected, unlink and link the storage again before pushing.
-                  </span>
-                  <div className="sync-sync-review-recovery-actions">
-                    {onOpenStorageSettings && (
-                      <button type="button" className="btn btn-ghost" onClick={onOpenStorageSettings} disabled={busy}>
-                        Storage settings
-                      </button>
-                    )}
-                    {onUnlinkStorage && (
-                      <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={busy}>
-                        Unlink storage…
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
-              {replacedDestination && (
-                <div className="sync-callout sync-sync-review-blocker sync-sync-review-remote-missing" role="alert">
-                  <Icon name="alert-triangle" size={15} />
-                  <span>
-                    <strong>Storage history changed</strong>
-                    The sync history in {storageName || "this storage"} is different from the one Mallard last synced for this project (generation {replacedDestination.base_generation}). This usually means Mallard&apos;s sync data in that storage was deleted and created again. Unlink this storage and link it again to start fresh. Unlinking does not delete files, but anything saved only in the previous storage history cannot be recovered from this machine.
-                  </span>
-                  {onUnlinkStorage && (
-                    <div className="sync-sync-review-recovery-actions">
-                      <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={busy}>
-                        Unlink storage
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-              {pullRequired && (
-                /* Not an error: the push is intact, it just has one step in
-                   front of it. Announced politely, and the way forward is the
-                   only enabled button on the step, so it leads. */
-                <div className="sync-callout sync-sync-review-blocker sync-sync-review-pull-required" role="status">
-                  <Icon name="git-compare-arrows" size={15} />
-                  <span>
-                    <strong>{pullRequired.title}</strong>
-                    {pullRequired.body}
-                    <small className="sync-sync-review-blocker-detail">{pullRequired.detail}</small>
-                  </span>
-                </div>
-              )}
-              <button type="button" onClick={() => selectStep("history")}>
-                <span><Icon name="git-branch" size={15} /><strong>Sessions</strong></span>
-                <span>{counts.history} included<Icon name="chevron-right" size={13} /></span>
-              </button>
-              {other.length > 0 && (
-                <details className="sync-sync-review-other">
-                  <summary>
-                    <span><Icon name="settings" size={15} /><strong>Requirements</strong></span>
-                    <span>{other.length} unavailable<Icon name="chevron-right" size={13} /></span>
-                  </summary>
-                  <ResourceInventory resources={other} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectableIds} disabled={busy} onToggle={toggleResource} />
-                </details>
-              )}
-              {sessionIndex && effectiveSelected.has(sessionIndex.resource_id) && (
-                <p className="sync-sync-review-derived"><Icon name="check-circle" size={13} />The project session index is included automatically.</p>
-              )}
-              {pullHolds.length > 0 && (
-                <div className="sync-callout sync-sync-review-pull-holds">
-                  <Icon name="git-compare-arrows" size={15} />
-                  <span>
-                    <strong>{pullHolds.length} conversation{pullHolds.length === 1 ? "" : "s"} held for Pull</strong>
-                    Diverged or behind storage. Held threads keep their stored versions; everything selected still pushes.
-                  </span>
-                  {onPull && <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>Review Pull</button>}
-                </div>
-              )}
-              {blockingCount > 0 && (
-                <div className="sync-callout sync-sync-review-blocker" role="alert">
-                  <Icon name="alert-triangle" size={15} />
-                  <span><strong>{blockerTitle}</strong>{blockerDetail}</span>
-                  {storageBlockingCount > 0 && onPull && <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>Review Pull</button>}
-                </div>
-              )}
-            </div>
-          )}
         </div>
 
         {error && <div className="sync-callout error sync-pull-error"><Icon name="alert-triangle" size={15} /> {error}</div>}
       </div>
 
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
-        {footerNote && <span><small>{footerNote}</small></span>}
-        {stepIndex > 0 && (
-          <button type="button" className="btn btn-secondary sync-sync-review-back" onClick={goBack} disabled={busy}>
-            <Icon name="chevron-left" size={14} />
-            Back: {STEP_LABELS[previousStep]}
-          </button>
+        {localBlockerSentence && (
+          <span role="status"><small>{localBlockerSentence}</small></span>
         )}
-        {activeStep !== "review" ? (
-          <button type="button" className="btn btn-primary" onClick={goNext} disabled={busy}>
-            Next: {STEP_LABELS[nextStep]}
-            <Icon name="chevron-right" size={14} />
-          </button>
-        ) : remotePullRequired && onPull ? (
-          <button
-            type="button"
-            className="btn btn-primary sync-pull-apply-button sync-sync-review-pull-action"
-            onClick={onPull}
-            disabled={busy}
-          >
-            <Icon name="download" size={16} />
-            Review Pull
-          </button>
-        ) : (
-          <button type="button" className="btn btn-primary sync-pull-apply-button" onClick={onPush} disabled={busy || remoteHistoryMissing || remoteHistoryReplaced || remotePullRequired || (selectedCount === 0 && projectContentRemovals.size === 0) || blockingCount > 0}>
-            <Icon name={busy ? "refresh" : "upload"} size={16} className={busy ? "icon-spin" : undefined} />
-            {busy
-              ? (fetchProgress && fetchProgress.phase === "push"
-                ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
-                : "Pushing…")
-              : "Push"}
-          </button>
-        )}
+        <button
+          type="button"
+          className="btn btn-primary sync-pull-apply-button"
+          onClick={onPush}
+          disabled={busy || pushDisabledReason !== null}
+          title={pushDisabledReason ?? undefined}
+        >
+          <Icon name={busy ? "refresh" : "upload"} size={16} className={busy ? "icon-spin" : undefined} />
+          {busy
+            ? (fetchProgress && fetchProgress.phase === "push"
+              ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
+              : "Pushing…")
+            : "Push"}
+        </button>
       </footer>
     </section>
   );

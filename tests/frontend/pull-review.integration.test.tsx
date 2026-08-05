@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
@@ -14,6 +15,8 @@ import type {
 import RestorePlanView, {
   pullSelectableResourceIds,
 } from "../../src/components/project-sync/RestorePlanView";
+import SyncOutcomeNotice from "../../src/components/project-sync/SyncOutcomeNotice";
+import { buildPullOutcome, type SyncOutcome } from "../../src/components/project-sync/syncOutcome";
 import {
   buildPullReviewItems,
   buildPullReviewSelection,
@@ -24,6 +27,17 @@ import {
   hasPendingRestoreMutations,
   type PullReviewApi,
 } from "../../src/components/project-sync/pullReviewFlow";
+
+/**
+ * The finished Pull no longer lives in the review — it closes and reports on
+ * the storage card — so outcome intents are asserted against the data
+ * `buildPullOutcome` produces and the banner `SyncOutcomeNotice` renders.
+ */
+function renderOutcome(outcome: SyncOutcome) {
+  return renderToStaticMarkup(
+    <SyncOutcomeNotice outcome={outcome} onAction={() => undefined} onDismiss={() => undefined} />,
+  );
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -110,10 +124,16 @@ test("a replacement storage history offers unlinking from Pull review", () => {
     />,
   );
 
-  assert.match(html, />Storage history changed</);
-  assert.match(html, /Applying this Pull adopts the replacement history/);
-  assert.match(html, /unlinking does not delete files/);
-  assert.match(html, />Unlink storage<\/button>/);
+  assert.match(html, /class="sync-callout warning" role="status"/);
+  assert.match(html, /<strong>Storage history changed<\/strong>/);
+  assert.match(
+    html,
+    /Local storage 1 was reset\. Pulling adopts its new history; local content is backed up first\./,
+  );
+  assert.match(html, /class="btn btn-ghost danger">Unlink storage…<\/button>/);
+  // The notice is in-flow, not a gate: the primary Pull action stays enabled.
+  assert.match(html, /class="btn btn-primary sync-pull-apply-button">/);
+  assert.match(html, /svg>Pull<\/button>/);
 });
 
 test("post-fork replans finalize only when conversation rows are informational", () => {
@@ -202,7 +222,7 @@ function divergenceAction(): ConversationPlanAction {
   };
 }
 
-test("conversation divergence defaults to keep-both and renders the reviewed fork contract", () => {
+test("conversation divergence defaults to keep-both in the inline row control", () => {
   const conflictPlan: RestorePlan = {
     ...restorePlan,
     actions: [],
@@ -243,15 +263,60 @@ test("conversation divergence defaults to keep-both and renders the reviewed for
       onBack={() => undefined}
     />,
   );
-  assert.match(html, /Conversation conflict/);
-  assert.match(html, /Keep both branches <em>Recommended<\/em>/);
-  assert.match(html, /Use cloud version only/);
-  assert.match(html, /app-server → native PTY/);
-  assert.match(html, /local before Pull/);
+  assert.match(html, /class="sync-divergence-inline"/);
+  assert.match(html, /role="radiogroup" aria-label="Conflict resolution"/);
   assert.match(
     html,
-    /type="radio"[^>]*checked=""/,
-    "the keep-both radio is selected initially",
+    /role="radio" aria-checked="true" class="active" title="The local branch becomes a Codex fork — nothing is lost">Keep both</,
+    "the recommended keep-both resolution is pre-selected",
+  );
+  assert.match(
+    html,
+    /role="radio" aria-checked="false" class="" title="Replaces the local branch">Use cloud only</,
+  );
+  assert.doesNotMatch(
+    html,
+    /sync-divergence-inline-confirm/,
+    "keep-both requires no destructive acknowledgement",
+  );
+  assert.doesNotMatch(html, /sync-divergence-card|Keep both branches|Use cloud version only/);
+});
+
+test("an unpreserved cloud-only default demands the discard confirmation before Pull", () => {
+  const action = divergenceAction();
+  action.divergence = {
+    ...action.divergence!,
+    recommended_resolution: "use_cloud_only",
+    local_branch_preserved: false,
+  };
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      profileLabel="myconf2"
+      plan={{ ...restorePlan, actions: [], conversation_actions: [action] }}
+      binding={binding}
+      readiness={null}
+      restoreResult={null}
+      phase="idle"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="history"
+      onApply={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.match(html, /aria-checked="true" class="active" title="Replaces the local branch">Use cloud only</);
+  assert.match(html, /class="sync-divergence-inline-confirm"/);
+  assert.match(html, /Discard the local branch — I understand it won&#x27;t remain in Codex/);
+  assert.match(
+    html,
+    /class="btn btn-primary sync-pull-apply-button" disabled="" title="Confirm the discard above first"/,
+    "an unconfirmed discard blocks the Pull action with its reason",
   );
 });
 
@@ -302,15 +367,26 @@ test("a preserved divergence recommends cloud adoption and waives the destructiv
       onBack={() => undefined}
     />,
   );
-  assert.match(html, /Adopt cloud version <em>Recommended<\/em>/);
-  assert.match(html, /already preserved in a Codex fork/);
-  assert.match(html, /Fork again/);
+  assert.match(
+    html,
+    /aria-checked="true" class="active" title="The local branch is already preserved in a Codex fork; restore the cloud conversation">Adopt cloud</,
+    "the plan-recommended cloud adoption is pre-selected",
+  );
+  assert.match(
+    html,
+    /title="Keep another copy of the local branch as a new Codex fork before restoring the cloud conversation">Fork again</,
+  );
   assert.doesNotMatch(
     html,
-    /I understand the divergent local branch/,
+    /sync-divergence-inline-confirm/,
     "the witnessed overwrite renders no destructive acknowledgement",
   );
-  assert.doesNotMatch(html, /Keep both branches <em>Recommended<\/em>/);
+  assert.doesNotMatch(html, />Keep both<|>Use cloud only</, "preserved rows swap to the fork-again vocabulary");
+  assert.match(
+    html,
+    /class="btn btn-primary sync-pull-apply-button">/,
+    "a preserved cloud adoption keeps Pull enabled without a discard confirmation",
+  );
 });
 
 test("unacknowledged fork checkpoints expose only an explicit retry", () => {
@@ -340,7 +416,20 @@ test("unacknowledged fork checkpoints expose only an explicit retry", () => {
       message: "Mallard did not acknowledge a fork from this attempt.",
     }],
   };
-  const html = renderToStaticMarkup(
+  const outcomeFor = (result: RestoreResult) => buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan: conflictPlan,
+    result,
+    readiness: null,
+    items: buildPullReviewItems(conflictPlan),
+    completedResourceIds: new Set<string>(),
+    error: null,
+  });
+
+  // The review itself no longer carries the fork decision: the checkpoint
+  // parks it, so the conflicted row's control is hidden and the footer offers
+  // nothing but the Pull.
+  const reviewHtml = renderToStaticMarkup(
     <RestorePlanView
       projectName="gam2"
       profileLabel="myconf2"
@@ -357,55 +446,106 @@ test("unacknowledged fork checkpoints expose only an explicit retry", () => {
       error={null}
       initialStep="review"
       onApply={() => undefined}
-      onRetryCodexFork={() => undefined}
-      onRefresh={() => undefined}
       onBack={() => undefined}
     />,
   );
-  assert.match(html, /Fork not acknowledged/);
-  assert.match(html, /A fork may already exist in Codex/);
-  assert.match(html, /Retrying may create another fork/);
-  assert.match(html, /Retry fork/);
-  assert.doesNotMatch(html, /Forked thread ID/);
-  assert.doesNotMatch(html, /Verify fork/);
-  assert.doesNotMatch(html, />Cancel</);
-  assert.doesNotMatch(html, /Use cloud version only/);
-  assert.doesNotMatch(html, /Force/);
+  assert.doesNotMatch(
+    reviewHtml,
+    /sync-divergence-inline/,
+    "the parked checkpoint hides the row conflict control",
+  );
+  assert.doesNotMatch(reviewHtml, /sync-fork-checkpoint/, "the old checkpoint section markup is gone");
+  assert.doesNotMatch(
+    reviewHtml,
+    /Retry fork|Verify fork|>Done<\/button>|>Cancel<|Force/,
+    "the closed-outcome model leaves the review with no fork verbs of its own",
+  );
+  assert.match(reviewHtml, /class="btn btn-primary sync-pull-apply-button">/);
+  assert.match(reviewHtml, /svg>Pull<\/button>/);
 
+  const outcome = outcomeFor(checkpoint);
+  assert.equal(outcome.tone, "warning");
+  assert.equal(outcome.title, "Pull complete — fork not confirmed");
+  assert.equal(outcome.defaultOpen, true, "a parked decision opens the banner instead of folding away");
+  assert.deepEqual(outcome.action, {
+    kind: "retry_fork",
+    label: "Retry fork",
+    operationId: "operation-divergence",
+  }, "the one affordance is an explicit retry of this checkpoint");
+  assert.deepEqual(outcome.rows, [{
+    key: "operation-divergence",
+    // The trailing date stamp goes the way the history list already sends it.
+    title: "Analyze codebase knowledge graph — local before Pull",
+    status: "failed",
+    forkCount: 0,
+    // The row leads with the thing that matters — nothing of theirs was lost.
+    // The backend's own sentence is support detail and lives in the technical
+    // block; the thread id rides along for the same reason.
+    reason: "Codex didn't confirm the fork — your local session is untouched",
+    threadId: "019fac21-4aba-7fc2-bb7d-df711c950987",
+  }], "the parked row keeps the reassurance and carries the thread id");
+
+  const html = renderOutcome(outcome);
+  // A decision holds the banner open: no collapsed class, and the fold button
+  // reports the state it would toggle away from.
+  assert.match(html, /class="sync-callout sync-outcome-notice warning"/);
+  assert.match(html, /class="sync-history-commit-toggle" aria-expanded="true"/);
+  assert.match(html, /<strong>Pull complete — fork not confirmed<\/strong>/);
+  assert.match(
+    html,
+    /<strong>Analyze codebase knowledge graph — local before Pull<\/strong>/,
+    "the suggested fork name is reachable without opening a technical block",
+  );
+  assert.match(
+    html,
+    /<code>019fac21-4aba-7fc2-bb7d-df711c950987<\/code>/,
+    "the row carries the complete thread id, not an 8-character stub",
+  );
+  assert.match(html, /your local session is untouched/);
+  assert.match(html, /<dt>Message<\/dt><dd>Mallard did not acknowledge a fork from this attempt\.<\/dd>/);
+  assert.equal(
+    (html.match(/>Retry fork<\/button>/g) ?? []).length,
+    1,
+    "one parked checkpoint exposes exactly one retry",
+  );
+  assert.doesNotMatch(html, /Restart /, "nothing forked, so no App restart is offered");
+
+  // The restart offer belongs to a fork that actually landed; an app that
+  // reports itself restartable cannot conjure one out of a parked checkpoint.
+  assert.deepEqual(outcomeFor({
+    ...checkpoint,
+    codex_app_refresh: {
+      operation_id: "operation-divergence",
+      app_kind: "codex",
+      app_name: "Codex App",
+      state: "restart_available",
+      message: "Codex App may need a restart to refresh its conversation list.",
+    },
+  }).action, {
+    kind: "retry_fork",
+    label: "Retry fork",
+    operationId: "operation-divergence",
+  }, "a restartable app does not turn an unconfirmed fork into a restart");
+
+  // A checkpoint that needs recovery rather than a retry still reports the
+  // session as unforked and carries its own message onto the banner.
   const recoveryRequired: RestoreResult = {
     ...checkpoint,
     status: "recovery_required",
+    message: "The acknowledged fork needs recovery.",
     codex_fork_checkpoints: checkpoint.codex_fork_checkpoints.map((item) => ({
       ...item,
       status: "recovery_required",
       message: "The acknowledged fork needs recovery.",
     })),
   };
-  const recoveryHtml = renderToStaticMarkup(
-    <RestorePlanView
-      projectName="gam2"
-      profileLabel="myconf2"
-      plan={conflictPlan}
-      binding={binding}
-      readiness={null}
-      restoreResult={recoveryRequired}
-      phase="complete"
-      supportLoading={false}
-      completedActionIds={new Set()}
-      completedResourceIds={new Set()}
-      failedResourceIds={new Set()}
-      busy={false}
-      error={null}
-      initialStep="review"
-      onApply={() => undefined}
-      onRetryCodexFork={() => undefined}
-      onRefresh={() => undefined}
-      onBack={() => undefined}
-    />,
+  const recoveryHtml = renderOutcome(outcomeFor(recoveryRequired));
+  assert.match(recoveryHtml, /<dt>Message<\/dt><dd>The acknowledged fork needs recovery\.<\/dd>/);
+  assert.match(
+    recoveryHtml,
+    /class="sync-thread-sync-indicator unavailable"/,
+    "the session is still reported as unforked",
   );
-  assert.match(recoveryHtml, /Fork recovery needs attention/);
-  assert.doesNotMatch(recoveryHtml, /Retry fork/);
-  assert.doesNotMatch(recoveryHtml, /Retrying may create another fork/);
 });
 
 function secondDivergenceAction(): ConversationPlanAction {
@@ -468,42 +608,50 @@ test("a fork checkpoint queue retries one fork at a time in the same review", ()
       },
     ],
   };
-  const html = renderToStaticMarkup(
-    <RestorePlanView
-      projectName="gam2"
-      profileLabel="myconf2"
-      plan={conflictPlan}
-      binding={binding}
-      readiness={null}
-      restoreResult={queued}
-      phase="complete"
-      supportLoading={false}
-      completedActionIds={new Set()}
-      completedResourceIds={new Set()}
-      failedResourceIds={new Set()}
-      busy={false}
-      error={null}
-      initialStep="review"
-      onApply={() => undefined}
-      onRetryCodexFork={() => undefined}
-      onRefresh={() => undefined}
-      onBack={() => undefined}
-    />,
+  const outcome = buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan: conflictPlan,
+    result: queued,
+    readiness: null,
+    items: buildPullReviewItems(conflictPlan),
+    completedResourceIds: new Set<string>(),
+    error: null,
+  });
+  assert.deepEqual(outcome.action, {
+    kind: "retry_fork",
+    label: "Retry fork",
+    operationId: "operation-divergence-first",
+  }, "the queue offers its first checkpoint, never the second");
+  assert.deepEqual(
+    outcome.stats.find((stat) => stat.label === "fork pending"),
+    { icon: "git-fork", value: "2", label: "fork pending" },
+    "the summary line counts the whole queue",
   );
-  assert.match(html, /Fork checkpoint 1 of 2/);
-  assert.match(html, /the rest of this Pull is already applied/);
-  assert.match(html, /019fac21-4aba-7fc2-bb7d-df711c950987/);
-  assert.doesNotMatch(
-    html,
-    /019fac21-4aba-7fc2-bb7d-df711c950988/,
-    "only the first checkpoint of the queue is actionable at a time",
+  assert.deepEqual(outcome.rows.map((row) => [row.key, row.title, row.status]), [
+    [
+      "operation-divergence-first",
+      "Analyze codebase knowledge graph — local before Pull",
+      "failed",
+    ],
+    [
+      "operation-divergence-second",
+      "Draft the release notes — local before Pull",
+      "failed",
+    ],
+  ], "both parked forks are reported by name even though only one can be retried");
+
+  const html = renderOutcome(outcome);
+  assert.equal(
+    (html.match(/>Retry fork<\/button>/g) ?? []).length,
+    1,
+    "two parked checkpoints still expose one retry, not one per row",
   );
-  assert.match(html, /Retry fork/);
-  assert.doesNotMatch(html, /Verify fork/);
-  assert.doesNotMatch(html, />Cancel</);
+  assert.match(html, /<b>2<\/b>fork pending/);
+  assert.match(html, /<strong>Draft the release notes — local before Pull<\/strong>/);
+  assert.doesNotMatch(html, /Verify fork|>Cancel<|Restart /);
 });
 
-test("multiple conversation conflicts stay distinguishable by title", () => {
+test("multiple conversation conflicts each keep their own inline resolution", () => {
   const conflictPlan: RestorePlan = {
     ...restorePlan,
     actions: [],
@@ -530,11 +678,25 @@ test("multiple conversation conflicts stay distinguishable by title", () => {
       onBack={() => undefined}
     />,
   );
-  assert.match(html, /Conversation conflict — Analyze codebase knowledge graph/);
-  assert.match(html, /Conversation conflict — Draft the release notes/);
+  assert.equal(
+    (html.match(/class="sync-divergence-inline"/g) ?? []).length,
+    2,
+    "each conflicted row hosts its own resolution control",
+  );
+  assert.equal((html.match(/role="radiogroup" aria-label="Conflict resolution"/g) ?? []).length, 2);
+  assert.equal(
+    (html.match(/aria-checked="true" class="active" title="The local branch becomes a Codex fork — nothing is lost">Keep both</g) ?? []).length,
+    2,
+    "both conflicts default to their own keep-both selection",
+  );
+  assert.equal(
+    (html.match(/aria-label="Select Conversation"/g) ?? []).length,
+    2,
+    "both conflicts stay independently selectable",
+  );
 });
 
-test("completed divergence reports both identities, naming outcomes, refresh warning, and optional App restart", () => {
+test("completed divergence reports the preserved fork, its naming outcome, refresh warning, and optional App restart", () => {
   const action = divergenceAction();
   const conflictPlan: RestorePlan = {
     ...restorePlan,
@@ -571,44 +733,119 @@ test("completed divergence reports both identities, naming outcomes, refresh war
       inventory_refresh_status: "failed",
     }],
   };
-  const renderCompleted = (restoreResult: RestoreResult) => renderToStaticMarkup(
-    <RestorePlanView
-      projectName="gam2"
-      profileLabel="myconf2"
-      plan={conflictPlan}
-      binding={binding}
-      readiness={null}
-      restoreResult={restoreResult}
-      phase="complete"
-      supportLoading={false}
-      completedActionIds={new Set([action.action_id])}
-      completedResourceIds={new Set([action.source_resource_id!])}
-      failedResourceIds={new Set()}
-      busy={false}
-      error={null}
-      initialStep="review"
-      onApply={() => undefined}
-      onRestartCodexApp={() => undefined}
-      onRefresh={() => undefined}
-      onBack={() => undefined}
-    />,
+  const outcomeFor = (
+    result: RestoreResult,
+    readiness: BundleReadiness | null = null,
+  ) => buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan: conflictPlan,
+    result,
+    readiness,
+    items: buildPullReviewItems(conflictPlan),
+    completedResourceIds: new Set([action.source_resource_id!]),
+    error: null,
+  });
+
+  const outcome = outcomeFor(completed);
+  assert.equal(outcome.tone, "success");
+  assert.equal(outcome.title, "Pull complete");
+  assert.equal(outcome.defaultOpen, false, "a fork that landed folds itself away");
+  assert.deepEqual(outcome.rows, [{
+    key: "conversation-divergence",
+    title: "Analyze codebase knowledge graph",
+    status: "forked",
+    forkCount: 0,
+    // This apply reported inventory_refresh_status "failed": the fork landed
+    // but Codex's conversation list did not reload, which is exactly the case
+    // where "it worked" alone would leave the user hunting for it.
+    reason: "local session kept as a Codex fork — Codex's conversation list did not refresh",
+  }], "the fork row names the original conversation and says the discovery refresh failed");
+  assert.deepEqual(
+    outcome.stats.find((stat) => stat.label === "session forked"),
+    { icon: "git-fork", value: "1", label: "session forked" },
   );
-  const html = renderCompleted(completed);
-  assert.match(html, /Both Codex branches preserved/);
-  assert.match(html, /019fac21-4aba-7fc2-bb7d-df711c950987/);
-  assert.match(html, /019fac73-c1ff-79b3-bb8e-1673ed0d644c/);
-  assert.match(html, /native PTY/);
-  assert.match(html, /Codex conversation discovery refresh failed/);
-  assert.match(html, /My active Codex chats are complete/);
-  assert.match(html, /Restart Codex App/);
-  const deferredHtml = renderCompleted({
+  assert.deepEqual(outcome.action, {
+    kind: "restart_codex",
+    label: "Restart Codex App",
+    title: "Shows the restored fork — active Codex App chats are interrupted",
+    operationId: "operation-divergence",
+    appKind: "codex",
+  }, "the restart names the app, its operation, and what it costs");
+
+  const html = renderOutcome(outcome);
+  assert.match(
+    html,
+    /class="sync-callout sync-outcome-notice success collapsed"/,
+    "a clean fork folds itself away; the sessions stay in the DOM behind the fold",
+  );
+  assert.match(html, /class="sync-history-commit-toggle" aria-expanded="false"/);
+  assert.match(html, /class="sync-thread-sync-indicator diverged-forked"/);
+  assert.match(html, /<strong>Analyze codebase knowledge graph<\/strong>/);
+  assert.match(html, /local session kept as a Codex fork/);
+  assert.match(
+    html,
+    /title="Shows the restored fork — active Codex App chats are interrupted"/,
+  );
+  assert.match(html, /svg>Restart Codex App<\/button>/);
+
+  // The restart is earned only by a fork that produced a child thread in an
+  // app that can be restarted, from an apply that finished.
+  assert.equal(outcomeFor({
     ...completed,
     codex_divergences: completed.codex_divergences.map((divergence) => ({
       ...divergence,
-      inventory_refresh_status: "deferred",
+      preserved_provider_thread_id: null,
     })),
+  }).action, undefined, "a fork with no child thread has nothing for Codex to reload");
+  assert.equal(outcomeFor({
+    ...completed,
+    codex_divergences: completed.codex_divergences.map((divergence) => ({
+      ...divergence,
+      resolution: "use_cloud_only" as const,
+    })),
+  }).action, undefined, "an adopted cloud branch forked nothing to show");
+  assert.equal(outcomeFor({
+    ...completed,
+    codex_app_refresh: { ...completed.codex_app_refresh!, state: "manual_restart" },
+  }).action, undefined, "an app Mallard cannot restart offers no button");
+  assert.equal(
+    outcomeFor({ ...completed, status: "fork_unacknowledged" }).action,
+    undefined,
+    "an unfinished apply offers no restart",
+  );
+
+  // Setup that still needs attention rides the same banner and opens it,
+  // without withdrawing the restart the fork earned.
+  const withSetupIssue = outcomeFor(completed, {
+    bundle_id: binding.bundle_id,
+    state: "needs_setup",
+    issues: [{
+      issue_id: "codex-profile",
+      category: "agent_setup",
+      title: "Codex profile is missing",
+      detail: "Add the profile before resuming.",
+      severity: "error",
+    }],
   });
-  assert.match(deferredHtml, /finishing in the background/);
+  assert.equal(withSetupIssue.tone, "warning");
+  assert.equal(withSetupIssue.defaultOpen, true);
+  assert.deepEqual(withSetupIssue.rows[1], {
+    key: "codex-profile",
+    title: "Codex profile is missing",
+    status: "failed",
+    reason: "Add the profile before resuming.",
+  });
+  assert.equal(withSetupIssue.action?.kind, "restart_codex");
+
+  // A ready verdict leaves the clean success alone.
+  const readyOutcome = outcomeFor(completed, {
+    bundle_id: binding.bundle_id,
+    state: "ready",
+    issues: [],
+  });
+  assert.equal(readyOutcome.tone, "success");
+  assert.equal(readyOutcome.title, "Pull complete");
+  assert.equal(readyOutcome.defaultOpen, false);
 });
 
 test("a valid Pull plan renders an enabled non-modal Apply workspace while supporting checks fail", async () => {
@@ -664,19 +901,20 @@ test("a valid Pull plan renders an enabled non-modal Apply workspace while suppo
     />,
   );
   assert.match(html, /sync-pull-review-workspace/);
-  assert.match(html, />Git &amp; sessions</);
-  assert.match(html, />Review</);
-  assert.doesNotMatch(html, /Project files &amp; setup/, "an empty setup group is omitted");
+  assert.doesNotMatch(html, /role="tablist"/, "a single-step review renders no tab strip");
+  assert.doesNotMatch(html, /role="tab"/);
   assert.doesNotMatch(html, /aria-modal/);
   assert.doesNotMatch(html, /sync-modal-backdrop/);
-  const applyText = html.lastIndexOf("Apply changes");
+  assert.doesNotMatch(html, /Verify project readiness/, "the pre-flight step strip is gone");
+  const applyText = html.lastIndexOf(">Pull</");
   assert.notEqual(applyText, -1);
   const applyTagStart = html.lastIndexOf("<button", applyText);
   const applyTagEnd = html.indexOf(">", applyTagStart);
+  assert.match(html.slice(applyTagStart, applyTagEnd), /sync-pull-apply-button/);
   assert.doesNotMatch(
     html.slice(applyTagStart, applyTagEnd),
     /disabled/,
-    "the default-approved conversation keeps Apply enabled",
+    "the default-approved conversation keeps Pull enabled",
   );
 
   readiness.reject(new Error("readiness unavailable"));
@@ -687,12 +925,12 @@ test("a valid Pull plan renders an enabled non-modal Apply workspace while suppo
   ]);
 });
 
-test("a Pull review opens on the first step by default", () => {
-  const html = renderToStaticMarkup(
+test("a Pull review opens on the history step and tabs appear only with a second step", () => {
+  const render = (plan: RestorePlan) => renderToStaticMarkup(
     <RestorePlanView
       projectName="gam2"
       profileLabel="myconf2"
-      plan={restorePlan}
+      plan={plan}
       binding={binding}
       readiness={null}
       restoreResult={null}
@@ -709,9 +947,24 @@ test("a Pull review opens on the first step by default", () => {
     />,
   );
 
-  assert.match(html, /aria-selected="true"[^>]*aria-label="Git &amp; sessions, 1 selected"/);
-  assert.doesNotMatch(html, /aria-selected="true"[^>]*aria-label="Review"/);
-  assert.match(html, />Next: Review</, "the first step advances instead of applying");
+  const singleStep = render(restorePlan);
+  assert.doesNotMatch(singleStep, /role="tablist"/, "one step is not a choice, so no tab strip renders");
+  assert.match(singleStep, /id="sync-review-history-panel"/, "the review opens on the history step");
+  assert.doesNotMatch(singleStep, />Next:|>Back</, "there is no wizard footer");
+  assert.match(singleStep, /svg>Pull<\/button>/, "the footer applies directly");
+
+  const twoStep = render({
+    ...restorePlan,
+    project_content_eligibility: { state: "eligible", reason: "Not inside a Git work tree." },
+  });
+  assert.match(
+    twoStep,
+    /aria-selected="true"[^>]*aria-label="Git &amp; sessions, 1 selected"/,
+    "the history tab opens selected with its count",
+  );
+  assert.match(twoStep, /aria-selected="false"[^>]*aria-label="Project files, 0 selected"/);
+  assert.equal((twoStep.match(/role="tab"/g) ?? []).length, 2, "only history and project files exist as steps");
+  assert.doesNotMatch(twoStep, />Review</);
 });
 
 test("the embedded Pull footer omits redundant helper copy", () => {
@@ -818,41 +1071,44 @@ test("conversation conflicts become one-time keep-local decisions without blocki
     />,
   );
 
-  assert.match(html, /aria-label="Git &amp; sessions, 1 selected, needs attention/);
-  assert.match(html, /1 conversation has local changes/);
-  assert.match(html, /Your local version will stay unchanged/);
-  assert.match(html, /You can push it later/);
-  assert.match(html, />Review</);
-  assert.match(html, />Optional change not selected</);
-  assert.match(html, /Apply will skip agents\.md and leave it unchanged/);
-  assert.doesNotMatch(html, /resolve.*separately/i);
-  assert.doesNotMatch(html, /Project files are not fully materialized/);
-  assert.match(html, />Apply changes</);
-
-  const historyHtml = renderToStaticMarkup(
-    <RestorePlanView
-      projectName="gam2"
-      profileLabel="myconf2"
-      plan={conflictedPlan}
-      binding={binding}
-      readiness={null}
-      restoreResult={null}
-      phase="idle"
-      supportLoading={false}
-      completedActionIds={new Set()}
-      completedResourceIds={new Set()}
-      failedResourceIds={new Set()}
-      busy={false}
-      error={null}
-      initialStep="history"
-      onApply={() => undefined}
-      onRefresh={() => undefined}
-      onBack={() => undefined}
-    />,
+  // The keep-local conflict renders as a non-selectable row with its decision
+  // chip; it never blocks the safe changes around it.
+  assert.match(html, /aria-label="Show details for Conflicted conversation"/);
+  assert.match(html, /class="sync-pull-item-status keep-local">Keep local</);
+  assert.doesNotMatch(
+    html,
+    /aria-label="Select Conflicted conversation"/,
+    "keep-local conflicts expose no checkbox",
   );
-  assert.equal((historyHtml.match(/sync-pull-item-selectable/g) ?? []).length, 1);
-  assert.doesNotMatch(historyHtml, /sync-selection-placeholder/);
-  assert.equal((historyHtml.match(/type="checkbox"/g) ?? []).length, 1);
+  // The optional definition now lives at the bottom of the history step.
+  assert.match(html, /<strong>Agent setup &amp; tools<\/strong>/);
+  assert.ok(
+    html.indexOf('class="sync-pull-items"') >= 0
+      && html.indexOf('class="sync-pull-items"') < html.indexOf("sync-sync-review-other"),
+    "Agent setup & tools renders below the session list",
+  );
+  assert.match(html, /aria-label="Select agents\.md"/);
+  assert.match(html, /class="sync-pull-item-status needs-approval">Needs approval</);
+  assert.doesNotMatch(html, /resolve.*separately/i);
+  assert.doesNotMatch(
+    html,
+    /Project files are not fully materialized/,
+    "pre-result readiness issues stay out of the review",
+  );
+  assert.doesNotMatch(html, /sync-sync-review-summary/, "the review-step summary is gone");
+  assert.match(
+    html,
+    /class="btn btn-primary sync-pull-apply-button">/,
+    "the safe selection keeps Pull enabled",
+  );
+  assert.match(html, /svg>Pull<\/button>/);
+  assert.equal(
+    (html.match(/sync-pull-item-selectable/g) ?? []).length,
+    2,
+    "only the safe conversation and the optional definition are selectable",
+  );
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 2);
+  assert.doesNotMatch(html, /sync-selection-placeholder/);
 
   const calls: string[] = [];
   const keepLocalOnlyPlan = { ...conflictedPlan, actions: [conflictedPlan.actions[1]] };
@@ -881,6 +1137,220 @@ test("conversation conflicts become one-time keep-local decisions without blocki
   );
   assert.deepEqual(calls, ["restore:0", "verify"]);
   assert.equal(result.success, true);
+});
+
+test("the Apply coordinator sends the empty apply for an acknowledge-only Pull", async () => {
+  const calls: string[] = [];
+  // The plan holds a real (unselected) action: before, the coordinator
+  // silently skipped the backend call, so the reviewed baseline never moved.
+  const result = await applyPullReview(
+    {
+      applyRestore: async (_planId, actionIds) => {
+        calls.push(`restore:${actionIds.length}`);
+        return {
+          success: true,
+          status: "complete",
+          message: "Applied 0 restore actions",
+          plan_id: restorePlan.plan_id,
+          reviewed_base_advanced: true,
+          applied_action_ids: [],
+          failed_actions: [],
+          codex_fork_checkpoints: [],
+          codex_divergences: [],
+        };
+      },
+      getRestoreReadiness: async () => {
+        calls.push("verify");
+        return { bundle_id: binding.bundle_id, state: "ready", issues: [] };
+      },
+    },
+    restorePlan,
+    { resourceIds: [], restoreActionIds: [], conversationResolutions: [] },
+    () => undefined,
+  );
+  assert.deepEqual(calls, ["restore:0", "verify"]);
+  assert.equal(result.success, true);
+});
+
+test("an all-optional plan keeps Pull enabled for the acknowledge-only apply", () => {
+  const optionalPlan: RestorePlan = {
+    ...restorePlan,
+    actions: [{
+      ...restorePlan.actions[0],
+      action_id: "action-optional",
+      resource_id: "codex:config:agents",
+      kind: { kind: "write_file", logical_path: "state/codex/AGENTS.md" },
+      requires_explicit_approval: true,
+    }],
+  };
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      storageName="Local storage 1"
+      profileLabel="myconf2"
+      plan={optionalPlan}
+      binding={binding}
+      readiness={null}
+      restoreResult={null}
+      phase="idle"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="history"
+      onApply={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  // Nothing is selected, yet the primary stays a live Pull: the empty apply
+  // advances the reviewed baseline, which is what unblocks Push.
+  assert.match(html, /class="btn btn-primary sync-pull-apply-button">/);
+  assert.match(html, /svg>Pull<\/button>/);
+  assert.doesNotMatch(html, /Nothing to pull is selected/);
+});
+
+test("a plan with nothing to review acknowledges without opening the review", () => {
+  // The storage-card Pull must work when the storage only moved its
+  // generation: planRestore runs the empty apply itself instead of opening
+  // an empty review the user has to click through. A replaced history is
+  // never adopted silently.
+  const source = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  assert.match(source, /!hasPendingRestoreMutations\(review\.restorePlan\)\s*&&\s*review\.restorePlan\.remote_continuity\?\.state !== "replaced"/);
+  assert.match(source, /applyRestore\(review\.restorePlan\.plan_id, \[\], \[\]\)/);
+  assert.match(source, /finalization\.reviewed_base_advanced === false/);
+});
+
+test("the storage-card Pull button applies the open review", () => {
+  // The card button is the review's footer primary, not a focus shortcut:
+  // with nothing selected it still applies, because the empty apply is how a
+  // generation-only storage change is acknowledged. The review reports its
+  // primary upward under the footer's own gating, and the card runs it the
+  // same way the push card button runs its onContinue.
+  const view = readFileSync("src/components/project-sync/RestorePlanView.tsx", "utf8");
+  assert.match(view, /disabledReason: primaryDisabledReason,/);
+  assert.match(view, /apply: \(\) => onApplyRef\.current\(selectionRef\.current\),/);
+
+  const sync = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  assert.match(sync, /onPrimaryChange=\{setPullReviewPrimary\}/);
+  assert.match(sync, /continueDisabled: !pullReviewPrimary \|\| pullReviewPrimary\.disabledReason !== null,/);
+
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.equal(
+    (workspace.match(/inlineStorageReview\?\.onContinue\?\.\(\);/g) ?? []).length,
+    2,
+    "the pull card button applies the open review exactly the way the push one does",
+  );
+  assert.doesNotMatch(
+    workspace,
+    /Return to the open Pull review|Return to Pull review/,
+    "the focus-only behavior is gone, not just unreachable",
+  );
+});
+
+test("Pull stays disabled until the storage rows have rendered", () => {
+  // With a project and a Codex profile the review embeds the history page,
+  // whose timeline and "Only in …" storage rows arrive from async fetches.
+  // Until they land, the primary must not apply a sight-unseen selection.
+  const historyProject = {
+    local_project_id: binding.local_project_id,
+    bundle_id: binding.bundle_id,
+    display_name: "gam2",
+    local_alias: "gam2",
+    repository_fingerprint: "fingerprint",
+    project_root: binding.project_root,
+    canonical_project_root: binding.canonical_project_root,
+    profile_ids: { codex: "profile-codex" },
+    profile_names: ["Default Codex"],
+    created_at: 1,
+    updated_at: 2,
+    revision: 1,
+  };
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      storageName="Local storage 1"
+      profileLabel="myconf2"
+      project={historyProject as never}
+      plan={restorePlan}
+      binding={binding}
+      readiness={null}
+      restoreResult={null}
+      phase="idle"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      initialStep="history"
+      onApply={() => undefined}
+      onRefresh={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.match(html, /disabled="" title="Loading storage changes…"/);
+  assert.match(html, /svg>Pull<\/button>/);
+});
+
+test("a completed apply that could not advance the baseline says so", () => {
+  const stalled: RestoreResult = {
+    success: true,
+    status: "complete",
+    message: "Applied 0 restore actions",
+    plan_id: restorePlan.plan_id,
+    reviewed_base_advanced: false,
+    applied_action_ids: [],
+    failed_actions: [],
+    codex_fork_checkpoints: [],
+    codex_divergences: [],
+  };
+  const outcomeFor = (result: RestoreResult) => buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan: restorePlan,
+    result,
+    readiness: { bundle_id: binding.bundle_id, state: "ready", issues: [] },
+    items: buildPullReviewItems(restorePlan),
+    completedResourceIds: new Set<string>(),
+    error: null,
+  });
+
+  // Even with readiness green, a stalled baseline must not read as success.
+  const outcome = outcomeFor(stalled);
+  assert.equal(outcome.tone, "warning");
+  assert.equal(outcome.title, "Pull complete — Push still blocked");
+  assert.equal(outcome.defaultOpen, true, "the banner opens on the news it has to deliver");
+  assert.deepEqual(outcome.rows, [{
+    key: "plan-restore:baseline",
+    title: "Push is still blocked",
+    status: "held",
+    reason: "Required changes were skipped, so this computer stays behind storage. Pull them to unblock Push.",
+  }], "the stalled baseline is named in the user's terms, not as a lineage number");
+  assert.deepEqual(
+    outcome.action,
+    { kind: "open_pull", label: "Open Pull review" },
+    "the way out is the Pull whose changes were skipped",
+  );
+
+  const html = renderOutcome(outcome);
+  assert.match(html, /class="sync-callout sync-outcome-notice warning"/);
+  assert.match(html, /<strong>Pull complete — Push still blocked<\/strong>/);
+  assert.match(
+    html,
+    /Required changes were skipped, so this computer stays behind storage\. Pull them to unblock Push\./,
+  );
+  assert.doesNotMatch(html, /sync-outcome-notice success/);
+
+  // The identical apply with an advanced baseline is the clean folded
+  // success, so the warning above is not boilerplate.
+  const advanced = outcomeFor({ ...stalled, reviewed_base_advanced: true });
+  assert.equal(advanced.tone, "success");
+  assert.equal(advanced.title, "Pull complete");
+  assert.equal(advanced.defaultOpen, false);
+  assert.deepEqual(advanced.rows, []);
+  assert.equal(advanced.action, undefined);
 });
 
 test("stored-only Pull conversations have no checkbox or empty alignment gutter", () => {

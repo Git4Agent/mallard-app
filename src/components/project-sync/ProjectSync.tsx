@@ -42,20 +42,22 @@ import LogPanel, { ACTIVITY_LOG_TYPES } from "../LogPanel";
 import BundleConnectionDialog from "./BundleConnectionDialog";
 import LogManagerDialog from "./LogManagerDialog";
 import ProjectBindingEditor, { type ProjectBindingDraft } from "./ProjectBindingEditor";
-import ProjectLinksWorkspace from "./ProjectLinksWorkspace";
+import ProjectLinksWorkspace, { type StorageNotice } from "./ProjectLinksWorkspace";
 import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
-  nextPushReviewStep,
   preserveSyncedPushRecipeEntries,
+  pullRequiredCopy,
   pushReviewBlockingCount,
   recommendedPushSelection,
   sanitizePushSelection,
 } from "./PushResourceWorkspace";
 import ProjectSetupWorkspace, { type SetupCompletion } from "./ProjectSetupWorkspace";
 import ProjectSidebar from "./ProjectSidebar";
-import RestorePlanView from "./RestorePlanView";
+import RestorePlanView, { type PullReviewPrimary } from "./RestorePlanView";
 import StartupLoadingScreen, { type StartupStage } from "./StartupLoadingScreen";
-import { syncReviewSteps, type SyncReviewStep } from "./SyncReviewTabs";
+import { type SyncReviewStep } from "./SyncReviewTabs";
+import { buildPullReviewItems } from "./pullReviewModel";
+import { buildPullOutcome, buildPushOutcome, type SyncOutcome } from "./syncOutcome";
 import { projectSyncApi } from "./api";
 import {
   applyPullReview,
@@ -270,6 +272,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [projectContentLoading, setProjectContentLoading] = useState(false);
   const [pushError, setPushError] = useState<string | null>(null);
   const [pushReviewStep, setPushReviewStep] = useState<SyncReviewStep>("history");
+  // A gate the push (or a pull plan) cannot get past never opens a review;
+  // it lands as a banner on the storage card with the way forward on it.
+  const [storageNotice, setStorageNotice] = useState<StorageNotice | null>(null);
+  // What produced the current Pull outcome, so Recheck can rebuild the banner
+  // against fresh readiness instead of replanning the whole Pull.
+  const pullOutcomeInputs = useRef<Parameters<typeof buildPullOutcome>[0] | null>(null);
   const [logLines, setLogLines] = useState<LogLine[]>([]);
   const [logTypeFilters, setLogTypeFilters] = useState<ActivityLogType[]>(() => [...ACTIVITY_LOG_TYPES]);
   const [logLevelFilter, setLogLevelFilter] = useState<ActivityLogLevel | "all">("all");
@@ -307,6 +315,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [historyRefreshEpoch, setHistoryRefreshEpoch] = useState(0);
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [pullApplyPhase, setPullApplyPhase] = useState<PullApplyPhase>("idle");
+  // The open Pull review's footer primary, mirrored out so the storage card's
+  // Pull button runs the same apply under the same gating.
+  const [pullReviewPrimary, setPullReviewPrimary] = useState<PullReviewPrimary | null>(null);
   const [reviewSupportLoading, setReviewSupportLoading] = useState(false);
   const [completedPullActionIds, setCompletedPullActionIds] = useState<Set<string>>(new Set());
   const [completedPullResourceIds, setCompletedPullResourceIds] = useState<Set<string>>(new Set());
@@ -627,6 +638,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setProjectContentLoading(false);
     setPushError(null);
     setPushReviewStep("history");
+    setStorageNotice(null);
     setEditingBinding(null);
     setRestorePlan(null);
     setRestoreBinding(null);
@@ -1176,7 +1188,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     const projectId = detail.project.local_project_id;
     const storageId = detail.links[0]?.storage_id ?? null;
     setNotice(completion === "pull"
-      ? `${projectLabel(detail.project)} connected. Review Pull before files are applied.`
+      ? `${projectLabel(detail.project)} connected. Open the Pull review before files are applied.`
       : `${projectLabel(detail.project)} is set up${storageId ? "" : " — link storage when ready"}.`);
     const { nextConfig, hostIdentityReady } = await loadShell();
     if (!hostIdentityReady || hostWorkflowGeneration.current !== workflowGeneration) return;
@@ -1304,6 +1316,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setPushProjectContentRemovals(new Set());
     setPushWarningAcknowledgements(new Set());
     setProjectContentLoading(false);
+    setStorageNotice(null);
     setBusy(true);
     setError(null);
     setPushError(null);
@@ -1318,6 +1331,41 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (!storage) throw new Error("The selected storage no longer exists.");
       const link = nextDetail.links.find((candidate) => candidate.storage_id === storageId);
       if (!link) throw new Error("This project is no longer linked to the selected storage.");
+
+      // A destination the push cannot get past never opens the review — the
+      // gate lands as a banner on the storage card instead.
+      const destination = context.destination_status;
+      if (
+        destination.state === "requires_pull"
+        || destination.state === "remote_history_missing"
+        || destination.state === "remote_history_replaced"
+      ) {
+        const changedConversations = context.thread_comparison
+          ? context.thread_comparison.counts.storage + context.thread_comparison.counts.diverged
+          : 0;
+        setStorageNotice(destination.state === "requires_pull"
+          ? {
+            projectId,
+            storageId,
+            kind: "requires_pull",
+            copy: pullRequiredCopy(
+              destination.reason,
+              storage.name,
+              destination.remote_generation,
+              destination.base_generation,
+              changedConversations,
+            ),
+          }
+          : {
+            projectId,
+            storageId,
+            kind: destination.state === "remote_history_missing" ? "remote_missing" : "remote_replaced",
+            baseGeneration: destination.base_generation ?? null,
+          });
+        setActiveProjectId(projectId);
+        setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
+        return;
+      }
 
       const savedRecipe = link.recipe ?? null;
       const nextResources = inventoryResources(nextInventory);
@@ -1376,7 +1424,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setActiveProjectId(projectId);
       setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowGeneration.current === workflowGeneration) {
+        setStorageNotice({
+          projectId,
+          storageId,
+          kind: "action_failed",
+          action: "push",
+          message: errorMessage(reason),
+        });
+      }
     } finally {
       if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
     }
@@ -1524,7 +1580,21 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         approvedConversationActionIds,
       );
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
-      setNotice(result.message);
+      // The push is finished, so the review closes and the result lands on the
+      // storage card — one banner that folds itself when nothing needs a
+      // decision, instead of a toast that takes the detail with it.
+      setStorageNotice({
+        projectId,
+        storageId,
+        kind: "outcome",
+        outcome: buildPushOutcome({
+          projectId,
+          storageId,
+          selectedResourceIds: safePushSelection,
+          threadComparison: pendingPush?.threadComparison,
+          result,
+        }),
+      });
       setHistoryRefreshEpoch((epoch) => epoch + 1);
       setPendingPush(null);
       setPushProjectContentRemovals(new Set());
@@ -1542,17 +1612,40 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             storageId,
           );
           if (hostWorkflowGeneration.current !== workflowGeneration) return;
-          setPendingPush((current) => (
-            current?.projectId === projectId && current.storageId === storageId
-              ? { ...current, destinationStatus }
-              : current
-          ));
           if (
             destinationStatus.state === "remote_history_missing"
             || destinationStatus.state === "remote_history_replaced"
+            || destinationStatus.state === "requires_pull"
           ) {
-            setPushReviewStep("review");
+            // The destination moved out from under the push mid-flight; the
+            // review can no longer finish its job, so it closes and the gate
+            // explains itself on the storage card.
+            setPendingPush(null);
             setPushError(null);
+            setPushProjectContentRemovals(new Set());
+            setPushWarningAcknowledgements(new Set());
+            const changedConversations = pendingPush.threadComparison
+              ? pendingPush.threadComparison.counts.storage + pendingPush.threadComparison.counts.diverged
+              : 0;
+            setStorageNotice(destinationStatus.state === "requires_pull"
+              ? {
+                projectId,
+                storageId,
+                kind: "requires_pull",
+                copy: pullRequiredCopy(
+                  destinationStatus.reason,
+                  pendingPush.storage.name,
+                  destinationStatus.remote_generation,
+                  destinationStatus.base_generation,
+                  changedConversations,
+                ),
+              }
+              : {
+                projectId,
+                storageId,
+                kind: destinationStatus.state === "remote_history_missing" ? "remote_missing" : "remote_replaced",
+                baseGeneration: destinationStatus.base_generation ?? null,
+              });
             return;
           }
         } catch {
@@ -1734,6 +1827,27 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const request = { storageId, bundleId, binding: targetBinding };
       const review = await beginPullReview(projectSyncApi, request);
       if (restoreRequest.current !== requestId) return null;
+      // Nothing to review means the storage only moved its generation: one
+      // empty apply acknowledges it right here, no review to click through.
+      // A replaced history is never adopted silently — that plan still opens.
+      if (
+        !hasPendingRestoreMutations(review.restorePlan)
+        && review.restorePlan.remote_continuity?.state !== "replaced"
+      ) {
+        const finalization = await projectSyncApi.applyRestore(review.restorePlan.plan_id, [], []);
+        if (restoreRequest.current !== requestId) return null;
+        if (
+          !finalization.success
+          || finalization.status !== "complete"
+          || finalization.reviewed_base_advanced === false
+        ) {
+          throw new Error("Nothing to pull, but the reviewed baseline could not be advanced.");
+        }
+        setReviewSupportLoading(false);
+        setRestoreBinding(null);
+        setNotice(`Nothing to pull for ${displayName} — caught up to storage generation ${review.restorePlan.generation}.`);
+        return null;
+      }
       setRestorePlan(review.restorePlan);
       setNotice(`Pull review ready for ${displayName}. Nothing has been applied yet.`);
 
@@ -1770,10 +1884,90 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
+  /**
+   * The one follow-up a finished sync can still owe. Restart and retry talk to
+   * the backend directly — the review that used to host them is closed by the
+   * time this banner exists — while anything unresolved reopens the Pull
+   * review, which replans from scratch.
+   */
+  const runOutcomeAction = async (outcome: SyncOutcome) => {
+    const action = outcome.action;
+    if (!action) return;
+    if (action.kind === "open_pull") {
+      setStorageNotice(null);
+      void beginProjectRestore(outcome.projectId, outcome.storageId);
+      return;
+    }
+    if (action.kind === "recheck") {
+      // Nothing to re-apply: ask the backend again and rebuild the same banner
+      // from the same result, so a fixed profile simply clears it.
+      const inputs = pullOutcomeInputs.current;
+      if (!inputs) return;
+      setBusy(true);
+      try {
+        const readiness = await projectSyncApi.getRestoreReadiness(action.planId);
+        setReadiness(readiness);
+        const next = buildPullOutcome({ ...inputs, readiness });
+        if (next.tone === "success" && !next.action) {
+          setStorageNotice(null);
+          setNotice("Remaining setup is resolved — the project is ready.");
+        } else {
+          setStorageNotice({
+            projectId: outcome.projectId,
+            storageId: outcome.storageId,
+            kind: "outcome",
+            outcome: next,
+          });
+        }
+      } catch (reason) {
+        setStorageNotice({
+          projectId: outcome.projectId,
+          storageId: outcome.storageId,
+          kind: "action_failed",
+          action: "pull",
+          message: errorMessage(reason),
+        });
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = action.kind === "restart_codex"
+        ? await projectSyncApi.restartCodexAppAfterPull(action.operationId, action.appKind, true)
+        : await projectSyncApi.retryCodexDivergence(action.operationId);
+      setHistoryRefreshEpoch((epoch) => epoch + 1);
+      if (result.success) {
+        setStorageNotice(null);
+        setNotice(result.message);
+      } else {
+        setStorageNotice({
+          projectId: outcome.projectId,
+          storageId: outcome.storageId,
+          kind: "action_failed",
+          action: "pull",
+          message: result.message,
+        });
+      }
+    } catch (reason) {
+      setStorageNotice({
+        projectId: outcome.projectId,
+        storageId: outcome.storageId,
+        kind: "action_failed",
+        action: "pull",
+        message: errorMessage(reason),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const beginProjectRestore = async (projectId: string, storageId: string) => {
     const workflowGeneration = hostWorkflowGeneration.current;
     setPendingPush(null);
     setPushError(null);
+    setStorageNotice(null);
     setError(null);
     try {
       const nextDetail = await projectSyncApi.getProject(projectId);
@@ -1817,7 +2011,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         }
       }
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowGeneration.current === workflowGeneration) {
+        setStorageNotice({
+          projectId,
+          storageId,
+          kind: "action_failed",
+          action: "pull",
+          message: errorMessage(reason),
+        });
+      }
     }
   };
 
@@ -2092,12 +2294,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       for (const actionId of interruptedActionIds) {
         if (!appliedActionIds.has(actionId)) failedActionIds.add(actionId);
       }
-      if (appliedActionIds.size > 0 && !result.error && failedActionIds.size === 0) {
-        const appliedLabel = `${appliedActionIds.size} approved change${appliedActionIds.size === 1 ? "" : "s"}`;
-        setNotice(result.readiness?.state === "ready"
-          ? `Pull finished for ${restoreProjectName}: applied ${appliedLabel}.`
-          : `Pull finished for ${restoreProjectName}: applied ${appliedLabel}. Optional setup remains.`);
-      }
       const failedResources = new Set(
         [...failedActionIds]
           .map((actionId) => resourceByAction.get(actionId))
@@ -2122,8 +2318,30 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         return next;
       });
 
-      if (result.restoreResult?.status !== undefined
-        && result.restoreResult.status !== "complete") {
+      // The Pull is finished — successfully or not — so the review closes and
+      // the result lands on the storage card. Anything left over reopens the
+      // review, which replans from scratch, so there is nothing to keep alive
+      // here.
+      if (result.restoreResult) {
+        pullOutcomeInputs.current = {
+          projectId: restoreBinding.local_project_id,
+          plan: currentRestorePlan,
+          result: result.restoreResult,
+          readiness: result.readiness ?? readiness,
+          items: buildPullReviewItems(currentRestorePlan),
+          completedResourceIds: new Set([...completedPullResourceIds, ...successfulResources]),
+          error: result.error,
+        };
+        setStorageNotice({
+          projectId: restoreBinding.local_project_id,
+          storageId: currentRestorePlan.storage_id,
+          kind: "outcome",
+          outcome: buildPullOutcome(pullOutcomeInputs.current),
+        });
+        closePullReview();
+        if (activeProjectId) {
+          await loadProjectData(activeProjectId, config, activeStorageId, workflowGeneration);
+        }
         return;
       }
 
@@ -2169,152 +2387,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
    * state; when nothing mutable remains, one empty apply finalizes the
    * reviewed Pull baseline.
    */
-  const refreshReviewAfterForkQueue = async (requestId: number, resolvedNote: string) => {
-    if (!restorePlan || !restoreBinding) return;
-    setReviewSupportLoading(true);
-    try {
-      const nextRestore = await projectSyncApi.planRestore(
-        restorePlan.storage_id,
-        restorePlan.bundle_id,
-        restoreBinding,
-      );
-      if (restoreRequest.current !== requestId) return;
-      setRestorePlan(nextRestore);
-      if (!hasPendingRestoreMutations(nextRestore)) {
-        const finalization = await projectSyncApi.applyRestore(
-          nextRestore.plan_id,
-          [],
-          [],
-        );
-        if (restoreRequest.current !== requestId) return;
-        if (!finalization.success || finalization.status !== "complete") {
-          throw new Error(`${resolvedNote}, but the Pull baseline could not be finalized.`);
-        }
-      }
-      const support = await loadPullReviewSupport(projectSyncApi, nextRestore);
-      if (restoreRequest.current !== requestId) return;
-      setReadiness(support.readiness);
-      if (support.errors.length > 0) {
-        setRestoreError(`${resolvedNote}. Remaining checks: ${support.errors.join(" ")}`);
-      }
-    } catch (reason) {
-      if (restoreRequest.current === requestId) {
-        setRestoreError(`${resolvedNote}, but remaining changes must be refreshed: ${errorMessage(reason)}`);
-      }
-    } finally {
-      if (restoreRequest.current === requestId) setReviewSupportLoading(false);
-    }
-  };
 
-  const retryCodexFork = async (operationId: string) => {
-    if (!restorePlan) return;
-    const requestId = restoreRequest.current;
-    const checkpointActionId = restoreResult?.codex_fork_checkpoints
-      .find((checkpoint) => checkpoint.operation_id === operationId)?.action_id;
-    setBusy(true);
-    setRestoreError(null);
-    try {
-      const result = await projectSyncApi.retryCodexDivergence(operationId);
-      if (restoreRequest.current !== requestId) return;
-      setRestoreResult(result);
-      setPullApplyPhase("complete");
-      if (!result.success) return;
-      const appliedActionIds = new Set(result.applied_action_ids ?? []);
-      setCompletedPullActionIds((current) => new Set([...current, ...appliedActionIds]));
-      const actionId = checkpointActionId ?? [...appliedActionIds][0];
-      const action = restorePlan.conversation_actions.find(
-        (candidate) => candidate.action_id === actionId,
-      );
-      if (action) {
-        const resourceId = action.source_resource_id
-          ?? `${action.provider}:conversation:${action.thread_id}`;
-        setCompletedPullResourceIds((current) => new Set([...current, resourceId]));
-        setFailedPullResourceIds((current) => {
-          const next = new Set(current);
-          next.delete(resourceId);
-          return next;
-        });
-      }
-      setHistoryRefreshEpoch((epoch) => epoch + 1);
-      const remaining = result.codex_fork_checkpoints
-        .filter((checkpoint) => checkpoint.origin !== "manual").length;
-      if (remaining > 0) {
-        setNotice(`Codex fork acknowledged. ${remaining} more fork checkpoint${remaining === 1 ? "" : "s"} can be retried.`);
-        return;
-      }
-      setNotice("Codex fork acknowledged. The cloud conversation was restored into the original thread.");
-      await refreshReviewAfterForkQueue(requestId, "The conversation conflict is resolved");
-    } catch (reason) {
-      if (restoreRequest.current === requestId) {
-        setRestoreError(errorMessage(reason));
-        setPullApplyPhase("complete");
-      }
-    } finally {
-      if (restoreRequest.current === requestId) setBusy(false);
-    }
-  };
 
-  const restartCodexAppAfterPull = async (
-    operationId: string,
-    appKind: "codex" | "codex_plus_plus",
-  ) => {
-    const requestId = restoreRequest.current;
-    setBusy(true);
-    try {
-      const result = await projectSyncApi.restartCodexAppAfterPull(
-        operationId,
-        appKind,
-        true,
-      );
-      if (restoreRequest.current !== requestId) return;
-      if (result.success) {
-        setRestoreResult((current) => current
-          ? { ...current, codex_app_refresh: null }
-          : current);
-        setNotice(result.message);
-      } else {
-        setNotice(`Pull is complete. ${result.message}`);
-      }
-    } catch (reason) {
-      if (restoreRequest.current === requestId) {
-        setNotice(`Pull is complete. ${errorMessage(reason)}`);
-      }
-    } finally {
-      if (restoreRequest.current === requestId) setBusy(false);
-    }
-  };
 
-  const refreshRestore = async () => {
-    if (!restorePlan || !restoreBinding) return;
-    const requestId = restoreRequest.current;
-    const currentPlan = restorePlan;
-    setBusy(true);
-    setRestoreError(null);
-    try {
-      const nextRestore = await projectSyncApi.planRestore(
-        currentPlan.storage_id,
-        currentPlan.bundle_id,
-        restoreBinding,
-      );
-      if (restoreRequest.current !== requestId) return;
-      const support = await loadPullReviewSupport(projectSyncApi, nextRestore);
-      if (restoreRequest.current !== requestId) return;
-      if (nextRestore.generation !== currentPlan.generation || nextRestore.manifest_sha256 !== currentPlan.manifest_sha256) {
-        setRestoreResult(null);
-        setPullApplyPhase("idle");
-        setCompletedPullActionIds(new Set());
-        setCompletedPullResourceIds(new Set());
-        setFailedPullResourceIds(new Set());
-      }
-      setRestorePlan(nextRestore);
-      setReadiness(support.readiness);
-      if (support.errors.length > 0) setRestoreError(support.errors.join(" "));
-    } catch (reason) {
-      if (restoreRequest.current === requestId) setRestoreError(errorMessage(reason));
-    } finally {
-      if (restoreRequest.current === requestId) setBusy(false);
-    }
-  };
 
   const saveStorageConfig = async (
     update: (current: SyncConfig) => SyncConfig,
@@ -2436,23 +2511,17 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     pendingPush?.destinationStatus.state === "remote_history_missing"
     || pendingPush?.destinationStatus.state === "remote_history_replaced"
     || pendingPush?.destinationStatus.state === "requires_pull";
-  const pendingPushSteps = syncReviewSteps(pendingPush?.showProjectFiles ?? false);
   const inlineStorageReview = pendingPush ? {
     kind: "push" as const,
     projectId: pendingPush.projectId,
     storageId: pendingPush.storageId,
     onContinue: () => {
-      if (pushReviewStep === "review") {
-        void publishPendingPush();
-        return;
-      }
-      setPushReviewStep(nextPushReviewStep(pushReviewStep, pendingPushSteps));
+      void publishPendingPush();
     },
-    continueDisabled: pushReviewStep === "review"
-      && ((safePushSelection.size === 0 && pushProjectContentRemovals.size === 0)
-        || pendingPushBlockingCount > 0
-        || pendingPushDestinationBlocked
-        || projectContentLoading),
+    continueDisabled: (safePushSelection.size === 0 && pushProjectContentRemovals.size === 0)
+      || pendingPushBlockingCount > 0
+      || pendingPushDestinationBlocked
+      || projectContentLoading,
     onClose: () => {
       if (busy) return;
       setPendingPush(null);
@@ -2489,7 +2558,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           else next.add(resourceId);
           return next;
         })}
-        onUseProjectDefaults={() => setPushSelected(new Set(pendingPush.projectDefaults))}
         onSelectionChange={setPushSelected}
         onScanProjectFiles={() => void scanPendingProjectFiles()}
         onToggleProjectContentRemoval={(resourceId) => {
@@ -2520,9 +2588,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           else next.add(warningDigest);
           return next;
         })}
-        onClear={() => setPushSelected(new Set((pendingPush.projectContentInventory?.entries ?? [])
-          .filter((entry) => entry.storage_present && !pushProjectContentRemovals.has(entry.descriptor.resource_id))
-          .map((entry) => entry.descriptor.resource_id)))}
         onClose={() => {
           if (busy) return;
           setPendingPush(null);
@@ -2538,18 +2603,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           setPushWarningAcknowledgements(new Set());
           void beginProjectRestore(pendingPush.projectId, pendingPush.storageId);
         }}
-        onOpenStorageSettings={() => {
-          setPendingPush(null);
-          setPushError(null);
-          setPushProjectContentRemovals(new Set());
-          setPushWarningAcknowledgements(new Set());
-          setStorageEditorRequest((current) => ({
-            mode: "open",
-            storageId: pendingPush.storageId,
-            settingsExpanded: true,
-            requestId: (current?.requestId ?? 0) + 1,
-          }));
-        }}
         onUnlinkStorage={() => {
           void unlinkStorage(
             pendingPush.projectId,
@@ -2563,6 +2616,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     kind: "pull" as const,
     projectId: restoreBinding.local_project_id,
     storageId: restorePlan.storage_id,
+    // The card's Pull is the review's footer primary: same apply, same
+    // gating. An empty selection still applies — it advances the reviewed
+    // baseline, which is the whole point of an acknowledge-only Pull.
+    onContinue: () => {
+      pullReviewPrimary?.apply();
+    },
+    continueDisabled: !pullReviewPrimary || pullReviewPrimary.disabledReason !== null,
+    continueTitle: pullReviewPrimary?.disabledReason ?? null,
     onClose: closePullReview,
     content: (
       <RestorePlanView
@@ -2583,13 +2644,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         busy={busy}
         error={restoreError}
         onApply={(selection) => void applyReview(selection)}
-        onRetryCodexFork={(operationId) => {
-          void retryCodexFork(operationId);
-        }}
-        onRestartCodexApp={(operationId, appKind) => {
-          void restartCodexAppAfterPull(operationId, appKind);
-        }}
-        onRefresh={() => void refreshRestore()}
         onBack={closePullReview}
         onUnlinkStorage={() => {
           void unlinkStorage(
@@ -2598,6 +2652,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             "remote_history_missing",
           );
         }}
+        onPrimaryChange={setPullReviewPrimary}
       />
     ),
   } : null;
@@ -2817,6 +2872,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onStorageIssueChange={updateStorageIssue}
             historyRefreshEpoch={historyRefreshEpoch}
             inlineStorageReview={inlineStorageReview}
+            storageNotice={storageNotice}
+            onStorageNoticeAction={(outcome) => void runOutcomeAction(outcome)}
+            onDismissStorageNotice={() => setStorageNotice(null)}
             newProjectSetup={setupDraftId ? (
               <ProjectSetupWorkspace
                 key={setupDraftId}

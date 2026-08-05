@@ -303,10 +303,7 @@ body {
 .sync-history-section-heading h2,
 .sync-history-branch-state,
 .sync-history-continuity-copy > strong,
-.sync-sync-review-blocker > span > strong,
-.sync-sync-review-pull-holds > span > strong,
 .sync-sync-review-tabs > button,
-.sync-sync-review-state,
 .sync-modal-header h1,
 .log-panel-title,
 .log-type,
@@ -314,7 +311,8 @@ body {
 .log-type-filter-value,
 .log-filter-control > span,
 .sync-log-storage-summary dt,
-.sync-log-policy-fields label > span {
+.sync-log-policy-fields label > span,
+.sync-divergence-choice button {
   font-family: var(--font-pixel);
   /* One weight exists, and synthesis is off, so asking for anything heavier
      here would be a declaration that quietly does nothing. Pixel hierarchy is
@@ -327,8 +325,7 @@ body {
 /* Sizes and tracking for the chrome labels that App.css left on fractional
    values. Uppercase micro-labels keep their air with whole-pixel tracking. */
 .sync-eyebrow,
-.sync-draft-badge,
-.sync-sync-review-state {
+.sync-draft-badge {
   font-size: var(--type-3xs);
   letter-spacing: 1px;
 }
@@ -357,13 +354,31 @@ body {
   line-height: var(--leading-prose);
 }
 
-/* The number on the recommend button is a count, not a label: it holds its
-   width as the selection changes rather than reflowing the button. */
-.sync-sync-review-icon-action > span {
+/* Counts, not labels: tabular figures so the header does not reflow as the
+   selection changes. */
+.sync-sync-review-icon-action > span,
+.sync-sync-review-selected {
   font-family: var(--font-mono);
   font-size: var(--type-2xs);
   font-weight: var(--weight-semibold);
   font-variant-numeric: tabular-nums;
+}
+
+.sync-sync-review-selected {
+  padding: 0 6px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+/* Tabular figures equalise digit widths but not digit counts: 9 → 10 grows the
+   string by a character, which shoved the header's icon buttons sideways on a
+   plain checkbox tick. The numerator gets a slot as wide as the total, so the
+   slash, the total, and every icon after them hold still while selecting. */
+.sync-sync-review-selected > b {
+  display: inline-block;
+  min-width: calc(var(--review-count-digits, 1) * 1ch);
+  font-weight: inherit;
+  text-align: right;
 }
 
 .sync-sync-review-tabs > button > small {
@@ -373,10 +388,10 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* The lineage line under a blocked destination is figures, not a sentence:
-   it holds its width in the mono face while the sentence above it stays in
-   the clean one. App.css left it on a literal 10px. */
-.sync-sync-review-blocker-detail {
+/* The lineage column on a blocked destination is figures, not a sentence: it
+   holds its width in the mono face while the sentence beside it stays in the
+   clean one. App.css left it on a literal 10px. */
+.sync-sync-review-pull-detail {
   font-family: var(--font-mono);
   font-size: var(--type-3xs);
   font-variant-numeric: tabular-nums;
@@ -1395,10 +1410,12 @@ summary {
   font-size: var(--type-xs);
 }
 
-/* The storage-only section is a sibling of the timeline, so it does not inherit
-   these and its rows rendered with no title gap and no icon size. It gets the
-   same row tokens rather than hoisting them to a scope that would also re-lay
-   out the review screens and flat lists, which never had them. */
+/* Every list of session rows needs these, not just the timeline: the flat list
+   a review renders for a non-git project, and the fold on a finished sync, both
+   showed the icon glued to the title and a ragged icon column without them.
+   Scoping to the list itself makes a session row self-sufficient wherever it
+   renders; the two sections below keep the same values for their own rows. */
+.sync-history-thread-list,
 .sync-history-timeline,
 .sync-history-storage-only {
   --sync-history-row-actions-column: 80px;
@@ -1692,17 +1709,24 @@ summary {
   gap: var(--sync-history-row-title-gap);
 }
 
+/* The fallback is load-bearing, not decoration. Only the timeline and the
+   storage-only section define the row token; the flat lists a review renders
+   for a non-git project do not. Without it the width/flex declarations are
+   invalid there, the slot shrink-wraps whatever glyph it holds, and swapping
+   one status icon for another — which is what selecting a row does — resizes
+   the slot and shifts every following item in the row. Pin the box so the
+   swap stays paint-only. */
 .sync-history-commit-icon,
 .sync-history-thread-kind,
 .sync-history-thread-title > .sync-thread-sync-indicator,
 .sync-history-thread-title > .sync-thread-sync-error {
   position: relative;
   z-index: 3;
-  width: var(--sync-history-row-icon-size);
-  height: var(--sync-history-row-icon-size);
+  width: var(--sync-history-row-icon-size, 18px);
+  height: var(--sync-history-row-icon-size, 18px);
   display: inline-grid;
   place-items: center;
-  flex: 0 0 var(--sync-history-row-icon-size);
+  flex: 0 0 var(--sync-history-row-icon-size, 18px);
   border-radius: 2px;
   line-height: 0;
 }
@@ -1725,6 +1749,7 @@ summary {
 }
 
 .sync-history-commit-icon > svg,
+.sync-history-commit-link > svg,
 .sync-history-thread-kind > svg,
 .sync-history-thread-title > .sync-thread-sync-error > svg,
 .sync-history-thread-meta > span > svg,
@@ -1739,8 +1764,8 @@ summary {
    some places and nothing in others, so the coin edge reads as dashed rather
    than solid. Only whole ratios (12px, 24px, 48px) render the ring cleanly. */
 .sync-history-thread-title > .sync-thread-sync-indicator > svg {
-  width: var(--sync-history-row-icon-size);
-  height: var(--sync-history-row-icon-size);
+  width: var(--sync-history-row-icon-size, 18px);
+  height: var(--sync-history-row-icon-size, 18px);
 }
 
 .sync-history-thread-kind {
@@ -1777,13 +1802,15 @@ summary {
   padding-left: var(--sync-history-row-text-offset);
 }
 
-/* Date and sha right-align into a fixed gutter, so they stack into two clean
-   columns down the timeline instead of floating mid-row. */
+/* Identifier first, stamp last, right-packed: the stamp holds the row's
+   right edge so it forms one column with the session stamps below. When the
+   meta drops under the subject (narrow), it indents into the shared text
+   column instead of leading the line from the card edge. */
 .sync-history-commit-meta {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding-left: 0;
+  padding-left: var(--sync-history-row-text-offset);
   overflow: hidden;
 }
 
@@ -1831,8 +1858,23 @@ summary {
 }
 
 .sync-history-commit-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border-radius: 3px;
+  color: var(--text-2);
   text-decoration: none;
+}
+
+.sync-history-commit-link > svg {
+  flex: 0 0 auto;
+}
+
+/* One hover surface: the glyph brightens with the chip, so the pair reads
+   as a single target. */
+.sync-history-commit-link:hover,
+.sync-history-commit-link:focus-visible {
+  color: var(--text-0);
 }
 
 .sync-history-commit-link:hover code,
@@ -1904,9 +1946,6 @@ summary {
   border-radius: 4px;
   background: var(--surface-row);
   box-shadow: none;
-  transition:
-    border-color 100ms steps(2, end),
-    background 100ms steps(2, end);
 }
 
 .sync-history-thread-topline {
@@ -2179,15 +2218,10 @@ summary {
   font-variant-numeric: tabular-nums;
 }
 
-/* The metric row spans the card so the stamp has room to reach the far edge;
-   the chat toggle still trails the metrics, just at the very end of the row. */
-.sync-history-session-summary .sync-history-thread-meta {
-  flex: 1;
-}
-
-/* The stamp is pushed to the far edge so it forms a column down the list, with
-   the duration left beside the metrics it belongs with. */
-.sync-history-thread-meta > .sync-history-thread-time-end {
+/* The stamp is the last thing on the line, pushed to the far edge so it forms
+   an unbroken column down the list; the readouts and the two row buttons keep
+   their content width on the left. */
+.sync-history-session-summary > .sync-history-thread-time-end {
   margin-left: auto;
   padding-left: 14px;
 }
@@ -2211,8 +2245,22 @@ summary {
   color: var(--accent);
 }
 
+/* The launch trio is the row's way out — hovering one reads as a pressed
+   pixel button, not a faint tint: engaged surface, full-strength glyph, and a
+   1px inset ring standing in for a border. */
 .sync-history-thread-actions .sync-history-launch-action:hover:not(:disabled) {
-  background: var(--bg-hover);
+  background: var(--surface-row-active);
+  color: var(--text-0);
+  box-shadow: inset 0 0 0 1px var(--border-mid);
+}
+
+/* The disclosure chevron closes the row at the far edge, in the same column
+   as the section headers' collapse chevrons — same 26px square as the git
+   menu's toggle, so every chevron on the page lines up. */
+.sync-history-chat-toggle {
+  width: var(--sync-history-commit-actions-column);
+  min-width: var(--sync-history-commit-actions-column);
+  min-height: var(--sync-history-commit-actions-column);
 }
 
 .sync-history-chat-toggle,
@@ -2295,18 +2343,24 @@ summary {
     --sync-history-row-anchor-y: 19px;
   }
 
+  /* Both trailing controls are 26px — the commit chevron here, the chat
+     toggle on a session row — so matching the session summary's 5px gap
+     lands the commit stamp in the session stamps' column (measured: 2px
+     apart, the card border). The 13px the gap gives up moves onto the
+     meta's own padding so the subject keeps its 18px of distance. */
   .sync-history-commit-heading,
   .sync-history-uncommitted .sync-history-section-heading {
     min-height: 38px;
     grid-template-columns: minmax(0, 1fr) auto var(--sync-history-commit-actions-column);
     grid-template-areas: "title meta actions";
-    column-gap: 18px;
+    column-gap: 5px;
     row-gap: 0;
     padding: 4px 12px;
   }
 
   .sync-history-commit-meta {
     justify-content: flex-end;
+    padding-left: 13px;
   }
 
   .sync-history-commit-meta > time {
@@ -2330,10 +2384,6 @@ summary {
 
   .sync-history-uncommitted .sync-history-section-heading {
     grid-template-areas: "title actions";
-  }
-
-  .sync-history-commit-meta {
-    padding-left: 0;
   }
 
   .sync-history-session-details {
@@ -2417,7 +2467,6 @@ summary {
 .sync-plan-section,
 .sync-storage-card,
 .sync-resource-group,
-.sync-pull-section,
 .sync-storage-details-panel,
 .sync-storage-repositories,
 .sync-setup-section,
@@ -2431,7 +2480,6 @@ summary {
 .sync-storage-card > header,
 .sync-card-heading,
 .sync-resource-group-header,
-.sync-pull-section-heading,
 .sync-storage-repositories-heading {
   border-bottom-color: var(--border);
   background: var(--surface-subtle);
@@ -2454,6 +2502,7 @@ summary {
   background: var(--surface-row-hover);
 }
 
+/* Selection reads from the checkbox and the row tint; no accent bar. */
 .sync-resource-row.selected,
 .sync-plan-action.selected,
 .sync-pull-item.selected,
@@ -2461,7 +2510,6 @@ summary {
 .sync-sync-selectable-row.selected {
   border-color: var(--border-strong);
   background: var(--surface-row-active);
-  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .sync-callout,
@@ -2499,21 +2547,32 @@ summary {
 
 .sync-agent-choice,
 .sync-segmented,
+/* These tabs are an underline strip, not a segmented control. They used to be
+   given both at once: a raised pill here on aria-selected, and the 2px
+   underline App.css draws on .active. The pill also inherited the underline
+   design's 2px side padding, so it closed to within two pixels of the label and
+   read as a box clipping the text. The segmented treatment belongs to
+   .sync-segmented and .sync-agent-choice, which are actual segmented controls;
+   this strip keeps the underline and just takes the theme's border colour. */
 .sync-project-tabs {
   border-color: var(--border-mid);
-  border-radius: 4px;
-  background: var(--surface-muted);
+}
+
+/* A tab is a click target, not a text run — 2px of padding gave it no edge to
+   hover and left the active state hugging the glyphs. */
+.sync-project-tabs > button {
+  padding: 0 10px;
 }
 
 .sync-agent-choice button,
 .sync-segmented button,
-.sync-project-tabs button {
+.sync-divergence-choice button {
   border-radius: 3px;
 }
 
 .sync-agent-choice button.active,
 .sync-segmented button.active,
-.sync-project-tabs button[aria-selected="true"] {
+.sync-divergence-choice button.active {
   background: var(--surface-card);
   box-shadow: 1px 1px 0 color-mix(in srgb, var(--border-strong) 18%, transparent);
   color: var(--accent);
@@ -2525,13 +2584,17 @@ summary {
   background: var(--surface-subtle);
 }
 
-.sync-sync-review-summary,
 .sync-pull-apply-bar,
-.sync-sticky-save,
 .sync-modal-footer {
   border-color: var(--border-mid);
   background: var(--surface-footer);
 }
+
+/* The review table is content, not a footer bar. Tinting the whole block made
+   the banner inside it disappear into its own background and merged the table
+   with the real footer below into one slab. The panel surface shows through;
+   the only tinted things left are the banner and the footer, which is what
+   makes each of them read as a distinct band. */
 
 .sync-sync-review-stepper button,
 .sync-sync-review-tabs button {
@@ -2990,4 +3053,40 @@ summary {
     animation-duration: 0.01ms;
     animation-iteration-count: 1;
   }
+}
+
+/* Nothing in this skin eases between states, and the reveals, chevrons,
+   tooltips and button presses above were each dropped for the same reason:
+   a transitioning element is promoted to its own compositing layer for the
+   duration, and everything around it re-rasterises against that layer's
+   origin. Text and icons drawn unsmoothed and crisp-edged land on whole
+   pixels, so a layer origin half a pixel off the page grid flips them — the
+   screen appears to flicker even though nothing moves, which is precisely how
+   it measures: zero geometry change across every element on the page. Ticking
+   one checkbox was animating its border, its fill, its tick transform and the
+   row tint, four promotions at once.
+   This is the rule those one-off drops were converging on, so it replaces the
+   game of finding them individually: states land at once, everywhere.
+   Animations are untouched — spinners and the startup pulse still run, and
+   they are continuous rather than triggered by a state change. If some surface
+   ever wants easing back, give it a `transition` after this rule. */
+.sync-app *,
+.sync-app *::before,
+.sync-app *::after {
+  transition: none;
+}
+
+/* The universal rule above is only one class deep, so anything the base sheet
+   styles with a class *and* a type outranks it. The row checkbox is exactly
+   that, and it is the one the pointer is on when the flicker shows: its border
+   and fill eased over 130ms while the tick mark scaled through a transform —
+   the single worst promoter of the four. Repeating the base sheet's own
+   selectors matches its specificity, and this sheet loads second. */
+.sync-sync-row-choice input,
+.sync-sync-review-workspace .sync-resource-select input,
+.sync-sync-review-workspace .sync-pull-item-select input,
+.sync-sync-row-choice input::before,
+.sync-sync-review-workspace .sync-resource-select input::before,
+.sync-sync-review-workspace .sync-pull-item-select input::before {
+  transition: none;
 }

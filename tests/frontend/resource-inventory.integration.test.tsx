@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import PushResourceWorkspace, {
-  nextPushReviewStep,
   preserveSyncedPushRecipeEntries,
   pullRequiredCopy,
   pushReviewBlockers,
@@ -282,7 +282,7 @@ test("blocked resources cannot enter a published recipe", () => {
   assert.deepEqual(Object.keys(recipe.entries), [allowed.resource_id]);
 });
 
-test("the push chooser shows one concise selection summary", () => {
+test("the push review is one screen: header actions, list, Push in the footer", () => {
   const resource = memoryResource("review");
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
@@ -291,10 +291,7 @@ test("the push chooser shows one concise selection summary", () => {
       projectDefaults={new Set([resource.resource_id])}
       busy={false}
       error={null}
-      initialStep="review"
       onToggle={() => undefined}
-      onUseProjectDefaults={() => undefined}
-      onClear={() => undefined}
       onClose={() => undefined}
       onPush={() => undefined}
     />,
@@ -310,19 +307,18 @@ test("the push chooser shows one concise selection summary", () => {
   const clearAction = html.indexOf('aria-label="Clear current selection"');
   const closeAction = html.indexOf('aria-label="Close push review"');
   assert.ok(recommendedAction < clearAction && clearAction < closeAction);
-  assert.match(html, />Review</);
-  assert.match(html, /Back: Git &amp; sessions/);
-  assert.match(html, /btn btn-secondary sync-sync-review-back/);
+  // The Review step is gone and a single step renders no tab strip at all.
+  assert.doesNotMatch(html, /role="tablist"/);
+  assert.doesNotMatch(html, />Review</);
+  assert.doesNotMatch(html, /Next: |Back: /);
   assert.match(html, />Push<\/button>/);
   const footer = html.slice(html.indexOf('<footer class="sync-inline-action-footer sync-push-resource-footer'));
+  assert.doesNotMatch(footer, /<small>/, "footers are buttons only");
   assert.doesNotMatch(footer, /\d+ included|Push \d+ resources?/);
-  assert.doesNotMatch(html, /Choose resources to push/);
-  assert.doesNotMatch(html, /Selections are saved after Push succeeds/);
-  assert.doesNotMatch(html, /last selection|selection will be remembered|resource selected/i);
   assert.doesNotMatch(html, /Remote history is missing/);
 });
 
-test("the push chooser gives a minimal recovery path when remote history is missing", () => {
+test("two steps render two plain tabs — never a Review tab", () => {
   const resource = memoryResource("review");
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
@@ -331,168 +327,83 @@ test("the push chooser gives a minimal recovery path when remote history is miss
       projectDefaults={new Set([resource.resource_id])}
       busy={false}
       error={null}
-      storageName="R2 storage 1"
-      destinationStatus={{
-        state: "remote_history_missing",
-        base_generation: 3,
-      }}
-      initialStep="review"
+      showProjectFiles
       onToggle={() => undefined}
-      onUseProjectDefaults={() => undefined}
-      onClear={() => undefined}
       onClose={() => undefined}
       onPush={() => undefined}
-      onOpenStorageSettings={() => undefined}
-      onUnlinkStorage={() => undefined}
     />,
   );
 
-  assert.match(html, /role="alert"/);
-  assert.match(html, />Remote history is missing</);
-  assert.match(html, /previously synced generation 3 to R2 storage 1/);
-  assert.match(html, /Mallard cannot determine why/);
-  assert.match(html, />Storage settings<\/button>/);
-  assert.match(html, />Unlink storage…<\/button>/);
-  assert.doesNotMatch(html, /was deleted|expired|lifecycle/i);
-  const pushButton = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[^>]*>/)?.[0];
-  assert.match(pushButton ?? "", /disabled=""/);
+  assert.match(html, /role="tablist"/);
+  assert.equal(html.match(/role="tab"/g)?.length, 2);
+  assert.match(html, />Git &amp; sessions</);
+  assert.match(html, />Project files</);
+  assert.doesNotMatch(html, />Review</);
+  assert.doesNotMatch(html, /Next: |Back: /, "tabs are navigation, not a wizard");
+  assert.match(html, />Push<\/button>/);
 });
 
-test("the push chooser blocks and explains when remote history was replaced", () => {
+test("destination gates never render inside the push review", () => {
   const resource = memoryResource("review");
-  const html = renderToStaticMarkup(
-    <PushResourceWorkspace
-      resources={[resource]}
-      selected={new Set([resource.resource_id])}
-      projectDefaults={new Set([resource.resource_id])}
-      busy={false}
-      error={null}
-      storageName="R2 storage 1"
-      destinationStatus={{
-        state: "remote_history_replaced",
-        base_generation: 1,
-        remote_generation: 2,
-        base_manifest_sha256: "a".repeat(64),
-        remote_manifest_sha256: "b".repeat(64),
-      }}
-      initialStep="review"
-      onToggle={() => undefined}
-      onUseProjectDefaults={() => undefined}
-      onClear={() => undefined}
-      onClose={() => undefined}
-      onPush={() => undefined}
-      onPull={() => undefined}
-      onUnlinkStorage={() => undefined}
-    />,
-  );
+  const destinations = [
+    { state: "remote_history_missing", base_generation: 3 },
+    {
+      state: "remote_history_replaced",
+      base_generation: 1,
+      remote_generation: 2,
+      base_manifest_sha256: "a".repeat(64),
+      remote_manifest_sha256: "b".repeat(64),
+    },
+    { state: "requires_pull", reason: "remote_advanced", remote_generation: 4, base_generation: 3 },
+  ];
+  for (const destinationStatus of destinations) {
+    const html = renderToStaticMarkup(
+      <PushResourceWorkspace
+        resources={[resource]}
+        selected={new Set([resource.resource_id])}
+        projectDefaults={new Set([resource.resource_id])}
+        busy={false}
+        error={null}
+        storageName="R2 storage 1"
+        destinationStatus={destinationStatus as never}
+        onToggle={() => undefined}
+        onClose={() => undefined}
+        onPush={() => undefined}
+        onPull={() => undefined}
+        onUnlinkStorage={() => undefined}
+      />,
+    );
 
-  assert.match(html, /role="alert"/);
-  assert.match(html, />Storage history changed</);
-  assert.match(html, /is different from the one Mallard last synced for this project \(generation 1\)/);
-  assert.match(html, /sync data in that storage was deleted and created again/);
-  assert.doesNotMatch(html, />Pull and review<\/button>/);
-  assert.match(html, />Unlink storage<\/button>/);
-  assert.match(html, /saved only in the previous storage history cannot be recovered from this machine/);
-  const pushButton = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[^>]*>/)?.[0];
-  assert.match(pushButton ?? "", /disabled=""/);
+    // These states close the review before it opens — ProjectSync lands them
+    // as a storage-card notice instead. The workspace keeps only a defensive
+    // disable with the reason on the button.
+    assert.doesNotMatch(html, /Remote history is missing|Storage history changed|Storage has newer changes/);
+    assert.doesNotMatch(html, /Open Pull review/);
+    const pushButton = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[^>]*>/)?.[0];
+    assert.match(pushButton ?? "", /disabled=""/);
+    assert.match(pushButton ?? "", /title="Resolve the storage notice before pushing"/);
+  }
 });
 
-test("the push chooser gates an advanced remote at review time, not at preflight", () => {
-  const resource = memoryResource("review");
-  const html = renderToStaticMarkup(
-    <PushResourceWorkspace
-      resources={[resource]}
-      selected={new Set([resource.resource_id])}
-      projectDefaults={new Set([resource.resource_id])}
-      busy={false}
-      error={null}
-      storageName="R2 storage 1"
-      destinationStatus={{
-        state: "requires_pull",
-        reason: "remote_advanced",
-        remote_generation: 4,
-        base_generation: 3,
-      }}
-      initialStep="review"
-      onToggle={() => undefined}
-      onUseProjectDefaults={() => undefined}
-      onClear={() => undefined}
-      onClose={() => undefined}
-      onPush={() => undefined}
-      onPull={() => undefined}
-    />,
-  );
-
-  // The reader gets the state and the cost of ignoring it; generations are
-  // support detail, so they sit on their own quiet line and never lead.
-  assert.match(html, />Storage has newer changes</);
-  assert.match(html, /Changes were saved in R2 storage 1 after this computer last synced\. Pushing now could overwrite them\./);
-  assert.match(html, /sync-sync-review-blocker-detail">Storage generation 4 · last reviewed 3</);
-  assert.doesNotMatch(html, /replica|advanced to generation|newer history/);
-  // The only way forward on a blocked step leads, and the disabled Push says
-  // why it is disabled instead of greying out in silence.
-  assert.match(
-    html,
-    /class="btn btn-primary sync-pull-apply-button sync-sync-review-pull-action"[^>]*>.*Review Pull<\/button>/,
-  );
-  assert.match(html, /sync-sync-review-pull-required/);
-  assert.match(html, /<small>Pull required before pushing<\/small>/);
-  assert.equal(html.match(/Review Pull/g)?.length, 1);
-  assert.doesNotMatch(html, />Push<\/button>/);
-});
-
-test("a blocked destination counts the conversations a Pull would bring", () => {
-  const resource = memoryResource("review");
-  const html = renderToStaticMarkup(
-    <PushResourceWorkspace
-      resources={[resource]}
-      selected={new Set([resource.resource_id])}
-      projectDefaults={new Set([resource.resource_id])}
-      busy={false}
-      error={null}
-      storageName="R2 storage 1"
-      threadComparison={{
-        project_id: "project-1",
-        storage_id: "storage-1",
-        storage_name: "R2 storage 1",
-        compared_at: 1,
-        entries: [],
-        counts: { synced: 4, local: 1, storage: 2, diverged: 1, unavailable: 0, unknown: 0 },
-        warnings: [],
-      }}
-      destinationStatus={{
-        state: "requires_pull",
-        reason: "remote_advanced",
-        remote_generation: 4,
-        base_generation: 3,
-      }}
-      initialStep="review"
-      onToggle={() => undefined}
-      onUseProjectDefaults={() => undefined}
-      onClear={() => undefined}
-      onClose={() => undefined}
-      onPush={() => undefined}
-      onPull={() => undefined}
-    />,
-  );
-
+test("the pull-required sentence counts the conversations a Pull would bring", () => {
   // storage (2) + diverged (1); the sentence names conversations because that
-  // is all the comparison counted.
-  assert.match(html, /3 conversations are newer in R2 storage 1\. Pushing now could overwrite them\./);
+  // is all the comparison counted. ProjectSync feeds this straight into the
+  // storage-card notice.
+  assert.match(
+    pullRequiredCopy("remote_advanced", "R2 storage 1", 4, 3, 3).body,
+    /^3 conversations are newer in R2 storage 1\. Pushing could overwrite them\.$/,
+  );
 });
 
 test("an unreviewed storage and a changed binding each get their own plain sentence", () => {
   const unreviewed = pullRequiredCopy("remote_without_base", "R2 storage 1", 6, undefined);
   assert.equal(unreviewed.title, "Storage has unreviewed data");
-  assert.equal(
-    unreviewed.body,
-    "R2 storage 1 holds data for this project that has never been reviewed on this computer.",
-  );
-  assert.equal(unreviewed.detail, "Storage generation 6 · never reviewed here");
+  assert.equal(unreviewed.body, "R2 storage 1 holds data never reviewed on this computer.");
+  assert.equal(unreviewed.detail, "Generation 6 · never reviewed");
 
   const rebound = pullRequiredCopy("binding_changed", null, 6, 5);
-  assert.equal(rebound.title, "This project changed since the last sync");
-  assert.match(rebound.body, /Review what is stored in this storage first\./);
+  assert.equal(rebound.title, "Project changed since last sync");
+  assert.match(rebound.body, /Review this storage first\./);
 
   // One conversation reads as one, not as "1 conversations are".
   assert.match(
@@ -501,34 +412,219 @@ test("an unreviewed storage and a changed binding each get their own plain sente
   );
 });
 
-test("the push chooser provides contextual back and next actions", () => {
-  const resource = memoryResource("review");
+test("held threads and storage blockers share one banner with one way forward", () => {
+  const held = conversation("codex:session:held");
+  const pushable = conversation("codex:session:pushable");
+  const comparison: ThreadSyncComparison = {
+    project_id: "project-a",
+    storage_id: "storage-a",
+    storage_name: "Local storage 1",
+    compared_at: 1,
+    counts: { synced: 0, local: 1, storage: 0, diverged: 1, unavailable: 0, unknown: 0 },
+    warnings: [],
+    entries: [
+      {
+        thread_id: "held",
+        resource_id: held.resource_id,
+        display_name: "Held",
+        state: "diverged",
+        local_present: true,
+        storage_present: true,
+        cloud_thread_id: "thread-held",
+        push_decision: decision("require_pull", "diverged"),
+        pull_decision: decision("resolve_divergence", "diverged", true),
+      },
+      {
+        thread_id: "pushable",
+        resource_id: pushable.resource_id,
+        display_name: "Pushable",
+        state: "local_ahead",
+        local_present: true,
+        storage_present: true,
+        push_decision: decision("fast_forward_cloud", "cloud_prefix_of_local", true),
+        pull_decision: decision("keep_local", "cloud_prefix_of_local"),
+      },
+    ],
+  };
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
-      resources={[resource]}
-      selected={new Set([resource.resource_id])}
-      projectDefaults={new Set([resource.resource_id])}
+      resources={[held, pushable]}
+      selected={new Set([pushable.resource_id])}
+      projectDefaults={new Set([pushable.resource_id])}
       busy={false}
       error={null}
-      initialStep="history"
+      storageName="Local storage 1"
+      threadComparison={comparison}
       onToggle={() => undefined}
-      onUseProjectDefaults={() => undefined}
-      onClear={() => undefined}
       onClose={() => undefined}
       onPush={() => undefined}
+      onPull={() => undefined}
     />,
   );
 
-  assert.match(html, /Next: Review/);
-  assert.doesNotMatch(html, /Back: /, "the first step has nothing to go back to");
-  assert.equal(nextPushReviewStep("history"), "review");
-  assert.equal(nextPushReviewStep("review"), "review");
-  assert.equal(
-    nextPushReviewStep("history", ["history", "project_files", "review"]),
-    "project_files",
+  assert.equal(html.match(/sync-sync-review-pull-holds/g)?.length, 1, "one banner, not two");
+  assert.match(html, />1 conversation held for Pull</);
+  assert.match(html, /Storage has newer versions\. Selected threads still push\./);
+  assert.equal(html.match(/Open Pull review/g)?.length, 1);
+  assert.match(html, /class="sync-callout sync-sync-review-pull-holds" role="status"/);
+  // The held thread keeps its cloud version and Push stays available for the rest.
+  const pushButton = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[^>]*>/)?.[0];
+  assert.doesNotMatch(pushButton ?? "", /disabled=""/);
+
+  // The banner is plan-derived: deselecting every row leaves it identical, so
+  // ticking a checkbox can never reflow the list underneath it.
+  const deselected = renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={[held, pushable]}
+      selected={new Set()}
+      projectDefaults={new Set([pushable.resource_id])}
+      busy={false}
+      error={null}
+      storageName="Local storage 1"
+      threadComparison={comparison}
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+      onPull={() => undefined}
+    />,
   );
-  assert.equal(
-    nextPushReviewStep("project_files", ["history", "project_files", "review"]),
-    "review",
+  const bannerZone = (markup: string) => markup.match(/<div class="sync-review-banners">[\s\S]*?<\/div><\/div>/)?.[0];
+  assert.ok(bannerZone(html), "the held banner renders");
+  assert.equal(bannerZone(deselected), bannerZone(html), "the banner zone does not change with selection");
+});
+
+test("the pixel skin transitions nothing, so a tick cannot flicker its neighbours", () => {
+  // A transitioning element is promoted to its own compositing layer for the
+  // duration, and unsmoothed crisp-edged icons re-rasterised against that
+  // layer's origin flip whole pixels — the screen appears to flicker with zero
+  // geometry change. Ticking one checkbox used to animate four things at once.
+  const retro = readFileSync("src/RetroTheme.css", "utf8");
+  const blanket = retro.match(/\.sync-app \*,\s*\n\.sync-app \*::before,\s*\n\.sync-app \*::after \{[^}]*\}/)?.[0] ?? "";
+  assert.match(blanket, /transition: none/, "the skin drops transitions app-wide");
+
+  // The base sheet styles the row checkbox with a class *and* a type, which
+  // outranks the one-class blanket rule, so the skin repeats those selectors.
+  const checkbox = retro.match(/\.sync-sync-row-choice input,[\s\S]*?\{[^}]*\}/g) ?? [];
+  const nulled = checkbox.find((rule) => /transition: none/.test(rule)) ?? "";
+  assert.match(nulled, /\.sync-sync-row-choice input::before/, "the tick's transform must not animate");
+  assert.match(nulled, /\.sync-sync-review-workspace \.sync-pull-item-select input/);
+
+  // Animations are deliberately untouched: the spinners still run.
+  assert.doesNotMatch(blanket, /animation/, "dropping animations would stop the spinners");
+});
+
+test("a row's status icon is keyed off its state, not off the selection", () => {
+  // The icon sits beside the checkbox: keying it off the selection-dependent
+  // decision phrase swapped the glyph under the very cursor that ticked it.
+  const source = readFileSync("src/components/project-sync/ProjectChatHistoryPage.tsx", "utf8");
+  const map = source.match(/const REVIEW_STATE_ICONS[\s\S]*?\};/)?.[0] ?? "";
+  assert.match(map, /local_ahead: "upload"/, "the map is keyed by entry state");
+  assert.match(map, /storage_ahead: "download"/);
+  assert.doesNotMatch(map, /"Not selected"|"Update cloud"/, "no selection-dependent phrases key the icon");
+  // The phrase still reaches the user, in the tooltip and the label, where it
+  // costs no layout.
+  assert.match(source, /REVIEW_STATE_ICONS\[state \?\? "unknown"\]/);
+  assert.doesNotMatch(source, /REVIEW_STATE_ICONS\[label\]/, "the label must not pick the icon");
+});
+
+test("the header count reserves its widest slot so ticking a row moves no icon", () => {
+  // tabular-nums equalises digit widths but not digit counts: 9 → 10 grew the
+  // string by a character and pushed the header's icon buttons 6px sideways.
+  const rows = Array.from({ length: 13 }, (_, i) => conversation(`codex:session:n${i}`));
+  const comparison: ThreadSyncComparison = {
+    project_id: "project-a",
+    storage_id: "storage-a",
+    storage_name: "Local storage 1",
+    compared_at: 1,
+    counts: { synced: 0, local: 13, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
+    warnings: [],
+    entries: rows.map((row, i) => ({
+      thread_id: `n${i}`,
+      resource_id: row.resource_id,
+      display_name: `Conversation ${i}`,
+      state: "local_ahead" as const,
+      local_present: true,
+      storage_present: true,
+      push_decision: decision("fast_forward_cloud", "cloud_prefix_of_local", true),
+      pull_decision: decision("keep_local", "cloud_prefix_of_local"),
+    })),
+  };
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={rows}
+      selected={new Set(rows.slice(0, 9).map((row) => row.resource_id))}
+      projectDefaults={new Set()}
+      busy={false}
+      error={null}
+      storageName="Local storage 1"
+      threadComparison={comparison}
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+      onPull={() => undefined}
+    />,
   );
+  // The numerator sits in its own slot, sized from the total's digit count.
+  assert.match(html, /class="sync-sync-review-selected" style="--review-count-digits:2"/);
+  assert.match(html, /<b>9<\/b>\/13/);
+
+  const css = readFileSync("src/RetroTheme.css", "utf8");
+  const slot = css.match(/\.sync-sync-review-selected > b \{[^}]+\}/)?.[0] ?? "";
+  assert.match(slot, /min-width: calc\(var\(--review-count-digits, 1\) \* 1ch\)/);
+  assert.match(slot, /display: inline-block/, "an inline element cannot hold a width");
+  assert.match(slot, /text-align: right/);
+});
+
+test("a selected item that cannot be captured reports in the footer, not above the list", () => {
+  // The banner zone sits above the list inside the scroll: a banner that
+  // appeared on a checkbox click would shove the clicked row out from under
+  // the cursor (measured at 255px before this fix).
+  const broken = conversation("codex:session:broken");
+  const comparison: ThreadSyncComparison = {
+    project_id: "project-a",
+    storage_id: "storage-a",
+    storage_name: "Local storage 1",
+    compared_at: 1,
+    counts: { synced: 0, local: 1, storage: 0, diverged: 0, unavailable: 1, unknown: 0 },
+    warnings: [],
+    entries: [
+      {
+        thread_id: "broken",
+        resource_id: broken.resource_id,
+        display_name: "Broken",
+        state: "unavailable",
+        local_present: true,
+        storage_present: false,
+        push_decision: decision("create_cloud", "local_only", true),
+        pull_decision: decision("no_op", "local_only"),
+      },
+    ],
+  };
+  const render = (selected: Set<string>) => renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={[broken]}
+      selected={selected}
+      projectDefaults={new Set()}
+      busy={false}
+      error={null}
+      storageName="Local storage 1"
+      threadComparison={comparison}
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+      onPull={() => undefined}
+    />,
+  );
+
+  const unselected = render(new Set());
+  const selected = render(new Set([broken.resource_id]));
+  assert.doesNotMatch(unselected, /sync-review-banners/);
+  assert.doesNotMatch(selected, /sync-review-banners/, "selection must not add a banner above the list");
+  const CANNOT_CAPTURE = /1 selected item can&#x27;t be captured — exclude it to push\./;
+  assert.doesNotMatch(unselected, CANNOT_CAPTURE);
+  assert.match(selected, CANNOT_CAPTURE);
+  // The footer is outside the scroll, so its note cannot move the rows.
+  const footer = selected.match(/<footer class="sync-inline-action-footer[^"]*">[\s\S]*?<\/footer>/)?.[0] ?? "";
+  assert.match(footer, CANNOT_CAPTURE);
+  assert.match(footer, /disabled=""/, "Push stays blocked while the item is selected");
 });

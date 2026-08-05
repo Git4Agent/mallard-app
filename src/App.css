@@ -3843,28 +3843,6 @@ summary:focus-visible {
 
 .sync-pane-message { max-width: 1180px; min-height: 180px; margin: 0 auto; display: flex; align-items: center; justify-content: center; gap: 9px; color: var(--text-2); }
 
-.sync-sticky-save {
-  position: sticky;
-  z-index: 10;
-  bottom: 12px;
-  max-width: 760px;
-  margin: 18px auto -46px;
-  min-height: 48px;
-  padding: 7px 8px 7px 13px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 7px;
-  border: 1px solid var(--border-mid);
-  border-radius: 12px;
-  color: var(--text-2);
-  background: var(--surface-overlay);
-  box-shadow: var(--shadow-overlay);
-  backdrop-filter: blur(18px);
-  font-size: 11px;
-}
-.sync-sticky-save > span { margin-right: auto; }
-
 .sync-empty-state {
   min-height: 360px;
   display: flex;
@@ -4346,13 +4324,6 @@ summary:focus-visible {
 .sync-result-summary > div { display: flex; flex-direction: column; }
 .sync-readiness-label { margin-top: 3px; color: var(--yellow) !important; text-transform: capitalize; }
 .sync-readiness-label.ready { color: var(--green) !important; }
-.sync-readiness-list { display: flex; flex-direction: column; }
-.sync-readiness-list > div { padding: 8px 11px; display: flex; align-items: flex-start; gap: 8px; border-bottom: 1px solid var(--border); color: var(--text-2); }
-.sync-readiness-list > div:last-child { border-bottom: 0; }
-.sync-readiness-list > div > span { display: flex; flex-direction: column; font-size: 10.5px; }
-.sync-readiness-list small { color: var(--text-3); }
-.sync-readiness-list em { margin-left: auto; color: var(--text-3); font-size: 9px; font-style: normal; text-transform: uppercase; }
-.sync-readiness-list .severity-error { color: var(--red); }
 
 /* Pull review workspace */
 
@@ -4411,40 +4382,6 @@ summary:focus-visible {
 .sync-pull-review-content {
   padding: 8px var(--sync-pull-gutter) 24px;
 }
-
-.sync-pull-section {
-  margin: 0 0 4px;
-  overflow: visible;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.sync-pull-section-heading {
-  min-height: 48px;
-  padding: 4px 8px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border: 0;
-  border-radius: 9px;
-  background: transparent;
-}
-
-.sync-pull-section-icon {
-  width: 16px;
-  height: 16px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  color: var(--text-1);
-}
-.sync-pull-section-heading > div { min-width: 0; flex: 1; }
-.sync-pull-section-heading h2 { color: var(--text-0); font-size: 14px; font-weight: 600; }
-.sync-pull-section-heading h2 span { color: var(--text-2); font-size: 10.5px; font-weight: 500; }
-.sync-pull-section-heading p { margin-top: 1px; color: var(--text-3); font-size: 10px; }
-.sync-pull-section-heading .btn { min-height: 28px; flex-shrink: 0; padding: 0 8px; color: var(--text-2); font-size: 10.5px; }
 
 .sync-pull-items {
   display: flex;
@@ -4618,37 +4555,6 @@ summary:focus-visible {
   font-size: 10.5px;
 }
 
-.sync-pull-progress {
-  margin: 0 0 8px;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  overflow: hidden;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  background: transparent;
-}
-
-.sync-pull-progress > div {
-  min-width: 0;
-  min-height: 58px;
-  padding: 10px 12px;
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
-  align-content: center;
-  column-gap: 8px;
-  border-right: 1px solid var(--border);
-  color: var(--text-3);
-}
-
-.sync-pull-progress > div:last-child { border-right: 0; }
-.sync-pull-progress > div > span { grid-row: 1 / 3; display: grid; place-items: center; }
-.sync-pull-progress strong { overflow: hidden; font-size: 10.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.sync-pull-progress small { font-size: 9px; }
-.sync-pull-progress .active { color: var(--text-0); background: transparent; }
-.sync-pull-progress .complete { color: var(--text-2); }
-.sync-pull-progress .warning { color: var(--yellow); background: transparent; }
-
 .sync-pull-outcome {
   margin: 4px 0 8px;
   padding: 11px 2px;
@@ -4715,9 +4621,6 @@ summary:focus-visible {
   backdrop-filter: none;
 }
 
-.sync-pull-apply-bar > span { min-width: 0; display: flex; flex: 1; flex-direction: column; }
-.sync-pull-apply-bar strong { color: var(--text-0); font-size: 12px; }
-.sync-pull-apply-bar small { color: var(--text-2); font-size: 10px; }
 .sync-pull-apply-button { min-width: 190px; min-height: 40px; padding: 0 15px; font-size: 12px; }
 
 .sync-pull-empty {
@@ -4833,15 +4736,6 @@ summary:focus-visible {
   padding: 8px 20px;
 }
 
-.sync-inline-pull-review .sync-readiness-list {
-  border-top: 1px solid var(--border);
-}
-
-.sync-inline-pull-review .sync-readiness-list > div {
-  min-height: 50px;
-  padding: 9px 2px;
-}
-
 .sync-push-resource-header {
   min-height: 52px;
   padding-top: 9px;
@@ -4873,11 +4767,6 @@ summary:focus-visible {
   align-items: center;
   justify-content: center;
   gap: 5px;
-}
-.sync-push-resource-actions .sync-sync-review-icon-action.has-count {
-  width: auto;
-  min-width: 42px;
-  padding: 0 7px;
 }
 .sync-push-resource-actions .sync-inline-action-close {
   margin-left: 7px;
@@ -5001,9 +4890,6 @@ summary:focus-visible {
 
 @media (max-width: 980px) {
   .sync-pull-review-workspace { --sync-pull-gutter: 20px; }
-  .sync-pull-progress { grid-template-columns: 1fr; }
-  .sync-pull-progress > div { border-right: 0; border-bottom: 1px solid var(--border); }
-  .sync-pull-progress > div:last-child { border-bottom: 0; }
   .sync-sidebar { width: 238px; min-width: 238px; }
   .sync-project-header, .sync-page-header { flex-direction: column; }
   .sync-project-actions, .sync-page-actions { width: 100%; flex-wrap: wrap; }
@@ -5017,8 +4903,6 @@ summary:focus-visible {
   .sync-pull-review-workspace { --sync-pull-gutter: 15px; }
   .sync-pull-review-header { padding-top: 16px; }
   .sync-pull-review-heading { flex-direction: column; gap: 8px; }
-  .sync-pull-section-heading { align-items: center; flex-flow: row wrap; gap: 8px; }
-  .sync-pull-section-heading .btn { width: auto; }
   .sync-pull-item-status { display: none; }
   .sync-pull-apply-bar { align-items: stretch; flex-direction: column; gap: 8px; }
   .sync-pull-apply-button { width: 100%; min-width: 0; }
@@ -7388,6 +7272,11 @@ div.storage-link-main {
 
 .storage-link-sync:hover:not(:disabled) {
   background: var(--bg-hover);
+}
+
+.storage-link-sync:disabled {
+  opacity: var(--button-disabled-opacity);
+  cursor: not-allowed;
 }
 
 .storage-link-sync.active {
@@ -9854,9 +9743,19 @@ div.storage-link-main {
   white-space: pre;
 }
 
+/* As a direct child of the summary row the stamp no longer inherits the meta
+   group's inline-flex; without it the inner <time> stays inline and its
+   overflow: hidden is inert, so the text would paint past the card edge
+   instead of truncating at narrow widths. */
+.sync-history-session-summary > .sync-history-thread-time-end {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
 /* The stamp is pinned to the right edge, so its tooltip has to open inward or
    it runs straight off the card. */
-.sync-history-thread-meta > .sync-history-thread-time-end::after {
+.sync-history-session-summary > .sync-history-thread-time-end::after {
   right: -6px;
   left: auto;
 }
@@ -9880,6 +9779,16 @@ div.storage-link-main {
 .sync-history-session-summary .sync-history-thread-meta { flex: 0 1 auto; }
 .sync-history-chat-toggle { width: 24px; min-width: 24px; min-height: 24px; flex: 0 0 auto; padding: 0; color: var(--text-2); }
 .sync-history-chat-toggle.active { color: var(--text-0); }
+
+/* Parts the hovered readouts from the debug button; same mark the storage
+   card uses between its overflow menu and its sync buttons. */
+.sync-history-actions-divider {
+  width: 1px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin: 0 4px 0 6px;
+  background: var(--border);
+}
 .sync-history-chat-details { display: grid; gap: 2px; padding-top: 7px; border-top: 1px solid var(--border); }
 .sync-history-load-older { min-height: 26px; justify-self: start; margin-bottom: 5px; font-size: 10.5px; }
 .sync-history-turn {
@@ -10084,9 +9993,13 @@ div.storage-link-main {
 }
 
 /* Push and Pull reuse the project tabs as one focused review workflow. */
+/* The review panel is sized by the sidebar and the drawer, not by the window,
+   so its responsive rules key off its own width. A viewport media query here
+   would fire at the wrong moments in both directions. */
 .sync-sync-review-workspace {
   width: 100%;
   background: var(--bg-0);
+  container: sync-review-layout / inline-size;
 }
 
 .sync-sync-review-header {
@@ -10253,26 +10166,12 @@ div.storage-link-main {
   padding: 5px 20px;
 }
 
-.sync-sync-review-summary {
-  width: 100%;
-  max-width: 900px;
-  margin: 0;
-  padding: 8px 0 2px;
-  display: grid;
-  gap: 0;
-}
+/* No max-width: the rows are a table that meets the panel edge like the tab
+   strip above it, and a 900px cap opened a growing channel of empty space on
+   the right of any wider panel. The sentence column cannot run away with the
+   line length — it is one of three columns, bounded by the label and the
+   lineage detail either side of it. */
 
-.sync-sync-review-summary-meta {
-  min-height: 34px;
-  padding: 0 12px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--text-3);
-  font-size: 10.5px;
-}
-
-.sync-sync-review-summary > button,
 .sync-sync-review-other > summary {
   width: 100%;
   min-height: 44px;
@@ -10292,13 +10191,11 @@ div.storage-link-main {
   list-style: none;
 }
 
-.sync-sync-review-summary > button:hover,
 .sync-sync-review-other > summary:hover {
   color: var(--text-0);
   background: var(--surface-subtle);
 }
 
-.sync-sync-review-summary > button > span,
 .sync-sync-review-other > summary > span {
   min-width: 0;
   display: inline-flex;
@@ -10306,7 +10203,6 @@ div.storage-link-main {
   gap: 8px;
 }
 
-.sync-sync-review-summary > button strong,
 .sync-sync-review-other > summary strong {
   color: var(--text-0);
   font-size: 12px;
@@ -10318,27 +10214,267 @@ div.storage-link-main {
 .sync-sync-review-other > .sync-resource-groups,
 .sync-sync-review-other > .sync-pull-items { padding: 4px 8px 10px; }
 
-.sync-sync-review-derived {
-  min-height: 34px;
-  padding: 0 12px;
+/* The banner zone: gates, progress, and outcomes stack at the top of the
+   review scroll, visible from every step. Children keep their own anatomy;
+   the zone owns spacing, so their standalone margins reset here. */
+.sync-review-banners {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 10px;
+}
+.sync-sync-review-scroll .sync-review-banners > * { margin: 0; }
+/* Every banner callout reads as one column of title, sentence, lineage —
+   the fork-banner anatomy — regardless of variant. */
+.sync-review-banners > .sync-callout > span {
+  min-width: 0;
   display: flex;
-  align-items: center;
-  gap: 7px;
-  border-top: 1px solid var(--border);
-  color: var(--text-3);
-  font-size: 10px;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+.sync-review-banners > .sync-callout > .btn {
+  margin-left: auto;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
-.sync-sync-review-derived svg { color: var(--green); }
+/* A finished sync is a section of the storage card: full width, no outline of
+   its own, one divider above, and its tint to say where it starts — the card
+   stays the only box on screen, and the sessions are lines inside it. The
+   summary line reads without opening; a clean result ships collapsed, one
+   holding a decision ships open. Title and figures match the session rows
+   exactly — 12px/600 for a name, 11px/600 mono for a number — so the banner
+   reads as the first row of the list rather than a differently-scaled header.
+   Compounded with .sync-callout because the theme restyles callout corners at
+   one class of specificity; the section must win that. */
+.sync-callout.sync-outcome-notice {
+  display: block;
+  margin: 0;
+  padding: 0;
+  border-width: 1px 0 0;
+  border-radius: 0;
+  /* The fold button sizes itself from a history-row token declared only on
+     the history lists; left undeclared it is invalid at computed-value time
+     and the width falls back to auto. */
+  --sync-history-commit-actions-column: 26px;
+}
+.sync-outcome-notice.success { border-color: color-mix(in srgb, var(--green) 30%, var(--border)); background: color-mix(in srgb, var(--green) 6%, transparent); }
+.sync-outcome-notice.warning { border-color: color-mix(in srgb, var(--yellow) 40%, var(--border)); background: var(--warning-soft); }
 
-/* Top-aligned, not centered: once the body runs past one line, centering the
-   icon and any recovery buttons against the full block height left them
-   floating mid-paragraph with dead space above and below. Top alignment pins
-   them to the title's cap-height, the way the rest of the app's icon+text
-   rows work. */
+.sync-outcome-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+.sync-outcome-head > svg:first-child { flex: 0 0 auto; }
+.sync-outcome-notice.success > .sync-outcome-head > svg:first-child { color: var(--green); }
+.sync-outcome-notice.warning > .sync-outcome-head > svg:first-child { color: var(--yellow); }
+
+.sync-outcome-summary {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+}
+.sync-outcome-summary > strong { color: var(--text-0); font-size: 12px; font-weight: 600; }
+.sync-outcome-stats { display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.sync-outcome-stat { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); font-size: 11px; }
+.sync-outcome-stat > svg { flex: 0 0 auto; color: var(--text-3); }
+.sync-outcome-stat b {
+  color: var(--text-0);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-outcome-actions { flex: 0 0 auto; display: inline-flex; gap: 4px; }
+.sync-outcome-actions .btn { white-space: nowrap; }
+
+/* The fold is the history table's own toggle, and the dismiss sits with it.
+   The shared toggle's hover chrome (border + fill) reads as a raised box
+   against the banner tint, so here the glyph brightens instead; keyboard
+   focus takes an outline ring, which paints outside the box and moves
+   nothing. Hit areas are unchanged. */
+.sync-outcome-head-actions { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 2px; }
+.sync-outcome-head .sync-history-commit-toggle,
+.sync-outcome-head .sync-history-commit-toggle:hover:not(:disabled),
+.sync-outcome-head .sync-history-commit-toggle:focus-visible,
+.sync-outcome-head .sync-notice-dismiss:hover,
+.sync-outcome-head .sync-notice-dismiss:focus-visible {
+  border-color: transparent;
+  background: transparent;
+}
+.sync-outcome-head .sync-history-commit-toggle:hover:not(:disabled),
+.sync-outcome-head .sync-notice-dismiss:hover { color: var(--text-0); }
+.sync-outcome-head .sync-history-commit-toggle:focus-visible,
+.sync-outcome-head .sync-notice-dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  color: var(--text-0);
+}
+
+/* The body stays in the DOM when folded — the banner is a report, and hiding
+   is presentation, not data. */
+.sync-outcome-notice.collapsed > .sync-outcome-body { display: none; }
+.sync-outcome-body {
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.sync-outcome-body > .sync-fork-technical { padding: 4px 10px 8px; }
+/* A session in the fold is a line in the banner, not a card on it: no border
+   of its own, no opaque background over the banner tint, and dividers that
+   reach both edges so the divisions belong to the box rather than to the
+   rows. No bottom padding on the fold — the last band ends on the border
+   like every other. */
+.sync-outcome-threads { margin: 0; padding: 0; gap: 0; }
+.sync-outcome-threads > .sync-history-thread-card {
+  padding-left: 10px;
+  padding-right: 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.sync-outcome-threads > .sync-history-thread-card + .sync-history-thread-card {
+  border-top: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+}
+.sync-outcome-threads > .sync-history-thread-card:hover {
+  background: color-mix(in srgb, var(--text-3) 7%, transparent);
+}
+
+/* Line 2 is which one it is: the whole thread id, never an 8-character stub.
+   It does not shrink or truncate — a partial id is worse than none — so at
+   narrow widths the meta row wraps and the timestamp drops to its own line.
+   (The timeline outside the fold truncates instead: its metrics carry hover
+   tooltips a wrapped row would displace; nothing in here has one.) */
+.sync-outcome-threads .sync-history-thread-meta { flex-wrap: wrap; row-gap: 2px; }
+.sync-outcome-threads .sync-outcome-threadid {
+  flex: 0 0 auto;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* The id itself is inline inside the flex item: a flex item is blockified,
+   and a blockified element serialises with a trailing newline, so selecting
+   it directly would paste "…c705\n". One click on the inline code takes all
+   36 characters whole. */
+.sync-outcome-threads .sync-outcome-threadid > code {
+  font: inherit;
+  cursor: text;
+  -webkit-user-select: all;
+  user-select: all;
+}
+/* A session forked N times says so once, instead of carrying N timestamps in
+   its display name. Neutral rather than coloured: a past fork is provenance,
+   and the row's status is already the icon at its front. */
+.sync-outcome-threads .sync-outcome-forkmark {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.sync-outcome-reason {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A gate the flow cannot get past lands here: inside the storage card, in
+   the slot the review opens into, with the way forward riding on it. */
+.sync-storage-notice {
+  margin: 0 10px 10px;
+  align-items: center;
+}
+.sync-storage-notice > span {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+.sync-storage-notice > svg { flex: 0 0 auto; }
+.sync-storage-notice .sync-sync-review-recovery-actions { margin-left: auto; }
+.sync-storage-notice .sync-sync-review-recovery-actions .btn { white-space: nowrap; }
+
+/* The conflict choice lives on the conflicted row itself. */
+.sync-divergence-inline {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 2px 0;
+  padding-left: 27px;
+}
+.sync-divergence-inline > svg { color: var(--text-3); flex: 0 0 auto; }
+.sync-divergence-choice { display: inline-flex; gap: 2px; }
+.sync-divergence-choice button {
+  line-height: 1;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.sync-divergence-choice button.active { background: var(--bg-hover); color: var(--text-0); }
+.sync-divergence-choice button:disabled { opacity: 0.55; cursor: default; }
+.sync-divergence-inline-confirm {
+  grid-column: 1 / -1;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  margin: 3px 0 4px 27px;
+  padding: 4px 9px;
+  font-size: 11px;
+  color: var(--yellow);
+  background: var(--warning-soft);
+  border: 1px solid color-mix(in srgb, var(--yellow) 40%, var(--border));
+  border-radius: 6px;
+}
+.sync-divergence-inline-confirm svg { flex: 0 0 auto; }
+
+/* Lines inside the consolidated needs-attention card. */
+.sync-attention-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  margin-top: 2px;
+}
+.sync-attention-line svg { flex: 0 0 auto; }
+.sync-attention-line.ok svg { color: var(--green); }
+.sync-attention-line.bad svg { color: var(--red); }
+
+/* Technical details tucked under a plain-language banner. */
+.sync-fork-technical {
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.sync-fork-technical summary { cursor: pointer; }
+.sync-fork-technical dl { margin: 4px 0 0; display: grid; gap: 2px; }
+.sync-fork-technical dl div { display: flex; gap: 6px; }
+.sync-fork-technical dt { color: var(--text-3); }
+.sync-fork-technical dd { margin: 0; }
+
+/* Footers are buttons only; the actions pin to the right edge. */
+.sync-inline-action-footer.sync-sync-review-footer { justify-content: flex-end; }
+
 .sync-sync-review-blocker {
   margin: 10px 0 0;
-  align-items: flex-start;
+  align-items: center;
 }
 
 .sync-sync-review-blocker > span {
@@ -10356,37 +10492,83 @@ div.storage-link-main {
   color: var(--yellow);
 }
 
-/* A destination waiting on a Pull is a step, not a failure: the push is
-   intact and one action clears it. It keeps the plain callout surface and
-   colours only its icon, the same way the remote-missing state does, so the
-   panel does not read as a second kind of alert. It carries no action of its
-   own — the footer swaps Push for Review Pull, so the step has exactly one
-   primary action instead of a disabled button beside a live one. */
+/* A destination waiting on a Pull is a step, not a failure: the push is intact
+   and one action clears it. It reads as the same banner the fork panel and the
+   blockers use — icon, then one column of text — rather than as a red error.
+   It was a bare three-column row before, which put the sentence and the lineage
+   numbers on the same baseline as the title and left it competing with the
+   Sessions row for the same rhythm. */
+/* Inset by the row gutter so the card sits inside the table rather than butting
+   against the panel edge, and top-aligned (the .sync-callout default) so the
+   icon reads against the title instead of floating beside the second line. */
 .sync-sync-review-pull-required {
-  margin: 6px 0 4px;
-  padding: 8px 10px;
-  gap: 10px;
+  margin: 8px 12px 10px;
+}
+
+.sync-sync-review-pull-required > span {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .sync-sync-review-pull-required > svg {
   flex: 0 0 auto;
-  margin-top: 1px;
   color: var(--blue);
 }
 
-.sync-sync-review-pull-action {
-  width: clamp(240px, 20vw, 320px);
-  min-width: 240px;
-  justify-content: center;
+.sync-sync-review-pull-required strong {
+  color: var(--text-0);
+  font-size: 12px;
+  font-weight: 620;
 }
 
-/* Lineage numbers ride along for support without competing with the sentence
-   that tells the reader what to do. The extra leading separates them from the
-   sentence rather than letting all three lines read as one dense block. */
-.sync-sync-review-blocker-detail {
-  margin-top: 3px;
+/* Lineage numbers for support: kept out of the leading sentence and set a step
+   down, so a screenshot still carries them without the banner leading on them. */
+.sync-sync-review-pull-detail {
+  margin-top: 2px;
   color: var(--text-3);
   font-size: 10px;
+}
+
+/* Narrow panel: rows that were two columns stop being two columns. The banner
+   above them needs nothing here — a callout is already a single column, which
+   is the other reason it suits this content better than the row did. */
+@container sync-review-layout (max-width: 620px) {
+  /* The trailing count has nothing left to line up against. */
+  .sync-sync-review-other > summary {
+    min-height: 44px;
+    padding: 9px 12px;
+    align-items: start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  /* Three separate rules each contributed a couple of pixels below the last
+     row, which read as one unexplained band above the footer. */
+
+  .sync-sync-review-scroll {
+    padding-bottom: 0;
+  }
+}
+
+/* The review step is a table, not prose: its rows carry their own 12px and a
+   background that is meant to meet the panel edge the way the tab strip above
+   it does. The wrapper's 20px reading gutter left it floating in a channel of
+   empty space at every width. Scoped by :has so the history and project-file
+   steps — which are prose-width content in the same wrapper — keep theirs. */
+
+/* The scroll wrapper's own bottom padding sits outside the table's background,
+   so unlike the summary's it does not read as breathing room inside the block —
+   it reads as a band of panel showing through between the last row and the
+   footer rule. The table meets the footer the way it meets the sides. */
+
+/* Sized by its content and its padding, not by a fixed track: pinned to a
+   240px width the label and icon floated in the middle of an empty slab and
+   the horizontal padding stopped reading as padding at all. */
+.sync-sync-review-pull-action {
+  padding: 0 26px;
 }
 
 .sync-sync-review-recovery-actions {
@@ -10465,28 +10647,6 @@ div.storage-link-main {
 .sync-sync-selectable-row.selected,
 .sync-capability-row.sync-capability-selectable.selected {
   background: var(--surface-subtle);
-}
-
-.sync-sync-review-state {
-  flex: 0 0 auto;
-  color: var(--text-3);
-  font-size: 9.5px;
-  font-weight: 560;
-  white-space: nowrap;
-}
-
-.sync-sync-review-state.state-storage_only,
-.sync-sync-review-state.state-storage_ahead,
-.sync-sync-review-state.state-diverged {
-  color: var(--yellow);
-}
-
-.sync-sync-review-state.state-diverged_forked {
-  color: var(--blue);
-}
-
-.sync-sync-review-state.state-unavailable {
-  color: var(--red);
 }
 
 .sync-capability-row.sync-capability-selectable {
@@ -10801,21 +10961,6 @@ button.sync-project-file-expand { cursor: pointer; }
   cursor: default;
 }
 
-.sync-sync-review-flag {
-  flex: 0 0 auto;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--yellow) 14%, transparent);
-  color: var(--yellow);
-  font-size: 9.5px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.sync-sync-review-state.action-blocked {
-  color: var(--red);
-}
-
 .sync-history-older-group {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -10855,76 +11000,14 @@ button.sync-project-file-expand { cursor: pointer; }
   margin-bottom: 8px;
 }
 
-.sync-divergence-resolutions {
-  display: grid;
-  gap: 12px;
-  padding: 12px;
-}
 
+/* The Activity page manual-fork checkpoint card (the Pull review now uses a
+   plain banner instead, but this surface keeps the card). */
 .sync-divergence-card,
 .sync-fork-checkpoint {
   border: 1px solid color-mix(in srgb, var(--yellow) 38%, var(--border));
   border-radius: 10px;
   background: color-mix(in srgb, var(--yellow) 5%, var(--bg-1));
-}
-
-.sync-divergence-card {
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-}
-
-.sync-divergence-card legend {
-  padding: 0 5px;
-  color: var(--text-0);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.sync-divergence-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 8px;
-  border-radius: 7px;
-  cursor: pointer;
-}
-
-.sync-divergence-option:has(input:checked) {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
-
-.sync-divergence-option span {
-  display: grid;
-  gap: 3px;
-}
-
-.sync-divergence-option strong {
-  color: var(--text-0);
-  font-size: 12px;
-}
-
-.sync-divergence-option strong em {
-  margin-left: 5px;
-  color: var(--accent);
-  font-size: 10px;
-  font-style: normal;
-}
-
-.sync-divergence-option small,
-.sync-divergence-unselected,
-.sync-divergence-confirm {
-  color: var(--text-2);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.sync-divergence-confirm {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin: 0 8px;
-  color: var(--yellow);
 }
 
 .sync-divergence-preview,
@@ -10995,11 +11078,6 @@ button.sync-project-file-expand { cursor: pointer; }
   line-height: 1.5;
 }
 
-.sync-fork-checkpoint-actions {
-  display: flex;
-  gap: 8px;
-}
-
 .sync-history-content > .sync-fork-checkpoint {
   display: grid;
   gap: 10px;
@@ -11024,11 +11102,6 @@ button.sync-project-file-expand { cursor: pointer; }
   line-height: 1.5;
 }
 
-.sync-fork-checkpoint-actions {
-  display: flex;
-  gap: 8px;
-}
-
 .sync-history-content > .sync-fork-checkpoint {
   display: grid;
   gap: 10px;
@@ -11036,34 +11109,12 @@ button.sync-project-file-expand { cursor: pointer; }
   margin-bottom: 10px;
 }
 
-.sync-app-refresh {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-1);
-}
-
-.sync-app-refresh > div,
-.sync-app-refresh label {
+.sync-fork-checkpoint-actions {
   display: flex;
-  align-items: flex-start;
-  gap: 9px;
+  gap: 8px;
 }
 
-.sync-app-refresh > div > span {
-  display: grid;
-  gap: 3px;
-}
-
-.sync-app-refresh small,
-.sync-app-refresh label {
-  color: var(--text-2);
-  font-size: 10.5px;
-  line-height: 1.45;
-}
-
-.sync-app-refresh button {
-  justify-self: start;
+.sync-fork-checkpoint-actions {
+  display: flex;
+  gap: 8px;
 }
