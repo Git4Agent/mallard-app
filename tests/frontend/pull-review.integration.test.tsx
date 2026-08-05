@@ -1237,6 +1237,17 @@ test("the storage-card Pull button applies the open review", () => {
   assert.match(sync, /onPrimaryChange=\{setPullReviewPrimary\}/);
   assert.match(sync, /continueDisabled: !pullReviewPrimary \|\| pullReviewPrimary\.disabledReason !== null,/);
 
+  // Completing the apply closes the review, and closePullReview advances the
+  // restore request counter — so applyReview's busy-clear must not be guarded
+  // on the request id it just invalidated, or every successful Pull leaves
+  // the whole app disabled.
+  const applyStart = sync.indexOf("const applyReview");
+  const applyEnd = sync.indexOf("const saveStorageConfig");
+  assert.ok(applyStart !== -1 && applyEnd > applyStart, "applyReview precedes saveStorageConfig");
+  const applyBody = sync.slice(applyStart, applyEnd);
+  assert.match(applyBody, /hostWorkflowGeneration\.current === workflowGeneration\) setBusy\(false\)/);
+  assert.doesNotMatch(applyBody, /restoreRequest\.current === requestId\) setBusy/);
+
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   assert.equal(
     (workspace.match(/inlineStorageReview\?\.onContinue\?\.\(\);/g) ?? []).length,

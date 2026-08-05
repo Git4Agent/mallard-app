@@ -2895,6 +2895,41 @@ summary {
   box-shadow: 2px 2px 0 color-mix(in srgb, var(--border-strong) 14%, transparent);
 }
 
+/* The toast was the last 8px corner in a 4px app, and its 10.5px text sat off
+   the whole-pixel scale. The rail replaces the tinted border App.css used to
+   carry the tone: one solid edge, read before the words are. */
+.sync-notice {
+  overflow: hidden;
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+  line-height: var(--leading-snug);
+}
+
+/* Positioned, not a stretched flex item: `align-self: stretch` spans only the
+   content box, so the toast's 5px of vertical padding left the rail floating
+   short of both edges. The toast is already absolute, so this anchors to it;
+   `overflow: hidden` trims the square end to the 4px corner. */
+.sync-notice::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--green);
+}
+
+.sync-notice.is-attention::before {
+  background: var(--yellow);
+}
+
+.sync-notice.is-attention > svg {
+  color: var(--yellow);
+}
+
+.sync-notice-dismiss {
+  border-radius: 3px;
+}
+
 .sync-empty-state,
 .sync-history-state,
 .sync-pane-message {

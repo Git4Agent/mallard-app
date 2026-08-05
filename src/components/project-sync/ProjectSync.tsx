@@ -144,6 +144,18 @@ function storedActiveStorages(): Record<string, string> {
   }
 }
 
+/** What happened, not how loud it was: the toast picks its glyph and rail
+ *  colour from this. Default "ok" keeps every existing confirmation a
+ *  one-argument call. "attention" is for the notices that report a stop —
+ *  a parked fork, a binding that needs confirming — which a green tick was
+ *  reporting as done. Hard failures still go to `error`, not here. */
+type SyncNoticeTone = "ok" | "attention";
+
+interface SyncNotice {
+  message: string;
+  tone: SyncNoticeTone;
+}
+
 interface PendingBundleConnection {
   projectId: string;
   storageId: string;
@@ -259,7 +271,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [backendError, setBackendError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  // A notice carries its tone so the toast can say which happened. It used to
+  // be a bare string with a hardcoded green tick, which meant a failed Pull
+  // reported itself as a success.
+  const [notice, setNotice] = useState<SyncNotice | null>(null);
+  const notify = (message: string, tone: SyncNoticeTone = "ok") => setNotice({ message, tone });
   const [hostIdentityStatus, setHostIdentityStatus] = useState<HostIdentityStatus | null>(null);
   const [hostIdentityShellReady, setHostIdentityShellReady] = useState(false);
   const [hostIdentityError, setHostIdentityError] = useState<string | null>(null);
@@ -1133,7 +1149,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       closeWorkspaceSettings();
       setSetupDraftId(created.draft.draft_id);
       if (created.resumed) {
-        setNotice(`Resumed the saved setup draft for ${created.draft.display_name}.`);
+        notify(`Resumed setup draft for ${created.draft.display_name}.`);
       }
       await refreshSetupDrafts(undefined, workflowGeneration);
     } catch (reason) {
@@ -1170,7 +1186,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (setupDraftId === draftId) setSetupDraftId(null);
       await refreshSetupDrafts(undefined, workflowGeneration);
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
-      setNotice("Setup draft discarded. Project files were not touched.");
+      notify("Draft discarded — no files touched.");
     } catch (reason) {
       if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
     } finally {
@@ -1187,8 +1203,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setSetupDraftId(null);
     const projectId = detail.project.local_project_id;
     const storageId = detail.links[0]?.storage_id ?? null;
-    setNotice(completion === "pull"
-      ? `${projectLabel(detail.project)} connected. Open the Pull review before files are applied.`
+    notify(completion === "pull"
+      ? `${projectLabel(detail.project)} connected — open Pull review to apply.`
       : `${projectLabel(detail.project)} is set up${storageId ? "" : " — link storage when ready"}.`);
     const { nextConfig, hostIdentityReady } = await loadShell();
     if (!hostIdentityReady || hostWorkflowGeneration.current !== workflowGeneration) return;
@@ -1221,7 +1237,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setActiveProjectId(projectId);
     await loadProjectData(projectId, nextConfig, storageId, workflowGeneration);
     if (hostWorkflowGeneration.current !== workflowGeneration) return;
-    setNotice("Storage linked to this project repo.");
+    notify("Storage linked.");
   };
 
   const linkStorage = async (projectId: string, storageId: string) => {
@@ -1287,8 +1303,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         workflowGeneration,
       );
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
-      setNotice(
-        `Repaired ${result.repaired_thread_ids.length} Codex conversation path${result.repaired_thread_ids.length === 1 ? "" : "s"}. Original rollouts were backed up.`,
+      notify(
+        `Repaired ${result.repaired_thread_ids.length} conversation path${result.repaired_thread_ids.length === 1 ? "" : "s"} — originals backed up.`,
       );
     } catch (reason) {
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
@@ -1723,7 +1739,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setDetail((current) => current ? { ...current, binding: saved } : current);
       await refreshRepositoryKinds(workflowGeneration);
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
-      setNotice("Machine binding updated. Cloud identity and logical paths were unchanged.");
+      notify("Machine binding updated — cloud identity unchanged.");
       await loadConversationPathAudits(nextBindings, undefined, workflowGeneration);
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
       await loadProjectData(projectId, config, activeStorageId, workflowGeneration);
@@ -1749,7 +1765,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (activeProjectId === projectId) {
         setDetail((current) => current ? { ...current, project: updated } : current);
       }
-      setNotice(alias
+      notify(alias
         ? `Shown as “${alias}” on this computer.`
         : `Name reset to “${updated.display_name}”.`);
       return true;
@@ -1816,9 +1832,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         setRestoreResult(pendingDivergence);
         setPullApplyPhase("complete");
         setReviewSupportLoading(false);
-        setNotice(pullCheckpoints.length === 1
-          ? `Resume the pending Codex fork for ${displayName}. The original conversation has not been replaced.`
-          : `Resume ${pullCheckpoints.length} pending Codex forks for ${displayName}. No original conversation has been replaced.`);
+        notify(pullCheckpoints.length === 1
+          ? `Pending Codex fork for ${displayName} — original not replaced.`
+          : `${pullCheckpoints.length} pending Codex forks for ${displayName} — no original replaced.`,
+          "attention");
         return null;
       }
       // The project-data review is the primary Pull surface. Render it as soon as it
@@ -1845,11 +1862,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         }
         setReviewSupportLoading(false);
         setRestoreBinding(null);
-        setNotice(`Nothing to pull for ${displayName} — caught up to storage generation ${review.restorePlan.generation}.`);
+        notify(`${displayName} is up to date (generation ${review.restorePlan.generation}).`);
         return null;
       }
       setRestorePlan(review.restorePlan);
-      setNotice(`Pull review ready for ${displayName}. Nothing has been applied yet.`);
+      notify(`Pull review ready for ${displayName} — nothing applied yet.`);
 
       // Supporting context fills in asynchronously after the workspace is usable.
       // Its lifecycle is request-scoped so closing or replanning cannot apply
@@ -1910,7 +1927,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         const next = buildPullOutcome({ ...inputs, readiness });
         if (next.tone === "success" && !next.action) {
           setStorageNotice(null);
-          setNotice("Remaining setup is resolved — the project is ready.");
+          notify("Setup resolved — project ready.");
         } else {
           setStorageNotice({
             projectId: outcome.projectId,
@@ -1940,7 +1957,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setHistoryRefreshEpoch((epoch) => epoch + 1);
       if (result.success) {
         setStorageNotice(null);
-        setNotice(result.message);
+        notify(result.message);
       } else {
         setStorageNotice({
           projectId: outcome.projectId,
@@ -1984,9 +2001,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           profile_ids: nextDetail.binding?.profile_ids ?? defaultProfileIds(),
           expected_revision: nextDetail.binding?.revision ?? null,
         });
-        setNotice(nextDetail.binding
-          ? "Confirm this machine's project folder and provider profile before pulling."
-          : "Choose this machine's project folder and provider profile before pulling.");
+        notify(nextDetail.binding
+          ? "Confirm project folder and profile before pulling."
+          : "Choose project folder and profile before pulling.",
+          "attention");
         return;
       }
       const failure = await planRestore(
@@ -2075,7 +2093,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       await loadProjectData(projectId, nextConfig, storageId, workflowGeneration);
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
       if (!connected.binding) {
-        setNotice("Remote repo connected. Configure the project folder and provider profile before Pull.");
+        notify("Repo connected — set folder and profile before Pull.");
         return;
       }
       await planRestore(
@@ -2103,7 +2121,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         if (hostWorkflowGeneration.current !== workflowGeneration) return;
       } else {
         setPendingBundleConnection(null);
-        setNotice("Kept the local-only repo identity. Review Push to publish it as a separate remote project.");
+        notify("Kept local-only identity — Push publishes it separately.");
         await openPushChooser(pending.projectId, pending.storageId, workflowGeneration);
         return;
       }
@@ -2130,7 +2148,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
       await refresh(workflowGeneration);
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
-      setNotice(`${summary ? projectLabel(summary) : "Project"} removed from Mallard. Files were not deleted.`);
+      notify(`${summary ? projectLabel(summary) : "Project"} removed — files kept on disk.`);
     } catch (reason) {
       if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
     } finally {
@@ -2225,11 +2243,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setActiveProjectId(projectId);
       await loadProjectData(projectId, nextConfig, nextStorageId, workflowGeneration);
       if (hostWorkflowGeneration.current !== workflowGeneration) return;
-      setNotice(removed
+      notify(removed
         ? reason === "remote_history_missing"
-          ? `${storageName} unlinked. No files were deleted. Link it again to start new remote history.`
-          : `${storageName} unlinked from ${projectName}. Stored files were not deleted.`
-        : `${storageName} was already unlinked from ${projectName}.`);
+          ? `${storageName} unlinked — files kept; link again for a fresh history.`
+          : `${storageName} unlinked from ${projectName} — files kept.`
+        : `${storageName} was already unlinked.`);
     } catch (reason) {
       if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
     } finally {
@@ -2377,7 +2395,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         setRestoreError(errorMessage(reason));
       }
     } finally {
-      if (restoreRequest.current === requestId) setBusy(false);
+      // Guarded by workflow generation, not the restore request: completing
+      // the apply closes the review, and closePullReview advances the request
+      // counter — a request-id guard here would skip this line on every
+      // successful Pull and leave the whole app disabled.
+      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
     }
   };
 
@@ -2425,7 +2447,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           link.local_project_id === localProjectId && link.storage_id === storageId
         )),
       )));
-      setNotice(successNotice);
+      notify(successNotice);
       return true;
     } catch (reason) {
       if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
@@ -2829,9 +2851,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           </div>
         )}
         {notice && (
-          <div className="sync-notice" role="status" aria-live="polite">
-            <Icon name="check-circle" size={14} />
-            <span>{notice}</span>
+          <div
+            className={`sync-notice${notice.tone === "attention" ? " is-attention" : ""}`}
+            role="status"
+            aria-live="polite"
+          >
+            <Icon name={notice.tone === "attention" ? "alert-triangle" : "check-circle"} size={14} />
+            <span>{notice.message}</span>
             <button type="button" className="sync-notice-dismiss" onClick={() => setNotice(null)}
               title="Dismiss" aria-label="Dismiss notification">
               <Icon name="x" size={12} />

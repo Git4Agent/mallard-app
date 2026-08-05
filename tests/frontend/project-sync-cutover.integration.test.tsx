@@ -336,6 +336,50 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(workspace, /aria-label="App actions"[\s\S]*?<Icon name="more" size=\{16\} \/>/);
 });
 
+test("the notice toast squares off and reports its own tone", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const retroCss = readFileSync("src/RetroTheme.css", "utf8");
+
+  // Squared to the app's corner, and on the whole-pixel scale: 8px/10.5px were
+  // the last of App.css's pill styling showing through the retro skin.
+  assert.match(retroCss, /\.sync-notice\s*\{[^}]*border-radius: 4px;[^}]*font-size: var\(--type-xs\);/s);
+  assert.match(retroCss, /\.sync-notice-dismiss\s*\{[^}]*border-radius: 3px;/s);
+  // The rail is positioned, not a stretched flex item: stretch spans only the
+  // content box, which left it short of both edges by the toast's padding.
+  assert.match(retroCss, /\.sync-notice::before\s*\{[^}]*position: absolute;[^}]*inset: 0 auto 0 0;[^}]*width: 3px;[^}]*background: var\(--green\);/s);
+  assert.match(retroCss, /\.sync-notice\s*\{[^}]*overflow: hidden;/s);
+  assert.match(retroCss, /\.sync-notice\.is-attention::before\s*\{[^}]*background: var\(--yellow\);/s);
+
+  // A green tick used to announce every notice, including the ones that report
+  // a stop. Tone drives the glyph, so those two cannot drift apart again.
+  assert.match(workspace, /type SyncNoticeTone = "ok" \| "attention"/);
+  assert.match(workspace, /notice\.tone === "attention" \? "alert-triangle" : "check-circle"/);
+  assert.match(workspace, /notice\.tone === "attention" \? " is-attention" : ""/);
+  // The parked-fork and unconfirmed-binding notices are stops, not successes.
+  assert.match(workspace, /no original replaced\.`,\s*"attention"\)/);
+  assert.match(workspace, /before pulling\.",\s*"attention"\)/);
+  // Every other call site stays a one-argument confirmation.
+  assert.match(workspace, /const notify = \(message: string, tone: SyncNoticeTone = "ok"\) => setNotice\(\{ message, tone \}\)/);
+});
+
+test("notice copy stays one line: no two-sentence reassurance", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const notices = [...workspace.matchAll(/\bnotify\(\s*([\s\S]*?)\);/g)].map((m) => m[1]);
+  assert.ok(notices.length >= 15, `expected the notice corpus, found ${notices.length}`);
+  for (const body of notices) {
+    for (const literal of body.matchAll(/[`"]([^`"]{12,})[`"]/g)) {
+      const text = literal[1];
+      if (!/[a-z]/.test(text)) continue;
+      // A toast is a confirmation, not documentation. One sentence; a dash
+      // carries the caveat. Trailing "." is the only period allowed.
+      assert.ok(
+        !/\.\s+[A-Z]/.test(text),
+        `notice copy runs to a second sentence: "${text}"`,
+      );
+    }
+  }
+});
+
 test("the titlebar marks active Git projects with the Git folder icon", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
 
