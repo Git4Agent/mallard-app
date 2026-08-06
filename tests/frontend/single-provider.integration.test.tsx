@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import ProjectBindingEditor from "../../src/components/project-sync/ProjectBindingEditor";
+import { shouldShowResourcesSection } from "../../src/components/project-sync/ProjectSetupWorkspace";
 import ProjectLinksWorkspace, {
+  projectPullActionLabel,
   projectPushActionLabel,
   storageActionLockedForReview,
 } from "../../src/components/project-sync/ProjectLinksWorkspace";
@@ -64,6 +66,27 @@ test("the project Push action describes its workflow state", () => {
     workspaceSource,
     /key=\{pushProgress \? "push-progress" : "push-idle"\}/,
     "the idle upload icon must replace the animated SVG instead of reusing it",
+  );
+});
+
+test("the project Pull action describes its workflow state", () => {
+  // Same contract as Push: while the review applies, the progress lives on
+  // the card button — spinner and label — not in a review banner.
+  assert.equal(projectPullActionLabel({ preparing: false, applying: false }), "Pull");
+  assert.equal(projectPullActionLabel({ preparing: true, applying: false }), "Preparing…");
+  assert.equal(projectPullActionLabel({ preparing: false, applying: true }), "Pulling…");
+
+  const workspaceSource = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(
+    workspaceSource,
+    /key=\{pullProgress \? "pull-progress" : "pull-idle"\}/,
+    "the idle download icon must replace the animated SVG instead of reusing it",
+  );
+  const reviewSource = readFileSync("src/components/project-sync/RestorePlanView.tsx", "utf8");
+  assert.doesNotMatch(
+    reviewSource,
+    /Nothing is replaced until it is verified/,
+    "the in-review Pulling banner is gone for good",
   );
 });
 
@@ -421,4 +444,29 @@ test("a detached project can reopen setup without linked storage", () => {
     />,
   );
   assert.doesNotMatch(activeHtml, />Confirm setup<\/button>|>Set up project<\/button>/);
+});
+
+test("setup hides Sync contents when it has neither a choice to offer nor anything to report", () => {
+  const quiet = {
+    choiceAvailable: false,
+    discovering: false,
+    warningCount: 0,
+    resourcesState: "ready",
+    selectionResetNoticeVisible: false,
+  };
+  // A connected remote repo owns the recipe, and an empty discovery leaves
+  // nothing to tick: either way the heading would stand over one sentence.
+  assert.equal(shouldShowResourcesSection(quiet), false);
+  // Before the first inspection lands there is no section status at all.
+  assert.equal(shouldShowResourcesSection({ ...quiet, resourcesState: null }), false);
+
+  // Anything the user can act on, or that the backend flagged, keeps it open.
+  assert.equal(shouldShowResourcesSection({ ...quiet, choiceAvailable: true }), true);
+  assert.equal(shouldShowResourcesSection({ ...quiet, discovering: true }), true);
+  assert.equal(shouldShowResourcesSection({ ...quiet, warningCount: 1 }), true);
+  // "blocked" covers discovery failure and the missing-profile gate;
+  // "attention" covers selection drift.
+  assert.equal(shouldShowResourcesSection({ ...quiet, resourcesState: "blocked" }), true);
+  assert.equal(shouldShowResourcesSection({ ...quiet, resourcesState: "attention" }), true);
+  assert.equal(shouldShowResourcesSection({ ...quiet, selectionResetNoticeVisible: true }), true);
 });

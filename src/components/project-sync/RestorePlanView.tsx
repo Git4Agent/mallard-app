@@ -341,15 +341,17 @@ export default function RestorePlanView({
     keepsLocalConversation(item) && !completedResourceIds.has(item.resourceId)
   ));
 
-  // Progress and outcome land in the banner zone at the top of whichever step
-  // is open; scrolling it into view replaces the old forced jump to the
-  // deleted Review step. The checkpoint-resume flow mounts with phase already
-  // "complete", and that mount-time scroll is deliberate.
+  // A result's banners (checkpoint, error) land in the zone at the top of
+  // whichever step is open; scrolling it into view replaces the old forced
+  // jump to the deleted Review step. Applying itself shows no banner — the
+  // progress lives on the Pull buttons — so only a result scrolls. The
+  // checkpoint-resume flow mounts with a result, and that mount-time scroll
+  // is deliberate.
   useEffect(() => {
-    if (phase !== "idle" || hasResult) {
+    if (hasResult) {
       bannerZoneRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
     }
-  }, [hasResult, phase]);
+  }, [hasResult]);
 
   useEffect(() => {
     if (!reviewSteps.includes(activeStep)) setActiveStep("history");
@@ -455,7 +457,6 @@ export default function RestorePlanView({
     completedResourceIds,
   );
   const bannerZoneRef = useRef<HTMLDivElement | null>(null);
-  const applying = phase === "restoring" || phase === "verifying";
   const storageReplacedGate = !hasResult && plan.remote_continuity?.state === "replaced";
   // The conflict choice renders on the conflicted row itself. Hidden while a
   // fork checkpoint is parked — that decision is already made — and after the
@@ -504,7 +505,7 @@ export default function RestorePlanView({
                 : "The local branch becomes a Codex fork — nothing is lost"}
               onClick={() => setResolution("preserve_local_with_native_fork")}
             >
-              {preserved ? "Fork again" : "Keep both"}
+              Fork and overwrite
             </button>
             <button
               type="button"
@@ -517,7 +518,7 @@ export default function RestorePlanView({
                 : "Replaces the local branch"}
               onClick={() => setResolution("use_cloud_only")}
             >
-              {preserved ? "Adopt cloud" : "Use cloud only"}
+              Overwrite
             </button>
           </span>
         </div>
@@ -652,17 +653,8 @@ export default function RestorePlanView({
         <div
           className="sync-inline-action-scroll sync-sync-review-scroll"
         >
-          {(storageReplacedGate || applying || forkCheckpointActive || hasResult || Boolean(error && !hasResult)) && (
+          {(storageReplacedGate || forkCheckpointActive || hasResult || Boolean(error && !hasResult)) && (
             <div className="sync-review-banners" ref={bannerZoneRef}>
-              {applying && (
-                <div className="sync-callout" role="status" aria-live="polite">
-                  <Icon name="refresh" size={15} className="icon-spin" />
-                  <span>
-                    <strong>Pulling…</strong>
-                    Nothing is replaced until it is verified.
-                  </span>
-                </div>
-              )}
               {storageReplacedGate && (
                 <div className="sync-callout warning" role="status">
                   <Icon name="alert-triangle" size={15} />

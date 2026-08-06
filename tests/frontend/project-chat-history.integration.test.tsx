@@ -14,6 +14,7 @@ import ProjectChatHistoryPage, {
 } from "../../src/components/project-sync/ProjectChatHistoryPage";
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
 import { pushSelectableResourceIds } from "../../src/components/project-sync/PushResourceWorkspace";
+import { sessionName } from "../../src/components/project-sync/syncOutcome";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../../src/components/project-sync/ThreadStatusIcon";
 import { createSingleFlight } from "../../src/components/project-sync/api";
 
@@ -77,23 +78,59 @@ const history = {
   }],
 };
 
-test("manual fork completion feedback keeps success neutral and preserves retry details", () => {
-  const successHtml = renderToStaticMarkup(
+test("a completed fork renders as a rail event carrying the thread it created", () => {
+  const html = renderToStaticMarkup(
     <ForkActivityPanel
       feedback={{
-        message: "Created the Codex fork 'Fork title'",
+        message: "Created the Codex fork 'Respond to greeting — fork · 2026-08-01 20:35Z — fork · 2026-08-06 02:01Z'",
+        success: true,
+        fork: {
+          name: "Respond to greeting — fork · 2026-08-01 20:35Z — fork · 2026-08-06 02:01Z",
+          providerThreadId: "019fca55-6b21-70d4-a3e7-9c04b2f81de6",
+          createdAt: 1_785_996_060,
+        },
+      }}
+      checkpoint={null}
+      resolving={false}
+      onRetry={() => undefined}
+      onDismissFeedback={() => undefined}
+    />,
+  );
+  assert.match(html, /class="sync-history-fork-event" role="status"/);
+  // The identity glyph leads the heading like the cloud and pencil on the
+  // group bars — in the card, not out on the rail, where no line passes and
+  // a mark would float in empty space.
+  assert.match(html, /class="sync-history-fork-line"><svg[^>]*data-icon="git-fork"/);
+  assert.doesNotMatch(html, /sync-history-spine-mark/);
+  // The app's phrase and the user's name split by element, not by regex — and
+  // the name arrives compacted through the same function the outcome rows use.
+  assert.match(html, /class="sync-history-fork-label">Created the Codex fork<\/span><strong>Respond to greeting<\/strong>/);
+  assert.doesNotMatch(html, /— fork ·/);
+  assert.doesNotMatch(html, /sync-callout-label|sync-callout-title/);
+  // Line 2 is the row grammar: the fork's whole id, then its stamp.
+  assert.match(html, /class="sync-history-stored-thread-id"><code>019fca55-6b21-70d4-a3e7-9c04b2f81de6<\/code><\/span><time dateTime=/);
+  assert.match(html, /aria-label="Dismiss fork notice"/);
+  assert.doesNotMatch(html, /class="sync-callout"/);
+
+  // The card exists only when the result names the fork; prose results — an
+  // acknowledged retry, a failure — keep the plain callout.
+  const proseHtml = renderToStaticMarkup(
+    <ForkActivityPanel
+      feedback={{
+        message: "Acknowledged the Codex fork and restored the cloud conversation",
         success: true,
       }}
       checkpoint={null}
       resolving={false}
       onRetry={() => undefined}
+      onDismissFeedback={() => undefined}
     />,
   );
-  assert.match(successHtml, /class="sync-callout"/);
-  assert.match(successHtml, /role="status"/);
-  assert.match(successHtml, /Created the Codex fork/);
-  assert.doesNotMatch(successHtml, /sync-callout success/);
-  assert.doesNotMatch(successHtml, /sync-callout error/);
+  assert.match(proseHtml, /class="sync-callout"/);
+  assert.match(proseHtml, /role="status"/);
+  assert.doesNotMatch(proseHtml, /sync-history-fork-event/);
+  assert.doesNotMatch(proseHtml, /sync-callout success/);
+  assert.doesNotMatch(proseHtml, /sync-callout error/);
 
   const failureHtml = renderToStaticMarkup(
     <ForkActivityPanel
@@ -114,6 +151,7 @@ test("manual fork completion feedback keeps success neutral and preserves retry 
       }}
       resolving={false}
       onRetry={() => undefined}
+      onDismissFeedback={() => undefined}
     />,
   );
   assert.match(failureHtml, /class="sync-callout error"/);
@@ -127,6 +165,31 @@ test("manual fork completion feedback keeps success neutral and preserves retry 
   assert.match(
     css,
     /\.sync-callout\.error\s*\{[^}]*color:\s*var\(--red\);[^}]*background:\s*var\(--danger-soft\)/s,
+  );
+  // The regex-split spans died with splitQuotedTitle; their styling goes too.
+  const retro = readFileSync("src/RetroTheme.css", "utf8");
+  assert.doesNotMatch(retro, /sync-callout-label|sync-callout-title/);
+
+  // The banner shares the cards' geometry: it must declare the tokens (they
+  // are not inherited) and take the same inset, and its heading wears the
+  // group headings' clothes — 18px glyph box, pixel label at the heading
+  // size, the name in the clean face beside it.
+  assert.match(retro, /\.sync-history-storage-only,\s*\.sync-history-fork-event\s*\{[^}]*--sync-history-card-offset: 26px;/s);
+  assert.match(retro, /\.sync-history-fork-event\s*\{[^}]*margin: 12px 0 12px var\(--sync-history-card-offset\);/s);
+  assert.match(retro, /\.sync-history-fork-line > svg\s*\{[^}]*width: var\(--sync-history-row-icon-size\);[^}]*color: var\(--text-2\);/s);
+  assert.match(retro, /\.sync-history-fork-label\s*\{[^}]*color: var\(--text-0\);[^}]*font-size: var\(--type-md\);/s);
+  assert.match(retro, /\.sync-history-fork-line > strong\s*\{[^}]*font-family: var\(--font-sans\);[^}]*font-size: var\(--type-md\);[^}]*font-weight: var\(--weight-semibold\);/s);
+});
+
+test("sessionName strips the whole fork chain and counts its links", () => {
+  assert.deepEqual(
+    sessionName("Respond to greeting — fork · 2026-08-01 20:35Z — fork · 2026-08-02 02:36Z — fork · 2026-08-06 02:01Z"),
+    { name: "Respond to greeting", forks: 3 },
+  );
+  assert.deepEqual(sessionName("Plain title"), { name: "Plain title", forks: 0 });
+  assert.deepEqual(
+    sessionName(" — fork · 2026-08-06 02:01Z"),
+    { name: "Untitled session", forks: 1 },
   );
 });
 
@@ -371,8 +434,11 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   // The metric tooltips need the same treatment: animating a transform promotes
   // them to their own compositing layer, which re-rasterises the text around
   // them and reads as the row — and the panel — twitching on hover.
-  const metricTooltipRule = css.match(/\.sync-history-thread-metric::after\s*\{[^}]+\}/s)?.[0] ?? "";
-  const metricHoverRule = css.match(/\.sync-history-thread-metric:hover::after,[\s\S]+?\n\}/)?.[0] ?? "";
+  // Guarded on [data-tooltip]: a metric without one (the outcome list's
+  // stamp) must not paint an empty tooltip box or invite a help cursor.
+  const metricTooltipRule = css.match(/\.sync-history-thread-metric\[data-tooltip\]::after\s*\{[^}]+\}/s)?.[0] ?? "";
+  const metricHoverRule = css.match(/\.sync-history-thread-metric\[data-tooltip\]:hover::after,[\s\S]+?\n\}/)?.[0] ?? "";
+  assert.doesNotMatch(css, /\.sync-history-thread-metric::after\s*\{/, "the unguarded tooltip selector must not come back");
   assert.match(metricTooltipRule, /position:\s*absolute/);
   assert.doesNotMatch(metricTooltipRule, /transform:/);
   assert.doesNotMatch(metricHoverRule, /transform:/);
@@ -564,14 +630,16 @@ test("history content uses the local alias and renders commit/thread actions", (
   assert.match(commitHeading, /data-icon="git-commit"/);
   assert.match(commitHeading, /class="sync-history-commit-title"/);
   assert.match(commitHeading, /class="sync-history-commit-meta"/);
-  assert.match(commitHeading, /class="sync-history-commit-actions"/);
   assert.match(commitHeading, /<strong title="Add project-scoped history">Add project-scoped history<\/strong>/);
   assert.ok(commitHeading.indexOf('data-icon="git-commit"') < commitHeading.indexOf("<strong"));
   assert.match(commitHeading, /<code>bbbbbbb<\/code>/);
   assert.match(commitHeading, /<time dateTime=/);
-  assert.match(commitHeading, /sync-history-commit-toggle/);
-  assert.doesNotMatch(commitHeading, /sync-history-commit-metrics/);
-  assert.match(html, /aria-label="Collapse commit bbbbbbb"/);
+  // The fold lives in the rail, before the heading in the DOM, not in a
+  // trailing actions column — the heading carries no buttons at all.
+  assert.doesNotMatch(commitHeading, /sync-history-commit-actions|sync-history-commit-toggle/);
+  assert.match(html, /class="sync-history-spine-fold"[^>]*aria-label="Collapse commit bbbbbbb"[^>]*aria-expanded="true"[^>]*aria-controls="commit-threads-bbbbbbb"/);
+  assert.match(html, /class="sync-history-spine-fold"[^>]*>\s*<svg[^>]*data-icon="chevron-down"/);
+  assert.ok(html.indexOf("sync-history-spine-fold") < html.indexOf('class="sync-history-commit-heading"'), "the fold precedes the content it controls");
   // Identifier before stamp: the linked sha chip leads with the external-link
   // glyph, and the timestamp trails the row to join the session stamp column.
   assert.match(html, /<a class="sync-history-commit-link"[^>]+><svg[^>]*data-icon="external-link"[\s\S]*?<code>bbbbbbb<\/code><\/a><time dateTime=/);
@@ -607,19 +675,20 @@ test("history content uses the local alias and renders commit/thread actions", (
     html.indexOf('data-tooltip="Tool calls · 8"')
       < html.indexOf('aria-label="Show thread debug info"'),
   );
-  // Line 2 order: readouts, the divider, the debug button, the stamp, and the
-  // disclosure chevron closing the row at the far edge.
+  // Line 2 order: readouts, the divider, then the clickable pair — debug info
+  // and the transcript chevron — with the stamp closing the line at the card
+  // edge so it forms one column with every other stamp on the page.
   {
     const row = html.slice(html.indexOf('class="sync-history-session-summary"'));
     const positions = [
       row.indexOf('class="sync-history-thread-meta"'),
       row.indexOf('class="sync-history-actions-divider"'),
       row.indexOf('aria-label="Show thread debug info"'),
-      row.indexOf("sync-history-thread-time-end"),
       row.indexOf('aria-label="Load chat history"'),
+      row.indexOf("sync-history-thread-time-end"),
     ];
     assert.ok(positions.every((position) => position >= 0), `line-2 pieces missing: ${positions}`);
-    assert.deepEqual(positions, [...positions].sort((a, b) => a - b), "line-2 order is readouts, divider, debug, stamp, chevron");
+    assert.deepEqual(positions, [...positions].sort((a, b) => a - b), "line-2 order is readouts, divider, debug, chevron, stamp");
   }
   assert.match(html, /aria-label="Load chat history"[^>]*aria-expanded="false"[^>]*>\s*<svg[^>]*data-icon="chevron-down"/);
   assert.doesNotMatch(html, /aria-label="Load chat history"[^>]*>\s*<svg[^>]*data-icon="message"/);
@@ -951,7 +1020,7 @@ test("embedded history follows the project workspace without repeating project c
   // The count badge is gone from the heading; the fold control carries the
   // count so the group is still announced with its size.
   assert.match(html, /aria-label="Collapse 1 session not linked to a commit"/);
-  assert.match(html, /class="[^"]*sync-history-group-toggle"[^>]*aria-expanded="true"/);
+  assert.match(html, /class="sync-history-spine-fold"[^>]*aria-label="Collapse 1 session not linked to a commit"[^>]*aria-expanded="true"[^>]*aria-controls="uncommitted-list"/);
   // The status legend is gone; the per-row tooltips carry the same meanings.
   assert.doesNotMatch(html, /sync-history-status-legend/);
   assert.doesNotMatch(html, /Cloud outstanding/);
@@ -1266,9 +1335,11 @@ test("selected storage adds directional indicators and storage-only threads", ()
   assert.doesNotMatch(html, /sync-thread-sync-glyph/);
   assert.match(html, /Improve cloud thread titles/);
   assert.match(html, /sync-history-stored-thread-meta/);
-  // The id is a chip and the timestamp a <time>, both right-aligned into the
-  // meta gutter, so the "Updated"/"Codex thread" prose labels are gone.
-  assert.match(html, /<code title="019f7798-[^"]*">019f7798<\/code>/);
+  // Line 2 matches the completed sync's rows: the whole thread id — never a
+  // stub, no chip, no title reveal — inline inside its wrapper so one click
+  // copies it whole, with the <time> beside it.
+  assert.match(html, /class="sync-history-stored-thread-id"><code>019f7798-5437-7632-9dbc-5b589cf68bf1<\/code><\/span>/);
+  assert.doesNotMatch(html, /<code title="019f7798-/);
   assert.match(html, /sync-history-stored-thread-meta[^>]*>[\s\S]*?<time[^>]*>[^<]+<\/time>/);
   assert.doesNotMatch(html, /Stored thread 019f7798/);
   assert.match(html, /aria-label="2 threads"/);

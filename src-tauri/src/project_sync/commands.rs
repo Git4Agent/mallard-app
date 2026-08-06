@@ -688,6 +688,16 @@ pub struct RestoreResult {
     pub codex_app_refresh: Option<CodexAppRefreshOffer>,
     #[serde(default)]
     pub codex_divergences: Vec<CodexDivergenceResult>,
+    /// The fork a manual-fork operation created, carried structurally so the
+    /// banner can name it without parsing the message sentence back apart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_manual_fork: Option<CodexManualForkSummary>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct CodexManualForkSummary {
+    pub fork_name: String,
+    pub provider_thread_id: String,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -2389,6 +2399,7 @@ pub(crate) fn pending_codex_divergence_with_repository(
         codex_fork_checkpoints: checkpoints,
         codex_app_refresh: None,
         codex_divergences: Vec::new(),
+        codex_manual_fork: None,
     }))
 }
 
@@ -2549,10 +2560,13 @@ pub async fn retry_codex_divergence(
                         Some(&retry_codex_home),
                     ),
                     codex_divergences,
+                    codex_manual_fork: None,
                 })
             }
             CodexDivergenceApplyOutcome::ManualForkCommitted {
-                desired_fork_name, ..
+                desired_fork_name,
+                preserved_provider_thread_id,
+                ..
             } => {
                 let remaining = pending_checkpoints_from_journal(&repository, &local_project_id)?;
                 let message = if remaining.is_empty() {
@@ -2575,6 +2589,10 @@ pub async fn retry_codex_divergence(
                     codex_fork_checkpoints: remaining,
                     codex_app_refresh: None,
                     codex_divergences: Vec::new(),
+                    codex_manual_fork: Some(CodexManualForkSummary {
+                        fork_name: desired_fork_name,
+                        provider_thread_id: preserved_provider_thread_id,
+                    }),
                 })
             }
             CodexDivergenceApplyOutcome::ForkUnacknowledged {
@@ -2635,6 +2653,7 @@ fn pending_queue_result(
         codex_fork_checkpoints: checkpoints,
         codex_app_refresh: None,
         codex_divergences: Vec::new(),
+        codex_manual_fork: None,
     })
 }
 
@@ -2923,7 +2942,9 @@ pub(crate) fn fork_codex_thread_with_repository(
         on_phase,
     )? {
         CodexDivergenceApplyOutcome::ManualForkCommitted {
-            desired_fork_name, ..
+            desired_fork_name,
+            preserved_provider_thread_id,
+            ..
         } => {
             let remaining = pending_checkpoints_from_journal(repository, local_project_id)?;
             let message = if remaining.is_empty() {
@@ -2946,6 +2967,10 @@ pub(crate) fn fork_codex_thread_with_repository(
                 codex_fork_checkpoints: remaining,
                 codex_app_refresh: None,
                 codex_divergences: Vec::new(),
+                codex_manual_fork: Some(CodexManualForkSummary {
+                    fork_name: desired_fork_name,
+                    provider_thread_id: preserved_provider_thread_id,
+                }),
             })
         }
         CodexDivergenceApplyOutcome::Committed(_) => {
@@ -8866,6 +8891,7 @@ fn apply_bundle_restore_with_progress(
         },
         codex_fork_checkpoints: fork_checkpoints,
         codex_divergences,
+        codex_manual_fork: None,
     };
     on_phase("persist receipts and finalize", phase_started.elapsed());
     Ok(result)

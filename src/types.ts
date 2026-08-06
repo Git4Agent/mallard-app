@@ -876,6 +876,12 @@ export interface RestoreResult {
     original_name_status?: ConversationNameStatus | null;
     inventory_refresh_status: CodexInventoryRefreshStatus;
   }>;
+  /** The fork a manual-fork operation created, carried structurally so the
+   *  banner can name it without parsing the message sentence back apart. */
+  codex_manual_fork?: {
+    fork_name: string;
+    provider_thread_id: string;
+  } | null;
 }
 
 export interface CodexAppRestartResult {

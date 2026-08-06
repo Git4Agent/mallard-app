@@ -56,6 +56,11 @@
   --primary-text: #0d0d0d;
   --green: #4ade80;
   --red: #f87171;
+  /* Error sentences, as opposed to error glyphs: prose must clear 4.5:1 where
+     a 3:1 graphic can ride the brighter signal red. Resolved against the
+     active palette's --red by default; a palette overrides it where its red
+     reads too light for body text. */
+  --danger-text: var(--red);
   --yellow: #fbbf24;
   --blue: #86bdfb;
   --purple: #a78bfa;
@@ -3727,7 +3732,6 @@ summary:focus-visible {
 .sync-resource-row.blocked { opacity: 0.72; }
 
 .sync-resource-select { display: grid; place-items: center; }
-.sync-plan-action input,
 .sync-storage-checks input {
   width: 15px;
   height: 15px;
@@ -3976,15 +3980,6 @@ summary:focus-visible {
 }
 .sync-modal-footer > div { margin-left: auto; display: flex; gap: 7px; }
 
-.sync-form-card,
-.sync-plan-section {
-  max-width: 1180px;
-  margin: 0 auto 12px;
-  padding: 13px;
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  background: var(--surface-card);
-}
 .sync-field-grid,
 .sync-provider-home-grid,
 .sync-storage-fields {
@@ -4062,6 +4057,13 @@ summary:focus-visible {
 .sync-folder-field > span { color: var(--text-1); font-weight: 600; }
 .sync-provider-home-grid small { margin-left: 3px; color: var(--text-3); font-size: 9px; font-weight: 400; }
 .sync-profile-select-row { min-width: 0; display: flex; gap: 7px; }
+/* The field fills the row. Without this an input sits at the browser's
+   default 20-character size no matter how much room the row has — which is
+   how a folder path came to truncate on a wide window. */
+.sync-profile-select-row input {
+  min-width: 0;
+  flex: 1;
+}
 .sync-profile-select-row select {
   min-width: 0;
   height: 33px;
@@ -4075,6 +4077,22 @@ summary:focus-visible {
   font-size: 11.5px;
 }
 .sync-profile-select-row .btn { min-height: 33px; padding: 0 10px; }
+/* A native select cannot hold an <svg> child, so the app's chevron rides a
+   pseudo-element on this wrapper; the select fills it either way its parent
+   lays out (flex row or grid track). After the row rules above, so the
+   shell's height wins where both apply. */
+.sync-select-shell {
+  position: relative;
+  min-width: 0;
+  flex: 1;
+  display: flex;
+}
+.sync-select-shell > select {
+  min-width: 0;
+  width: 100%;
+  flex: 1;
+  height: 32px;
+}
 .sync-profile-picker-dialog { width: min(680px, calc(100vw - 32px)); }
 .sync-profile-picker-note { margin: 12px 2px 0; color: var(--text-2); font-size: 10.5px; }
 .sync-inline-new-project,
@@ -4212,13 +4230,12 @@ summary:focus-visible {
 .sync-bundle-match-copy strong,
 .sync-bundle-choice-copy strong { color: var(--text-0); font-size: 11.5px; }
 .sync-bundle-recommended {
-  margin-left: 7px;
-  padding: 2px 5px;
-  border-radius: 4px;
-  color: var(--accent);
-  background: var(--accent-soft);
-  font-size: 8px;
-  font-weight: 600;
+  margin-left: 6px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  color: var(--text-1);
+  background: var(--chip-bg);
+  font-size: 9px;
   text-transform: uppercase;
 }
 .sync-bundle-match-copy span,
@@ -4288,36 +4305,6 @@ summary:focus-visible {
   font-size: 12.5px;
   box-shadow: 0 5px 16px rgba(0, 0, 0, 0.22);
 }
-.sync-plan-section { padding: 0; overflow: hidden; }
-.sync-plan-section > .sync-card-heading { padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); }
-.sync-plan-select-actions { display: flex !important; flex-direction: row !important; gap: 4px; }
-.sync-plan-actions { display: flex; flex-direction: column; }
-.sync-plan-action {
-  min-height: 54px;
-  padding: 8px 11px;
-  display: grid;
-  grid-template-columns: 22px 30px 1fr auto;
-  align-items: center;
-  gap: 8px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-row);
-  cursor: pointer;
-}
-.sync-plan-action:hover { background: var(--surface-row-hover); }
-.sync-plan-action.blocked { opacity: 0.7; cursor: not-allowed; }
-.sync-plan-action-icon { width: 28px; height: 28px; display: grid; place-items: center; color: var(--accent); background: var(--accent-soft); border-radius: 7px; }
-.sync-plan-action.risk-executable .sync-plan-action-icon,
-.sync-plan-action.risk-review .sync-plan-action-icon { color: var(--yellow); background: var(--warning-soft); }
-.sync-plan-action.blocked .sync-plan-action-icon { color: var(--red); background: var(--danger-soft); }
-.sync-plan-action-copy { min-width: 0; display: flex; flex-direction: column; }
-.sync-plan-action-copy strong { font-size: 11.5px; }
-.sync-plan-action-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 10px; }
-.sync-plan-action-copy small { color: var(--red); font-size: 9.5px; }
-.sync-plan-action-meta { display: flex; align-items: center; gap: 6px; }
-.sync-plan-action-meta span,
-.sync-plan-action-meta small { padding: 2px 5px; border-radius: 4px; color: var(--text-2); background: var(--chip-bg); font-size: 8.5px; text-transform: uppercase; }
-.sync-plan-footer { min-height: 48px; padding: 8px 10px; display: flex; align-items: center; justify-content: flex-end; gap: 9px; color: var(--text-3); background: var(--surface-footer); font-size: 10px; }
-.sync-plan-footer span { margin-right: auto; }
 .sync-result-summary { margin: 8px; padding: 9px; display: flex; align-items: flex-start; gap: 8px; border-radius: 7px; font-size: 10.5px; }
 .sync-result-summary.success { color: var(--green); background: color-mix(in srgb, var(--green) 8%, transparent); }
 .sync-result-summary.warning { color: var(--yellow); background: var(--warning-soft); }
@@ -4937,8 +4924,6 @@ summary:focus-visible {
   .sync-r2-guide { padding: 12px; }
   .sync-r2-guide ol { align-items: flex-start; flex-direction: column; gap: 7px; }
   .sync-r2-fields { padding: 12px; }
-  .sync-plan-action { grid-template-columns: 22px 28px 1fr; }
-  .sync-plan-action-meta { display: none; }
   .sync-restore-apply-footer { align-items: stretch; flex-direction: column; }
   .sync-restore-apply-footer > div { width: 100%; margin-left: 0; }
   .sync-restore-apply-button { width: 100%; }
@@ -8330,26 +8315,32 @@ div.storage-link-main {
 }
 
 /* Project setup workspace (resumable drafts) */
+/* The page scrolls the way every other workspace screen does: .sync-main is
+   the scroller, so the one scrollbar rides the workspace tile's edge instead
+   of cutting the page in half beside a pinned footer. On a tall window the
+   footer still closes the viewport — the workspace stretches to the scroller
+   — and on a short one it scrolls into reach with the rest of the form. */
 .sync-project-setup-page {
   --sync-setup-gutter: clamp(24px, 3.2vw, 48px);
-  overflow: hidden;
+  /* One column at a capped measure. Optimal field width tracks expected
+     content, not container width; the sections, their controls, and the
+     footer's actions all close on this same edge. */
+  --sync-setup-column: min(100%, 720px);
   padding: 28px 0 0;
 }
+/* The page ends where the form ends. Stretching the workspace to the
+   scroller's full height would park the footer at the viewport's bottom edge
+   and leave a dead band above it whenever the form is short. */
 .sync-project-setup-page .profile-links-section {
   width: 100%;
-  height: 100%;
-  min-height: 0;
   max-width: none;
   margin: 0;
   display: flex;
   flex-direction: column;
 }
 .sync-inline-new-project.sync-setup-workspace {
-  height: 100%;
-  min-height: 0;
   max-width: none;
   margin: 0;
-  overflow: hidden;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -8357,33 +8348,28 @@ div.storage-link-main {
 .sync-setup-workspace .sync-modal-header {
   min-height: 0;
   flex: 0 0 auto;
-  padding: 8px 14px 16px var(--sync-setup-gutter);
+  padding: 8px 14px 10px var(--sync-setup-gutter);
   background: transparent;
 }
 .sync-setup-workspace .sync-modal-header h1 { font-size: 18px; }
 .sync-setup-workspace .sync-modal-body {
   width: 100%;
-  min-height: 0;
-  flex: 1 1 auto;
-  padding: 0 var(--sync-setup-gutter) 8px;
+  padding: 0 var(--sync-setup-gutter);
   display: flex;
   flex-direction: column;
   gap: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
 }
+/* A section is a band in a continuous page, not a card: hairline rules
+   between bands, no surface of its own. */
 .sync-setup-section {
   width: 100%;
-  max-width: none;
+  max-width: var(--sync-setup-column);
   margin: 0;
-  padding: 18px 0;
+  padding: 13px 0;
   display: flex;
   flex-direction: column;
   gap: 9px;
-  border: 0;
   border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  background: transparent;
 }
 .sync-setup-section:last-of-type { border-bottom: 0; }
 .sync-setup-section > .sync-card-heading {
@@ -8392,16 +8378,22 @@ div.storage-link-main {
 }
 .sync-setup-section > .sync-card-heading strong { font-size: 13px; }
 .sync-setup-section > .sync-card-heading > div > span {
-  max-width: 680px;
-  margin-top: 2px;
-  line-height: 1.4;
+  margin-top: 3px;
 }
 .sync-setup-section .sync-provider-home-grid { margin-top: 2px; }
+/* Name over Folder, not beside it: the path is the widest value on the page
+   and it was the one field stuck in the narrow half of a two-column row. */
 .sync-setup-project-fields {
-  max-width: 1040px;
-  grid-template-columns: minmax(180px, 0.7fr) minmax(320px, 1.3fr);
+  max-width: var(--sync-setup-column);
+  grid-template-columns: minmax(0, 1fr);
+  gap: 9px;
 }
-.sync-setup-workspace .sync-profile-select-row { max-width: 1040px; }
+.sync-setup-workspace .sync-profile-select-row {
+  max-width: var(--sync-setup-column);
+  gap: 6px;
+}
+.sync-setup-workspace .sync-profile-select-row .btn { min-height: 32px; }
+.sync-setup-workspace .sync-field-grid label { gap: 5px; }
 .sync-single-agent-setup {
   margin-top: 2px;
   display: flex;
@@ -8417,94 +8409,75 @@ div.storage-link-main {
 .sync-agent-profile-row {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(240px, 420px) auto;
+  grid-template-columns: minmax(220px, 1fr) auto;
   align-items: center;
   justify-content: start;
-  gap: 8px;
+  gap: 6px;
 }
 .sync-agent-profile-row.has-custom-path {
   grid-template-columns: minmax(180px, 320px) minmax(280px, 620px) auto;
 }
+/* One 32px control height for everything in the form body. */
 .sync-agent-profile-row select,
 .sync-agent-profile-row input {
   min-width: 0;
-  height: 33px;
+  height: 32px;
   border: 1px solid var(--border-mid);
-  border-radius: 7px;
-  color: var(--text-0);
-  background: var(--surface-row);
   font: inherit;
-  font-size: 11.5px;
 }
-.sync-agent-profile-row select { padding: 0 28px 0 9px; }
 .sync-agent-profile-row.has-error select {
   border-color: color-mix(in srgb, var(--red) 52%, var(--border-mid));
 }
 .sync-agent-profile-row input {
-  padding: 0 9px;
+  padding: 0 10px;
   font-family: var(--font-mono);
 }
-.sync-agent-profile-row .btn { min-height: 33px; padding: 0 10px; }
+.sync-agent-profile-row .btn { min-height: 32px; padding: 0 10px; }
 .sync-setup-workspace .sync-agent-choice {
-  width: min(100%, 320px);
+  width: min(100%, 232px);
 }
 .sync-setup-workspace .sync-agent-choice button {
-  min-height: 34px;
+  min-height: 28px;
   align-items: center;
-  padding: 4px 12px;
+  justify-content: center;
+  padding: 0 10px;
 }
 .sync-setup-heading-actions { display: flex; align-items: center; gap: 8px; }
 .sync-setup-resource-toggle {
   min-height: 28px;
-  padding: 0 8px;
-  font-size: 10.5px;
+  padding: 0 9px;
 }
 .sync-setup-state {
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   display: grid;
   place-items: center;
   flex: 0 0 auto;
-  border-radius: 6px;
+  border-radius: 3px;
   color: var(--text-2);
   background: transparent;
 }
 .sync-setup-state.attention { color: var(--yellow); }
 .sync-setup-state.blocked { color: var(--red); }
+/* The sentence takes the prose red; the triangle stays on the signal red,
+   which a glyph may ride at 3:1 where text may not. */
 .sync-setup-field-error {
   width: fit-content;
-  max-width: min(1040px, 100%);
+  max-width: 100%;
   display: flex;
   align-items: flex-start;
   gap: 6px;
-  color: var(--red);
-  font-size: 10.5px;
-  line-height: 1.4;
+  color: var(--danger-text);
 }
-.sync-setup-field-error svg { margin-top: 1px; flex: 0 0 auto; }
+.sync-setup-field-error svg { margin-top: 1px; flex: 0 0 auto; color: var(--red); }
 .sync-setup-system-error { margin: 8px 0 12px; }
-.sync-setup-workspace .sync-bundle-match-options {
-  border-color: var(--border);
-  background: transparent;
-}
-.sync-setup-workspace .sync-bundle-match-option.active {
-  background: var(--bg-hover);
-  box-shadow: inset 2px 0 0 var(--text-2);
-}
-.sync-setup-workspace .active > .sync-bundle-radio { border-color: var(--text-1); }
-.sync-setup-workspace .active > .sync-bundle-radio > span { background: var(--text-1); }
-.sync-setup-workspace .sync-bundle-recommended {
-  color: var(--text-2);
-  background: var(--chip-bg);
-}
 .sync-setup-workspace .sync-resource-install { color: var(--text-2); }
-.sync-setup-hint { color: var(--text-3); font-size: 9.5px; }
+.sync-setup-hint { color: var(--text-3); }
 .sync-setup-inline-status {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   color: var(--text-3);
-  font-size: 9.5px;
 }
 .sync-setup-inline-status .status-loader { width: 11px; height: 11px; }
 .sync-setup-sync-title {
@@ -8575,30 +8548,65 @@ div.storage-link-main {
 }
 .sync-setup-warning-list li { overflow-wrap: anywhere; }
 .sync-setup-warning-list li + li { margin-top: 5px; }
+/* Consent, not a banner: the sentence and its checkbox are one click target,
+   sitting on the same column the picker closes on. */
 .sync-setup-acknowledge {
-  margin-top: 8px;
-  padding: 8px;
+  margin-top: 2px;
+  padding: 9px 11px;
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 9px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 4px;
   background: var(--warning-soft);
-  font-size: 10.5px;
   cursor: pointer;
 }
-.sync-setup-acknowledge input { margin-top: 2px; }
+/* The same 14px square, 2px corner, and 6px filled mark as the repository
+   radios directly above — one control family for the whole picker. */
+.sync-setup-acknowledge input {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 1px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background: transparent;
+  cursor: inherit;
+}
+.sync-setup-acknowledge input::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  background: transparent;
+}
+.sync-setup-acknowledge input:checked {
+  border-color: var(--text-0);
+}
+.sync-setup-acknowledge input:checked::before {
+  background: var(--text-0);
+}
+/* The actions close the form's own column, and their rule is the same hairline
+   the sections are separated by — the commit bar is the last band of the form,
+   not a slab of page chrome bolted under it. */
 .sync-setup-footer {
   position: relative;
   bottom: auto;
-  min-height: 58px;
+  min-height: 0;
+  /* Inset by the gutter rather than padded by it, so the rule starts and ends
+     on the section dividers above instead of running out to the page edge. */
+  width: 100%;
+  max-width: var(--sync-setup-column);
+  margin-left: var(--sync-setup-gutter);
   flex: 0 0 auto;
-  padding: 10px var(--sync-setup-gutter) 12px;
-  background: var(--bg-0);
+  padding: 13px 0 28px;
+  background: transparent;
   border-top: 1px solid var(--border);
   backdrop-filter: none;
 }
-.sync-setup-save-state { color: var(--text-3); font-size: 10px; }
+.sync-setup-save-state { color: var(--text-2); }
 .sync-setup-footer > div { margin-left: auto; }
 .sync-draft-badge {
   margin-left: auto;
@@ -9327,10 +9335,6 @@ div.storage-link-main {
   flex: 1;
 }
 
-.sync-history-error .btn {
-  flex-shrink: 0;
-}
-
 .sync-history-continuity {
   align-items: center;
 }
@@ -9413,46 +9417,25 @@ div.storage-link-main {
   list-style: none;
 }
 
-.sync-history-commit-rail::before {
-  content: "";
-  position: absolute;
-  top: 14px;
-  bottom: 14px;
-  left: 7px;
-  width: 1px;
-  background: var(--border-mid);
-}
-
 .sync-history-commit {
   position: relative;
   min-width: 0;
   padding: 0 0 20px 30px;
 }
 
-.sync-history-commit-node {
-  position: absolute;
-  z-index: 1;
-  top: 9px;
-  left: 3px;
-  width: 9px;
-  height: 9px;
-  border: 2px solid var(--accent);
-  border-radius: 50%;
-  background: var(--bg-0);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-
 .sync-history-commit-heading {
   min-height: 28px;
   display: grid;
-  grid-template-columns: 74px 166px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 4px 0 8px;
 }
 
+/* Bare mono for a sha with no remote behind it; the linked chip re-colours
+   itself through the link's own inherit below. */
 .sync-history-commit-heading code {
-  color: var(--accent);
+  color: var(--text-2);
   font-family: var(--font-mono);
   font-size: 11px;
 }
@@ -9662,13 +9645,17 @@ div.storage-link-main {
   white-space: nowrap;
 }
 
+/* Line 2 of a stored row: the whole thread id, then the stamp. Wraps rather
+   than truncates — a partial id is worse than none. */
 .sync-history-stored-thread-meta {
-  overflow: hidden;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 12px;
   color: var(--text-3);
   font-size: 10.5px;
   line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .sync-history-thread-meta {
@@ -9691,8 +9678,14 @@ div.storage-link-main {
 .sync-history-thread-metric {
   position: relative;
   border-radius: 4px;
-  cursor: help;
   outline: none;
+}
+
+/* Only a metric that actually carries a tooltip invites the hover: without
+   the guard, a bare metric (the outcome list's stamp) showed the help cursor
+   and an empty tooltip box. */
+.sync-history-thread-metric[data-tooltip] {
+  cursor: help;
 }
 
 .sync-history-thread-time {
@@ -9707,7 +9700,7 @@ div.storage-link-main {
   font-weight: 540;
 }
 
-.sync-history-thread-metric::after {
+.sync-history-thread-metric[data-tooltip]::after {
   content: attr(data-tooltip);
   position: absolute;
   z-index: 40;
@@ -9760,8 +9753,8 @@ div.storage-link-main {
   left: auto;
 }
 
-.sync-history-thread-metric:hover::after,
-.sync-history-thread-metric:focus-visible::after {
+.sync-history-thread-metric[data-tooltip]:hover::after,
+.sync-history-thread-metric[data-tooltip]:focus-visible::after {
   opacity: 1;
   visibility: visible;
 }
@@ -10330,7 +10323,15 @@ div.storage-link-main {
    rows. No bottom padding on the fold — the last band ends on the border
    like every other. */
 .sync-outcome-threads { margin: 0; padding: 0; gap: 0; }
+/* An outcome row wears the history card's classes but has no launch buttons
+   and no fold of its own, so the inherited 80px actions track goes: line 1
+   runs to the edge (the why-mark holds the far end) and line 2's stamp takes
+   the same right rail as every stamp on the page. */
 .sync-outcome-threads > .sync-history-thread-card {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "title"
+    "meta";
   padding-left: 10px;
   padding-right: 10px;
   border: 0;
@@ -10350,6 +10351,10 @@ div.storage-link-main {
    (The timeline outside the fold truncates instead: its metrics carry hover
    tooltips a wrapped row would displace; nothing in here has one.) */
 .sync-outcome-threads .sync-history-thread-meta { flex-wrap: wrap; row-gap: 2px; }
+/* The readout group shrink-wraps on session rows; here it is the whole line,
+   so it stretches and the stamp's auto margin has space to absorb. */
+.sync-outcome-threads .sync-history-session-summary > .sync-history-thread-meta { flex: 1 1 auto; }
+.sync-outcome-threads .sync-history-thread-meta > .sync-history-thread-time-end { margin-left: auto; }
 .sync-outcome-threads .sync-outcome-threadid {
   flex: 0 0 auto;
   color: var(--text-2);
@@ -10380,13 +10385,26 @@ div.storage-link-main {
   font-family: var(--font-mono);
   font-size: 10.5px;
 }
-.sync-outcome-reason {
-  min-width: 0;
-  overflow: hidden;
+/* The status icon says what happened; the ⓘ at the line's end carries the
+   why on hover. Its tooltip pins right and opens downward: the banner sits
+   at the top of the scroll pane, so an upward tooltip on the first row would
+   clip against it, and a left-anchored one would run past the card edge. */
+.sync-outcome-why {
+  flex: 0 0 auto;
+  margin-left: 4px;
   color: var(--text-3);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+.sync-outcome-why:hover,
+.sync-outcome-why:focus-visible { color: var(--text-1); }
+.sync-outcome-why > svg { display: block; }
+.sync-outcome-why[data-tooltip]::after {
+  top: calc(100% + 7px);
+  bottom: auto;
+  right: -6px;
+  left: auto;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 40px));
+  white-space: pre-line;
 }
 
 /* A gate the flow cannot get past lands here: inside the storage card, in
@@ -10937,9 +10955,6 @@ button.sync-project-file-expand { cursor: pointer; }
     padding-left: var(--sync-setup-gutter);
   }
 
-  .sync-setup-section { padding: 18px 0; }
-
-  .sync-setup-project-fields { grid-template-columns: 1fr; }
 
   .sync-agent-profile-row {
     grid-template-columns: 1fr auto;
@@ -11083,35 +11098,6 @@ button.sync-project-file-expand { cursor: pointer; }
   gap: 10px;
   padding: 12px;
   margin-bottom: 10px;
-}
-
-.sync-fork-checkpoint h4 {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin: 0;
-  color: var(--text-0);
-  font-size: 12.5px;
-  font-weight: 650;
-}
-
-.sync-fork-checkpoint p {
-  margin: 0;
-  color: var(--text-1);
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-
-.sync-history-content > .sync-fork-checkpoint {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-  margin-bottom: 10px;
-}
-
-.sync-fork-checkpoint-actions {
-  display: flex;
-  gap: 8px;
 }
 
 .sync-fork-checkpoint-actions {

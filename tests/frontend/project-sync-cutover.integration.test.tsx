@@ -259,18 +259,34 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /\.sync-titlebar-context/);
   assert.match(retroCss, /\.sync-history-commit-heading/);
   assert.match(retroCss, /\.sync-history-thread-card/);
-  assert.match(retroCss, /\.sync-history-timeline\.has-uncommitted::before\s*\{[^}]*display: none;/s);
-  assert.match(retroCss, /\.sync-history-timeline\.has-uncommitted::after\s*\{[^}]*width: var\(--sync-history-node-size\);[^}]*height: var\(--sync-history-node-size\);[^}]*box-shadow: inset 0 0 0 3px var\(--text-2\);/s);
-  assert.match(retroCss, /\.sync-history-commit-rail::before\s*\{[^}]*display: none;/s);
+  // The old continuous rail line is gone from BOTH sheets, not neutralised:
+  // the theme's display:none existed only to kill the App.css original.
+  assert.doesNotMatch(retroCss, /\.sync-history-commit-rail::before/);
+  assert.doesNotMatch(readFileSync("src/App.css", "utf8"), /\.sync-history-commit-rail::before/);
   assert.match(retroCss, /\.sync-history-commit::before\s*\{[^}]*top: var\(--sync-history-row-anchor-y\);[^}]*bottom: calc\(-10px - var\(--sync-history-row-anchor-y\)\);[^}]*left: calc\(var\(--sync-history-rail-x\) - var\(--sync-history-card-offset\)\);[^}]*width: 1px;[^}]*background: var\(--border-mid\);/s);
-  assert.match(retroCss, /\.sync-history-uncommitted::before\s*\{[^}]*top: var\(--sync-history-row-anchor-y\);[^}]*width: calc\(var\(--sync-history-card-offset\) - var\(--sync-history-rail-x\)\);[^}]*background: repeating-linear-gradient\(/s);
   assert.match(retroCss, /\.sync-history-uncommitted::after\s*\{[^}]*bottom: -10px;[^}]*left: calc\(var\(--sync-history-rail-x\) - var\(--sync-history-card-offset\)\);[^}]*background: repeating-linear-gradient\(/s);
-  assert.match(retroCss, /\.sync-history-commit-node\s*\{[^}]*width: var\(--sync-history-node-size\);[^}]*height: var\(--sync-history-node-size\);/s);
-  assert.match(retroCss, /\.sync-history-commit-node::after\s*\{[^}]*top: calc\(var\(--sync-history-node-half\) - 1px\);[^}]*left: calc\(var\(--sync-history-node-size\) - 1px\);[^}]*width: calc\(\s*var\(--sync-history-card-offset\) - var\(--sync-history-rail-x\) -\s*var\(--sync-history-node-half\)\s*\);[^}]*background: var\(--border-mid\);/s);
   assert.match(retroCss, /\.sync-history-commit:last-child::before\s*\{[^}]*display: none;/s);
   assert.match(retroCss, /\.sync-history-timeline\.has-uncommitted \.sync-history-commit:only-child::before\s*\{[^}]*top: 0;[^}]*bottom: auto;[^}]*height: var\(--sync-history-row-anchor-y\);[^}]*display: block;/s);
-  // Storage-only rows live outside the timeline and need the same row tokens.
-  assert.match(retroCss, /\.sync-history-timeline,\s*\.sync-history-storage-only\s*\{[^}]*--sync-history-row-actions-column: 80px;[^}]*--sync-history-commit-actions-column: 26px;[^}]*--sync-history-commit-date-column: 26ch;[^}]*--sync-history-row-icon-size: 18px;[^}]*--sync-history-row-anchor-y: 15px;[^}]*--sync-history-rail-x: 8px;[^}]*--sync-history-card-offset: 26px;[^}]*--sync-history-node-size: 12px;[^}]*--sync-history-node-half: 6px;/s);
+  // The rail node became the fold button: one 24px control (WCAG 2.5.8) in
+  // the rail column for every fold on the page, outside the card so neither
+  // a review's checkbox nor an outcome banner can move it. The decorative
+  // node, its connector, and the pixel-ring var it used are gone with it.
+  assert.match(retroCss, /\.sync-history-spine-fold\s*\{[^}]*position: absolute;[^}]*top: calc\(var\(--sync-history-row-anchor-y\) - 12px\);[^}]*left: calc\(var\(--sync-history-rail-x\) - var\(--sync-history-card-offset\) - 12px\);[^}]*width: 24px;[^}]*height: 24px;[^}]*background: var\(--bg-0\);/s);
+  assert.match(retroCss, /\.sync-history-spine-fold:disabled\s*\{[^}]*opacity: 0\.35;/s);
+  assert.doesNotMatch(retroCss, /sync-history-commit-node|--sync-history-node-size|--sync-history-node-half|--retro-pixel-ring|sync-history-group-toggle/);
+  // Storage-only rows and the fork banner live outside the timeline and need
+  // the same row tokens — they are not inherited, so a scope left off the
+  // list silently computes margin-left to 0 and leaves the rail column.
+  assert.match(retroCss, /\.sync-history-timeline,\s*\.sync-history-storage-only,\s*\.sync-history-fork-event\s*\{[^}]*--sync-history-row-actions-column: 80px;[^}]*--sync-history-commit-actions-column: 26px;[^}]*--sync-history-commit-date-column: 26ch;[^}]*--sync-history-row-icon-size: 18px;[^}]*--sync-history-row-anchor-y: 15px;[^}]*--sync-history-rail-x: 8px;[^}]*--sync-history-card-offset: 26px;/s);
+  // The storage-only card and the fork banner take the timeline's inset, so
+  // their rail marks land in the same column, and all three scopes take the
+  // wide anchor together.
+  assert.match(retroCss, /\.sync-history-storage-only\s*\{[^}]*margin: 12px 0 12px var\(--sync-history-card-offset\);/s);
+  assert.match(retroCss, /\.sync-history-fork-event\s*\{[^}]*margin: 12px 0 12px var\(--sync-history-card-offset\);/s);
+  // The banner has no rail control — its glyph lives in the heading — so the
+  // wide anchor stays a two-scope affair.
+  assert.match(retroCss, /@container sync-history-layout \(min-width: 700px\)\s*\{[^{]*\.sync-history-timeline,\s*\.sync-history-storage-only\s*\{[^}]*--sync-history-row-anchor-y: 19px;/s);
+  assert.doesNotMatch(retroCss, /sync-history-spine-mark/);
   assert.doesNotMatch(retroCss, /--sync-history-commit-thread-rail-x|--sync-history-commit-child-offset|--sync-history-commit-branch-length/);
   assert.doesNotMatch(retroCss, /\.sync-history-commit-heading:has\(\+ \.sync-history-thread-list\)::after/);
   assert.match(retroCss, /\.sync-history-commit > \.sync-history-thread-list::after\s*\{[^}]*display: none;/s);
@@ -280,8 +296,11 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   // A date is scanned as a column, so it takes the identifier face and figures
   // that hold their width.
   assert.match(retroCss, /\.sync-history-commit-meta > time\s*\{[^}]*font-family: var\(--font-mono\);[^}]*font-size: var\(--type-xs\);[^}]*font-weight: var\(--weight-medium\);[^}]*font-variant-numeric: tabular-nums;[^}]*letter-spacing: 0;/s);
-  // The sha reads as an identifier chip, not as more prose.
-  assert.match(retroCss, /\.sync-history-commit-heading code\s*\{[^}]*min-width: 7ch;[^}]*border: 1px solid var\(--border\);[^}]*font-family: var\(--font-mono\);[^}]*font-size: var\(--type-xs\);[^}]*font-weight: var\(--weight-medium\);[^}]*letter-spacing: 0;[^}]*text-align: center;/s);
+  // Only the link wears the chip — the border is the affordance — so the
+  // chip rule is scoped to the link and a sha with no remote is bare mono.
+  assert.match(retroCss, /\.sync-history-commit-link > code\s*\{[^}]*min-width: 7ch;[^}]*border: 1px solid var\(--border\);[^}]*font-family: var\(--font-mono\);[^}]*font-size: var\(--type-xs\);[^}]*font-weight: var\(--weight-medium\);[^}]*letter-spacing: 0;[^}]*text-align: center;/s);
+  assert.doesNotMatch(retroCss, /\.sync-history-commit-heading code\s*\{/);
+  assert.match(retroCss, /\.sync-history-commit-meta > code\s*\{[^}]*color: var\(--text-2\);[^}]*font-family: var\(--font-mono\);[^}]*font-size: var\(--type-xs\);/s);
   assert.match(retroCss, /\.sync-history-commit-link:hover code,\s*\.sync-history-commit-link:focus-visible code\s*\{[^}]*border-color: var\(--border-strong\);[^}]*color: var\(--text-0\);/s);
   // The subject outranks the session titles nested under it by one size step.
   // It used to be a weight step too, but 650 over 600 was never drawn apart.
@@ -291,11 +310,6 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   // A translucent block is a smudge, not a pixel — metrics are held back with
   // colour so every block stays solid.
   assert.match(retroCss, /\.sync-history-thread-metric svg\s*\{[^}]*opacity: 1;[^}]*color: var\(--text-3\);/s);
-  // Rail nodes are stepped pixel rings, not antialiased circles.
-  assert.match(retroCss, /--retro-pixel-ring: polygon\(/s);
-  assert.match(retroCss, /\.sync-history-commit-node\s*\{[^}]*border: 0;[^}]*border-radius: 0;[^}]*background: transparent;/s);
-  assert.match(retroCss, /\.sync-history-commit-node::before\s*\{[^}]*box-shadow: inset 0 0 0 3px var\(--text-2\);[^}]*clip-path: var\(--retro-pixel-ring\);/s);
-  assert.match(retroCss, /\.sync-history-timeline\.has-uncommitted::after\s*\{[^}]*border-radius: 0;[^}]*clip-path: var\(--retro-pixel-ring\);/s);
   assert.match(retroCss, /\.sync-history-content\s*\{[^}]*container: sync-history-layout \/ inline-size;/s);
   assert.match(retroCss, /@container sync-history-layout \(min-width: 700px\)/);
   // The status legend was removed, so none of its styling should linger.
@@ -308,10 +322,10 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /\.sync-history-commit-heading,\s*\.sync-history-thread-card\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) var\(--sync-history-row-actions-column\);[^}]*grid-template-areas:[^}]*"title actions"[^}]*"meta meta";/s);
   assert.match(retroCss, /\.sync-history-thread-topline\s*\{[^}]*display: contents;/s);
   assert.match(retroCss, /\.sync-history-commit-meta,\s*\.sync-history-session-details\s*\{[^}]*padding-left: var\(--sync-history-row-text-offset\);/s);
-  assert.match(retroCss, /@container sync-history-layout \(min-width: 700px\)\s*\{[^}]*\.sync-history-timeline\s*\{[^}]*--sync-history-row-anchor-y: 19px;/s);
-  // Wide rows: the subject takes every spare pixel, and date + sha right-align
-  // into a fixed gutter so they stack into columns down the timeline.
-  assert.match(retroCss, /@container sync-history-layout \(min-width: 700px\)[\s\S]*?\.sync-history-commit-heading,[^{]*\{[^}]*grid-template-columns: minmax\(0, 1fr\) auto var\(--sync-history-commit-actions-column\);[^}]*grid-template-areas: "title meta actions";/s);
+  // Wide rows: the subject takes every spare pixel, and sha + date right-align
+  // so the stamp closes the row at the card edge — one column with the
+  // session and cloud stamps, no trailing actions track anywhere.
+  assert.match(retroCss, /@container sync-history-layout \(min-width: 700px\)[\s\S]*?\.sync-history-commit-heading\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) auto;[^}]*grid-template-areas: "title meta";/s);
   assert.match(retroCss, /@container sync-history-layout \(min-width: 700px\)[\s\S]*?\.sync-history-commit-meta\s*\{[^}]*justify-content: flex-end;/s);
   assert.match(retroCss, /@container sync-history-layout \(min-width: 700px\)[\s\S]*?\.sync-history-commit-meta > time\s*\{[^}]*min-width: var\(--sync-history-commit-date-column\);/s);
   assert.doesNotMatch(retroCss, /--sync-history-row-title-column|--sync-history-row-meta-column/);

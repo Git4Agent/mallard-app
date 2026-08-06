@@ -194,6 +194,21 @@ export function projectPushActionLabel({
   return "Push";
 }
 
+export function projectPullActionLabel({
+  preparing,
+  applying,
+}: {
+  preparing: boolean;
+  applying: boolean;
+}): string {
+  // Same shape as Push: the card button on an open review IS the pull — the
+  // first click opens the review, the second applies it. Progress lives on
+  // the button, not in a review banner.
+  if (applying) return "Pulling…";
+  if (preparing) return "Preparing…";
+  return "Pull";
+}
+
 export function storageActionLockedForReview(
   reviewKind: StorageReviewKind | null,
   action: StorageReviewKind | "storage",
@@ -1042,6 +1057,16 @@ export default function ProjectLinksWorkspace({
                       const pullReviewOpen = reviewOpen && inlineStorageReview?.kind === "pull";
                       const pushPreparing = runningAction === `push:${actionPrefix}`;
                       const pushPublishing = pushReviewOpen && busy;
+                      const pullPreparing = runningAction === `pull:${actionPrefix}`;
+                      const pullApplying = pullReviewOpen && busy;
+                      const pullLabel = projectPullActionLabel({
+                        preparing: pullPreparing,
+                        applying: pullApplying,
+                      });
+                      const pullProgress = pullPreparing || pullApplying;
+                      const pullPlanReadout = pullPreparing && fetchProgress?.phase === "plan"
+                        ? `${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`
+                        : null;
                       const linkedStorageLabel = `${projectLinks.length} linked`;
                       const storageActionsOpen = storageActionsProjectId === project.local_project_id;
                       const storageActionsMenuId = `storage-actions-${actionPrefix.replace(/[^a-z0-9_-]/gi, "-")}`;
@@ -1314,15 +1339,16 @@ export default function ProjectLinksWorkspace({
                                   aria-expanded={pullReviewOpen}
                                   aria-controls={pullReviewOpen ? reviewPanelId : undefined}
                                 >
-                                  <Icon name="download" size={15} />
+                                  <Icon
+                                    key={pullProgress ? "pull-progress" : "pull-idle"}
+                                    name={pullProgress ? "refresh" : "download"}
+                                    size={15}
+                                    className={pullProgress ? "icon-spin" : undefined}
+                                  />
                                   {/* The card says what the button does, never
                                       which screen it lands on; setup prompts and
                                       review focus live in the title and label. */}
-                                  {runningAction === `pull:${actionPrefix}`
-                                    ? (fetchProgress && fetchProgress.phase === "plan"
-                                      ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
-                                      : "Preparing…")
-                                    : "Pull"}
+                                  {pullPlanReadout ? <span className="sync-btn-readout">{pullPlanReadout}</span> : pullLabel}
                                 </button>
                                 <button
                                   type="button"

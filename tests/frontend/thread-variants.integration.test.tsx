@@ -302,9 +302,10 @@ test("storage-only rows speak location and offer Pull to open", () => {
   });
 
   assert.match(html, /In Local storage 1 · Pull to open/);
-  // The id is a chip and the timestamp a <time>, both right-aligned into the
-  // meta gutter, so the "Updated"/"Codex thread" prose labels are gone.
-  assert.match(html, /<code title="019f7798-[^"]*">019f7798<\/code>/);
+  // Line 2 carries the whole thread id — never a stub, no chip, no title
+  // reveal — with the <time> beside it.
+  assert.match(html, /class="sync-history-stored-thread-id"><code>019f7798-5437-7632-9dbc-5b589cf68bf3<\/code><\/span>/);
+  assert.doesNotMatch(html, /<code title="019f7798-/);
   assert.match(html, /sync-history-stored-thread-meta[^>]*>[\s\S]*?<time[^>]*>[^<]+<\/time>/);
   assert.match(html, /aria-label="Include Improve cloud thread titles, Codex thread 019f7798-5437-7632-9dbc-5b589cf68bf3"/);
 });

@@ -120,7 +120,19 @@ export default function SyncOutcomeNotice({
                       <Icon name={presentation.icon} size={13} />
                     </span>
                     <strong>{row.title}</strong>
-                    {row.reason && <span className="sync-outcome-reason">{row.reason}</span>}
+                    {/* The status icon already says what happened; the why is
+                        a mark at the line's end carrying the words on hover,
+                        not a sentence competing with the title. */}
+                    {row.reason && (
+                      <span
+                        className="sync-history-thread-metric sync-outcome-why"
+                        data-tooltip={row.reason}
+                        aria-label={row.reason}
+                        tabIndex={0}
+                      >
+                        <Icon name="info" size={13} />
+                      </span>
+                    )}
                   </div>
                 </div>
                 {(row.threadId || row.updatedAt != null || forkCount > 0) && (

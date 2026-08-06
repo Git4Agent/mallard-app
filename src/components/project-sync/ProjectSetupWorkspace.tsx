@@ -65,6 +65,33 @@ function summarizeIds(ids: string[], limit = 3): string {
   return `${ids.slice(0, limit).join(", ")} +${ids.length - limit} more`;
 }
 
+/**
+ * Sync contents earns its place when it offers a choice or has something to
+ * report. A connected remote repo makes the selection the repo's to make, and
+ * a discovery that came back empty leaves nothing to tick — in both cases the
+ * heading would stand over one static sentence. Every state the backend flags
+ * still forces it open, so nothing actionable can hide behind this.
+ */
+export function shouldShowResourcesSection(input: {
+  /** The picker and its Customize toggle have something to offer. */
+  choiceAvailable: boolean;
+  /** Discovery is running and has not produced an inventory yet. */
+  discovering: boolean;
+  warningCount: number;
+  /** Backend status: "blocked" on discovery failure or a missing profile,
+      "attention" on selection drift. */
+  resourcesState: string | null;
+  /** A profile change re-derived the selection and the note is showing. */
+  selectionResetNoticeVisible: boolean;
+}): boolean {
+  return input.choiceAvailable
+    || input.discovering
+    || input.warningCount > 0
+    || input.resourcesState === "blocked"
+    || input.resourcesState === "attention"
+    || input.selectionResetNoticeVisible;
+}
+
 function sectionBadge(section: SetupSectionStatus | null) {
   if (section?.state === "attention") {
     return (
@@ -447,6 +474,15 @@ export default function ProjectSetupWorkspace({
     ? (profileNeedsSelection ? "Choose a profile to continue." : profilesSection?.message)
     : null;
 
+  const resourceChoiceAvailable = !usesExistingRepo && resources.length > 0;
+  const showResourcesSection = shouldShowResourcesSection({
+    choiceAvailable: resourceChoiceAvailable,
+    discovering: inspecting && !inspection?.inventory,
+    warningCount: inspection?.warnings?.length ?? 0,
+    resourcesState: resourcesSection?.state ?? null,
+    selectionResetNoticeVisible: !usesExistingRepo && rediscovered,
+  });
+
   // Configs already claimed by a project on this same folder: the composite
   // project key (folder, config) makes them invalid choices for this draft.
   const claimedProfiles = new Map<string, string>();
@@ -469,38 +505,43 @@ export default function ProjectSetupWorkspace({
         className={`sync-agent-profile-row${selection?.kind === "pending" ? " has-custom-path" : ""}${profileBlocked ? " has-error" : ""}`}
         key={provider}
       >
-        <select
-          value={value}
-          disabled={working}
-          aria-label={`${label} profile`}
-          aria-invalid={profileBlocked || undefined}
-          onChange={(event) => {
-            const next = event.target.value;
-            if (next === "__pending") {
-              void chooseProfileFolder(provider);
-              return;
-            }
-            edit((current) => {
-              const nextProfiles: Partial<Record<ProjectProvider, DraftProfileSelection>> = {};
-              if (next) {
-                nextProfiles[provider] = { kind: "existing", profile_id: next };
+        {/* A native select cannot hold an <svg>, so the app's chevron rides a
+            pseudo-element on this shell — the same construction the log
+            policy fields use. */}
+        <span className="sync-select-shell">
+          <select
+            value={value}
+            disabled={working}
+            aria-label={`${label} profile`}
+            aria-invalid={profileBlocked || undefined}
+            onChange={(event) => {
+              const next = event.target.value;
+              if (next === "__pending") {
+                void chooseProfileFolder(provider);
+                return;
               }
-              return { ...current, profiles: nextProfiles };
-            });
-          }}
-        >
-          <option value="">Choose profile</option>
-          {options.map((profile) => {
-            const unavailable = !profile.available || !profile.readable;
-            const claimedBy = claimedProfiles.get(profile.profile_id);
-            return (
-              <option key={profile.profile_id} value={profile.profile_id} disabled={unavailable || Boolean(claimedBy)}>
-                {profile.display_name}{unavailable ? " (unavailable)" : claimedBy ? ` (used by ${claimedBy})` : ""}
-              </option>
-            );
-          })}
-          <option value="__pending">Custom path…</option>
-        </select>
+              edit((current) => {
+                const nextProfiles: Partial<Record<ProjectProvider, DraftProfileSelection>> = {};
+                if (next) {
+                  nextProfiles[provider] = { kind: "existing", profile_id: next };
+                }
+                return { ...current, profiles: nextProfiles };
+              });
+            }}
+          >
+            <option value="">Choose profile</option>
+            {options.map((profile) => {
+              const unavailable = !profile.available || !profile.readable;
+              const claimedBy = claimedProfiles.get(profile.profile_id);
+              return (
+                <option key={profile.profile_id} value={profile.profile_id} disabled={unavailable || Boolean(claimedBy)}>
+                  {profile.display_name}{unavailable ? " (unavailable)" : claimedBy ? ` (used by ${claimedBy})` : ""}
+                </option>
+              );
+            })}
+            <option value="__pending">Custom path…</option>
+          </select>
+        </span>
         {selection?.kind === "pending" && (
           <input
             value={path}
@@ -548,7 +589,7 @@ export default function ProjectSetupWorkspace({
         )}
 
         {/* Project */}
-        <section className="sync-form-card sync-setup-section">
+        <section className="sync-setup-section">
           <div className="sync-card-heading">
             <div><strong>Project</strong></div>
             {sectionBadge(projectSection)}
@@ -579,7 +620,7 @@ export default function ProjectSetupWorkspace({
         </section>
 
         {/* Agent profile */}
-        <section className="sync-form-card sync-setup-section">
+        <section className="sync-setup-section">
           <div className="sync-card-heading">
             <div><strong>Agent</strong></div>
             {sectionBadge(profilesSection)}
@@ -610,37 +651,40 @@ export default function ProjectSetupWorkspace({
         </section>
 
         {/* Storage */}
-        <section className="sync-form-card sync-setup-section">
+        <section className="sync-setup-section">
           <div className="sync-card-heading">
             <div><strong>Storage</strong></div>
             {sectionBadge(storageSection)}
           </div>
           <div className="sync-profile-select-row">
-            <select
-              value={draft.storage?.kind === "existing" ? draft.storage.storage_id : draft.storage?.kind === "pending" ? "__pending" : ""}
-              disabled={working}
-              onChange={(event) => {
-                const next = event.target.value;
-                edit((current) => ({
-                  ...current,
-                  // Repository choices are storage-specific.
-                  repository: { kind: "new" },
-                  storage: !next || next === "__pending"
-                    ? (next === "__pending" ? current.storage : null)
-                    : { kind: "existing", storage_id: next },
-                }));
-              }}
-            >
-              <option value="">Local only</option>
-              {storageIsPending && selectedStorage && (
-                <option value="__pending">{selectedStorage.name} (new)</option>
-              )}
-              {storages.map((storage) => (
-                <option key={storage.id} value={storage.id}>
-                  {storage.name || "(unnamed)"} · {storage.kind === "local" ? "local folder" : "S3"}
-                </option>
-              ))}
-            </select>
+            <span className="sync-select-shell">
+              <select
+                value={draft.storage?.kind === "existing" ? draft.storage.storage_id : draft.storage?.kind === "pending" ? "__pending" : ""}
+                disabled={working}
+                aria-label="Storage"
+                onChange={(event) => {
+                  const next = event.target.value;
+                  edit((current) => ({
+                    ...current,
+                    // Repository choices are storage-specific.
+                    repository: { kind: "new" },
+                    storage: !next || next === "__pending"
+                      ? (next === "__pending" ? current.storage : null)
+                      : { kind: "existing", storage_id: next },
+                  }));
+                }}
+              >
+                <option value="">Local only</option>
+                {storageIsPending && selectedStorage && (
+                  <option value="__pending">{selectedStorage.name} (new)</option>
+                )}
+                {storages.map((storage) => (
+                  <option key={storage.id} value={storage.id}>
+                    {storage.name || "(unnamed)"} · {storage.kind === "local" ? "local folder" : "S3"}
+                  </option>
+                ))}
+              </select>
+            </span>
             <button
               type="button"
               className="btn"
@@ -663,7 +707,7 @@ export default function ProjectSetupWorkspace({
 
         {/* Repository */}
         {showRepositoryChoice && (
-          <section className="sync-form-card sync-setup-section">
+          <section className="sync-setup-section">
             <div className="sync-card-heading">
               <div><strong>Repository</strong></div>
               {sectionBadge(repositorySection)}
@@ -752,7 +796,8 @@ export default function ProjectSetupWorkspace({
         )}
 
         {/* Sync contents */}
-        <section className="sync-form-card sync-setup-section">
+        {showResourcesSection && (
+        <section className="sync-setup-section">
           <div className="sync-card-heading">
             <div className="sync-setup-sync-copy">
               <div className="sync-setup-sync-title">
@@ -778,7 +823,7 @@ export default function ProjectSetupWorkspace({
             </div>
             <div className="sync-setup-heading-actions">
               {!resourcesWaitingForProfile && sectionBadge(resourcesSection)}
-              {!usesExistingRepo && resources.length > 0 && (
+              {resourceChoiceAvailable && (
                 <button type="button" className="btn btn-ghost sync-setup-resource-toggle" onClick={() => setResourcesOpen((current) => !current)}>
                   {resourcesOpen ? "Collapse" : "Customize"}
                 </button>
@@ -832,7 +877,7 @@ export default function ProjectSetupWorkspace({
           {inspecting && !inspection?.inventory && (
             <div className="sync-storage-repository-state"><span className="status-loader" /> Discovering resources…</div>
           )}
-          {!usesExistingRepo && resourcesOpen && resources.length > 0 && (
+          {resourceChoiceAvailable && resourcesOpen && (
             <ResourceInventory
               resources={resources}
               selected={selectedResources}
@@ -852,6 +897,7 @@ export default function ProjectSetupWorkspace({
             />
           )}
         </section>
+        )}
         {error && (
           <div className="sync-setup-field-error sync-setup-system-error" role="alert">
             <Icon name="alert-triangle" size={13} /> {error}

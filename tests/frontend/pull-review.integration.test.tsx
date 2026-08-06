@@ -267,19 +267,19 @@ test("conversation divergence defaults to keep-both in the inline row control", 
   assert.match(html, /role="radiogroup" aria-label="Conflict resolution"/);
   assert.match(
     html,
-    /role="radio" aria-checked="true" class="active" title="The local branch becomes a Codex fork — nothing is lost">Keep both</,
-    "the recommended keep-both resolution is pre-selected",
+    /role="radio" aria-checked="true" class="active" title="The local branch becomes a Codex fork — nothing is lost">Fork and overwrite</,
+    "the recommended fork-and-overwrite resolution is pre-selected",
   );
   assert.match(
     html,
-    /role="radio" aria-checked="false" class="" title="Replaces the local branch">Use cloud only</,
+    /role="radio" aria-checked="false" class="" title="Replaces the local branch">Overwrite</,
   );
   assert.doesNotMatch(
     html,
     /sync-divergence-inline-confirm/,
-    "keep-both requires no destructive acknowledgement",
+    "forking first requires no destructive acknowledgement",
   );
-  assert.doesNotMatch(html, /sync-divergence-card|Keep both branches|Use cloud version only/);
+  assert.doesNotMatch(html, /sync-divergence-card|Keep both|Use cloud version only/);
 });
 
 test("an unpreserved cloud-only default demands the discard confirmation before Pull", () => {
@@ -310,7 +310,7 @@ test("an unpreserved cloud-only default demands the discard confirmation before 
       onBack={() => undefined}
     />,
   );
-  assert.match(html, /aria-checked="true" class="active" title="Replaces the local branch">Use cloud only</);
+  assert.match(html, /aria-checked="true" class="active" title="Replaces the local branch">Overwrite</);
   assert.match(html, /class="sync-divergence-inline-confirm"/);
   assert.match(html, /Discard the local branch — I understand it won&#x27;t remain in Codex/);
   assert.match(
@@ -369,19 +369,21 @@ test("a preserved divergence recommends cloud adoption and waives the destructiv
   );
   assert.match(
     html,
-    /aria-checked="true" class="active" title="The local branch is already preserved in a Codex fork; restore the cloud conversation">Adopt cloud</,
+    /aria-checked="true" class="active" title="The local branch is already preserved in a Codex fork; restore the cloud conversation">Overwrite</,
     "the plan-recommended cloud adoption is pre-selected",
   );
   assert.match(
     html,
-    /title="Keep another copy of the local branch as a new Codex fork before restoring the cloud conversation">Fork again</,
+    /title="Keep another copy of the local branch as a new Codex fork before restoring the cloud conversation">Fork and overwrite</,
   );
   assert.doesNotMatch(
     html,
     /sync-divergence-inline-confirm/,
     "the witnessed overwrite renders no destructive acknowledgement",
   );
-  assert.doesNotMatch(html, />Keep both<|>Use cloud only</, "preserved rows swap to the fork-again vocabulary");
+  // One vocabulary for both cases: the labels name the act, and only the
+  // titles distinguish an already-preserved branch from a fresh one.
+  assert.doesNotMatch(html, />Fork again<|>Adopt cloud<|>Keep both<|>Use cloud only</);
   assert.match(
     html,
     /class="btn btn-primary sync-pull-apply-button">/,
@@ -685,9 +687,9 @@ test("multiple conversation conflicts each keep their own inline resolution", ()
   );
   assert.equal((html.match(/role="radiogroup" aria-label="Conflict resolution"/g) ?? []).length, 2);
   assert.equal(
-    (html.match(/aria-checked="true" class="active" title="The local branch becomes a Codex fork — nothing is lost">Keep both</g) ?? []).length,
+    (html.match(/aria-checked="true" class="active" title="The local branch becomes a Codex fork — nothing is lost">Fork and overwrite</g) ?? []).length,
     2,
-    "both conflicts default to their own keep-both selection",
+    "both conflicts default to their own fork-and-overwrite selection",
   );
   assert.equal(
     (html.match(/aria-label="Select Conversation"/g) ?? []).length,

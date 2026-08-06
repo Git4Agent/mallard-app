@@ -15,6 +15,7 @@ import type {
 import Icon, { type IconName } from "../Icons";
 import { projectSyncApi } from "./api";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
+import { sessionName } from "./syncOutcome";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "./ThreadStatusIcon";
 
 interface PageProps {
@@ -93,37 +94,55 @@ const CHAT_HISTORY_PAGE_SIZE = 10;
 export interface ForkCompletionFeedback {
   message: string;
   success: boolean;
+  /** Present when the result named the fork it created — the banner then
+   *  draws the thread structurally instead of printing the sentence. */
+  fork?: {
+    name: string;
+    providerThreadId: string;
+    /** Seconds; stamped at receipt, which is when the fork finished. */
+    createdAt: number;
+  } | null;
 }
 
-// The backend hands the banner one string: a fixed phrase wrapped around a
-// thread title the user named. Split it at the quotes so the app's half can
-// speak in the pixel face while the title keeps the clean one. Only success
-// messages are templated this way — failures are prose, and prose that happens
-// to contain two apostrophes must not be torn apart — so they stay whole.
-function splitQuotedTitle(message: string, success: boolean) {
-  if (!success) return null;
-  const match = /^([^']*')([^']+)('.*)$/s.exec(message);
-  if (!match) return null;
-  const [, before, title, after] = match;
-  return { before, title, after };
-}
-
-export function ForkCompletionBanner({ feedback }: { feedback: ForkCompletionFeedback }) {
-  const parts = splitQuotedTitle(feedback.message, feedback.success);
+export function ForkCompletionBanner({ feedback, onDismiss }: {
+  feedback: ForkCompletionFeedback;
+  onDismiss: () => void;
+}) {
+  const fork = feedback.success ? feedback.fork : null;
+  if (!fork) {
+    return (
+      <div className={`sync-callout${feedback.success ? "" : " error"}`}
+        role={feedback.success ? "status" : "alert"}>
+        <Icon name={feedback.success ? "git-fork" : "alert-triangle"} size={15} />
+        <span>{feedback.message}</span>
+      </div>
+    );
+  }
+  // A fork is a timeline event — the thread it created is sitting in the
+  // Uncommitted group below — so the notice takes the cards' shape and the
+  // group headings' grammar: identity glyph, pixel-face phrase, the name in
+  // the clean face ("Only in {storage}" exactly), with line 2 in the row
+  // grammar (whole id left, stamp at the rail). The glyph lives in the
+  // heading like the cloud and pencil do, not out on the rail — no line
+  // passes the banner, so a rail mark would float in empty space.
   return (
-    <div className={`sync-callout${feedback.success ? "" : " error"}`}
-      role={feedback.success ? "status" : "alert"}>
-      <Icon name={feedback.success ? "git-fork" : "alert-triangle"} size={15} />
-      <span>
-        {parts ? (
-          <>
-            <span className="sync-callout-label">{parts.before}</span>
-            <span className="sync-callout-title">{parts.title}</span>
-            <span className="sync-callout-label">{parts.after}</span>
-          </>
-        ) : feedback.message}
+    <section className="sync-history-fork-event" role="status">
+      <div className="sync-history-fork-line">
+        <Icon name="git-fork" size={13} />
+        <span className="sync-history-fork-label">Created the Codex fork</span>
+        <strong>{sessionName(fork.name).name}</strong>
+        <button type="button" className="sync-notice-dismiss" title="Dismiss"
+          aria-label="Dismiss fork notice" onClick={onDismiss}>
+          <Icon name="x" size={12} />
+        </button>
+      </div>
+      <span className="sync-history-fork-meta">
+        <span className="sync-history-stored-thread-id"><code>{fork.providerThreadId}</code></span>
+        <time dateTime={new Date(fork.createdAt * 1_000).toISOString()}>
+          {formatDate(fork.createdAt)}
+        </time>
       </span>
-    </div>
+    </section>
   );
 }
 
@@ -133,6 +152,7 @@ interface ForkActivityPanelProps {
   selectionMode?: "push" | "pull";
   resolving: boolean;
   onRetry: () => void;
+  onDismissFeedback: () => void;
 }
 
 export function ForkActivityPanel({
@@ -141,12 +161,13 @@ export function ForkActivityPanel({
   selectionMode,
   resolving,
   onRetry,
+  onDismissFeedback,
 }: ForkActivityPanelProps) {
   const retryable = checkpoint?.status === "fork_unacknowledged";
   if (!feedback && !checkpoint) return null;
   return (
     <>
-      {feedback && <ForkCompletionBanner feedback={feedback} />}
+      {feedback && <ForkCompletionBanner feedback={feedback} onDismiss={onDismissFeedback} />}
       {checkpoint && !selectionMode && (
         <section className="sync-fork-checkpoint" aria-live="polite">
           <h4>
@@ -841,7 +862,10 @@ function syncReviewStateLabel(
       case "require_pull": return "Pull required";
       case "resolve_divergence":
         if (!selected) return "Not selected";
-        return entry.state === "diverged_forked" ? "Adopt storage version" : "Keep both branches";
+        // The same words the row's own resolution control uses: a branch
+        // already preserved in a fork is simply overwritten, a fresh one is
+        // forked first. One vocabulary for the phrase and the buttons.
+        return entry.state === "diverged_forked" ? "Overwrite" : "Fork and overwrite";
       case "create_cloud": return selected ? "Publish new thread" : "Not selected";
       case "create_local": return selected ? "Restore new conversation" : "Not selected";
       case "store_only": return "Backup only";
@@ -1073,9 +1097,10 @@ function ThreadCard({
 
       {rowResolution?.(resourceId)}
 
-      {/* Line 2 reads left to right: readouts you hover, a hairline rule, the
-          debug button, then the stamp — and the disclosure chevron closes the
-          row at the far edge, where "expand this" belongs. */}
+      {/* Line 2 reads left to right: readouts you hover, a hairline rule, then
+          the two clickables — debug info and the transcript — as one group,
+          with the stamp closing the line at the card edge so it forms one
+          column with every other stamp on the page. */}
       <div className="sync-history-session-details">
         <div className="sync-history-session-summary">
           <ThreadMetrics thread={thread} showTimestamp={false} />
@@ -1085,7 +1110,6 @@ function ThreadCard({
             workingDirectory={workingDirectory}
             codexHome={codexHome}
           />
-          <ThreadTimestamp thread={thread} />
           {onToggleDetails && (
             <button type="button" className={`btn btn-ghost sync-history-chat-toggle${detailsOpen ? " active" : ""}`}
               aria-label={chatDetailsLabel} title={chatDetailsLabel} aria-expanded={detailsOpen} aria-controls={chatDetailsId}
@@ -1093,6 +1117,7 @@ function ThreadCard({
               <Icon name={detailsOpen ? "chevron-up" : "chevron-down"} size={13} />
             </button>
           )}
+          <ThreadTimestamp thread={thread} />
         </div>
         {onToggleDetails && detailsOpen && (
           <div id={chatDetailsId} className="sync-history-chat-details" aria-live="polite">
@@ -1141,7 +1166,6 @@ function SyncEntryCard({
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
 }) {
-  const shortId = entry.thread_id.length > 12 ? entry.thread_id.slice(0, 8) : entry.thread_id;
   const fullTitle = entry.display_name.trim() && entry.display_name !== entry.thread_id
     ? entry.display_name
     : "Untitled thread";
@@ -1207,12 +1231,6 @@ function SyncEntryCard({
             <strong title={title === fullTitle ? undefined : fullTitle}>{title}</strong>
             {visibleLocation && <span className="sync-history-stored-thread-location">{visibleLocation}</span>}
           </div>
-          <span className="sync-history-stored-thread-meta">
-            <code title={entry.thread_id}>{shortId}</code>
-            {updatedAt != null && (
-              <time dateTime={new Date(updatedAt * 1_000).toISOString()}>{formatDate(updatedAt)}</time>
-            )}
-          </span>
           <ReviewPullRowAction
             mode={selectionMode}
             entry={entry}
@@ -1221,7 +1239,47 @@ function SyncEntryCard({
           />
         </div>
       </div>
+      {/* Line 2 matches the completed sync's rows: the whole thread id, never
+          a stub, with the stamp at the far edge. The id is inline inside the
+          wrapper because a flex item is blockified and a blockified element
+          serialises with a trailing newline — one click on the inline code
+          takes all 36 characters whole. */}
+      <span className="sync-history-stored-thread-meta">
+        <span className="sync-history-stored-thread-id"><code>{entry.thread_id}</code></span>
+        {updatedAt != null && (
+          <time dateTime={new Date(updatedAt * 1_000).toISOString()}>{formatDate(updatedAt)}</time>
+        )}
+      </span>
     </article>
+  );
+}
+
+/** The fold control lives in the timeline rail, where the pixel node used to
+ *  sit — the node became the button. Every fold on the page shares the rail's
+ *  column, and because the button is outside the card, neither a review's
+ *  checkbox nor an outcome banner can move it. It precedes the heading and
+ *  the list in the DOM, so the trigger reads before the content it controls.
+ *  Leading-position rotation: right when collapsed, down when open. */
+function SectionFold({ collapsed, controls, label, disabled = false, onToggle }: {
+  collapsed: boolean;
+  controls: string;
+  label: string;
+  disabled?: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="sync-history-spine-fold"
+      aria-label={label}
+      title={label}
+      aria-expanded={!collapsed}
+      aria-controls={controls}
+      disabled={disabled}
+      onClick={onToggle}
+    >
+      <Icon name={collapsed ? "chevron-right" : "chevron-down"} size={12} />
+    </button>
   );
 }
 
@@ -1493,18 +1551,14 @@ export function ProjectChatHistoryContent({
               <>
                 {storedOnlyEntries.length > 0 && (
                   <section className={`sync-history-storage-only${storageOnlyCollapsed ? " collapsed" : ""}`} aria-labelledby="storage-only-heading">
+                    <SectionFold
+                      collapsed={storageOnlyCollapsed}
+                      controls="storage-only-list"
+                      label={`${storageOnlyCollapsed ? "Expand" : "Collapse"} ${storedOnlyEntries.length} thread${storedOnlyEntries.length === 1 ? "" : "s"} only in ${comparisonStorageName}`}
+                      onToggle={() => setStorageOnlyOverride(!storageOnlyCollapsed)}
+                    />
                     <div className="sync-history-section-heading">
                       <h2 id="storage-only-heading"><Icon name="cloud" size={13} />Only in <span className="sync-history-storage-name">{comparisonStorageName}</span></h2>
-                      <button
-                        type="button"
-                        className="sync-history-commit-toggle sync-history-group-toggle"
-                        aria-label={`${storageOnlyCollapsed ? "Expand" : "Collapse"} ${storedOnlyEntries.length} thread${storedOnlyEntries.length === 1 ? "" : "s"} only in ${comparisonStorageName}`}
-                        aria-expanded={!storageOnlyCollapsed}
-                        aria-controls="storage-only-list"
-                        onClick={() => setStorageOnlyOverride(!storageOnlyCollapsed)}
-                      >
-                        <Icon name={storageOnlyCollapsed ? "chevron-down" : "chevron-up"} size={12} />
-                      </button>
                     </div>
                     {!storageOnlyCollapsed && (
                       <div id="storage-only-list" className="sync-history-thread-list flat">
@@ -1520,18 +1574,14 @@ export function ProjectChatHistoryContent({
                 <div className={`sync-history-timeline${history.unmapped.length > 0 ? " has-uncommitted" : ""}`}>
                   {history.unmapped.length > 0 && (
                     <section className={`sync-history-uncommitted${uncommittedCollapsed ? " collapsed" : ""}`} aria-labelledby="uncommitted-heading">
+                      <SectionFold
+                        collapsed={uncommittedCollapsed}
+                        controls="uncommitted-list"
+                        label={`${uncommittedCollapsed ? "Expand" : "Collapse"} ${history.unmapped.length} session${history.unmapped.length === 1 ? "" : "s"} not linked to a commit`}
+                        onToggle={() => setUncommittedCollapsed(!uncommittedCollapsed)}
+                      />
                       <div className="sync-history-section-heading">
                         <h2 id="uncommitted-heading"><Icon name="edit" size={13} />Uncommitted</h2>
-                        <button
-                          type="button"
-                          className="sync-history-commit-toggle sync-history-group-toggle"
-                          aria-label={`${uncommittedCollapsed ? "Expand" : "Collapse"} ${history.unmapped.length} session${history.unmapped.length === 1 ? "" : "s"} not linked to a commit`}
-                          aria-expanded={!uncommittedCollapsed}
-                          aria-controls="uncommitted-list"
-                          onClick={() => setUncommittedCollapsed(!uncommittedCollapsed)}
-                        >
-                          <Icon name={uncommittedCollapsed ? "chevron-down" : "chevron-up"} size={12} />
-                        </button>
                       </div>
                       {!uncommittedCollapsed && (
                         <div id="uncommitted-list" className="sync-history-thread-list flat">{history.unmapped.map((reference) => { const thread = threads.get(reference.thread_id); return thread ? renderThread(thread, `uncommitted:${thread.thread_id}`) : null; })}</div>
@@ -1548,7 +1598,14 @@ export function ProjectChatHistoryContent({
                         const displaySha = commit.short_sha.slice(0, 7);
                         const threadListId = `commit-threads-${commit.short_sha}`;
                         return (
-                          <li key={commit.sha} className={`sync-history-commit${collapsed ? " collapsed" : ""}`}><span className="sync-history-commit-node" aria-hidden="true" />
+                          <li key={commit.sha} className={`sync-history-commit${collapsed ? " collapsed" : ""}`}>
+                            <SectionFold
+                              collapsed={collapsed}
+                              controls={threadListId}
+                              label={`${collapsed ? "Expand" : "Collapse"} commit ${displaySha}`}
+                              disabled={references.length === 0}
+                              onToggle={() => toggleCommit(commit.sha)}
+                            />
                             <div className="sync-history-commit-heading">
                               <span className="sync-history-commit-title">
                                 <span className="sync-history-commit-icon" aria-hidden="true">
@@ -1556,10 +1613,11 @@ export function ProjectChatHistoryContent({
                                 </span>
                                 <strong title={commit.subject}>{commit.subject}</strong>
                               </span>
-                              {/* Identifier first, stamp last: the stamp holds the row's
-                                  right edge and forms one column with the session stamps
-                                  below. The external-link glyph marks the chip as an
-                                  off-app target, so it exists only when the remote does. */}
+                              {/* Identifier first, stamp last: the stamp closes the row
+                                  at the card edge and forms one column with the session
+                                  stamps below. The external-link glyph marks the chip as
+                                  an off-app target, so it exists only when the remote
+                                  does — an unlinked sha is bare mono, not a chip. */}
                               <span className="sync-history-commit-meta">
                                 {commitUrl ? (
                                   <a className="sync-history-commit-link" href={commitUrl} target="_blank" rel="noopener noreferrer"
@@ -1570,19 +1628,6 @@ export function ProjectChatHistoryContent({
                                   </a>
                                 ) : <code title={commit.sha}>{displaySha}</code>}
                                 <time dateTime={new Date(commit.committed_at * 1_000).toISOString()}>{formatDate(commit.committed_at)}</time>
-                              </span>
-                              <span className="sync-history-commit-actions">
-                                <button
-                                  type="button"
-                                  className="sync-history-commit-toggle"
-                                  aria-label={`${collapsed ? "Expand" : "Collapse"} commit ${displaySha}`}
-                                  aria-expanded={!collapsed}
-                                  aria-controls={threadListId}
-                                  disabled={references.length === 0}
-                                  onClick={() => toggleCommit(commit.sha)}
-                                >
-                                  <Icon name={collapsed ? "chevron-down" : "chevron-up"} size={12} />
-                                </button>
                               </span>
                             </div>
                             {!collapsed && references.length > 0 && (
@@ -1851,6 +1896,13 @@ export default function ProjectChatHistoryPage({
     setForkNotice({
       message: result.message,
       success: result.success,
+      fork: result.codex_manual_fork
+        ? {
+          name: result.codex_manual_fork.fork_name,
+          providerThreadId: result.codex_manual_fork.provider_thread_id,
+          createdAt: Math.floor(Date.now() / 1_000),
+        }
+        : null,
     });
     return result.status === "complete" || activityCheckpoint == null;
   };
@@ -1911,6 +1963,7 @@ export default function ProjectChatHistoryPage({
       selectionMode={selectionMode}
       resolving={forkResolving}
       onRetry={() => void retryForkCheckpoint()}
+      onDismissFeedback={() => setForkNotice(null)}
     />
   );
   return <ProjectChatHistoryContent project={project} binding={binding} history={history} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyThreadId={actionBusyThreadId} detailsByThread={detailsByThread} openDetailOccurrences={openDetailOccurrences} onBranchChange={changeBranch} onRefresh={() => { void refreshActivity(true); }} onLoadMore={() => void load(history?.next_before ?? null, branch)} onOpenCodex={(id) => void openCodex(id)} onOpenTerminal={(id) => void openTerminal(id)} onFork={(id) => void forkThread(id)} forkBusyThreadId={forkBusyThreadId} forkPanel={forkPanel} onToggleDetails={toggleDetails} onLoadMoreDetails={(id) => void loadDetails(id, detailsByThread[id]?.page?.next_cursor)} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} rowResolution={rowResolution} />;

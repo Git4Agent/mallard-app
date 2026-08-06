@@ -153,22 +153,6 @@
      currentColor. Lets a control that cannot hold an <svg> child — a native
      select — still draw the same arrow every other control in the app uses. */
   --retro-chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M20 8v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-4v-1H9v-1H8v-1H7v-1H6v-1H5v-1H4V8h2v1h1v1h1v1h1v1h1v1h4v-1h1v-1h1v-1h1V9h1V8h2Z'/%3E%3C/svg%3E");
-  /* A square with its four corner blocks removed — the pixel-art stand-in for
-     a circle. Applied to any node that would otherwise be antialiased. */
-  --retro-pixel-ring: polygon(
-    25% 0,
-    75% 0,
-    75% 25%,
-    100% 25%,
-    100% 75%,
-    75% 75%,
-    75% 100%,
-    25% 100%,
-    25% 75%,
-    0 75%,
-    0 25%,
-    25% 25%
-  );
   --retro-rule: #8a8a8a;
   --retro-bevel-highlight: #343434;
   --retro-bevel-shadow: #080808;
@@ -240,6 +224,11 @@
   --primary-text: #fffaf4;
   --green: #4b9661;
   --red: #d8523e;
+  /* This palette's red reads 3.9:1 against the paper — enough for a glyph,
+     short of the 4.5:1 an error sentence needs. One step darker measures
+     4.9:1 and is indistinguishable at a glance. The dark palette's red
+     already clears the bar, so only this block overrides the default. */
+  --danger-text: #c73d28;
   --yellow: #d99609;
   --amber: var(--yellow);
   --blue: #2f88b4;
@@ -297,7 +286,7 @@ body {
 .settings-section-title,
 .sync-project-combined-page .storage-link-sync,
 .sync-history-embedded-title,
-.sync-callout-label,
+.sync-history-fork-label,
 .sync-sync-review-header h1,
 .sync-sync-review-header h2,
 .sync-history-section-heading h2,
@@ -312,6 +301,10 @@ body {
 .log-filter-control > span,
 .sync-log-storage-summary dt,
 .sync-log-policy-fields label > span,
+.sync-setup-section > .sync-card-heading strong,
+.sync-setup-workspace .sync-field-grid label > span,
+.sync-setup-workspace .sync-agent-choice button strong,
+.sync-bundle-recommended,
 .sync-divergence-choice button {
   font-family: var(--font-pixel);
   /* One weight exists, and synthesis is off, so asking for anything heavier
@@ -325,7 +318,8 @@ body {
 /* Sizes and tracking for the chrome labels that App.css left on fractional
    values. Uppercase micro-labels keep their air with whole-pixel tracking. */
 .sync-eyebrow,
-.sync-draft-badge {
+.sync-draft-badge,
+.sync-bundle-recommended {
   font-size: var(--type-3xs);
   letter-spacing: 1px;
 }
@@ -1414,10 +1408,14 @@ summary {
    a review renders for a non-git project, and the fold on a finished sync, both
    showed the icon glued to the title and a ragged icon column without them.
    Scoping to the list itself makes a session row self-sufficient wherever it
-   renders; the two sections below keep the same values for their own rows. */
+   renders; the sections below keep the same values for their own rows. The
+   fork-event banner is in the list because the tokens are NOT inherited — a
+   sibling left off it silently computes margin-left to 0 and jumps flush
+   left, with an invalid absolute position on its rail mark. */
 .sync-history-thread-list,
 .sync-history-timeline,
-.sync-history-storage-only {
+.sync-history-storage-only,
+.sync-history-fork-event {
   --sync-history-row-actions-column: 80px;
   --sync-history-commit-actions-column: 26px;
   --sync-history-commit-date-column: 26ch;
@@ -1428,8 +1426,6 @@ summary {
   --sync-history-row-anchor-y: 15px;
   --sync-history-rail-x: 8px;
   --sync-history-card-offset: 26px;
-  --sync-history-node-size: 12px;
-  --sync-history-node-half: 6px;
   position: relative;
 }
 
@@ -1441,26 +1437,6 @@ summary {
   padding-top: 12px;
 }
 
-.sync-history-timeline.has-uncommitted::before {
-  display: none;
-}
-
-.sync-history-timeline.has-uncommitted::after {
-  content: "";
-  position: absolute;
-  z-index: 4;
-  top: calc(12px + var(--sync-history-row-anchor-y) - var(--sync-history-node-half));
-  left: calc(var(--sync-history-rail-x) - var(--sync-history-node-half));
-  width: var(--sync-history-node-size);
-  height: var(--sync-history-node-size);
-  border: 0;
-  border-radius: 0;
-  background: var(--bg-0);
-  box-shadow: inset 0 0 0 3px var(--text-2);
-  clip-path: var(--retro-pixel-ring);
-  pointer-events: none;
-}
-
 .sync-history-uncommitted {
   position: relative;
   overflow: visible;
@@ -1468,22 +1444,6 @@ summary {
   border: 1px solid var(--border-mid);
   border-radius: 4px;
   background: var(--surface-row);
-}
-
-.sync-history-uncommitted::before {
-  content: "";
-  position: absolute;
-  z-index: 2;
-  top: var(--sync-history-row-anchor-y);
-  left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset));
-  width: calc(var(--sync-history-card-offset) - var(--sync-history-rail-x));
-  height: 1px;
-  background: repeating-linear-gradient(
-    to right,
-    color-mix(in srgb, var(--border-mid) 76%, transparent) 0 4px,
-    transparent 4px 8px
-  );
-  pointer-events: none;
 }
 
 .sync-history-uncommitted::after {
@@ -1502,23 +1462,15 @@ summary {
   pointer-events: none;
 }
 
+/* The fold left the heading for the rail, so the bar is just the label now:
+   one flex line, no actions column. */
 .sync-history-uncommitted .sync-history-section-heading {
   min-height: 38px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--sync-history-commit-actions-column);
-  grid-template-areas: "title actions";
+  display: flex;
   align-items: center;
-  gap: var(--sync-history-row-column-gap);
   margin: 0;
   padding: 4px 12px;
   border-bottom: 1px solid var(--border-mid);
-}
-
-/* Group folds sit in the same actions column as the commit folds, at the same
-   width, so every chevron in the timeline lines up on one edge. */
-.sync-history-group-toggle {
-  grid-area: actions;
-  justify-self: end;
 }
 
 .sync-history-uncommitted.collapsed .sync-history-section-heading {
@@ -1528,7 +1480,6 @@ summary {
 .sync-history-uncommitted .sync-history-section-heading h2 {
   min-width: 0;
   display: inline-flex;
-  grid-area: title;
   align-items: center;
   gap: var(--sync-history-row-title-gap);
 }
@@ -1565,10 +1516,6 @@ summary {
   isolation: isolate;
   z-index: 5;
   gap: 0;
-}
-
-.sync-history-commit-rail::before {
-  display: none;
 }
 
 /* Deliberately no z-index. It opened a stacking context that trapped the debug
@@ -1625,48 +1572,121 @@ summary {
   display: none;
 }
 
-/* The rail node is the last antialiased shape in a pixel timeline, so it is
-   built as a stepped ring: a 3px inset frame with the four corner blocks
-   clipped away. The connector line lives on ::after, which clip-path would
-   also cut, so the ring is painted on ::before instead. */
-.sync-history-commit-node {
+/* The fold control lives in the rail, where the node used to sit: one column
+   for every fold on the page — group headings and commits alike — and outside
+   the card, so neither a review's checkbox nor an outcome banner can move it.
+   24px hit area (WCAG 2.5.8) centred on the rail x; the opaque background
+   masks the rail line passing behind it. */
+.sync-history-spine-fold {
   position: absolute;
-  z-index: 4;
-  top: calc(var(--sync-history-row-anchor-y) - var(--sync-history-node-half));
-  left: calc(
-    var(--sync-history-rail-x) - var(--sync-history-card-offset) -
-      var(--sync-history-node-half)
-  );
-  width: var(--sync-history-node-size);
-  height: var(--sync-history-node-size);
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.sync-history-commit-node::before {
-  content: "";
-  position: absolute;
-  inset: 0;
+  z-index: 6;
+  top: calc(var(--sync-history-row-anchor-y) - 12px);
+  left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset) - 12px);
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
   background: var(--bg-0);
-  box-shadow: inset 0 0 0 3px var(--text-2);
-  clip-path: var(--retro-pixel-ring);
-  pointer-events: none;
+  box-shadow: none;
+  color: var(--text-2);
 }
 
-.sync-history-commit-node::after {
-  content: "";
-  position: absolute;
-  top: calc(var(--sync-history-node-half) - 1px);
-  left: calc(var(--sync-history-node-size) - 1px);
-  width: calc(
-    var(--sync-history-card-offset) - var(--sync-history-rail-x) -
-      var(--sync-history-node-half)
-  );
-  height: 1px;
-  background: var(--border-mid);
-  pointer-events: none;
+.sync-history-spine-fold:hover:not(:disabled),
+.sync-history-spine-fold:focus-visible {
+  border-color: var(--border);
+  background: var(--bg-hover);
+  color: var(--text-0);
+}
+
+.sync-history-spine-fold:disabled {
+  opacity: 0.35;
+}
+
+/* The fork notice is a timeline event — the thread it created sits in the
+   Uncommitted group below — so it takes the cards' shape: inset onto the
+   rail, row-height, with its mark in the fold column. */
+.sync-history-fork-event {
+  min-height: 52px;
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  margin: 12px 0 12px var(--sync-history-card-offset);
+  padding: 5px 12px 6px;
+  border: 1px solid var(--border-mid);
+  border-radius: 4px;
+  background: var(--surface-row);
+}
+
+.sync-history-fork-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sync-history-row-title-gap);
+}
+
+/* The identity glyph sits in the heading like the cloud and pencil on the
+   group bars: an 18px box, so the 8px gap lands the label at the same text
+   offset line 2 indents to. */
+.sync-history-fork-line > svg {
+  width: var(--sync-history-row-icon-size);
+  height: var(--sync-history-row-icon-size);
+  flex: 0 0 var(--sync-history-row-icon-size);
+  color: var(--text-2);
+}
+
+/* The group headings' grammar exactly: the app's phrase in the pixel face
+   (declared in the one grouped rule up top) at the heading size, the user's
+   name beside it in the clean face — "Only in {storage}", one card down. */
+.sync-history-fork-label {
+  flex: 0 0 auto;
+  color: var(--text-0);
+  font-size: var(--type-md);
+}
+
+.sync-history-fork-line > strong {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1;
+  color: var(--text-0);
+  font-family: var(--font-sans);
+  font-size: var(--type-md);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-history-fork-line > .sync-notice-dismiss {
+  flex: 0 0 auto;
+  margin-left: 2px;
+  border-radius: 3px;
+}
+
+/* Line 2 is the row grammar: the new fork's whole id on the left — bare mono,
+   never truncated — and its stamp closing the line at the rail. */
+.sync-history-fork-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  padding-left: var(--sync-history-row-text-offset);
+}
+
+.sync-history-fork-meta > time {
+  margin-left: auto;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-snug);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  white-space: nowrap;
 }
 
 .sync-history-commit-heading,
@@ -1684,16 +1704,18 @@ summary {
   background: transparent;
 }
 
+/* The commit fold lives in the rail, so the heading carries no actions
+   column: subject on line 1, identifier-then-stamp on line 2 (narrow) or the
+   same line (wide), with the stamp closing the row at the card edge. */
 .sync-history-commit-heading {
   position: relative;
-  grid-template-columns: minmax(0, 1fr) var(--sync-history-commit-actions-column);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "title"
+    "meta";
   border: 0;
   border-radius: 0;
   box-shadow: none;
-}
-
-.sync-history-commit-heading::before {
-  display: none;
 }
 
 .sync-history-commit-heading:has(+ .sync-history-thread-list) {
@@ -1839,9 +1861,10 @@ summary {
   white-space: nowrap;
 }
 
-/* The sha reads as an identifier rather than more prose — and as a target,
-   since it opens the commit on GitHub when the remote is known. */
-.sync-history-commit-heading code {
+/* Only the link wears the chip: the border is the affordance — it says
+   "opens the commit on GitHub" — so a commit with no remote gets the same
+   bare mono the thread ids use, not a box with nothing behind it. */
+.sync-history-commit-link > code {
   min-width: 7ch;
   display: inline-block;
   padding: 2px 6px;
@@ -1855,6 +1878,15 @@ summary {
   line-height: var(--leading-snug);
   letter-spacing: 0;
   text-align: center;
+}
+
+.sync-history-commit-meta > code {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-snug);
+  letter-spacing: 0;
 }
 
 .sync-history-commit-link {
@@ -1884,7 +1916,6 @@ summary {
   color: var(--text-0);
 }
 
-.sync-history-commit-actions,
 .sync-history-thread-actions {
   width: var(--sync-history-row-actions-column);
   display: flex;
@@ -1894,10 +1925,7 @@ summary {
   justify-self: end;
 }
 
-.sync-history-commit-actions {
-  width: var(--sync-history-commit-actions-column);
-}
-
+/* The completed sync's own fold — the one control still wearing this class. */
 .sync-history-commit-toggle {
   width: var(--sync-history-commit-actions-column);
   min-width: var(--sync-history-commit-actions-column);
@@ -1916,10 +1944,6 @@ summary {
   border-color: var(--border);
   background: var(--bg-hover);
   color: var(--text-1);
-}
-
-.sync-history-commit-toggle:disabled {
-  opacity: 0.35;
 }
 
 .sync-history-commit > .sync-history-thread-list {
@@ -2039,21 +2063,19 @@ summary {
      rounded background is what shows at the corners. */
   overflow: visible;
   /* Top margin so the frame clears the tab strip above it rather than butting
-     into it — the group reads as its own block, not a continuation of the
-     chrome. Matched below so stacked groups sit evenly. */
-  margin: 12px 0;
+     into it; the left inset matches the timeline cards, so this group's fold
+     lands in the same rail column as every other fold on the page. */
+  margin: 12px 0 12px var(--sync-history-card-offset);
   border: 1px solid var(--border-mid);
   border-radius: 4px;
   background: var(--surface-row);
 }
 
+/* The fold left the heading for the rail, so the bar is just the label. */
 .sync-history-storage-only .sync-history-section-heading {
   min-height: 38px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--sync-history-commit-actions-column);
-  grid-template-areas: "title actions";
+  display: flex;
   align-items: center;
-  gap: var(--sync-history-row-column-gap);
   margin: 0;
   padding: 4px 12px;
   border-bottom: 1px solid var(--border-mid);
@@ -2068,7 +2090,6 @@ summary {
 .sync-history-storage-only .sync-history-section-heading h2 {
   min-width: 0;
   display: inline-flex;
-  grid-area: title;
   align-items: center;
   gap: var(--sync-history-row-title-gap);
 }
@@ -2111,18 +2132,24 @@ summary {
   white-space: nowrap;
 }
 
-/* A stored thread reads like a commit: identity on the left, thread id and
-   freshness right-aligned into the same gutter the commit rows use. */
+/* A stored thread reads like the completed sync's rows: title on line 1, the
+   whole thread id on line 2 with the stamp at the far edge. The id is bare
+   monospace — a box here would mean "target", and the sha chip has already
+   spent that signal on a link — and it never shrinks or truncates: a partial
+   id is worse than none, so when the line runs out the stamp wraps under it
+   instead. */
 .sync-history-stored-thread-meta {
-  margin-left: auto;
-  display: inline-flex;
+  min-width: 0;
+  display: flex;
+  grid-area: meta;
   align-items: center;
-  flex: 0 0 auto;
-  gap: 14px;
-  overflow: visible;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  padding-left: var(--sync-history-row-text-offset);
 }
 
 .sync-history-stored-thread-meta > time {
+  margin-left: auto;
   color: var(--text-2);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
@@ -2133,20 +2160,31 @@ summary {
   white-space: nowrap;
 }
 
-.sync-history-stored-thread-meta > code {
-  min-width: 8ch;
-  display: inline-block;
-  padding: 2px 6px;
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  background: var(--surface-subtle);
+.sync-history-stored-thread-id {
+  flex: 0 0 auto;
   color: var(--text-2);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   font-weight: var(--weight-medium);
   line-height: var(--leading-snug);
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0;
-  text-align: center;
+  white-space: nowrap;
+}
+
+/* Inline inside the blockified flex item, so one click selects the whole id
+   with no trailing newline. */
+.sync-history-stored-thread-id > code {
+  font: inherit;
+  cursor: text;
+  -webkit-user-select: all;
+  user-select: all;
+}
+
+/* The completed sync's list prints the same id three rows away; one size for
+   both, on the whole-pixel scale. */
+.sync-outcome-threads .sync-outcome-threadid {
+  font-size: var(--type-xs);
 }
 
 .sync-history-thread-meta {
@@ -2254,13 +2292,20 @@ summary {
   box-shadow: inset 0 0 0 1px var(--border-mid);
 }
 
-/* The disclosure chevron closes the row at the far edge, in the same column
-   as the section headers' collapse chevrons — same 26px square as the git
-   menu's toggle, so every chevron on the page lines up. */
+/* The transcript chevron pairs with the debug button — the two clickables on
+   the line, one group behind the hairline — and the stamp closes the row at
+   the card edge. Same 26px square as the outcome's fold. */
 .sync-history-chat-toggle {
   width: var(--sync-history-commit-actions-column);
   min-width: var(--sync-history-commit-actions-column);
   min-height: var(--sync-history-commit-actions-column);
+}
+
+/* Pulled to 2px of the debug trigger against the summary's 5px gap, so the
+   pair reads as one group rather than two strays. The adjacent sibling is the
+   trigger's static menu wrapper, not the button itself. */
+.sync-history-debug-menu + .sync-history-chat-toggle {
+  margin-left: -3px;
 }
 
 .sync-history-chat-toggle,
@@ -2315,6 +2360,7 @@ summary {
 .sync-history-chat-toggle:active:not(:disabled),
 .sync-history-debug-trigger:active:not(:disabled),
 .sync-history-commit-toggle:active:not(:disabled),
+.sync-history-spine-fold:active:not(:disabled),
 .sync-history-icon-action:active:not(:disabled),
 .sync-history-debug-copy:active:not(:disabled),
 .sidebar-profile-actions button:active:not(:disabled),
@@ -2339,20 +2385,20 @@ summary {
 }
 
 @container sync-history-layout (min-width: 700px) {
-  .sync-history-timeline {
+  /* The storage-only group sits outside the timeline but its fold rides the
+     same anchor, so both scopes take the wide value together. */
+  .sync-history-timeline,
+  .sync-history-storage-only {
     --sync-history-row-anchor-y: 19px;
   }
 
-  /* Both trailing controls are 26px — the commit chevron here, the chat
-     toggle on a session row — so matching the session summary's 5px gap
-     lands the commit stamp in the session stamps' column (measured: 2px
-     apart, the card border). The 13px the gap gives up moves onto the
-     meta's own padding so the subject keeps its 18px of distance. */
-  .sync-history-commit-heading,
-  .sync-history-uncommitted .sync-history-section-heading {
+  /* Subject and meta share the line; the stamp closes it at the card edge,
+     forming one column with the session and cloud stamps below. The 13px on
+     the meta's own padding keeps the subject 18px clear of the identifier. */
+  .sync-history-commit-heading {
     min-height: 38px;
-    grid-template-columns: minmax(0, 1fr) auto var(--sync-history-commit-actions-column);
-    grid-template-areas: "title meta actions";
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "title meta";
     column-gap: 5px;
     row-gap: 0;
     padding: 4px 12px;
@@ -2367,10 +2413,6 @@ summary {
     min-width: var(--sync-history-commit-date-column);
   }
 
-  .sync-history-uncommitted .sync-history-section-heading {
-    grid-template-columns: minmax(0, 1fr) var(--sync-history-commit-actions-column);
-  }
-
   .sync-history-thread-card {
     min-height: 52px;
     grid-template-columns: minmax(0, 1fr) var(--sync-history-row-actions-column);
@@ -2380,10 +2422,6 @@ summary {
     column-gap: var(--sync-history-row-column-gap);
     row-gap: 2px;
     padding: 5px 12px 6px;
-  }
-
-  .sync-history-uncommitted .sync-history-section-heading {
-    grid-template-areas: "title actions";
   }
 
   .sync-history-session-details {
@@ -2396,9 +2434,12 @@ summary {
   }
 
   .sync-history-stored-thread {
-    min-height: 48px;
+    min-height: 52px;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "title";
+    grid-template-areas:
+      "title"
+      "meta";
+    row-gap: 2px;
   }
 }
 
@@ -2463,13 +2504,10 @@ summary {
 
 /* Setup, storage, review, and resource surfaces */
 
-.sync-form-card,
-.sync-plan-section,
 .sync-storage-card,
 .sync-resource-group,
 .sync-storage-details-panel,
 .sync-storage-repositories,
-.sync-setup-section,
 .sync-project-files-panel {
   border-color: var(--border-mid);
   border-radius: 5px;
@@ -2478,7 +2516,6 @@ summary {
 }
 
 .sync-storage-card > header,
-.sync-card-heading,
 .sync-resource-group-header,
 .sync-storage-repositories-heading {
   border-bottom-color: var(--border);
@@ -2486,7 +2523,6 @@ summary {
 }
 
 .sync-resource-row,
-.sync-plan-action,
 .sync-pull-item,
 .sync-project-file-row,
 .sync-storage-repository-row {
@@ -2495,7 +2531,6 @@ summary {
 }
 
 .sync-resource-row:hover,
-.sync-plan-action:hover,
 .sync-pull-item:hover,
 .sync-project-file-row:hover,
 .sync-storage-repository-row:hover {
@@ -2504,7 +2539,6 @@ summary {
 
 /* Selection reads from the checkbox and the row tint; no accent bar. */
 .sync-resource-row.selected,
-.sync-plan-action.selected,
 .sync-pull-item.selected,
 .sync-project-file-row.selected,
 .sync-sync-selectable-row.selected {
@@ -2519,22 +2553,10 @@ summary {
   box-shadow: none;
 }
 
-/* App.css leaves this at 11.5px, a fractional legacy size that is on no step of
-   the scale. The node keeps the clean face because it carries a thread title the
-   user named; the fixed phrase around it is wrapped in .sync-callout-label and
-   takes the pixel face with the rest of the app's own voice. */
+/* App.css leaves this at 11.5px, a fractional legacy size that is on no step
+   of the scale. */
 .sync-callout {
   font-size: var(--type-sm);
-}
-
-/* The quoted half names the same object the row headlines name, so it is set
-   like one rather than like the sentence carrying it. Longhands and a literal
-   size: it should follow the thread titles if the callout's own size moves. */
-.sync-callout-title {
-  font-family: var(--font-sans);
-  font-size: var(--type-sm);
-  font-weight: var(--weight-semibold);
-  color: var(--text-0);
 }
 
 .sync-callout.error {
@@ -2576,6 +2598,185 @@ summary {
   background: var(--surface-card);
   box-shadow: 1px 1px 0 color-mix(in srgb, var(--border-strong) 18%, transparent);
   color: var(--accent);
+}
+
+/* Project setup workspace
+   ---------------------------------------------------------------------------
+   A stack of hairline-ruled bands on one capped column; App.css owns that
+   structure. What this block owns is the page's voice: section names and
+   field labels in the pixel face, values in the reading faces, the platform
+   selects rebuilt as app controls, and the circular radios squared to match
+   the rest of the skin.
+*/
+
+.sync-setup-section > .sync-card-heading strong {
+  color: var(--text-0);
+  font-size: var(--type-md);
+}
+
+/* The line under a heading is a sentence the app wrote, not chrome. */
+.sync-setup-section > .sync-card-heading > div > span {
+  color: var(--text-2);
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+  line-height: var(--leading-snug);
+}
+
+/* Field names take the log-policy labels' pairing: 10px, whole-pixel air. */
+.sync-setup-workspace .sync-field-grid label > span {
+  color: var(--text-2);
+  font-size: var(--type-2xs);
+  letter-spacing: 1px;
+}
+
+/* The last native macOS widgets in the app: a platform select paints its own
+   rounded stepper, which no border or background rule reaches. Same fix as
+   the log policy fields — a flat box and the app's own chevron, masked so it
+   takes currentColor and follows the palette without a second asset. */
+.sync-select-shell > select {
+  appearance: none;
+  padding: 0 30px 0 10px;
+  font-size: var(--type-sm);
+  cursor: pointer;
+}
+
+.sync-select-shell::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  width: 12px;
+  height: 12px;
+  margin-top: -6px;
+  background: currentColor;
+  color: var(--text-3);
+  pointer-events: none;
+  -webkit-mask: var(--retro-chevron-down) center / 12px 12px no-repeat;
+  mask: var(--retro-chevron-down) center / 12px 12px no-repeat;
+}
+
+/* One 32px control height; values in the reading faces at whole sizes. */
+.sync-setup-workspace .sync-field-grid input {
+  height: 32px;
+  padding: 0 10px;
+  font-size: var(--type-sm);
+}
+
+/* A path is a machine identifier even while it is read-only. */
+.sync-setup-workspace .sync-field-grid input[readonly] {
+  font-family: var(--font-mono);
+}
+
+.sync-setup-workspace .sync-agent-profile-row select,
+.sync-setup-workspace .sync-agent-profile-row input {
+  font-size: var(--type-sm);
+}
+
+.sync-setup-workspace .sync-agent-choice {
+  padding: 2px;
+  gap: 2px;
+  border-radius: 5px;
+}
+
+.sync-setup-workspace .sync-agent-choice button strong {
+  font-size: var(--type-sm);
+}
+
+/* The repository picker in the theme's own selection language: border and
+   row tint, no accent bar — and square radios. 15px circles with a 7px round
+   dot were the only circular geometry left in a skin built from square
+   blocks, at a size where a clean circle cannot be drawn anyway. */
+.sync-setup-workspace .sync-bundle-match-options {
+  border-color: var(--border-mid);
+  border-radius: 4px;
+  background: var(--surface-row);
+}
+
+.sync-setup-workspace .sync-bundle-match-option {
+  min-height: 44px;
+  padding: 7px 10px;
+  gap: 9px;
+}
+
+.sync-setup-workspace .sync-bundle-match-option.active {
+  background: var(--surface-row-active);
+  box-shadow: none;
+}
+
+.sync-setup-workspace .sync-bundle-radio {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  border-color: var(--border-strong);
+  border-radius: 2px;
+}
+
+.sync-setup-workspace .active > .sync-bundle-radio {
+  border-color: var(--text-0);
+}
+
+.sync-setup-workspace .active > .sync-bundle-radio > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 0;
+  background: var(--text-0);
+}
+
+.sync-setup-workspace .sync-bundle-match-copy strong {
+  font-size: var(--type-sm);
+}
+
+/* The id under the name is data at the floor size, not decoration: it must
+   hold 4.5:1 on the selected row's tint as well as the rest one. */
+.sync-setup-workspace .sync-bundle-match-copy span {
+  color: var(--text-2);
+  font-size: var(--type-2xs);
+}
+
+/* A stamp is a machine value: mono, tabular, holding its column while the
+   list refreshes. */
+.sync-setup-workspace .sync-bundle-match-meta {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The acknowledge row borders in the callout family's warning mix; its
+   sentence is prose in the reading face. */
+.sync-setup-acknowledge {
+  border-color: color-mix(in srgb, var(--yellow) 45%, var(--border));
+}
+
+.sync-setup-acknowledge > span {
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+  line-height: var(--leading-snug);
+}
+
+/* Error sentences, hints, and the save state are prose, at whole sizes. */
+.sync-setup-field-error {
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+  line-height: var(--leading-snug);
+}
+
+.sync-setup-hint,
+.sync-setup-inline-status,
+.sync-setup-save-state {
+  font-family: var(--font-sans);
+  font-size: var(--type-2xs);
+}
+
+/* Disabled at 0.38 opacity left the primary action a ghost that read as a
+   rendering fault rather than as "not yet". An inert fill with a legible
+   label says the same thing and stays visible. */
+.sync-setup-footer .btn-primary:disabled {
+  opacity: 1;
+  border-color: var(--border-mid);
+  background: var(--surface-subtle);
+  color: var(--text-3);
 }
 
 .sync-sync-review-header,
