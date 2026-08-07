@@ -262,8 +262,8 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /:root\[data-theme="light"\]\s*\{[^}]*--text-0: #1e1817;/s);
   assert.match(retroCss, /:root\[data-theme="light"\]\s*\{[^}]*--accent: #2a211d;/s);
   assert.match(retroCss, /:root\[data-theme="light"\]\s*\{[^}]*--retro-rule: #8f7f74;/s);
-  assert.match(retroCss, /:root,\s*:root\[data-theme="dark"\]\s*\{[^}]*--border: #292929;[^}]*--border-mid: #3d3d3d;[^}]*--border-strong: #707070;/s);
-  assert.match(retroCss, /:root,\s*:root\[data-theme="dark"\]\s*\{[^}]*--retro-rule: #8a8a8a;[^}]*--retro-frame-edge: #8a8a8a;/s);
+  assert.match(retroCss, /:root,\s*:root\[data-theme="dark"\]\s*\{[^}]*--border: #2e2925;[^}]*--border-mid: #443d36;[^}]*--border-strong: #7a7065;/s);
+  assert.match(retroCss, /:root,\s*:root\[data-theme="dark"\]\s*\{[^}]*--retro-rule: #968a7c;[^}]*--retro-frame-edge: #968a7c;/s);
   assert.match(retroCss, /:root\[data-theme="light"\]\s*\{[^}]*--retro-scroll-thumb: #d3d4d7;[^}]*--retro-scroll-thumb-highlight: #dcdddf;[^}]*--retro-scroll-thumb-shadow: rgba\(61, 50, 44, 0\.18\);/s);
   assert.match(retroCss, /::-webkit-scrollbar\s*\{[^}]*width: 6px;[^}]*height: 6px;/s);
   assert.match(retroCss, /::-webkit-scrollbar-track\s*\{[^}]*background: transparent;[^}]*box-shadow: none;/s);

@@ -72,77 +72,83 @@
   --leading-prose: 1.5;
 }
 
+/* Both palettes ride one warm axis. Light is cream paper over sepia browns;
+   dark is the same paper at night: every neutral keeps its lightness and takes
+   the sepia cast, text and accent go lamplight cream (the family the switch
+   thumb always wore), and the shadow ink is warm brown-black, never blue.
+   Signal hues match the light set. Bars held: text ≥4.5:1, non-text ≥3:1
+   (WCAG 2.2), primary text ≥15.8:1 on the darkest surface (Material). */
 :root,
 :root[data-theme="dark"] {
   --color-scheme: dark;
-  --bg-0: #101010;
-  --bg-1: #0b0b0b;
-  --bg-2: #171717;
-  --bg-3: #242424;
-  --bg-4: #121212;
-  --bg-hover: rgba(255, 255, 255, 0.065);
-  --bg-active: rgba(255, 255, 255, 0.11);
-  --border: #292929;
-  --border-mid: #3d3d3d;
-  --border-strong: #707070;
-  --button-bg: #151515;
-  --button-bg-hover: #232323;
-  --button-bg-active: #303030;
-  --button-border: #626262;
+  --bg-0: #12100d;
+  --bg-1: #0d0b09;
+  --bg-2: #1a1714;
+  --bg-3: #282420;
+  --bg-4: #14120f;
+  --bg-hover: rgba(255, 238, 217, 0.065);
+  --bg-active: rgba(255, 238, 217, 0.11);
+  --border: #2e2925;
+  --border-mid: #443d36;
+  --border-strong: #7a7065;
+  --button-bg: #181512;
+  --button-bg-hover: #27221d;
+  --button-bg-active: #362f28;
+  --button-border: #6f6459;
   /* Same construction as the light theme: the fill sits with the surrounding
      surfaces rather than inverting against them, the strong border is what
      makes it read as a button, and the label takes the body text colour.
      Its own token rather than --primary-text — App.css also uses that one as a
      background in three places, so it cannot follow the button's label. */
-  --button-primary-bg: #303030;
-  --button-primary-hover: #3b3b3b;
-  --button-primary-border: #707070;
-  --button-primary-text: #f5f5f2;
+  --button-primary-bg: #362f28;
+  --button-primary-hover: #423a31;
+  --button-primary-border: #7a7065;
+  --button-primary-text: #f6f1e6;
   --button-radius: 4px;
-  --app-shell: #080808;
-  --surface-card: #141414;
-  --surface-row: #121212;
-  --surface-row-hover: #1c1c1c;
-  --surface-row-active: #232323;
-  --surface-popover: #181818;
-  --surface-footer: #0d0d0d;
-  --surface-subtle: rgba(255, 255, 255, 0.035);
-  --surface-subtle-hover: rgba(255, 255, 255, 0.06);
-  --surface-overlay: rgba(18, 18, 18, 0.97);
+  --app-shell: #0b0908;
+  --surface-card: #171412;
+  --surface-row: #14120f;
+  --surface-row-hover: #201c18;
+  --surface-row-active: #27231e;
+  --surface-popover: #1b1815;
+  --surface-footer: #0f0d0b;
+  --surface-subtle: rgba(255, 238, 217, 0.035);
+  --surface-subtle-hover: rgba(255, 238, 217, 0.06);
+  --surface-overlay: rgba(23, 20, 18, 0.97);
   --surface-muted: rgba(0, 0, 0, 0.24);
   --surface-raised: var(--surface-card);
-  --chip-bg: rgba(255, 255, 255, 0.08);
-  --chip-strong-bg: rgba(255, 255, 255, 0.13);
-  --loader-track: rgba(255, 255, 255, 0.2);
-  --danger-soft: rgba(255, 102, 118, 0.11);
+  --chip-bg: rgba(255, 238, 217, 0.08);
+  --chip-strong-bg: rgba(255, 238, 217, 0.13);
+  --loader-track: rgba(255, 238, 217, 0.2);
+  --danger-soft: rgba(251, 115, 97, 0.11);
   --warning-soft: rgba(244, 185, 79, 0.11);
-  --accent-soft: rgba(255, 255, 255, 0.1);
-  --accent-contrast: #0d0d0d;
-  --switch-off: #505050;
+  --accent-soft: rgba(239, 231, 212, 0.1);
+  --accent-contrast: #100e0b;
+  --switch-off: #575048;
   --switch-thumb: #f6f2df;
-  --editor-active-line: rgba(255, 255, 255, 0.055);
-  --text-0: #f5f5f2;
-  --text-1: #d7d7d4;
-  --text-2: #a3a3a0;
-  --text-3: #737370;
-  --accent: #f0f0ed;
-  --accent-glow: rgba(255, 255, 255, 0.15);
-  --primary: #f0f0ed;
-  --primary-text: #111111;
-  --green: #54d59a;
-  --red: #ff6676;
+  --editor-active-line: rgba(255, 238, 217, 0.055);
+  --text-0: #f6f1e6;
+  --text-1: #d8d2c5;
+  --text-2: #a59d8f;
+  --text-3: #756e62;
+  --accent: #efe7d4;
+  --accent-glow: rgba(239, 231, 212, 0.15);
+  --primary: #efe7d4;
+  --primary-text: #161210;
+  --green: #63cd82;
+  --red: #fb7361;
   --yellow: #f4b94f;
   --amber: var(--yellow);
   --blue: #69c6f4;
-  --purple: #c59bff;
+  --purple: #bfa0f2;
   --focus-ring: var(--accent);
   --r-lg: 9px;
   --r: 6px;
   --r-sm: 4px;
   --r-pill: 4px;
-  --shadow-card: 2px 2px 0 rgba(3, 5, 17, 0.3);
-  --shadow-overlay: 4px 4px 0 rgba(3, 5, 17, 0.38);
-  --shadow-popover: 4px 4px 0 rgba(3, 5, 17, 0.44);
+  --shadow-card: 2px 2px 0 rgba(26, 16, 8, 0.32);
+  --shadow-overlay: 4px 4px 0 rgba(26, 16, 8, 0.4);
+  --shadow-popover: 4px 4px 0 rgba(26, 16, 8, 0.46);
   /* Shell frame: every region is a rounded tile floating on a uniform gutter,
      so horizontal and vertical separators meet in rounded corners instead of
      square T-joints. */
@@ -153,19 +159,19 @@
      currentColor. Lets a control that cannot hold an <svg> child — a native
      select — still draw the same arrow every other control in the app uses. */
   --retro-chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M20 8v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-4v-1H9v-1H8v-1H7v-1H6v-1H5v-1H4V8h2v1h1v1h1v1h1v1h1v1h4v-1h1v-1h1v-1h1V9h1V8h2Z'/%3E%3C/svg%3E");
-  --retro-rule: #8a8a8a;
-  --retro-bevel-highlight: #343434;
-  --retro-bevel-shadow: #080808;
-  --retro-divider-shell: #181818;
+  --retro-rule: #968a7c;
+  --retro-bevel-highlight: #3a332c;
+  --retro-bevel-shadow: #0a0807;
+  --retro-divider-shell: #1b1815;
   --retro-divider-fill: #3a302b;
-  --retro-frame-edge: #8a8a8a;
-  --retro-frame-highlight: #242424;
-  --retro-frame-gutter: #030303;
-  --retro-scroll-thumb: #55575a;
-  --retro-scroll-thumb-highlight: #686a6d;
-  --retro-scroll-thumb-hover: #66686b;
+  --retro-frame-edge: #968a7c;
+  --retro-frame-highlight: #282420;
+  --retro-frame-gutter: #040303;
+  --retro-scroll-thumb: #5d564c;
+  --retro-scroll-thumb-highlight: #6f675c;
+  --retro-scroll-thumb-hover: #6d655a;
   --retro-scroll-thumb-shadow: rgba(0, 0, 0, 0.3);
-  --retro-grid: rgba(255, 255, 255, 0.02);
+  --retro-grid: rgba(255, 238, 217, 0.02);
 }
 
 :root[data-theme="light"] {
