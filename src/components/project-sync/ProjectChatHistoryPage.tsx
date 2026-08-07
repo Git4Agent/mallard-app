@@ -326,7 +326,7 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
         }}
       >
         <div className="sync-history-branch-menu-heading">
-          <span>Switch branch</span>
+          <span>View branch</span>
           <small>{branches.length}</small>
         </div>
         <div className="sync-history-branch-options">
