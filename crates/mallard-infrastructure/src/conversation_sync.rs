@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use super::domain::{
+use mallard_domain::{
     classify_thread_refresh, ActionId, CanonicalConversationMessage, ConversationDivergencePlan,
     ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
     ConversationReasonCode, ConversationRelation, HostId, LocalProjectId, LocalProviderProfileId,

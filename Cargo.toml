@@ -1,0 +1,23 @@
+[workspace]
+members = [
+  "src-tauri",
+  "crates/mallard-cli",
+  "crates/mallard-domain",
+  "crates/mallard-infrastructure",
+]
+default-members = ["src-tauri"]
+# A virtual workspace without an explicit resolver falls back to resolver 1;
+# "2" matches what the pre-workspace edition-2021 package used.
+resolver = "2"
+
+[workspace.package]
+version = "0.1.2"
+edition = "2021"
+license = "Apache-2.0"
+
+# Optimize dependencies only: the wildcard excludes workspace members, so app
+# edits keep opt-level 0 incremental builds while serde_json/sha2/aws-* run
+# optimized (~3.9× on transcript analysis). Deps compile once; the cost is a
+# single full rebuild when this setting first lands.
+[profile.dev.package."*"]
+opt-level = 1

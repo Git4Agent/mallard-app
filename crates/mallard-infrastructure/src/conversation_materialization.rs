@@ -11,14 +11,15 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use super::codex_native_fork::{
+use crate::codex_native_fork::{
     complete_codex_post_commit_presentation, coordinate_native_fork, preflight_native_fork,
     verify_recorded_fork, verify_source_idle_and_title, CodexForkCoordinatorOutcome,
     CodexForkExecutionRequest, CodexNameStatus, CodexPostCommitPresentationRequest,
     CodexThreadRenameRequest, ForkPhaseObserver, VerifiedNativeFork,
 };
-use super::conversation_codec::{analyze_codex_transcript, CodecLineage};
-use super::domain::{
+use crate::conversation_codec::{analyze_codex_transcript, CodecLineage};
+use crate::persistence::LocalStateRepository;
+use mallard_domain::{
     conversation_resource_id, ActionId, ActionStatus, ApplyReceipt, CodexDivergenceReceipt,
     CodexForkAttempt, CodexForkAttemptStatus, CodexForkExecutor, CodexInventoryRefreshStatus,
     ConversationApplyReceipt, ConversationCloudAnchor, ConversationDivergenceResolution,
@@ -28,7 +29,6 @@ use super::domain::{
     ForkStamp, LocalConversationBinding, MaterializationId, MaterializationRecord,
     MaterializationStatus, RestoreActionType, TargetExpectation, ThreadId, LOCAL_SCHEMA,
 };
-use super::persistence::LocalStateRepository;
 
 const MAX_PROVIDER_TARGET_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -159,7 +159,7 @@ pub struct ConversationCloudPublication {
 /// engine, and finalize the local receipt. `inspect_after_error` closes the
 /// important CAS ambiguity: an object store may commit the head and then
 /// return an I/O error.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn apply_conversation_cloud_publication(
     repository: &LocalStateRepository,
     mut operation: ConversationSyncOperation,
@@ -228,7 +228,7 @@ pub fn apply_conversation_cloud_publication(
 /// Publish a reviewed set of Push conversation actions while the command
 /// orchestrator holds the host-operation guard across generic and
 /// conversation publication.
-pub(crate) fn apply_conversation_cloud_publications_locked(
+pub fn apply_conversation_cloud_publications_locked(
     repository: &LocalStateRepository,
     operations: Vec<ConversationSyncOperation>,
     publish: impl FnOnce() -> Result<ConversationCloudPublication, String>,
@@ -340,7 +340,7 @@ pub(crate) fn apply_conversation_cloud_publications_locked(
 /// Recover Push operations with a caller-supplied immutable-head inspector.
 /// The inspector must return a publication only after validating that the
 /// reviewed result variant and digests are present in that exact manifest.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn recover_conversation_cloud_publications(
     repository: &LocalStateRepository,
     mut inspect: impl FnMut(
@@ -414,7 +414,7 @@ pub fn recover_conversation_cloud_publications(
 
 /// Apply one reviewed Pull materialization. All target expectations and local
 /// scope revisions are checked before the Prepared record is written.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn apply_conversation_materialization(
     repository: &LocalStateRepository,
     request: ConversationMaterializationRequest,
@@ -424,7 +424,7 @@ pub fn apply_conversation_materialization(
     apply_conversation_materialization_locked(repository, request, failpoints)
 }
 
-pub(crate) fn apply_conversation_materialization_locked(
+pub fn apply_conversation_materialization_locked(
     repository: &LocalStateRepository,
     request: ConversationMaterializationRequest,
     failpoints: &mut impl ConversationFailpoints,
@@ -495,7 +495,7 @@ pub(crate) fn apply_conversation_materialization_locked(
     Ok(receipt)
 }
 
-pub(crate) fn apply_codex_divergence_locked(
+pub fn apply_codex_divergence_locked(
     repository: &LocalStateRepository,
     request: CodexDivergenceMaterializationRequest,
     failpoints: &mut impl ConversationFailpoints,
@@ -571,7 +571,7 @@ pub(crate) fn apply_codex_divergence_locked(
     finish_codex_divergence(repository, operation, &request.fork, failpoints)
 }
 
-pub(crate) fn retry_codex_divergence_locked(
+pub fn retry_codex_divergence_locked(
     repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
     mut fork: CodexForkExecutionRequest,
@@ -936,7 +936,7 @@ fn validate_operation_scope_for_resume(
     Ok(())
 }
 
-pub(crate) fn codex_fork_request_for_operation(
+pub fn codex_fork_request_for_operation(
     repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
 ) -> Result<CodexForkExecutionRequest, String> {
@@ -982,7 +982,7 @@ pub(crate) fn codex_fork_request_for_operation(
 
 fn divergence_mut(
     operation: &mut ConversationSyncOperation,
-) -> Result<&mut super::domain::CodexDivergenceOperation, String> {
+) -> Result<&mut mallard_domain::CodexDivergenceOperation, String> {
     match &mut operation.operation {
         ConversationSyncOperationKind::CodexDivergence(divergence) => Ok(divergence),
         _ => Err("conversation operation is not a Codex divergence".to_string()),
@@ -2054,12 +2054,12 @@ fn verify_target_role_set(
     // The Codex index row is conditional presentation metadata, written
     // only when the cloud thread carries a real title, so creates and
     // replacements alike allow at most one fragment.
-    if operation.provider == super::domain::Provider::Codex && indexes > 1 {
+    if operation.provider == mallard_domain::Provider::Codex && indexes > 1 {
         return Err("Codex conversations allow at most one index fragment".to_string());
     }
     // Claude has no provider index: the projects directory listing is the
     // index, so a resumable Claude materialization is exactly one transcript.
-    if operation.provider == super::domain::Provider::Claude && indexes != 0 {
+    if operation.provider == mallard_domain::Provider::Claude && indexes != 0 {
         return Err("Claude conversations have no provider index fragment".to_string());
     }
     Ok(())
@@ -2080,7 +2080,7 @@ fn verify_provider_payload(
     })?;
     match &target.role {
         ConversationFileRole::Transcript
-            if operation.provider == super::domain::Provider::Claude =>
+            if operation.provider == mallard_domain::Provider::Claude =>
         {
             // Claude transcripts have no lineage codec. Verify what can be
             // proven without one: bounded JSONL structure, and that the
@@ -2101,9 +2101,9 @@ fn verify_provider_payload(
                 serde_json::from_slice::<serde_json::Value>(line)
                     .map_err(|_| "Claude transcript contains malformed JSON".to_string())?;
             }
-            let meta = super::provider_capture::scan_jsonl_metadata(
+            let meta = crate::provider_capture::scan_jsonl_metadata(
                 path,
-                super::provider_capture::Provider::Claude,
+                crate::provider_capture::Provider::Claude,
             )
             .map_err(|error| format!("staged Claude transcript metadata: {error}"))?;
             if Some(meta.session_id.as_str()) != operation.provider_thread_id.as_deref() {
@@ -2124,7 +2124,7 @@ fn verify_provider_payload(
             }
         }
         ConversationFileRole::Transcript => {
-            if operation.provider != super::domain::Provider::Codex {
+            if operation.provider != mallard_domain::Provider::Codex {
                 return Err("unsupported resumable conversation provider".to_string());
             }
             let analysis = analyze_codex_transcript(&bytes);
@@ -2460,7 +2460,7 @@ fn commit_binding(
 }
 
 fn binding_commit_is_complete(
-    document: &super::domain::ConversationBindings,
+    document: &mallard_domain::ConversationBindings,
     operation: &ConversationSyncOperation,
 ) -> bool {
     let materialized_exists = document.bindings.iter().any(|binding| {

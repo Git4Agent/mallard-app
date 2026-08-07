@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Rust workspace build output
+/target
+
 # Generated UI captures
 /output/
 .superdesign/tmp/

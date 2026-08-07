@@ -6,8 +6,9 @@ const projectUrl = new URL("../", import.meta.url);
 const read = (path) => readFile(new URL(path, projectUrl), "utf8");
 
 test("release version is 0.1.2 in every source", async () => {
-  const [tauriConfigSource, cargoSource, packageSource, packageLockSource] = await Promise.all([
+  const [tauriConfigSource, workspaceCargoSource, cargoSource, packageSource, packageLockSource] = await Promise.all([
     read("src-tauri/tauri.conf.json"),
+    read("Cargo.toml"),
     read("src-tauri/Cargo.toml"),
     read("package.json"),
     read("package-lock.json"),
@@ -17,7 +18,8 @@ test("release version is 0.1.2 in every source", async () => {
   const packageLock = JSON.parse(packageLockSource);
 
   assert.equal(tauriConfig.version, "0.1.2");
-  assert.match(cargoSource, /^version = "0\.1\.2"$/m);
+  assert.match(workspaceCargoSource, /^version = "0\.1\.2"$/m);
+  assert.match(cargoSource, /^version\.workspace = true$/m);
   assert.equal(packageConfig.version, "0.1.2");
   assert.equal(packageLock.version, "0.1.2");
   assert.equal(packageLock.packages[""].version, "0.1.2");
@@ -86,8 +88,8 @@ test("application contains no automatic updater", async () => {
 test("Codex native fork is compiled in without an Expect helper", async () => {
   const [tauriConfigSource, cargoSource, nativeForkSource] = await Promise.all([
     read("src-tauri/tauri.conf.json"),
-    read("src-tauri/Cargo.toml"),
-    read("src-tauri/src/project_sync/codex_native_fork.rs"),
+    read("crates/mallard-infrastructure/Cargo.toml"),
+    read("crates/mallard-infrastructure/src/codex_native_fork.rs"),
   ]);
   const tauriConfig = JSON.parse(tauriConfigSource);
 

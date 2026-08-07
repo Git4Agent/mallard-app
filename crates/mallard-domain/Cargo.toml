@@ -1,0 +1,20 @@
+[package]
+name = "mallard-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mallard domain types, validation limits, and digest rules"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+hmac = "0.12"
+getrandom = "0.3"
+
+[features]
+# Exposes test-only helpers (e.g. classify_conversation_relation) to other
+# crates' test suites. Enabled from dev-dependencies only.
+test-support = []
+
+[dev-dependencies]
+serde_json = "1"

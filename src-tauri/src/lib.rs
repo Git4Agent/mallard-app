@@ -1,5 +1,4 @@
 mod activity_log;
-mod codex_binary;
 mod project_sync;
 
 #[cfg(test)]

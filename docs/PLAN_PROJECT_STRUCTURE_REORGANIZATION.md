@@ -1,131 +1,203 @@
-# Plan: Rust Workspace and Project Structure Reorganization
+# Plan: Behavior-Preserving Rust Workspace Reorganization
 
 - **Status:** Proposed
 - **Date:** August 6, 2026
-- **Implementation baseline:** Mallard 0.1.2 at `a5d41c5`
-- **Product baseline:** ProjectSync, machine-local schema 1, portable bundle
-  schema 1
-- **Primary objective:** Reorganize the Rust backend into a workspace with
-  explicit domain, application, infrastructure, desktop, and CLI boundaries
-  without changing existing Mallard behavior
-- **CLI scope in this plan:** A compilable, dependency-free placeholder only
+- **Implementation baseline:** Mallard 0.1.2 at `2aa6c7a`
+- **Change model:** In-place refactor; every existing behavior is preserved
+- **Backward compatibility:** Total — old and new builds are interchangeable
+- **Data migration:** None, because no data contract changes
+- **User action required:** None (no reset, no reconfiguration)
+- **CLI scope:** A compilable, dependency-free placeholder only
 
 ## 1. Outcome
 
-Mallard becomes a Cargo workspace with two entry-point packages:
+Rebuild Mallard's Rust organization as a Cargo workspace with explicit
+domain, application, infrastructure, desktop, and future CLI boundaries —
+without changing anything a user, the frontend, existing local state, or
+existing cloud storage can observe.
 
-- the existing Tauri desktop application; and
-- a new, empty `mallard-cli` package reserved for future commands.
+This is a pure restructuring. Code moves between crates and module paths
+change internally, but serialized bytes, IPC payloads, event names, on-disk
+layouts, cloud object layouts, and packaged artifacts stay identical. A user
+upgrades in place; nothing is reset, migrated, or reconfigured. Installing
+the previous build again afterwards is safe, because the state it reads is
+unchanged.
 
-Both entry points will eventually use the same application services. This
-plan creates that architecture incrementally while keeping the current React
-frontend, Tauri command names, persistence schemas, bundle formats, safety
-checks, tests, and release behavior intact.
+This revision supersedes the earlier clean-cutover draft of this plan. The
+target structure is the same; the schema replacement, new IPC contract,
+mandatory reset, and fail-closed old-state rejection are all withdrawn.
 
-The target is not a rewrite. Each migration step must leave the desktop
-application buildable and testable, and each pull request must have an
-independently useful or mechanically verifiable result.
+## 2. Frozen contracts
 
-## 2. Decision summary
+The following are contracts, verified before, during, and after the work.
+No phase may change any of them:
 
-1. Add a virtual Cargo workspace at the repository root.
-2. Keep the React application in `src/`.
-3. Keep the Tauri application in `src-tauri/`.
-4. Keep the current Cargo package name `mallard` during this refactor.
-5. Create separate `mallard-domain`, `mallard-application`, and
-   `mallard-infrastructure` library packages under `crates/`.
-6. Create `mallard-cli` as a separate package with an empty `fn main() {}`.
-7. Do not package, install, advertise, or add commands to the CLI in this plan.
-8. Move behavior by complete vertical slices rather than by performing one
-   repository-wide file shuffle.
-9. Keep Tauri commands as compatibility-stable adapters until all behavior
-   behind them has moved.
-10. Use Cargo resolver 2 initially to preserve the current Rust 2021 dependency
-    resolution behavior. Evaluate resolver 3 as a separate follow-up.
+1. **Machine-local state.** The schema-1 layout under `~/.mallard`: every
+   document path, file format, field name, lock protocol, and byte the
+   current build writes (see `CURRENT_METADATA_LAYOUT.md`).
+2. **Portable bundle storage.** The schema-1
+   `.mallard/v1/repositories/<bundle-id>/` object layout, key names, digest
+   algorithms, and compare-and-swap head semantics, for both local-folder
+   and S3-compatible/R2 destinations.
+3. **Tauri IPC.** All 71 registered commands (66 in
+   `project_sync/commands.rs`, 5 in `activity_log.rs`): names, argument
+   shapes, response shapes, error strings, and the full
+   `generate_handler!` registration list.
+4. **Events.** Every emitted event: name, payload shape, and emission order
+   relative to the operation that produces it.
+5. **Frontend.** `src/` requires zero changes. An empty
+   `git diff -- src/` at every merge is the acceptance check, not a hope.
+6. **Activity log.** The JSONL schema, sanitization behavior, and file
+   locations.
+7. **Packaging identity.** Product name `Mallard`, identifier
+   `com.hequ.agent-sync`, Cargo package name `mallard`, library name
+   `tauri_app_lib`, executable and DMG naming, and bundle contents.
+   (Renaming the desktop package is deliberately deferred; the package name
+   feeds the binary name and bundle.)
+8. **Dependency selection.** `src-tauri/Cargo.lock` is *moved* to the
+   repository root, never regenerated. Dependency versions and features do
+   not drift as a side effect of this plan.
+9. **Safety behavior.** Canonical-path validation, bounded I/O, atomic
+   writes, cross-process locking, immutable publication, SHA-256
+   verification, compare-and-swap heads, reviewed push/pull application,
+   digest-checked deletion, credential redaction, and sanitized activity
+   events — all preserved by moving their implementations without
+   functional edits, with their existing tests still passing.
 
-## 3. Why this change is needed
+"Preserved behavior" means these observable surfaces. Internal module
+paths, file names, crate boundaries, and `use` statements are free to
+change.
 
-The current Rust package contains clear conceptual modules, but several files
-now combine multiple architectural responsibilities:
+## 3. Change rules
 
-- `src-tauri/src/project_sync/commands.rs` contains 66 Tauri commands and is
-  approximately 18,000 lines;
-- `domain.rs` is approximately 5,800 lines;
-- `bundle_engine.rs` is approximately 5,600 lines and contains both storage
-  abstractions and concrete filesystem behavior;
-- `persistence.rs` is approximately 3,000 lines and is mostly reusable except
-  for its Tauri-specific construction path; and
-- Tauri, AWS, SQLite, PTY, filesystem, and domain dependencies are declared by
-  one Cargo package.
+### 3.1 Moves over rewrites
 
-Adding a substantial CLI inside `src-tauri/src/bin/` would make the CLI depend
-on the desktop package's dependency graph and would encourage it to call Tauri
-or persistence internals directly. That arrangement is acceptable for a
-short-lived prototype, but it is not the desired structure for a CLI that will
-eventually cover projects, storage, history, sync planning, and other Mallard
-operations.
+Relocate code mechanically. A moved function's diff should consist of
+import-path adjustments and nothing else. Do not rename fields, reorder
+serde attributes, change derive lists, reword error strings, or "improve"
+logic in passing. If a move reveals a bug, record it and fix it in a
+separate, ordinary bug-fix change — not inside a relocation commit.
 
-## 4. Scope and non-goals
+### 3.2 Temporary re-export shims are allowed
+
+During extraction, the old module path may forward to the new crate:
+
+```rust
+// src-tauri/src/project_sync/mod.rs (temporary)
+pub use mallard_domain as domain;
+```
+
+This keeps the not-yet-moved code compiling unchanged while a module moves
+out. Shims are internal and invisible to every frozen contract. They are
+inventoried as they are added and deleted in Phase 5; the final tree
+contains none.
+
+### 3.3 Tests are the harness, not a work item
+
+The existing suites are the primary proof of preservation:
+
+- `npm run test:frontend-integration`
+- `npm run test:release-config`
+- `npm run check:release-version`
+- `npm run test:backend-integration`
+- `cargo test` (unit tests travel with their modules; the headless
+  `sync_tests` integration suite stays in `src-tauri` and keeps driving the
+  real Tauri commands through the mock runtime)
+
+Test edits are limited to import paths. Editing a test's assertions or
+fixtures to make a phase pass is a stop-the-line signal that behavior
+changed. Adding *new* freeze tests (for example, a command-registration
+snapshot) is encouraged; weakening existing ones is not.
+
+### 3.4 Tauri coupling is wrapped, not rewritten
+
+Where moved code touches Tauri today, leave a thin desktop-side wrapper
+instead of redesigning the flow:
+
+- `persistence.rs` has exactly one Tauri reference — the
+  `from_app<R: tauri::Runtime>` constructor. The store moves to
+  infrastructure with `from_home_dir`; a small `from_app` helper stays in
+  the desktop crate and delegates.
+- `commands.rs` orchestration uses `AppHandle` for event emission (66
+  `emit` calls). Extracted application functions take an event-sink
+  callback; the desktop wrapper passes a closure that forwards to
+  `app.emit` with the identical event name and payload, emitted at the
+  identical point in the flow.
+- `activity_log.rs` splits: the JSONL persistence core (no Tauri) moves to
+  infrastructure; its 5 Tauri commands and event emission stay in the
+  desktop crate.
+
+All other candidate modules — `domain.rs`, `bundle_engine.rs`,
+`s3_store.rs`, `provider_capture.rs`, `chat_history.rs`,
+`conversation_codec.rs`, `conversation_materialization.rs`,
+`conversation_sync.rs`, `codex_app_refresh.rs`, `codex_native_fork.rs`,
+`codex_rollout.rs`, `codex_binary.rs` — have zero Tauri references today
+and move cleanly.
+
+### 3.5 No concurrent feature work
+
+No new features, schema fields, commands, or UI changes land inside this
+plan's phases. Feature plans (see §5) run entirely before or entirely after
+this restructure — never interleaved with it.
+
+## 4. Scope
 
 ### 4.1 In scope
 
-- a root Cargo workspace and root `Cargo.lock`;
-- centralized package metadata and dependency versions where safe;
-- a compile-only `mallard-cli` placeholder package;
-- extraction of pure domain code;
-- extraction of application use cases and external-service ports;
-- extraction of persistence, storage, provider, filesystem, and platform
-  adapters;
-- decomposition of Tauri commands into thin command-family modules;
-- relocation of tests to the package that owns the behavior;
-- updates required for workspace-aware development and release scripts; and
-- enforcement of dependency direction after the migration is complete.
+- a virtual Cargo workspace at the repository root;
+- one root `Cargo.lock` (moved, not regenerated) and one root target
+  directory;
+- shared package metadata and the existing dev profile moved to the root;
+- `mallard-domain`, `mallard-application`, and `mallard-infrastructure`
+  library packages populated by mechanical extraction;
+- `src-tauri` reduced to a thin desktop adapter with unchanged commands;
+- an empty `mallard-cli` package reserving the future entry-point boundary;
+- workspace-aware build, release, version-check, and CI-cache updates;
+- freeze tests that pin the command registration list; and
+- verification that a pre-restructure `~/.mallard` and existing storage
+  destinations work unchanged, including after downgrading back.
 
 ### 4.2 Out of scope
 
-- implementing any real CLI command;
-- adding Clap or another CLI parser;
-- installing the CLI on `PATH`;
-- adding the CLI to a DMG, app bundle, MSI, NSIS installer, or updater;
-- changing the React component structure;
-- changing a Tauri command name or frontend invocation;
-- changing machine-local schema 1 or portable bundle schema 1;
-- changing the `~/.mallard` directory layout;
-- changing provider capture rules;
-- changing push, pull, restore, deletion, or trust semantics;
-- renaming the desktop Cargo package or application executable;
-- adopting Cargo resolver 3;
-- introducing a new state database; or
-- combining this refactor with product features from the R2 plans.
+- any change to local state, bundle, cloud-key, IPC, event, or log schemas;
+- any frontend change;
+- renaming the desktop package, library, binary, or bundle identity;
+- hexagonal ports, trait boundaries, or fake-port test scaffolding;
+- real CLI commands, Clap, CLI packaging, or `PATH` installation;
+- R2 provisioning or agent-assisted setup;
+- dependency upgrades, edition changes, or `rust-version` adoption;
+- Windows CI (none exists today; the status quo is preserved); and
+- behavior fixes, performance work, or API redesign of any kind.
 
-## 5. Plan precedence
+## 5. Plan precedence and sequencing
 
-This document owns the Rust workspace and package-layout decisions.
+This document owns the Rust workspace layout and package boundaries.
 
-It supersedes only the structural assumption in:
-
-- `PLAN_AGENT_ASSISTED_R2_SETUP.md`; and
-- `PLAN_R2_STORAGE_CLI_SETUP.md`
-
-that places `mallard-cli` under `src-tauri/src/bin/` and makes it part of the
-desktop Cargo package.
-
-Those documents continue to own their product requirements, secret-handling
-requirements, Cloudflare behavior, and future CLI experience. Their CLI work
-must begin only after this reorganization reaches the appropriate application
-and infrastructure boundaries.
+- `PLAN_AGENT_ASSISTED_R2_SETUP.md` and `PLAN_R2_STORAGE_CLI_SETUP.md`:
+  their assumption that `mallard-cli` lives in `src-tauri/src/bin/` is
+  superseded — the CLI boundary is `crates/mallard-cli`, and their future
+  implementation targets the application and infrastructure packages. Their
+  product and secret-handling requirements are unaffected.
+- `PLAN_STORAGE_SCOPED_AGENT_CATALOG.md` (proposed the same day): must not
+  interleave with this restructure. Recommended order: land this plan
+  first — it is mechanical, behavior-neutral, and short-lived — then build
+  the catalog on the new layout. If the catalog lands first instead, this
+  plan rebases and re-runs its Phase 0 inventory.
+- `PLAN_REMOVE_BACKWARD_COMPAT.md` (executed 2026-07-28): established the
+  single schema-1 local and bundle formats. This plan freezes exactly that
+  state; nothing here reintroduces migration or compatibility machinery,
+  because nothing changes shape.
 
 ## 6. Target repository structure
 
 ```text
 mallard-app/
-├── Cargo.toml
-├── Cargo.lock
+├── Cargo.toml                 # virtual workspace root
+├── Cargo.lock                 # moved from src-tauri/, not regenerated
 ├── package.json
-├── src/
-│   └── ... existing React frontend ...
+├── src/                       # React frontend — untouched
 │
-├── src-tauri/
+├── src-tauri/                 # desktop adapter (package name stays `mallard`)
 │   ├── Cargo.toml
 │   ├── build.rs
 │   ├── tauri.conf.json
@@ -133,8 +205,9 @@ mallard-app/
 │   ├── icons/
 │   └── src/
 │       ├── main.rs
-│       ├── lib.rs
-│       ├── commands/
+│       ├── lib.rs             # builder, managed state, registration list
+│       ├── activity_log.rs    # 5 Tauri commands + emission (JSONL core moves out)
+│       ├── commands/          # Phase 5 file split of today's command wrappers
 │       │   ├── mod.rs
 │       │   ├── activity.rs
 │       │   ├── config.rs
@@ -143,318 +216,101 @@ mallard-app/
 │       │   ├── sync.rs
 │       │   ├── history.rs
 │       │   └── setup.rs
-│       └── sync_tests/
-│           └── ... cross-layer desktop tests retained as needed ...
+│       └── sync_tests/        # headless integration suite — stays, unchanged
 │
 └── crates/
-    ├── mallard-domain/
+    ├── mallard-domain/        # domain.rs content, split into modules
     │   ├── Cargo.toml
     │   └── src/
-    │       ├── lib.rs
-    │       ├── identity.rs
-    │       ├── config.rs
-    │       ├── project.rs
-    │       ├── storage.rs
-    │       ├── bundle.rs
-    │       ├── restore.rs
-    │       ├── conversation.rs
-    │       └── setup.rs
-    │
-    ├── mallard-application/
+    ├── mallard-application/   # orchestration extracted from commands.rs
     │   ├── Cargo.toml
     │   └── src/
-    │       ├── lib.rs
-    │       ├── error.rs
-    │       ├── services.rs
-    │       ├── ports/
-    │       │   ├── mod.rs
-    │       │   ├── state_repository.rs
-    │       │   ├── bundle_store.rs
-    │       │   ├── provider.rs
-    │       │   ├── activity_sink.rs
-    │       │   └── clock.rs
-    │       └── use_cases/
-    │           ├── mod.rs
-    │           ├── config.rs
-    │           ├── storage.rs
-    │           ├── projects.rs
-    │           ├── sync.rs
-    │           ├── history.rs
-    │           └── setup.rs
-    │
     ├── mallard-infrastructure/
     │   ├── Cargo.toml
-    │   └── src/
-    │       ├── lib.rs
-    │       ├── persistence/
-    │       │   └── mod.rs
-    │       ├── storage/
-    │       │   ├── mod.rs
-    │       │   ├── local.rs
-    │       │   └── s3.rs
-    │       ├── providers/
-    │       │   ├── mod.rs
-    │       │   ├── codex.rs
-    │       │   └── claude.rs
-    │       ├── activity/
-    │       │   └── jsonl.rs
-    │       ├── filesystem/
-    │       │   └── mod.rs
-    │       └── platform/
-    │           ├── mod.rs
-    │           ├── macos.rs
-    │           └── windows.rs
-    │
+    │   └── src/               # persistence, stores, providers, codecs,
+    │                          # filesystem, platform, activity JSONL
     └── mallard-cli/
         ├── Cargo.toml
         └── src/
-            └── main.rs
+            └── main.rs        # `fn main() {}`
 ```
 
-This is the desired end state. Except for the explicitly requested CLI
-placeholder, the implementation should not create empty packages or empty
-module trees far in advance of moving their first owned behavior.
+Except for the explicitly requested CLI placeholder, do not create empty
+module trees ahead of moved code. Each crate directory appears when its
+first module moves in. Splitting a moved file into smaller modules inside
+its new crate is allowed (and expected for the 5,806-line `domain.rs`), as
+long as content is otherwise unchanged.
 
 ## 7. Architecture and dependency direction
 
-The compile-time dependency graph is:
+The compile-time graph after extraction:
 
 ```text
 mallard-domain
        ↑
-mallard-application  ←  mallard-infrastructure
-       ↑                       ↑
-       ├── mallard desktop ────┤
-       └── mallard-cli ────────┘
+mallard-infrastructure
+       ↑
+mallard-application
+       ↑
+       ├── mallard-desktop (src-tauri, package `mallard`)
+       └── mallard-cli (future)
 ```
 
-At runtime, application services call port traits that are implemented by
-infrastructure adapters. The dependency direction remains inward because the
-port traits are owned by `mallard-application`.
+This is a **layered** structure: application code calls infrastructure
+directly, exactly as today's `commands.rs` calls `persistence.rs` and
+`s3_store.rs` directly. The earlier draft's hexagonal shape — application-
+owned port traits with infrastructure implementing them — is deliberately
+deferred: inverting that dependency requires rewriting call sites and test
+scaffolding, which conflicts with behavior preservation. Introduce ports
+later, one real boundary at a time, as ordinary reviewed refactors on top
+of this layout.
 
-### 7.1 `mallard-domain`
+Crate rules (enforced in Phase 5):
 
-Owns:
+- `mallard-domain`: no Tauri, no Tokio, no AWS, no SQLite, no PTY, no
+  `dirs`, no filesystem traversal. Holds types, validation, digests, and
+  pure comparison logic. (Verified feasible: `domain.rs` has zero Tauri
+  references today.)
+- `mallard-infrastructure`: may use Tokio, AWS SDK, SQLite, PTY, `notify`,
+  `walkdir`, `dirs`, platform APIs. Must not depend on Tauri. Constructed
+  from validated paths (`from_home_dir`), never from an `AppHandle`.
+- `mallard-application`: orchestration and coordination. Must not depend on
+  Tauri. Emits events only through the injected sink callback.
+- `src-tauri` (desktop): Tauri builder, managed state, the 71 command
+  wrappers, DTO passthrough, event forwarding, dialogs, opener. Each
+  wrapper extracts arguments, calls one application function, and returns
+  its result — with names, shapes, and errors identical to today.
+- `mallard-cli`: empty; no dependencies; excluded from default builds and
+  from every installer.
 
-- validated IDs and value objects;
-- machine-local and portable schema types;
-- manifests, heads, plans, actions, receipts, and policy decisions;
-- validation limits and invariants;
-- pure digest and comparison behavior; and
-- pure domain tests.
+## 8. Current-to-target ownership
 
-May depend on:
+Tauri-reference counts are from the baseline and explain why each move is
+mechanical.
 
-- `serde`;
-- cryptographic primitives needed to represent or verify domain digests; and
-- other small, platform-independent libraries.
+| Current source | Tauri refs | Destination |
+| --- | --- | --- |
+| `project_sync/domain.rs` (5,806 lines) | 0 | `mallard-domain`, split into modules, content unchanged |
+| `project_sync/persistence.rs` | 1 (`from_app`) | `mallard-infrastructure`; `from_app` helper stays in desktop |
+| `project_sync/s3_store.rs` | 0 | `mallard-infrastructure` |
+| local store code in `project_sync/bundle_engine.rs` | 0 | `mallard-infrastructure` |
+| `project_sync/provider_capture.rs` | 0 | `mallard-infrastructure` |
+| `project_sync/chat_history.rs` | 0 | `mallard-infrastructure` |
+| `project_sync/conversation_codec.rs` | 0 | `mallard-infrastructure` |
+| `project_sync/conversation_materialization.rs` | 0 | `mallard-infrastructure` |
+| `project_sync/conversation_sync.rs` | 0 | `mallard-application` (orchestration) / `mallard-infrastructure` (mechanics), split along existing function boundaries |
+| `project_sync/codex_app_refresh.rs` | 0 | `mallard-infrastructure` |
+| `project_sync/codex_native_fork.rs` | 0 | `mallard-infrastructure` |
+| `project_sync/codex_rollout.rs` | 0 | `mallard-infrastructure` |
+| `src-tauri/src/codex_binary.rs` | 0 | `mallard-infrastructure` |
+| orchestration bodies in `project_sync/commands.rs` (17,997 lines) | 69 `AppHandle`, 66 `emit` | `mallard-application`, with event-sink injection (§3.4) |
+| `#[tauri::command]` wrappers, DTO definitions used on the wire | — | stay in `src-tauri` (wrappers) or move with their owners — serde shapes frozen either way |
+| JSONL core of `src-tauri/src/activity_log.rs` | 19 total in file | core → `mallard-infrastructure`; commands and emission stay in desktop |
+| `src-tauri/src/sync_tests/` | — | stays in `src-tauri`, assertions unchanged |
 
-Must not depend on:
+## 9. Workspace design
 
-- Tauri or Tauri plugins;
-- Clap;
-- Tokio runtime facilities;
-- AWS SDK crates;
-- SQLite;
-- PTY or process-launching libraries;
-- `dirs`;
-- filesystem traversal;
-- operating-system APIs; or
-- React-facing transport behavior.
-
-Durable schema DTOs may remain serializable domain types. Tauri-only request
-and response DTOs do not belong here.
-
-### 7.2 `mallard-application`
-
-Owns:
-
-- application services and use cases;
-- input and result types shared by multiple entry points;
-- typed application errors;
-- transaction and orchestration order;
-- external-service port traits;
-- revision, digest, expiry, and approval coordination; and
-- tests using in-memory or deterministic fake ports.
-
-Must not depend on:
-
-- Tauri;
-- Clap;
-- AWS SDK implementations;
-- a concrete filesystem repository;
-- a concrete provider-home implementation; or
-- OS-specific APIs.
-
-The application layer must preserve the ordering currently enforced by Tauri
-commands. Moving a function is not permission to simplify a safety sequence.
-
-### 7.3 `mallard-infrastructure`
-
-Owns:
-
-- `LocalStateRepository` and persistence locking;
-- local-folder and S3-compatible object stores;
-- filesystem traversal, canonicalization, bounded reads, and atomic writes;
-- provider discovery, capture, codecs, and materialization;
-- SQLite backup and restore mechanics;
-- Git and chat-history adapters;
-- JSONL activity persistence;
-- platform-specific process and filesystem integration; and
-- adapter integration tests using temporary homes and loopback services.
-
-May depend on the heavy runtime crates currently declared by the desktop
-package, including AWS SDK, Tokio, SQLite, PTY, `notify`, and platform APIs.
-
-It must implement application ports without importing Tauri types.
-
-### 7.4 Tauri desktop package
-
-Owns:
-
-- Tauri builder and plugin initialization;
-- managed application state and dependency wiring;
-- JavaScript-to-Rust command request mapping;
-- mapping typed application errors to the existing frontend error contract;
-- frontend event emission;
-- dialogs, openers, windows, and other desktop capabilities; and
-- desktop integration tests.
-
-Tauri command handlers should eventually contain only:
-
-1. Tauri argument extraction;
-2. conversion into an application request;
-3. one application service call; and
-4. conversion into the existing serialized response.
-
-The existing `src-tauri/src/main.rs` remains unchanged except when required by
-Tauri itself.
-
-### 7.5 Empty CLI package
-
-During this plan, `mallard-cli` contains no Mallard behavior:
-
-```toml
-[package]
-name = "mallard-cli"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-publish = false
-
-[[bin]]
-name = "mallard-cli"
-path = "src/main.rs"
-```
-
-```rust
-fn main() {}
-```
-
-The placeholder:
-
-- has no dependencies;
-- does not read or write Mallard state;
-- is not linked to Tauri;
-- has no commands, flags, or output;
-- exits successfully;
-- is not included in packaged artifacts; and
-- exists only to reserve the package, binary name, workspace location, and
-  future entry-point boundary.
-
-## 8. Current-to-target ownership map
-
-| Current source | Target ownership |
-| --- | --- |
-| `project_sync/domain.rs` | `mallard-domain`, split by bounded context |
-| `project_sync/commands.rs` | orchestration to `mallard-application`; thin handlers to `src-tauri/src/commands/` |
-| `project_sync/persistence.rs` | `mallard-infrastructure/persistence` |
-| `project_sync/s3_store.rs` | `mallard-infrastructure/storage/s3.rs` |
-| local object-store code in `bundle_engine.rs` | `mallard-infrastructure/storage/local.rs` |
-| publication and restore orchestration in `bundle_engine.rs` | `mallard-application/use_cases/sync.rs` |
-| filesystem restore/apply code in `bundle_engine.rs` | `mallard-infrastructure/filesystem` |
-| `project_sync/provider_capture.rs` | `mallard-infrastructure/providers` |
-| `project_sync/chat_history.rs` | parsing/adapters in infrastructure; query orchestration in application |
-| `project_sync/conversation_codec.rs` | provider adapters in infrastructure |
-| `project_sync/conversation_materialization.rs` | provider/filesystem adapters in infrastructure |
-| `project_sync/conversation_sync.rs` | application sync use cases |
-| `project_sync/codex_app_refresh.rs` | infrastructure platform/provider adapter |
-| `project_sync/codex_native_fork.rs` | infrastructure platform/provider adapter |
-| `project_sync/codex_rollout.rs` | infrastructure provider adapter |
-| `src-tauri/src/codex_binary.rs` | infrastructure platform/provider adapter |
-| `src-tauri/src/activity_log.rs` | event contract/port in application, JSONL implementation in infrastructure, Tauri commands/emission in desktop |
-
-Some files contain both application and infrastructure behavior. They must be
-split by responsibility rather than moved wholesale into a convenient package.
-
-## 9. Contracts that must not change
-
-### 9.1 Frontend and Tauri contract
-
-The following stay stable:
-
-- command names registered in `src-tauri/src/lib.rs`;
-- camelCase JavaScript argument keys;
-- serialized Rust field names;
-- request optionality and defaults;
-- response shapes mirrored by `src/types.ts`;
-- error strings when the frontend depends on them;
-- event names and payload shapes; and
-- single-flight and revision behavior in frontend callers.
-
-Moving a DTO to another crate must not change its serialized form.
-
-### 9.2 Persistence contract
-
-The following stay stable:
-
-- `~/.mallard` as the machine-local root;
-- schema 1 filenames and JSON shapes;
-- bounded reads and collection sizes;
-- atomic replacement;
-- `persistence.lock` cross-process coordination;
-- optimistic revision checks;
-- no-follow traversal;
-- canonical-path validation;
-- symlink and special-file rejection; and
-- sanitized error and activity output.
-
-`LocalStateRepository::from_app` should become desktop wiring around a
-Tauri-free constructor such as `from_home_dir` or a validated `StatePaths`
-value. The repository itself must not retain an `AppHandle`.
-
-### 9.3 Sync and restore contract
-
-The following stay stable:
-
-- immutable publication;
-- SHA-256 verification;
-- compare-and-swap mutable heads;
-- reviewed push and pull plans;
-- plan digest, revision, expiry, and approval checks;
-- backup and receipt behavior;
-- exact, digest-checked file deletion;
-- exact-empty-directory deletion only;
-- non-Git project-content restrictions;
-- provider-path and trust decisions remaining local; and
-- best-effort secret warnings and executable-content acknowledgement.
-
-### 9.4 Release contract
-
-The following stay stable:
-
-- application version agreement;
-- Tauri configuration discovery in `src-tauri`;
-- frontend build paths;
-- application identifiers and product name;
-- signing and bundle verification;
-- release artifact names; and
-- no CLI binary in release bundles yet.
-
-## 10. Workspace manifest design
-
-The workspace membership grows as packages are extracted. Phase 1 contains
-only the existing desktop package and the requested CLI placeholder:
+Create a virtual workspace at the repository root:
 
 ```toml
 [workspace]
@@ -469,494 +325,298 @@ resolver = "2"
 version = "0.1.2"
 edition = "2021"
 license = "Apache-2.0"
-publish = false
 
+# Optimize dependencies only: the wildcard excludes workspace crates, so app
+# edits keep opt-level 0 incremental builds while serde_json/sha2/aws-* run
+# optimized. Moved here because Cargo ignores profiles in member manifests.
 [profile.dev.package."*"]
 opt-level = 1
 ```
 
-Add `mallard-domain`, `mallard-application`, and `mallard-infrastructure` to
-`members` in the phase that creates each package. The final membership is:
+Library crates join `members` when their first module moves in; the final
+list adds `crates/mallard-domain`, `crates/mallard-application`, and
+`crates/mallard-infrastructure`.
 
-```toml
-[workspace]
-members = [
-  "src-tauri",
-  "crates/mallard-cli",
-  "crates/mallard-domain",
-  "crates/mallard-application",
-  "crates/mallard-infrastructure",
-]
-default-members = ["src-tauri"]
-resolver = "2"
-```
+Decisions and their reasons:
 
-Important workspace consequences:
+1. **`resolver = "2"`, explicitly.** A virtual workspace without a
+   `resolver` key defaults to resolver 1; the current single-package build
+   (edition 2021) uses resolver 2. Writing `"2"` preserves today's
+   resolution exactly. Resolver 3 and an explicit `rust-version` are
+   deferred — they are policy changes, not restructuring.
+2. **Move the lockfile.** `git mv src-tauri/Cargo.lock Cargo.lock`. Cargo
+   accepts it at the root and keeps every pin. Do not run a bare
+   `cargo update`. The empty CLI adds no dependencies, so the graph is
+   unchanged.
+3. **Move the dev profile.** Cargo ignores `[profile]` in member manifests
+   (with a warning), so `[profile.dev.package."*"]` must move to the root
+   to keep its effect. Keep its explanatory comment.
+4. **Centralize the version.** `src-tauri/Cargo.toml` inherits
+   `version.workspace = true`; `scripts/check-release-version.mjs` is
+   updated to read the workspace root (its current regex on
+   `src-tauri/Cargo.toml` stops matching), and `tests/release-config.test.mjs`
+   is updated to match.
+5. **Keep the package name `mallard`.** The Cargo package name determines
+   the binary name, which feeds bundle contents. Renaming to
+   `mallard-desktop` (with `mainBinaryName` pinning and bundle
+   verification) is deferred work.
+6. **Target directory moves to the root.** Consequences, all in scope:
+   - `scripts/tauri-build.mjs` resolves the DMG under
+     `src-tauri/target/...` today; derive the target directory from
+     `cargo metadata` (or the workspace root) instead.
+   - `.github/workflows/release.yml` line 37 pins the rust-cache workspace
+     as `"./src-tauri -> target"`; update it for the root workspace.
+   - The root `.gitignore` gains a `/target` entry
+     (`src-tauri/.gitignore` only covers the old location).
+7. **`npm run test:backend-integration` keeps working unchanged** —
+   `cargo test --manifest-path src-tauri/Cargo.toml --lib` resolves the
+   workspace from the member manifest. Optionally modernize to
+   `cargo test -p mallard --lib` in the same change.
+8. **`default-members = ["src-tauri"]`** keeps bare `cargo` commands and
+   the CLI exclusion behavior: the placeholder builds only when named or
+   under `--workspace`.
 
-1. `src-tauri/Cargo.lock` moves to the repository root.
-2. Cargo build output moves to the workspace target directory by default.
-3. Cargo profiles are honored only from the workspace root, so the existing
-   dependency optimization profile must move to the root manifest.
-4. `src-tauri/Cargo.toml` should inherit workspace package metadata.
-5. Each member declares only the dependencies it actually uses.
-6. Shared dependency versions may move to `[workspace.dependencies]`, but a
-   member must still opt into each dependency.
-7. The CLI is excluded from `default-members` while it is an empty placeholder.
+## 10. Implementation phases
 
-Do not change resolver version and package topology in the same pull request.
-Resolver 3 can be evaluated later with a separate lockfile and feature-graph
-review.
-
-## 11. Migration strategy
-
-### 11.1 Rules
-
-- No big-bang move.
-- No feature work in a structural pull request.
-- One architectural boundary or vertical slice per pull request.
-- Preserve public names while moving private implementation.
-- Move tests with the behavior they protect.
-- Add characterization coverage before extracting poorly isolated behavior.
-- Keep the old Tauri command as the active entry point until the shared use
-  case passes all existing tests.
-- Delete the old implementation in the same pull request that switches the
-  command; do not keep two production paths.
-- Do not create temporary persistence formats or compatibility files.
-- Keep the full integration suite green after every merged step.
-
-### 11.2 Why vertical slices
-
-A layer-by-layer move of every domain type, then every repository, then every
-service would leave the repository in a partially integrated state for too
-long. Instead, after the domain foundation is extracted, move complete
-capabilities in this order:
-
-1. configuration and storage;
-2. projects and bindings;
-3. history and inventory;
-4. bundle status and verification;
-5. push planning and publication;
-6. pull planning and restore;
-7. conversations and provider materialization;
-8. setup, recovery, and platform actions.
-
-Each slice should end with its existing Tauri commands calling the new
-application service and infrastructure adapters.
-
-## 12. Phased implementation plan
-
-### Phase 0 — Record the behavioral baseline
-
-Purpose: make regressions attributable to the refactor.
-
-Actions:
-
-1. Run all committed integration suites on the existing package layout.
-2. Record the current `cargo metadata` package graph.
-3. Inventory all registered Tauri commands and frontend invocations.
-4. Identify serialized fixtures that cover local state, manifests, plans,
-   actions, receipts, and activity entries.
-5. Add characterization tests only where a migration target lacks coverage.
-6. Confirm no tests use real `~/.mallard`, `~/.codex`, or `~/.claude`.
-
-Required checks:
+Every phase ends with the same gate:
 
 ```text
 npm run build
 npm run test:frontend-integration
 npm run test:release-config
-cargo test --manifest-path src-tauri/Cargo.toml --lib
 npm run check:release-version
+npm run test:backend-integration
+cargo check --workspace
+cargo test --workspace
+git diff --stat -- src/        # must be empty
 ```
 
-Acceptance:
+### Phase 0 — Freeze the baseline
 
-- the baseline is green or every pre-existing failure is documented;
-- all 66 Tauri commands have an owning command family; and
-- schema fixtures exist for every durable document moved later.
+Actions:
 
-### Phase 1 — Add the workspace and empty CLI placeholder
+1. record the baseline commit and confirm every suite above is green on it;
+2. inventory the frozen contracts: the 71 command names, the emitted event
+   names, the `~/.mallard` document set, and the portable key layout
+   (cross-check against `CURRENT_METADATA_LAYOUT.md`);
+3. add a freeze test in `src-tauri` asserting the exact registered command
+   list, so an accidental registration change fails loudly; and
+4. snapshot a baseline `~/.mallard` fixture and a populated test
+   destination for the Phase 6 compatibility check.
+
+Deliverables: the inventory (a short appendix to this document or a sibling
+note), the registration freeze test, and the saved fixtures.
+
+Acceptance: baseline suites green; freeze test passes; fixtures captured.
+
+### Phase 1 — Create the workspace and empty CLI
 
 Files:
 
-- new root `Cargo.toml`;
-- move `src-tauri/Cargo.lock` to root `Cargo.lock`;
-- update `src-tauri/Cargo.toml`;
-- new `crates/mallard-cli/Cargo.toml`;
-- new `crates/mallard-cli/src/main.rs`;
-- update `package.json`;
-- update `scripts/check-release-version.mjs`;
-- update `scripts/tauri-build.mjs`; and
-- update `tests/release-config.test.mjs`.
-
-Actions:
-
-1. Create the virtual workspace with resolver 2.
-2. Keep the desktop package name `mallard`.
-3. Inherit version, edition, license, and publish policy from the workspace.
-4. Move the existing development dependency optimization profile to the root.
-5. Generate one root lockfile without intentionally upgrading dependencies.
-6. Create the dependency-free CLI placeholder.
-7. Make backend test scripts workspace-aware.
-8. Update version checking to read the workspace version.
-9. Stop hardcoding `src-tauri/target` in release verification. Resolve Cargo's
-   target directory from `cargo metadata` or one centralized helper.
-10. Keep the CLI out of Tauri `bundle.resources`, `bundle.externalBin`, and
-    installer configuration.
-
-Acceptance:
-
-```text
-cargo check --workspace
-cargo test --workspace
-cargo run -p mallard-cli
-npm run build
-npm run test:integration
-npm run check:release-version
-```
-
-Additionally:
-
-- `cargo run -p mallard-cli` exits successfully with no output;
-- the Tauri application starts normally;
-- the DMG verification helper locates workspace build output correctly; and
-- the dependency versions in the lockfile do not drift unexpectedly.
-
-### Phase 2 — Extract the domain package mechanically
-
-Purpose: establish a Tauri-free core without redesigning domain behavior.
-
-Actions:
-
-1. Create `crates/mallard-domain`.
-2. Move `project_sync/domain.rs` into the new package as one mechanical unit
-   first.
-3. Preserve public type names, derives, serde attributes, constants, and
-   validation functions.
-4. Update imports in the desktop package and tests.
-5. Keep durable schema fixture comparisons byte- or value-equivalent.
-6. Do not split the large file in the same commit as the crate extraction.
-
-Acceptance:
-
-- `mallard-domain` has no Tauri, AWS, SQLite, PTY, or filesystem dependencies;
-- all existing Rust tests pass;
-- serialized local-state and bundle fixtures are unchanged; and
-- the frontend TypeScript contract requires no changes.
-
-### Phase 3 — Split the domain by bounded context
-
-Purpose: reach the target domain layout after the crate boundary is stable.
-
-Recommended order:
-
-1. `identity.rs`;
-2. `storage.rs` and `config.rs`;
-3. `project.rs`;
-4. `bundle.rs`;
-5. `restore.rs`;
-6. `conversation.rs`; and
-7. `setup.rs`.
-
-Actions:
-
-- move cohesive types and their validation/tests together;
-- keep cross-context dependencies explicit through imports;
-- use `lib.rs` to expose the intended domain API;
-- avoid a blanket `pub use *` once the split is complete; and
-- keep filesystem paths as validated domain values only where they are part of
-  a local application request, never a portable manifest.
-
-Acceptance:
-
-- no domain module exceeds an agreed reviewable size without a documented
-  reason;
-- no dependency-direction violation is introduced; and
-- all schema and behavioral tests remain unchanged.
-
-### Phase 4 — Create application and infrastructure foundations
-
-Purpose: establish ports, typed errors, and Tauri-free path construction before
-moving feature behavior.
-
-Actions:
+- new root `Cargo.toml`; root `Cargo.lock` (moved);
+- updated `src-tauri/Cargo.toml` (inherit workspace metadata; drop the
+  member-level profile);
+- new `crates/mallard-cli/Cargo.toml` and `src/main.rs` (`fn main() {}`);
+- updated `scripts/check-release-version.mjs`;
+- updated `scripts/tauri-build.mjs`;
+- updated `tests/release-config.test.mjs`;
+- updated `.github/workflows/release.yml` (rust-cache workspace path);
+- updated root `.gitignore` (`/target`).
+
+Acceptance: the phase gate, plus:
+
+- `cargo run -p mallard-cli` exits 0 with no output;
+- the desktop application boots and behaves identically;
+- `cargo tree -p mallard` shows an unchanged dependency graph;
+- `MALLARD_VERIFY_MACOS_BUNDLE=1 npm run tauri build` passes and the DMG
+  contains `Mallard.app` with no `mallard-cli` binary.
+
+### Phase 2 — Extract `mallard-domain`
+
+Move `project_sync/domain.rs` into `crates/mallard-domain`, splitting into
+modules (identity, config, project, storage, bundle, restore, conversation,
+setup) with content otherwise unchanged. Its unit tests move with it. Leave
+`pub use mallard_domain as domain;` (or narrower re-exports) at the old
+path so `commands.rs` and the rest compile without edits.
+
+Acceptance: the phase gate, plus `cargo tree -p mallard-domain` shows no
+Tauri, Tokio, AWS, SQLite, or PTY dependency.
+
+### Phase 3 — Extract `mallard-infrastructure`
+
+Move, in one or more PRs grouped by family:
+
+1. `persistence.rs` (leaving the `from_app` desktop helper), `s3_store.rs`,
+   and the local store code from `bundle_engine.rs`;
+2. `provider_capture.rs`, `chat_history.rs`, `conversation_codec.rs`,
+   `conversation_materialization.rs`, `codex_rollout.rs`,
+   `codex_app_refresh.rs`, `codex_native_fork.rs`, `codex_binary.rs`; and
+3. the JSONL core of `activity_log.rs`.
+
+Unit tests travel with their modules; `sync_tests` stays in `src-tauri` and
+keeps passing without assertion changes. Old paths forward through shims.
+
+Acceptance: the phase gate, plus `cargo tree -p mallard-infrastructure`
+shows no Tauri dependency.
+
+### Phase 4 — Extract `mallard-application`
+
+For each command family (config, storage, projects/links/profiles/bindings,
+sync push/pull, conversations, history, setup, activity):
+
+1. move the orchestration body of each `#[tauri::command]` function into an
+   application function taking plain arguments plus, where the flow emits
+   events, an event-sink callback;
+2. keep the `#[tauri::command]` wrapper in `src-tauri` with an identical
+   name, signature, DTO set, and error mapping, forwarding `app.emit`
+   through the sink so event names, payloads, and ordering are unchanged;
+3. change nothing else — the wrapper-plus-body pair must be a pure split of
+   today's function.
+
+This is the largest phase; split it into one PR per family. The
+registration freeze test and `sync_tests` hold the contract still while
+17,997 lines relocate.
+
+Acceptance per family PR: the phase gate, plus the registration freeze test
+unchanged and `cargo tree -p mallard-application` free of Tauri.
+
+### Phase 5 — Remove shims and tidy the desktop crate
+
+1. delete every temporary re-export shim recorded since Phase 2 and update
+   remaining imports to the real crate paths;
+2. split the residual desktop command wrappers into `src/commands/` family
+   files (a file move only — the registration list is byte-identical);
+3. delete the now-empty `project_sync` module shell;
+4. review the remaining `pub` surface of each crate and reduce what nothing
+   uses; and
+5. add the boundary checks: fail CI (or a workspace test) if Tauri appears
+   in `cargo tree` for the three library crates, or if `src-tauri` is
+   imported by another package.
+
+Acceptance: the phase gate; no shims remain (`grep` for the shim inventory
+comes back empty); boundary checks active and green.
+
+### Phase 6 — Compatibility and release verification
+
+1. run the restructured build against the Phase 0 `~/.mallard` fixture and
+   populated destination: existing projects, links, profiles, bindings,
+   history, push, pull, conversation, and recovery flows all work without
+   any reset or warning;
+2. verify the build wrote no new-shape artifacts: state documents and cloud
+   objects remain schema 1 in the same locations;
+3. **downgrade check:** run the baseline 0.1.2 build against the same state
+   afterwards and confirm it works — proof the restructure is invisible;
+4. `MALLARD_VERIFY_MACOS_BUNDLE=1 npm run tauri build`; inspect the DMG:
+   identifier, product name, executable, signing, and no `mallard-cli`;
+5. on Windows, preserve the status quo: `cargo check --workspace` and
+   `cargo test --workspace` on a Windows machine if available, as today
+   there is no Windows CI or release automation (adding it is deferred
+   work, not an acceptance bar here); and
+6. update `RELEASING.md` and contributor documentation for the workspace
+   layout (root lockfile, root target, `-p` flags).
 
-1. Create `mallard-application` and `mallard-infrastructure`.
-2. Define the smallest initial ports required by persistence:
-   `StateRepository`, `Clock`, and `ActivitySink`.
-3. Move Tauri-free state path construction and `LocalStateRepository` into
-   infrastructure.
-4. Move the persistence guard with the repository.
-5. Leave the `AppHandle`-to-home-directory conversion in the desktop package.
-6. Split activity JSONL persistence from Tauri event emission.
-7. Map typed application errors back to the existing Tauri `Result<T, String>`
-   behavior at the desktop edge.
+Acceptance: all of the above, plus the full phase gate.
 
-Do not define ports for every helper. Add a port only when:
+## 11. Pull request boundaries
 
-- an external system is crossed;
-- more than one implementation is expected; or
-- deterministic tests need substitution.
+1. Baseline freeze: inventory, registration freeze test, fixtures.
+2. Workspace, root lockfile, empty CLI, script/CI/gitignore updates.
+3. Domain extraction.
+4. Infrastructure extraction (1–3 PRs by family).
+5. Application extraction (one PR per command family).
+6. Shim removal, desktop tidy-up, boundary checks.
+7. Compatibility verification and documentation.
 
-Acceptance:
+Every PR merges with the full phase gate green and an empty `src/` diff.
+Because each PR is behavior-neutral, `main` remains releasable throughout —
+there is no integration branch, feature flag, or transition state.
 
-- persistence and JSONL activity writing compile without Tauri;
-- cross-process lock tests still pass;
-- Tauri command and event payloads are unchanged; and
-- no second repository or state-writing path exists.
+## 12. Verification matrix
 
-### Phase 5 — Move configuration and storage as the first vertical slice
-
-Purpose: prove the architecture on the capability needed by the future CLI.
-
-Application ownership:
-
-- load and validate configuration;
-- list storage definitions;
-- add, update, and remove storage definitions;
-- revision conflict handling;
-- storage-isolation validation;
-- connectivity probe orchestration; and
-- sanitized results.
-
-Infrastructure ownership:
-
-- local configuration repository;
-- local-folder store;
-- S3/R2 store;
-- AWS client construction; and
-- connectivity probe implementation.
-
-Desktop ownership:
-
-- current Tauri command DTOs;
-- dialogs and frontend events; and
-- mapping requests/results to the existing frontend contract.
-
-Acceptance:
-
-- every existing storage Tauri command calls the application service;
-- the frontend behaves identically;
-- R2/S3 and local-folder tests pass;
-- concurrent repository mutation still uses `persistence.lock`; and
-- the CLI placeholder remains empty and does not depend on these crates yet.
-
-### Phase 6 — Move projects, links, profiles, and bindings
-
-Actions:
-
-1. Move project registration, rename, and removal orchestration.
-2. Move storage links and bundle recipes.
-3. Move provider-profile management.
-4. Move project bindings and materialization queries.
-5. Keep all portable/local-field separation intact.
-6. Split corresponding Tauri commands into `config.rs`, `projects.rs`, and
-   `storage.rs`.
-
-Acceptance:
-
-- project and binding Tauri contracts are unchanged;
-- Git and non-Git policy tests pass;
-- local-only fields never enter portable manifests; and
-- revision and single-flight behavior remain intact.
-
-### Phase 7 — Move history, inventory, and provider reads
-
-Actions:
-
-1. Place provider parsing, filesystem discovery, and Git access in
-   infrastructure.
-2. Place history and inventory query orchestration in application use cases.
-3. Keep provider-specific codecs behind provider adapter boundaries.
-4. Preserve bounded reads, path canonicalization, and secret redaction.
-5. Split Tauri handlers into `history.rs` and the appropriate project module.
-
-Acceptance:
-
-- Codex and Claude history results are unchanged;
-- inventory ordering and stable resource identities are unchanged;
-- provider fixtures produce equivalent results; and
-- no application module reads a provider home directly.
-
-### Phase 8 — Split bundle publication and restore
-
-This is the highest-risk migration and must be split into small pull requests.
-
-Actions:
-
-1. Move `BundleObjectStore` into an application-owned port.
-2. Move local and S3 implementations into infrastructure.
-3. Move immutable publication orchestration into application.
-4. Move filesystem staging, backup, apply, and recovery mechanics into
-   infrastructure.
-5. Keep plan construction and policy decisions in domain/application.
-6. Keep exact digest, revision, expiry, and approval checks.
-7. Route current status, verify, push, plan-restore, and apply-restore Tauri
-   commands through the extracted services.
-
-Acceptance:
-
-- publication remains immutable and SHA-256 verified;
-- mutable heads retain compare-and-swap behavior;
-- restore plans and receipts serialize identically;
-- failure-injection and recovery tests pass;
-- deletion invariants remain intact; and
-- no Tauri type crosses into application or infrastructure.
-
-### Phase 9 — Move conversations, setup, and platform behavior
-
-Actions:
-
-1. Move conversation sync orchestration into application.
-2. Move codecs, materialization, provider indexes, and sidecars into provider
-   infrastructure adapters.
-3. Move Codex process discovery, app refresh, native fork, rollout, and PTY
-   behavior into platform/provider infrastructure.
-4. Move setup-draft orchestration into application.
-5. Keep Tauri opening, dialogs, and frontend event emission in desktop.
-6. Split remaining handlers into `setup.rs`, `history.rs`, and `sync.rs`.
-
-Acceptance:
-
-- conversation metadata and provider-native files remain consistent;
-- fork and divergence recovery behavior is unchanged;
-- setup drafts preserve revision and expiry semantics;
-- platform-specific tests pass on their supported runners; and
-- desktop-only UI operations remain outside application services.
-
-### Phase 10 — Finish the thin desktop adapter
-
-Actions:
-
-1. Remove the old `project_sync/commands.rs`.
-2. Register command-family modules from `src-tauri/src/lib.rs`.
-3. Build application services and adapters in one desktop composition root.
-4. Remove temporary internal forwarding modules and obsolete re-exports.
-5. Reduce desktop dependencies to Tauri-specific crates plus the shared
-   workspace packages.
-6. Move remaining tests to their owning package where practical.
-7. Add an automated dependency-boundary check.
-
-The dependency-boundary check should reject:
-
-- `tauri` or `clap` in domain/application;
-- AWS SDK, SQLite, PTY, or OS APIs in domain/application;
-- imports from `src-tauri` by another package; and
-- direct local-state writes outside the infrastructure repository.
-
-Acceptance:
-
-- Tauri handlers are adapter-sized;
-- no production behavior remains duplicated;
-- `cargo test --workspace` covers all Rust packages;
-- the complete frontend and release suites pass; and
-- the final repository matches the target structure.
-
-## 13. Pull request boundaries
-
-Recommended pull requests:
-
-1. Workspace, root lockfile, release-script adaptation, and empty CLI.
-2. Mechanical `mallard-domain` extraction.
-3. Domain bounded-context split.
-4. Persistence, activity, and application/infrastructure foundations.
-5. Configuration and storage vertical slice.
-6. Projects, links, profiles, and bindings.
-7. History, inventory, and provider reads.
-8. Bundle-store port and adapters.
-9. Push publication use cases.
-10. Pull planning, apply, and recovery use cases.
-11. Conversations and provider materialization.
-12. Setup and platform actions.
-13. Tauri command-module cleanup and dependency enforcement.
-
-Pull requests 8–12 may be divided further if their behavioral diff becomes
-difficult to review. They must not be combined merely to finish the directory
-tree sooner.
-
-## 14. Verification matrix
-
-| Change area | Required checks |
+| Area | Required verification |
 | --- | --- |
-| Workspace or Cargo metadata | `cargo check --workspace`, `cargo test --workspace`, lockfile review |
-| Domain types or serialization | domain tests, Rust integration tests, fixture equivalence |
-| Application use cases | unit tests with fake ports and existing cross-layer tests |
-| Persistence or filesystem | Rust library tests, temporary-home tests, failure injection |
-| S3/R2 adapters | storage tests including loopback conditional-write tests |
-| Tauri contract | `npm run build`, frontend integration tests, Rust tests |
-| Release scripts or paths | version check, release-config tests, packaged build verification |
-| Platform behavior | supported macOS and Windows CI runners |
+| Workspace | `cargo check/test --workspace`, unchanged `cargo tree -p mallard`, moved (not regenerated) lockfile diff |
+| IPC contract | registration freeze test; `sync_tests` unchanged; empty `src/` diff |
+| Events | `sync_tests` and frontend integration tests against identical event names/payloads |
+| Local state | Phase 6 fixture run + downgrade check; schema-1 documents byte-stable |
+| Bundle storage | existing local and stub-S3 tests unchanged; Phase 6 populated-destination run |
+| Activity log | existing tests unchanged; JSONL files identical in place and shape |
+| Crate boundaries | `cargo tree` checks: no Tauri in domain/application/infrastructure; no cross-import of `src-tauri` |
+| Release | `check:release-version`, `test:release-config`, DMG verify + inspection, CLI absent |
 
-Final handoff checks:
+Final verification is the Phase 10-equivalent single block:
 
 ```text
 npm run build
 npm run test:frontend-integration
 npm run test:release-config
 npm run check:release-version
+npm run test:backend-integration
 cargo check --workspace
 cargo test --workspace
 MALLARD_VERIFY_MACOS_BUNDLE=1 npm run tauri build
 ```
 
-The Windows release runner must also build and inspect the packaged desktop
-application. It must confirm that `mallard-cli.exe` is absent until a later
-packaging plan explicitly adds it.
-
-## 15. Risks and mitigations
+## 13. Risks and mitigations
 
 | Risk | Mitigation |
 | --- | --- |
-| Workspace changes Cargo's target path | Resolve `target_directory` with `cargo metadata`; do not hardcode `src-tauri/target` |
-| Workspace silently changes dependency selection | Start with resolver 2 and review the root lockfile without dependency upgrades |
-| Cargo profiles stop applying | Move profiles to the root manifest in the workspace pull request |
-| Serde output changes during type moves | Preserve derives/attributes and compare durable fixtures |
-| Tauri command behavior drifts | Keep command names and DTOs at the desktop edge; add parity tests |
-| Business logic is duplicated during migration | Switch each command and delete its old implementation in the same pull request |
-| GUI and future CLI race on local state | Retain the same infrastructure repository and `persistence.lock` |
-| Traits create unnecessary complexity | Define ports only at external or test-substitution boundaries |
-| Infrastructure becomes a new monolith | Organize it by adapter family and move one vertical slice at a time |
-| Heavy dependencies leak into all packages | Declare dependencies only in the member that uses them |
-| Cross-platform behavior is accidentally generalized | Keep macOS and Windows implementations explicit behind platform adapters |
-| Release verification breaks after lock/target relocation | Update and test release scripts in Phase 1 before moving behavior |
-| The empty CLI is mistaken for a supported product | Do not package, document as user-facing, or expose it from the UI |
+| A move silently changes a serde shape | Moves-only rule (§3.1); serde attributes untouchable; existing integration tests exercise the wire shapes |
+| Event ordering shifts when orchestration extracts | Sink callback forwards synchronously at the original call sites; tests assert existing events |
+| Lockfile regeneration changes dependency behavior | `git mv` the lockfile; review the (empty) dependency diff; `cargo tree -p mallard` compared before/after |
+| Virtual-workspace resolver default (v1) changes builds | `resolver = "2"` written explicitly |
+| Dev profile silently stops applying | Profile moved to root in the same PR that creates the workspace |
+| Release scripts/CI break on the root target | `tauri-build.mjs`, `check-release-version.mjs`, release-config tests, and the rust-cache path all updated in Phase 1 and gated by the release checks |
+| Temporary shims become permanent | Shim inventory; Phase 5 deletes them; grep gate in acceptance |
+| Refactor scope creeps into redesign | §3.1/§3.3 rules; PR review rejects non-move diffs; hexagonal work explicitly deferred |
+| Concurrent feature plans collide | §3.5/§5 sequencing: this plan lands first or entirely after; no interleaving |
+| A hidden Tauri coupling blocks a move | Verified counts (§8) say only `persistence.rs`/`commands.rs`/`activity_log.rs`; if another appears, wrap it in the desktop crate (§3.4), never rewrite |
 
-## 16. Definition of done
+## 14. Definition of done
 
 The reorganization is complete when:
 
-- the repository has one root Cargo workspace and lockfile;
-- `src-tauri` remains the desktop entry point;
-- the frontend works without invocation or DTO changes;
-- domain rules live in `mallard-domain`;
-- shared orchestration lives in `mallard-application`;
-- external integrations live in `mallard-infrastructure`;
-- Tauri commands are thin adapters grouped by capability;
-- no Tauri type appears in domain, application, or infrastructure;
-- all current state, bundle, plan, receipt, and activity schemas are preserved;
-- all safety invariants and integration tests pass;
-- release tooling is workspace-aware on macOS and Windows;
-- `mallard-cli` is a separate, empty, compilable package;
-- the CLI is not shipped or installed; and
-- future CLI work can add an adapter without extracting business logic from
-  Tauri again.
+- the repository has one root Cargo workspace, one moved lockfile, and one
+  root target directory;
+- `mallard-domain`, `mallard-application`, and `mallard-infrastructure`
+  hold the relocated code, with the dependency direction of §7 enforced by
+  checks;
+- `src-tauri` is a thin adapter: builder, managed state, and 71 unchanged
+  command wrappers that each delegate to one application function;
+- `mallard-cli` is a separate, empty, compilable package excluded from
+  default builds and absent from installers;
+- every suite that was green at the baseline is green, with no behavioral
+  test edits;
+- `src/` has zero changes across the entire plan;
+- a pre-restructure `~/.mallard` and populated storage destination work
+  unchanged, and the baseline build still works against them afterwards;
+- no temporary re-export shim remains; and
+- release documentation reflects the workspace layout — and tells users
+  nothing, because nothing about using Mallard changed.
 
-## 17. Deferred follow-up plans
+## 15. Deferred work
 
-After this plan is complete, use separate plans for:
+Separate plans, in no required order, for:
 
-1. the CLI command and output contract;
-2. storage and agent-assisted R2 commands;
-3. macOS and Windows CLI packaging and PATH installation;
-4. resolver 3 and minimum-supported-Rust-version evaluation;
-5. optional renaming of the desktop Cargo package; and
-6. any frontend component reorganization.
+1. hexagonal ports and fake-port test scaffolding, one real boundary at a
+   time;
+2. renaming the desktop package/library (`mallard-desktop`,
+   `mallard_desktop_lib`) with `mainBinaryName` pinning and bundle
+   verification;
+3. CLI command design, Clap, packaging, and `PATH` installation;
+4. agent-assisted R2 connection and provisioning;
+5. Windows CI and release automation;
+6. resolver 3, an explicit `rust-version`, and edition 2024 adoption;
+7. dependency upgrades; and
+8. optional React component reorganization.
 
-## 18. Industry references
+Any future schema change gets its own plan with its own compatibility
+story. This plan neither needs nor provides one.
+
+## 16. Industry references
 
 - [Cargo workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html)
 - [Cargo dependency resolution](https://doc.rust-lang.org/cargo/reference/resolver.html)
 - [Tauri project structure](https://v2.tauri.app/start/project-structure/)
-- [AWS Prescriptive Guidance: hexagonal architecture best practices](https://docs.aws.amazon.com/prescriptive-guidance/latest/hexagonal-architectures/best-practices.html)
-- [Command Line Applications in Rust](https://rust-cli.github.io/book/)
-- [Clap derive reference](https://docs.rs/clap/latest/clap/_derive/)
+- [Working Effectively with Legacy Code — characterization tests](https://www.oreilly.com/library/view/working-effectively-with/0131177052/)
+- [Refactoring: Improving the Design of Existing Code](https://martinfowler.com/books/refactoring.html)

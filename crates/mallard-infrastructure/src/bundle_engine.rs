@@ -17,17 +17,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
-use super::domain::{
-    self, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt, BindingState, BundleDirectoryEntry,
-    BundleFileEntry, BundleHead, BundleId, BundleIdentity, BundleKind, BundleManifest,
-    BundleRecipe, BundleSnapshot, CapturedWith, ConversationThread, LogicalPath, PlanId,
-    PortableOrigin, ProjectBinding, Provider, ResourceDescriptor, ResourceId, ResourceKind,
+#[cfg(test)]
+use crate::provider_capture;
+use crate::provider_capture::CapturedResources;
+use mallard_domain::{
+    self as domain, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt, BindingState,
+    BundleDirectoryEntry, BundleFileEntry, BundleHead, BundleId, BundleIdentity, BundleKind,
+    BundleManifest, BundleRecipe, BundleSnapshot, CapturedWith, ConversationThread, LogicalPath,
+    PlanId, PortableOrigin, ProjectBinding, Provider, ResourceDescriptor, ResourceId, ResourceKind,
     RestoreAction, RestoreActionKind, RestorePlan, StorageId, ThreadId, Tombstone, TombstoneTarget,
     BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
 };
-#[cfg(test)]
-use super::provider_capture;
-use super::provider_capture::CapturedResources;
 
 const MALLARD_ROOT: &str = ".mallard";
 const STORAGE_MARKER_KEY: &str = ".mallard/_storage.json";
@@ -1313,7 +1313,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     /// sha256 checksum so the accepted PUT is the verification receipt;
     /// publish downloads nothing back. Durability audits are the separate
     /// `verify_objects` pass.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn publish(&self, request: PublishBundleRequest) -> Result<PublishedBundle, String> {
         self.publish_with_progress(request, &mut |_| {}, &mut |_, _| {})
     }
@@ -2310,8 +2310,8 @@ impl<S: BundleObjectStore> BundleEngine<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_sync::domain::{LocalProjectId, RecipeEntry, ReplicaId};
-    use crate::project_sync::provider_capture::{capture_recipe, discover_project, CaptureRequest};
+    use crate::provider_capture::{capture_recipe, discover_project, CaptureRequest};
+    use mallard_domain::{LocalProjectId, RecipeEntry, ReplicaId};
 
     fn bundle_id(number: u64) -> BundleId {
         BundleId::parse(format!("{:032x}", number)).unwrap()
@@ -2367,7 +2367,7 @@ mod tests {
         claude_home: Option<&Path>,
     ) -> ProjectBinding {
         ProjectBinding {
-            host_id: super::domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+            host_id: mallard_domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
             replica_id: ReplicaId::parse("replica-test").unwrap(),
             local_project_id: LocalProjectId::parse("project-test").unwrap(),
             bundle_id: id,
@@ -4194,7 +4194,7 @@ fn write_target_atomic_from_reader(
     Ok(())
 }
 
-pub(crate) fn write_target_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
+pub fn write_target_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
     let expected_size = u64::try_from(bytes.len())
         .map_err(|_| "target bytes cannot fit the portable size field".to_string())?;
     let expected_sha256 = sha256(bytes);
@@ -4224,7 +4224,7 @@ fn write_verified_body_atomic(
     )
 }
 
-pub(crate) fn write_immutable_backup(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub fn write_immutable_backup(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let expected_size = u64::try_from(bytes.len())
         .map_err(|_| "backup bytes cannot fit the portable size field".to_string())?;
     let expected_sha256 = sha256(bytes);
@@ -4714,7 +4714,7 @@ fn normalized_relative_path(root: &Path, path: &Path) -> Result<String, String> 
     Ok(parts.join("/"))
 }
 
-pub(crate) fn reconcile_manifest_content(
+pub fn reconcile_manifest_content(
     recipe: &BundleRecipe,
     captured_descriptors: &BTreeMap<ResourceId, ResourceDescriptor>,
     captured: &CapturedResources,

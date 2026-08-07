@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -29,6 +29,20 @@ function buildTarget(buildArgs) {
   return target;
 }
 
+function cargoTargetDirectory() {
+  return new Promise((resolveMetadata, rejectMetadata) => {
+    execFile(
+      "cargo",
+      ["metadata", "--format-version", "1", "--no-deps"],
+      { maxBuffer: 64 * 1024 * 1024 },
+      (error, stdout) => {
+        if (error) rejectMetadata(error);
+        else resolveMetadata(JSON.parse(stdout).target_directory);
+      },
+    );
+  });
+}
+
 async function macosDmgPath(buildArgs) {
   const target = buildTarget(buildArgs);
   const architecture = target === "aarch64-apple-darwin" || (!target && process.arch === "arm64")
@@ -37,9 +51,8 @@ async function macosDmgPath(buildArgs) {
   const tauriConfig = JSON.parse(await readFile(resolve("src-tauri", "tauri.conf.json"), "utf8"));
   const fileProductName = tauriConfig.productName.replaceAll(" ", "_");
 
-  return resolve(
-    "src-tauri",
-    "target",
+  return join(
+    await cargoTargetDirectory(),
     ...(target ? [target] : []),
     "release",
     "bundle",

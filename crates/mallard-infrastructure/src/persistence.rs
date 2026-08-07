@@ -4,7 +4,7 @@
 //! share a process lock and revision check so concurrent Tauri commands
 //! cannot silently lose changes.
 
-use super::domain::{
+use mallard_domain::{
     derive_origin_host_token, derive_origin_replica_token, fallback_origin_host_label,
     generated_named_id, BundleId, ConversationBindings, ConversationPushPlan,
     ConversationSyncJournal, HostId, HostIdentity, LocalProjectId, MachineProjectState,
@@ -85,7 +85,7 @@ impl BoundedJsonReadError {
 /// publication, and rotation). The OS lock coordinates separate Mallard
 /// processes; dropping the file releases it on every supported platform.
 #[derive(Debug)]
-pub(crate) struct HostOperationGuard {
+pub struct HostOperationGuard {
     _file: fs::File,
 }
 
@@ -105,8 +105,11 @@ pub struct LocalStateRepository {
 }
 
 impl LocalStateRepository {
-    /// Resolve the machine-global metadata directory for any Tauri runtime.
-    pub fn from_app<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) -> Result<Self, String> {
+    /// Resolve the machine-global metadata directory from the user's home.
+    /// The desktop crate's Tauri command layer calls this; `from_app` lived
+    /// here before the workspace reorganization moved this module out of the
+    /// Tauri crate.
+    pub fn from_user_home() -> Result<Self, String> {
         let home = dirs::home_dir().ok_or_else(|| "cannot find home directory".to_string())?;
         Self::from_home_dir(home)
     }
@@ -132,7 +135,7 @@ impl LocalStateRepository {
         &self.root
     }
 
-    pub(crate) fn acquire_host_operation(&self) -> Result<HostOperationGuard, String> {
+    pub fn acquire_host_operation(&self) -> Result<HostOperationGuard, String> {
         let path = self.root.join("host_operation.lock");
         ensure_no_symlinks(&self.root, &path)?;
         let mut options = OpenOptions::new();
@@ -329,7 +332,7 @@ impl LocalStateRepository {
             });
             conversations
                 .origin_aliases
-                .truncate(super::domain::MAX_ORIGIN_ALIASES);
+                .truncate(mallard_domain::MAX_ORIGIN_ALIASES);
         }
         let mut materializations = match self.load_materializations_unlocked(&config) {
             Ok(materializations) => materializations,
@@ -346,7 +349,7 @@ impl LocalStateRepository {
             let next_replica = ReplicaId::parse(generated_named_id("replica")?)?;
             binding.host_id = next.host_id.clone();
             binding.replica_id = next_replica.clone();
-            binding.state = super::domain::BindingState::Detached;
+            binding.state = mallard_domain::BindingState::Detached;
             binding.revision = binding.revision.saturating_add(1);
             binding.updated_at = binding.updated_at.max(timestamp);
             replica_map.insert(previous_replica, next_replica);
@@ -367,9 +370,9 @@ impl LocalStateRepository {
             binding.host_id = next.host_id.clone();
             binding.replica_id = next_replica.clone();
             binding.materialization_state = if binding.provider_thread_id.is_some() {
-                super::domain::ConversationMaterializationState::Pending
+                mallard_domain::ConversationMaterializationState::Pending
             } else {
-                super::domain::ConversationMaterializationState::StoredOnly
+                mallard_domain::ConversationMaterializationState::StoredOnly
             };
             binding.revision = binding.revision.saturating_add(1);
             binding.updated_at = binding.updated_at.max(binding.created_at).max(timestamp);
@@ -378,7 +381,7 @@ impl LocalStateRepository {
         conversations.validate(&next, &machine, &config)?;
 
         for record in &mut materializations.records {
-            record.status = super::domain::MaterializationStatus::Detached;
+            record.status = mallard_domain::MaterializationStatus::Detached;
         }
         materializations.revision = materializations.revision.saturating_add(1);
         materializations.validate(&config)?;
@@ -547,7 +550,7 @@ impl LocalStateRepository {
         Ok(result)
     }
 
-    pub fn load_origin_aliases(&self) -> Result<Vec<super::domain::OriginHostAlias>, String> {
+    pub fn load_origin_aliases(&self) -> Result<Vec<mallard_domain::OriginHostAlias>, String> {
         let _guard = persistence_guard(&self.root)?;
         let identity = self.load_or_create_host_identity_unlocked()?;
         Ok(self
@@ -557,7 +560,7 @@ impl LocalStateRepository {
 
     pub fn mutate_origin_aliases<T>(
         &self,
-        mutate: impl FnOnce(&mut Vec<super::domain::OriginHostAlias>) -> Result<T, String>,
+        mutate: impl FnOnce(&mut Vec<mallard_domain::OriginHostAlias>) -> Result<T, String>,
     ) -> Result<T, String> {
         let _guard = persistence_guard(&self.root)?;
         let identity = self.load_or_create_host_identity_unlocked()?;
@@ -591,7 +594,7 @@ impl LocalStateRepository {
                 config.revision, current.revision
             ));
         }
-        config.schema = super::domain::LOCAL_SCHEMA;
+        config.schema = mallard_domain::LOCAL_SCHEMA;
         config.revision = current.revision.saturating_add(1);
         config.validate()?;
         write_json_atomic(&self.root, &self.config_path(), &config, MAX_CONFIG_BYTES)?;
@@ -607,7 +610,7 @@ impl LocalStateRepository {
         let _guard = persistence_guard(&self.root)?;
         let mut config = self.load_config_unlocked()?;
         let result = mutate(&mut config)?;
-        config.schema = super::domain::LOCAL_SCHEMA;
+        config.schema = mallard_domain::LOCAL_SCHEMA;
         config.revision = config.revision.saturating_add(1);
         config.validate()?;
         write_json_atomic(&self.root, &self.config_path(), &config, MAX_CONFIG_BYTES)?;
@@ -671,7 +674,7 @@ impl LocalStateRepository {
         let config = self.load_config_unlocked()?;
         let mut materializations = self.load_materializations_unlocked(&config)?;
         let result = mutate(&config, &mut materializations)?;
-        materializations.schema = super::domain::LOCAL_SCHEMA;
+        materializations.schema = mallard_domain::LOCAL_SCHEMA;
         materializations.revision = materializations.revision.saturating_add(1);
         materializations.validate(&config)?;
         write_json_atomic(
@@ -1499,7 +1502,7 @@ impl LocalStateRepository {
         transaction.machine_projects.validate(config)?;
         if transaction.machine_projects.bindings.iter().any(|binding| {
             binding.host_id != transaction.next_identity.host_id
-                || binding.state != super::domain::BindingState::Detached
+                || binding.state != mallard_domain::BindingState::Detached
         }) {
             return Err("host rotation contains a live or mismatched project binding".to_string());
         }
@@ -1514,7 +1517,7 @@ impl LocalStateRepository {
             .iter()
             .any(|binding| {
                 binding.materialization_state
-                    == super::domain::ConversationMaterializationState::Resumable
+                    == mallard_domain::ConversationMaterializationState::Resumable
             })
         {
             return Err(
@@ -1526,7 +1529,7 @@ impl LocalStateRepository {
             .materializations
             .records
             .iter()
-            .any(|record| record.status != super::domain::MaterializationStatus::Detached)
+            .any(|record| record.status != mallard_domain::MaterializationStatus::Detached)
         {
             return Err("host rotation contains a live materialization record".to_string());
         }
@@ -1730,8 +1733,8 @@ impl LocalStateRepository {
         document: &ConversationBindings,
     ) -> Result<(), String> {
         if document.schema != CONVERSATION_BINDINGS_SCHEMA
-            || document.bindings.len() > super::domain::MAX_CONVERSATION_BINDINGS
-            || document.origin_aliases.len() > super::domain::MAX_ORIGIN_ALIASES
+            || document.bindings.len() > mallard_domain::MAX_CONVERSATION_BINDINGS
+            || document.origin_aliases.len() > mallard_domain::MAX_ORIGIN_ALIASES
         {
             return Err("invalid conversation bindings document".to_string());
         }
@@ -2061,7 +2064,7 @@ fn read_json_bounded_classified<T: DeserializeOwned>(
     })
 }
 
-pub(crate) fn write_json_atomic<T: Serialize>(
+pub fn write_json_atomic<T: Serialize>(
     root: &Path,
     path: &Path,
     value: &T,
@@ -2134,7 +2137,7 @@ fn write_bytes_atomic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_sync::domain::{
+    use mallard_domain::{
         generated_named_id, BindingState, BundleId, BundleRecipe, ConversationMaterializationState,
         LocalConversationBinding, LocalProjectRegistration, LocalProviderProfileId,
         OriginHostAlias, ProjectBinding, Provider, ProviderProfile, ThreadId, LOCAL_SCHEMA,

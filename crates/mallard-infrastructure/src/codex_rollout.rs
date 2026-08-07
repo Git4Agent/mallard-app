@@ -8,7 +8,7 @@
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::domain::MAX_CONVERSATION_FILE_BYTES;
+use mallard_domain::MAX_CONVERSATION_FILE_BYTES;
 
 pub const MAX_CODEX_FORK_DEPTH: usize = 256;
 pub const MAX_CODEX_RECORDS: usize = 100_000;
@@ -304,7 +304,7 @@ pub fn analyze_codex_rollout_structure(
     structure.finalize()
 }
 
-pub(crate) fn structural_record_type(value: &Value) -> Option<&str> {
+pub fn structural_record_type(value: &Value) -> Option<&str> {
     value
         .get("type")
         .and_then(Value::as_str)
@@ -318,7 +318,7 @@ pub(crate) fn session_meta_id(payload: &Map<String, Value>) -> Option<&str> {
     )
 }
 
-pub(crate) fn session_meta_is_internal_subagent(value: &Value) -> bool {
+pub fn session_meta_is_internal_subagent(value: &Value) -> bool {
     let Some(payload) = payload_object(value) else {
         return false;
     };

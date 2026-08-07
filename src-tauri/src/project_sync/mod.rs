@@ -3,16 +3,22 @@
 //! Current state is isolated below `~/.mallard`. This module has no migration
 //! or compatibility path for pre-cutover state.
 
-pub mod bundle_engine;
-pub mod chat_history;
-pub mod codex_app_refresh;
-pub mod codex_native_fork;
-pub mod codex_rollout;
 pub mod commands;
-pub mod conversation_codec;
-pub mod conversation_materialization;
-pub mod conversation_sync;
-pub mod domain;
-pub mod persistence;
-pub mod provider_capture;
-pub mod s3_store;
+
+// Temporary reorganization shims (PLAN_PROJECT_STRUCTURE_REORGANIZATION.md
+// §3.2): these modules now live in the mallard-domain and
+// mallard-infrastructure crates; the re-exports keep existing
+// `super::` / `crate::project_sync::` paths compiling until Phase 5
+// removes them.
+pub use mallard_domain as domain;
+pub use mallard_infrastructure::bundle_engine;
+pub use mallard_infrastructure::chat_history;
+pub use mallard_infrastructure::codex_app_refresh;
+pub use mallard_infrastructure::codex_native_fork;
+pub use mallard_infrastructure::codex_rollout;
+pub use mallard_infrastructure::conversation_codec;
+pub use mallard_infrastructure::conversation_materialization;
+pub use mallard_infrastructure::conversation_sync;
+pub use mallard_infrastructure::persistence;
+pub use mallard_infrastructure::provider_capture;
+pub use mallard_infrastructure::s3_store;

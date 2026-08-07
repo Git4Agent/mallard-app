@@ -718,9 +718,9 @@ pub struct BundleReadiness {
 }
 
 fn repository<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
+    _app: &tauri::AppHandle<R>,
 ) -> Result<LocalStateRepository, String> {
-    LocalStateRepository::from_app(app)
+    LocalStateRepository::from_user_home()
 }
 
 fn project_storage_log_labels(

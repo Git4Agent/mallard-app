@@ -14,12 +14,12 @@ use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use walkdir::{DirEntry, WalkDir};
 
-use super::chat_history::parse_session_index_titles;
-use super::codex_rollout::session_meta_is_internal_subagent;
-use super::conversation_codec::{
+use crate::chat_history::parse_session_index_titles;
+use crate::codex_rollout::session_meta_is_internal_subagent;
+use crate::conversation_codec::{
     analyze_codex_transcript, CodecLineage, CodecUnknownReason, CODEX_LINEAGE_CODEC_KEY,
 };
-use super::domain;
+use mallard_domain as domain;
 
 const MAX_DISCOVERED_FILES: usize = 20_000;
 pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -128,7 +128,7 @@ pub struct CapturedResources {
     pub conversations: BTreeMap<String, CapturedConversation>,
     pub unavailable_resource_ids: Vec<String>,
     pub warnings: Vec<String>,
-    pub(crate) excluded_codex_subagent_ids: BTreeSet<String>,
+    pub excluded_codex_subagent_ids: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,7 +159,7 @@ pub struct CaptureRequest {
 }
 
 impl CaptureRequest {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn for_project(project_root: impl Into<PathBuf>) -> Self {
         Self {
             project_root: project_root.into(),
@@ -225,14 +225,14 @@ impl Discovery {
         }
     }
 
-    pub(crate) fn excluded_codex_subagent_resource_ids(&self) -> &BTreeSet<String> {
+    pub fn excluded_codex_subagent_resource_ids(&self) -> &BTreeSet<String> {
         &self.excluded_codex_subagent_resource_ids
     }
 }
 
 /// Discover resources without retaining file bytes. Absolute source paths are
 /// kept only inside this module and never become resource identity.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn discover_project(request: &CaptureRequest) -> Result<ProjectInventory, String> {
     Ok(discover_full(request)?.project_inventory())
 }
@@ -240,7 +240,7 @@ pub fn discover_project(request: &CaptureRequest) -> Result<ProjectInventory, St
 /// Capture exactly the live resource IDs selected by the persistent recipe.
 /// Missing or blocked resources are reported as unavailable; they are not
 /// turned into deselections or tombstones.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn capture_selected(
     request: &CaptureRequest,
     selected_resource_ids: &BTreeSet<String>,
@@ -1468,16 +1468,13 @@ fn discover_claude(
 }
 
 #[derive(Debug)]
-pub(crate) struct SessionMetadata {
-    pub(crate) session_id: String,
+pub struct SessionMetadata {
+    pub session_id: String,
     pub(crate) cwd: PathBuf,
     pub(crate) is_internal_subagent: bool,
 }
 
-pub(crate) fn scan_jsonl_metadata(
-    path: &Path,
-    provider: Provider,
-) -> Result<SessionMetadata, String> {
+pub fn scan_jsonl_metadata(path: &Path, provider: Provider) -> Result<SessionMetadata, String> {
     let file = fs::File::open(path).map_err(|e| format!("open: {}", e))?;
     let mut reader = BufReader::new(file);
     let mut total = 0_usize;

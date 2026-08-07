@@ -8,25 +8,28 @@ if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
   throw new Error(`Expected a release tag such as v0.2.0, received “${requestedTag || "nothing"}”.`);
 }
 
-const [packageSource, tauriSource, cargoSource] = await Promise.all([
+const [packageSource, tauriSource, workspaceSource, memberSource] = await Promise.all([
   readFile(new URL("package.json", root), "utf8"),
   readFile(new URL("src-tauri/tauri.conf.json", root), "utf8"),
+  readFile(new URL("Cargo.toml", root), "utf8"),
   readFile(new URL("src-tauri/Cargo.toml", root), "utf8"),
 ]);
 
 const packageVersion = JSON.parse(packageSource).version;
 const tauriVersion = JSON.parse(tauriSource).version;
-const cargoPackageStart = cargoSource.indexOf("[package]");
-const cargoPackageEnd = cargoSource.indexOf("\n[", cargoPackageStart + "[package]".length);
-const cargoPackage = cargoPackageStart >= 0
-  ? cargoSource.slice(cargoPackageStart, cargoPackageEnd >= 0 ? cargoPackageEnd : undefined)
+const workspacePackageStart = workspaceSource.indexOf("[workspace.package]");
+const workspacePackageEnd = workspaceSource.indexOf("\n[", workspacePackageStart + "[workspace.package]".length);
+const workspacePackage = workspacePackageStart >= 0
+  ? workspaceSource.slice(workspacePackageStart, workspacePackageEnd >= 0 ? workspacePackageEnd : undefined)
   : "";
-const cargoVersion = cargoPackage.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+const cargoVersion = workspacePackage.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+const memberInherits = /^version\.workspace\s*=\s*true$/m.test(memberSource);
 const versions = {
   "release tag": version,
   "package.json": packageVersion,
   "src-tauri/tauri.conf.json": tauriVersion,
-  "src-tauri/Cargo.toml": cargoVersion,
+  "Cargo.toml (workspace)": cargoVersion,
+  "src-tauri/Cargo.toml": memberInherits ? cargoVersion : undefined,
 };
 
 const mismatches = Object.entries(versions).filter(([, candidate]) => candidate !== version);

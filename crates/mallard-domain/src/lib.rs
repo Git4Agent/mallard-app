@@ -3220,7 +3220,11 @@ impl ConversationPushPlan {
 /// [`classify_thread_refresh`] (manifest metadata, local chain, pin); this
 /// full-chain twin remains as the test suite's independent witness that the
 /// metadata table agrees with chain-level truth.
-#[cfg(test)]
+///
+/// `test-support` keeps this helper visible to the desktop crate's test
+/// suite now that the domain lives in its own crate; the feature is enabled
+/// only from dev-dependencies, so production builds still compile it out.
+#[cfg(any(test, feature = "test-support"))]
 pub fn classify_conversation_relation(
     local: Option<&[CanonicalConversationMessage]>,
     cloud: Option<&[CanonicalConversationMessage]>,

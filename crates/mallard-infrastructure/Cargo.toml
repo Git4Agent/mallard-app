@@ -1,0 +1,49 @@
+[package]
+name = "mallard-infrastructure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mallard persistence, object stores, provider adapters, and platform mechanics"
+
+[dependencies]
+mallard-domain = { path = "../mallard-domain" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+dirs = "5"
+walkdir = "2"
+tokio = { version = "1", features = ["full"] }
+aws-sdk-s3 = "1"
+aws-smithy-http-client = { version = "1", features = ["rustls-aws-lc"] }
+# Base64 for x-amz-checksum-sha256 values; already in the tree via aws-sdk-s3.
+aws-smithy-types = "1"
+bytes = "1"
+sha2 = "0.10"
+hmac = "0.12"
+libc = "0.2"
+tempfile = "3"
+getrandom = "0.3"
+chrono = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+portable-pty = "0.9"
+notify = "8.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[features]
+# Exposes test-only helpers (apply/recover conversation fixtures, capture
+# helpers, BundleEngine::publish) to other crates' test suites. Enabled from
+# dev-dependencies only.
+test-support = []
+
+[dev-dependencies]
+# Test-only domain helpers (compiled out of production builds).
+mallard-domain = { path = "../mallard-domain", features = ["test-support"] }
+# Stub S3 server (already in the dependency tree via aws-smithy-http-client).
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"

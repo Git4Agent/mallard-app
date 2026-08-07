@@ -4,8 +4,8 @@
 //! first-message summaries, and inferred Git relationships stay on this
 //! machine and are recomputed from the active project binding on demand.
 
-use super::domain::{BindingState, LocalProjectId, MaterializationStatus, Provider};
-use super::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
+use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
+use mallard_domain::{BindingState, LocalProjectId, MaterializationStatus, Provider};
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -1001,7 +1001,7 @@ fn parse_session_index_lines<'a>(
     result
 }
 
-pub(crate) fn parse_session_index_titles(bytes: &[u8]) -> BTreeMap<String, String> {
+pub fn parse_session_index_titles(bytes: &[u8]) -> BTreeMap<String, String> {
     parse_session_index_lines(
         bytes
             .split(|byte| *byte == b'\n')
@@ -1013,7 +1013,7 @@ pub(crate) fn parse_session_index_titles(bytes: &[u8]) -> BTreeMap<String, Strin
     .collect()
 }
 
-pub(crate) fn first_codex_user_summary(bytes: &[u8]) -> Option<String> {
+pub fn first_codex_user_summary(bytes: &[u8]) -> Option<String> {
     let mut parser = RolloutParser::new(0);
     for line in bytes
         .split(|byte| *byte == b'\n')
@@ -2109,7 +2109,7 @@ fn discover_github_repository_url(project_root: &Path) -> Option<String> {
     fallback
 }
 
-pub(super) fn normalize_github_repository_url(remote_url: &str) -> Option<String> {
+pub fn normalize_github_repository_url(remote_url: &str) -> Option<String> {
     let remote_url = remote_url.trim();
     if remote_url.is_empty()
         || remote_url
@@ -2367,10 +2367,7 @@ fn codex_app_deep_links(
 
 /// The invocation `open_in_codex` performs for a project, rendered as a shell
 /// line.  Logs quote this so the command they teach is the one that runs.
-pub(crate) fn codex_app_project_open_command(
-    codex_home: &Path,
-    project_root: &Path,
-) -> Option<String> {
+pub fn codex_app_project_open_command(codex_home: &Path, project_root: &Path) -> Option<String> {
     if !codex_home.is_absolute() || !project_root.is_absolute() {
         return None;
     }

@@ -1,0 +1,10 @@
+[package]
+name = "mallard-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reserved Mallard CLI entry point (placeholder, not packaged)"
+
+[[bin]]
+name = "mallard-cli"
+path = "src/main.rs"

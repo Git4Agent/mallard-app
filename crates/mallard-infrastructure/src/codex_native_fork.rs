@@ -22,9 +22,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::codex_rollout::analyze_codex_rollout_structure;
-use super::conversation_codec::{analyze_codex_transcript, CodecLineage};
-use super::domain::{
+use crate::codex_rollout::analyze_codex_rollout_structure;
+use crate::conversation_codec::{analyze_codex_transcript, CodecLineage};
+use mallard_domain::{
     CodexForkAttemptStatus, CodexForkExecutor, ConversationDivergencePlan, ForkOrigin, ThreadId,
     MAX_CONVERSATION_FILE_BYTES,
 };
@@ -487,18 +487,18 @@ pub fn build_divergence_plan(
         CodexForkExecutor::NativePty,
     ];
     let recommended_resolution = if local_branch_preserved {
-        super::domain::ConversationDivergenceResolution::UseCloudOnly
+        mallard_domain::ConversationDivergenceResolution::UseCloudOnly
     } else {
-        super::domain::ConversationDivergenceResolution::PreserveLocalWithNativeFork
+        mallard_domain::ConversationDivergenceResolution::PreserveLocalWithNativeFork
     };
     Ok(ConversationDivergencePlan {
         available_resolutions: vec![
-            super::domain::ConversationDivergenceResolution::PreserveLocalWithNativeFork,
-            super::domain::ConversationDivergenceResolution::UseCloudOnly,
+            mallard_domain::ConversationDivergenceResolution::PreserveLocalWithNativeFork,
+            mallard_domain::ConversationDivergenceResolution::UseCloudOnly,
         ],
         recommended_resolution,
         local_branch_preserved,
-        preserved_thread_id: ThreadId::parse(super::domain::generated_named_id("thread")?)?,
+        preserved_thread_id: ThreadId::parse(mallard_domain::generated_named_id("thread")?)?,
         source_provider_thread_id: source_provider_thread_id.to_string(),
         local_lineage_digest: local_lineage_digest.to_string(),
         local_semantic_digest: local_semantic_digest.to_string(),
@@ -589,7 +589,7 @@ pub(crate) fn native_thread_at_path(
     Ok(thread)
 }
 
-pub(crate) fn verify_native_thread_prefix_at_path(
+pub fn verify_native_thread_prefix_at_path(
     codex_home: &Path,
     transcript_path: &Path,
     expected_provider_thread_id: &str,
@@ -615,7 +615,7 @@ pub(crate) fn verify_native_thread_prefix_at_path(
         return Err("Codex rollout no longer contains the expected prefix".to_string());
     }
     let (prefix_lineage, prefix_semantic) =
-        super::domain::conversation_chain_digests(&chain[..expected_message_count])?;
+        mallard_domain::conversation_chain_digests(&chain[..expected_message_count])?;
     if prefix_lineage != expected_lineage_digest || prefix_semantic != expected_semantic_digest {
         return Err("Codex rollout rewrote the expected prefix".to_string());
     }
@@ -1867,7 +1867,7 @@ fn verify_candidate_workspace(
 const FORK_VOLATILE_RECORD_TYPES: [&str; 2] = ["session_meta", "turn_context"];
 
 fn is_fork_volatile_record(value: &Value) -> bool {
-    if super::codex_rollout::structural_record_type(value)
+    if crate::codex_rollout::structural_record_type(value)
         .is_some_and(|record_type| FORK_VOLATILE_RECORD_TYPES.contains(&record_type))
     {
         return true;
@@ -2688,7 +2688,7 @@ done
         let writer = master.take_writer().unwrap();
         let mut command = CommandBuilder::new(executable);
         command.arg("--exact");
-        command.arg("project_sync::codex_native_fork::tests::fake_codex_pty_subprocess_entrypoint");
+        command.arg("codex_native_fork::tests::fake_codex_pty_subprocess_entrypoint");
         command.arg("--nocapture");
         command.cwd(&request.project_directory);
         command.env("MALLARD_TEST_CODEX_PTY_CHILD", "1");

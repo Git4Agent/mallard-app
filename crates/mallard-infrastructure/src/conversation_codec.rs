@@ -10,11 +10,11 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-use super::codex_rollout::{
+use crate::codex_rollout::{
     analyze_codex_rollout_structure, check_rollout_bounds, session_meta_id, structural_record_type,
     CodexStructureAccumulator, CodexStructureErrorKind,
 };
-use super::domain::{
+use mallard_domain::{
     conversation_chain_digests, validate_conversation_chain, CanonicalConversationMessage,
     MessageId,
 };
@@ -23,7 +23,7 @@ pub const CODEX_LINEAGE_CODEC_KEY: &str = "codex.lineage.v2";
 pub const CODEX_CODEC_VERSION: u32 = 2;
 
 #[cfg(test)]
-const MAX_TRANSCRIPT_BYTES: usize = super::domain::MAX_CONVERSATION_FILE_BYTES as usize;
+const MAX_TRANSCRIPT_BYTES: usize = mallard_domain::MAX_CONVERSATION_FILE_BYTES as usize;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -605,7 +605,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_sync::domain::{classify_conversation_relation, ConversationRelation};
+    use mallard_domain::{classify_conversation_relation, ConversationRelation};
     use serde_json::json;
 
     fn transcript(thread: &str, cwd: &str, messages: &[(&str, Option<&str>, &str)]) -> Vec<u8> {

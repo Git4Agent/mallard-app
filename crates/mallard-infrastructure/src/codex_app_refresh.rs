@@ -33,7 +33,7 @@ pub enum CodexAppRefreshState {
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CodexAppRefreshOffer {
-    pub operation_id: super::domain::ConversationOperationId,
+    pub operation_id: mallard_domain::ConversationOperationId,
     pub app_kind: CodexAppKind,
     pub app_name: String,
     pub state: CodexAppRefreshState,
@@ -83,7 +83,7 @@ const SUPPORTED_MAC_APPS: [SupportedMacApp; 2] = [
 /// LaunchServices, while any other profile relaunches the validated bundle
 /// executable directly with `CODEX_HOME` pinned to that profile.
 pub fn refresh_offer(
-    operation_id: super::domain::ConversationOperationId,
+    operation_id: mallard_domain::ConversationOperationId,
     codex_home: Option<&Path>,
 ) -> Option<CodexAppRefreshOffer> {
     #[cfg(all(not(test), target_os = "macos"))]

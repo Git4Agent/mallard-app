@@ -39,7 +39,7 @@ The version must match in these files:
 
 - `package.json`
 - `package-lock.json`
-- `src-tauri/Cargo.toml`
+- `Cargo.toml` (`[workspace.package]`; `src-tauri/Cargo.toml` inherits it)
 - `src-tauri/tauri.conf.json`
 
 Run the release checks before creating a tag:
@@ -48,7 +48,7 @@ Run the release checks before creating a tag:
 npm run check:release-version -- v0.1.2
 npm run test:integration
 npm run build
-cargo check --manifest-path src-tauri/Cargo.toml
+cargo check --workspace
 ```
 
 ## Build and verify locally
@@ -65,16 +65,16 @@ Inspect the generated DMG and application:
 
 ```bash
 hdiutil verify \
-  src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Mallard_0.1.2_aarch64.dmg
+  target/aarch64-apple-darwin/release/bundle/dmg/Mallard_0.1.2_aarch64.dmg
 
 file \
-  src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Mallard.app/Contents/MacOS/mallard
+  target/aarch64-apple-darwin/release/bundle/macos/Mallard.app/Contents/MacOS/mallard
 
 codesign --verify --deep --strict --verbose=4 \
-  src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Mallard.app
+  target/aarch64-apple-darwin/release/bundle/macos/Mallard.app
 
 codesign -dvvv \
-  src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Mallard.app
+  target/aarch64-apple-darwin/release/bundle/macos/Mallard.app
 ```
 
 The DMG verification must succeed, `file` must report an `arm64` executable,
