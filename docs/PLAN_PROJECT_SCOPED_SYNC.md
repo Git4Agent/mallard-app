@@ -2,7 +2,10 @@
 
 > **Partially superseded** by
 > [`PLAN_REMOVE_PROJECT_CONFIG_CAPTURE.md`](./PLAN_REMOVE_PROJECT_CONFIG_CAPTURE.md)
-> (typed project-artifact sync removed).
+> (typed project-artifact sync removed). Its proposal to place global skills
+> and plugins in project/repository bundles is fully superseded by
+> [`DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md`](./DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md).
+> Project bundles must not regain those resource classes.
 
 **Status:** proposed clean-break redesign  
 **Date:** 2026-07-17  

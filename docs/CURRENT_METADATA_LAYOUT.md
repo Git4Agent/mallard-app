@@ -374,9 +374,10 @@ under:
 <CLAUDE_CONFIG_DIR>/projects/.../memory/...
 ```
 
-Global standalone skills can be captured from a provider home's `skills/`
-tree. Global plugins are represented primarily as portable dependency intent
-and descriptor metadata rather than by copying an installed plugin cache.
+The active implementation does not capture or restore user-global agent
+customizations. The former repository-scoped skill/plugin feature was removed;
+its storage-scoped, multi-provider replacement is only a proposal in
+`DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md`.
 
 ### Project root
 
@@ -562,8 +563,6 @@ state/claude/projects/<relative-cwd-key>/<session-file>
 state/claude/file-history/<relative-path>
 state/claude/todos/<relative-path>
 state/claude/memory/<relative-cwd-key>/<relative-path>
-
-state/<provider>/skills/<install-directory>/<relative-path>
 ```
 
 Codex discovery initially observes paths under
@@ -660,7 +659,7 @@ so there is no active remote garbage collector for those orphans.
 ### Stored remotely
 
 - Selected raw payload bytes, including conversation transcripts, provider
-  memory/skills, and explicitly approved non-Git project content.
+  memory, and explicitly approved non-Git project content.
 - Bundle/project display name and optional repository fingerprint.
 - Selected recipe and apply policies.
 - Resource display names, portable provenance, project-relative cwd, and

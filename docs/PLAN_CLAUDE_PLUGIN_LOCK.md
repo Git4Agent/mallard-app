@@ -1,8 +1,13 @@
 # Plan: Claude Plugin Lock — Cross-Machine Plugin Intent That Actually Merges
 
+> **Historical and superseded.** The plugin-lock implementation was removed.
+> The new design uses typed provider intent in a storage-scoped catalog and
+> does not read or migrate these locks:
+> [`DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md`](./DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md).
+
 ## Implementation Status (2026-07-10)
 
-Shipped as planned, in `codex_plugins.rs` (shared lock structs, validation,
+Formerly shipped as planned, in `codex_plugins.rs` (shared lock structs, validation,
 canonical serialization, and merge driver reused). Deviations:
 
 - `captured_with` field is `agent_version` (agent-neutral), not

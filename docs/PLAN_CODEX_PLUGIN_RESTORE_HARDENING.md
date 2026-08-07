@@ -1,8 +1,14 @@
 # Plan: Harden Codex Plugin Restore And Machine-Local Config
 
+> **Historical and superseded.** The implementation described here was later
+> removed. Its target-machine resolution and truthful-verification lessons
+> remain inputs to the new storage-scoped design, but its profile lock/config
+> transport is not a compatibility path:
+> [`DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md`](./DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md).
+
 ## Status
 
-Implemented on 2026-07-13 as the hardening follow-up to
+Formerly implemented on 2026-07-13 as the hardening follow-up to
 `PLAN_ENVIRONMENT_RECONCILER.md`.
 
 Automated verification: `cargo test --no-fail-fast`, `cargo check --lib`, and

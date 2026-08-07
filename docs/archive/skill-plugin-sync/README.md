@@ -6,6 +6,10 @@ first commit touching this directory). This archive is a reference snapshot —
 it will not compile against the post-removal tree and is not meant to be
 re-imported wholesale.
 
+The replacement design is storage-scoped and intentionally uses different
+portable types, plans, commands, and UI:
+[`DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md`](../../DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md).
+
 ## What the feature did
 
 Mallard used to sync two "capability" resource classes alongside conversations

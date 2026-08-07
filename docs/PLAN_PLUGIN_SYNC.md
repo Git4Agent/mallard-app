@@ -1,5 +1,10 @@
 # Plan: Claude Plugins Across Machines — Repair, Don't Copy
 
+> **Historical and superseded.** The profile-file sync and repair path
+> described here was removed with the old capability implementation. The
+> replacement design stores provider plugin intent in a storage-scoped catalog:
+> [`DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md`](./DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md).
+
 Goal: after a normal pull on machine B, one click makes `ponytail` and the
 other installed Claude plugins work — by driving Claude Code's own install
 flow, not by copying plugin-manager workspaces.

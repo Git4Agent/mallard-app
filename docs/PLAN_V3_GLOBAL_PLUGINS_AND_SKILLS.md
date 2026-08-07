@@ -1,6 +1,13 @@
 # Plan: Back up and install global plugins and custom skills
 
-**Status:** implemented (core slices; see Implementation status below)
+> **Historical and superseded.** The repository-scoped implementation
+> described here was removed on 2026-07-30. It must not be reintroduced.
+> Its storage-scoped successor is
+> [`DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md`](./DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md).
+> The removed source snapshot remains under
+> [`archive/skill-plugin-sync/`](./archive/skill-plugin-sync/).
+
+**Status:** historical; formerly implemented, then removed
 **Date:** 2026-07-18 (implemented 2026-07-18)
 **Scope:** schema-3 project sync; legacy profile sync stops syncing global
 `skills/**` (schema-3 is the sole owner of global custom skills)
