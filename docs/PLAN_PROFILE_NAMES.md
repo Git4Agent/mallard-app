@@ -72,7 +72,7 @@ races real pushes, for zero safety gain on a display string.
   live bug — rename then push with zero changed files hit the
   everything-up-to-date early exit before any tag write, so nothing
   happened. That path now rewrites just the tag's label (and adopts) when
-  `rename_to` differs; no generation is published — the tag is display data
+  `rename_to` differs; no revision is published — the tag is display data
   outside the CAS surface.
 - **Label precedence in `write_tag_best_effort`**: `rename_to` (pusher's
   custom name) > existing tag's non-empty label (one extra GET per push;
@@ -117,7 +117,7 @@ match by `(storage, profile_id)`. Everything else already keys by id.
   pushes — the tag keeps A's name and B's saved link adopts it.
 - S35 (both backends, the live bug repro): one machine, two local profiles
   sharing one cloud profile; renaming one and pushing WITH NO FILE CHANGES
-  (asserted: generation does not bump) renames the tag label (what the
+  (asserted: revision does not bump) renames the tag label (what the
   storage rows display) and heals BOTH links' cached labels; the unnamed
   sibling's own push doesn't revert. Negative-checked against both the
   publish-path and no-change-path propagation.

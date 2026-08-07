@@ -98,7 +98,7 @@ pub struct ActivityLogContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u64>,
+    pub revision: Option<u64>,
 }
 
 impl ActivityLogContext {

@@ -287,7 +287,7 @@ index 0649184..f8b33e3 100644
          projectContentScanned: lockedProjectContentInventory !== null,
          showProjectFiles: !isGitRepository || lockedProjectContentInventory !== null,
 @@ -1538,7 +1526,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
-       if (hostWorkflowGeneration.current !== workflowGeneration) return;
+       if (hostWorkflowEpoch.current !== workflowEpoch) return;
        setNotice(result.message);
        setHistoryRefreshEpoch((epoch) => epoch + 1);
 -      setProjectTabResetEpoch((epoch) => epoch + 1);
@@ -338,7 +338,7 @@ index 0649184..f8b33e3 100644
      setReviewSupportLoading(false);
 @@ -2050,7 +2031,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
      const requestId = restoreRequest.current;
-     const workflowGeneration = hostWorkflowGeneration.current;
+     const workflowEpoch = hostWorkflowEpoch.current;
      const currentRestorePlan = restorePlan;
 -    const currentDependencyPlan = dependencyPlan;
      // The review-ready notice describes the pre-Apply state. Clear it before
@@ -426,7 +426,7 @@ index 0649184..f8b33e3 100644
 
 -      // Refresh both aligned plans after a partial pass so remaining setup is
 +      // Refresh the plan after a partial pass so remaining setup is
-       // presented against one current generation.
+       // presented against one current revision.
 -      const approvedThisPass = new Set([
 -        ...selection.restoreActionIds,
 -        ...selection.dependencyActionIds,
@@ -472,7 +472,7 @@ index 0649184..f8b33e3 100644
          setNotice(`Codex fork verified. ${remaining} more fork checkpoint${remaining === 1 ? "" : "s"} to resolve.`);
 @@ -2372,14 +2322,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
        if (restoreRequest.current !== requestId) return;
-       if (nextRestore.generation !== currentPlan.generation || nextRestore.manifest_sha256 !== currentPlan.manifest_sha256) {
+       if (nextRestore.revision !== currentPlan.revision || nextRestore.manifest_sha256 !== currentPlan.manifest_sha256) {
          setRestoreResult(null);
 -        setDependencyResult(null);
          setPullApplyPhase("idle");
@@ -1522,12 +1522,12 @@ index 913b83d..fc54d9f 100644
 -      dependencyPlan.host_id === restorePlan.host_id &&
 -      dependencyPlan.replica_id === restorePlan.replica_id &&
 -      dependencyPlan.expected_host_identity_revision === restorePlan.expected_host_identity_revision &&
--      dependencyPlan.generation === restorePlan.generation &&
+-      dependencyPlan.revision === restorePlan.revision &&
 -      dependencyPlan.commit_id === restorePlan.commit_id &&
 -      dependencyPlan.manifest_sha256 === restorePlan.manifest_sha256 &&
 -      dependencyPlan.binding_revision === restorePlan.binding_revision;
 -    if (!sameSnapshot) {
--      throw new Error("The project and tool plans describe different bundle generations. Refresh the Pull review.");
+-      throw new Error("The project and tool plans describe different bundle revisions. Refresh the Pull review.");
 -    }
 -    const dependencyIds = new Set(dependencyPlan.actions.map((action) => action.action_id));
 -    if (selection.dependencyActionIds.some((actionId) => !dependencyIds.has(actionId))) {
@@ -1969,8 +1969,8 @@ index a803718..69753cc 100644
 -  profiles: CapabilityProfileContext[];
 -  storage_id?: string | null;
 -  storage_name?: string | null;
--  generation?: number | null;
--  base_generation?: number | null;
+-  revision?: number | null;
+-  base_revision?: number | null;
 -  compared_at: number;
 -  items: CapabilityStatusItem[];
 -  warnings: string[];
@@ -2018,7 +2018,7 @@ index a803718..69753cc 100644
 -  host_id: string;
 -  replica_id: string;
 -  expected_host_identity_revision: number;
--  generation: number;
+-  revision: number;
 -  commit_id: string;
 -  manifest_sha256: string;
 -  binding_revision: number;

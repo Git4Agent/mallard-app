@@ -58,7 +58,7 @@ Invariants:
   (project, profile).
 - A fork records `forked_from: Option<ThreadId>` on the new thread —
   provenance only, never consulted by the resolver.
-- Cloud manifest publishes are CAS on `generation`; fork publishes are purely
+- Cloud manifest publishes are CAS on `revision`; fork publishes are purely
   additive, so a lost race rebases trivially.
 
 ## Decision tables
@@ -148,7 +148,7 @@ locally in the meantime, and a host that never pushes never publishes it.
 
 - `ReplaceCloud`: cloud `t` := local chain. Destroys the cloud chain — the
   first cloud-destructive conversation operation, therefore gated on
-  explicit approval plus pinned cloud generation/digests. Optional
+  explicit approval plus pinned cloud revision/digests. Optional
   mitigation (recommended, cheap): auto-record the losing chain as a
   content-bearing tombstone so force is recoverable.
 - `ReplaceLocal`: local file := cloud chain. The only conflict action that

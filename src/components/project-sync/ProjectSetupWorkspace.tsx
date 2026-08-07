@@ -13,30 +13,25 @@ import type {
   StorageConfig,
 } from "../../types";
 import Icon from "../Icons";
-import ResourceInventory from "./ResourceInventory";
 import { projectSyncApi } from "./api";
 import {
   compactProjectPath,
   configuredProjectProvider,
   errorMessage,
   formatRelativeTime,
-  inventoryResources,
   PROJECT_PROVIDERS,
   projectLabel,
   providerLabel,
-  prunedSelection,
-  recipeSelection,
   repositoryFingerprintMatches,
   singleProviderSelection,
-  unavailableSelection,
 } from "./model";
 
 export type SetupCompletion = "open" | "pull";
 
 interface Props {
   draftId: string;
-  workflowGeneration: number;
-  isWorkflowCurrent: (workflowGeneration: number) => boolean;
+  workflowEpoch: number;
+  isWorkflowCurrent: (workflowEpoch: number) => boolean;
   profiles: ProviderProfileSummary[];
   projects: LocalProjectSummary[];
   storages: StorageConfig[];
@@ -47,7 +42,7 @@ interface Props {
   onFinalized: (
     detail: ProjectDetail,
     completion: SetupCompletion,
-    workflowGeneration: number,
+    workflowEpoch: number,
   ) => void;
 }
 
@@ -57,39 +52,6 @@ const AUTOSAVE_DELAY_MS = 700;
 
 function sectionState(sections: SetupSectionStatus[], id: string): SetupSectionStatus | null {
   return sections.find((section) => section.section === id) ?? null;
-}
-
-/** Name a few resource IDs without letting a long tail take over the callout. */
-function summarizeIds(ids: string[], limit = 3): string {
-  if (ids.length <= limit) return ids.join(", ");
-  return `${ids.slice(0, limit).join(", ")} +${ids.length - limit} more`;
-}
-
-/**
- * Sync contents earns its place when it offers a choice or has something to
- * report. A connected remote repo makes the selection the repo's to make, and
- * a discovery that came back empty leaves nothing to tick — in both cases the
- * heading would stand over one static sentence. Every state the backend flags
- * still forces it open, so nothing actionable can hide behind this.
- */
-export function shouldShowResourcesSection(input: {
-  /** The picker and its Customize toggle have something to offer. */
-  choiceAvailable: boolean;
-  /** Discovery is running and has not produced an inventory yet. */
-  discovering: boolean;
-  warningCount: number;
-  /** Backend status: "blocked" on discovery failure or a missing profile,
-      "attention" on selection drift. */
-  resourcesState: string | null;
-  /** A profile change re-derived the selection and the note is showing. */
-  selectionResetNoticeVisible: boolean;
-}): boolean {
-  return input.choiceAvailable
-    || input.discovering
-    || input.warningCount > 0
-    || input.resourcesState === "blocked"
-    || input.resourcesState === "attention"
-    || input.selectionResetNoticeVisible;
 }
 
 function sectionBadge(section: SetupSectionStatus | null) {
@@ -112,7 +74,7 @@ function sectionBadge(section: SetupSectionStatus | null) {
 
 export default function ProjectSetupWorkspace({
   draftId,
-  workflowGeneration,
+  workflowEpoch,
   isWorkflowCurrent,
   profiles,
   projects,
@@ -125,18 +87,13 @@ export default function ProjectSetupWorkspace({
 }: Props) {
   const [draft, setDraft] = useState<ProjectSetupDraft | null>(null);
   const [inspection, setInspection] = useState<SetupDraftInspection | null>(null);
-  const [inspecting, setInspecting] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [finalizing, setFinalizing] = useState(false);
-  const [resourcesOpen, setResourcesOpen] = useState(false);
   const [remoteBundles, setRemoteBundles] = useState<BundleSnapshotSummary[]>([]);
   const [bundlesLoading, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
   const [setupProvider, setSetupProvider] = useState<ProjectProvider>("codex");
-  // Set when a profile change re-derived the selection, so the note outlives
-  // the inspection that reported it.
-  const [rediscovered, setRediscovered] = useState(false);
 
   // Autosave bookkeeping: edits mark the draft dirty; one debounced save
   // persists the latest state and refreshes inspection afterwards.
@@ -146,13 +103,12 @@ export default function ProjectSetupWorkspace({
   const repoAutoSelected = useRef(false);
   const mountedRef = useRef(true);
   const workflowIsActive = () => (
-    mountedRef.current && isWorkflowCurrent(workflowGeneration)
+    mountedRef.current && isWorkflowCurrent(workflowEpoch)
   );
 
   const refreshInspection = async (id: string) => {
     if (!workflowIsActive()) return;
     const requestId = ++inspectRequest.current;
-    setInspecting(true);
     try {
       const next = await projectSyncApi.inspectSetupDraft(id);
       if (requestId !== inspectRequest.current || !workflowIsActive()) return;
@@ -161,8 +117,6 @@ export default function ProjectSetupWorkspace({
       if (requestId === inspectRequest.current && workflowIsActive()) {
         setError(errorMessage(reason));
       }
-    } finally {
-      if (requestId === inspectRequest.current && workflowIsActive()) setInspecting(false);
     }
   };
 
@@ -322,48 +276,8 @@ export default function ProjectSetupWorkspace({
     repositoryFingerprint,
   ]);
 
-  // Adopt the discovered default selection the first time discovery runs.
-  useEffect(() => {
-    if (!draft || !inspection?.inventory || !inspection.fresh_discovery_signature) return;
-    if (draft.discovery_signature) return;
-    const defaults = recipeSelection(inspection.inventory.recipe);
-    edit((current) => ({
-      ...current,
-      selected_resource_ids: [...defaults].sort(),
-      discovery_signature: inspection.fresh_discovery_signature ?? "",
-      discovery_profile_signature: inspection.fresh_profile_signature ?? "",
-    }));
-  }, [draft, inspection]);
-
-  // Repointing a profile changes which resources exist at all, so the saved
-  // selection describes sources that are no longer in play.  Re-derive the
-  // defaults exactly as first discovery would, and say so, instead of
-  // reporting drift the user just caused on purpose.
-  useEffect(() => {
-    if (!draft || !inspection?.profile_changed || !inspection.inventory) return;
-    if (!inspection.fresh_profile_signature) return;
-    // The edit below lands before the next inspection arrives; matching
-    // signatures mean this already ran for that inspection.
-    if (draft.discovery_profile_signature === inspection.fresh_profile_signature) return;
-    const defaults = recipeSelection(inspection.inventory.recipe);
-    setRediscovered(true);
-    edit((current) => ({
-      ...current,
-      selected_resource_ids: [...defaults].sort(),
-      discovery_signature: inspection.fresh_discovery_signature ?? current.discovery_signature,
-      discovery_profile_signature: inspection.fresh_profile_signature ?? "",
-    }));
-  }, [draft, inspection]);
-
   const sections = inspection?.sections ?? [];
-  const resources = useMemo(() => inventoryResources(inspection?.inventory ?? null), [inspection?.inventory]);
-  const selectedResources = useMemo(() => new Set(draft?.selected_resource_ids ?? []), [draft?.selected_resource_ids]);
   const usesExistingRepo = draft?.repository.kind === "existing";
-  // Selected resources discovery no longer offers.  Finalize drops these with
-  // a warning, so name them here while the choice is still editable.
-  const droppedResources = useMemo(() => (
-    inspection?.inventory ? unavailableSelection(resources, selectedResources) : []
-  ), [inspection?.inventory, resources, selectedResources]);
   const exactMatches = useMemo(() => (
     remoteBundles.filter((bundle) => (
       repositoryFingerprintMatches(
@@ -424,7 +338,7 @@ export default function ProjectSetupWorkspace({
     try {
       const detail = await projectSyncApi.finalizeProjectSetup(draftId, expectedRevision);
       if (!workflowIsActive()) return;
-      onFinalized(detail, completion, workflowGeneration);
+      onFinalized(detail, completion, workflowEpoch);
     } catch (reason) {
       if (!workflowIsActive()) return;
       setError(errorMessage(reason));
@@ -454,7 +368,6 @@ export default function ProjectSetupWorkspace({
   const profilesSection = sectionState(sections, "profiles");
   const storageSection = sectionState(sections, "storage");
   const repositorySection = sectionState(sections, "repository");
-  const resourcesSection = sectionState(sections, "resources");
   const working = busy || finalizing;
   const canFinalize = !!inspection?.can_finalize
     && !working
@@ -469,19 +382,9 @@ export default function ProjectSetupWorkspace({
   const profileNeedsSelection = !setupProfileSelection
     || (setupProfileSelection.kind === "pending" && !setupProfileSelection.path.trim());
   const profileBlocked = profilesSection?.state === "blocked";
-  const resourcesWaitingForProfile = profileBlocked && resourcesSection?.state === "blocked";
   const profileErrorMessage = profileBlocked
     ? (profileNeedsSelection ? "Choose a profile to continue." : profilesSection?.message)
     : null;
-
-  const resourceChoiceAvailable = !usesExistingRepo && resources.length > 0;
-  const showResourcesSection = shouldShowResourcesSection({
-    choiceAvailable: resourceChoiceAvailable,
-    discovering: inspecting && !inspection?.inventory,
-    warningCount: inspection?.warnings?.length ?? 0,
-    resourcesState: resourcesSection?.state ?? null,
-    selectionResetNoticeVisible: !usesExistingRepo && rediscovered,
-  });
 
   // Configs already claimed by a project on this same folder: the composite
   // project key (folder, config) makes them invalid choices for this draft.
@@ -795,109 +698,6 @@ export default function ProjectSetupWorkspace({
           </section>
         )}
 
-        {/* Sync contents */}
-        {showResourcesSection && (
-        <section className="sync-setup-section">
-          <div className="sync-card-heading">
-            <div className="sync-setup-sync-copy">
-              <div className="sync-setup-sync-title">
-                <strong>Sync contents</strong>
-                {(inspection?.warnings?.length ?? 0) > 0 && (
-                  <details className="sync-setup-warning-disclosure">
-                    <summary aria-label="Show sync warning details" title="Sync warning details">
-                      <Icon name="alert-triangle" size={14} />
-                    </summary>
-                    <ul className="sync-setup-warning-list">
-                      {inspection?.warnings?.map((warning) => <li key={warning}>{warning}</li>)}
-                    </ul>
-                  </details>
-                )}
-              </div>
-              <span>
-                {resourcesWaitingForProfile
-                  ? (profileNeedsSelection ? "Select a profile first" : "Resolve the profile first")
-                  : usesExistingRepo
-                  ? "Uses repository defaults"
-                  : `${selectedResources.size} of ${resources.length} selected`}
-              </span>
-            </div>
-            <div className="sync-setup-heading-actions">
-              {!resourcesWaitingForProfile && sectionBadge(resourcesSection)}
-              {resourceChoiceAvailable && (
-                <button type="button" className="btn btn-ghost sync-setup-resource-toggle" onClick={() => setResourcesOpen((current) => !current)}>
-                  {resourcesOpen ? "Collapse" : "Customize"}
-                </button>
-              )}
-            </div>
-          </div>
-          {/* Both notices concern the saved selection, which an existing remote
-              repo ignores in favour of its own recipe. */}
-          {!usesExistingRepo && rediscovered && (
-            <div className="sync-callout sync-setup-selection-callout">
-              <Icon name="info" size={15} />
-              <span>
-                <strong>Agent profile changed</strong>
-                Resources were re-discovered from the new home, and the selection reset to this profile's defaults.
-              </span>
-            </div>
-          )}
-          {!usesExistingRepo && inspection?.selection_stale && (
-            <div className="sync-callout warning sync-setup-selection-callout">
-              <Icon name="alert-triangle" size={15} />
-              <span>
-                <strong>Discovered resources changed</strong>
-                {droppedResources.length > 0
-                  ? <>
-                      {droppedResources.length} selected {droppedResources.length === 1 ? "resource is" : "resources are"} no longer
-                      available and will be left out: <code>{summarizeIds(droppedResources)}</code>
-                    </>
-                  : "Review the list, or accept it to keep syncing what is still there."}
-              </span>
-              <button
-                type="button"
-                className="btn"
-                disabled={working || !inspection.fresh_discovery_signature}
-                // "Accept" means the selection now describes what was
-                // discovered: drop what is gone rather than carry IDs that
-                // finalize would silently discard.
-                onClick={() => edit((current) => ({
-                  ...current,
-                  selected_resource_ids: [...prunedSelection(resources, new Set(current.selected_resource_ids))].sort(),
-                  discovery_signature: inspection.fresh_discovery_signature ?? current.discovery_signature,
-                  discovery_profile_signature: inspection.fresh_profile_signature ?? current.discovery_profile_signature,
-                }))}
-              >
-                Accept current list
-              </button>
-            </div>
-          )}
-          {!resourcesWaitingForProfile && resourcesSection?.message && resourcesSection.state === "blocked" && (
-            <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {resourcesSection.message}</div>
-          )}
-          {inspecting && !inspection?.inventory && (
-            <div className="sync-storage-repository-state"><span className="status-loader" /> Discovering resources…</div>
-          )}
-          {resourceChoiceAvailable && resourcesOpen && (
-            <ResourceInventory
-              resources={resources}
-              selected={selectedResources}
-              statuses={new Map()}
-              disabled={working}
-              onToggle={(resourceId) => edit((current) => {
-                const next = new Set(current.selected_resource_ids);
-                if (next.has(resourceId)) next.delete(resourceId);
-                else next.add(resourceId);
-                return {
-                  ...current,
-                  selected_resource_ids: [...next].sort(),
-                  discovery_signature: inspection?.fresh_discovery_signature ?? current.discovery_signature,
-                  discovery_profile_signature: inspection?.fresh_profile_signature ?? current.discovery_profile_signature,
-                };
-              })}
-            />
-          )}
-        </section>
-        )}
         {error && (
           <div className="sync-setup-field-error sync-setup-system-error" role="alert">
             <Icon name="alert-triangle" size={13} /> {error}

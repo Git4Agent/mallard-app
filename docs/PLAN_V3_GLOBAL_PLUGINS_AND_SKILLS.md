@@ -44,7 +44,7 @@ Deviations / not yet implemented:
 - **Install as renamed copy** (§6.4) is not offered; duplicates resolve to
   Keep (default, unapproved) or Overwrite only.
 - **Version-history selection on pull** (§8.3) is not built; pull installs
-  the head generation. History remains derivable from immutable manifests.
+  the head revision. History remains derivable from immutable manifests.
 - The **machine-local plugin requirement graph** (§6.6) and cross-bundle
   source-conflict blocking are not persisted yet; same-plugin coalescing is
   per-bundle.
@@ -99,7 +99,7 @@ not changed by this work.
    supplied by a plugin is represented by the plugin dependency only. It is
    never copied again as a standalone skill.
 5. **Custom skill updates create cloud history.** Content changes keep the same
-   resource identity and publish a new immutable bundle generation. Version
+   resource identity and publish a new immutable bundle revision. Version
    history reuses today's manifests, file entries, digests, commits, and object
    storage; it is not a second versioning system.
 6. **Existing custom skills are never silently replaced.** Missing targets can
@@ -121,9 +121,9 @@ Schema 3 already has most of the transport and restore model:
 
 - `StandaloneSkillSource` and bounded standalone-skill capture;
 - dependency actions for Codex plugins, Claude plugins, and executable skills;
-- generation-pinned restore and dependency plans;
+- revision-pinned restore and dependency plans;
 - explicit approval, receipts, backups, and readiness reporting; and
-- immutable generation manifests, commit links, file entries, content digests,
+- immutable revision manifests, commit links, file entries, content digests,
   object storage, and materialization receipts.
 
 The command layer currently passes `standalone_skills: Vec::new()`, and plugin
@@ -164,7 +164,7 @@ not the identity required for a normal custom skill.
 
 The existing `ApplyReceipt` already records resource ID, target path, source
 digest, and resulting target digest; its containing `MaterializationRecord` is
-pinned to the bundle generation and manifest. Reuse them together as the
+pinned to the bundle revision and manifest. Reuse them together as the
 installed-version claim. Do not add a second custom registry unless an
 implementation gap is proven.
 
@@ -206,23 +206,23 @@ existing schema-3 bundle history is the source of truth:
 - `ResourceDescriptor.resource_id` is the stable custom-skill identity;
 - `ResourceDescriptor.metadata["content_sha256"]` is today's resource digest
   over logical paths, bytes, safe modes, and dependency intent;
-- `BundleManifest.generation` identifies the immutable bundle snapshot;
+- `BundleManifest.revision` identifies the immutable bundle snapshot;
 - `BundleFileEntry` stores each file's hash, size, mode, and immutable object
   key;
 - `CommitRecord.previous_commit_id` links bundle history and its file deltas;
 - the bundle head CAS prevents concurrent pushes from losing an update; and
-- `MaterializationRecord` plus `ApplyReceipt` record which generation/digest was
+- `MaterializationRecord` plus `ApplyReceipt` record which revision/digest was
   installed locally.
 
 The user-visible custom-skill version is therefore:
 
 ```text
-bundle generation + custom-skill content_sha256
+bundle revision + custom-skill content_sha256
 ```
 
 The history view walks immutable commits/manifests and keeps only points where
 that resource's content digest changed. An unchanged skill does not acquire a
-fake new version merely because conversations caused another bundle generation.
+fake new version merely because conversations caused another bundle revision.
 Previous file objects remain reachable through their immutable manifests.
 
 Publishing an updated skill follows the existing optimistic concurrency model:
@@ -230,7 +230,7 @@ Publishing an updated skill follows the existing optimistic concurrency model:
 1. Compare the local skill digest with the recipe base and current remote head.
 2. If unchanged, reuse the prior resource/files in the new manifest.
 3. If locally changed and the remote still matches the reviewed base, publish a
-   new bundle generation through head CAS.
+   new bundle revision through head CAS.
 4. If both local and remote changed, block push and require Pull review; do not
    choose a winner from timestamps.
 5. If capture observes files changing while they are read, retry a bounded
@@ -238,7 +238,7 @@ Publishing an updated skill follows the existing optimistic concurrency model:
 
 Restoring an old version never rewinds the bundle head. It selects files from an
 older immutable manifest and, if the user later pushes them, creates a new head
-generation whose digest matches that restored content. Cloud garbage
+revision whose digest matches that restored content. Cloud garbage
 collection must retain every manifest, commit, and object still covered by the
 configured history-retention policy.
 
@@ -486,7 +486,7 @@ There is no automatic per-file merge for opaque/executable skill trees.
 Implement a typed `InstallCustomSkill`/`OverwriteCustomSkill` transaction:
 
 1. Acquire the canonical provider-home operation lock.
-2. Revalidate the pinned bundle generation, binding, source objects, target
+2. Revalidate the pinned bundle revision, binding, source objects, target
    type, target digest, and free-space requirement.
 3. Materialize the complete cloud tree into a same-filesystem staging directory.
 4. Verify every staged path, byte hash, mode, total size, and final tree digest;
@@ -498,7 +498,7 @@ Implement a typed `InstallCustomSkill`/`OverwriteCustomSkill` transaction:
 7. If the final rename or verification fails, restore the backup and retain the
    journal for recovery.
 8. Record the existing `ApplyReceipt` fields with before/after digest, target
-   path, resource ID, and generation.
+   path, resource ID, and revision.
 
 If backup creation fails, disk space is insufficient, the target is in use in a
 way that prevents safe replacement, or the target changes after review, perform
@@ -591,7 +591,7 @@ requirement graph keyed by canonical provider home and normalized plugin ID.
    checkable, newly discovered items are unchecked, and prior recipe selections
    remain checked.
 3. Show each selected resource as `new`, `unchanged`, `updated`, `missing`,
-   `blocked`, or `conflict`, including the current cloud generation/digest.
+   `blocked`, or `conflict`, including the current cloud revision/digest.
 4. Saving this selection updates the persistent recipe. Push uses that exact
    saved recipe; there is no hidden transient file filter.
 5. Validate plugin/skill ownership overlap, effective capability claims, source
@@ -610,7 +610,7 @@ requirement graph keyed by canonical provider home and normalized plugin ID.
     through the existing CAS boundary.
 
 If a selected resource is unavailable locally, preserve its recipe entry and
-report it as unavailable. Do not silently delete it from the next generation.
+report it as unavailable. Do not silently delete it from the next revision.
 If the cloud head advanced or the same custom skill changed remotely since the
 reviewed base, Push stops and directs the user to Pull review.
 
@@ -618,7 +618,7 @@ reviewed base, Push stops and directs the user to Pull review.
 
 1. Fetch and validate the complete bundle before creating either plan.
 2. Open **Choose resources to install** containing only plugins and custom
-   skills present in the fetched generation. Install/update/overwrite actions
+   skills present in the fetched revision. Install/update/overwrite actions
    start unchecked; already-matching resources are marked ready.
 3. Let the user choose a historical custom-skill version when more than one
    immutable digest exists. Default to the bundle head's version.
@@ -633,7 +633,7 @@ reviewed base, Push stops and directs the user to Pull review.
 7. For every plugin, distinguish install, matching no-op, same-source update,
    source replacement, ownership conflict, missing authentication, unsupported
    provider version, and offline/unavailable marketplace.
-8. Pin the chosen actions to storage, bundle, generation, commit, manifest
+8. Pin the chosen actions to storage, bundle, revision, commit, manifest
    digest, binding revision, source digests, and expected target digests.
 9. Apply approved custom skills transactionally under the provider-home lock.
 10. Run approved plugin commands with the bound project as cwd and only the
@@ -654,7 +654,7 @@ install one plugin must not erase successfully restored conversations or skills.
   existing Skills and Plugins groups.
 - Keep every new global resource unchecked by default.
 - Show source profile, provenance, shared-profile scope, observed version,
-  current content digest, last cloud generation, change state, and whether a
+  current content digest, last cloud revision, change state, and whether a
   plugin supplies skills.
 - Render plugin-provided skills as non-selectable children labelled
   `Provided by <plugin>`.
@@ -670,7 +670,7 @@ install one plugin must not erase successfully restored conversations or skills.
 
 - List every backed-up custom skill and plugin with an independent checkbox;
   global mutation actions start unchecked.
-- Show cloud version history for custom skills as generation, capture time,
+- Show cloud version history for custom skills as revision, capture time,
   digest prefix, and changed file count.
 - For duplicates, show installed versus cloud version and require **Keep
   installed**, **Overwrite with cloud**, or an adapter-supported renamed copy.
@@ -710,7 +710,7 @@ install one plugin must not erase successfully restored conversations or skills.
   command string from a bundle.
 - Never sync marketplace authentication. A private plugin remains blocked until
   the target provider is authenticated locally.
-- Revalidate generation, manifest digest, binding revision, target paths, and
+- Revalidate revision, manifest digest, binding revision, target paths, and
   live provider inventory immediately before mutation.
 
 ## 11. Edge-case policy
@@ -720,7 +720,7 @@ install one plugin must not erase successfully restored conversations or skills.
 - A resource newly discovered on Push is unchecked. A resource newly available
   on Pull has no install approval. Defaults never expand authority.
 - Applying only some Pull actions must not consume approval for the others.
-  Create a fresh generation-pinned plan for remaining actions or persist
+  Create a fresh revision-pinned plan for remaining actions or persist
   receipts per action; do not make a skipped plugin permanently un-installable.
 - A custom skill name change is an explicit remove/add because its effective
   runtime identity and target path changed. Preserve the old cloud versions and
@@ -807,7 +807,7 @@ install one plugin must not erase successfully restored conversations or skills.
 - Define the versioned provider-adapter contract for declared names, effective
   runtime names, namespaces, canonicalization, and target-path collision keys.
 - Add normalized plugin source metadata and provided-capability metadata.
-- Reuse resource IDs, `content_sha256`, generation manifests, commit history,
+- Reuse resource IDs, `content_sha256`, revision manifests, commit history,
   file entries, and apply receipts for custom-skill identity and versions.
 - Add typed `InstallCustomSkill` and `OverwriteCustomSkill` plan actions with
   expected target tree digests and explicit overwrite decisions.
@@ -831,7 +831,7 @@ install one plugin must not erase successfully restored conversations or skills.
 - Coalesce project-config and global-inventory observations of the same plugin.
 - Enforce selected-only payload/dependency capture.
 - Reuse unchanged manifest entries/objects and derive custom-skill history by
-  comparing resource digests across existing immutable generations.
+  comparing resource digests across existing immutable revisions.
 - Add history traversal and selection APIs without creating another cloud head
   or skill-version database.
 
@@ -845,7 +845,7 @@ install one plugin must not erase successfully restored conversations or skills.
 - Implement provider-home operation locking, complete-directory staging,
   local backup/journal, atomic replacement where the platform supports it, and
   rollback on Agent Sync-managed overwrite failure.
-- Use existing apply receipts as the installed generation/digest claim.
+- Use existing apply receipts as the installed revision/digest claim.
 
 ### Slice 5: UI and readiness
 
@@ -900,12 +900,12 @@ install one plugin must not erase successfully restored conversations or skills.
   tombstone;
 - explicit recipe removal creates the intended resource tombstone; and
 - head CAS conflict prevents a stale skill update from replacing a newer remote
-  generation.
+  revision.
 
 ### Cloud history tests
 
-- the first skill snapshot appears in one immutable manifest generation;
-- an unchanged skill across later bundle generations appears as one user-visible
+- the first skill snapshot appears in one immutable manifest revision;
+- an unchanged skill across later bundle revisions appears as one user-visible
   skill version;
 - an updated skill produces a new digest and history point without changing its
   resource ID;
@@ -913,7 +913,7 @@ install one plugin must not erase successfully restored conversations or skills.
   digest;
 - previous manifests still fetch their original immutable file objects;
 - choosing an old skill version installs those exact files;
-- pushing a restored old version creates a new generation instead of rewinding
+- pushing a restored old version creates a new revision instead of rewinding
   the head; and
 - history retention never removes objects referenced by a retained manifest.
 
@@ -974,7 +974,7 @@ install one plugin must not erase successfully restored conversations or skills.
 - two simultaneous operations on one provider home serialize on the same
   canonical lock;
 - differently spelled paths resolving to the same provider home share the lock;
-- stale plans fail on generation, binding, source, or target digest mismatch;
+- stale plans fail on revision, binding, source, or target digest mismatch;
 - app termination with a custom-skill journal is detected and recoverable on
   restart;
 - provider process activity that makes replacement unsafe blocks the action;
@@ -990,7 +990,7 @@ install one plugin must not erase successfully restored conversations or skills.
 - plugin-provided skills are visible but not separately selectable;
 - selecting independent overlapping owners backs up both with a warning, while
   Pull blocks activating both until the user resolves the overlap;
-- updated skills display current and prior cloud generations/digests;
+- updated skills display current and prior cloud revisions/digests;
 - Pull install actions start unchecked and allow independent plugin/skill
   selection;
 - applying one subset leaves remaining resources available through a fresh
@@ -1009,7 +1009,7 @@ install one plugin must not erase successfully restored conversations or skills.
 1. Push backs up exactly the global plugins and custom skills selected by the
    user; new discoveries never enter a bundle automatically.
 2. A custom skill can be updated under the same resource identity, and its cloud
-   history is derived from existing immutable bundle generations and digests.
+   history is derived from existing immutable bundle revisions and digests.
 3. Pull lets the user independently select which backed-up plugins and custom
    skills to install into mapped provider homes.
 4. Existing different custom skills are detected automatically and cannot be

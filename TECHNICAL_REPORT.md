@@ -1,6 +1,6 @@
 # Mallard Current Technical Report
 
-**Implementation date:** 2026-07-28
+**Implementation date:** 2026-08-06
 **Application version:** 0.1.2
 **Scope:** the active implementation only. This report does not describe
 superseded formats, migrations, or compatibility behavior.
@@ -41,7 +41,7 @@ React review UI
 Tauri command orchestration
   |-- local metadata repository (~/.mallard)
   |-- provider/project discovery and capture
-  |-- bundle engine: publish, fetch, plan, apply
+  |-- bundle engine: publish, inspect/lazy stage, plan, apply
   `-- object store
        |-- local folder
        `-- S3-compatible storage / R2
@@ -55,10 +55,10 @@ The main implementation boundaries are:
 | `src/components/project-sync/` | Setup, inventory, Push/Pull review, project-file tree, readiness, and storage UI. |
 | `project_sync/domain.rs` | Current IDs, schemas, validation rules, manifests, actions, plans, and receipts. |
 | `project_sync/provider_capture.rs` | Provider adapters, generic project scanner, filters, stable identities, and capture. |
-| `project_sync/bundle_engine.rs` | Object-key validation, immutable publication, head CAS, verified fetch, restore planning, backups, and apply. |
+| `project_sync/bundle_engine.rs` | Object-key validation, immutable publication, head CAS, tempfile-backed verified-body access, restore planning, streamed backups, and apply. |
 | `project_sync/commands.rs` | Tauri command boundary and cross-document transactions. |
 | `project_sync/persistence.rs` | Bounded, atomic machine-local JSON persistence. |
-| `project_sync/s3_store.rs` | S3/R2 transport with conditional writes and bounded pagination. |
+| `project_sync/s3_store.rs` | S3/R2 transport with conditional writes, chunk-to-tempfile verified downloads, per-chunk inactivity timeouts, and bounded pagination. |
 | `activity_log.rs` | Sanitized local JSONL activity history and retention. |
 
 ## 3. Core domain model
@@ -110,8 +110,10 @@ Machine state is stored directly under `~/.mallard`:
 `sync_config.json` contains schema-1 storage definitions, including S3
 credentials, project registrations, project/storage links, recipes,
 project-content exclusions, and reviewed remote bases. A `RecipeBase` pins the
-generation, commit ID, manifest SHA-256, recipe revision, binding revision,
-and last Push/Pull timestamps reviewed on this replica.
+revision, commit ID, required nonzero serialized manifest size, manifest
+SHA-256, recipe revision, binding revision, and last Push/Pull timestamps
+reviewed on this replica. Historical manifest reads use the size and hash as
+exact transfer expectations.
 
 `machine_projects.json` contains the provider profile catalog and checkout
 bindings. Exact and canonical project/profile paths stay here. Resolved
@@ -120,7 +122,7 @@ serialized into portable bundles.
 
 Restore plans are immutable approval documents. They contain resolved
 absolute targets, source digests, expected target digests or modes, a binding
-revision, a remote generation/commit/hash pin, and a 24-hour expiry.
+revision, a remote bundle revision/commit/hash pin, and a 24-hour expiry.
 Materialization records contain the resulting receipts. Backups are stored
 per restore plan.
 
@@ -155,16 +157,24 @@ Local-folder and S3/R2 storage share one key layout:
 `-- v1/repositories/<bundle-id>/
     |-- _tag.json
     |-- _head.json
-    |-- _manifests/<generation>-<commit-id>.json
-    |-- _commits/<generation>-<commit-id>.json
-    `-- _uploads/<upload-id>/files/<logical-path>
+    |-- _objects/<payload-sha256>
+    |-- _manifests/<revision>-<commit-id>.json
+    |-- _commits/<revision>-<commit-id>.json
+    `-- _uploads/                         # reserved; not written
 ```
 
 `_storage.json` identifies the root as
 `{"format":"mallard-storage","layout_version":1}`. `_head.json` is the
 only authoritative mutable bundle pointer. It stores schema version 1, bundle
-identity, generation, commit ID, manifest key, manifest SHA-256, and update
-time.
+identity, revision, commit ID, manifest key, manifest SHA-256, and update
+time. It also stores the required nonzero `manifest_size`, which is the exact
+byte length of the one serialized immutable manifest representation.
+
+Current and historical manifest reads stage against both the recorded size
+and SHA-256 before parsing. `manifest_size` has no default and is not inferred
+from S3 `Content-Length`, an additional `HEAD`, or received bytes. State that
+predates the field is rejected under the schema-1 clean cutover; it is not
+migrated.
 
 Each immutable schema-1 manifest is a complete live snapshot containing:
 
@@ -182,7 +192,7 @@ safe mode, and immutable object key. A directory entry stores its resource ID,
 safe mode, and source mtime and owns no byte object. A commit record points to
 the manifest, links the previous commit ID, and records file delta counts.
 `_tag.json` is a derived listing hint; failure to refresh it after a successful
-head CAS does not invalidate the generation.
+head CAS does not invalidate the revision.
 
 Remote metadata can contain selected conversations and user-authored project
 content. It does not contain checkout paths, provider-home paths, local
@@ -283,7 +293,7 @@ The Push inventory compares:
 
 - `local`: the explicit scan result;
 - `storage`: the current schema-1 head manifest; and
-- `base`: the exact generation last reviewed by this binding/link.
+- `base`: the exact revision last reviewed by this binding/link.
 
 Entries are classified as `synced`, `local_only`, `local_ahead`,
 `storage_only`, `storage_ahead`, `diverged`, `missing`, `blocked`, or
@@ -297,7 +307,7 @@ entries to remain selected. This state is still transient until Push
 succeeds.
 
 The review token binds the local project and replica IDs, binding revision,
-eligibility, preference revision, remote generation/commit/manifest hash, and
+eligibility, preference revision, remote revision/commit/manifest hash, and
 every reviewed entry state/digest/warning. Push rescans and recomputes it.
 Changed bytes, modes, warnings, binding, preferences, or remote head require a
 fresh review. Warning acknowledgements are separately bound to the resource,
@@ -320,19 +330,19 @@ Push executes in this order:
 6. Compare the current remote head with the local `RecipeBase`. A missing,
    unknown, stale, or binding-mismatched base blocks publication.
 7. Upload selected file objects, then the immutable manifest and commit.
-8. Compare-and-swap `_head.json` from the reviewed ETag to the new generation.
+8. Compare-and-swap `_head.json` from the reviewed ETag to the new revision.
 9. Best-effort refresh `_tag.json`.
 10. Guardedly update machine-local metadata.
 
 Publication writes immutable objects before the mutable head. A failed CAS can
 leave unreachable upload/manifest/commit objects, but readers cannot observe a
-partial generation. Local-folder storage serializes publication with
+partial revision. Local-folder storage serializes publication with
 `.mallard/.storage.lock`. S3/R2 uses `If-None-Match` or `If-Match`; an
 ambiguous response is resolved by rereading the head and comparing bytes.
 
 ### Successful Push: remote update
 
-The remote gains a new generation containing the full selected resource set,
+The remote gains a new revision containing the full selected resource set,
 file objects, directory entries, and any typed tombstones. Removing a selected
 resource from the recipe is not enough for ordinary project content: the
 command preserves stored entries unless its resource ID is explicitly listed
@@ -345,14 +355,14 @@ After head publication, one guarded config mutation:
 - saves the destination recipe on the project/storage link;
 - updates the link's exact exclusion set and increments its preference
   revision only if those preferences changed;
-- writes the new `RecipeBase` generation, commit, manifest hash, recipe
-  revision, binding revision, and Push timestamp; and
+- writes the new `RecipeBase` revision, commit, exact manifest size,
+  manifest hash, recipe revision, binding revision, and Push timestamp; and
 - increments the project/config revisions.
 
 Scan, cancel, capture failure, upload failure, and head-CAS conflict do not
 change the saved recipe or exclusions. There is one unavoidable distributed
 boundary: if the remote head succeeds and the later guarded local mutation
-detects a local revision race, the remote generation remains valid while the
+detects a local revision race, the remote revision remains valid while the
 command reports that local state must be refreshed.
 
 ## 9. Explicit removal and tombstones
@@ -376,13 +386,21 @@ old exact resource plus addition of the new exact resource.
 
 Pull is split into immutable review and mutation phases.
 
-### 10.1 Fetch and plan
+### 10.1 Inspect, lazy staging, and plan
 
-Fetch validates the storage marker, head, manifest schema, bundle identity,
-manifest SHA-256, logical paths, resource ownership, case-folded path
-collisions, directory ancestry, tombstones, object sizes, and every file
-SHA-256. The restore planner maps portable logical paths to the current
-binding and emits typed actions.
+Inspect validates the bounded storage marker and head, then stages the
+manifest against the head's exact `manifest_size` and `manifest_sha256` before
+parsing and validating schema, bundle identity, logical paths, resource
+ownership, case-folded path collisions, directory ancestry, and tombstones.
+The restore planner maps portable logical paths to the current binding and
+emits typed actions without eagerly downloading a whole bundle.
+
+Payload bytes are staged only when a consumer needs them. The manifest
+entry's exact size and SHA-256 are passed to the storage adapter, which
+returns `Missing`, `Mismatch`, or a tempfile-backed verified body. Pull
+prefetch stages only the selected paths; the durability audit explicitly
+stages every object. There is no byte-returning object-store GET,
+`FetchedBundle`, `PreloadedBytes`, or eager fetch/planning/apply wrapper.
 
 Project content uses four explicit action kinds:
 
@@ -396,22 +414,24 @@ UI. Selecting a nested file also selects its planned ancestor directories.
 Unchecked actions mean **Keep local / skip this Pull** and do not block
 approved conversations.
 
-The plan pins the storage, bundle, replica, generation, commit, manifest hash,
+The plan pins the storage, bundle, replica, revision, commit, manifest hash,
 binding revision, targets, expected target digests/modes, and expiry.
 
 ### 10.2 Apply preflight
 
 Before mutation, Apply rejects unknown/duplicate action IDs, expired or
 already-recorded plans, changed bindings, changed remote heads, changed
-fetched bytes, path escapes, link traversal, changed target hashes/modes, and
-newly Git-managed project roots when a project-content action was approved.
+staged payload bytes, path escapes, link traversal, changed target
+hashes/modes, and newly Git-managed project roots when a project-content
+action was approved.
 
 Apply uses this filesystem order:
 
 1. Prepare approved directories shallowest-first with a temporary
    owner-writable mode.
-2. Apply approved file writes using synced temporary files and atomic rename;
-   back up an existing target first.
+2. Apply approved file writes by streaming verified bodies into
+   destination-parent synced temporary files and atomically renaming them;
+   stream and verify an immutable backup of an existing target first.
 3. Apply approved file deletions deepest-first after digest/mode revalidation
    and a verified immutable backup.
 4. Apply approved directory deletions deepest-first, but only when each exact
@@ -435,8 +455,8 @@ Pull never changes remote storage. Locally, it records one materialization
 with applied, skipped, failed, and blocked receipts plus any backup paths. If
 the file phase is complete, including explicit keep-local decisions recorded
 as skipped actions, it updates the link recipe to the pulled manifest recipe
-and advances the `RecipeBase`. Project-content exclusion preferences are not
-rewritten by Pull.
+and advances the `RecipeBase` with the inspected head's exact manifest size
+and hash. Project-content exclusion preferences are not rewritten by Pull.
 
 Apply is followed by readiness verification. A readiness failure does not
 hide an already valid restore plan from the user.
@@ -452,9 +472,19 @@ case-insensitive path collisions.
 SHA-256 binds:
 
 - each uploaded file object to its manifest entry;
-- the serialized manifest to `_head.json` and the commit record;
+- the exact serialized manifest size and SHA-256 to `_head.json`, with the
+  digest also retained by the commit record;
 - reviewed local/storage/base content comparisons; and
 - warning acknowledgement and Push review tokens.
+
+Local-folder and S3/R2 reads share one staged contract. Both copy into a
+private `NamedTempFile` while incrementally counting and hashing. S3/R2 checks
+declared `Content-Length` before polling when present, rejects an overrun
+before writing the excess chunk, and uses a 120-second inactivity timeout for
+each next-chunk wait rather than a whole-body deadline. Active large transfers
+can therefore exceed 120 seconds without failing solely because of total
+duration. Bounded bulk staging preserves request order and cancels/drains
+siblings after a transport failure.
 
 Restore target construction starts at the canonical bound root, performs a
 safe lexical join, resolves prospective canonical paths, and inspects every
@@ -464,7 +494,7 @@ absolute path.
 Head CAS provides single-winner publication. A pusher must hold the exact
 reviewed `RecipeBase`, and a restore plan must still match the current head.
 The immutable commit chain retains published history, while stale writers fail
-and must fetch/review again.
+and must inspect/review again.
 
 A local storage directory must not overlap `~/.mallard`, a project checkout,
 a provider profile, or another configured local storage. Filesystem lock files
@@ -485,13 +515,15 @@ multi-machine Push.
 | Manifest files/directories/tombstones | 100,000 each |
 | Restore actions | 100,000 |
 | Logical path length | 1,024 bytes |
-| Object read/write ceiling | 512 MiB |
 | Ignore rules | 8,192 |
 | Restore-plan lifetime | 24 hours |
 | Project-file rows rendered at once | 500 |
 
 The UI uses path search and collapsed directories for inventories larger than
 the render window. Backend validation remains authoritative for the full set.
+There is no generic object read/write ceiling: manifest sizes are exact
+integrity coordinates, while conversation/provider/project-content and
+aggregate capture limits remain product policy.
 
 ## 13. Current automated coverage
 

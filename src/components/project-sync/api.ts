@@ -23,7 +23,6 @@ import type {
   OriginHostLabel,
   ProjectBinding,
   ProjectChatHistory,
-  ProjectDiscovery,
   ProjectDetail,
   ProjectContentInventory,
   ProjectOperationResult,
@@ -89,9 +88,6 @@ export const projectSyncApi = {
 
   getActivityLogFolder: () =>
     invoke<string>("get_activity_log_folder"),
-
-  discoverProject: (path: string, profileIds: Partial<Record<ProjectProvider, string>>) =>
-    invoke<ProjectDiscovery>("discover_project", { path, profileIds }),
 
   listProviderProfiles: () =>
     invoke<ProviderProfileSummary[]>("list_provider_profiles"),

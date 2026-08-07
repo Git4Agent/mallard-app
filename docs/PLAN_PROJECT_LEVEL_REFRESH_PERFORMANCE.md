@@ -91,8 +91,8 @@ or the separate comparison capture.
 
 ### Correctness problem coupled to performance
 
-`loadProjectData()` is guarded only by the host workflow generation. Rapid
-project changes do not advance that generation, so an older request can write
+`loadProjectData()` is guarded only by the host workflow epoch. Rapid
+project changes do not advance that epoch, so an older request can write
 detail, inventory, readiness, or errors after a newer project is selected.
 This is the current audit finding M-04.
 
@@ -149,7 +149,7 @@ Replace the overloaded `loading`/`historyRefreshEpoch` model with:
 type ProjectSection = "overview" | "history" | "capabilities";
 
 interface ProjectRequestOwner {
-  workflowGeneration: number;
+  workflowEpoch: number;
   projectId: string;
   storageId: string | null;
   section: ProjectSection;
@@ -168,7 +168,7 @@ interface ProjectRequestOwner {
 
 Every async project request captures:
 
-- host workflow generation;
+- host workflow epoch;
 - project ID;
 - selected storage ID where relevant;
 - section;
@@ -178,7 +178,7 @@ It may commit only if all five still match. Project selection increments the
 project sequence before rendering the new selection. The same guard applies
 to focus reconcile and post-Push background reconcile.
 
-This replaces the current assumption that a host-wide generation is also a
+This replaces the current assumption that a host-wide epoch is also a
 project request ID.
 
 ### Remove general-load inventory and readiness
@@ -344,7 +344,7 @@ Add a bounded in-process snapshot cache keyed by:
 - bundle ID; and
 - the observed `HeadToken`.
 
-Every refresh still reads the mutable head. If generation, commit,
+Every refresh still reads the mutable head. If revision, commit,
 manifest SHA-256, and ETag equal the cached token, reuse the already-verified
 manifest. If any coordinate changes, read and verify the immutable manifest
 once before replacing the cache entry.
@@ -354,7 +354,7 @@ its prior comparison as stale presentation, but the backend must not label a
 cached result current.
 
 Push, Pull, apply, repair, and deletion continue to perform their existing
-authoritative revision, digest, generation, expiry, and CAS checks. A
+authoritative configuration revision, digest, bundle revision, expiry, and CAS checks. A
 read-only snapshot cache is never an approval or mutation precondition.
 
 ## Source Versions and Invalidation
@@ -485,7 +485,7 @@ schema change.
 - A changed remote head reads and verifies one manifest.
 - An unchanged `HeadToken` reads no manifest.
 - Storage failure never returns cached data as current.
-- A mutation command still rejects stale generation/revision/digest state
+- A mutation command still rejects stale bundle/configuration revision or digest state
   even when a read-only cache is warm.
 - Host rotation and binding/profile changes invalidate the right cache keys.
 

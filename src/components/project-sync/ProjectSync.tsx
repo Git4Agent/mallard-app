@@ -340,7 +340,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [failedPullResourceIds, setFailedPullResourceIds] = useState<Set<string>>(new Set());
   const restoreRequest = useRef(0);
   const shellRequest = useRef(0);
-  const hostWorkflowGeneration = useRef(0);
+  const hostWorkflowEpoch = useRef(0);
   const readyHostIdentity = useRef<{ hostId: string; revision: number } | null>(null);
 
   const toggleSidebar = useCallback(() => {
@@ -644,7 +644,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     ? activeStorageByProject[activeProjectId] ?? projectLinks[0]?.storage_id ?? null
     : null;
   const clearHostScopedWorkflows = useCallback(() => {
-    hostWorkflowGeneration.current += 1;
+    hostWorkflowEpoch.current += 1;
     restoreRequest.current += 1;
     setPendingBundleConnection(null);
     setPendingPush(null);
@@ -687,11 +687,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const loadConversationPathAudits = async (
     nextBindings: ProjectBinding[],
     shellRequestId?: number,
-    workflowGeneration?: number,
+    workflowEpoch?: number,
   ) => {
     if (
       (shellRequestId !== undefined && shellRequest.current !== shellRequestId)
-      || (workflowGeneration !== undefined && hostWorkflowGeneration.current !== workflowGeneration)
+      || (workflowEpoch !== undefined && hostWorkflowEpoch.current !== workflowEpoch)
     ) return;
     setConversationPathAuditLoading(true);
     const activeBindings = nextBindings.filter((candidate) => candidate.state === "active");
@@ -709,7 +709,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }));
     if (
       (shellRequestId !== undefined && shellRequest.current !== shellRequestId)
-      || (workflowGeneration !== undefined && hostWorkflowGeneration.current !== workflowGeneration)
+      || (workflowEpoch !== undefined && hostWorkflowEpoch.current !== workflowEpoch)
     ) return;
     const nextAudits: Record<string, CodexConversationPathAudit> = {};
     const nextErrors: Record<string, string> = {};
@@ -869,15 +869,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     projectId: string,
     cfg = config,
     preferredStorage?: string | null,
-    workflowGeneration?: number,
+    workflowEpoch?: number,
   ) => {
-    const requestedWorkflowGeneration = workflowGeneration ?? hostWorkflowGeneration.current;
-    if (hostWorkflowGeneration.current !== requestedWorkflowGeneration) return;
+    const requestedWorkflowEpoch = workflowEpoch ?? hostWorkflowEpoch.current;
+    if (hostWorkflowEpoch.current !== requestedWorkflowEpoch) return;
     setLoading(true);
     setError(null);
     try {
       const nextDetail = await projectSyncApi.getProject(projectId);
-      if (hostWorkflowGeneration.current !== requestedWorkflowGeneration) return;
+      if (hostWorkflowEpoch.current !== requestedWorkflowEpoch) return;
       if (!nextDetail) throw new Error("The selected local project no longer exists.");
       setDetail(nextDetail);
       setRegistrations((current) => upsertProject(current, nextDetail.project));
@@ -889,9 +889,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (nextDetail.binding?.state === "active") {
         try {
           nextInventory = await projectSyncApi.getInventory(projectId);
-          if (hostWorkflowGeneration.current !== requestedWorkflowGeneration) return;
+          if (hostWorkflowEpoch.current !== requestedWorkflowEpoch) return;
         } catch (reason) {
-          if (hostWorkflowGeneration.current === requestedWorkflowGeneration) {
+          if (hostWorkflowEpoch.current === requestedWorkflowEpoch) {
             setError(errorMessage(reason));
           }
         }
@@ -915,10 +915,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             nextDetail.project.bundle_id,
             nextDetail.binding,
           );
-          if (hostWorkflowGeneration.current !== requestedWorkflowGeneration) return;
+          if (hostWorkflowEpoch.current !== requestedWorkflowEpoch) return;
           setReadiness(nextReadiness);
         } catch {
-          if (hostWorkflowGeneration.current === requestedWorkflowGeneration) {
+          if (hostWorkflowEpoch.current === requestedWorkflowEpoch) {
             setReadiness(null);
           }
         }
@@ -926,13 +926,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         setReadiness(null);
       }
     } catch (reason) {
-      if (hostWorkflowGeneration.current !== requestedWorkflowGeneration) return;
+      if (hostWorkflowEpoch.current !== requestedWorkflowEpoch) return;
       setDetail(null);
       setInventory(null);
       setReadiness(null);
       setError(errorMessage(reason));
     } finally {
-      if (hostWorkflowGeneration.current === requestedWorkflowGeneration) setLoading(false);
+      if (hostWorkflowEpoch.current === requestedWorkflowEpoch) setLoading(false);
     }
   };
 
@@ -946,28 +946,28 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     })();
   }, []); // ProjectSync is the project-sync lifetime boundary.
 
-  const refresh = async (workflowGeneration?: number) => {
+  const refresh = async (workflowEpoch?: number) => {
     if (
-      workflowGeneration !== undefined
-      && hostWorkflowGeneration.current !== workflowGeneration
+      workflowEpoch !== undefined
+      && hostWorkflowEpoch.current !== workflowEpoch
     ) return;
     const current = activeProjectId;
     const { nextProjects, nextConfig, hostIdentityReady } = await loadShell();
     if (
       !hostIdentityReady
-      || (workflowGeneration !== undefined && hostWorkflowGeneration.current !== workflowGeneration)
+      || (workflowEpoch !== undefined && hostWorkflowEpoch.current !== workflowEpoch)
     ) return;
-    const continuationGeneration = workflowGeneration ?? hostWorkflowGeneration.current;
+    const continuationEpoch = workflowEpoch ?? hostWorkflowEpoch.current;
     const next = current && nextProjects.some((candidate) => candidate.local_project_id === current)
       ? current
       : nextProjects[0]?.local_project_id ?? null;
     setActiveProjectId(next);
-    if (next) await loadProjectData(next, nextConfig, undefined, continuationGeneration);
+    if (next) await loadProjectData(next, nextConfig, undefined, continuationEpoch);
     else {
       setDetail(null);
       setInventory(null);
     }
-    if (hostWorkflowGeneration.current !== continuationGeneration) return;
+    if (hostWorkflowEpoch.current !== continuationEpoch) return;
     setHistoryRefreshEpoch((epoch) => epoch + 1);
   };
 
@@ -977,10 +977,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const reconcileExternalChanges = async () => {
     if (loading || busy || !hostIdentityShellReady) return;
     const shellRequestId = shellRequest.current;
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     const stale = () => (
       shellRequest.current !== shellRequestId
-      || hostWorkflowGeneration.current !== workflowGeneration
+      || hostWorkflowEpoch.current !== workflowEpoch
     );
     try {
       const [nextProjects, nextRepositoryKinds] = await Promise.all([
@@ -993,7 +993,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (!activeProjectId) return;
       if (!nextProjects.some((candidate) => candidate.local_project_id === activeProjectId)) {
         // The active project vanished externally; the full refresh reselects safely.
-        await refresh(workflowGeneration);
+        await refresh(workflowEpoch);
         return;
       }
       const nextDetail = await projectSyncApi.getProject(activeProjectId);
@@ -1063,16 +1063,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const createProfileAtPath = async (
     provider: ProjectProvider,
     path: string,
-    workflowGeneration = hostWorkflowGeneration.current,
+    workflowEpoch = hostWorkflowEpoch.current,
   ): Promise<ProviderProfile | null> => {
-    if (!path.trim() || hostWorkflowGeneration.current !== workflowGeneration) return null;
+    if (!path.trim() || hostWorkflowEpoch.current !== workflowEpoch) return null;
     setBusy(true);
     setError(null);
     try {
       const probe = await projectSyncApi.probeProviderProfile(provider, path.trim());
-      if (hostWorkflowGeneration.current !== workflowGeneration) return null;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return null;
       const currentProfiles = await projectSyncApi.listProviderProfiles();
-      if (hostWorkflowGeneration.current !== workflowGeneration) return null;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return null;
       const existing = probe.existing_profile_id
         ? currentProfiles.find((profile) => profile.profile_id === probe.existing_profile_id) ?? null
         : null;
@@ -1081,41 +1081,41 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         probe.suggested_name,
         path.trim(),
       );
-      if (hostWorkflowGeneration.current !== workflowGeneration) return null;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return null;
       const nextProfiles = existing ? currentProfiles : await projectSyncApi.listProviderProfiles();
-      if (hostWorkflowGeneration.current !== workflowGeneration) return null;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return null;
       setProfiles(nextProfiles);
       return profile;
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
       return null;
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
   const chooseAndCreateProfile = async (provider: ProjectProvider): Promise<ProviderProfile | null> => {
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     const picked = await open({ directory: true, multiple: false });
     if (
-      hostWorkflowGeneration.current !== workflowGeneration
+      hostWorkflowEpoch.current !== workflowEpoch
       || typeof picked !== "string"
       || !picked
     ) return null;
-    return createProfileAtPath(provider, picked, workflowGeneration);
+    return createProfileAtPath(provider, picked, workflowEpoch);
   };
 
-  const refreshSetupDrafts = async (shellRequestId?: number, workflowGeneration?: number) => {
-    const requestedWorkflowGeneration = workflowGeneration ?? hostWorkflowGeneration.current;
+  const refreshSetupDrafts = async (shellRequestId?: number, workflowEpoch?: number) => {
+    const requestedWorkflowEpoch = workflowEpoch ?? hostWorkflowEpoch.current;
     if (
       (shellRequestId !== undefined && shellRequest.current !== shellRequestId)
-      || hostWorkflowGeneration.current !== requestedWorkflowGeneration
+      || hostWorkflowEpoch.current !== requestedWorkflowEpoch
     ) return;
     try {
       const listed = await projectSyncApi.listSetupDrafts();
       if (
         (shellRequestId !== undefined && shellRequest.current !== shellRequestId)
-        || hostWorkflowGeneration.current !== requestedWorkflowGeneration
+        || hostWorkflowEpoch.current !== requestedWorkflowEpoch
       ) return;
       setSetupDrafts(listed.drafts);
     } catch {
@@ -1134,10 +1134,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   };
 
   const beginAddProject = async () => {
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     const picked = await open({ directory: true, multiple: false });
     if (
-      hostWorkflowGeneration.current !== workflowGeneration
+      hostWorkflowEpoch.current !== workflowEpoch
       || typeof picked !== "string"
       || !picked
     ) return;
@@ -1145,17 +1145,17 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setError(null);
     try {
       const created = await projectSyncApi.createSetupDraft(picked);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       closeWorkspaceSettings();
       setSetupDraftId(created.draft.draft_id);
       if (created.resumed) {
         notify(`Resumed setup draft for ${created.draft.display_name}.`);
       }
-      await refreshSetupDrafts(undefined, workflowGeneration);
+      await refreshSetupDrafts(undefined, workflowEpoch);
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
@@ -1171,35 +1171,35 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   };
 
   const discardSetupDraft = async (draftId: string) => {
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     const summary = setupDrafts.find((candidate) => candidate.draft_id === draftId);
     const approved = await confirm(
       `Discard the setup draft for “${summary?.display_name ?? "this project"}”?\n\nOnly the draft is removed. No project files are touched.`,
       { title: "Discard draft" },
     );
-    if (!approved || hostWorkflowGeneration.current !== workflowGeneration) return;
+    if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
     setBusy(true);
     setError(null);
     try {
       await projectSyncApi.discardSetupDraft(draftId);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       if (setupDraftId === draftId) setSetupDraftId(null);
-      await refreshSetupDrafts(undefined, workflowGeneration);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      await refreshSetupDrafts(undefined, workflowEpoch);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify("Draft discarded — no files touched.");
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
   const completeSetup = async (
     detail: ProjectDetail,
     completion: SetupCompletion,
-    workflowGeneration: number,
+    workflowEpoch: number,
   ) => {
-    if (hostWorkflowGeneration.current !== workflowGeneration) return;
+    if (hostWorkflowEpoch.current !== workflowEpoch) return;
     setSetupDraftId(null);
     const projectId = detail.project.local_project_id;
     const storageId = detail.links[0]?.storage_id ?? null;
@@ -1207,13 +1207,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       ? `${projectLabel(detail.project)} connected — open Pull review to apply.`
       : `${projectLabel(detail.project)} is set up${storageId ? "" : " — link storage when ready"}.`);
     const { nextConfig, hostIdentityReady } = await loadShell();
-    if (!hostIdentityReady || hostWorkflowGeneration.current !== workflowGeneration) return;
-    await refreshSetupDrafts(undefined, workflowGeneration);
-    if (hostWorkflowGeneration.current !== workflowGeneration) return;
+    if (!hostIdentityReady || hostWorkflowEpoch.current !== workflowEpoch) return;
+    await refreshSetupDrafts(undefined, workflowEpoch);
+    if (hostWorkflowEpoch.current !== workflowEpoch) return;
     setActiveProjectId(projectId);
     if (detail.binding) setBindings((current) => upsertBinding(current, detail.binding as ProjectBinding));
-    await loadProjectData(projectId, nextConfig, storageId, workflowGeneration);
-    if (hostWorkflowGeneration.current !== workflowGeneration) return;
+    await loadProjectData(projectId, nextConfig, storageId, workflowEpoch);
+    if (hostWorkflowEpoch.current !== workflowEpoch) return;
     if (completion === "pull" && storageId && detail.binding) {
       await planRestore(storageId, detail.project.bundle_id, detail.binding, projectLabel(detail.project));
     }
@@ -1222,33 +1222,33 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const saveStorageLink = async (
     projectId: string,
     storageId: string,
-    workflowGeneration = hostWorkflowGeneration.current,
+    workflowEpoch = hostWorkflowEpoch.current,
   ) => {
-    if (hostWorkflowGeneration.current !== workflowGeneration) return;
+    if (hostWorkflowEpoch.current !== workflowEpoch) return;
     await projectSyncApi.saveLink({
       local_project_id: projectId,
       storage_id: storageId,
       pinned: true,
     });
-    if (hostWorkflowGeneration.current !== workflowGeneration) return;
+    if (hostWorkflowEpoch.current !== workflowEpoch) return;
     const { nextConfig, hostIdentityReady } = await loadShell();
-    if (!hostIdentityReady || hostWorkflowGeneration.current !== workflowGeneration) return;
+    if (!hostIdentityReady || hostWorkflowEpoch.current !== workflowEpoch) return;
     setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
     setActiveProjectId(projectId);
-    await loadProjectData(projectId, nextConfig, storageId, workflowGeneration);
-    if (hostWorkflowGeneration.current !== workflowGeneration) return;
+    await loadProjectData(projectId, nextConfig, storageId, workflowEpoch);
+    if (hostWorkflowEpoch.current !== workflowEpoch) return;
     notify("Storage linked.");
   };
 
   const linkStorage = async (projectId: string, storageId: string) => {
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     setBusy(true);
     setError(null);
     try {
       const project = registrations.find((candidate) => candidate.local_project_id === projectId);
       if (!project) throw new Error("The selected local project no longer exists.");
       const bundles = await projectSyncApi.listRemoteBundleSnapshots(storageId);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       bundles.sort((left, right) => {
         const leftMatches = !!project.repository_fingerprint
           && left.repository_fingerprint === project.repository_fingerprint;
@@ -1258,19 +1258,19 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         return (right.updated_at ?? 0) - (left.updated_at ?? 0);
       });
       if (bundles.some((bundle) => bundle.bundle_id === project.bundle_id) || bundles.length === 0) {
-        await saveStorageLink(projectId, storageId, workflowGeneration);
+        await saveStorageLink(projectId, storageId, workflowEpoch);
         return;
       }
       setPendingBundleConnection({ projectId, storageId, matches: bundles, reason: "link" });
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
   const repairConversationPaths = async (projectId: string) => {
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     const audit = conversationPathAudits[projectId];
     if (!audit?.can_repair) return;
     const registration = registrations.find((candidate) => candidate.local_project_id === projectId);
@@ -1279,13 +1279,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       `Repair ${audit.issues.length} Codex conversation path${audit.issues.length === 1 ? "" : "s"} for “${projectName}”?\n\nOnly conversations explicitly assigned to this project by Codex Desktop will be changed. Mallard will back up every affected rollout first, then update structural cwd fields without changing messages or history.\n\nClose the affected Codex tasks before continuing so they are not written at the same time.`,
       { title: "Repair conversation paths" },
     );
-    if (!approved || hostWorkflowGeneration.current !== workflowGeneration) return;
+    if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
 
     setBusy(true);
     setError(null);
     try {
       const result = await projectSyncApi.repairCodexConversationPaths(projectId);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       setConversationPathAudits((current) => ({
         ...current,
         [projectId]: result.audit,
@@ -1300,33 +1300,33 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         projectId,
         config,
         activeStorageByProject[projectId],
-        workflowGeneration,
+        workflowEpoch,
       );
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify(
         `Repaired ${result.repaired_thread_ids.length} conversation path${result.repaired_thread_ids.length === 1 ? "" : "s"} — originals backed up.`,
       );
     } catch (reason) {
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       setError(errorMessage(reason));
       try {
         const refreshed = await projectSyncApi.auditCodexConversationPaths(projectId);
-        if (hostWorkflowGeneration.current !== workflowGeneration) return;
+        if (hostWorkflowEpoch.current !== workflowEpoch) return;
         setConversationPathAudits((current) => ({ ...current, [projectId]: refreshed }));
       } catch {
         // Keep the prior gate visible when the follow-up audit also fails.
       }
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
   const openPushChooser = async (
     projectId: string,
     storageId: string,
-    workflowGeneration = hostWorkflowGeneration.current,
+    workflowEpoch = hostWorkflowEpoch.current,
   ) => {
-    if (hostWorkflowGeneration.current !== workflowGeneration) return;
+    if (hostWorkflowEpoch.current !== workflowEpoch) return;
     if (restorePlan) closePullReview();
     setPushReviewStep("history");
     setPushProjectContentRemovals(new Set());
@@ -1340,7 +1340,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // One backend call runs a single discovery pass and a single remote
       // snapshot for every review section.
       const context = await projectSyncApi.preparePushReview(projectId, storageId);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       const nextDetail = context.project;
       const nextInventory = context.inventory;
       const storage = config.storages.find((candidate) => candidate.id === storageId);
@@ -1367,8 +1367,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             copy: pullRequiredCopy(
               destination.reason,
               storage.name,
-              destination.remote_generation,
-              destination.base_generation,
+              destination.remote_revision,
+              destination.base_revision,
               changedConversations,
             ),
           }
@@ -1376,7 +1376,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             projectId,
             storageId,
             kind: destination.state === "remote_history_missing" ? "remote_missing" : "remote_replaced",
-            baseGeneration: destination.base_generation ?? null,
+            baseRevision: destination.base_revision ?? null,
           });
         setActiveProjectId(projectId);
         setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
@@ -1394,7 +1394,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           ? context.project_files
           : null;
       const projectDefaults = recommendedPushSelection(
-        recipeSelection(nextInventory.recipe),
+        recipeSelection(savedRecipe ?? nextInventory.recipe),
         nextResources,
         nextThreadComparison,
       );
@@ -1417,7 +1417,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         linked_storage_ids: nextDetail.links.map((candidate) => candidate.storage_id),
         is_git_repository: isGitRepository,
       };
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       setPendingPush({
         projectId,
         storageId,
@@ -1440,7 +1440,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setActiveProjectId(projectId);
       setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) {
+      if (hostWorkflowEpoch.current === workflowEpoch) {
         setStorageNotice({
           projectId,
           storageId,
@@ -1450,26 +1450,26 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         });
       }
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
-  const refreshRepositoryKinds = async (workflowGeneration?: number) => {
+  const refreshRepositoryKinds = async (workflowEpoch?: number) => {
     if (
-      workflowGeneration !== undefined
-      && hostWorkflowGeneration.current !== workflowGeneration
+      workflowEpoch !== undefined
+      && hostWorkflowEpoch.current !== workflowEpoch
     ) return;
     try {
       const nextRepositoryKinds = await projectSyncApi.listProjectRepositoryKinds();
       if (
-        workflowGeneration !== undefined
-        && hostWorkflowGeneration.current !== workflowGeneration
+        workflowEpoch !== undefined
+        && hostWorkflowEpoch.current !== workflowEpoch
       ) return;
       setRepositoryKinds(nextRepositoryKinds);
     } catch {
       if (
-        workflowGeneration === undefined
-        || hostWorkflowGeneration.current === workflowGeneration
+        workflowEpoch === undefined
+        || hostWorkflowEpoch.current === workflowEpoch
       ) setRepositoryKinds({});
     }
   };
@@ -1477,12 +1477,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const scanPendingProjectFiles = async () => {
     const pending = pendingPush;
     if (!pending || projectContentLoading) return;
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     setProjectContentLoading(true);
     setPushError(null);
     try {
       const inspected = await projectSyncApi.inspectProjectFiles(pending.projectId, pending.storageId);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       setPendingPush((current) => {
         if (!current || current.projectId !== pending.projectId || current.storageId !== pending.storageId) {
           return current;
@@ -1527,9 +1527,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         };
       });
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setPushError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setPushError(errorMessage(reason));
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setProjectContentLoading(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setProjectContentLoading(false);
     }
   };
 
@@ -1540,9 +1540,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const refreshAfterPush = async (
     projectId: string,
     storageId: string,
-    workflowGeneration: number,
+    workflowEpoch: number,
   ) => {
-    const stale = () => hostWorkflowGeneration.current !== workflowGeneration;
+    const stale = () => hostWorkflowEpoch.current !== workflowEpoch;
     try {
       const [nextConfig, nextDetail] = await Promise.all([
         projectSyncApi.getConfig(),
@@ -1579,7 +1579,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     conversationPushPlanId: string | null = null,
     approvedConversationActionIds: string[] = [],
   ) => {
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     openActivity();
     setBusy(true);
     setError(null);
@@ -1595,7 +1595,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         conversationPushPlanId,
         approvedConversationActionIds,
       );
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       // The push is finished, so the review closes and the result lands on the
       // storage card — one banner that folds itself when nothing needs a
       // decision, instead of a toast that takes the detail with it.
@@ -1617,9 +1617,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setPushWarningAcknowledgements(new Set());
       setActiveProjectId(projectId);
       setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
-      void refreshAfterPush(projectId, storageId, workflowGeneration);
+      void refreshAfterPush(projectId, storageId, workflowEpoch);
     } catch (reason) {
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       const message = errorMessage(reason);
       if (pendingPush) {
         try {
@@ -1627,7 +1627,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             projectId,
             storageId,
           );
-          if (hostWorkflowGeneration.current !== workflowGeneration) return;
+          if (hostWorkflowEpoch.current !== workflowEpoch) return;
           if (
             destinationStatus.state === "remote_history_missing"
             || destinationStatus.state === "remote_history_replaced"
@@ -1651,8 +1651,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                 copy: pullRequiredCopy(
                   destinationStatus.reason,
                   pendingPush.storage.name,
-                  destinationStatus.remote_generation,
-                  destinationStatus.base_generation,
+                  destinationStatus.remote_revision,
+                  destinationStatus.base_revision,
                   changedConversations,
                 ),
               }
@@ -1660,7 +1660,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                 projectId,
                 storageId,
                 kind: destinationStatus.state === "remote_history_missing" ? "remote_missing" : "remote_replaced",
-                baseGeneration: destinationStatus.base_generation ?? null,
+                baseRevision: destinationStatus.base_revision ?? null,
               });
             return;
           }
@@ -1672,7 +1672,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         setError(message);
       }
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
@@ -1721,7 +1721,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   const saveRemap = async (nextBinding: ProjectBindingDraft) => {
     if (!activeProjectId) return;
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     const projectId = activeProjectId;
     setBusy(true);
     setError(null);
@@ -1732,33 +1732,33 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         profile_ids: nextBinding.profile_ids,
         expected_revision: nextBinding.expected_revision ?? binding?.revision ?? null,
       });
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       setEditingBinding(null);
       const nextBindings = upsertBinding(bindings, saved);
       setBindings(nextBindings);
       setDetail((current) => current ? { ...current, binding: saved } : current);
-      await refreshRepositoryKinds(workflowGeneration);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      await refreshRepositoryKinds(workflowEpoch);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify("Machine binding updated — cloud identity unchanged.");
-      await loadConversationPathAudits(nextBindings, undefined, workflowGeneration);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
-      await loadProjectData(projectId, config, activeStorageId, workflowGeneration);
+      await loadConversationPathAudits(nextBindings, undefined, workflowEpoch);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      await loadProjectData(projectId, config, activeStorageId, workflowEpoch);
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
   const renameProject = async (projectId: string, alias: string | null): Promise<boolean> => {
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     setBusy(true);
     setError(null);
     try {
       const registration = registrations.find((candidate) => candidate.local_project_id === projectId);
       if (!registration) throw new Error("Project not found.");
       const updated = await projectSyncApi.renameProject(projectId, alias, registration.revision);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return false;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return false;
       setRegistrations((current) => current.map((candidate) => (
         candidate.local_project_id === projectId ? updated : candidate
       )));
@@ -1770,10 +1770,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         : `Name reset to “${updated.display_name}”.`);
       return true;
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
       return false;
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
@@ -1844,7 +1844,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const request = { storageId, bundleId, binding: targetBinding };
       const review = await beginPullReview(projectSyncApi, request);
       if (restoreRequest.current !== requestId) return null;
-      // Nothing to review means the storage only moved its generation: one
+      // Nothing to review means the storage only moved its revision: one
       // empty apply acknowledges it right here, no review to click through.
       // A replaced history is never adopted silently — that plan still opens.
       if (
@@ -1862,7 +1862,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         }
         setReviewSupportLoading(false);
         setRestoreBinding(null);
-        notify(`${displayName} is up to date (generation ${review.restorePlan.generation}).`);
+        notify(`${displayName} is up to date (revision ${review.restorePlan.revision}).`);
         return null;
       }
       setRestorePlan(review.restorePlan);
@@ -1981,14 +1981,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   };
 
   const beginProjectRestore = async (projectId: string, storageId: string) => {
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     setPendingPush(null);
     setPushError(null);
     setStorageNotice(null);
     setError(null);
     try {
       const nextDetail = await projectSyncApi.getProject(projectId);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       if (!nextDetail) throw new Error("The selected local project no longer exists.");
       setActiveProjectId(projectId);
       setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
@@ -2015,7 +2015,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       );
       if (failure?.includes("does not exist")) {
         const bundles = await projectSyncApi.listRemoteBundleSnapshots(storageId);
-        if (hostWorkflowGeneration.current !== workflowGeneration) return;
+        if (hostWorkflowEpoch.current !== workflowEpoch) return;
         if (bundles.length > 0) {
           bundles.sort((left, right) => {
             const leftMatches = !!nextDetail.project.repository_fingerprint
@@ -2029,7 +2029,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         }
       }
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) {
+      if (hostWorkflowEpoch.current === workflowEpoch) {
         setStorageNotice({
           projectId,
           storageId,
@@ -2061,7 +2061,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     bundleId: string,
     allowRepositoryMismatch = false,
   ) => {
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     const project = registrations.find((candidate) => (
       candidate.local_project_id === projectId
     ));
@@ -2081,17 +2081,17 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         pinned: true,
         allow_repository_mismatch: allowRepositoryMismatch,
       });
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       setPendingBundleConnection(null);
       const { nextConfig, hostIdentityReady } = await loadShell();
-      if (!hostIdentityReady || hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (!hostIdentityReady || hostWorkflowEpoch.current !== workflowEpoch) return;
       setActiveProjectId(projectId);
       setActiveStorageByProject((current) => ({
         ...current,
         [projectId]: storageId,
       }));
-      await loadProjectData(projectId, nextConfig, storageId, workflowGeneration);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      await loadProjectData(projectId, nextConfig, storageId, workflowEpoch);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       if (!connected.binding) {
         notify("Repo connected — set folder and profile before Pull.");
         return;
@@ -2103,56 +2103,56 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         projectLabel(connected.project),
       );
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
   const keepPendingBundle = async () => {
     if (!pendingBundleConnection) return;
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     const pending = pendingBundleConnection;
     setBusy(true);
     setError(null);
     try {
       if (pending.reason === "link") {
-        await saveStorageLink(pending.projectId, pending.storageId, workflowGeneration);
-        if (hostWorkflowGeneration.current !== workflowGeneration) return;
+        await saveStorageLink(pending.projectId, pending.storageId, workflowEpoch);
+        if (hostWorkflowEpoch.current !== workflowEpoch) return;
       } else {
         setPendingBundleConnection(null);
         notify("Kept local-only identity — Push publishes it separately.");
-        await openPushChooser(pending.projectId, pending.storageId, workflowGeneration);
+        await openPushChooser(pending.projectId, pending.storageId, workflowEpoch);
         return;
       }
       setPendingBundleConnection(null);
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
   const removeProject = async (projectId: string) => {
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     const summary = projects.find((candidate) => candidate.local_project_id === projectId);
     const approved = await confirm(
       `Remove “${summary ? projectLabel(summary) : "this project"}” from Mallard?\n\nThe checkout and provider files stay on disk. Only this app's project registration, links, and active binding are removed.`,
       { title: "Remove project" },
     );
-    if (!approved || hostWorkflowGeneration.current !== workflowGeneration) return;
+    if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
     setBusy(true);
     setError(null);
     try {
       await projectSyncApi.removeProject(projectId);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
-      await refresh(workflowGeneration);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      await refresh(workflowEpoch);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify(`${summary ? projectLabel(summary) : "Project"} removed — files kept on disk.`);
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
@@ -2192,7 +2192,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     storageId: string,
     reason: "standard" | "remote_history_missing" = "standard",
   ) => {
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     const project = projects.find((candidate) => candidate.local_project_id === projectId);
     const storage = config.storages.find((candidate) => candidate.id === storageId);
     if (!project || !storage) return;
@@ -2205,13 +2205,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         : `Unlink “${storageName}” from “${projectName}”?\n\nPush and Pull will stop for this pairing. Files and repositories already stored there will not be deleted, and you can link the storage again later.`,
       { title: "Unlink storage" },
     );
-    if (!approved || hostWorkflowGeneration.current !== workflowGeneration) return;
+    if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
 
     setBusy(true);
     setError(null);
     try {
       const removed = await projectSyncApi.removeLink(projectId, storageId);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
 
       if (pendingPush?.projectId === projectId && pendingPush.storageId === storageId) {
         setPendingPush(null);
@@ -2225,7 +2225,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       }
 
       const { nextConfig, hostIdentityReady } = await loadShell();
-      if (!hostIdentityReady || hostWorkflowGeneration.current !== workflowGeneration) return;
+      if (!hostIdentityReady || hostWorkflowEpoch.current !== workflowEpoch) return;
       const remainingLinks = nextConfig.links.filter((link) => link.local_project_id === projectId);
       const rememberedStorageId = activeStorageByProject[projectId];
       const nextStorageId = rememberedStorageId
@@ -2241,24 +2241,24 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         return next;
       });
       setActiveProjectId(projectId);
-      await loadProjectData(projectId, nextConfig, nextStorageId, workflowGeneration);
-      if (hostWorkflowGeneration.current !== workflowGeneration) return;
+      await loadProjectData(projectId, nextConfig, nextStorageId, workflowEpoch);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify(removed
         ? reason === "remote_history_missing"
           ? `${storageName} unlinked — files kept; link again for a fresh history.`
           : `${storageName} unlinked from ${projectName} — files kept.`
         : `${storageName} was already unlinked.`);
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
   const applyReview = async (selection: PullReviewSelection) => {
     if (!restorePlan || !restoreBinding) return;
     const requestId = restoreRequest.current;
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     const currentRestorePlan = restorePlan;
     // The review-ready notice describes the pre-Apply state. Clear it before
     // execution so a completed Pull can never still claim that nothing was
@@ -2358,13 +2358,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         });
         closePullReview();
         if (activeProjectId) {
-          await loadProjectData(activeProjectId, config, activeStorageId, workflowGeneration);
+          await loadProjectData(activeProjectId, config, activeStorageId, workflowEpoch);
         }
         return;
       }
 
       // Refresh the plan after a partial pass so remaining setup is
-      // presented against one current generation.
+      // presented against one current revision.
       const approvedThisPass = new Set(selection.restoreActionIds);
       const hasSkippedActions = currentRestorePlan.actions
         .map((action) => action.action_id)
@@ -2387,7 +2387,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         }
       }
       if (activeProjectId) {
-        await loadProjectData(activeProjectId, config, activeStorageId, workflowGeneration);
+        await loadProjectData(activeProjectId, config, activeStorageId, workflowEpoch);
       }
     } catch (reason) {
       if (restoreRequest.current === requestId) {
@@ -2395,11 +2395,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         setRestoreError(errorMessage(reason));
       }
     } finally {
-      // Guarded by workflow generation, not the restore request: completing
+      // Guarded by workflow epoch, not the restore request: completing
       // the apply closes the review, and closePullReview advances the request
       // counter — a request-id guard here would skip this line on every
       // successful Pull and leave the whole app disabled.
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
@@ -2416,9 +2416,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const saveStorageConfig = async (
     update: (current: SyncConfig) => SyncConfig,
     successNotice = "Project storage settings saved.",
-    workflowGeneration = hostWorkflowGeneration.current,
+    workflowEpoch = hostWorkflowEpoch.current,
   ): Promise<boolean> => {
-    if (hostWorkflowGeneration.current !== workflowGeneration) return false;
+    if (hostWorkflowEpoch.current !== workflowEpoch) return false;
     setBusy(true);
     setError(null);
     try {
@@ -2426,9 +2426,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // Rebase this storage-only edit on the latest document instead of the
       // potentially stale React snapshot used to render the editor.
       const current = await projectSyncApi.getConfig();
-      if (hostWorkflowGeneration.current !== workflowGeneration) return false;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return false;
       const saved = await projectSyncApi.saveConfig(update(current));
-      if (hostWorkflowGeneration.current !== workflowGeneration) return false;
+      if (hostWorkflowEpoch.current !== workflowEpoch) return false;
       setConfig(saved);
       setRegistrations(saved.projects);
       setDetail((current) => {
@@ -2450,10 +2450,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       notify(successNotice);
       return true;
     } catch (reason) {
-      if (hostWorkflowGeneration.current === workflowGeneration) setError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
       return false;
     } finally {
-      if (hostWorkflowGeneration.current === workflowGeneration) setBusy(false);
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
@@ -2470,7 +2470,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   };
 
   const removeStorage = async (storageId: string) => {
-    const workflowGeneration = hostWorkflowGeneration.current;
+    const workflowEpoch = hostWorkflowEpoch.current;
     const storage = config.storages.find((candidate) => candidate.id === storageId);
     if (!storage) return;
     const storageName = storage.name || "Storage";
@@ -2483,7 +2483,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       `Remove “${storageName}” from Mallard?\n\nFiles already written to the storage location will not be deleted.`,
       { title: "Remove storage" },
     );
-    if (!approved || hostWorkflowGeneration.current !== workflowGeneration) return;
+    if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
     const removed = await saveStorageConfig((current) => {
       if (current.links.some((link) => link.storage_id === storageId)) {
         throw new Error(`${storageName} is linked to a project. Unlink it before removing the storage.`);
@@ -2492,8 +2492,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         ...current,
         storages: current.storages.filter((candidate) => candidate.id !== storageId),
       };
-    }, `${storageName} removed. Stored files were not deleted.`, workflowGeneration);
-    if (removed && hostWorkflowGeneration.current === workflowGeneration) {
+    }, `${storageName} removed. Stored files were not deleted.`, workflowEpoch);
+    if (removed && hostWorkflowEpoch.current === workflowEpoch) {
       setStorageEditorRequest((current) => ({
         mode: "close",
         requestId: (current?.requestId ?? 0) + 1,
@@ -2905,9 +2905,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
               <ProjectSetupWorkspace
                 key={setupDraftId}
                 draftId={setupDraftId}
-                workflowGeneration={hostWorkflowGeneration.current}
-                isWorkflowCurrent={(workflowGeneration) => (
-                  hostWorkflowGeneration.current === workflowGeneration
+                workflowEpoch={hostWorkflowEpoch.current}
+                isWorkflowCurrent={(workflowEpoch) => (
+                  hostWorkflowEpoch.current === workflowEpoch
                 )}
                 profiles={profiles}
                 projects={projects}
@@ -2916,8 +2916,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                 onClose={() => void closeSetupDraft()}
                 onDiscard={(draftId) => void discardSetupDraft(draftId)}
                 onAddStorage={openNewStorageConfiguration}
-                onFinalized={(detail, completion, workflowGeneration) => (
-                  void completeSetup(detail, completion, workflowGeneration)
+                onFinalized={(detail, completion, workflowEpoch) => (
+                  void completeSetup(detail, completion, workflowEpoch)
                 )}
               />
             ) : null}

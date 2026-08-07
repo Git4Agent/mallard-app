@@ -69,7 +69,6 @@ pub fn run() {
             project_sync::commands::list_project_materializations,
             project_sync::commands::get_restore_plan,
             project_sync::commands::discard_restore_plan,
-            project_sync::commands::discover_project,
             project_sync::commands::get_bundle_inventory,
             project_sync::commands::inspect_project_files,
             project_sync::commands::list_remote_bundles,

@@ -63,29 +63,6 @@ export function recipeSelection(recipe: BundleRecipe): Set<string> {
   return new Set(Object.keys(recipe.entries));
 }
 
-/** Selected IDs that discovery no longer offers, so they would be dropped. */
-export function unavailableSelection(
-  resources: ProjectResourceDescriptor[],
-  selected: Iterable<string>,
-): string[] {
-  const available = new Set(resources.map((resource) => resource.resource_id));
-  return [...selected].filter((resourceId) => !available.has(resourceId)).sort();
-}
-
-/** Narrow a saved selection to what is still discoverable and syncable. */
-export function prunedSelection(
-  resources: ProjectResourceDescriptor[],
-  selected: Set<string>,
-): Set<string> {
-  return new Set(resources
-    .filter((resource) => (
-      selected.has(resource.resource_id)
-      && !resource.blocked_reason
-      && resource.apply_policy !== "never"
-    ))
-    .map((resource) => resource.resource_id));
-}
-
 export function recipeWithSelection(
   recipe: BundleRecipe,
   resources: ProjectResourceDescriptor[],

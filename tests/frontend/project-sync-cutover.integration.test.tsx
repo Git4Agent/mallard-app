@@ -39,6 +39,31 @@ test("project setup does not offer an immediate push", () => {
   assert.doesNotMatch(setupWorkspace, /Finish & push|finalize\("push"\)/);
 });
 
+test("project setup configures the project without selecting sync contents", () => {
+  const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
+  const types = readFileSync("src/types.ts", "utf8");
+  const api = readFileSync("src/components/project-sync/api.ts", "utf8");
+  const backend = readFileSync("src-tauri/src/lib.rs", "utf8");
+
+  assert.doesNotMatch(setupWorkspace, /Sync contents|ResourceInventory|selected_resource_ids/);
+  assert.doesNotMatch(
+    types,
+    /selected_resource_ids|discovery_signature|discovery_profile_signature|selection_stale|profile_changed/,
+  );
+  assert.doesNotMatch(api, /discoverProject|invoke<ProjectDiscovery>\("discover_project"/);
+  assert.doesNotMatch(backend, /commands::discover_project/);
+});
+
+test("Push requires the reviewed destination recipe", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const commands = readFileSync("src-tauri/src/project_sync/commands.rs", "utf8");
+  const pushSignature = commands.match(/pub async fn push_bundle\([\s\S]*?\) -> Result<ProjectOperationResult, String>/)?.[0] ?? "";
+
+  assert.match(pushSignature, /recipe: BundleRecipe/);
+  assert.doesNotMatch(pushSignature, /recipe: Option<BundleRecipe>/);
+  assert.match(workspace, /recipeSelection\(savedRecipe \?\? nextInventory\.recipe\)/);
+});
+
 test("project setup accepts only the current canonical repository fingerprint", () => {
   assert.equal(repositoryFingerprintMatches("canonical", "canonical"), true);
   assert.equal(repositoryFingerprintMatches("legacy-dot-git", "canonical"), false);
@@ -82,6 +107,50 @@ test("the desktop shell supports a persistent sidebar toggle and keyboard shortc
   assert.match(css, /\.sync-sidebar-drag \{[^}]*height: 38px;/);
   assert.match(css, /\.sync-sidebar-brand \{[^}]*height: 52px;/);
   assert.deepEqual(tauriConfig.app.windows[0].trafficLightPosition, { x: 20, y: 29 });
+});
+
+// The sidebar's width is --sync-sidebar-width, owned by the drag handle, so
+// window width does not move the rail at all above the 720px icon-rail step.
+// Anything inside the rail that keys off window width therefore restyles itself
+// while the rail it sits in stays put — which is exactly the bug where the
+// wordmark dropped 26px -> 23px and its padding 22px -> 14px as the window
+// crossed 860px. Only the 720px collapse, where the rail really does become an
+// icon strip, may touch these.
+test("the sidebar rail is sized by its own width, never by the window", () => {
+  const blocks = (css: string) => {
+    const found: { limit: number; body: string }[] = [];
+    const opener = /@media\s*\(max-width:\s*(\d+)px\)\s*\{/g;
+    for (let hit = opener.exec(css); hit; hit = opener.exec(css)) {
+      let depth = 1;
+      let index = hit.index + hit[0].length;
+      const start = index;
+      while (index < css.length && depth > 0) {
+        if (css[index] === "{") depth += 1;
+        if (css[index] === "}") depth -= 1;
+        index += 1;
+      }
+      found.push({ limit: Number(hit[1]), body: css.slice(start, index - 1) });
+    }
+    return found;
+  };
+
+  for (const file of ["src/App.css", "src/RetroTheme.css"]) {
+    const wide = blocks(readFileSync(file, "utf8")).filter((block) => block.limit > 720);
+    assert.ok(wide.length > 0, `${file} should still have wide breakpoints to check`);
+    for (const block of wide) {
+      for (const selector of [".sync-sidebar-brand", ".sync-brand-logo", ".sync-sidebar "]) {
+        assert.ok(
+          !block.body.includes(selector),
+          `${file}: @media (max-width: ${block.limit}px) must not restyle ${selector.trim()}`,
+        );
+      }
+      assert.doesNotMatch(
+        block.body,
+        /\.sync-sidebar\s*\{/,
+        `${file}: @media (max-width: ${block.limit}px) must not resize the sidebar`,
+      );
+    }
+  }
 });
 
 test("the retro skin stays presentation-only and preserves the shell controls", () => {
@@ -426,15 +495,15 @@ test("the shell verifies host identity and relies on backend auto-registration",
   assert.match(workspace, /const clearHostScopedWorkflows = useCallback\(\(\) => \{[\s\S]*setRestorePlan\(null\)/);
   assert.match(
     workspace,
-    /const loadProjectData = async \([\s\S]*const requestedWorkflowGeneration = workflowGeneration \?\? hostWorkflowGeneration\.current;[\s\S]*getProject\(projectId\);[\s\S]*hostWorkflowGeneration\.current !== requestedWorkflowGeneration/,
+    /const loadProjectData = async \([\s\S]*const requestedWorkflowEpoch = workflowEpoch \?\? hostWorkflowEpoch\.current;[\s\S]*getProject\(projectId\);[\s\S]*hostWorkflowEpoch\.current !== requestedWorkflowEpoch/,
   );
   assert.match(
     workspace,
-    /const completeSetup = async \([\s\S]*workflowGeneration: number,[\s\S]*hostWorkflowGeneration\.current !== workflowGeneration[\s\S]*await loadShell\(\);[\s\S]*!hostIdentityReady \|\| hostWorkflowGeneration\.current !== workflowGeneration/,
+    /const completeSetup = async \([\s\S]*workflowEpoch: number,[\s\S]*hostWorkflowEpoch\.current !== workflowEpoch[\s\S]*await loadShell\(\);[\s\S]*!hostIdentityReady \|\| hostWorkflowEpoch\.current !== workflowEpoch/,
   );
   assert.match(
     workspace,
-    /const connectStorageBundle = async[\s\S]*const workflowGeneration = hostWorkflowGeneration\.current;[\s\S]*await loadShell\(\);[\s\S]*!hostIdentityReady \|\| hostWorkflowGeneration\.current !== workflowGeneration/,
+    /const connectStorageBundle = async[\s\S]*const workflowEpoch = hostWorkflowEpoch\.current;[\s\S]*await loadShell\(\);[\s\S]*!hostIdentityReady \|\| hostWorkflowEpoch\.current !== workflowEpoch/,
   );
   // A mid-load identity change (backend auto-registration) restarts the
   // shell load instead of surfacing stale host-scoped state.
@@ -460,8 +529,8 @@ test("the shell verifies host identity and relies on backend auto-registration",
   assert.match(linksWorkspace, /const bindingActive = projectBinding\?\.state === "active"/);
   assert.match(linksWorkspace, /const canSync = bindingActive && profilesReadable/);
   assert.match(linksWorkspace, /onConfigureBinding\(project\.local_project_id\)/);
-  assert.match(setupWorkspace, /mountedRef\.current && isWorkflowCurrent\(workflowGeneration\)/);
-  assert.match(setupWorkspace, /if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, completion, workflowGeneration\)/);
+  assert.match(setupWorkspace, /mountedRef\.current && isWorkflowCurrent\(workflowEpoch\)/);
+  assert.match(setupWorkspace, /if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, completion, workflowEpoch\)/);
   assert.doesNotMatch(workspace, /Host settings/);
 });
 
@@ -480,7 +549,7 @@ test("the startup screen communicates minimal, staged loading progress", () => {
   assert.match(css, /@keyframes sync-startup-progress-glint/);
 });
 
-test("host-scoped workflows keep their originating generation across async continuations", () => {
+test("host-scoped workflows keep their originating epoch across async continuations", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
   const section = (source: string, name: string, nextName: string | null) => {
@@ -493,65 +562,65 @@ test("host-scoped workflows keep their originating generation across async conti
     return source.slice(start, end);
   };
   const capturesBefore = (body: string, awaitExpression: string) => {
-    const capture = body.indexOf("const workflowGeneration = hostWorkflowGeneration.current;");
+    const capture = body.indexOf("const workflowEpoch = hostWorkflowEpoch.current;");
     const awaited = body.indexOf(awaitExpression);
-    assert.ok(capture >= 0, "workflow must capture the host generation");
-    assert.ok(awaited > capture, `generation must be captured before ${awaitExpression}`);
+    assert.ok(capture >= 0, "workflow must capture the host workflow epoch");
+    assert.ok(awaited > capture, `epoch must be captured before ${awaitExpression}`);
   };
 
   const addProject = section(workspace, "beginAddProject", "openSetupDraft");
   capturesBefore(addProject, "await open(");
-  assert.match(addProject, /await projectSyncApi\.createSetupDraft\(picked\);\s*if \(hostWorkflowGeneration\.current !== workflowGeneration\) return;/);
-  assert.match(addProject, /refreshSetupDrafts\(undefined, workflowGeneration\)/);
+  assert.match(addProject, /await projectSyncApi\.createSetupDraft\(picked\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return;/);
+  assert.match(addProject, /refreshSetupDrafts\(undefined, workflowEpoch\)/);
 
   const chooseProfile = section(workspace, "chooseAndCreateProfile", "refreshSetupDrafts");
   capturesBefore(chooseProfile, "await open(");
-  assert.match(chooseProfile, /createProfileAtPath\(provider, picked, workflowGeneration\)/);
+  assert.match(chooseProfile, /createProfileAtPath\(provider, picked, workflowEpoch\)/);
 
   const discardDraft = section(workspace, "discardSetupDraft", "completeSetup");
   capturesBefore(discardDraft, "await confirm(");
-  assert.match(discardDraft, /await projectSyncApi\.discardSetupDraft\(draftId\);\s*if \(hostWorkflowGeneration\.current !== workflowGeneration\) return;/);
+  assert.match(discardDraft, /await projectSyncApi\.discardSetupDraft\(draftId\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return;/);
 
   const linkStorage = section(workspace, "linkStorage", "repairConversationPaths");
   capturesBefore(linkStorage, "await projectSyncApi.listRemoteBundleSnapshots");
-  assert.match(linkStorage, /saveStorageLink\(projectId, storageId, workflowGeneration\)/);
-  assert.match(linkStorage, /hostWorkflowGeneration\.current === workflowGeneration\) setBusy\(false\)/);
+  assert.match(linkStorage, /saveStorageLink\(projectId, storageId, workflowEpoch\)/);
+  assert.match(linkStorage, /hostWorkflowEpoch\.current === workflowEpoch\) setBusy\(false\)/);
 
   const repairPaths = section(workspace, "repairConversationPaths", "openPushChooser");
   capturesBefore(repairPaths, "await confirm(");
-  assert.match(repairPaths, /await projectSyncApi\.repairCodexConversationPaths\(projectId\);\s*if \(hostWorkflowGeneration\.current !== workflowGeneration\) return;/);
-  assert.match(repairPaths, /activeStorageByProject\[projectId\],[\s\S]*workflowGeneration,[\s\S]*\);/);
+  assert.match(repairPaths, /await projectSyncApi\.repairCodexConversationPaths\(projectId\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return;/);
+  assert.match(repairPaths, /activeStorageByProject\[projectId\],[\s\S]*workflowEpoch,[\s\S]*\);/);
 
   const renameProject = section(workspace, "renameProject", "planRestore");
   capturesBefore(renameProject, "await projectSyncApi.renameProject");
-  assert.match(renameProject, /hostWorkflowGeneration\.current !== workflowGeneration\) return false;/);
+  assert.match(renameProject, /hostWorkflowEpoch\.current !== workflowEpoch\) return false;/);
 
   const keepBundle = section(workspace, "keepPendingBundle", "removeProject");
   capturesBefore(keepBundle, "await saveStorageLink");
-  assert.match(keepBundle, /openPushChooser\(pending\.projectId, pending\.storageId, workflowGeneration\)/);
+  assert.match(keepBundle, /openPushChooser\(pending\.projectId, pending\.storageId, workflowEpoch\)/);
 
   const removeProject = section(workspace, "removeProject", "closePullReview");
   capturesBefore(removeProject, "await confirm(");
-  assert.match(removeProject, /await refresh\(workflowGeneration\)/);
+  assert.match(removeProject, /await refresh\(workflowEpoch\)/);
 
   const unlinkStorage = section(workspace, "unlinkStorage", "applyReview");
   capturesBefore(unlinkStorage, "await confirm(");
-  assert.match(unlinkStorage, /await projectSyncApi\.removeLink\(projectId, storageId\);\s*if \(hostWorkflowGeneration\.current !== workflowGeneration\) return;/);
-  assert.match(unlinkStorage, /loadProjectData\(projectId, nextConfig, nextStorageId, workflowGeneration\)/);
+  assert.match(unlinkStorage, /await projectSyncApi\.removeLink\(projectId, storageId\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return;/);
+  assert.match(unlinkStorage, /loadProjectData\(projectId, nextConfig, nextStorageId, workflowEpoch\)/);
 
   const saveStorage = section(workspace, "saveStorageConfig", "saveInlineStorage");
-  assert.match(saveStorage, /workflowGeneration = hostWorkflowGeneration\.current/);
-  assert.match(saveStorage, /await projectSyncApi\.getConfig\(\);\s*if \(hostWorkflowGeneration\.current !== workflowGeneration\) return false;/);
-  assert.match(saveStorage, /await projectSyncApi\.saveConfig\(update\(current\)\);\s*if \(hostWorkflowGeneration\.current !== workflowGeneration\) return false;/);
+  assert.match(saveStorage, /workflowEpoch = hostWorkflowEpoch\.current/);
+  assert.match(saveStorage, /await projectSyncApi\.getConfig\(\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return false;/);
+  assert.match(saveStorage, /await projectSyncApi\.saveConfig\(update\(current\)\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return false;/);
 
   const removeStorage = section(workspace, "removeStorage", "openNewStorageConfiguration");
   capturesBefore(removeStorage, "await confirm(");
-  assert.match(removeStorage, /Stored files were not deleted\.`, workflowGeneration\)/);
+  assert.match(removeStorage, /Stored files were not deleted\.`, workflowEpoch\)/);
 
-  assert.match(workspace, /workflowGeneration=\{hostWorkflowGeneration\.current\}/);
-  assert.match(workspace, /isWorkflowCurrent=\{\(workflowGeneration\) => \([\s\S]*hostWorkflowGeneration\.current === workflowGeneration/);
+  assert.match(workspace, /workflowEpoch=\{hostWorkflowEpoch\.current\}/);
+  assert.match(workspace, /isWorkflowCurrent=\{\(workflowEpoch\) => \([\s\S]*hostWorkflowEpoch\.current === workflowEpoch/);
   const finalize = section(setupWorkspace, "finalize", null);
-  assert.match(finalize, /const detail = await projectSyncApi\.finalizeProjectSetup\(draftId, expectedRevision\);\s*if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, completion, workflowGeneration\)/);
+  assert.match(finalize, /const detail = await projectSyncApi\.finalizeProjectSetup\(draftId, expectedRevision\);\s*if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, completion, workflowEpoch\)/);
   assert.match(setupWorkspace, /mountedRef\.current = false;\s*inspectRequest\.current \+= 1;/);
 });
 
@@ -578,7 +647,7 @@ test("refocus reconciles external changes narrowly and the full reload lives in 
   assert.match(reconcile, /getProject\(activeProjectId\)/);
   assert.doesNotMatch(reconcile, /auditCodexConversationPaths|listProviderProfiles|listBindings|getReadiness|getInventory|setLoading/);
   assert.match(reconcile, /shellRequest\.current !== shellRequestId/);
-  assert.match(reconcile, /hostWorkflowGeneration\.current !== workflowGeneration/);
-  assert.match(reconcile, /await refresh\(workflowGeneration\)/);
+  assert.match(reconcile, /hostWorkflowEpoch\.current !== workflowEpoch/);
+  assert.match(reconcile, /await refresh\(workflowEpoch\)/);
   assert.match(workspace, /Date\.now\(\) - blurredAt >= FOCUS_RECONCILE_MIN_AWAY_MS/);
 });

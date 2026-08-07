@@ -122,6 +122,7 @@ export function StorageEditor({
   const set = (patch: Partial<StorageConfig>) => onChange({ ...storage, ...patch });
   const derivedS3ApiUrl = r2S3ApiUrl(storage.account_id ?? "", storage.bucket ?? "");
   const [s3ApiUrlDraft, setS3ApiUrlDraft] = useState(derivedS3ApiUrl);
+  const [secretVisible, setSecretVisible] = useState(false);
   const editingS3ApiUrl = useRef(false);
   const parsedS3ApiUrl = parseR2S3ApiUrl(s3ApiUrlDraft);
   useEffect(() => {
@@ -151,13 +152,25 @@ export function StorageEditor({
     const picked = await open({ directory: true, multiple: false });
     if (typeof picked === "string" && picked) set({ local_dir: picked });
   };
+  // Counts the five rendered fields, not the four stored ones: the URL flips to
+  // set exactly when account and bucket both exist, so pasting it moves the
+  // counter by three — which is the coupling, stated honestly.
+  const r2FieldsSet = [
+    derivedS3ApiUrl,
+    storage.bucket,
+    storage.account_id,
+    storage.access_key_id,
+    storage.secret_access_key,
+  ].filter((value) => !!value?.trim()).length;
 
   return (
     <article className="sync-storage-card">
       <header>
         <span className="sync-storage-icon"><Icon name={storage.kind === "local" ? "drive" : "cloud"} size={18} /></span>
-        {showNameField && (
+        {showNameField ? (
           <input value={storage.name} onChange={(event) => set({ name: event.target.value })} disabled={disabled} aria-label="Storage name" />
+        ) : (
+          <h2 className="sync-storage-editor-title">Storage settings</h2>
         )}
         <div className="sync-segmented" role="radiogroup" aria-label="Storage type">
           <button
@@ -195,7 +208,7 @@ export function StorageEditor({
       </header>
       {storage.kind === "local" ? (
         <label className="sync-folder-field compact">
-          <span>Location path</span>
+          <span className="sync-field-name">Location path</span>
           <div>
             <input
               type="text"
@@ -211,32 +224,27 @@ export function StorageEditor({
             <button type="button" className="btn" onClick={() => void chooseFolder()} disabled={disabled}>
               <Icon name="folder" size={13} /> Browse…
             </button>
-            {primaryAction}
           </div>
         </label>
       ) : (
         <>
-          <div className="sync-r2-setup">
-            <section className="sync-r2-guide" aria-labelledby={`storage-${storage.id}-r2-guide`}>
-              <div>
-                <div className="sync-r2-guide-heading">
-                  <strong id={`storage-${storage.id}-r2-guide`}>Connect a Cloudflare R2 bucket</strong>
-                  <button type="button" className="btn-link" onClick={() => void openHelp(R2_SETUP_DOC)}>Setup guide</button>
-                </div>
-                <p>Create one bucket and an <strong>Object Read &amp; Write</strong> token scoped to that bucket.</p>
-                <ol>
-                  <li><button type="button" onClick={() => void openHelp(R2_BUCKET_DOC)}>Create an R2 bucket</button></li>
-                  <li><button type="button" onClick={() => void openHelp(R2_CREDENTIALS_DOC)}>Create R2 credentials</button></li>
-                  <li><button type="button" onClick={() => void openHelp(CLOUDFLARE_ACCOUNT_ID_DOC)}>Find your Account ID</button></li>
-                </ol>
-                <small>Copy both credentials when the token is created—the Secret Access Key is shown only once.</small>
-              </div>
-            </section>
+          {/* One line instead of a heading, a sentence, a numbered list, and a
+              warning: every doc the list linked is still one click away behind
+              the field it explains, and the only unrecoverable fact — the
+              secret is shown once — survives as the line's tail. */}
+          <div className="sync-r2-guide" role="note">
+            <Icon name="info" size={13} />
+            <span className="sync-r2-guide-copy">
+              Needs one bucket and an <strong>Object Read &amp; Write</strong> token scoped to that bucket.
+            </span>
+            <button type="button" className="btn-link" onClick={() => void openHelp(R2_SETUP_DOC)}>Setup guide</button>
+            <span className="sync-r2-guide-warning">Secret shown once</span>
+          </div>
 
-            <div className="sync-storage-fields sync-r2-fields">
+          <div className="sync-storage-fields sync-r2-fields">
             <label className="sync-r2-url-field">
               <span className="form-label-row">
-                <span>S3 API URL</span>
+                <span className="sync-field-name">S3 API URL</span>
                 <HelpButton url={R2_SETUP_DOC} label="How to find the Cloudflare R2 S3 API URL" />
               </span>
               <input
@@ -257,13 +265,11 @@ export function StorageEditor({
                 autoCorrect="off"
                 autoComplete="off"
                 aria-invalid={s3ApiUrlDraft.trim() && !parsedS3ApiUrl ? true : undefined}
-                aria-describedby={`storage-${storage.id}-url-hint`}
               />
-              <small id={`storage-${storage.id}-url-hint`}>Example: <code>https://9cc0…aca1.r2.cloudflarestorage.com/agent</code></small>
             </label>
             <label>
               <span className="form-label-row">
-                <span>Bucket name</span>
+                <span className="sync-field-name">Bucket name</span>
                 <HelpButton url={R2_BUCKET_DOC} label="How to create a Cloudflare R2 bucket" />
               </span>
               <input
@@ -276,13 +282,11 @@ export function StorageEditor({
                 autoCapitalize="none"
                 autoCorrect="off"
                 autoComplete="off"
-                aria-describedby={`storage-${storage.id}-bucket-hint`}
               />
-              <small id={`storage-${storage.id}-bucket-hint`}>Example: <code>codex-sync-backups</code></small>
             </label>
             <label>
               <span className="form-label-row">
-                <span>Account ID</span>
+                <span className="sync-field-name">Account ID</span>
                 <HelpButton url={CLOUDFLARE_ACCOUNT_ID_DOC} label="Where to find your Cloudflare Account ID" />
               </span>
               <input
@@ -295,17 +299,11 @@ export function StorageEditor({
                 autoCapitalize="none"
                 autoCorrect="off"
                 autoComplete="off"
-                aria-describedby={`storage-${storage.id}-account-hint`}
               />
-              <small id={`storage-${storage.id}-account-hint`}>
-                {storage.account_id?.trim()
-                  ? <>Endpoint: <code>{r2EndpointForAccount(storage.account_id)}</code></>
-                  : <>Example: <code>023e…c353</code></>}
-              </small>
             </label>
             <label>
               <span className="form-label-row">
-                <span>Access Key ID</span>
+                <span className="sync-field-name">Access Key ID</span>
                 <HelpButton url={R2_CREDENTIALS_DOC} label="How to create an R2 Access Key ID" />
               </span>
               <input
@@ -318,31 +316,49 @@ export function StorageEditor({
                 autoCapitalize="none"
                 autoCorrect="off"
                 autoComplete="off"
-                aria-describedby={`storage-${storage.id}-access-hint`}
               />
-              <small id={`storage-${storage.id}-access-hint`}>Example: <code>4a2b…91ef</code></small>
             </label>
             <label>
               <span className="form-label-row">
-                <span>Secret Access Key</span>
+                <span className="sync-field-name">Secret Access Key</span>
                 <HelpButton url={R2_CREDENTIALS_DOC} label="How to create an R2 Secret Access Key" />
               </span>
-              <input
-                type="password"
-                value={storage.secret_access_key ?? ""}
-                onChange={(event) => set({ secret_access_key: event.target.value })}
-                placeholder="Example: a1B2…x9Y0"
-                disabled={disabled}
-                required
-                autoComplete="new-password"
-                aria-describedby={`storage-${storage.id}-secret-hint`}
-              />
-              <small id={`storage-${storage.id}-secret-hint`}>Example: <code>a1B2…x9Y0</code></small>
+              {/* NIST SP 800-63B §5.1.1.2: the secret can be shown while
+                  entering it. A word, not an eye glyph — the icon alone does
+                  not say which state it puts you in. */}
+              <span className="sync-secret-input">
+                <input
+                  type={secretVisible ? "text" : "password"}
+                  value={storage.secret_access_key ?? ""}
+                  onChange={(event) => set({ secret_access_key: event.target.value })}
+                  placeholder="Example: a1B2…x9Y0"
+                  disabled={disabled}
+                  required
+                  autoComplete="new-password"
+                />
+                <button
+                  type="button"
+                  className="sync-secret-reveal"
+                  onClick={() => setSecretVisible((visible) => !visible)}
+                  aria-pressed={secretVisible}
+                  disabled={disabled}
+                >
+                  {secretVisible ? "Hide" : "Show"}
+                </button>
+              </span>
             </label>
-            </div>
           </div>
-          {primaryAction && <div className="sync-storage-primary-action">{primaryAction}</div>}
         </>
+      )}
+      {(primaryAction || storage.kind !== "local") && (
+        <footer className="sync-storage-editor-footer">
+          {storage.kind !== "local" && (
+            <span className="sync-storage-editor-progress" aria-live="polite">
+              {r2FieldsSet} of 5 set
+            </span>
+          )}
+          {primaryAction}
+        </footer>
       )}
     </article>
   );

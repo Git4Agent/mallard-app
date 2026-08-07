@@ -476,7 +476,6 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
     // \`.btn\` for a fixed square size or zero padding.
     "\\.sync-inline-action-close:active",
     "\\.sync-storage-settings-icon:active",
-    "\\.sync-setup-resource-toggle:active",
     "\\.log-panel-actions \\.btn:active",
     "\\.sync-modal-header \\.btn:active",
   ]) {
@@ -722,8 +721,8 @@ test("changed storage history explains the recovery path and exposes only unlink
         project_id: project.local_project_id,
         storage_id: "storage-1",
         storage_name: "Local storage 1",
-        generation: 2,
-        base_generation: 1,
+        revision: 2,
+        base_revision: 1,
         compared_at: 3,
         entries: [],
         counts: {
@@ -737,8 +736,8 @@ test("changed storage history explains the recovery path and exposes only unlink
         warnings: [],
         remote_continuity: {
           state: "replaced",
-          base_generation: 1,
-          remote_generation: 2,
+          base_revision: 1,
+          remote_revision: 2,
         },
       }}
       loading={false}
@@ -755,7 +754,7 @@ test("changed storage history explains the recovery path and exposes only unlink
   );
 
   assert.match(html, />Storage history changed</);
-  assert.match(html, /sync history in Local storage 1 is different from the one Mallard last synced for this project \(generation 1\)/);
+  assert.match(html, /sync history in Local storage 1 is different from the one Mallard last synced for this project \(revision 1\)/);
   assert.match(html, /sync data in that storage was deleted and created again/);
   assert.match(html, /session statuses below use the replacement/);
   assert.match(html, /Unlinking does not delete files/);
@@ -1256,8 +1255,8 @@ test("selected storage adds directional indicators and storage-only threads", ()
     project_id: project.local_project_id,
     storage_id: "storage-1",
     storage_name: "Local storage 1",
-    generation: 4,
-    base_generation: 3,
+    revision: 4,
+    base_revision: 3,
     compared_at: 1_752_804_000,
     counts: { synced: 0, local: 2, storage: 1, diverged: 0, unavailable: 0, unknown: 0 },
     warnings: [],

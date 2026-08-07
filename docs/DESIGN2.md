@@ -10,7 +10,7 @@ Supersedes `DESIGN1.md`. What changed structurally from v1:
 
 - Publishing is a CAS flip of one tiny pointer object, `_head.json`. All
   profile history (`_manifests/`, `_commits/`) is immutable and written
-  *before* publish, so every published generation provably has its manifest
+  *before* publish, so every published revision provably has its manifest
   and commit — no repair passes, no history holes.
 - The local baseline records only entries actually applied on this machine,
   eliminating phantom `local deleted` prompts from excluded or skipped paths.
@@ -66,7 +66,7 @@ Cloudflare R2.
 - Make pulls deterministic: read `_head.json`, then exactly the manifest it
   references — never stray bucket objects.
 - Keep local baselines scoped by remote and profile.
-- Make commit history verifiable and every published generation
+- Make commit history verifiable and every published revision
   reconstructable.
 - Preserve safe defaults for temporary files, caches, machine-specific runtime
   state, and SQLite sidecars.
@@ -124,7 +124,7 @@ profiles never share objects, so a `.claude` publish can neither race nor
 invalidate a `.codex` publish.
 
 The single authoritative object per profile is `_head.json`: a small,
-CAS-protected pointer to the current generation's immutable manifest and
+CAS-protected pointer to the current revision's immutable manifest and
 commit. Everything else is either immutable history or a display cache.
 
 File states are computed from three inputs:
@@ -235,7 +235,7 @@ physical key:   {profile_id}/_uploads/{upload_id}/files/.codex/sessions/2026/04/
 The per-attempt `{upload_id}` prefix is required for partial-upload and race
 safety: no uploaded byte is visible to pull until `_head.json` flips to a
 manifest that references it, and two racing pushes write under different
-batch prefixes so they can never overwrite each other. A generation's full
+batch prefixes so they can never overwrite each other. A revision's full
 tree is readable in place under its batches; unchanged files keep pointing
 at the batch that first uploaded them.
 
@@ -244,7 +244,7 @@ at the batch that first uploaded them.
   _head.json                         canonical profile HEAD, CAS-protected
   _tag.json                          display cache, non-authoritative
   _manifests/
-    000000000012-4d58b5a0d3e24e2b.json   immutable manifest, {generation}-{commit_id}
+    000000000012-4d58b5a0d3e24e2b.json   immutable manifest, {revision}-{commit_id}
   _commits/
     000000000012-4d58b5a0d3e24e2b.json   immutable commit record
   _uploads/
@@ -260,7 +260,7 @@ at the batch that first uploaded them.
 
 Every object under `_manifests/`, `_commits/`, and `_uploads/` is immutable
 and written **before** the head flips. Keys embed both the zero-padded
-generation (so listings sort in generation order) and the `commit_id` (so
+revision (so listings sort in revision order) and the `commit_id` (so
 racing or crashed pushes can never collide on a key — the head CAS is the sole
 arbiter of who published). An object whose key is never referenced by the head
 chain is an **orphan**: the residue of a lost race or a crashed push, ignored
@@ -268,7 +268,7 @@ by every reader and cleanable by age.
 
 **Profile discovery** lists the bucket root by prefix (paginated), skips
 entries whose first path component starts with `_`, and reads
-`{id}/_head.json` for the authoritative `root` and generation, plus
+`{id}/_head.json` for the authoritative `root` and revision, plus
 `{id}/_tag.json` for display fields. Prefixes with no readable head are
 ignored. One bad profile must not block the picker. Auto-linking matches on
 `head.root`: exactly one profile with the wanted root links itself, none
@@ -286,7 +286,7 @@ every push.
   "profile_id": "01h...a9",
   "root": ".codex",
   "state": "active",
-  "generation": 12,
+  "revision": 12,
   "commit_id": "4d58b5a0d3e24e2b",
   "manifest_key": "_manifests/000000000012-4d58b5a0d3e24e2b.json",
   "commit_key": "_commits/000000000012-4d58b5a0d3e24e2b.json",
@@ -317,11 +317,11 @@ may rewrite it from the current head and commit.
   "root": ".codex",
   "created_at": 1750000000,
   "updated_at": 1750000300,
-  "generation": 12,
+  "revision": 12,
   "files": 142,
   "last_commit": {
     "commit_id": "4d58b5a0d3e24e2b",
-    "generation": 12,
+    "revision": 12,
     "created_at": 1750000300,
     "actor_name": "alice",
     "machine_name": "alice-macbook",
@@ -333,16 +333,16 @@ may rewrite it from the current head and commit.
 Timestamps come from client clocks and are display-only; the picker may sort
 by `updated_at` but must not use it for any correctness decision.
 
-### `_manifests/{generation}-{commit_id}.json`
+### `_manifests/{revision}-{commit_id}.json`
 
-The immutable full inventory of the profile as of one generation. The manifest
+The immutable full inventory of the profile as of one revision. The manifest
 referenced by the current head is the source of truth for pull and conflict
 detection.
 
 ```json
 {
   "schema_version": 1,
-  "generation": 12,
+  "revision": 12,
   "commit_id": "4d58b5a0d3e24e2b",
   "updated_at": 1750000300,
   "files": {
@@ -374,13 +374,13 @@ tooling (Codex's thread rebuild) sees real recency
 older builds) means unknown — apply skips the restore. Merge-driver outputs
 and this machine's conflict copies are stamped at merge time instead, and
 SQLite snapshots are exempt. Same-content re-uploads keep the published
-entry, so a bare `touch` never republishes a generation.
+entry, so a bare `touch` never republishes a revision.
 
-Because manifests are written before publish, every generation reachable from
+Because manifests are written before publish, every revision reachable from
 the head chain has its manifest by construction. There are no history holes —
 only orphans, which are unpublished and ignored.
 
-### `_commits/{generation}-{commit_id}.json`
+### `_commits/{revision}-{commit_id}.json`
 
 The immutable commit record for one publish attempt, written alongside its
 manifest before the head flip.
@@ -389,7 +389,7 @@ manifest before the head flip.
 {
   "schema_version": 1,
   "commit_id": "4d58b5a0d3e24e2b",
-  "generation": 12,
+  "revision": 12,
   "created_at": 1750000300,
   "actor_name": "alice",
   "machine_name": "alice-macbook",
@@ -405,8 +405,8 @@ manifest before the head flip.
 
 Authoritative history is the chain walked backward from the head via
 `previous_commit_key`. A plain listing of `_commits/` is only a display
-approximation: it sorts by generation but may include orphans (same
-generation, different `commit_id`, never published). The chain never includes
+approximation: it sorts by revision but may include orphans (same
+revision, different `commit_id`, never published). The chain never includes
 them.
 
 ### `_uploads/{upload_id}/_upload.json`
@@ -422,7 +422,7 @@ inspectable without a manifest.
   "created_at": 1750000290,
   "actor_name": "alice",
   "machine_name": "alice-macbook",
-  "base_generation": 11,
+  "base_revision": 11,
   "status": "staged",
   "objects": [
     {
@@ -451,9 +451,9 @@ Retention policy:
 
 - `_commits/` and `_manifests/` entries are small and retained indefinitely
   by default.
-- The **retained generation set** is found by walking the chain backward from
-  the head via `previous_commit_key`: the current generation plus the most
-  recent `history_keep` generations (default 10, configurable per remote).
+- The **retained revision set** is found by walking the chain backward from
+  the head via `previous_commit_key`: the current revision plus the most
+  recent `history_keep` revisions (default 10, configurable per remote).
 - The **protected batch set** is every `upload_id` appearing in the
   `object_key`s of the retained manifests. Published manifests always exist
   (they are written before publish), so this set is always computable —
@@ -466,7 +466,7 @@ history never affects sync correctness.
 Cleanup is user-initiated and runs in three passes:
 
 1. **History pruning (optional).** Walk the chain from the head; delete
-   `_manifests/` and `_commits/` entries older than the retained generation
+   `_manifests/` and `_commits/` entries older than the retained revision
    set. (The walk then terminates at the pruning horizon; that is expected.)
 2. **Orphan cleanup.** Delete `_manifests/` and `_commits/` objects that are
    not reachable from the head chain **and are older than 24 hours** — the
@@ -527,7 +527,7 @@ struct LocalBaseline {
     schema_version: u32,
     remote_id: String,
     profile_id: String,
-    cloud_generation: u64,
+    cloud_revision: u64,
     cloud_commit_id: String,
     cloud_manifest_sha256: String,
     files: HashMap<String, LocalFileRecord>,
@@ -657,7 +657,7 @@ sha with the mtime fast path disabled, so the locally resolved file keeps
 showing as `local ahead` until a push publishes it.
 
 **Scenario: racing pushes.** A and B work against the same profile. A
-pushes at 19:00 and publishes generation `N+1` at 19:05. B pushes at
+pushes at 19:00 and publishes revision `N+1` at 19:05. B pushes at
 19:10: B GETs the head, sees `N+1`, downloads every path where both B's
 copy and `N+1` changed since B's baseline, resolves each locally as a
 union, then uploads and CASes the head to `N+2`. Nothing A published is
@@ -666,7 +666,7 @@ and B would rebase against the new head and re-run the same union — the
 head CAS serializes publishes; the union makes the retry safe.
 
 **Scenario: pull over local edits.** A pulls at 19:00 (baseline at
-generation `N`). B publishes `N+1` at 19:15. A keeps editing locally until
+revision `N`). B publishes `N+1` at 19:15. A keeps editing locally until
 19:20, then pulls. The pull fetches head `N+1` and classifies against A's
 baseline: paths only B changed are applied, paths only A changed are kept
 and reported as `local ahead`, and paths both changed resolve as the same
@@ -729,7 +729,7 @@ Computing the matrix needs `C`. Rules:
        v
 +------+-----------------------------+
 | Write immutable manifest + commit  |
-| for generation+1 (unique keys)     |
+| for revision+1 (unique keys)     |
 +------+-----------------------------+
        |
        v
@@ -768,11 +768,11 @@ Steps:
    the original relative path under the batch prefix. Snapshots are deleted
    after the push.
 9. PUT `_uploads/{upload_id}/_upload.json` with actor, machine, base
-   generation, object list (with logical paths), and status `staged`.
+   revision, object list (with logical paths), and status `staged`.
 10. PUT the immutable manifest
-    `_manifests/{generation+1}-{commit_id}.json`.
+    `_manifests/{revision+1}-{commit_id}.json`.
 11. PUT the immutable commit
-    `_commits/{generation+1}-{commit_id}.json`, linking
+    `_commits/{revision+1}-{commit_id}.json`, linking
     `previous_commit_key` to the current head's commit.
 12. CAS `_head.json` (`If-Match`: the ETag from step 3) to point at the new
     manifest and commit, with the new `manifest_sha256`.
@@ -780,7 +780,7 @@ Steps:
     baseline; the new manifest, commit, and batch become orphans, ignored
     by every reader and cleanable by age. Rebase instead of reporting a
     failure — re-read the head, re-run the union against the new
-    generation, and retry (bounded attempts). If the outcome is ambiguous,
+    revision, and retry (bounded attempts). If the outcome is ambiguous,
     re-GET the head and compare `commit_id` (see Publish Semantics).
 14. Best-effort PUT `_tag.json` with the latest commit summary.
 15. Optionally update `_uploads/{upload_id}/_upload.json` status to
@@ -797,7 +797,7 @@ S3-compatible storage has no atomic multi-object transaction, so the head CAS
 is the only publish point. Everything written before it — content objects,
 batch metadata, the manifest, the commit — is invisible to readers until the
 head flips, and every key is unique to this attempt (`upload_id`,
-`{generation}-{commit_id}`), so concurrent pushes can never overwrite each
+`{revision}-{commit_id}`), so concurrent pushes can never overwrite each
 other's staged objects. Race handling is uniform: the CAS wins or loses.
 
 Each changed file is snapshotted once into a local staging file; the recorded
@@ -826,7 +826,7 @@ Failure cases:
 ### Single-Writer Mode
 
 The head CAS is what makes every multi-writer guarantee hold: it serializes
-pushes, assigns generations uniquely, and decides races. A remote that lacks
+pushes, assigns revisions uniquely, and decides races. A remote that lacks
 conditional writes (`supports_conditional_writes == false`) cannot
 approximate that — two unconditional head writes are last-writer-wins, and
 the loser's push is silently discarded.
@@ -838,8 +838,8 @@ pretend: it disables the guarantees rather than weakening them silently.
   that it is safe only if exactly one machine ever pushes to the profile.
 - `_head.json` is overwritten unconditionally; racing pushes are
   last-writer-wins.
-- Generation numbers and the commit chain are advisory: history is not
-  trusted, and `manifest_sha256` verification of *past* generations is
+- Revision numbers and the commit chain are advisory: history is not
+  trusted, and `manifest_sha256` verification of *past* revisions is
   disabled (the current head's `manifest_sha256` is still checked on pull).
 - Profile creation degrades to check-then-write; the random ID makes a
   collision effectively impossible, but the creation race guarantee is gone.
@@ -943,7 +943,7 @@ Steps:
    confirmed delete pass is deferred together with explicit deletion
    propagation.
 9. Save the baseline containing exactly the entries now applied locally, with
-   fresh mtimes, plus the head's generation, `commit_id`, and
+   fresh mtimes, plus the head's revision, `commit_id`, and
    `manifest_sha256`.
 
 **Failure policy — three tiers.** Validation failures (step 3) skip the
@@ -1019,9 +1019,9 @@ reports both paths as conflicted and skips both; neither enters the baseline.
 exactly `_uploads/{upload_id}/objects/{sha256}` where `upload_id` is 1–64
 characters of `[a-z0-9-]` (lowercase Crockford base32 ULID recommended) and
 `sha256` is exactly 64 lowercase hex characters. Head-referenced keys must
-match `_manifests/{generation}-{commit_id}.json` and
-`_commits/{generation}-{commit_id}.json`, with a zero-padded 12-digit
-generation and a 16-lowercase-hex `commit_id`. Reject the manifest entry (or
+match `_manifests/{revision}-{commit_id}.json` and
+`_commits/{revision}-{commit_id}.json`, with a zero-padded 12-digit
+revision and a 16-lowercase-hex `commit_id`. Reject the manifest entry (or
 the whole head) on any mismatch.
 
 ### Destination Writes And Symlinks
@@ -1164,14 +1164,14 @@ async fn get_file_statuses(paths: Vec<String>) -> Result<FileStatusReport, Strin
 
 ```rust
 struct CloudState {
-    generation: u64,
+    revision: u64,
     commit_id: String,
     fetched_at: u64,
     files: u64,
 }
 
 struct FileStatusReport {
-    cloud_generation: Option<u64>,   // None = cloud state unavailable
+    cloud_revision: Option<u64>,   // None = cloud state unavailable
     cloud_fetched_at: Option<u64>,
     statuses: HashMap<String, FileStatus>,
 }
@@ -1199,7 +1199,7 @@ struct ProfileInfo {
     profile_id: String,
     label: String,               // placeholder if _tag.json is missing
     files: u64,
-    generation: u64,
+    revision: u64,
     updated_at: u64,
     last_actor_name: String,
     last_machine_name: String,
@@ -1207,7 +1207,7 @@ struct ProfileInfo {
 
 struct CommitInfo {
     commit_id: String,
-    generation: u64,
+    revision: u64,
     created_at: u64,
     actor_name: String,
     machine_name: String,
@@ -1388,6 +1388,6 @@ Deliberate deviations from this document, to revisit:
 - Additional merge drivers beyond history.jsonl and session_index.jsonl.
 - Profile export/import.
 - Profile archival/tombstoning via `head.state`.
-- Rollback-to-generation UI (immutable `_manifests/` history makes this
+- Rollback-to-revision UI (immutable `_manifests/` history makes this
   possible later without schema changes).
 - Remote health checks and scheduled sync.

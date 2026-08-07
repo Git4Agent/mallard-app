@@ -234,7 +234,7 @@ Settings gains a "Sync links" section, one row per root:
 
 Plain text inputs (placeholders `~/.codex` / `auto`), saved with the
 settings form via `set_sync_link`. The existing profile box keeps showing
-the resolved link + generation. `types.ts`: `codex_root?`, `claude_root?`
+the resolved link + revision. `types.ts`: `codex_root?`, `claude_root?`
 on `SyncConfig`; `pinned?` on `ProfileLink`.
 
 ## 6. Tests (dual-backend via the existing `run_*` wrapper pattern)

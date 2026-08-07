@@ -232,6 +232,7 @@ impl Discovery {
 
 /// Discover resources without retaining file bytes. Absolute source paths are
 /// kept only inside this module and never become resource identity.
+#[cfg(test)]
 pub fn discover_project(request: &CaptureRequest) -> Result<ProjectInventory, String> {
     Ok(discover_full(request)?.project_inventory())
 }

@@ -337,7 +337,7 @@ displaced inode until the whole repair group commits.
 ### H-07 — Storage settings can be repointed during Push
 
 **Impact.** Push can publish to an old endpoint/bucket/local directory and then
-record the returned generation as the base for a newly repointed storage with
+record the returned revision as the base for a newly repointed storage with
 the same ID. Mallard can report the project as synced while future Pull/Push
 operations address a different store.
 
@@ -456,7 +456,7 @@ that the user's selection and understanding were formed from the wrong data.
 
 **Evidence.**
 
-- The immutable restore plan pins generation, commit, manifest, binding, and
+- The immutable restore plan pins revision, commit, manifest, binding, and
   actions in `src/types.ts:739-755`.
 - `RestorePlanView.tsx:602-615` embeds `ProjectChatHistoryPage` without a
   plan-derived comparison override.
@@ -492,13 +492,13 @@ materially different action without renewed user consent.
 - `ProjectSyncV3.tsx:2115-2126` replaces the restore plan after a partial or
   skipped pass without remounting the review.
 - `ProjectSyncV3.tsx:2144-2170` refreshes and replaces the plan; even when it
-  clears result/completion sets for a new generation or manifest, it does not
+  clears result/completion sets for a new revision or manifest, it does not
   clear the child's resource-ID selection memory.
 - Selection building maps those retained resource IDs onto the current plan's
   new action IDs.
 
 **Why tests miss it.** There is no mounted rerender test that changes plan ID,
-generation, manifest, action kind, or materialized digest while preserving a
+revision, manifest, action kind, or materialized digest while preserving a
 resource ID.
 
 **Recommended correction.** Scope review state to `plan_id` and to an approval
@@ -512,7 +512,7 @@ that fingerprint changes.
 
 **Impact.** If an operator, lifecycle rule, or storage fault deletes or corrupts
 a content-addressed object, a later non-noop Push can advance the head while
-still referencing the missing object. The new generation is structurally valid
+still referencing the missing object. The new revision is structurally valid
 but cannot be fully restored.
 
 **Evidence.**
@@ -527,7 +527,7 @@ but cannot be fully restored.
 **Recommended correction.** Before reuse, verify object existence, size, and
 SHA-256 from the current store. If missing or corrupt, re-upload the captured
 bytes before publication. Add local-folder and S3 tests that delete/corrupt a
-previous object between generations.
+previous object between revisions.
 
 ### M-02 — Activity logs persist absolute local paths
 
@@ -582,7 +582,7 @@ Detail-dependent actions can then run against mismatched UI state.
 **Evidence.**
 
 - `ProjectSyncV3.tsx:837-905` guards `loadProjectData` only with the host-wide
-  workflow generation, which does not change on project selection.
+  workflow revision, which does not change on project selection.
 - `ProjectSyncV3.tsx:1019-1022` can start another project request immediately.
 - Project buttons are disabled only by `busy`, not `loading`, in
   `ProjectSidebar.tsx:253-258`.
@@ -845,7 +845,7 @@ approved or revalidate identity and digest immediately at the mutation.
 ### Approval identity is weaker than action identity
 
 The frontend often uses stable resource IDs as UI identity, but approval is for
-an action against exact bytes, target, mode, and plan generation. H-11 and H-12
+an action against exact bytes, target, mode, and plan revision. H-11 and H-12
 are two manifestations of the same mismatch. Backend APIs should accept an
 approval token/fingerprint issued for the exact plan action, not rely on the
 frontend to translate a remembered resource selection into new action IDs.

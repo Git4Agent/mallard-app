@@ -1747,6 +1747,7 @@ summary:focus-visible {
 }
 
 .field-help {
+  position: relative;
   width: 18px;
   height: 18px;
   border: 1px solid var(--border-mid);
@@ -1759,6 +1760,13 @@ summary:focus-visible {
   font-size: 10.5px;
   font-weight: 700;
   line-height: 1;
+}
+
+/* Visually 18px; the hit area meets the 24px minimum without inflating the glyph. */
+.field-help::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
 }
 
 .field-help:hover {
@@ -1981,7 +1989,7 @@ summary:focus-visible {
 }
 .profile-box-icon { color: var(--blue); flex-shrink: 0; }
 .profile-box-label { font-size: 13.5px; font-weight: 600; color: var(--text-0); }
-.profile-box-gen {
+.profile-box-rev {
   font-size: 11px;
   color: var(--text-2);
   margin-left: auto;
@@ -4053,7 +4061,6 @@ summary:focus-visible {
 .sync-folder-field { min-width: 0; display: flex; flex-direction: column; gap: 4px; color: var(--text-2); font-size: 10.5px; }
 .sync-field-grid label > span,
 .sync-provider-home-grid label > span,
-.sync-storage-fields label > span,
 .sync-folder-field > span { color: var(--text-1); font-weight: 600; }
 .sync-provider-home-grid small { margin-left: 3px; color: var(--text-3); font-size: 9px; font-weight: 400; }
 .sync-profile-select-row { min-width: 0; display: flex; gap: 7px; }
@@ -4793,91 +4800,85 @@ summary:focus-visible {
 .sync-segmented { display: flex; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-muted); }
 .sync-segmented button { height: 25px; padding: 0 8px; border: 0; border-radius: 5px; color: var(--text-2); background: transparent; font: inherit; font-size: 9.5px; cursor: pointer; }
 .sync-segmented button.active { color: var(--text-0); background: var(--button-bg); box-shadow: 0 1px 3px rgba(0,0,0,0.16); }
-.sync-storage-card > .sync-folder-field { margin: 12px; }
-.sync-storage-fields { padding: 12px; grid-template-columns: 1fr 1.5fr; }
+.sync-storage-card > .sync-folder-field { margin: 12px 14px; }
+.sync-storage-card > header .sync-segmented { margin-left: auto; }
+.sync-storage-editor-title { margin: 0; color: var(--text-0); font-size: 13px; font-weight: 600; }
+.sync-storage-fields { padding: 13px 14px 15px; grid-template-columns: 1fr 1fr; }
+/* Field names are chrome micro-labels; the value below them carries the voice. */
+.sync-storage-card .sync-field-name {
+  color: var(--text-2);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
 .sync-r2-guide {
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border);
-}
-.sync-r2-guide > div { min-width: 0; }
-.sync-r2-guide-heading {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-}
-.sync-r2-guide-heading strong { color: var(--text-0); font-size: 12.5px; }
-.sync-r2-guide-heading .btn-link { margin-left: auto; }
-.sync-r2-guide p { margin-top: 3px; color: var(--text-2); font-size: 10.5px; }
-.sync-r2-guide p strong { color: var(--text-1); font-weight: 600; }
-.sync-r2-guide ol {
-  margin: 10px 0 6px;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-  counter-reset: r2-step;
-  list-style: none;
-}
-.sync-r2-guide li {
-  counter-increment: r2-step;
+  padding: 9px 14px;
   display: flex;
   align-items: center;
-  gap: 5px;
-}
-.sync-r2-guide li::before {
-  content: counter(r2-step);
-  width: 16px;
-  height: 16px;
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  border: 1px solid var(--border-mid);
-  border-radius: var(--r-pill);
+  flex-wrap: wrap;
+  gap: 4px 9px;
+  border-bottom: 1px solid var(--border);
   color: var(--text-2);
-  font-size: 8.5px;
-  font-weight: 650;
+  font-size: 11px;
 }
-.sync-r2-guide li button {
-  padding: 0;
-  border: 0;
-  color: var(--text-1);
-  background: transparent;
-  font: inherit;
-  font-size: 10.5px;
-  text-decoration: underline;
-  text-decoration-color: var(--border-strong);
-  text-underline-offset: 3px;
-  cursor: pointer;
+.sync-r2-guide > svg { flex: none; }
+.sync-r2-guide-copy { min-width: 0; flex: 1 1 300px; }
+.sync-r2-guide-copy strong { color: var(--text-1); font-weight: 600; }
+.sync-r2-guide > .btn-link { min-height: 24px; padding: 2px 0; flex: none; white-space: nowrap; }
+.sync-r2-guide-warning {
+  flex: none;
+  color: var(--text-2);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
-.sync-r2-guide li button:hover { color: var(--text-0); }
-.sync-r2-guide small { color: var(--text-3); font-size: 9.5px; }
 .sync-r2-fields {
-  padding: 14px 16px 16px;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px 16px;
+  gap: 12px 14px;
 }
 .sync-r2-url-field { grid-column: 1 / -1; }
 .sync-r2-fields label { gap: 5px; }
 .sync-r2-fields .form-label-row { overflow: visible; }
-.sync-r2-fields label > small {
-  min-height: 14px;
-  color: var(--text-3);
-  font-size: 9.5px;
+.sync-secret-input { position: relative; display: block; }
+.sync-secret-input > input { width: 100%; padding-right: 58px; }
+.sync-secret-reveal {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
+  min-width: 48px;
+  padding: 0 10px;
+  border: 0;
+  border-left: 1px solid var(--button-border);
+  border-radius: 0 6px 6px 0;
+  color: var(--text-2);
+  background: transparent;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
 }
-.sync-r2-fields code {
-  overflow-wrap: anywhere;
+.sync-secret-reveal:hover:not(:disabled) { color: var(--text-0); background: var(--bg-hover); }
+.sync-secret-reveal:disabled { cursor: default; opacity: 0.58; }
+.sync-storage-editor-footer {
+  min-height: 44px;
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-footer);
+}
+.sync-storage-editor-footer > .btn { margin-left: auto; }
+.sync-storage-editor-progress {
   color: var(--text-2);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
-.sync-storage-card > footer { min-height: 30px; padding: 6px 11px; display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--border); color: var(--text-3); background: var(--surface-footer); font-size: 9px; }
-.sync-storage-card > footer code { font-family: var(--font-mono); }
-.sync-storage-card > footer span { margin-left: auto; }
-.sync-storage-card > footer span:only-child { margin-left: 0; }
 
 @media (max-width: 980px) {
   .sync-pull-review-workspace { --sync-pull-gutter: 20px; }
-  .sync-sidebar { width: 238px; min-width: 238px; }
   .sync-project-header, .sync-page-header { flex-direction: column; }
   .sync-project-actions, .sync-page-actions { width: 100%; flex-wrap: wrap; }
   .sync-scope-strip { grid-template-columns: 1fr 1fr; }
@@ -4921,8 +4922,7 @@ summary:focus-visible {
   .sync-provider-home-grid,
   .sync-storage-fields,
   .sync-storage-checks { grid-template-columns: 1fr; }
-  .sync-r2-guide { padding: 12px; }
-  .sync-r2-guide ol { align-items: flex-start; flex-direction: column; gap: 7px; }
+  .sync-r2-guide { padding: 9px 12px; }
   .sync-r2-fields { padding: 12px; }
   .sync-restore-apply-footer { align-items: stretch; flex-direction: column; }
   .sync-restore-apply-footer > div { width: 100%; margin-left: 0; }
@@ -7472,67 +7472,16 @@ div.storage-link-main {
   animation: storage-link-reveal 180ms ease-out both;
 }
 
+/* A stack of sibling cards — settings editor, totals band, repository list —
+   rather than one card with ruled regions, so each panel owns its own frame. */
 .sync-storage-settings-below {
   width: 100%;
   max-width: 1180px;
   margin: 18px auto 0;
-  overflow: hidden;
-  border: 1px solid var(--border-mid);
-  border-radius: 10px;
-  background: var(--surface-card);
-  animation: storage-link-reveal 180ms ease-out both;
-}
-
-.sync-inline-storage-heading {
-  min-height: 52px;
-  padding: 9px 12px 9px 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  border-bottom: 1px solid var(--border);
-}
-
-.sync-inline-storage-heading > div {
-  min-width: 0;
-  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-}
-
-.sync-inline-storage-heading strong,
-.sync-inline-bundle-picker strong {
-  color: var(--text-0);
-  font-size: 12.5px;
-}
-
-.sync-inline-storage-heading span,
-.sync-inline-bundle-picker > div:first-child span {
-  color: var(--text-2);
-  font-size: 10.5px;
-}
-
-.sync-storage-settings-below > .sync-storage-card {
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.sync-storage-settings-below > .sync-storage-card > header {
-  background: transparent;
-}
-
-.sync-storage-settings-below > .sync-storage-card > footer {
-  display: none;
-}
-
-.sync-storage-primary-action {
-  min-height: 48px;
-  padding: 8px 12px 8px 16px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  border-top: 1px solid var(--border);
+  gap: 12px;
+  animation: storage-link-reveal 180ms ease-out both;
 }
 
 .sync-storage-settings-dedicated {
@@ -7553,6 +7502,10 @@ div.storage-link-main {
 }
 
 .sync-storage-details-panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-card);
+  overflow: hidden;
   animation: storage-link-reveal 160ms ease-out both;
 }
 
@@ -7562,79 +7515,57 @@ div.storage-link-main {
   background: transparent;
 }
 
-.sync-storage-details-panel > .sync-storage-card > header {
-  background: transparent;
-}
-
-.sync-storage-settings-below.settings-collapsed > .sync-storage-repositories {
-  border-top: 0;
-}
-
+/* Storage totals, promoted from the rows that used to hide them. */
 .sync-storage-repositories {
-  border-top: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-card);
+  overflow: hidden;
+  /* The fold buttons size themselves from the history table's row token;
+     undeclared it computes to width:auto, so the section declares it too. */
+  --sync-history-commit-actions-column: 26px;
 }
 
 .sync-storage-repositories-heading {
-  min-height: 64px;
-  padding: 12px 16px;
+  min-height: 48px;
+  padding: 8px 10px 8px 14px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.sync-storage-repositories-heading > div {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+  gap: 9px;
+  border-bottom: 1px solid var(--border);
 }
 
 .sync-storage-repositories-heading h2 {
   margin: 0;
   color: var(--text-0);
   font-size: 13px;
-  font-weight: 650;
-}
-
-.sync-storage-repositories-heading span {
-  color: var(--text-2);
-  font-size: 10.5px;
+  font-weight: 600;
 }
 
 .sync-storage-repositories-heading .btn {
   width: 32px;
   min-height: 32px;
   padding: 0;
+  margin-left: auto;
 }
 
-.sync-storage-repository-list {
-  border-top: 1px solid var(--border);
-}
+/* Items own the divider: the details fold renders inside the item, under the
+   summary row, above the next divider. */
+.sync-storage-repository-item { border-bottom: 1px solid var(--border); }
+.sync-storage-repository-item:last-child { border-bottom: 0; }
 
 .sync-storage-repository-row {
-  border-bottom: 1px solid var(--border);
-}
-
-.sync-storage-repository-row > summary {
-  min-height: 50px;
-  padding: 8px 16px;
+  min-height: 46px;
+  padding: 8px 14px;
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) 30px;
+  grid-template-columns: 26px minmax(0, 1fr) auto var(--sync-history-commit-actions-column);
   align-items: center;
   gap: 10px;
-  cursor: pointer;
-  list-style: none;
 }
 
-.sync-storage-repository-row > summary::-webkit-details-marker { display: none; }
-.sync-storage-repository-row > summary:hover { background: var(--bg-hover); }
-.sync-storage-repository-row > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.sync-storage-repository-row:last-child { border-bottom: 0; }
-
 .sync-storage-repository-icon {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   display: grid;
   place-items: center;
   border-radius: 6px;
@@ -7646,72 +7577,79 @@ div.storage-link-main {
   min-width: 0;
   overflow: hidden;
   color: var(--text-0);
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.sync-storage-repository-details-icon {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  border-radius: 6px;
-  color: var(--text-2);
-}
-
-.sync-storage-repository-row > summary:hover .sync-storage-repository-details-icon,
-.sync-storage-repository-row[open] .sync-storage-repository-details-icon {
-  color: var(--text-0);
-  background: var(--bg-hover);
-}
-
+/* The fold: labels in the chips' own micro-voice, values one step up; the
+   soft hairline is the outcome fold's divider. Left padding aligns the label
+   column with the name column (14px pad + 26px icon + 10px gap). */
 .sync-storage-repository-details {
   margin: 0;
-  padding: 10px 16px 12px 56px;
+  padding: 9px 14px 11px 50px;
   display: grid;
-  grid-template-columns: minmax(180px, 2fr) repeat(3, minmax(76px, 1fr));
-  gap: 12px;
-  border-top: 1px solid var(--border);
-  background: var(--surface-muted);
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 5px 16px;
+  align-items: baseline;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 
-.sync-storage-repository-details > div {
-  min-width: 0;
-}
-
-.sync-storage-repository-details dt {
-  margin-bottom: 3px;
-  color: var(--text-3);
-  font-size: 8.5px;
-  font-weight: 600;
-  letter-spacing: .035em;
+.sync-storage-repository-details > dt {
+  color: var(--text-2);
+  font-size: 9px;
+  letter-spacing: 1px;
   text-transform: uppercase;
 }
 
-.sync-storage-repository-details dd {
-  min-width: 0;
+.sync-storage-repository-details > dd {
   margin: 0;
-  overflow: hidden;
+  min-width: 0;
   color: var(--text-1);
-  font-size: 9.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .sync-storage-repository-details code {
-  color: inherit;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: text;
+  -webkit-user-select: all;
+  user-select: all;
 }
 
-@media (max-width: 720px) {
-  .sync-storage-repository-details {
-    padding-left: 56px;
-    grid-template-columns: 1fr 1fr;
-  }
-  .sync-storage-repository-details > div:first-child { grid-column: 1 / -1; }
+.sync-storage-repository-chips {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.sync-storage-repo-chip {
+  padding: 3px 7px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface-muted);
+}
+
+.sync-storage-repo-chip > span {
+  color: var(--text-2);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.sync-storage-repo-chip > b {
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .sync-storage-repository-state {
@@ -7721,78 +7659,16 @@ div.storage-link-main {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border-top: 1px solid var(--border);
   color: var(--text-2);
   font-size: 11px;
 }
 
 .sync-storage-repositories > .sync-callout {
-  margin: 0 16px 16px;
-}
-
-.sync-inline-bundle-picker {
-  padding: 12px 16px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  border-top: 1px solid var(--border);
-  background: var(--surface-muted);
-}
-
-.sync-inline-bundle-picker > div:first-child {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.sync-inline-bundle-refresh {
-  position: absolute;
-  top: -5px;
-  right: 0;
-  width: 29px;
-  min-height: 29px;
-  padding: 0;
-}
-
-.sync-inline-bundle-controls {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.sync-inline-bundle-controls select {
-  min-width: 0;
-  height: 35px;
-  flex: 1;
-  padding: 0 30px 0 10px;
-  border: 1px solid var(--border-mid);
-  border-radius: 7px;
-  color: var(--text-0);
-  background: var(--surface-row);
-  font: inherit;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-}
-
-.sync-inline-bundle-controls .btn {
-  min-height: 35px;
-  white-space: nowrap;
-}
-
-.sync-inline-bundle-error,
-.sync-inline-bundle-empty {
-  color: var(--text-3);
-  font-size: 10px;
-}
-
-.sync-inline-bundle-error {
-  color: var(--red);
+  margin: 14px 16px 16px;
 }
 
 .sync-storage-settings-below > .sync-callout {
-  margin: 0 16px 14px;
+  margin: 0;
 }
 
 @keyframes storage-link-reveal {
@@ -8201,8 +8077,7 @@ div.storage-link-main {
     flex-basis: 100%;
   }
 
-  .sync-storage-settings-below .sync-storage-card > header,
-  .sync-inline-bundle-controls {
+  .sync-storage-settings-below .sync-storage-card > header {
     align-items: stretch;
     flex-direction: column;
   }
@@ -8442,11 +8317,6 @@ div.storage-link-main {
   justify-content: center;
   padding: 0 10px;
 }
-.sync-setup-heading-actions { display: flex; align-items: center; gap: 8px; }
-.sync-setup-resource-toggle {
-  min-height: 28px;
-  padding: 0 9px;
-}
 .sync-setup-state {
   width: 20px;
   height: 20px;
@@ -8471,7 +8341,6 @@ div.storage-link-main {
 }
 .sync-setup-field-error svg { margin-top: 1px; flex: 0 0 auto; color: var(--red); }
 .sync-setup-system-error { margin: 8px 0 12px; }
-.sync-setup-workspace .sync-resource-install { color: var(--text-2); }
 .sync-setup-hint { color: var(--text-3); }
 .sync-setup-inline-status {
   display: inline-flex;
@@ -8480,74 +8349,6 @@ div.storage-link-main {
   color: var(--text-3);
 }
 .sync-setup-inline-status .status-loader { width: 11px; height: 11px; }
-.sync-setup-sync-title {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-/* Selection notices stack a title over detail, with the action trailing. */
-.sync-setup-selection-callout { align-items: center; }
-.sync-setup-selection-callout > svg { flex: 0 0 auto; }
-.sync-setup-selection-callout > span {
-  min-width: 0;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 1px;
-}
-.sync-setup-selection-callout .btn {
-  margin-left: auto;
-  white-space: nowrap;
-}
-.sync-setup-selection-callout code {
-  color: var(--text-2);
-  overflow-wrap: anywhere;
-}
-.sync-setup-warning-disclosure {
-  position: relative;
-  width: auto;
-  margin: 0;
-}
-.sync-setup-warning-disclosure > summary {
-  width: 24px;
-  height: 24px;
-  display: grid;
-  place-items: center;
-  list-style: none;
-  border-radius: 7px;
-  color: var(--yellow);
-  cursor: pointer;
-  transition: color 140ms ease, background 140ms ease;
-}
-.sync-setup-warning-disclosure > summary::-webkit-details-marker { display: none; }
-.sync-setup-warning-disclosure > summary:hover,
-.sync-setup-warning-disclosure > summary:focus-visible,
-.sync-setup-warning-disclosure[open] > summary {
-  color: var(--yellow);
-  background: var(--warning-soft);
-}
-.sync-setup-warning-disclosure > summary:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
-.sync-setup-warning-list {
-  position: absolute;
-  z-index: 30;
-  top: calc(100% + 5px);
-  left: 0;
-  width: min(620px, calc(100vw - 64px));
-  margin: 0;
-  padding: 9px 12px 9px 28px;
-  border: 1px solid color-mix(in srgb, var(--yellow) 28%, var(--border));
-  border-radius: 8px;
-  color: var(--text-2);
-  background: var(--surface-overlay);
-  box-shadow: var(--shadow-overlay);
-  font-size: 10px;
-  line-height: 1.45;
-}
-.sync-setup-warning-list li { overflow-wrap: anywhere; }
-.sync-setup-warning-list li + li { margin-top: 5px; }
 /* Consent, not a banner: the sentence and its checkbox are one click target,
    sitting on the same column the picker closes on. */
 .sync-setup-acknowledge {

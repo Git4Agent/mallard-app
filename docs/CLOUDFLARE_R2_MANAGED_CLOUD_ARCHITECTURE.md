@@ -115,8 +115,8 @@ Agent Sync schema 3 already has a suitable remote layout:
 `-- v1/repositories/<bundle-id>/
     |-- _tag.json
     |-- _head.json
-    |-- _manifests/<generation>-<commit-id>.json
-    |-- _commits/<generation>-<commit-id>.json
+    |-- _manifests/<revision>-<commit-id>.json
+    |-- _commits/<revision>-<commit-id>.json
     `-- _uploads/<upload-id>/files/<logical-path>
 ```
 
@@ -528,8 +528,8 @@ Agent Sync schema 3 已经有适合这个服务的远端布局：
 `-- v1/repositories/<bundle-id>/
     |-- _tag.json
     |-- _head.json
-    |-- _manifests/<generation>-<commit-id>.json
-    |-- _commits/<generation>-<commit-id>.json
+    |-- _manifests/<revision>-<commit-id>.json
+    |-- _commits/<revision>-<commit-id>.json
     `-- _uploads/<upload-id>/files/<logical-path>
 ```
 

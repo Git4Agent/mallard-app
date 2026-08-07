@@ -263,7 +263,7 @@ pub struct ConversationPlanActionRequest {
     pub source_resource_id: Option<ResourceId>,
     pub proposed_provider_thread_id: Option<String>,
     pub required_codec: String,
-    pub pinned_generation: u64,
+    pub pinned_revision: u64,
     pub pinned_commit_id: String,
     pub pinned_manifest_sha256: String,
     pub pinned_lineage_digest: Option<String>,
@@ -302,7 +302,7 @@ pub fn build_conversation_plan_action(
         source_resource_id: request.source_resource_id,
         proposed_provider_thread_id: request.proposed_provider_thread_id,
         required_codec: request.required_codec,
-        pinned_generation: request.pinned_generation,
+        pinned_revision: request.pinned_revision,
         pinned_commit_id: request.pinned_commit_id,
         pinned_manifest_sha256: request.pinned_manifest_sha256,
         pinned_lineage_digest: request.pinned_lineage_digest,
@@ -392,7 +392,7 @@ pub enum ConversationStalePin {
     LocalProject,
     ProviderProfile,
     HostIdentityRevision,
-    Generation,
+    Revision,
     Commit,
     Manifest,
     LineageDigest,
@@ -415,7 +415,7 @@ pub struct ConversationApplyContext {
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
     pub host_identity_revision: u64,
-    pub generation: u64,
+    pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
     pub lineage_digest: Option<String>,
@@ -455,8 +455,8 @@ pub fn validate_conversation_action_pins(
     if current.host_identity_revision != action.expected_host_identity_revision {
         return Err(ConversationStalePin::HostIdentityRevision);
     }
-    if current.generation != action.pinned_generation {
-        return Err(ConversationStalePin::Generation);
+    if current.revision != action.pinned_revision {
+        return Err(ConversationStalePin::Revision);
     }
     if current.commit_id != action.pinned_commit_id {
         return Err(ConversationStalePin::Commit);

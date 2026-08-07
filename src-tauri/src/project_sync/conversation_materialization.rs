@@ -150,7 +150,7 @@ pub struct ConversationRecoveryReport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConversationCloudPublication {
-    pub generation: u64,
+    pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
 }
@@ -1179,7 +1179,7 @@ fn commit_preserved_fork_binding(
                 == Some(&divergence.local_lineage_digest)
             && binding.last_observed_semantic_digest.as_ref()
                 == Some(&divergence.local_semantic_digest)
-            && binding.source_generation.is_none()
+            && binding.source_revision.is_none()
             && binding.source_manifest_sha256.is_none()
     }) && current
         .bindings
@@ -1220,7 +1220,7 @@ fn commit_preserved_fork_binding(
                 last_observed_head_message_id: None,
                 last_observed_lineage_digest: Some(divergence.local_lineage_digest.clone()),
                 last_observed_semantic_digest: Some(divergence.local_semantic_digest.clone()),
-                source_generation: None,
+                source_revision: None,
                 source_manifest_sha256: None,
                 revision: 0,
                 created_at: operation.updated_at,
@@ -2390,7 +2390,7 @@ fn record_publication_anchor(
         .cloud
         .as_mut()
         .ok_or_else(|| "conversation operation lacks a cloud anchor".to_string())?;
-    anchor.generation = publication.generation;
+    anchor.revision = publication.revision;
     anchor.commit_id = publication.commit_id.clone();
     anchor.manifest_sha256 = publication.manifest_sha256.clone();
     Ok(())
@@ -2429,7 +2429,7 @@ fn commit_binding(
             binding.last_observed_file_sha256 = transcript_target_digest(operation);
             binding.last_observed_lineage_digest = operation.lineage_digest.clone();
             binding.last_observed_semantic_digest = operation.semantic_digest.clone();
-            binding.source_generation = Some(anchor.generation);
+            binding.source_revision = Some(anchor.revision);
             binding.source_manifest_sha256 = Some(anchor.manifest_sha256.clone());
             binding.revision = binding.revision.saturating_add(1);
             binding.updated_at = operation.updated_at;
@@ -2448,7 +2448,7 @@ fn commit_binding(
                 last_observed_head_message_id: None,
                 last_observed_lineage_digest: operation.lineage_digest.clone(),
                 last_observed_semantic_digest: operation.semantic_digest.clone(),
-                source_generation: Some(anchor.generation),
+                source_revision: Some(anchor.revision),
                 source_manifest_sha256: Some(anchor.manifest_sha256.clone()),
                 revision: 0,
                 created_at: operation.updated_at,
@@ -2478,7 +2478,7 @@ fn binding_commit_is_complete(
             && binding.last_observed_file_sha256 == transcript_target_digest(operation)
             && binding.last_observed_lineage_digest == operation.lineage_digest
             && binding.last_observed_semantic_digest == operation.semantic_digest
-            && binding.source_generation == operation.cloud.as_ref().map(|anchor| anchor.generation)
+            && binding.source_revision == operation.cloud.as_ref().map(|anchor| anchor.revision)
             && binding.source_manifest_sha256.as_deref()
                 == operation
                     .cloud
@@ -2552,7 +2552,7 @@ fn commit_receipt(
                 || record.local_project_id != operation.local_project_id
                 || record.storage_id != anchor.storage_id
                 || record.bundle_id != anchor.bundle_id
-                || record.generation != anchor.generation
+                || record.revision != anchor.revision
                 || record.commit_id != anchor.commit_id
                 || record.manifest_sha256 != anchor.manifest_sha256
             {
@@ -2571,7 +2571,7 @@ fn commit_receipt(
                 local_project_id: operation.local_project_id.clone(),
                 storage_id: anchor.storage_id.clone(),
                 bundle_id: anchor.bundle_id.clone(),
-                generation: anchor.generation,
+                revision: anchor.revision,
                 commit_id: anchor.commit_id.clone(),
                 manifest_sha256: anchor.manifest_sha256.clone(),
                 binding_revision: operation.expected_project_binding_revision,
@@ -2600,7 +2600,7 @@ fn conversation_receipt(
         lineage_digest: operation.lineage_digest.clone(),
         semantic_digest: operation.semantic_digest.clone(),
         local_file_sha256_after: transcript_target_digest(operation),
-        cloud_generation: anchor.generation,
+        cloud_revision: anchor.revision,
         cloud_commit_id: anchor.commit_id.clone(),
         cloud_manifest_sha256: anchor.manifest_sha256.clone(),
         published_origin_host_token: None,

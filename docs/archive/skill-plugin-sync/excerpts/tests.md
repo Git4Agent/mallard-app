@@ -718,7 +718,7 @@ recorded in the frontend/persistence diffs rather than here.
 
         let result =
             push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
-        assert_eq!(result.generation, Some(1));
+        assert_eq!(result.revision, Some(1));
         let remote = list_remote_bundle_snapshots_with_repository(&repo, &storage_id).unwrap();
         assert_eq!(remote.len(), 1);
         assert_eq!(remote[0].bundle_id, project.bundle_id);
@@ -726,10 +726,10 @@ recorded in the frontend/persistence diffs rather than here.
 
 ```
 
-## commands.rs tests: dependency plan generation/apply over S3 (pre-removal lines 14034–14183)
+## commands.rs tests: dependency plan revision/apply over S3 (pre-removal lines 14034–14183)
 ```rust
     #[tokio::test]
-    async fn dependency_plan_generation_uses_a_valid_id_and_supports_retry() {
+    async fn dependency_plan_revision_uses_a_valid_id_and_supports_retry() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("dependency-store").unwrap();

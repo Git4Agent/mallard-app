@@ -40,7 +40,7 @@ The decision table, evaluated top to bottom per thread:
 | 11 | local len == cloud len, digests differ | `Diverged` |
 
 Refresh output is advisory. Push and Pull keep their existing apply-time
-verification: pinned generation, commit ID, manifest SHA, and
+verification: pinned revision, commit ID, manifest SHA, and
 conditional-write CAS. Anything that moves between refresh and apply fails
 closed at apply.
 

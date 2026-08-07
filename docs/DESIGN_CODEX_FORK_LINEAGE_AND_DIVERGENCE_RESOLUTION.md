@@ -273,7 +273,7 @@ respectively.
 
 - The action executed is the action serialized in the reviewed plan.
 - Fork result IDs and destination provider IDs are reserved at plan time.
-- Plans pin cloud generation, commit, manifest digest, local content digest,
+- Plans pin cloud revision, commit, manifest digest, local content digest,
   lineage/semantic digests, profile revision, project binding revision, host
   identity revision, bindings-document revision, binding revision, target
   expectations, codec version, and expiry.
@@ -1121,7 +1121,7 @@ Using the same ancestry:
 5. assert the original local transcript is unchanged and bound to the result;
 6. assert the result records `forked_from == t111` locally;
 7. assert cloud `t111` is materialized under a different provider ID;
-8. assert Pull did not change cloud generation;
+8. assert Pull did not change cloud revision;
 9. simulate a crash after each journal phase and recover twice;
 10. Push the local-only result;
 11. assert its portable `forked_from == t111`; and
@@ -1129,7 +1129,7 @@ Using the same ancestry:
 
 ### Concurrent Push forks
 
-- Plan divergence forks on two hosts from the same source generation.
+- Plan divergence forks on two hosts from the same source revision.
 - Apply A.
 - Apply/rebase B.
 - Assert two distinct children, both with the same immediate source, with no

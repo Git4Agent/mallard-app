@@ -62,8 +62,8 @@ export type StorageNotice = {
   storageId: string;
 } & (
   | { kind: "requires_pull"; copy: PullRequiredCopy }
-  | { kind: "remote_missing"; baseGeneration: number | null }
-  | { kind: "remote_replaced"; baseGeneration: number | null }
+  | { kind: "remote_missing"; baseRevision: number | null }
+  | { kind: "remote_replaced"; baseRevision: number | null }
   | { kind: "action_failed"; action: "push" | "pull"; message: string }
   /** A finished Push or Pull; the flow has already closed behind it. */
   | { kind: "outcome"; outcome: SyncOutcome }
@@ -120,36 +120,85 @@ function storageSubtitleIsPath(storage: StorageConfig): boolean {
   return storage.kind === "local";
 }
 
+function absoluteTime(epoch: number): string {
+  // Same second/millisecond tolerance as formatRelativeTime, since the fold's
+  // absolute stamp expands the very value the chip shows relatively.
+  const milliseconds = epoch > 10_000_000_000 ? epoch : epoch * 1000;
+  return new Date(milliseconds).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/** The fold: everything the storage listing knows about a repository beyond
+ * its chips. Absent facts don't render — no dash placeholders. */
+export function StorageRepositoryDetails({ bundle, id }: { bundle: RemoteBundleSummary; id?: string }) {
+  return (
+    <dl className="sync-storage-repository-details" id={id}>
+      <dt>Repository ID</dt>
+      <dd><code>{bundle.bundle_id}</code></dd>
+      {typeof bundle.updated_at === "number" && (
+        <>
+          <dt>Updated</dt>
+          <dd>{absoluteTime(bundle.updated_at)}</dd>
+        </>
+      )}
+      {typeof bundle.resource_count === "number" && (
+        <>
+          <dt>Resources</dt>
+          <dd>{bundle.resource_count}</dd>
+        </>
+      )}
+      {!!bundle.providers?.length && (
+        <>
+          <dt>Agents</dt>
+          <dd>{bundle.providers.map((provider) => providerLabel(provider)).join(" · ")}</dd>
+        </>
+      )}
+      {bundle.repository_fingerprint && (
+        <>
+          <dt>Fingerprint</dt>
+          <dd><code>{bundle.repository_fingerprint}</code></dd>
+        </>
+      )}
+    </dl>
+  );
+}
+
 export function StorageRepositoryRow({ bundle }: { bundle: RemoteBundleSummary }) {
   const name = bundle.display_name || "Unnamed repository";
+  const [open, setOpen] = useState(false);
+  const detailsId = `repo-details-${bundle.bundle_id}`;
   return (
-    <details className="sync-storage-repository-row" name="storage-repository-details">
-      <summary aria-label={`Show details for ${name}`}>
-        <span className="sync-storage-repository-icon"><Icon name="folder" size={16} /></span>
-        <strong className="sync-storage-repository-name">{name}</strong>
-        <span className="sync-storage-repository-details-icon" title="Repository details">
-          <Icon name="info" size={15} />
+    <div className="sync-storage-repository-item">
+      <div className="sync-storage-repository-row">
+        {/* A fingerprint only exists when the bundle came from a git remote,
+            so it is also the signal for the git flavour of the folder icon. */}
+        <span className="sync-storage-repository-icon">
+          <Icon name={bundle.repository_fingerprint ? "git-folder" : "folder"} size={14} />
         </span>
-      </summary>
-      <dl className="sync-storage-repository-details">
-        <div>
-          <dt>Repository ID</dt>
-          <dd><code>{bundle.bundle_id}</code></dd>
-        </div>
-        <div>
-          <dt>Generation</dt>
-          <dd>{bundle.generation ?? "—"}</dd>
-        </div>
-        <div>
-          <dt>Resources</dt>
-          <dd>{bundle.resource_count ?? 0}</dd>
-        </div>
-        <div>
-          <dt>Updated</dt>
-          <dd>{formatRelativeTime(bundle.updated_at)}</dd>
-        </div>
-      </dl>
-    </details>
+        <strong className="sync-storage-repository-name">{name}</strong>
+        <span className="sync-storage-repository-chips">
+          <span className="sync-storage-repo-chip"><span>Revision</span><b>{bundle.revision ?? "—"}</b></span>
+          <span className="sync-storage-repo-chip"><span>Updated</span><b>{formatRelativeTime(bundle.updated_at)}</b></span>
+        </span>
+        <button
+          type="button"
+          className="sync-history-commit-toggle"
+          aria-expanded={open}
+          aria-controls={detailsId}
+          aria-label={`${open ? "Hide" : "Show"} details for ${name}`}
+          title={`${open ? "Hide" : "Show"} details for ${name}`}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <Icon name={open ? "chevron-up" : "chevron-down"} size={12} />
+        </button>
+      </div>
+      {open && <StorageRepositoryDetails bundle={bundle} id={detailsId} />}
+    </div>
   );
 }
 
@@ -393,7 +442,6 @@ export default function ProjectLinksWorkspace({
   const orderedRemoteBundles = [...(bundlePage?.bundles ?? [])].sort((left, right) => {
     return (right.updated_at ?? 0) - (left.updated_at ?? 0);
   });
-
   const run = async (key: string, action: () => Promise<void> | void) => {
     setRunningAction(key);
     try {
@@ -671,7 +719,7 @@ export default function ProjectLinksWorkspace({
                   primaryAction={(
                     <button
                       type="button"
-                      className="btn"
+                      className="btn btn-primary"
                       disabled={busy || !storageReady || (!creatingStorage && JSON.stringify(storageDraft) === JSON.stringify(editedStorageConfig))}
                       onClick={() => void run(`storage:${editedStorageConfig.id}`, async () => {
                         const saved = await onSaveStorage(storageDraft);
@@ -690,10 +738,8 @@ export default function ProjectLinksWorkspace({
             {!creatingStorage && (
               <section className="sync-storage-repositories" aria-labelledby="storage-repositories-heading">
                 <div className="sync-storage-repositories-heading">
-                  <div>
-                    <h2 id="storage-repositories-heading">Repositories</h2>
-                    <span>{orderedRemoteBundles.length} repo{orderedRemoteBundles.length === 1 ? "" : "s"} in this storage</span>
-                  </div>
+                  <Icon name="git-folder" size={15} />
+                  <h2 id="storage-repositories-heading">Repositories</h2>
                   <button
                     type="button"
                     className="btn btn-ghost"
@@ -1312,7 +1358,7 @@ export default function ProjectLinksWorkspace({
                                     if (pullReviewOpen) {
                                       // The card button IS the review's primary: it applies
                                       // the current selection — an empty one included, which
-                                      // is how a generation-only change is acknowledged.
+                                      // is how a revision-only change is acknowledged.
                                       inlineStorageReview?.onContinue?.();
                                       return;
                                     }
@@ -1511,7 +1557,7 @@ export default function ProjectLinksWorkspace({
                               <Icon name="alert-triangle" size={15} />
                               <span>
                                 <strong>Storage history changed</strong>
-                                {`${storage.name || "This storage"} holds a different sync history than this project last synced${activeNotice.baseGeneration != null ? ` (generation ${activeNotice.baseGeneration})` : ""}. Review & adopt pulls the new history; unlinking doesn't delete files.`}
+                                {`${storage.name || "This storage"} holds a different sync history than this project last synced${activeNotice.baseRevision != null ? ` (revision ${activeNotice.baseRevision})` : ""}. Review & adopt pulls the new history; unlinking doesn't delete files.`}
                               </span>
                               <div className="sync-sync-review-recovery-actions">
                                 <button

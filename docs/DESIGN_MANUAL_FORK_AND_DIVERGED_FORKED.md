@@ -196,7 +196,7 @@ than `Diverged` never read the stamp.**
   to know that no cloud restore, index payload, or baseline step follows
   fork adoption.
 - As implemented, the journal's five cloud-commit fields
-  (`storage_id`/`bundle_id`/`generation`/`commit_id`/`manifest_sha256`)
+  (`storage_id`/`bundle_id`/`revision`/`commit_id`/`manifest_sha256`)
   grouped into `ConversationSyncOperation.cloud:
   Option<ConversationCloudAnchor>` — present on every push and pull
   operation, `None` only for `Manual` origin, which must not fabricate a

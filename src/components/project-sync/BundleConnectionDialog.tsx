@@ -95,7 +95,7 @@ export default function BundleConnectionDialog({
                     <span>{match.bundle_id}</span>
                   </span>
                   <span className="sync-bundle-choice-meta">
-                    <strong>gen {match.generation ?? "—"}</strong>
+                    <strong>rev {match.revision ?? "—"}</strong>
                     <span>{match.resource_count ?? match.resources?.length ?? 0} resources</span>
                     <small>{formatRelativeTime(match.updated_at)}</small>
                   </span>

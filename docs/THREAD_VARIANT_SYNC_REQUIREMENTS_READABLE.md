@@ -126,7 +126,7 @@ delete/modify race keeps the modified version as a conflict.
 
 - Keep cloud bundles immutable and SHA-256 verified.
 - Use compare-and-swap for cloud updates and primary changes.
-- Recheck cloud generation, digests, local target, provider ID, binding
+- Recheck cloud revision, digests, local target, provider ID, binding
   revision, and plan expiry before apply.
 - Back up content before an explicitly approved replacement.
 - Reject symlinks, special files, stale reviews, and ID collisions.

@@ -346,15 +346,15 @@ test("two steps render two plain tabs — never a Review tab", () => {
 test("destination gates never render inside the push review", () => {
   const resource = memoryResource("review");
   const destinations = [
-    { state: "remote_history_missing", base_generation: 3 },
+    { state: "remote_history_missing", base_revision: 3 },
     {
       state: "remote_history_replaced",
-      base_generation: 1,
-      remote_generation: 2,
+      base_revision: 1,
+      remote_revision: 2,
       base_manifest_sha256: "a".repeat(64),
       remote_manifest_sha256: "b".repeat(64),
     },
-    { state: "requires_pull", reason: "remote_advanced", remote_generation: 4, base_generation: 3 },
+    { state: "requires_pull", reason: "remote_advanced", remote_revision: 4, base_revision: 3 },
   ];
   for (const destinationStatus of destinations) {
     const html = renderToStaticMarkup(
@@ -399,7 +399,7 @@ test("an unreviewed storage and a changed binding each get their own plain sente
   const unreviewed = pullRequiredCopy("remote_without_base", "R2 storage 1", 6, undefined);
   assert.equal(unreviewed.title, "Storage has unreviewed data");
   assert.equal(unreviewed.body, "R2 storage 1 holds data never reviewed on this computer.");
-  assert.equal(unreviewed.detail, "Generation 6 · never reviewed");
+  assert.equal(unreviewed.detail, "Revision 6 · never reviewed");
 
   const rebound = pullRequiredCopy("binding_changed", null, 6, 5);
   assert.equal(rebound.title, "Project changed since last sync");

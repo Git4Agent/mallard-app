@@ -328,7 +328,7 @@ impl DependencyAction {
     }
 }
 
-/// Immutable, generation-pinned dependency approval surface. It is separate
+/// Immutable, revision-pinned dependency approval surface. It is separate
 /// from a restore plan because plugin installation can be retried without
 /// rebuilding or reapplying project files.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -340,7 +340,7 @@ pub struct DependencyPlan {
     pub host_id: HostId,
     pub replica_id: ReplicaId,
     pub expected_host_identity_revision: u64,
-    pub generation: u64,
+    pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
     pub binding_revision: u64,
@@ -418,7 +418,7 @@ pub struct DependencyApplicationRecord {
     pub bundle_id: BundleId,
     pub host_id: HostId,
     pub replica_id: ReplicaId,
-    pub generation: u64,
+    pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
     pub binding_revision: u64,

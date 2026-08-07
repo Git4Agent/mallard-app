@@ -1,15 +1,16 @@
 use crate::project_sync::bundle_engine::{
-    BundleEngine, BundleObjectStore, CapturedBundleFile, HeadToken, LocalBundleObjectStore,
-    PublishBundleRequest, PublishExpectation, PublishedBundle,
+    BundleBytes, BundleEngine, BundleObjectStore, CapturedBundleFile, HeadToken,
+    LocalBundleObjectStore, PublishBundleRequest, PublishExpectation,
 };
 use crate::project_sync::conversation_codec::{
     analyze_codex_transcript, CodecLineage, CODEX_LINEAGE_CODEC_KEY,
 };
 use crate::project_sync::domain::{
     conversation_resource_id, conversation_transcript_path, ApplyPolicy, BundleId, BundleIdentity,
-    BundleKind, BundleRecipe, CapturedWith, ConversationFileRef, ConversationFileRole,
-    ConversationLineageStatus, ConversationThread, PortableOrigin, Provenance, Provider,
-    RecipeEntry, ReplicaId, ResourceDescriptor, ResourceKind, ResourceScope, StorageId, ThreadId,
+    BundleKind, BundleRecipe, BundleSnapshot, CapturedWith, ConversationFileRef,
+    ConversationFileRole, ConversationLineageStatus, ConversationThread, PortableOrigin,
+    Provenance, Provider, RecipeEntry, ReplicaId, ResourceDescriptor, ResourceKind, ResourceScope,
+    StorageId, ThreadId,
 };
 use crate::project_sync::persistence::LocalStateRepository;
 use serde_json::{json, Value};
@@ -24,6 +25,35 @@ pub struct VariantWorld {
     pub repo_a: LocalStateRepository,
     pub repo_b: LocalStateRepository,
     pub repo_fresh: LocalStateRepository,
+}
+
+#[derive(Clone, Debug)]
+pub struct PublishedFixture {
+    pub published: bool,
+    pub snapshot: BundleSnapshot,
+    pub head_token: HeadToken,
+}
+
+pub fn publish_with_head<S: BundleObjectStore>(
+    engine: &BundleEngine<S>,
+    request: PublishBundleRequest,
+) -> Result<PublishedFixture, String> {
+    let outcome = engine.publish(request)?;
+    let (_, head_token) = engine
+        .read_head(&outcome.snapshot.head.bundle_id)?
+        .ok_or_else(|| "published bundle has no authoritative head".to_string())?;
+    if head_token.revision != outcome.snapshot.head.revision
+        || head_token.commit_id != outcome.snapshot.head.commit_id
+        || head_token.manifest_sha256 != outcome.snapshot.head.manifest_sha256
+        || head_token.manifest_size != outcome.snapshot.head.manifest_size
+    {
+        return Err("published snapshot does not match authoritative head".to_string());
+    }
+    Ok(PublishedFixture {
+        published: outcome.published,
+        snapshot: outcome.snapshot,
+        head_token,
+    })
 }
 
 impl VariantWorld {
@@ -82,7 +112,7 @@ impl VariantWorld {
         threads: &[ThreadSpec],
         publisher: PortableOrigin,
         updated_at: u64,
-    ) -> PublishedBundle {
+    ) -> PublishedFixture {
         let engine = self.engine();
         let current = engine.read_head(&self.bundle_id).unwrap();
         let previous = current
@@ -98,7 +128,7 @@ impl VariantWorld {
                 .map(|(_, token)| PublishExpectation::Match(token))
                 .unwrap_or(PublishExpectation::Absent),
         );
-        engine.publish(request).unwrap()
+        publish_with_head(&engine, request).unwrap()
     }
 }
 
@@ -364,13 +394,11 @@ pub fn sha256(bytes: &[u8]) -> String {
 }
 
 pub fn assert_manifest_consistent(world: &VariantWorld) {
-    let fetched = world.engine().fetch(&world.bundle_id).unwrap();
-    fetched.snapshot.validate().unwrap();
-    for (path, entry) in &fetched.snapshot.manifest.files {
-        assert_eq!(sha256(&fetched.files[path]), entry.sha256);
-    }
-    let live = fetched.snapshot.manifest.resources.len();
-    assert_eq!(live, fetched.snapshot.manifest.recipe.entries.len());
+    let engine = world.engine();
+    let snapshot = engine.inspect(&world.bundle_id).unwrap();
+    assert_snapshot_consistent(&engine, &snapshot);
+    let live = snapshot.manifest.resources.len();
+    assert_eq!(live, snapshot.manifest.recipe.entries.len());
     for repository in [&world.repo_a, &world.repo_b, &world.repo_fresh] {
         repository.load_config().unwrap();
         repository.load_bindings().unwrap();
@@ -394,5 +422,18 @@ pub fn assert_manifest_consistent(world: &VariantWorld) {
             "storage retained temporary path '{}'",
             entry.path().display()
         );
+    }
+}
+
+pub fn assert_snapshot_consistent<S: BundleObjectStore>(
+    engine: &BundleEngine<S>,
+    snapshot: &BundleSnapshot,
+) {
+    snapshot.validate().unwrap();
+    let mut bytes = engine.byte_source(&snapshot, None, None);
+    for (path, entry) in &snapshot.manifest.files {
+        let body = bytes.body(path).unwrap();
+        assert_eq!(body.size(), entry.size);
+        assert_eq!(body.sha256(), entry.sha256);
     }
 }

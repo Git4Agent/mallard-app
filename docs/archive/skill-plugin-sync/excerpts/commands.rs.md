@@ -53,9 +53,9 @@ pub struct CapabilityStatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u64>,
+    pub revision: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_generation: Option<u64>,
+    pub base_revision: Option<u64>,
     pub compared_at: u64,
     pub items: Vec<CapabilityStatusItem>,
     #[serde(default)]
@@ -447,10 +447,10 @@ fn build_capability_status(
     let mut base_manifest = None;
     let mut effective_recipe = project.recipe.clone();
     let mut storage_comparison_available = false;
-    let base_generation = storage_id
+    let base_revision = storage_id
         .as_ref()
         .and_then(|storage_id| project.recipe_bases.get(storage_id))
-        .map(|base| base.generation);
+        .map(|base| base.revision);
 
     if let Some(context) = storage {
         let storage_id = context.storage_id;
@@ -480,14 +480,14 @@ fn build_capability_status(
                                 .to_string(),
                         );
                     } else if current.as_ref().is_some_and(|snapshot| {
-                        snapshot.head.generation == base.generation
+                        snapshot.head.revision == base.revision
                             && snapshot.head.manifest_sha256 == base.manifest_sha256
                     }) {
                         base_manifest = current.as_ref().map(|snapshot| snapshot.manifest.clone());
                     } else if let Some(commit_id) = base.commit_id.as_deref() {
                         match engine.inspect_manifest_version(
                             &project.bundle_id,
-                            base.generation,
+                            base.revision,
                             commit_id,
                             &base.manifest_sha256,
                         ) {
@@ -666,8 +666,8 @@ fn build_capability_status(
         profiles,
         storage_id,
         storage_name,
-        generation: current.as_ref().map(|snapshot| snapshot.head.generation),
-        base_generation,
+        revision: current.as_ref().map(|snapshot| snapshot.head.revision),
+        base_revision,
         compared_at: now_secs(),
         items,
         warnings,
@@ -761,7 +761,7 @@ fn plan_dependencies_with_repository(
         host_id: binding.host_id.clone(),
         replica_id: binding.replica_id,
         expected_host_identity_revision: restore_plan.expected_host_identity_revision,
-        generation: restore_plan.generation,
+        revision: restore_plan.revision,
         commit_id: restore_plan.commit_id,
         manifest_sha256: restore_plan.manifest_sha256,
         binding_revision: binding.revision,
@@ -827,7 +827,7 @@ fn prepare_dependency_application(
             || record.bundle_id != plan.bundle_id
             || record.host_id != plan.host_id
             || record.replica_id != plan.replica_id
-            || record.generation != plan.generation
+            || record.revision != plan.revision
             || record.commit_id != plan.commit_id
             || record.manifest_sha256 != plan.manifest_sha256
             || record.binding_revision != plan.binding_revision
@@ -933,7 +933,7 @@ fn finalize_dependency_application(
         bundle_id: plan.bundle_id.clone(),
         host_id: binding.host_id,
         replica_id: binding.replica_id,
-        generation: plan.generation,
+        revision: plan.revision,
         commit_id: plan.commit_id.clone(),
         manifest_sha256: plan.manifest_sha256.clone(),
         binding_revision: plan.binding_revision,
@@ -951,7 +951,7 @@ fn finalize_dependency_application(
                 || current.bundle_id != record.bundle_id
                 || current.host_id != record.host_id
                 || current.replica_id != record.replica_id
-                || current.generation != record.generation
+                || current.revision != record.revision
                 || current.commit_id != record.commit_id
                 || current.manifest_sha256 != record.manifest_sha256
                 || current.binding_revision != record.binding_revision
@@ -1035,7 +1035,7 @@ fn validate_dependency_plan_pin(
         || plan.bundle_id != binding.bundle_id
         || plan.host_id != binding.host_id
         || plan.replica_id != binding.replica_id
-        || plan.generation != snapshot.head.generation
+        || plan.revision != snapshot.head.revision
         || plan.commit_id != snapshot.head.commit_id
         || plan.manifest_sha256 != snapshot.head.manifest_sha256
         || plan.binding_revision != binding.revision
@@ -1063,7 +1063,7 @@ async fn execute_dependency_action(
                     record.host_id == binding.host_id
                         && record.replica_id == binding.replica_id
                         && record.bundle_id == plan.bundle_id
-                        && record.generation == plan.generation
+                        && record.revision == plan.revision
                         && record.manifest_sha256 == plan.manifest_sha256
                         && record.binding_revision == binding.revision
                         && record.receipts.iter().any(|receipt| {
@@ -1442,7 +1442,7 @@ fn capture_request_with_global_inventory(
             application.host_id == binding.host_id
                 && application.replica_id == binding.replica_id
                 && application.bundle_id == *bundle_id
-                && application.generation == head.generation
+                && application.revision == head.revision
                 && application.manifest_sha256 == head.manifest_sha256
                 && application.binding_revision == binding.revision
         })

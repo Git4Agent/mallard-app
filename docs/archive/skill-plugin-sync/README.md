@@ -25,7 +25,7 @@ and project files:
 
 The pipeline was: capture → bundle descriptors (`ResourceKind::StandaloneSkill`
 / `Plugin`, `ResourceScope::Dependency`) → restore-plan skill actions +
-a separate immutable **DependencyPlan** (generation-pinned approval surface
+a separate immutable **DependencyPlan** (revision-pinned approval surface
 with its own persistence in `~/.mallard/dependency_plans/` and receipts in
 `dependency_applications.json`) → native CLI installers → readiness
 verification. The UI surfaced it as Skills/Plugins tabs in the project

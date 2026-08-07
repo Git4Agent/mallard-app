@@ -1,6 +1,6 @@
 # Mallard Current Metadata Layout
 
-**Code snapshot:** July 29, 2026<br>
+**Code snapshot:** August 6, 2026<br>
 **Application version:** 0.1.2<br>
 **Scope:** the active implementation in this repository, including the
 pull-first Codex divergence work currently in the working tree.
@@ -39,7 +39,7 @@ Machine-private control plane
   local IDs, absolute paths, credentials, plans, journals, receipts,
   backups, caches, logs
 
-          maps by bundle_id and reviewed generation/commit/hash
+      maps by bundle_id and reviewed revision/commit/manifest-size/hash
                               |
                               v
 
@@ -171,8 +171,10 @@ The records divide responsibility as follows:
   selected provider profile IDs.
 - `ProviderProfile` owns the selected `CODEX_HOME` or
   `CLAUDE_CONFIG_DIR` spelling and its canonical path.
-- A `RecipeBase` pins the last reviewed remote generation, commit ID,
-  manifest SHA-256, recipe revision, binding revision, and Push/Pull times.
+- A `RecipeBase` pins the last reviewed remote revision, commit ID, required
+  nonzero serialized manifest size, manifest SHA-256, recipe revision, binding
+  revision, and Push/Pull times. Historical manifest reads use the stored size
+  and hash as exact transfer expectations.
 
 ### 3.3 Conversation identity
 
@@ -187,7 +189,7 @@ One provider thread ID may have only one owner for a given host/profile.
 
 - whether the provider copy is `pending`, `resumable`, or `stored_only`;
 - the last observed provider-file, head-message, lineage, and semantic hashes;
-- the source cloud generation and manifest hash; and
+- the source cloud revision and manifest hash; and
 - `forked_from` for a locally preserved divergence branch.
 
 The portable manifest has its own conversation entry keyed by Mallard
@@ -202,7 +204,7 @@ error.
 
 | Directory | Document | What it pins |
 | --- | --- | --- |
-| `restore_plans/` | `RestorePlan` | Host/replica, storage/bundle, generation, commit, manifest hash, binding revision, expiry, absolute targets, expected target state, selected file/conversation actions |
+| `restore_plans/` | `RestorePlan` | Host/replica, storage/bundle, revision, commit, manifest hash, binding revision, expiry, absolute targets, expected target state, selected file/conversation actions |
 | `dependency_plans/` | `DependencyPlan` | The same remote and binding coordinates plus reviewed install/check actions, warnings, and blockers |
 | `conversation_push_plans/` | `ConversationPushPlan` | Host/replica/project/profile revisions, current or absent head coordinates, conversation relations/actions, target expectations, lineage/semantic pins, expiry |
 
@@ -401,9 +403,9 @@ The local-folder and S3/R2 adapters expose the same object keys:
                 |-- _objects/
                 |   `-- <payload-sha256>
                 |-- _manifests/
-                |   `-- <generation>-<commit-id>.json
+                |   `-- <revision>-<commit-id>.json
                 |-- _commits/
-                |   `-- <generation>-<commit-id>.json
+                |   `-- <revision>-<commit-id>.json
                 `-- _uploads/                 # reserved; not used by today's publisher
 ```
 
@@ -431,16 +433,23 @@ schema-1 fields are:
 schema_version
 bundle_id
 kind                         # currently only "project"
-generation
+revision
 commit_id
 manifest_key                 # relative _manifests/... key
 manifest_sha256
+manifest_size                # exact serialized manifest byte length
 updated_at
 ```
 
-Readers first load the head, fetch the referenced immutable manifest, verify
-the manifest bytes against `manifest_sha256`, and then validate that the
-bundle, kind, generation, and commit identities agree.
+Readers first load the bounded head metadata, then stage the referenced
+immutable manifest using both `manifest_size` and `manifest_sha256`. Parsing
+starts only after exact-size and digest verification. The parsed bundle, kind,
+revision, and commit identities must then agree with the head.
+
+`manifest_size` is a required nonzero schema-1 field. It has no default and is
+not inferred from S3 `Content-Length`, an extra `HEAD` request, or received
+bytes. Existing state without the field is unsupported and must be cleared;
+there is no migration or compatibility reader.
 
 ### 5.3 Discovery tag
 
@@ -451,7 +460,7 @@ schema_version
 bundle_id
 display_name
 kind
-generation
+revision
 updated_at
 resources
 files
@@ -467,7 +476,7 @@ Every manifest is a complete live snapshot:
 
 ```text
 schema_version
-generation
+revision
 commit_id
 updated_at
 bundle
@@ -577,14 +586,36 @@ used as resource identity or object keys.
 The manifest, not the object path alone, supplies ownership, size, logical
 path, source mtime, and safe mode.
 
+Payload reads use the manifest entry's exact `size` and `sha256`. Both storage
+adapters copy each object into a private temporary file while hashing it and
+return a file-backed verified-body handle only after EOF matches both
+coordinates. The local-folder adapter stages a private snapshot rather than
+returning a mutable storage path. The S3/R2 adapter consumes one body chunk at
+a time, rejects a declared-length mismatch before polling when possible, and
+rejects an overrun before writing the excess chunk.
+
+S3/R2 body waits use a 120-second inactivity timeout per next-chunk wait, not
+a 120-second whole-transfer deadline. Actively progressing large transfers
+may therefore run longer than 120 seconds. Bulk staging retains bounded
+concurrency and input ordering.
+
+The storage contract exposes bounded `get_metadata`, exact
+`stage_verified -> StageOutcome`, and ordered `stage_many_verified`
+operations. `StageOutcome` distinguishes missing, mismatched, and verified
+objects. The previous byte-returning store reads, eager whole-bundle fetch
+types, and eager planning/apply wrappers do not exist.
+
+There is no generic 512 MiB payload-object ceiling. Resource-specific capture
+limits and aggregate capture budgets still apply where listed below.
+
 ### 5.8 Immutable commit record
 
-Each `_commits/<generation>-<commit-id>.json` stores:
+Each `_commits/<revision>-<commit-id>.json` stores:
 
 ```text
 schema_version
 bundle_id
-generation
+revision
 commit_id
 manifest_key
 manifest_sha256
@@ -607,9 +638,10 @@ One publication performs:
 2. Verify every retained file still has its reviewed immutable object.
 3. Detect a semantic no-op and write nothing if the snapshot is unchanged.
 4. Write new content-addressed payload objects immutably.
-5. Write the immutable manifest.
+5. Serialize the immutable manifest once, record its exact byte length and
+   SHA-256, and write it immutably.
 6. Write the immutable commit record.
-7. Compare-and-swap `_head.json`.
+7. Compare-and-swap `_head.json` with the same manifest size and hash.
 8. Best-effort compare-and-swap `_tag.json`.
 9. Commit the corresponding local bindings and reviewed base.
 
@@ -619,7 +651,7 @@ SHA-256 of the current bytes. S3/R2 uses service ETags with
 responses are resolved by reading the object back.
 
 If publication fails before head CAS, immutable objects, manifests, or commits
-may remain unreachable. Readers cannot see them as a generation because the
+may remain unreachable. Readers cannot see them as a revision because the
 head did not move. The current object-store interface has no delete operation,
 so there is no active remote garbage collector for those orphans.
 
@@ -672,13 +704,16 @@ payload is safe. Shared storage should be treated as private user data.
 - logical path: at most 1,024 bytes, relative and normalized.
 - resources: at most 20,000 per manifest.
 - files, directories, and tombstones: at most 100,000 each.
-- one ordinary portable object: at most 512 MiB.
 - one conversation source file: at most 100 MiB.
 - one ordinary captured provider file: at most 16 MiB.
 - one project-content file: at most 16 MiB.
 - aggregate selected capture/project content: at most 512 MiB.
 - conversation bindings: at most 100,000.
 - active conversation journal operations: at most 10,000.
+
+There is no generic portable-object size cap. Manifest-declared sizes are
+exact integrity coordinates, while the remaining per-resource and aggregate
+limits are capture/product policies.
 
 ## 9. Corrections to older repository documentation
 
@@ -710,9 +745,10 @@ are authoritative.
   execution, and journal cleanup.
 - [`bundle_engine.rs`](../src-tauri/src/project_sync/bundle_engine.rs):
   portable keys, marker/head/tag/manifest/commit formats, immutable objects,
-  CAS, fetch, restore plans, and apply backups.
+  CAS, lazy verified-body access, restore plans, streamed apply, and backups.
 - [`s3_store.rs`](../src-tauri/src/project_sync/s3_store.rs): S3/R2 ETag,
-  conditional-write, timeout, and pagination behavior.
+  conditional-write, chunk-to-tempfile staging, inactivity timeout, and
+  pagination behavior.
 - [`chat_history.rs`](../src-tauri/src/project_sync/chat_history.rs):
   local-only history cache and Codex index/session scanning.
 - [`activity_log.rs`](../src-tauri/src/activity_log.rs): local JSONL event

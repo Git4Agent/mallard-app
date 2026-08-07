@@ -98,7 +98,7 @@ their conversation titles so several conflicts stay distinguishable.
 - The push review surfaces held threads without disabling Push: a per-row
   "Review Pull" button on every `Pull required` conversation row, plus a
   non-blocking summary callout with the same affordance. The
-  bundle-generation destination gate (base must equal head) is unchanged.
+  bundle-revision destination gate (base must equal head) is unchanged.
 
 ## Invariants kept
 

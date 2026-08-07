@@ -70,8 +70,8 @@ mount), C ⇄ `002/.codex` (default mount). All in one bucket.
 
 Assert:
 - A push → B pull → B push → A pull converge through `001/.codex`.
-- C pushes different files: only `002/.codex`'s generation moves; `001`'s
-  generation unchanged (and vice versa for A/B pushes).
+- C pushes different files: only `002/.codex`'s revision moves; `001`'s
+  revision unchanged (and vice versa for A/B pushes).
 - Manifests are disjoint: C's rels never appear in 001's manifest, A/B's
   never in 002's.
 - `bucket/001/.codex/_head.json` and `bucket/002/.codex/_head.json` both
@@ -94,7 +94,7 @@ Assert:
 
 Variant 1 — files moved with the mount:
 - A pushes from the default mount; `relocate(".codex", scratch, move_files: true)`;
-  push again → **"everything up to date"**, generation unchanged, no
+  push again → **"everything up to date"**, revision unchanged, no
   conflict siblings. (Baselines are sha-based: mtime mismatch falls
   through to the hash check.)
 
@@ -102,7 +102,7 @@ Variant 2 — empty new mount:
 - A `relocate(".codex", empty_dir, move_files: false)`; push → union
   semantics must NOT delete anything cloud-side; instead the full tree is
   restored *into the new mount* (`Missing` + cloud entry + baseline record
-  → ApplyCloud), generation unchanged.
+  → ApplyCloud), revision unchanged.
 - Follow-up pull is a no-op; old default dir untouched.
 
 ### S18 — Mixed link shapes on one machine
@@ -119,7 +119,7 @@ hex, the codex one nested-named.
 Seed `001/.codex` via A. Machine W pins `.claude ⇄ 001/.codex`.
 
 Assert: push and pull both fail with "holds .codex — cannot sync it as
-.claude"; the store is unmodified (001's generation unchanged, no new
+.claude"; the store is unmodified (001's revision unchanged, no new
 profiles); W recovers by re-pinning `.claude ⇄ 001/.claude`.
 
 ### S20 — Repointing a pin (baseline isolation)
@@ -129,7 +129,7 @@ profiles); W recovers by re-pinning `.claude ⇄ 001/.claude`.
   profile (per-profile baselines: no bleed); `001` still holds v1.
 - Edit files (different length! — see gotchas) → repoint back to `001` →
   push publishes the edit as a normal change: **zero conflict siblings**,
-  `001` at generation+1.
+  `001` at revision+1.
 
 ## 4. Smaller targeted tests
 

@@ -1512,7 +1512,7 @@ export function ProjectChatHistoryContent({
             <div className="sync-history-continuity-copy">
               <strong>Storage history changed</strong>
               <span>
-                {`The sync history in ${comparisonStorageName} is different from the one Mallard last synced for this project (generation ${comparison.remote_continuity.base_generation}). This usually means Mallard's sync data in that storage was deleted and created again. The session statuses below use the replacement. Unlink this storage and link it again to start fresh. Unlinking does not delete files, but anything saved only in the previous storage history cannot be recovered from this machine.`}
+                {`The sync history in ${comparisonStorageName} is different from the one Mallard last synced for this project (revision ${comparison.remote_continuity.base_revision}). This usually means Mallard's sync data in that storage was deleted and created again. The session statuses below use the replacement. Unlink this storage and link it again to start fresh. Unlinking does not delete files, but anything saved only in the previous storage history cannot be recovered from this machine.`}
               </span>
             </div>
             {onUnlinkStorage && (

@@ -104,7 +104,7 @@ export default function LogManagerDialog({ onClose, onLogsChanged }: Props) {
 
   const handleDeleteAll = async () => {
     const approved = await confirm(
-      "Delete all retained activity logs?\n\nMallard configuration, backups, local files, and cloud generations will not be changed.",
+      "Delete all retained activity logs?\n\nMallard configuration, backups, local files, and cloud revisions will not be changed.",
       { title: "Delete activity logs", kind: "warning", okLabel: "Delete logs", cancelLabel: "Cancel" },
     );
     if (!approved) return;

@@ -70,7 +70,7 @@ alongside the existing `resources`, `files`, and `tombstones` maps.
 | `variants` | `BTreeMap<VariantId, ConversationVariant>` | Non-empty |
 
 The group carries no revision of its own. Concurrency is already handled by
-`BundleHead.generation` plus compare-and-swap on head publication
+`BundleHead.revision` plus compare-and-swap on head publication
 (`s3_store.rs:47`); adding a second CAS domain would be redundant machinery.
 
 ### ConversationVariant
@@ -179,7 +179,7 @@ against, and apply revalidates all of it. Add to the action payload:
 | --- | --- |
 | `variant_action` | `NoOp \| FastForwardLocal \| KeepLocal \| AddAlternate \| StoreOnly \| PromoteLocal \| ReplaceLocal` |
 | `relation` | Classifier output, shown in review (see next section) |
-| `pinned_generation`, `pinned_manifest_sha256` | Cloud state at review |
+| `pinned_revision`, `pinned_manifest_sha256` | Cloud state at review |
 | `pinned_variant_lineage_digest` | The exact variant reviewed |
 | `expected_local_digest` | `Option<String>`; `None` asserts local absence |
 | `expected_binding_revision` | Rejects a binding changed since review |
@@ -187,7 +187,7 @@ against, and apply revalidates all of it. Add to the action payload:
 | `proposed_provider_thread_id` | Reserved at plan time so two actions cannot pick one ID |
 | `plan_expires_at` | Existing plan-expiry convention |
 
-`MaterializationRecord` already pins `generation`, `commit_id`,
+`MaterializationRecord` already pins `revision`, `commit_id`,
 `manifest_sha256`, and `binding_revision` (`domain.rs:2403-2406`). Extend the
 receipt to also record the `variant_id` and the `provider_thread_id` actually
 allocated, so a repeat Pull can prove idempotence from the receipt.

@@ -279,7 +279,7 @@ fn custom_skill_action(
         return manual_action(
             &descriptor.resource_id,
             &format!(
-                "Custom skill '{}' has no payload in this generation",
+                "Custom skill '{}' has no payload in this revision",
                 identity.effective_name
             ),
         );

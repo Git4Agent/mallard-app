@@ -29,7 +29,7 @@ resources portable across teammates and machines.
   and session state — through a local folder or Cloudflare R2.
 - Compares local and stored resources before Push or Pull, including
   local-only, storage-only, ahead, synchronized, and conflict states.
-- Publishes immutable, SHA-256-verified bundle generations and presents an
+- Publishes immutable, SHA-256-verified bundle revisions and presents an
   explicit restore plan before applying changes. Pulls create backups and
   retain apply receipts.
 - Optionally syncs selected ordinary files and folders for non-Git projects.

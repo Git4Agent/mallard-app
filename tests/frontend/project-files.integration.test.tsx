@@ -84,7 +84,7 @@ const inventory: ProjectContentInventory = {
   project_root: "/tmp/project-a",
   eligibility: { state: "eligible", reason: "Not inside a Git work tree." },
   review_token: "review-token",
-  storage_generation: null,
+  storage_revision: null,
   preference_revision: 0,
   excluded_resource_ids: [],
   entries: [
@@ -260,7 +260,7 @@ const pullPlan: RestorePlan = {
   host_id: binding.host_id,
   replica_id: binding.replica_id,
   expected_host_identity_revision: 0,
-  generation: 1,
+  revision: 1,
   commit_id: "commit-a",
   manifest_sha256: "b".repeat(64),
   binding_revision: 0,

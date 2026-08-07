@@ -146,7 +146,7 @@ delete/modify race is divergence and preserves the modified content.
 - A representation unsafe for schema-4 readers uses a new schema, one reviewed
   cutover, and no permanent dual writers.
 - Push remains immutable and SHA-256 verified.
-- Cloud writes use compare-and-swap against reviewed generation and manifest.
+- Cloud writes use compare-and-swap against reviewed revision and manifest.
 - Pull revalidates cloud and local digests, provider-ID availability, binding
   revision, and expiry.
 - Replacement requires a matching reviewed digest and recoverable backup.

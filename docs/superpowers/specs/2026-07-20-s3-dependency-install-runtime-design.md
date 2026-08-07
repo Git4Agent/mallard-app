@@ -2,7 +2,7 @@
 
 ## Problem
 
-Applying approved dependency actions is an asynchronous operation because native plugin installers are child processes. Before starting an installer, Mallard synchronously re-fetches the approved bundle to verify that its storage ID, bundle ID, generation, commit, manifest hash, and binding revision still match the dependency plan.
+Applying approved dependency actions is an asynchronous operation because native plugin installers are child processes. Before starting an installer, Mallard synchronously re-fetches the approved bundle to verify that its storage ID, bundle ID, revision, commit, manifest hash, and binding revision still match the dependency plan.
 
 The S3 bundle-store adapter implements the synchronous bundle-store contract by driving AWS SDK futures with a Tokio runtime handle. That bridge must execute on a blocking worker. The dependency-application command currently performs the re-fetch directly on a Tokio async runtime worker, where `Handle::block_on` is forbidden. The adapter converts the resulting panic into the reported `S3 bundle-store get cannot block an async runtime worker` error. Local-folder storage does not expose the mistake because its implementation is synchronous.
 
@@ -20,7 +20,7 @@ The phase boundary must use the existing `run_blocking` helper so S3 engine oper
 
 - S3 credentials continue to be handled only by the existing configured S3 client.
 - Bundle objects continue through the bundle engine's existing size, object-key, ETag, manifest-hash, and content-digest validation.
-- The fetched bundle must match the dependency plan's storage, bundle, generation, commit, manifest hash, replica, and binding revision before any installer starts.
+- The fetched bundle must match the dependency plan's storage, bundle, revision, commit, manifest hash, replica, and binding revision before any installer starts.
 - Installer arguments remain restricted to the already validated portable plugin identifier and supported argument sets.
 - A changed or missing remote bundle fails closed and launches no installer.
 - Dependency application receipts are persisted only after execution, preserving current retry and audit behavior.

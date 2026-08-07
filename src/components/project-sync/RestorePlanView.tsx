@@ -576,7 +576,7 @@ export default function RestorePlanView({
               ? (
                 <>
                   <h2 id="sync-pull-review-title">Pull review</h2>
-                  <span className="sync-pull-review-meta">Generation {plan.generation}</span>
+                  <span className="sync-pull-review-meta">Revision {plan.revision}</span>
                 </>
               )
               : <h1 id="sync-pull-review-title">Restore {projectName}</h1>}
@@ -707,7 +707,7 @@ export default function RestorePlanView({
                   rowResolution={rowResolution}
                 />
               ) : items.length === 0 && !supportLoading ? (
-                <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>Nothing to pull</strong><small>This project already matches the selected generation.</small></span></div>
+                <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>Nothing to pull</strong><small>This project already matches the selected revision.</small></span></div>
               ) : (
                 <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No session changes</strong><small>Sessions already match this storage.</small></span></div>
               )}

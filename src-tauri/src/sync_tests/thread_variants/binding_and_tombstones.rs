@@ -1,4 +1,6 @@
-use super::harness::{analyzed_chain, chain, publish_request, sha256, ThreadSpec, VariantWorld};
+use super::harness::{
+    analyzed_chain, chain, publish_request, publish_with_head, sha256, ThreadSpec, VariantWorld,
+};
 use crate::project_sync::bundle_engine::{PublishBundleRequest, PublishExpectation};
 use crate::project_sync::conversation_sync::{
     recover_unique_compatible_binding_from_meta, BindingRecoveryResult,
@@ -124,7 +126,8 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
     delete_thread
         .tombstones
         .insert(tombstone.canonical_key(), tombstone.clone());
-    let deleted = world.engine().publish(delete_thread).unwrap();
+    let engine = world.engine();
+    let deleted = publish_with_head(&engine, delete_thread).unwrap();
     assert!(deleted.published);
     assert_eq!(
         deleted
@@ -147,9 +150,9 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
     repeated
         .tombstones
         .insert(tombstone.canonical_key(), tombstone.clone());
-    let repeated = world.engine().publish(repeated).unwrap();
+    let repeated = publish_with_head(&engine, repeated).unwrap();
     assert!(!repeated.published);
-    assert_eq!(repeated.snapshot.head.generation, 2);
+    assert_eq!(repeated.snapshot.head.revision, 2);
 
     let final_tombstone = Tombstone {
         target: TombstoneTarget::ConversationThread {
@@ -174,7 +177,7 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         expected_head: PublishExpectation::Match(repeated.head_token),
         updated_at: 40,
     };
-    let deleted_all = world.engine().publish(delete_all).unwrap();
+    let deleted_all = publish_with_head(&engine, delete_all).unwrap();
     assert!(deleted_all.published);
     assert!(deleted_all.snapshot.manifest.conversations.is_empty());
     assert!(deleted_all.snapshot.manifest.resources.is_empty());
@@ -202,9 +205,9 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         Some(&deleted_all.snapshot.manifest),
         PublishExpectation::Match(deleted_all.head_token),
     );
-    let resurrected = world.engine().publish(resurrect).unwrap();
+    let resurrected = publish_with_head(&engine, resurrect).unwrap();
     assert!(resurrected.published);
-    assert_eq!(resurrected.snapshot.head.generation, 4);
+    assert_eq!(resurrected.snapshot.head.revision, 4);
     assert!(resurrected
         .snapshot
         .manifest
@@ -219,7 +222,7 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
             matches!(
                 &tombstone.target,
                 TombstoneTarget::ConversationThread { thread_id }
-                    if thread_id == &t1_id
+                    if thread_id.as_str() == t1_id.as_str()
             )
         }));
     let fixed_point = publish_request(
@@ -230,5 +233,5 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         Some(&resurrected.snapshot.manifest),
         PublishExpectation::Match(resurrected.head_token),
     );
-    assert!(!world.engine().publish(fixed_point).unwrap().published);
+    assert!(!engine.publish(fixed_point).unwrap().published);
 }

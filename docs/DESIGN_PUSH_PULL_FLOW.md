@@ -246,7 +246,7 @@ Fixtures follow the existing `sync_tests` harness style; work counts use
   the TTL/clock argument above. At most an advisory marker later, UX only.
 - **Per-chat target version** ("target version (default latest)"):
   deferred. v1 pulls only from the head manifest. If added later, a
-  version is `(generation, commit_id)` of a retained immutable manifest,
+  version is `(revision, commit_id)` of a retained immutable manifest,
   enumerated from `_manifests/`; per-chat mixing is safe because chats are
   independent, but nothing today indexes chat → historical manifests.
 - **Post-upload read-back** (sketch push step 8): rejected outright —

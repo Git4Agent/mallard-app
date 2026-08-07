@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
-use std::io::Write;
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
 use super::domain::{
@@ -36,7 +37,9 @@ const STORAGE_LAYOUT_VERSION: u32 = 1;
 const LOCAL_STORAGE_LOCK: &str = ".storage.lock";
 const HEAD_FILE: &str = "_head.json";
 const TAG_FILE: &str = "_tag.json";
-const MAX_OBJECT_BYTES: usize = 512 * 1024 * 1024;
+const MAX_STORAGE_MARKER_BYTES: u64 = 4 * 1024;
+const MAX_BUNDLE_HEAD_BYTES: u64 = 64 * 1024;
+const MAX_BUNDLE_TAG_BYTES: u64 = 64 * 1024;
 const MAX_LIST_PAGE: usize = 10_000;
 const DEFAULT_PLAN_LIFETIME_SECS: u64 = 24 * 60 * 60;
 
@@ -93,9 +96,138 @@ impl ObjectPrefix {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoredObject {
+pub struct StoredMetadata {
     pub bytes: Vec<u8>,
     pub etag: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpectedObject {
+    pub size: u64,
+    pub sha256: String,
+}
+
+struct VerifiedBodyInner {
+    file: Mutex<NamedTempFile>,
+}
+
+pub struct VerifiedBodyReader {
+    inner: Arc<VerifiedBodyInner>,
+    position: u64,
+}
+
+impl Read for VerifiedBodyReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let mut staged = self
+            .inner
+            .file
+            .lock()
+            .map_err(|_| std::io::Error::other("verified object lock is poisoned"))?;
+        staged.as_file_mut().seek(SeekFrom::Start(self.position))?;
+        let count = staged.as_file_mut().read(buffer)?;
+        self.position = self
+            .position
+            .checked_add(count as u64)
+            .ok_or_else(|| std::io::Error::other("verified object reader position overflow"))?;
+        Ok(count)
+    }
+}
+
+/// A fully received and integrity-verified object backed by a private
+/// machine-local temporary file. Clones share ownership of the staged bytes;
+/// each [`Self::open`] call returns an independent reader at byte zero.
+#[derive(Clone)]
+pub struct VerifiedBody {
+    inner: Arc<VerifiedBodyInner>,
+    size: u64,
+    sha256: String,
+    etag: String,
+}
+
+impl std::fmt::Debug for VerifiedBody {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VerifiedBody")
+            .field("size", &self.size)
+            .field("sha256", &self.sha256)
+            .field("etag", &self.etag)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VerifiedBody {
+    pub(crate) fn from_temp_file(
+        mut file: NamedTempFile,
+        size: u64,
+        sha256: String,
+        etag: String,
+    ) -> Result<Self, String> {
+        domain::validate_sha256("verified object", &sha256)?;
+        let actual_size = file
+            .as_file()
+            .metadata()
+            .map_err(|error| format!("inspect verified object: {}", error))?
+            .len();
+        if actual_size != size {
+            return Err("verified object size differs from its staged file".to_string());
+        }
+        file.as_file_mut()
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| format!("rewind verified object: {}", error))?;
+        Ok(Self {
+            inner: Arc::new(VerifiedBodyInner {
+                file: Mutex::new(file),
+            }),
+            size,
+            sha256,
+            etag,
+        })
+    }
+
+    pub fn open(&self) -> Result<VerifiedBodyReader, String> {
+        Ok(VerifiedBodyReader {
+            inner: self.inner.clone(),
+            position: 0,
+        })
+    }
+
+    pub fn read_bounded(&self, max_bytes: u64, label: &str) -> Result<Vec<u8>, String> {
+        if self.size > max_bytes {
+            return Err(format!("{} exceeds its read limit", label));
+        }
+        let capacity = usize::try_from(self.size)
+            .map_err(|_| format!("{} cannot fit in memory on this platform", label))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|_| format!("reserve memory for {}", label))?;
+        Read::take(self.open()?, max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("read {}: {}", label, error))?;
+        if bytes.len() as u64 != self.size || sha256(&bytes) != self.sha256 {
+            return Err(format!("{} changed after verification", label));
+        }
+        Ok(bytes)
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    pub fn etag(&self) -> &str {
+        &self.etag
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum StageOutcome {
+    Missing,
+    Mismatch,
+    Verified(VerifiedBody),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,12 +256,28 @@ pub struct StoreListPage {
 
 /// The narrow transport contract required by the bundle protocol.
 pub trait BundleObjectStore: Send + Sync {
-    fn get(&self, key: &ObjectKey) -> Result<Option<StoredObject>, String>;
+    fn get_metadata(
+        &self,
+        key: &ObjectKey,
+        max_bytes: u64,
+    ) -> Result<Option<StoredMetadata>, String>;
 
-    /// Fetch several objects; results line up with `keys`. Remote stores
-    /// override this with a bounded-concurrency implementation.
-    fn get_many(&self, keys: &[ObjectKey]) -> Result<Vec<Option<StoredObject>>, String> {
-        keys.iter().map(|key| self.get(key)).collect()
+    fn stage_verified(
+        &self,
+        key: &ObjectKey,
+        expected: &ExpectedObject,
+    ) -> Result<StageOutcome, String>;
+
+    /// Fetch several verified objects; results line up with `requests`.
+    /// Remote stores override this with a bounded-concurrency implementation.
+    fn stage_many_verified(
+        &self,
+        requests: &[(ObjectKey, ExpectedObject)],
+    ) -> Result<Vec<StageOutcome>, String> {
+        requests
+            .iter()
+            .map(|(key, expected)| self.stage_verified(key, expected))
+            .collect()
     }
 
     fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String>;
@@ -250,7 +398,10 @@ impl LocalBundleObjectStore {
         Ok(file)
     }
 
-    fn read_unlocked(&self, key: &ObjectKey) -> Result<Option<StoredObject>, String> {
+    fn open_object_unlocked(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<Option<(fs::File, fs::Metadata)>, String> {
         let path = checked_existing_object_path(&self.root, key)?;
         let Some(path) = path else {
             return Ok(None);
@@ -259,20 +410,109 @@ impl LocalBundleObjectStore {
         if !meta.is_file() || meta.file_type().is_symlink() {
             return Err(format!("object '{}' is not a regular no-follow file", key));
         }
-        if meta.len() > MAX_OBJECT_BYTES as u64 {
-            return Err(format!("object '{}' exceeds the read limit", key));
+        let file = open_read_only_no_follow(&path, &format!("object '{}'", key))?;
+        let opened_meta = file
+            .metadata()
+            .map_err(|error| format!("inspect opened object '{}': {}", key, error))?;
+        if !opened_meta.is_file() || opened_meta.len() != meta.len() {
+            return Err(format!("object '{}' changed while opening", key));
         }
-        let bytes = fs::read(&path).map_err(|e| format!("read '{}': {}", key, e))?;
-        Ok(Some(StoredObject {
+        Ok(Some((file, opened_meta)))
+    }
+
+    fn read_metadata_unlocked(
+        &self,
+        key: &ObjectKey,
+        max_bytes: u64,
+    ) -> Result<Option<StoredMetadata>, String> {
+        let Some((mut file, metadata)) = self.open_object_unlocked(key)? else {
+            return Ok(None);
+        };
+        if metadata.len() > max_bytes {
+            return Err(format!("metadata object '{}' exceeds its read limit", key));
+        }
+        let capacity = usize::try_from(metadata.len())
+            .map_err(|_| format!("metadata object '{}' is too large for this platform", key))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|_| format!("reserve memory for metadata object '{}'", key))?;
+        Read::by_ref(&mut file)
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("read metadata object '{}': {}", key, error))?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(format!("metadata object '{}' exceeds its read limit", key));
+        }
+        Ok(Some(StoredMetadata {
             etag: sha256(&bytes),
             bytes,
         }))
     }
 
-    fn write_atomic_unlocked(&self, key: &ObjectKey, bytes: &[u8]) -> Result<(), String> {
-        if bytes.len() > MAX_OBJECT_BYTES {
-            return Err(format!("object '{}' exceeds the write limit", key));
+    fn stage_verified_unlocked(
+        &self,
+        key: &ObjectKey,
+        expected: &ExpectedObject,
+    ) -> Result<StageOutcome, String> {
+        domain::validate_sha256("expected object", &expected.sha256)?;
+        let Some((mut source, metadata)) = self.open_object_unlocked(key)? else {
+            return Ok(StageOutcome::Missing);
+        };
+        if metadata.len() != expected.size {
+            return Ok(StageOutcome::Mismatch);
         }
+        let mut staged = NamedTempFile::new()
+            .map_err(|error| format!("create staged object '{}': {}", key, error))?;
+        let mut hasher = Sha256::new();
+        let mut received = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = source
+                .read(&mut buffer)
+                .map_err(|error| format!("read object '{}': {}", key, error))?;
+            if count == 0 {
+                break;
+            }
+            received = received
+                .checked_add(count as u64)
+                .ok_or_else(|| format!("object '{}' byte count overflow", key))?;
+            if received > expected.size {
+                return Ok(StageOutcome::Mismatch);
+            }
+            hasher.update(&buffer[..count]);
+            staged
+                .as_file_mut()
+                .write_all(&buffer[..count])
+                .map_err(|error| format!("stage object '{}': {}", key, error))?;
+        }
+        let digest = hex_lower(&hasher.finalize());
+        if received != expected.size || digest != expected.sha256 {
+            return Ok(StageOutcome::Mismatch);
+        }
+        staged
+            .as_file_mut()
+            .sync_all()
+            .map_err(|error| format!("sync staged object '{}': {}", key, error))?;
+        Ok(StageOutcome::Verified(VerifiedBody::from_temp_file(
+            staged,
+            received,
+            digest.clone(),
+            digest,
+        )?))
+    }
+
+    fn current_etag_unlocked(&self, key: &ObjectKey) -> Result<Option<String>, String> {
+        let Some((mut file, _)) = self.open_object_unlocked(key)? else {
+            return Ok(None);
+        };
+        Ok(Some(sha256_reader(
+            &mut file,
+            &format!("object '{}'", key),
+        )?))
+    }
+
+    fn write_atomic_unlocked(&self, key: &ObjectKey, bytes: &[u8]) -> Result<(), String> {
         let path = checked_create_object_path(&self.root, key)?;
         let parent = path
             .parent()
@@ -292,14 +532,28 @@ impl LocalBundleObjectStore {
 }
 
 impl BundleObjectStore for LocalBundleObjectStore {
-    fn get(&self, key: &ObjectKey) -> Result<Option<StoredObject>, String> {
-        self.read_unlocked(key)
+    fn get_metadata(
+        &self,
+        key: &ObjectKey,
+        max_bytes: u64,
+    ) -> Result<Option<StoredMetadata>, String> {
+        self.read_metadata_unlocked(key, max_bytes)
+    }
+
+    fn stage_verified(
+        &self,
+        key: &ObjectKey,
+        expected: &ExpectedObject,
+    ) -> Result<StageOutcome, String> {
+        self.stage_verified_unlocked(key, expected)
     }
 
     fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
         let _guard = self.lock()?;
-        if let Some(existing) = self.read_unlocked(key)? {
-            if existing.bytes == bytes {
+        if let Some((mut existing, metadata)) = self.open_object_unlocked(key)? {
+            if metadata.len() == bytes.len() as u64
+                && sha256_reader(&mut existing, &format!("object '{}'", key))? == sha256(bytes)
+            {
                 return Ok(ImmutablePutOutcome::AlreadyPresent);
             }
             return Err(format!(
@@ -318,17 +572,13 @@ impl BundleObjectStore for LocalBundleObjectStore {
         bytes: &[u8],
     ) -> Result<CasOutcome, String> {
         let _guard = self.lock()?;
-        let current = self.read_unlocked(key)?;
+        let current_etag = self.current_etag_unlocked(key)?;
         let matches = match expectation {
-            CasExpectation::Absent => current.is_none(),
-            CasExpectation::Match(expected) => current
-                .as_ref()
-                .is_some_and(|object| object.etag == *expected),
+            CasExpectation::Absent => current_etag.is_none(),
+            CasExpectation::Match(expected) => current_etag.as_ref() == Some(expected),
         };
         if !matches {
-            return Ok(CasOutcome::Conflict {
-                current_etag: current.map(|object| object.etag),
-            });
+            return Ok(CasOutcome::Conflict { current_etag });
         }
         self.write_atomic_unlocked(key, bytes)?;
         Ok(CasOutcome::Written {
@@ -419,9 +669,10 @@ impl BundleObjectStore for LocalBundleObjectStore {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeadToken {
-    pub generation: u64,
+    pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
+    pub manifest_size: u64,
     pub etag: String,
 }
 
@@ -447,13 +698,10 @@ pub struct CapturedResourcesPublishRequest {
 #[derive(Clone, Debug)]
 pub struct PublishedBundle {
     /// False when the candidate manifest was semantically identical to the
-    /// observed head's: nothing was written and `snapshot`/`head_token` are
-    /// the observed generation's.
+    /// observed head's: nothing was written and `snapshot` is the observed
+    /// revision's.
     pub published: bool,
     pub snapshot: BundleSnapshot,
-    // Read by CAS-chaining tests; command flows re-read the head instead.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub head_token: HeadToken,
 }
 
 #[derive(Clone, Debug)]
@@ -467,7 +715,7 @@ pub struct CapturedBundleFile {
 /// Result of the explicit object durability audit (`verify_objects`).
 #[derive(Clone, Debug, Serialize)]
 pub struct BundleObjectAudit {
-    pub generation: u64,
+    pub revision: u64,
     pub commit_id: String,
     pub objects_total: usize,
     pub objects_verified: usize,
@@ -493,12 +741,6 @@ pub struct PublishBundleRequest {
     pub updated_at: u64,
 }
 
-#[derive(Clone, Debug)]
-pub struct FetchedBundle {
-    pub snapshot: BundleSnapshot,
-    pub files: BTreeMap<LogicalPath, Vec<u8>>,
-}
-
 /// One payload object finished downloading. `fetched_bytes`/`total_bytes`
 /// are manifest-declared sizes, so consumers can render byte-accurate
 /// progress without waiting for the transfer to finish.
@@ -510,25 +752,33 @@ pub struct FetchProgress {
     pub total_bytes: u64,
 }
 
-const OBJECT_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
-/// Objects per `get_many` round in `EngineByteSource::prefetch` — one
+const OBJECT_CACHE_MAX_STAGED_BYTES: u64 = 256 * 1024 * 1024;
+/// Objects per `stage_many_verified` round in `EngineByteSource::prefetch` — one
 /// concurrent store window per batch, with progress after each object.
 const PREFETCH_BATCH_OBJECTS: usize = 6;
 /// Objects per `put_many` round in `publish_with_progress`; same shape as
 /// the prefetch batching, with progress after each object.
 const UPLOAD_BATCH_OBJECTS: usize = 6;
 
-/// Process-wide LRU for verified payload objects, keyed by content hash.
-/// Bundle objects are immutable, so an entry can never go stale; eviction
-/// exists only to bound memory. One Pull review warms the cache for the
-/// apply that follows it.
+/// Process-wide LRU for staged verified payload objects, keyed by storage,
+/// bundle, content hash, and exact size. Bundle objects are immutable, so an
+/// entry can never go stale; eviction exists only to bound retained staging
+/// space. One Pull review warms the cache for the apply that follows it.
 pub struct ObjectCache {
     inner: Mutex<ObjectCacheInner>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ObjectCacheKey {
+    storage_id: StorageId,
+    bundle_id: BundleId,
+    sha256: String,
+    size: u64,
+}
+
 struct ObjectCacheInner {
-    entries: HashMap<(StorageId, BundleId, String), Arc<Vec<u8>>>,
-    order: VecDeque<(StorageId, BundleId, String)>,
+    entries: HashMap<ObjectCacheKey, VerifiedBody>,
+    order: VecDeque<ObjectCacheKey>,
     total_bytes: u64,
 }
 
@@ -545,7 +795,7 @@ impl Default for ObjectCache {
 }
 
 impl ObjectCache {
-    fn get(&self, key: &(StorageId, BundleId, String)) -> Option<Arc<Vec<u8>>> {
+    fn get(&self, key: &ObjectCacheKey) -> Option<VerifiedBody> {
         let mut inner = self.inner.lock().ok()?;
         let hit = inner.entries.get(key).cloned()?;
         if let Some(position) = inner.order.iter().position(|current| current == key) {
@@ -555,8 +805,8 @@ impl ObjectCache {
         Some(hit)
     }
 
-    fn insert(&self, key: (StorageId, BundleId, String), bytes: Arc<Vec<u8>>) {
-        if bytes.len() as u64 > OBJECT_CACHE_MAX_BYTES {
+    fn insert(&self, key: ObjectCacheKey, body: VerifiedBody) {
+        if body.size() > OBJECT_CACHE_MAX_STAGED_BYTES {
             return;
         }
         let Ok(mut inner) = self.inner.lock() else {
@@ -565,70 +815,39 @@ impl ObjectCache {
         if inner.entries.contains_key(&key) {
             return;
         }
-        inner.total_bytes = inner.total_bytes.saturating_add(bytes.len() as u64);
-        inner.entries.insert(key.clone(), bytes);
+        inner.total_bytes = inner.total_bytes.saturating_add(body.size());
+        inner.entries.insert(key.clone(), body);
         inner.order.push_back(key);
-        while inner.total_bytes > OBJECT_CACHE_MAX_BYTES {
+        while inner.total_bytes > OBJECT_CACHE_MAX_STAGED_BYTES {
             let Some(oldest) = inner.order.pop_front() else {
                 break;
             };
             if let Some(evicted) = inner.entries.remove(&oldest) {
-                inner.total_bytes = inner.total_bytes.saturating_sub(evicted.len() as u64);
+                inner.total_bytes = inner.total_bytes.saturating_sub(evicted.size());
             }
         }
     }
 }
 
 /// Payload access for planning and apply. Implementations verify each
-/// object against the manifest exactly once — callers trust returned bytes.
+/// object against the manifest exactly once — callers trust returned bodies.
 pub trait BundleBytes {
-    fn get(&mut self, logical_path: &LogicalPath) -> Result<&[u8], String>;
+    fn body(&mut self, logical_path: &LogicalPath) -> Result<VerifiedBody, String>;
+
+    fn read_bounded(
+        &mut self,
+        logical_path: &LogicalPath,
+        max_bytes: u64,
+        label: &str,
+    ) -> Result<Vec<u8>, String>;
 
     /// Bulk-load a known set so progress totals reflect the real transfer.
-    /// The default sequential loop is sufficient for preloaded sources.
+    /// The default sequential loop is sufficient for simple sources.
     fn prefetch(&mut self, paths: &[LogicalPath]) -> Result<(), String> {
         for path in paths {
-            self.get(path)?;
+            self.body(path)?;
         }
         Ok(())
-    }
-}
-
-/// Byte source over an already fully downloaded bundle. Existing callers and
-/// engine tests use this; it re-verifies on access exactly like the historic
-/// apply path did.
-pub struct PreloadedBytes<'a> {
-    bundle: &'a FetchedBundle,
-}
-
-impl<'a> PreloadedBytes<'a> {
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn new(bundle: &'a FetchedBundle) -> Self {
-        Self { bundle }
-    }
-}
-
-impl BundleBytes for PreloadedBytes<'_> {
-    fn get(&mut self, logical_path: &LogicalPath) -> Result<&[u8], String> {
-        let entry = self
-            .bundle
-            .snapshot
-            .manifest
-            .files
-            .get(logical_path)
-            .ok_or_else(|| format!("manifest has no file entry for '{}'", logical_path))?;
-        let bytes = self
-            .bundle
-            .files
-            .get(logical_path)
-            .ok_or_else(|| format!("fetched bytes for '{}' are missing", logical_path))?;
-        if bytes.len() as u64 != entry.size || sha256(bytes) != entry.sha256 {
-            return Err(format!(
-                "fetched bytes for '{}' failed verification",
-                logical_path
-            ));
-        }
-        Ok(bytes)
     }
 }
 
@@ -639,7 +858,7 @@ pub struct EngineByteSource<'a, S: BundleObjectStore> {
     engine: &'a BundleEngine<S>,
     snapshot: &'a BundleSnapshot,
     cache: Option<Arc<ObjectCache>>,
-    loaded: BTreeMap<LogicalPath, Arc<Vec<u8>>>,
+    loaded: BTreeMap<LogicalPath, VerifiedBody>,
     on_progress: Option<&'a mut dyn FnMut(FetchProgress)>,
 }
 
@@ -655,44 +874,68 @@ impl<'a, S: BundleObjectStore> EngineByteSource<'a, S> {
             .get(logical_path)
             .ok_or_else(|| format!("manifest has no file entry for '{}'", logical_path))?;
         let bundle_id = &self.snapshot.head.bundle_id;
-        let cache_key = (
-            self.snapshot.storage_id.clone(),
-            bundle_id.clone(),
-            entry.sha256.clone(),
-        );
+        let cache_key = ObjectCacheKey {
+            storage_id: self.snapshot.storage_id.clone(),
+            bundle_id: bundle_id.clone(),
+            sha256: entry.sha256.clone(),
+            size: entry.size,
+        };
         if let Some(hit) = self.cache.as_ref().and_then(|cache| cache.get(&cache_key)) {
             self.loaded.insert(logical_path.clone(), hit);
             return Ok(());
         }
         let key = repository_object_key(bundle_id, &entry.object_key)?;
-        let object = self
-            .engine
-            .store
-            .get(&key)?
-            .ok_or_else(|| format!("bundle object '{}' is missing", key))?;
-        if object.bytes.len() as u64 != entry.size || sha256(&object.bytes) != entry.sha256 {
-            return Err(format!(
-                "bundle object '{}' does not match manifest size/hash",
-                key
-            ));
-        }
-        let bytes = Arc::new(object.bytes);
+        let outcome = self.engine.store.stage_verified(
+            &key,
+            &ExpectedObject {
+                size: entry.size,
+                sha256: entry.sha256.clone(),
+            },
+        )?;
+        let body = match outcome {
+            StageOutcome::Missing => return Err(format!("bundle object '{}' is missing", key)),
+            StageOutcome::Mismatch => {
+                return Err(format!(
+                    "bundle object '{}' does not match manifest size/hash",
+                    key
+                ))
+            }
+            StageOutcome::Verified(body) => body,
+        };
         if let Some(cache) = &self.cache {
-            cache.insert(cache_key, bytes.clone());
+            cache.insert(cache_key, body.clone());
         }
-        self.loaded.insert(logical_path.clone(), bytes);
+        self.loaded.insert(logical_path.clone(), body);
         Ok(())
     }
 }
 
 impl<S: BundleObjectStore> BundleBytes for EngineByteSource<'_, S> {
-    fn get(&mut self, logical_path: &LogicalPath) -> Result<&[u8], String> {
+    fn body(&mut self, logical_path: &LogicalPath) -> Result<VerifiedBody, String> {
         self.ensure_loaded(logical_path)?;
         Ok(self
             .loaded
             .get(logical_path)
             .expect("object loaded by ensure_loaded")
-            .as_slice())
+            .clone())
+    }
+
+    fn read_bounded(
+        &mut self,
+        logical_path: &LogicalPath,
+        max_bytes: u64,
+        label: &str,
+    ) -> Result<Vec<u8>, String> {
+        let entry = self
+            .snapshot
+            .manifest
+            .files
+            .get(logical_path)
+            .ok_or_else(|| format!("manifest has no file entry for '{}'", logical_path))?;
+        if entry.size > max_bytes {
+            return Err(format!("{} exceeds its read limit", label));
+        }
+        self.body(logical_path)?.read_bounded(max_bytes, label)
     }
 
     fn prefetch(&mut self, paths: &[LogicalPath]) -> Result<(), String> {
@@ -708,11 +951,12 @@ impl<S: BundleObjectStore> BundleBytes for EngineByteSource<'_, S> {
                 .files
                 .get(path)
                 .ok_or_else(|| format!("manifest has no file entry for '{}'", path))?;
-            let cache_key = (
-                self.snapshot.storage_id.clone(),
-                self.snapshot.head.bundle_id.clone(),
-                entry.sha256.clone(),
-            );
+            let cache_key = ObjectCacheKey {
+                storage_id: self.snapshot.storage_id.clone(),
+                bundle_id: self.snapshot.head.bundle_id.clone(),
+                sha256: entry.sha256.clone(),
+                size: entry.size,
+            };
             if let Some(hit) = self.cache.as_ref().and_then(|cache| cache.get(&cache_key)) {
                 self.loaded.insert(path.clone(), hit);
                 continue;
@@ -729,34 +973,44 @@ impl<S: BundleObjectStore> BundleBytes for EngineByteSource<'_, S> {
         let mut fetched_bytes = 0_u64;
         let mut index = 0_usize;
         for batch in pending.chunks(PREFETCH_BATCH_OBJECTS) {
-            let keys = batch
+            let requests = batch
                 .iter()
                 .map(|(_, entry)| {
-                    repository_object_key(&self.snapshot.head.bundle_id, &entry.object_key)
+                    Ok((
+                        repository_object_key(&self.snapshot.head.bundle_id, &entry.object_key)?,
+                        ExpectedObject {
+                            size: entry.size,
+                            sha256: entry.sha256.clone(),
+                        },
+                    ))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            let objects = self.engine.store.get_many(&keys)?;
-            for (((path, entry), key), object) in batch.iter().zip(&keys).zip(objects) {
-                let object = object.ok_or_else(|| format!("bundle object '{}' is missing", key))?;
-                if object.bytes.len() as u64 != entry.size || sha256(&object.bytes) != entry.sha256
-                {
-                    return Err(format!(
-                        "bundle object '{}' does not match manifest size/hash",
-                        key
-                    ));
-                }
-                let bytes = Arc::new(object.bytes);
+            let objects = self.engine.store.stage_many_verified(&requests)?;
+            for (((path, entry), (key, _)), outcome) in batch.iter().zip(&requests).zip(objects) {
+                let body = match outcome {
+                    StageOutcome::Missing => {
+                        return Err(format!("bundle object '{}' is missing", key))
+                    }
+                    StageOutcome::Mismatch => {
+                        return Err(format!(
+                            "bundle object '{}' does not match manifest size/hash",
+                            key
+                        ))
+                    }
+                    StageOutcome::Verified(body) => body,
+                };
                 if let Some(cache) = &self.cache {
                     cache.insert(
-                        (
-                            self.snapshot.storage_id.clone(),
-                            self.snapshot.head.bundle_id.clone(),
-                            entry.sha256.clone(),
-                        ),
-                        bytes.clone(),
+                        ObjectCacheKey {
+                            storage_id: self.snapshot.storage_id.clone(),
+                            bundle_id: self.snapshot.head.bundle_id.clone(),
+                            sha256: entry.sha256.clone(),
+                            size: entry.size,
+                        },
+                        body.clone(),
                     );
                 }
-                self.loaded.insert(path.clone(), bytes);
+                self.loaded.insert(path.clone(), body);
                 index += 1;
                 fetched_bytes = fetched_bytes.saturating_add(entry.size);
                 if let Some(on_progress) = self.on_progress.as_mut() {
@@ -804,7 +1058,7 @@ struct PlannedFile<'m> {
 struct CommitRecord {
     schema_version: u32,
     bundle_id: BundleId,
-    generation: u64,
+    revision: u64,
     commit_id: String,
     manifest_key: String,
     manifest_sha256: String,
@@ -823,7 +1077,7 @@ struct BundleTag {
     bundle_id: BundleId,
     display_name: String,
     kind: BundleKind,
-    generation: u64,
+    revision: u64,
     updated_at: u64,
     resources: u64,
     files: u64,
@@ -865,7 +1119,7 @@ pub struct RemoteBundleSummary {
     pub bundle_id: BundleId,
     pub display_name: String,
     pub kind: BundleKind,
-    pub generation: u64,
+    pub revision: u64,
     pub updated_at: u64,
     pub resources: u64,
     pub files: u64,
@@ -892,9 +1146,8 @@ impl<S: BundleObjectStore> BundleEngine<S> {
 
     fn ensure_storage_marker(&self) -> Result<(), String> {
         let key = ObjectKey::parse(STORAGE_MARKER_KEY)?;
-        if let Some(stored) = self.store.get(&key)? {
-            let marker: StorageMarker =
-                parse_bounded_json(&stored.bytes, "Mallard storage marker")?;
+        if let Some(stored) = self.store.get_metadata(&key, MAX_STORAGE_MARKER_BYTES)? {
+            let marker: StorageMarker = parse_json_bytes(&stored.bytes, "Mallard storage marker")?;
             marker.validate()?;
             return Ok(());
         }
@@ -904,9 +1157,9 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         self.store.put_immutable(&key, &bytes)?;
         let stored = self
             .store
-            .get(&key)?
+            .get_metadata(&key, MAX_STORAGE_MARKER_BYTES)?
             .ok_or_else(|| "Mallard storage marker disappeared after creation".to_string())?;
-        let marker: StorageMarker = parse_bounded_json(&stored.bytes, "Mallard storage marker")?;
+        let marker: StorageMarker = parse_json_bytes(&stored.bytes, "Mallard storage marker")?;
         marker.validate()
     }
 
@@ -915,10 +1168,10 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         bundle_id: &BundleId,
     ) -> Result<Option<(BundleHead, HeadToken)>, String> {
         let key = repository_object_key(bundle_id, HEAD_FILE)?;
-        let Some(stored) = self.store.get(&key)? else {
+        let Some(stored) = self.store.get_metadata(&key, MAX_BUNDLE_HEAD_BYTES)? else {
             return Ok(None);
         };
-        let head: BundleHead = parse_bounded_json(&stored.bytes, "bundle head")?;
+        let head: BundleHead = parse_json_bytes(&stored.bytes, "bundle head")?;
         head.validate()?;
         if &head.bundle_id != bundle_id {
             return Err(format!(
@@ -927,9 +1180,10 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             ));
         }
         let token = HeadToken {
-            generation: head.generation,
+            revision: head.revision,
             commit_id: head.commit_id.clone(),
             manifest_sha256: head.manifest_sha256.clone(),
+            manifest_size: head.manifest_size,
             etag: stored.etag,
         };
         Ok(Some((head, token)))
@@ -937,7 +1191,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
 
     /// Publish immutable objects and history first, then compare-and-swap the
     /// single bundle head. A failed CAS can leave only unreachable immutable
-    /// objects, never a partially visible generation. Payloads are content-
+    /// objects, never a partially visible revision. Payloads are content-
     /// addressed under `_objects/<sha256>`, so bytes already referenced by the
     /// previous manifest never travel again and a semantically unchanged
     /// publish writes nothing at all.
@@ -1100,9 +1354,10 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             }
             (PublishExpectation::Match(expected), Some((head, token)))
                 if expected == token
-                    && expected.generation == head.generation
+                    && expected.revision == head.revision
                     && expected.commit_id == head.commit_id
-                    && expected.manifest_sha256 == head.manifest_sha256 =>
+                    && expected.manifest_sha256 == head.manifest_sha256
+                    && expected.manifest_size == head.manifest_size =>
             {
                 CasExpectation::Match(token.etag.clone())
             }
@@ -1138,16 +1393,13 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             }
         }
 
-        let generation = current
+        let revision = current
             .as_ref()
-            .map(|(head, _)| head.generation.saturating_add(1))
+            .map(|(head, _)| head.revision.saturating_add(1))
             .unwrap_or(1);
         let commit_id = random_named_id("commit")?;
         let mut files = request.retained_files.clone();
         for (path, captured) in &request.captured_files {
-            if captured.bytes.len() as u64 > domain::MAX_FILE_BYTES {
-                return Err(format!("bundle file '{}' exceeds the portable limit", path));
-            }
             if captured.mode.is_some_and(|mode| mode & !0o777 != 0) {
                 return Err(format!("bundle file '{}' has unsafe mode bits", path));
             }
@@ -1173,7 +1425,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
 
         let manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA,
-            generation,
+            revision,
             commit_id: commit_id.clone(),
             updated_at: request.updated_at,
             bundle: request.identity.clone(),
@@ -1195,7 +1447,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             phase_started.elapsed(),
         );
 
-        if let (Some((head, token)), Some(previous)) = (&current, &previous_manifest) {
+        if let (Some((head, _)), Some(previous)) = (&current, &previous_manifest) {
             if manifest_is_semantic_noop(previous, &manifest) {
                 return Ok(PublishedBundle {
                     published: false,
@@ -1205,7 +1457,6 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                         manifest: previous.clone(),
                         fetched_at: request.updated_at,
                     },
-                    head_token: token.clone(),
                 });
             }
         }
@@ -1249,8 +1500,10 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         let phase_started = Instant::now();
         let manifest_bytes = serde_json::to_vec(&manifest)
             .map_err(|error| format!("serialize bundle manifest: {error}"))?;
+        let manifest_size = u64::try_from(manifest_bytes.len())
+            .map_err(|_| "serialized bundle manifest is too large".to_string())?;
         let manifest_sha256 = sha256(&manifest_bytes);
-        let manifest_relative_key = format!("_manifests/{}-{}.json", generation, commit_id);
+        let manifest_relative_key = format!("_manifests/{}-{}.json", revision, commit_id);
         let manifest_key =
             repository_object_key(&request.identity.bundle_id, &manifest_relative_key)?;
         self.store.put_immutable(&manifest_key, &manifest_bytes)?;
@@ -1260,7 +1513,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         let commit = CommitRecord {
             schema_version: BUNDLE_SCHEMA,
             bundle_id: request.identity.bundle_id.clone(),
-            generation,
+            revision,
             commit_id: commit_id.clone(),
             manifest_key: manifest_relative_key.clone(),
             manifest_sha256: manifest_sha256.clone(),
@@ -1275,7 +1528,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             .map_err(|error| format!("serialize bundle commit: {error}"))?;
         let commit_key = repository_object_key(
             &request.identity.bundle_id,
-            &format!("_commits/{}-{}.json", generation, commit_id),
+            &format!("_commits/{}-{}.json", revision, commit_id),
         )?;
         self.store.put_immutable(&commit_key, &commit_bytes)?;
         on_phase(
@@ -1288,28 +1541,26 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             schema_version: BUNDLE_SCHEMA,
             bundle_id: request.identity.bundle_id.clone(),
             kind: request.identity.kind,
-            generation,
+            revision,
             commit_id,
             manifest_key: manifest_relative_key,
             manifest_sha256,
+            manifest_size,
             updated_at: request.updated_at,
         };
         head.validate()?;
         let head_bytes =
             serde_json::to_vec(&head).map_err(|error| format!("serialize bundle head: {error}"))?;
         let head_key = repository_object_key(&request.identity.bundle_id, HEAD_FILE)?;
-        let head_etag =
-            match self
-                .store
-                .compare_and_swap(&head_key, &cas_expectation, &head_bytes)?
-            {
-                CasOutcome::Written { etag } => etag,
-                CasOutcome::Conflict { .. } => {
-                    return Err(
-                        "bundle head CAS conflict; fetch and rebase before retrying".to_string()
-                    )
-                }
-            };
+        match self
+            .store
+            .compare_and_swap(&head_key, &cas_expectation, &head_bytes)?
+        {
+            CasOutcome::Written { .. } => {}
+            CasOutcome::Conflict { .. } => {
+                return Err("bundle head CAS conflict; fetch and rebase before retrying".to_string())
+            }
+        }
         let _ = self.publish_tag(&manifest);
         on_phase("publish: swing head", phase_started.elapsed());
         Ok(PublishedBundle {
@@ -1320,61 +1571,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 manifest,
                 fetched_at: request.updated_at,
             },
-            head_token: HeadToken {
-                generation: head.generation,
-                commit_id: head.commit_id.clone(),
-                manifest_sha256: head.manifest_sha256.clone(),
-                etag: head_etag,
-            },
         })
-    }
-
-    /// Whole-bundle download. Production paths plan and apply lazily via
-    /// [`Self::byte_source`]; this remains the exhaustive test surface.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn fetch(&self, bundle_id: &BundleId) -> Result<FetchedBundle, String> {
-        self.fetch_with_progress(bundle_id, &mut |_| {})
-    }
-
-    /// Full-payload fetch reporting per-object progress. The totals come from
-    /// the already-verified manifest, so observers can size progress bars
-    /// before the first payload byte arrives.
-    pub fn fetch_with_progress(
-        &self,
-        bundle_id: &BundleId,
-        on_progress: &mut dyn FnMut(FetchProgress),
-    ) -> Result<FetchedBundle, String> {
-        let snapshot = self.inspect(bundle_id)?;
-        let total_objects = snapshot.manifest.files.len();
-        let total_bytes = snapshot
-            .manifest
-            .files
-            .values()
-            .fold(0_u64, |sum, entry| sum.saturating_add(entry.size));
-        let mut files = BTreeMap::new();
-        let mut fetched_bytes = 0_u64;
-        for (index, (logical_path, entry)) in snapshot.manifest.files.iter().enumerate() {
-            let key = repository_object_key(bundle_id, &entry.object_key)?;
-            let object = self
-                .store
-                .get(&key)?
-                .ok_or_else(|| format!("bundle object '{}' is missing", key))?;
-            if object.bytes.len() as u64 != entry.size || sha256(&object.bytes) != entry.sha256 {
-                return Err(format!(
-                    "bundle object '{}' does not match manifest size/hash",
-                    key
-                ));
-            }
-            fetched_bytes = fetched_bytes.saturating_add(entry.size);
-            on_progress(FetchProgress {
-                index: index + 1,
-                total_objects,
-                fetched_bytes,
-                total_bytes,
-            });
-            files.insert(logical_path.clone(), object.bytes);
-        }
-        Ok(FetchedBundle { snapshot, files })
     }
 
     /// Lazy payload access for `snapshot`, sharing verified objects through
@@ -1438,28 +1635,36 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     pub fn inspect_manifest_version(
         &self,
         bundle_id: &BundleId,
-        generation: u64,
+        revision: u64,
         commit_id: &str,
+        manifest_size: u64,
         manifest_sha256: &str,
     ) -> Result<BundleManifest, String> {
         domain::validate_sha256("historical manifest", manifest_sha256)?;
-        let relative_key = format!("_manifests/{generation}-{commit_id}.json");
+        if manifest_size == 0 {
+            return Err("historical manifest size must be nonzero".to_string());
+        }
+        let relative_key = format!("_manifests/{revision}-{commit_id}.json");
         validate_bundle_relative_object_key(&relative_key)?;
         let key = repository_object_key(bundle_id, &relative_key)?;
-        let stored = self
-            .store
-            .get(&key)?
-            .ok_or_else(|| format!("bundle manifest '{}' is missing", key))?;
-        if sha256(&stored.bytes) != manifest_sha256 {
-            return Err(format!(
-                "bundle manifest '{}' failed hash verification",
-                key
-            ));
-        }
-        let manifest: BundleManifest = parse_bounded_json(&stored.bytes, "bundle manifest")?;
+        let outcome = self.store.stage_verified(
+            &key,
+            &ExpectedObject {
+                size: manifest_size,
+                sha256: manifest_sha256.to_string(),
+            },
+        )?;
+        let body = match outcome {
+            StageOutcome::Missing => return Err(format!("bundle manifest '{}' is missing", key)),
+            StageOutcome::Mismatch => {
+                return Err(format!("bundle manifest '{}' failed verification", key))
+            }
+            StageOutcome::Verified(body) => body,
+        };
+        let manifest: BundleManifest = parse_json_reader(body.open()?, "bundle manifest")?;
         manifest.validate()?;
         if &manifest.bundle.bundle_id != bundle_id
-            || manifest.generation != generation
+            || manifest.revision != revision
             || manifest.commit_id != commit_id
         {
             return Err("historical manifest coordinates do not match its contents".to_string());
@@ -1478,24 +1683,33 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     pub fn fetch_manifest_version_optional(
         &self,
         bundle_id: &BundleId,
-        generation: u64,
+        revision: u64,
         commit_id: &str,
+        manifest_size: u64,
         manifest_sha256: &str,
     ) -> Result<Option<BundleManifest>, String> {
         domain::validate_sha256("historical manifest", manifest_sha256)?;
-        let relative_key = format!("_manifests/{generation}-{commit_id}.json");
+        if manifest_size == 0 {
+            return Err("historical manifest size must be nonzero".to_string());
+        }
+        let relative_key = format!("_manifests/{revision}-{commit_id}.json");
         validate_bundle_relative_object_key(&relative_key)?;
         let key = repository_object_key(bundle_id, &relative_key)?;
-        let Some(stored) = self.store.get(&key)? else {
-            return Ok(None);
+        let outcome = self.store.stage_verified(
+            &key,
+            &ExpectedObject {
+                size: manifest_size,
+                sha256: manifest_sha256.to_string(),
+            },
+        )?;
+        let body = match outcome {
+            StageOutcome::Missing | StageOutcome::Mismatch => return Ok(None),
+            StageOutcome::Verified(body) => body,
         };
-        if sha256(&stored.bytes) != manifest_sha256 {
-            return Ok(None);
-        }
-        let manifest: BundleManifest = parse_bounded_json(&stored.bytes, "bundle manifest")?;
+        let manifest: BundleManifest = parse_json_reader(body.open()?, "bundle manifest")?;
         manifest.validate()?;
         if &manifest.bundle.bundle_id != bundle_id
-            || manifest.generation != generation
+            || manifest.revision != revision
             || manifest.commit_id != commit_id
         {
             return Err("historical manifest coordinates do not match its contents".to_string());
@@ -1519,31 +1733,36 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         let mut verified = 0_usize;
         let mut failures = Vec::new();
         for batch in entries.chunks(PREFETCH_BATCH_OBJECTS) {
-            let keys = batch
+            let requests = batch
                 .iter()
-                .map(|(object_key, _)| repository_object_key(bundle_id, object_key))
+                .map(|(object_key, (expected_sha, expected_size))| {
+                    Ok((
+                        repository_object_key(bundle_id, object_key)?,
+                        ExpectedObject {
+                            size: *expected_size,
+                            sha256: expected_sha.clone(),
+                        },
+                    ))
+                })
                 .collect::<Result<Vec<_>, String>>()?;
-            let objects = self.store.get_many(&keys)?;
-            for (((_, (expected_sha, expected_size)), key), object) in
-                batch.iter().zip(&keys).zip(objects)
-            {
-                match object {
-                    None => failures.push(format!("bundle object '{}' is missing", key)),
-                    Some(stored)
-                        if stored.bytes.len() as u64 != *expected_size
-                            || sha256(&stored.bytes) != *expected_sha =>
-                    {
+            let objects = self.store.stage_many_verified(&requests)?;
+            for ((key, _), outcome) in requests.iter().zip(objects) {
+                match outcome {
+                    StageOutcome::Missing => {
+                        failures.push(format!("bundle object '{}' is missing", key))
+                    }
+                    StageOutcome::Mismatch => {
                         failures.push(format!(
                             "bundle object '{}' does not match manifest size/hash",
                             key
                         ));
                     }
-                    Some(_) => verified += 1,
+                    StageOutcome::Verified(_) => verified += 1,
                 }
             }
         }
         Ok(BundleObjectAudit {
-            generation: snapshot.head.generation,
+            revision: snapshot.head.revision,
             commit_id: snapshot.head.commit_id.clone(),
             objects_total: entries.len(),
             objects_verified: verified,
@@ -1600,9 +1819,9 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             }
             let stored = self
                 .store
-                .get(&key)?
+                .get_metadata(&key, MAX_BUNDLE_TAG_BYTES)?
                 .ok_or_else(|| format!("listed bundle tag '{}' disappeared", key))?;
-            let tag: BundleTag = parse_bounded_json(&stored.bytes, "bundle tag")?;
+            let tag: BundleTag = parse_json_bytes(&stored.bytes, "bundle tag")?;
             if tag.schema_version != BUNDLE_SCHEMA || tag.bundle_id != bundle_id {
                 return Err(format!("bundle tag '{}' has inconsistent identity", key));
             }
@@ -1610,7 +1829,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 bundle_id: tag.bundle_id,
                 display_name: tag.display_name,
                 kind: tag.kind,
-                generation: tag.generation,
+                revision: tag.revision,
                 updated_at: tag.updated_at,
                 resources: tag.resources,
                 files: tag.files,
@@ -1624,25 +1843,6 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             bundles: summaries,
             next_cursor,
         })
-    }
-
-    /// Plan over a fully fetched bundle — the historic byte-verified entry
-    /// point, retained for tests; production plans lazily.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn build_restore_plan(
-        &self,
-        bundle: &FetchedBundle,
-        binding: &ProjectBinding,
-        created_at: u64,
-        expected_host_identity_revision: u64,
-    ) -> Result<RestorePlan, String> {
-        validate_bundle_snapshot_bytes(bundle)?;
-        self.build_restore_plan_from_snapshot(
-            &bundle.snapshot,
-            binding,
-            created_at,
-            expected_host_identity_revision,
-        )
     }
 
     /// Build a restore plan from a verified current-schema manifest.
@@ -1764,7 +1964,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                     previous, logical_path
                 ));
             }
-            let target_state = match inspect_restore_target_digest(&target) {
+            let target_state = match inspect_restore_target(&target) {
                 Ok(state) => state,
                 Err(error) if descriptor.kind == ResourceKind::ProjectContentFile => {
                     planned_files.push(PlannedFile {
@@ -1891,7 +2091,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                         )
                     })?;
                     let target = project_content_target(logical_path, binding)?;
-                    let target_state = match inspect_restore_target_digest(&target) {
+                    let target_state = match inspect_restore_target(&target) {
                         Ok(state) => state,
                         Err(error) => {
                             actions.push(manual_action(
@@ -1981,7 +2181,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             host_id: binding.host_id.clone(),
             replica_id: binding.replica_id.clone(),
             expected_host_identity_revision,
-            generation: snapshot.head.generation,
+            revision: snapshot.head.revision,
             commit_id: snapshot.head.commit_id.clone(),
             manifest_sha256: snapshot.head.manifest_sha256.clone(),
             binding_revision: binding.revision,
@@ -2002,17 +2202,21 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         head.validate()?;
         validate_bundle_relative_object_key(&head.manifest_key)?;
         let key = repository_object_key(&head.bundle_id, &head.manifest_key)?;
-        let stored = self
-            .store
-            .get(&key)?
-            .ok_or_else(|| format!("bundle manifest '{}' is missing", key))?;
-        if sha256(&stored.bytes) != head.manifest_sha256 {
-            return Err(format!(
-                "bundle manifest '{}' failed hash verification",
-                key
-            ));
-        }
-        let manifest: BundleManifest = parse_bounded_json(&stored.bytes, "bundle manifest")?;
+        let outcome = self.store.stage_verified(
+            &key,
+            &ExpectedObject {
+                size: head.manifest_size,
+                sha256: head.manifest_sha256.clone(),
+            },
+        )?;
+        let body = match outcome {
+            StageOutcome::Missing => return Err(format!("bundle manifest '{}' is missing", key)),
+            StageOutcome::Mismatch => {
+                return Err(format!("bundle manifest '{}' failed verification", key))
+            }
+            StageOutcome::Verified(body) => body,
+        };
+        let manifest: BundleManifest = parse_json_reader(body.open()?, "bundle manifest")?;
         manifest.validate_against_head(head)?;
         Ok(manifest)
     }
@@ -2023,7 +2227,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             bundle_id: manifest.bundle.bundle_id.clone(),
             display_name: manifest.bundle.display_name.clone(),
             kind: manifest.bundle.kind,
-            generation: manifest.generation,
+            revision: manifest.revision,
             updated_at: manifest.updated_at,
             resources: manifest.resources.len() as u64,
             files: manifest.files.len() as u64,
@@ -2031,7 +2235,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         let bytes = serde_json::to_vec(&tag).map_err(|e| format!("serialize bundle tag: {}", e))?;
         let key = repository_object_key(&manifest.bundle.bundle_id, TAG_FILE)?;
         for _ in 0..4 {
-            let expectation = match self.store.get(&key)? {
+            let expectation = match self.store.get_metadata(&key, MAX_BUNDLE_TAG_BYTES)? {
                 Some(existing) => CasExpectation::Match(existing.etag),
                 None => CasExpectation::Absent,
             };
@@ -2224,7 +2428,49 @@ mod tests {
                 .unwrap(),
             CasOutcome::Written { .. }
         ));
-        assert_eq!(store.get(&head).unwrap().unwrap().bytes, b"second");
+        assert_eq!(
+            store
+                .get_metadata(&head, MAX_BUNDLE_HEAD_BYTES)
+                .unwrap()
+                .unwrap()
+                .bytes,
+            b"second"
+        );
+    }
+
+    #[test]
+    fn verified_body_readers_have_independent_positions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalBundleObjectStore::open(temp.path().join("store")).unwrap();
+        let key = ObjectKey::parse(format!(
+            ".mallard/v1/repositories/{}/_objects/{}",
+            bundle_id(1),
+            sha256(b"abcdef")
+        ))
+        .unwrap();
+        store.put_immutable(&key, b"abcdef").unwrap();
+        let outcome = store
+            .stage_verified(
+                &key,
+                &ExpectedObject {
+                    size: 6,
+                    sha256: sha256(b"abcdef"),
+                },
+            )
+            .unwrap();
+        let StageOutcome::Verified(body) = outcome else {
+            panic!("object was not staged")
+        };
+
+        let mut first = body.open().unwrap();
+        let mut second = body.open().unwrap();
+        let mut first_prefix = [0_u8; 2];
+        let mut second_prefix = [0_u8; 2];
+        first.read_exact(&mut first_prefix).unwrap();
+        second.read_exact(&mut second_prefix).unwrap();
+
+        assert_eq!(&first_prefix, b"ab");
+        assert_eq!(&second_prefix, b"ab");
     }
 
     #[test]
@@ -2255,6 +2501,51 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.contains("layout version 2"));
+    }
+
+    #[test]
+    fn current_manifest_read_enforces_the_head_manifest_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        write(&project.join("CLAUDE.md"), b"portable guidance");
+        let mut request = CaptureRequest::for_project(&project);
+        request.include_project_content = true;
+        let inventory = discover_project(&request).unwrap();
+        let recipe = recipe_for(
+            inventory
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id.clone()),
+        );
+        let id = bundle_id(91);
+        let store_root = temp.path().join("store");
+        let engine = BundleEngine::open(
+            LocalBundleObjectStore::open(&store_root).unwrap(),
+            storage_id(),
+        )
+        .unwrap();
+        engine
+            .publish_test_resources(CapturedResourcesPublishRequest {
+                identity: identity(id.clone(), "Sized manifest"),
+                recipe: recipe.clone(),
+                captured_with: captured_with(),
+                captured: capture_recipe(&request, &recipe).unwrap(),
+                observed_head: None,
+                updated_at: 10,
+            })
+            .unwrap();
+
+        let head_path = store_root
+            .join(REPOSITORY_PREFIX)
+            .join(id.as_str())
+            .join(HEAD_FILE);
+        let mut head: BundleHead = serde_json::from_slice(&fs::read(&head_path).unwrap()).unwrap();
+        head.manifest_size += 1;
+        fs::write(&head_path, serde_json::to_vec(&head).unwrap()).unwrap();
+
+        let error = engine.inspect(&id).unwrap_err();
+        assert!(error.contains("failed verification"), "{error}");
     }
 
     #[test]
@@ -2306,7 +2597,8 @@ mod tests {
                 updated_at: 10,
             })
             .unwrap();
-        assert_eq!(first.snapshot.head.generation, 1);
+        assert_eq!(first.snapshot.head.revision, 1);
+        let first_token = engine.read_head(&id).unwrap().unwrap().1;
         let repository_root = store_root.join(format!("{}/{}", REPOSITORY_PREFIX, id));
         assert!(store_root.join(STORAGE_MARKER_KEY).is_file());
         assert!(repository_root.join(HEAD_FILE).is_file());
@@ -2314,8 +2606,30 @@ mod tests {
         assert!(repository_root.join("_manifests").is_dir());
         assert!(repository_root.join("_commits").is_dir());
         assert!(repository_root.join("_objects").is_dir());
-        let fetched = engine.fetch(&id).unwrap();
-        assert_eq!(fetched.files.values().next().unwrap(), b"version one");
+        assert_eq!(
+            fs::metadata(repository_root.join(&first.snapshot.head.manifest_key))
+                .unwrap()
+                .len(),
+            first.snapshot.head.manifest_size
+        );
+        let snapshot = engine.inspect(&id).unwrap();
+        let path = snapshot.manifest.files.keys().next().unwrap().clone();
+        let cache = Arc::new(ObjectCache::default());
+        let mut bytes = engine.byte_source(&snapshot, Some(cache.clone()), None);
+        assert_eq!(
+            bytes.read_bounded(&path, 1024, "test payload").unwrap(),
+            b"version one"
+        );
+        drop(bytes);
+
+        let mut wrong_size = snapshot.clone();
+        wrong_size.manifest.files.get_mut(&path).unwrap().size += 1;
+        let mut bytes = engine.byte_source(&wrong_size, Some(cache), None);
+        let error = bytes.body(&path).unwrap_err();
+        assert!(
+            error.contains("does not match manifest size/hash"),
+            "{error}"
+        );
 
         write(&project.join("CLAUDE.md"), b"version two");
         let captured = capture_recipe(&request, &recipe).unwrap();
@@ -2325,18 +2639,19 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured,
-                observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
+                observed_head: Some((first.snapshot.head.clone(), first_token.clone())),
                 updated_at: 20,
             })
             .unwrap();
-        assert_eq!(second.snapshot.head.generation, 2);
+        assert_eq!(second.snapshot.head.revision, 2);
+        let second_token = engine.read_head(&id).unwrap().unwrap().1;
         assert!(engine
             .publish_test_resources(CapturedResourcesPublishRequest {
                 identity: identity(id.clone(), "Stale"),
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: Some((first.snapshot.head.clone(), first.head_token)),
+                observed_head: Some((first.snapshot.head.clone(), first_token)),
                 updated_at: 21,
             })
             .is_err());
@@ -2348,7 +2663,7 @@ mod tests {
                 recipe: empty_recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(&request, &empty_recipe).unwrap(),
-                observed_head: Some((second.snapshot.head.clone(), second.head_token)),
+                observed_head: Some((second.snapshot.head.clone(), second_token)),
                 updated_at: 30,
             })
             .unwrap();
@@ -2373,7 +2688,7 @@ mod tests {
                 bundle_id: id.clone(),
                 display_name: format!("Bundle {}", number),
                 kind: BundleKind::Project,
-                generation: 1,
+                revision: 1,
                 updated_at: number,
                 resources: 1,
                 files: 1,
@@ -2438,10 +2753,10 @@ mod tests {
                 updated_at: 10,
             })
             .unwrap();
-        let fetched = engine.fetch(&id).unwrap();
+        let snapshot = engine.inspect(&id).unwrap();
         let binding = active_binding(id, &target, None, None);
         let plan = engine
-            .build_restore_plan(&fetched, &binding, 100, 0)
+            .build_restore_plan_from_snapshot(&snapshot, &binding, 100, 0)
             .unwrap();
         let write_action = plan
             .actions
@@ -2455,9 +2770,11 @@ mod tests {
             .unwrap();
         assert!(write_action.requires_explicit_approval);
         let approved = BTreeSet::from([write_action.action_id.clone()]);
+        let mut bytes = engine.byte_source(&snapshot, None, None);
         let result = engine
-            .apply_restore_plan(
-                &fetched,
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut bytes,
                 &binding,
                 &plan,
                 &approved,
@@ -2480,7 +2797,7 @@ mod tests {
             .any(|receipt| receipt.status == ActionStatus::Applied));
     }
 
-    /// Store wrapper recording every `get`/`get_many` key and every write so
+    /// Store wrapper recording every staged/metadata key and every write so
     /// tests can prove which payload objects an operation actually downloaded
     /// or uploaded. The trait-default `put_many` routes through
     /// `put_immutable`, so bulk uploads are recorded per object.
@@ -2545,18 +2862,34 @@ mod tests {
     }
 
     impl BundleObjectStore for CountingStore {
-        fn get(&self, key: &ObjectKey) -> Result<Option<StoredObject>, String> {
+        fn get_metadata(
+            &self,
+            key: &ObjectKey,
+            max_bytes: u64,
+        ) -> Result<Option<StoredMetadata>, String> {
             self.keys.lock().unwrap().push(key.as_str().to_string());
-            self.inner.get(key)
+            self.inner.get_metadata(key, max_bytes)
         }
 
-        fn get_many(&self, keys: &[ObjectKey]) -> Result<Vec<Option<StoredObject>>, String> {
+        fn stage_verified(
+            &self,
+            key: &ObjectKey,
+            expected: &ExpectedObject,
+        ) -> Result<StageOutcome, String> {
+            self.keys.lock().unwrap().push(key.as_str().to_string());
+            self.inner.stage_verified(key, expected)
+        }
+
+        fn stage_many_verified(
+            &self,
+            requests: &[(ObjectKey, ExpectedObject)],
+        ) -> Result<Vec<StageOutcome>, String> {
             let mut recorded = self.keys.lock().unwrap();
-            for key in keys {
+            for (key, _) in requests {
                 recorded.push(key.as_str().to_string());
             }
             drop(recorded);
-            self.inner.get_many(keys)
+            self.inner.stage_many_verified(requests)
         }
 
         fn put_immutable(
@@ -2625,6 +2958,7 @@ mod tests {
             })
             .unwrap();
         assert!(first.published);
+        let first_token = engine.read_head(&id).unwrap().unwrap().1;
         assert_eq!(store.payload_puts().len(), 2);
         for entry in first.snapshot.manifest.files.values() {
             assert_eq!(entry.object_key, format!("_objects/{}", entry.sha256));
@@ -2638,12 +2972,12 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
+                observed_head: Some((first.snapshot.head.clone(), first_token)),
                 updated_at: 20,
             })
             .unwrap();
         assert!(second.published);
-        assert_eq!(second.snapshot.head.generation, 2);
+        assert_eq!(second.snapshot.head.revision, 2);
         let changed_key =
             repository_object_key(&id, &format!("_objects/{}", sha256(b"second draft"))).unwrap();
         assert_eq!(
@@ -2718,12 +3052,13 @@ mod tests {
         let hit = engine
             .fetch_manifest_version_optional(
                 &id,
-                head.generation,
+                head.revision,
                 &head.commit_id,
+                head.manifest_size,
                 &head.manifest_sha256,
             )
             .unwrap();
-        assert_eq!(hit.map(|manifest| manifest.generation), Some(1));
+        assert_eq!(hit.map(|manifest| manifest.revision), Some(1));
         assert_eq!(manifest_key_reads(&store), 1);
 
         // A second identical call reads the store again: presence answers
@@ -2731,8 +3066,9 @@ mod tests {
         assert!(engine
             .fetch_manifest_version_optional(
                 &id,
-                head.generation,
+                head.revision,
                 &head.commit_id,
+                head.manifest_size,
                 &head.manifest_sha256,
             )
             .unwrap()
@@ -2742,11 +3078,23 @@ mod tests {
         // Bytes that no longer reproduce the recorded digest are absence,
         // not an error — row 8 treats them exactly like a missing key.
         assert!(engine
-            .fetch_manifest_version_optional(&id, head.generation, &head.commit_id, &"f".repeat(64))
+            .fetch_manifest_version_optional(
+                &id,
+                head.revision,
+                &head.commit_id,
+                head.manifest_size,
+                &"f".repeat(64),
+            )
             .unwrap()
             .is_none());
         assert!(engine
-            .fetch_manifest_version_optional(&id, 99, "commit-nowhere", &head.manifest_sha256)
+            .fetch_manifest_version_optional(
+                &id,
+                99,
+                "commit-nowhere",
+                head.manifest_size,
+                &head.manifest_sha256,
+            )
             .unwrap()
             .is_none());
 
@@ -2763,8 +3111,9 @@ mod tests {
         assert!(engine
             .fetch_manifest_version_optional(
                 &id,
-                head.generation,
+                head.revision,
                 &head.commit_id,
+                head.manifest_size,
                 &head.manifest_sha256,
             )
             .unwrap()
@@ -2838,6 +3187,7 @@ mod tests {
             })
             .unwrap();
         assert!(first.published);
+        let first_token = engine.read_head(&id).unwrap().unwrap().1;
 
         store.reset();
         let noop = engine
@@ -2846,20 +3196,20 @@ mod tests {
                 recipe: recipe.clone(),
                 captured_with: captured_with(),
                 captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
+                observed_head: Some((first.snapshot.head.clone(), first_token.clone())),
                 updated_at: 20,
             })
             .unwrap();
         assert!(!noop.published);
-        assert_eq!(noop.snapshot.head.generation, 1);
-        assert_eq!(noop.head_token, first.head_token);
+        assert_eq!(noop.snapshot.head.revision, 1);
+        assert_eq!(engine.read_head(&id).unwrap().unwrap().1, first_token);
         assert_eq!(store.put_count(), 0, "a semantic no-op writes no objects");
         assert_eq!(
             store.cas_count(),
             0,
             "a semantic no-op never touches the head"
         );
-        assert_eq!(engine.inspect(&id).unwrap().head.generation, 1);
+        assert_eq!(engine.inspect(&id).unwrap().head.revision, 1);
     }
 
     #[test]
@@ -2895,6 +3245,7 @@ mod tests {
                 &mut |progress| events.push(progress),
             )
             .unwrap();
+        let first_token = engine.read_head(&id).unwrap().unwrap().1;
         let full_bytes = (b"tiny".len() + b"a considerably longer payload".len()) as u64;
         assert_eq!(events.len(), 2);
         assert_eq!(events.last().unwrap().index, 2);
@@ -2910,7 +3261,7 @@ mod tests {
                     recipe: recipe.clone(),
                     captured_with: captured_with(),
                     captured: capture_recipe(&request, &recipe).unwrap(),
-                    observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
+                    observed_head: Some((first.snapshot.head.clone(), first_token.clone())),
                     updated_at: 20,
                 },
                 &mut |progress| events.push(progress),
@@ -2931,7 +3282,7 @@ mod tests {
                     recipe: recipe.clone(),
                     captured_with: captured_with(),
                     captured: capture_recipe(&request, &recipe).unwrap(),
-                    observed_head: Some((first.snapshot.head.clone(), first.head_token.clone())),
+                    observed_head: Some((first.snapshot.head.clone(), first_token)),
                     updated_at: 30,
                 },
                 &mut |progress| events.push(progress),
@@ -2966,7 +3317,8 @@ mod tests {
             .clone();
         let recipe = recipe_for([resource_id]);
         let id = bundle_id(97);
-        let store = CountingStore::open(&temp.path().join("store"));
+        let store_root = temp.path().join("store");
+        let store = CountingStore::open(&store_root);
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
         engine
             .publish_test_resources(CapturedResourcesPublishRequest {
@@ -2982,6 +3334,22 @@ mod tests {
 
         store.reset();
         let snapshot = engine.inspect(&id).unwrap();
+        let logical_path = snapshot.manifest.files.keys().next().unwrap();
+        let entry_size = snapshot.manifest.files[logical_path].size;
+        let mut limited_bytes = engine.byte_source(&snapshot, None, None);
+        let error = limited_bytes
+            .read_bounded(
+                logical_path,
+                entry_size.saturating_sub(1),
+                "bounded test payload",
+            )
+            .unwrap_err();
+        assert!(error.contains("exceeds its read limit"), "{error}");
+        assert_eq!(
+            store.payload_gets(),
+            0,
+            "resource limits must reject before downloading an object"
+        );
         let plan = engine
             .build_restore_plan_from_snapshot(&snapshot, &binding, 100, 0)
             .unwrap();
@@ -3070,6 +3438,31 @@ mod tests {
             fs::read(target.join("CLAUDE.md")).unwrap(),
             b"portable guidance"
         );
+
+        let head_path = store_root
+            .join(REPOSITORY_PREFIX)
+            .join(id.as_str())
+            .join(HEAD_FILE);
+        let mut changed_head: BundleHead =
+            serde_json::from_slice(&fs::read(&head_path).unwrap()).unwrap();
+        changed_head.manifest_size += 1;
+        fs::write(&head_path, serde_json::to_vec(&changed_head).unwrap()).unwrap();
+        let mut apply_bytes = engine.byte_source(&snapshot, None, None);
+        let error = engine
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut apply_bytes,
+                &binding,
+                &plan,
+                &approved,
+                &temp.path().join("backups"),
+                104,
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("bundle head changed after restore planning"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -3128,7 +3521,7 @@ mod tests {
                 updated_at: 10,
             })
             .unwrap();
-        let fetched = engine.fetch(&id).unwrap();
+        let snapshot = engine.inspect(&id).unwrap();
         let binding = active_binding(id, &target, None, Some(&target_claude));
 
         let is_generic_write = |action: &RestoreAction| {
@@ -3137,15 +3530,23 @@ mod tests {
                 RestoreActionKind::WriteFile { .. } | RestoreActionKind::MergeFile { .. }
             )
         };
-        let plan = engine.build_restore_plan(&fetched, &binding, 100, 0).unwrap();
-        let action = plan.actions.iter().find(|action| is_generic_write(action)).unwrap();
+        let plan = engine
+            .build_restore_plan_from_snapshot(&snapshot, &binding, 100, 0)
+            .unwrap();
+        let action = plan
+            .actions
+            .iter()
+            .find(|action| is_generic_write(action))
+            .unwrap();
         let memory_target = PathBuf::from(action.target_path.clone().unwrap());
 
         // The target already holds the manifest bytes: the plan stops asking,
         // so an all-deselected apply cannot strand the reviewed baseline
         // behind a write that would change nothing.
         write(&memory_target, b"remember the ducks");
-        let plan = engine.build_restore_plan(&fetched, &binding, 101, 0).unwrap();
+        let plan = engine
+            .build_restore_plan_from_snapshot(&snapshot, &binding, 101, 0)
+            .unwrap();
         assert!(
             !plan.actions.iter().any(|action| is_generic_write(action)),
             "identical generic files must not re-enter review: {:?}",
@@ -3154,7 +3555,9 @@ mod tests {
 
         // A drifted target is real work again.
         write(&memory_target, b"remember the geese");
-        let plan = engine.build_restore_plan(&fetched, &binding, 102, 0).unwrap();
+        let plan = engine
+            .build_restore_plan_from_snapshot(&snapshot, &binding, 102, 0)
+            .unwrap();
         assert!(plan.actions.iter().any(|action| is_generic_write(action)));
     }
 
@@ -3211,10 +3614,10 @@ mod tests {
                 updated_at: 10,
             })
             .unwrap();
-        let fetched = engine.fetch(&id).unwrap();
+        let snapshot = engine.inspect(&id).unwrap();
         let binding = active_binding(id, &target, None, Some(&target_claude));
         let plan = engine
-            .build_restore_plan(&fetched, &binding, 100, 0)
+            .build_restore_plan_from_snapshot(&snapshot, &binding, 100, 0)
             .unwrap();
         let action = plan
             .actions
@@ -3233,9 +3636,11 @@ mod tests {
             .unwrap()
             .contains(&encoded_target));
         let approved = BTreeSet::from([action.action_id.clone()]);
+        let mut bytes = engine.byte_source(&snapshot, None, None);
         engine
-            .apply_restore_plan(
-                &fetched,
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut bytes,
                 &binding,
                 &plan,
                 &approved,
@@ -3577,58 +3982,11 @@ fn safe_lexical_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
 #[derive(Debug)]
 struct RestoreTargetState {
     digest: Option<String>,
-    bytes: Option<Vec<u8>>,
+    size: Option<u64>,
     mode: Option<u32>,
 }
 
-/// Digest-and-mode-only variant of [`inspect_restore_target`] for planning:
-/// the target is hashed streaming instead of being read into memory, so a
-/// plan over many large conversations never holds their bytes at once.
-fn inspect_restore_target_digest(path: &Path) -> Result<RestoreTargetState, String> {
-    inspect_existing_ancestors_no_symlink(path)?;
-    let meta = match fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(RestoreTargetState {
-                digest: None,
-                bytes: None,
-                mode: None,
-            })
-        }
-        Err(e) => {
-            return Err(format!(
-                "inspect restore target '{}': {}",
-                path.display(),
-                e
-            ))
-        }
-    };
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return Err(format!(
-            "restore target '{}' is not a regular no-follow file",
-            path.display()
-        ));
-    }
-    if meta.len() > MAX_OBJECT_BYTES as u64 {
-        return Err(format!("restore target '{}' is too large", path.display()));
-    }
-    let mut file = fs::File::open(path)
-        .map_err(|e| format!("read restore target '{}': {}", path.display(), e))?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)
-        .map_err(|e| format!("read restore target '{}': {}", path.display(), e))?;
-    let mut digest = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        use std::fmt::Write as _;
-        let _ = write!(&mut digest, "{:02x}", byte);
-    }
-    Ok(RestoreTargetState {
-        digest: Some(digest),
-        bytes: None,
-        mode: Some(safe_mode(&meta)),
-    })
-}
-
+/// Inspect a restore target without materializing it in memory.
 fn inspect_restore_target(path: &Path) -> Result<RestoreTargetState, String> {
     inspect_existing_ancestors_no_symlink(path)?;
     let meta = match fs::symlink_metadata(path) {
@@ -3636,7 +3994,7 @@ fn inspect_restore_target(path: &Path) -> Result<RestoreTargetState, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(RestoreTargetState {
                 digest: None,
-                bytes: None,
+                size: None,
                 mode: None,
             })
         }
@@ -3654,15 +4012,21 @@ fn inspect_restore_target(path: &Path) -> Result<RestoreTargetState, String> {
             path.display()
         ));
     }
-    if meta.len() > MAX_OBJECT_BYTES as u64 {
-        return Err(format!("restore target '{}' is too large", path.display()));
+    let mut file = open_read_only_no_follow(path, &format!("restore target '{}'", path.display()))?;
+    let opened_meta = file
+        .metadata()
+        .map_err(|e| format!("inspect opened restore target '{}': {}", path.display(), e))?;
+    if !opened_meta.is_file() || opened_meta.len() != meta.len() {
+        return Err(format!(
+            "restore target '{}' changed while opening",
+            path.display()
+        ));
     }
-    let bytes =
-        fs::read(path).map_err(|e| format!("read restore target '{}': {}", path.display(), e))?;
+    let digest = sha256_reader(&mut file, &format!("restore target '{}'", path.display()))?;
     Ok(RestoreTargetState {
-        digest: Some(sha256(&bytes)),
-        bytes: Some(bytes),
-        mode: Some(safe_mode(&meta)),
+        digest: Some(digest),
+        size: Some(opened_meta.len()),
+        mode: Some(safe_mode(&opened_meta)),
     })
 }
 
@@ -3736,6 +4100,19 @@ fn inspect_existing_ancestors_no_symlink(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn open_read_only_no_follow(path: &Path, label: &str) -> Result<fs::File, String> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options
+        .open(path)
+        .map_err(|error| format!("open {}: {}", label, error))
+}
+
 fn prospective_canonical_path(path: &Path) -> Result<PathBuf, String> {
     let mut missing = Vec::new();
     let mut cursor = path;
@@ -3766,9 +4143,17 @@ fn prospective_canonical_path(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-pub(crate) fn write_target_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
-    if bytes.len() > MAX_OBJECT_BYTES || mode & !0o777 != 0 {
-        return Err("unsafe target bytes or mode".to_string());
+fn write_target_atomic_from_reader(
+    path: &Path,
+    reader: &mut dyn Read,
+    expected_size: u64,
+    expected_sha256: &str,
+    mode: u32,
+    expected_target: Option<&RestoreTargetState>,
+) -> Result<(), String> {
+    domain::validate_sha256("target bytes", expected_sha256)?;
+    if mode & !0o777 != 0 {
+        return Err("unsafe target mode".to_string());
     }
     let parent = path
         .parent()
@@ -3778,9 +4163,13 @@ pub(crate) fn write_target_atomic(path: &Path, bytes: &[u8], mode: u32) -> Resul
     inspect_existing_ancestors_no_symlink(path)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .map_err(|e| format!("create target temp in '{}': {}", parent.display(), e))?;
-    temp.as_file_mut()
-        .write_all(bytes)
-        .map_err(|e| format!("write target '{}': {}", path.display(), e))?;
+    copy_and_verify(
+        reader,
+        temp.as_file_mut(),
+        expected_size,
+        expected_sha256,
+        &format!("target '{}'", path.display()),
+    )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -3791,21 +4180,146 @@ pub(crate) fn write_target_atomic(path: &Path, bytes: &[u8], mode: u32) -> Resul
     temp.as_file_mut()
         .sync_all()
         .map_err(|e| format!("sync target '{}': {}", path.display(), e))?;
+    if let Some(expected) = expected_target {
+        let current = inspect_restore_target(path)?;
+        if current.digest != expected.digest
+            || current.size != expected.size
+            || current.mode != expected.mode
+        {
+            return Err("restore target changed while staging its replacement".to_string());
+        }
+    }
     temp.persist(path)
         .map_err(|e| format!("publish target '{}': {}", path.display(), e.error))?;
     Ok(())
 }
 
+pub(crate) fn write_target_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
+    let expected_size = u64::try_from(bytes.len())
+        .map_err(|_| "target bytes cannot fit the portable size field".to_string())?;
+    let expected_sha256 = sha256(bytes);
+    write_target_atomic_from_reader(
+        path,
+        &mut std::io::Cursor::new(bytes),
+        expected_size,
+        &expected_sha256,
+        mode,
+        None,
+    )
+}
+
+fn write_verified_body_atomic(
+    path: &Path,
+    body: &VerifiedBody,
+    mode: u32,
+    expected_target: &RestoreTargetState,
+) -> Result<(), String> {
+    write_target_atomic_from_reader(
+        path,
+        &mut body.open()?,
+        body.size(),
+        body.sha256(),
+        mode,
+        Some(expected_target),
+    )
+}
+
 pub(crate) fn write_immutable_backup(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Ok(existing) = fs::read(path) {
-        return if existing == bytes {
-            Ok(())
-        } else {
-            Err(format!(
-                "backup '{}' already exists with different bytes",
-                path.display()
-            ))
-        };
+    let expected_size = u64::try_from(bytes.len())
+        .map_err(|_| "backup bytes cannot fit the portable size field".to_string())?;
+    let expected_sha256 = sha256(bytes);
+    write_immutable_backup_from_reader(
+        path,
+        &mut std::io::Cursor::new(bytes),
+        expected_size,
+        &expected_sha256,
+    )
+}
+
+fn write_immutable_backup_from_path(
+    backup_path: &Path,
+    source_path: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    inspect_existing_ancestors_no_symlink(source_path)?;
+    let source_meta = fs::symlink_metadata(source_path).map_err(|error| {
+        format!(
+            "inspect backup source '{}': {}",
+            source_path.display(),
+            error
+        )
+    })?;
+    if source_meta.file_type().is_symlink() || !source_meta.is_file() {
+        return Err(format!(
+            "backup source '{}' is not a regular no-follow file",
+            source_path.display()
+        ));
+    }
+    let mut source = open_read_only_no_follow(
+        source_path,
+        &format!("backup source '{}'", source_path.display()),
+    )?;
+    let opened_meta = source.metadata().map_err(|error| {
+        format!(
+            "inspect opened backup source '{}': {}",
+            source_path.display(),
+            error
+        )
+    })?;
+    if !opened_meta.is_file() || opened_meta.len() != source_meta.len() {
+        return Err(format!(
+            "backup source '{}' changed while opening",
+            source_path.display()
+        ));
+    }
+    write_immutable_backup_from_reader(backup_path, &mut source, expected_size, expected_sha256)
+}
+
+fn write_immutable_backup_from_reader(
+    path: &Path,
+    reader: &mut dyn Read,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    domain::validate_sha256("backup bytes", expected_sha256)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(format!(
+                    "backup '{}' is not a regular no-follow file",
+                    path.display()
+                ));
+            }
+            if metadata.len() != expected_size {
+                return Err(format!(
+                    "backup '{}' already exists with different bytes",
+                    path.display()
+                ));
+            }
+            let mut existing =
+                open_read_only_no_follow(path, &format!("backup '{}'", path.display()))?;
+            let opened_metadata = existing.metadata().map_err(|error| {
+                format!("inspect opened backup '{}': {}", path.display(), error)
+            })?;
+            if !opened_metadata.is_file() || opened_metadata.len() != expected_size {
+                return Err(format!(
+                    "backup '{}' already exists with different bytes",
+                    path.display()
+                ));
+            }
+            let digest = sha256_reader(&mut existing, &format!("backup '{}'", path.display()))?;
+            return if digest == expected_sha256 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "backup '{}' already exists with different bytes",
+                    path.display()
+                ))
+            };
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("inspect backup '{}': {}", path.display(), error)),
     }
     let parent = path
         .parent()
@@ -3814,9 +4328,13 @@ pub(crate) fn write_immutable_backup(path: &Path, bytes: &[u8]) -> Result<(), St
     create_safe_directory_tree(&base, parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .map_err(|e| format!("create backup temp: {}", e))?;
-    temp.as_file_mut()
-        .write_all(bytes)
-        .map_err(|e| format!("write backup '{}': {}", path.display(), e))?;
+    copy_and_verify(
+        reader,
+        temp.as_file_mut(),
+        expected_size,
+        expected_sha256,
+        &format!("backup '{}'", path.display()),
+    )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -3826,6 +4344,40 @@ pub(crate) fn write_immutable_backup(path: &Path, bytes: &[u8]) -> Result<(), St
     }
     temp.persist_noclobber(path)
         .map_err(|e| format!("publish backup '{}': {}", path.display(), e.error))?;
+    Ok(())
+}
+
+fn copy_and_verify(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    expected_size: u64,
+    expected_sha256: &str,
+    label: &str,
+) -> Result<(), String> {
+    let mut hasher = Sha256::new();
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("read {}: {}", label, error))?;
+        if count == 0 {
+            break;
+        }
+        copied = copied
+            .checked_add(count as u64)
+            .ok_or_else(|| format!("{} byte count overflow", label))?;
+        if copied > expected_size {
+            return Err(format!("{} exceeds its expected size", label));
+        }
+        hasher.update(&buffer[..count]);
+        writer
+            .write_all(&buffer[..count])
+            .map_err(|error| format!("write {}: {}", label, error))?;
+    }
+    if copied != expected_size || hex_lower(&hasher.finalize()) != expected_sha256 {
+        return Err(format!("{} failed size/hash verification", label));
+    }
     Ok(())
 }
 
@@ -3895,7 +4447,7 @@ fn validate_plan_pin(
         || plan.host_id != binding.host_id
         || plan.replica_id != binding.replica_id
         || plan.bundle_id != binding.bundle_id
-        || plan.generation != snapshot.head.generation
+        || plan.revision != snapshot.head.revision
         || plan.commit_id != snapshot.head.commit_id
         || plan.manifest_sha256 != snapshot.head.manifest_sha256
         || plan.binding_revision != binding.revision
@@ -3994,14 +4546,40 @@ fn sha256(bytes: &[u8]) -> String {
     output
 }
 
-fn parse_bounded_json<T: for<'de> Deserialize<'de>>(
-    bytes: &[u8],
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut output, "{:02x}", byte);
+    }
+    output
+}
+
+fn sha256_reader(reader: &mut impl Read, label: &str) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("read {}: {}", label, error))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hex_lower(&hasher.finalize()))
+}
+
+fn parse_json_bytes<T: for<'de> Deserialize<'de>>(bytes: &[u8], label: &str) -> Result<T, String> {
+    serde_json::from_slice(bytes).map_err(|e| format!("parse {}: {}", label, e))
+}
+
+fn parse_json_reader<T: for<'de> Deserialize<'de>>(
+    reader: impl Read,
     label: &str,
 ) -> Result<T, String> {
-    if bytes.len() > MAX_OBJECT_BYTES {
-        return Err(format!("{} exceeds the JSON read limit", label));
-    }
-    serde_json::from_slice(bytes).map_err(|e| format!("parse {}: {}", label, e))
+    serde_json::from_reader(BufReader::new(reader))
+        .map_err(|error| format!("parse {}: {}", label, error))
 }
 
 fn validate_store_path(value: &str, minimum_components: usize) -> Result<(), String> {
@@ -4308,7 +4886,7 @@ fn validate_conversation_retention(
     Ok(())
 }
 
-/// Semantic manifest equality excludes `object_key` and generation/commit/time
+/// Semantic manifest equality excludes `object_key` and revision/commit/time
 /// coordinates. Object keys are derived from content and do not define the
 /// reviewed bundle state.
 fn manifest_is_semantic_noop(previous: &BundleManifest, candidate: &BundleManifest) -> bool {
@@ -4365,32 +4943,6 @@ fn file_delta(previous: Option<&BundleManifest>, current: &BundleManifest) -> (u
     (added, changed, removed)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-fn validate_bundle_snapshot_bytes(bundle: &FetchedBundle) -> Result<(), String> {
-    bundle.snapshot.validate()?;
-    if bundle.files.len() != bundle.snapshot.manifest.files.len() {
-        return Err("fetched bundle file set differs from its manifest".to_string());
-    }
-    for (path, entry) in &bundle.snapshot.manifest.files {
-        let bytes = bundle
-            .files
-            .get(path)
-            .ok_or_else(|| format!("fetched bundle lacks '{}'", path))?;
-        if bytes.len() as u64 != entry.size || sha256(bytes) != entry.sha256 {
-            return Err(format!(
-                "fetched file '{}' failed size/hash verification",
-                path
-            ));
-        }
-    }
-    let bytes = serde_json::to_vec(&bundle.snapshot.manifest)
-        .map_err(|e| format!("serialize fetched manifest: {}", e))?;
-    if sha256(&bytes) != bundle.snapshot.head.manifest_sha256 {
-        return Err("fetched manifest bytes differ from the pinned head hash".to_string());
-    }
-    Ok(())
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BackupRecord {
     pub action_id: ActionId,
@@ -4409,31 +4961,6 @@ pub struct ApplyBundleResult {
 impl<S: BundleObjectStore> BundleEngine<S> {
     /// Apply approved byte-materialization actions. This engine never shells
     /// out or silently activates executable configuration.
-    /// Apply over a fully fetched bundle — the historic byte-verified entry
-    /// point, retained for tests; production applies lazily.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn apply_restore_plan(
-        &self,
-        bundle: &FetchedBundle,
-        binding: &ProjectBinding,
-        plan: &RestorePlan,
-        approved_action_ids: &BTreeSet<ActionId>,
-        backup_root: &Path,
-        applied_at: u64,
-    ) -> Result<ApplyBundleResult, String> {
-        validate_bundle_snapshot_bytes(bundle)?;
-        let mut bytes = PreloadedBytes::new(bundle);
-        self.apply_restore_plan_lazy(
-            &bundle.snapshot,
-            &mut bytes,
-            binding,
-            plan,
-            approved_action_ids,
-            backup_root,
-            applied_at,
-        )
-    }
-
     /// Apply approved actions, downloading only the payload objects that
     /// will actually be written. Actions whose pinned materialized digest
     /// matches the pinned target digest complete without any bytes.
@@ -4513,8 +5040,9 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         let current = self
             .read_head(&plan.bundle_id)?
             .ok_or_else(|| "bundle head disappeared after planning".to_string())?;
-        if current.0.generation != plan.generation
+        if current.0.revision != plan.revision
             || current.0.commit_id != plan.commit_id
+            || current.0.manifest_size != snapshot.head.manifest_size
             || current.0.manifest_sha256 != plan.manifest_sha256
         {
             return Err("bundle head changed after restore planning".to_string());
@@ -4810,7 +5338,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         }
         validate_target_for_logical(&target, logical_path, binding)?;
         let before = inspect_restore_target(&target)?;
-        let Some(bytes) = before.bytes else {
+        let Some(before_digest) = before.digest.as_deref() else {
             return Ok(receipt_for(
                 action,
                 ActionStatus::Applied,
@@ -4820,7 +5348,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                 None,
             ));
         };
-        if before.digest.as_deref() != Some(last_sha256.as_str())
+        if before_digest != last_sha256
             || action.expected_target_sha256.as_deref() != Some(last_sha256.as_str())
         {
             return Err("local project file changed; deletion was blocked".to_string());
@@ -4833,13 +5361,17 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             return Err("local project file mode changed; deletion was blocked".to_string());
         }
         let backup_path = plan_backup.join(format!("{}.delete.bak", action.action_id.as_str()));
-        write_immutable_backup(&backup_path, &bytes)?;
-        if sha256(
-            &fs::read(&backup_path)
-                .map_err(|error| format!("verify deletion backup: {}", error))?,
-        ) != *last_sha256
-        {
-            return Err("project-file deletion backup failed verification".to_string());
+        write_immutable_backup_from_path(
+            &backup_path,
+            &target,
+            before
+                .size
+                .ok_or_else(|| "restore target size disappeared".to_string())?,
+            last_sha256,
+        )?;
+        let current = inspect_restore_target(&target)?;
+        if current.digest.as_deref() != Some(last_sha256.as_str()) || current.mode != before.mode {
+            return Err("local project file changed while backing it up".to_string());
         }
         backups.push(BackupRecord {
             action_id: action.action_id.clone(),
@@ -4988,8 +5520,14 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             ));
         }
 
-        let source_bytes = bytes.get(logical_path)?;
-        let materialized_sha256 = sha256(source_bytes);
+        let source_body = bytes.body(logical_path)?;
+        if source_body.size() != entry.size || source_body.sha256() != entry.sha256 {
+            return Err(format!(
+                "byte source for '{}' differs from the pinned manifest",
+                logical_path
+            ));
+        }
+        let materialized_sha256 = source_body.sha256().to_string();
         if before.digest.as_deref() == Some(materialized_sha256.as_str()) {
             if let RestoreActionKind::WriteProjectFile {
                 mode, source_mtime, ..
@@ -5011,17 +5549,24 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             ));
         }
 
-        if let Some(existing) = before.bytes.as_ref() {
+        if let (Some(existing_digest), Some(existing_size)) =
+            (before.digest.as_deref(), before.size)
+        {
             let backup_path = plan_backup.join(format!("{}.bak", action.action_id.as_str()));
-            write_immutable_backup(&backup_path, existing)?;
+            write_immutable_backup_from_path(
+                &backup_path,
+                &target,
+                existing_size,
+                existing_digest,
+            )?;
             backups.push(BackupRecord {
                 action_id: action.action_id.clone(),
                 target_path: path_text(&target)?,
                 backup_path: path_text(&backup_path)?,
-                sha256: sha256(existing),
+                sha256: existing_digest.to_string(),
             });
         }
-        write_target_atomic(&target, source_bytes, entry.mode.unwrap_or(0o600))?;
+        write_verified_body_atomic(&target, &source_body, entry.mode.unwrap_or(0o600), &before)?;
         if let RestoreActionKind::WriteProjectFile {
             mode, source_mtime, ..
         } = &action.kind

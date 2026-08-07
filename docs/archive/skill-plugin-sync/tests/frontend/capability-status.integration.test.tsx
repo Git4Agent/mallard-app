@@ -52,8 +52,8 @@ function report(items: CapabilityStatusItem[]): CapabilityStatusReport {
     }],
     storage_id: "storage-one",
     storage_name: "R2 backup",
-    generation: 7,
-    base_generation: 6,
+    revision: 7,
+    base_revision: 6,
     compared_at: 1_753_000_000,
     items,
     warnings: [],
@@ -303,7 +303,7 @@ test("the Skills status view excludes plugins", () => {
   assert.doesNotMatch(html, /Work Codex/);
   assert.doesNotMatch(html, /Shared by/);
   assert.doesNotMatch(html, /Updated/);
-  assert.doesNotMatch(html, /Generation 7/);
+  assert.doesNotMatch(html, /Revision 7/);
   assert.doesNotMatch(html, /inventory warning/);
 });
 

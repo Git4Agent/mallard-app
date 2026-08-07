@@ -1,7 +1,7 @@
 # Design: Remote history continuity
 
 - Status: Implemented
-- Last reviewed: August 1, 2026
+- Last reviewed: August 6, 2026
 - Scope: repository-level continuity classification between a replica's
   recorded sync base and the observed bundle head, computed in the shared
   plan phase and surfaced by Refresh, Pull review, and Push review
@@ -16,6 +16,8 @@
   - [DESIGN_FAST_PUSH_PULL.md](DESIGN_FAST_PUSH_PULL.md) — D5 cache
     interaction (the probe must bypass it) and D6 batching (the probe joins
     an existing fetch round)
+  - [DESIGN_STREAMED_OBJECT_DOWNLOADS.md](DESIGN_STREAMED_OBJECT_DOWNLOADS.md)
+    — the probe's required manifest-size coordinate and staged read contract
 
 ## Motivating incident
 
@@ -28,8 +30,8 @@ Two replicas, one storage, and a wiped repository directory:
    after relink A classifies fresh and the push **recreates the repository
    under the same `bundle_id`** — the bundle id belongs to the project
    registration, not the link, so relinking reuses it.
-2. Replica B still holds base `generation 1` with the old manifest digest.
-   The head now reads `generation 1` with a new digest. Today's classifier
+2. Replica B still holds base `revision 1` with the old manifest digest.
+   The head now reads `revision 1` with a new digest. Today's classifier
    ([classify_push_destination](../src-tauri/src/project_sync/commands.rs#L5476))
    has no replaced-history state, so its catch-all arm reports
    `RemoteAdvanced` — "remote bundle advanced since this replica's base" —
@@ -45,23 +47,24 @@ additional requests**, and every direction now surfaces it.
 
 The shared plan phase classifies remote history continuity from the
 observed head, the recorded base, and — in exactly one arm — a store-read
-probe of the base manifest. All witnesses are content digests; no clock,
-no timestamp, no cache participates in a verdict.
+probe of the base manifest. Store reads use exact size and content-digest
+coordinates; no clock, timestamp, or cache participates in a verdict.
 
 | # | condition | continuity |
 | - | --- | --- |
 | 1 | no head, no base | `Fresh` |
 | 2 | no head, base recorded | `RemoteMissing` |
 | 3 | head present, no base | `Unreviewed` |
-| 4 | generations equal, digests equal | `InSync` |
-| 5 | generations equal, digests differ | `Replaced` |
-| 6 | head generation < base generation | `Replaced` |
-| 7 | head generation > base generation, probe hits | `Advanced` |
-| 8 | head generation > base generation, probe misses or hash-mismatches | `Replaced` |
+| 4 | revisions equal, digests equal | `InSync` |
+| 5 | revisions equal, digests differ | `Replaced` |
+| 6 | head revision < base revision | `Replaced` |
+| 7 | head revision > base revision, probe hits | `Advanced` |
+| 8 | head revision > base revision, probe misses or size/hash-mismatches | `Replaced` |
 
-**The probe** fetches `_manifests/{base.generation}-{base.commit_id}.json`
-**from the store — never from the object cache** — hashes the bytes, and
-compares against `base.manifest_sha256`. It is consulted only in rows 7–8.
+**The probe** fetches `_manifests/{base.revision}-{base.commit_id}.json`
+**from the store — never from the object cache** — and stages it against
+`base.manifest_size` plus `base.manifest_sha256` before parsing. It is
+consulted only in rows 7–8.
 
 **Placement.** The base manifest key is known from local state before any
 remote call, and the head answers the probe in the steady state:
@@ -76,14 +79,15 @@ remote call, and the head answers the probe in the steady state:
 
 - **Base** — the per-storage `RecipeBase` on the project
   (`recipe_bases[storage_id]`,
-  [domain.rs:782](../src-tauri/src/project_sync/domain.rs#L782)): generation,
-  manifest digest, commit ID. Written by every push receipt
+  [domain.rs:782](../src-tauri/src/project_sync/domain.rs#L782)): revision,
+  exact manifest size, manifest digest, commit ID. Written by every push receipt
   ([commands.rs:7051](../src-tauri/src/project_sync/commands.rs#L7051)) and
   every pull apply
   ([commands.rs:8169](../src-tauri/src/project_sync/commands.rs#L8169));
   removed by unlink. `commit_id` becomes **required** — both writers already
   populate it; `validate()` enforces it; the unprobeable edge ceases to
-  exist.
+  exist. `manifest_size` is likewise required and nonzero; there is no
+  fallback inference for pre-cutover bases.
 - **Head** — the mutable bundle head, read live on every operation, never
   cached (fast doc rule, unchanged).
 - **Probe** — the row-7/8 store read defined above.
@@ -91,14 +95,15 @@ remote call, and the head answers the probe in the steady state:
 ## Soundness
 
 - **Rows 4 and 7** — the store demonstrably holds the exact manifest this
-  replica recorded: row 4 because the head names our digest, row 7 because
-  we fetched the bytes and they reproduce it. The witness is our own
-  recorded hash, so no trust is placed in remote metadata.
+  replica recorded: row 4 because the inspected head names our digest, row
+  7 because the staged bytes reproduce the recorded size and hash. The
+  witness is our own recorded coordinate, so no trust is placed in response
+  length metadata.
 - **Row 5** — the commit CAS linearizes publishes and every publish
-  increments the generation, so one lineage commits a given generation
-  exactly once. Two different manifests at one generation cannot share a
+  increments the revision, so one lineage commits a given revision
+  exactly once. Two different manifests at one revision cannot share a
   lineage.
-- **Row 6** — generations are monotonic in a lineage; a regressed head is
+- **Row 6** — revisions are monotonic in a lineage; a regressed head is
   not a descendant of the base.
 - **Row 8** — manifests are immutable and nothing in the store deletes
   them (no delete API exists); absence of the base manifest proves the
@@ -135,7 +140,7 @@ remote call, and the head answers the probe in the steady state:
   preflight failure toast. The push-side `BindingChanged` overlay is
   policy, not continuity, and keeps its current precedence.
 - **Push preflight** — same classification re-run, message updated to
-  match, and the failure log line gains base and head generation + digest
+  match, and the failure log line gains base and head revision + digest
   (today's log carries no numbers).
 
 ## Failure handling
@@ -159,7 +164,8 @@ remote call, and the head answers the probe in the steady state:
 
 ## Cutover
 
-1. Make `RecipeBase.commit_id` required; enforce in `validate()`.
+1. Make `RecipeBase.commit_id` and `RecipeBase.manifest_size` required;
+   enforce the ID and nonzero size in `validate()`.
 2. Extract `classify_remote_continuity(head, base)` and run it in the
    shared plan phase; Push maps continuity onto its destination status and
    keeps the `BindingChanged` overlay. Delete the ambiguous catch-all arm —
@@ -170,7 +176,8 @@ remote call, and the head answers the probe in the steady state:
    add the pull and refresh surfaces.
 5. Update the preflight messages and the push failure log line.
 
-No migration. First post-cutover sync writes a complete base.
+No migration or fallback reader. Pre-cutover local state and storage are
+cleared; every base written by the supported path is complete.
 
 ## Test plan
 
@@ -187,6 +194,8 @@ No migration. First post-cutover sync writes a complete base.
   as the manifest fetch.
 - **Probe error degradation** — a store that fails only the probe key
   yields `Unknown` and a storage error, not a verdict.
+- **Probe coordinate checks** — short, overlong, and wrong-hash historical
+  manifests miss; no body is exposed to the continuity classifier.
 - **`BindingChanged` precedence** — a binding-revision mismatch still wins
   over continuity on the push side.
 - **Pull heals** — after a pull from a replaced repository, the rewritten
@@ -196,19 +205,19 @@ No migration. First post-cutover sync writes a complete base.
 
 - **TODO — commit-record ancestry walk for the retained-files force-reset
   edge.** The one case the probe misreads. Worked example: a repository at
-  generation 2 (lineage `c1 ← c2`; replica B based at `c2`, digest `M2`)
-  is rewound by restoring a generation-1 snapshot **without deleting newer
+  revision 2 (lineage `c1 ← c2`; replica B based at `c2`, digest `M2`)
+  is rewound by restoring a revision-1 snapshot **without deleting newer
   files** — `rsync -a` without `--delete` over the storage directory, or
   an S3 versioning rollback that removes only `_head`'s latest version.
-  `_head` returns to generation 1 while `_manifests/2-c2.json` survives as
+  `_head` returns to revision 1 while `_manifests/2-c2.json` survives as
   an orphan. New pushes then grow a second lineage past the base's
-  generation (`c1 ← d2 ← d3`, head at generation 3, and
+  revision (`c1 ← d2 ← d3`, head at revision 3, and
   `_commits/2-d2.json` records `previous: c1`, not `c2`). B lands in the
-  generation-ahead arm, probes `_manifests/2-c2.json`, finds its own
+  revision-ahead arm, probes `_manifests/2-c2.json`, finds its own
   recorded digest, and reads `Advanced` — though the head's ancestry
   (`d3 → d2 → c1`) never contains `c2`. Had the new lineage stopped at
-  generation 2, row 5 would have caught it for free; the misread requires
-  the rewrite to overtake the base's generation. Degradation is safe —
+  revision 2, row 5 would have caught it for free; the misread requires
+  the rewrite to overtake the base's revision. Degradation is safe —
   pull is offered, pins and apply-time verification prevent loss, and
   abandoned-lineage content resurfaces as locally outstanding — but the
   diagnosis is wrong: B is told teammates advanced when history was
@@ -216,7 +225,7 @@ No migration. First post-cutover sync writes a complete base.
   content the reset meant to purge (e.g. a leaked secret). Exact fix when
   this edge matters: `CommitRecord.previous_commit_id`
   ([bundle_engine.rs:808](../src-tauri/src/project_sync/bundle_engine.rs#L808))
-  gives lineage membership by walking head back to the base's generation
+  gives lineage membership by walking head back to the base's revision
   at O(chain) GETs — row 7 then requires *ancestry*, not *presence*.
 - **Repository epoch nonce in the head** — a random id minted at repo
   creation would detect recreation with zero probe reads, but adds a
@@ -227,5 +236,5 @@ No migration. First post-cutover sync writes a complete base.
   retention floor or the ancestry walk replaces it. Recorded here so that
   design cannot land without revisiting this one.
 - **Pull-apply surfacing** — apply already fails closed via its pinned
-  generation, commit ID, and manifest digest checks; a continuity re-check
-  there would duplicate an existing witness.
+  revision, commit ID, manifest size, and manifest digest checks; a
+  continuity re-check there would duplicate an existing witness.

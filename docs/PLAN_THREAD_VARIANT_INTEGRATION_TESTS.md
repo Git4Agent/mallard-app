@@ -52,7 +52,7 @@ Resolve the current “preserve or block/store-only” choice by reason:
 
 Confirm that a true semantic and lineage no-op does not:
 
-- publish a new generation;
+- publish a new revision;
 - create a new commit;
 - update publisher provenance;
 - update last-editor provenance; or
@@ -174,7 +174,7 @@ not for provider resumability or continuation proofs.
 Capture the following before planning, after planning, after apply, after
 retry, and after restart:
 
-- cloud generation, commit, manifest digest, primary, groups, and variants;
+- cloud revision, commit, manifest digest, primary, groups, and variants;
 - immutable object keys and SHA-256 values;
 - local bindings, preferences, aliases, and materialization states;
 - provider transcript, index, and sidecar inventories;
@@ -207,13 +207,13 @@ A controllable clock is also needed for expiry and timestamp-sensitive tests.
 
 ## Complete relation matrix
 
-Every row must be exercised for both plan generation and apply. Each case must
+Every row must be exercised for both plan revision and apply. Each case must
 assert the typed relation and action, final state, retry behavior, and restart
 behavior.
 
 | Local/cloud state | Push expectation | Pull expectation |
 | --- | --- | --- |
-| Same lineage and semantics | `NoOp`; generation and provenance unchanged | `NoOp`; no provider or binding writes |
+| Same lineage and semantics | `NoOp`; revision and provenance unchanged | `NoOp`; no provider or binding writes |
 | Raw bytes differ only through verified thread-ID or `cwd` rewrites | Same as identical | Same as identical |
 | Cloud is an exact prefix of local | Fast-forward the same cloud variant; create no variant | `KeepLocal`; perform no writes |
 | Local is an exact prefix of cloud | Typed `RequirePull`; publish nothing | Fast-forward the existing provider thread while preserving its ID and preference |
@@ -237,7 +237,7 @@ local bytes, binding, provider ID, preference, and active conversation.
 ### Plan assertions
 
 - The plan contains the exact typed relation and action.
-- The plan pins host, replica, generation, commit, manifest, local target,
+- The plan pins host, replica, revision, commit, manifest, local target,
   provider state, binding revisions, preference revision, profile revision,
   codec, and expiry.
 - Proposed provider IDs and target paths are reserved without mutating provider
@@ -349,7 +349,7 @@ entire provider profile, not merely within one project.
 Create a table-driven test that changes exactly one reviewed pin after plan
 creation:
 
-- cloud generation;
+- cloud revision;
 - commit ID;
 - manifest digest;
 - local transcript digest;
@@ -611,7 +611,7 @@ recovery, retry, and restart. It must validate:
 - cloud primary, local preference, and active provider state changed only when
   allowed;
 - unselected and remote-only variants survived;
-- generations advance only after successful publication;
+- revisions advance only after successful publication;
 - no duplicate bindings, receipts, index rows, sidecars, or journal records;
 - no unexpected staging or temporary files remain; and
 - portable and logged state passes privacy checks.
@@ -621,7 +621,7 @@ recovery, retry, and restart. It must validate:
 1. Lock the ambiguous action and policy decisions listed above.
 2. Add real-format transcript fixtures and the transcript builder.
 3. Add `VariantWorld`, normalized snapshots, and the invariant checker.
-4. Add the complete Push and Pull relation matrix as plan-generation tests.
+4. Add the complete Push and Pull relation matrix as plan-revision tests.
 5. Enable successful apply paths for no-op, prefix, missing, and structural
    equality.
 6. Add same-ID divergence and bound-alternate continuation.

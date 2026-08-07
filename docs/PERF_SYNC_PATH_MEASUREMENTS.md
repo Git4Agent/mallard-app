@@ -244,7 +244,7 @@ Pull planning could not be measured against the benchmark state: the isolated
 storage directory contains only `_storage.json` and a lock file.
 `inspect_from_storage` reports that the anonymized bundle does not exist in
 8–10 ms for both bindings, even though both registrations record a
-`recipe_bases` entry at generation 1 — the bundle was published at some point
+`recipe_bases` entry at revision 1 — the bundle was published at some point
 and the storage has since been cleared.
 
 This also explains the 0.004–0.006s "inspect remote head": a local-directory

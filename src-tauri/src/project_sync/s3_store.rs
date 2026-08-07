@@ -17,22 +17,24 @@ use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
+use tempfile::NamedTempFile;
 use tokio::runtime::Handle;
 use tokio::time::timeout;
 
 use super::bundle_engine::{
-    BundleObjectStore, CasExpectation, CasOutcome, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
-    StoreListPage, StoredObject,
+    BundleObjectStore, CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey,
+    ObjectPrefix, StageOutcome, StoreListPage, StoredMetadata, VerifiedBody,
 };
-use super::domain::{StorageConfig, StorageKind, MAX_FILE_BYTES};
+use super::domain::{self, StorageConfig, StorageKind};
 
 const MAX_LIST_PAGE: usize = 10_000;
 const S3_MAX_KEYS: usize = 1_000;
 const MAX_LIST_REQUESTS: usize = MAX_LIST_PAGE + 2;
 const R2_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-const BULK_GET_CONCURRENCY: usize = 6;
+const BULK_STAGE_CONCURRENCY: usize = 6;
 const BULK_PUT_CONCURRENCY: usize = 6;
 
 #[derive(Clone)]
@@ -111,7 +113,10 @@ impl S3BundleObjectStore {
         }
     }
 
-    async fn get_async(&self, key: &ObjectKey) -> Result<Option<StoredObject>, String> {
+    async fn get_response(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<Option<aws_sdk_s3::operation::get_object::GetObjectOutput>, String> {
         let request = self
             .client
             .get_object()
@@ -130,32 +135,149 @@ impl S3BundleObjectStore {
             Ok(Err(error)) if sdk_status(&error) == Some(404) => return Ok(None),
             Ok(Err(error)) => return Err(format!("S3 get '{}': {}", key, error)),
         };
+        Ok(Some(response))
+    }
 
-        if let Some(length) = response.content_length() {
-            if length < 0 || length as u64 > MAX_FILE_BYTES {
-                return Err(format!("S3 object '{}' exceeds the read limit", key));
+    async fn get_metadata_async(
+        &self,
+        key: &ObjectKey,
+        max_bytes: u64,
+    ) -> Result<Option<StoredMetadata>, String> {
+        let Some(response) = self.get_response(key).await? else {
+            return Ok(None);
+        };
+        let declared_length = response.content_length();
+        if let Some(length) = declared_length {
+            if length < 0 {
+                return Err(format!(
+                    "S3 metadata object '{}' returned a negative Content-Length",
+                    key
+                ));
+            }
+            if length as u64 > max_bytes {
+                return Err(format!("metadata object '{}' exceeds its read limit", key));
             }
         }
         let etag = response
             .e_tag()
             .ok_or_else(|| format!("S3 get '{}' returned no ETag", key))
             .and_then(|etag| validated_service_etag(etag, key.as_str()))?;
-        let body = timeout(self.request_timeout, response.body.collect())
-            .await
-            .map_err(|_| {
-                format!(
-                    "S3 body '{}' timed out after {} ms",
-                    key,
-                    self.request_timeout.as_millis()
-                )
-            })?
-            .map_err(|error| format!("S3 body '{}': {}", key, error))?
-            .into_bytes()
-            .to_vec();
-        if body.len() as u64 > MAX_FILE_BYTES {
-            return Err(format!("S3 object '{}' exceeds the read limit", key));
+        let mut body = response.body;
+        let mut bytes = Vec::new();
+        if let Some(length) = declared_length {
+            let capacity = usize::try_from(length)
+                .map_err(|_| format!("metadata object '{}' is too large for this platform", key))?;
+            bytes
+                .try_reserve_exact(capacity)
+                .map_err(|_| format!("reserve memory for metadata object '{}'", key))?;
         }
-        Ok(Some(StoredObject { bytes: body, etag }))
+        let mut received = 0_u64;
+        loop {
+            let next = timeout(self.request_timeout, body.try_next())
+                .await
+                .map_err(|_| {
+                    format!(
+                        "S3 body '{}' timed out after {} ms of inactivity",
+                        key,
+                        self.request_timeout.as_millis()
+                    )
+                })?
+                .map_err(|error| format!("S3 body '{}': {}", key, error))?;
+            let Some(chunk) = next else {
+                break;
+            };
+            let chunk_len = u64::try_from(chunk.len())
+                .map_err(|_| format!("S3 metadata object '{}' byte count overflow", key))?;
+            let new_received = received
+                .checked_add(chunk_len)
+                .ok_or_else(|| format!("S3 metadata object '{}' byte count overflow", key))?;
+            if new_received > max_bytes {
+                return Err(format!("metadata object '{}' exceeds its read limit", key));
+            }
+            bytes
+                .try_reserve(chunk.len())
+                .map_err(|_| format!("reserve memory for metadata object '{}'", key))?;
+            bytes.extend_from_slice(&chunk);
+            received = new_received;
+        }
+        Ok(Some(StoredMetadata { bytes, etag }))
+    }
+
+    async fn stage_verified_async(
+        &self,
+        key: &ObjectKey,
+        expected: &ExpectedObject,
+    ) -> Result<S3StageOutcome, String> {
+        domain::validate_sha256("expected object", &expected.sha256)?;
+        let Some(response) = self.get_response(key).await? else {
+            return Ok(S3StageOutcome::Missing);
+        };
+        let declared_length = response.content_length();
+        if let Some(length) = declared_length {
+            if length < 0 {
+                return Err(format!(
+                    "S3 object '{}' returned a negative Content-Length",
+                    key
+                ));
+            }
+        }
+        let etag = response
+            .e_tag()
+            .ok_or_else(|| format!("S3 get '{}' returned no ETag", key))
+            .and_then(|etag| validated_service_etag(etag, key.as_str()))?;
+        if declared_length.is_some_and(|length| length as u64 != expected.size) {
+            return Ok(S3StageOutcome::Mismatch { etag });
+        }
+
+        let mut staged = NamedTempFile::new()
+            .map_err(|error| format!("create staged S3 object '{}': {}", key, error))?;
+        let mut body = response.body;
+        let mut hasher = Sha256::new();
+        let mut received = 0_u64;
+        loop {
+            let next = timeout(self.request_timeout, body.try_next())
+                .await
+                .map_err(|_| {
+                    format!(
+                        "S3 body '{}' timed out after {} ms of inactivity",
+                        key,
+                        self.request_timeout.as_millis()
+                    )
+                })?
+                .map_err(|error| format!("S3 body '{}': {}", key, error))?;
+            let Some(chunk) = next else {
+                break;
+            };
+            let chunk_len = u64::try_from(chunk.len())
+                .map_err(|_| format!("S3 object '{}' byte count overflow", key))?;
+            let new_received = received
+                .checked_add(chunk_len)
+                .ok_or_else(|| format!("S3 object '{}' byte count overflow", key))?;
+            if new_received > expected.size {
+                return Ok(S3StageOutcome::Mismatch { etag });
+            }
+            staged
+                .as_file_mut()
+                .write_all(&chunk)
+                .map_err(|error| format!("stage S3 object '{}': {}", key, error))?;
+            hasher.update(&chunk);
+            received = new_received;
+        }
+        let digest = hex_lower(&hasher.finalize());
+        if received != expected.size || digest != expected.sha256 {
+            return Ok(S3StageOutcome::Mismatch { etag });
+        }
+        staged
+            .as_file_mut()
+            .flush()
+            .map_err(|error| format!("flush staged S3 object '{}': {}", key, error))?;
+        staged
+            .as_file_mut()
+            .sync_all()
+            .map_err(|error| format!("sync staged S3 object '{}': {}", key, error))?;
+        Ok(S3StageOutcome::Verified(VerifiedBody::from_temp_file(
+            staged, received, digest, etag,
+        )?))
     }
 
     async fn conditional_put_async(
@@ -210,27 +332,32 @@ impl S3BundleObjectStore {
         key: &ObjectKey,
         bytes: Bytes,
     ) -> Result<ImmutablePutOutcome, String> {
+        let expected = expected_object(&bytes)?;
         match self
             .conditional_put_async(key, bytes.clone(), &CasExpectation::Absent)
             .await?
         {
             PutAttempt::Written(_) => Ok(ImmutablePutOutcome::Written),
-            PutAttempt::PreconditionFailed => match self.get_async(key).await? {
-                Some(existing) => immutable_existing_outcome(key, &bytes, existing),
-                None => Err(format!(
+            PutAttempt::PreconditionFailed => {
+                match self.stage_verified_async(key, &expected).await? {
+                    S3StageOutcome::Verified(_) => Ok(ImmutablePutOutcome::AlreadyPresent),
+                    S3StageOutcome::Mismatch { .. } => Err(format!(
+                        "immutable object '{}' already exists with different bytes",
+                        key
+                    )),
+                    S3StageOutcome::Missing => Err(format!(
                     "immutable put '{}' failed its absent precondition but the object is missing",
                     key
                 )),
-            },
-            PutAttempt::Ambiguous(cause) => match self.get_async(key).await {
-                Ok(Some(existing)) if existing.bytes == bytes => {
-                    Ok(ImmutablePutOutcome::AlreadyPresent)
                 }
-                Ok(Some(_)) => Err(format!(
+            }
+            PutAttempt::Ambiguous(cause) => match self.stage_verified_async(key, &expected).await {
+                Ok(S3StageOutcome::Verified(_)) => Ok(ImmutablePutOutcome::AlreadyPresent),
+                Ok(S3StageOutcome::Mismatch { .. }) => Err(format!(
                     "immutable put '{}' was ambiguous ({}) and a different object is present",
                     key, cause
                 )),
-                Ok(None) => Err(format!(
+                Ok(S3StageOutcome::Missing) => Err(format!(
                     "immutable put '{}' was ambiguous ({}) and no object is present",
                     key, cause
                 )),
@@ -254,9 +381,14 @@ impl S3BundleObjectStore {
         {
             PutAttempt::Written(Some(etag)) => Ok(CasOutcome::Written { etag }),
             PutAttempt::Written(None) => self.resolve_cas_write(key, &bytes).await,
-            PutAttempt::PreconditionFailed => Ok(CasOutcome::Conflict {
-                current_etag: self.get_async(key).await?.map(|object| object.etag),
-            }),
+            PutAttempt::PreconditionFailed => {
+                let current = self
+                    .stage_verified_async(key, &expected_object(&bytes)?)
+                    .await?;
+                Ok(CasOutcome::Conflict {
+                    current_etag: current.etag().map(str::to_string),
+                })
+            }
             PutAttempt::Ambiguous(_) => self.resolve_cas_write(key, &bytes).await,
         }
     }
@@ -266,16 +398,18 @@ impl S3BundleObjectStore {
         key: &ObjectKey,
         intended_bytes: &[u8],
     ) -> Result<CasOutcome, String> {
-        let current = self.get_async(key).await?;
-        if let Some(current) = current {
-            if current.bytes == intended_bytes {
-                return Ok(CasOutcome::Written { etag: current.etag });
-            }
-            return Ok(CasOutcome::Conflict {
-                current_etag: Some(current.etag),
-            });
+        match self
+            .stage_verified_async(key, &expected_object(intended_bytes)?)
+            .await?
+        {
+            S3StageOutcome::Verified(body) => Ok(CasOutcome::Written {
+                etag: body.etag().to_string(),
+            }),
+            S3StageOutcome::Mismatch { etag } => Ok(CasOutcome::Conflict {
+                current_etag: Some(etag),
+            }),
+            S3StageOutcome::Missing => Ok(CasOutcome::Conflict { current_etag: None }),
         }
-        Ok(CasOutcome::Conflict { current_etag: None })
     }
 
     async fn list_async(
@@ -392,49 +526,86 @@ impl S3BundleObjectStore {
 }
 
 impl BundleObjectStore for S3BundleObjectStore {
-    fn get(&self, key: &ObjectKey) -> Result<Option<StoredObject>, String> {
-        self.run("get", self.get_async(key))
+    fn get_metadata(
+        &self,
+        key: &ObjectKey,
+        max_bytes: u64,
+    ) -> Result<Option<StoredMetadata>, String> {
+        self.run("get metadata", self.get_metadata_async(key, max_bytes))
     }
 
-    /// Bounded-concurrency bulk download. Order matches `keys`; the first
-    /// failure aborts the remaining transfers, like the sequential loop it
-    /// replaces.
-    fn get_many(&self, keys: &[ObjectKey]) -> Result<Vec<Option<StoredObject>>, String> {
-        if keys.len() <= 1 {
-            return keys.iter().map(|key| self.get(key)).collect();
+    fn stage_verified(
+        &self,
+        key: &ObjectKey,
+        expected: &ExpectedObject,
+    ) -> Result<StageOutcome, String> {
+        self.run("stage verified", async {
+            Ok(self
+                .stage_verified_async(key, expected)
+                .await?
+                .into_public())
+        })
+    }
+
+    /// Bounded-concurrency verified staging. Order matches `requests`; the
+    /// first failure aborts and drains every remaining transfer.
+    fn stage_many_verified(
+        &self,
+        requests: &[(ObjectKey, ExpectedObject)],
+    ) -> Result<Vec<StageOutcome>, String> {
+        if requests.len() <= 1 {
+            return requests
+                .iter()
+                .map(|(key, expected)| self.stage_verified(key, expected))
+                .collect();
         }
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(BULK_GET_CONCURRENCY));
-        self.run("bulk get", async {
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(BULK_STAGE_CONCURRENCY));
+        self.run("bulk verified staging", async {
             let mut join_set = tokio::task::JoinSet::new();
-            for (index, key) in keys.iter().cloned().enumerate() {
+            for (index, (key, expected)) in requests.iter().cloned().enumerate() {
                 let store = self.clone();
                 let semaphore = semaphore.clone();
                 join_set.spawn(async move {
                     let _permit = semaphore
                         .acquire_owned()
                         .await
-                        .map_err(|_| "bulk get concurrency gate closed".to_string())?;
-                    Ok::<_, String>((index, store.get_async(&key).await?))
+                        .map_err(|_| "bulk staging concurrency gate closed".to_string())?;
+                    Ok::<_, String>((
+                        index,
+                        store
+                            .stage_verified_async(&key, &expected)
+                            .await?
+                            .into_public(),
+                    ))
                 });
             }
-            let mut objects: Vec<Option<Option<StoredObject>>> = Vec::new();
-            objects.resize_with(keys.len(), || None);
+            let mut outcomes: Vec<Option<StageOutcome>> = Vec::new();
+            outcomes.resize_with(requests.len(), || None);
             while let Some(joined) = join_set.join_next().await {
-                let (index, object) =
-                    joined.map_err(|error| format!("bulk get worker failed: {}", error))??;
-                objects[index] = Some(object);
+                let worker_result = match joined {
+                    Ok(result) => result,
+                    Err(error) => {
+                        abort_and_drain(&mut join_set).await;
+                        return Err(format!("bulk staging worker failed: {}", error));
+                    }
+                };
+                let (index, outcome) = match worker_result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        abort_and_drain(&mut join_set).await;
+                        return Err(error);
+                    }
+                };
+                outcomes[index] = Some(outcome);
             }
-            Ok(objects
+            Ok(outcomes
                 .into_iter()
-                .map(|slot| slot.expect("every bulk-get index resolves"))
+                .map(|slot| slot.expect("every bulk-staging index resolves"))
                 .collect())
         })
     }
 
     fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
-        if bytes.len() as u64 > MAX_FILE_BYTES {
-            return Err(format!("object '{}' exceeds the write limit", key));
-        }
         self.run(
             "immutable put",
             self.put_immutable_async(key, Bytes::copy_from_slice(bytes)),
@@ -448,11 +619,6 @@ impl BundleObjectStore for S3BundleObjectStore {
         &self,
         objects: Vec<(ObjectKey, Bytes)>,
     ) -> Result<Vec<ImmutablePutOutcome>, String> {
-        for (key, bytes) in &objects {
-            if bytes.len() as u64 > MAX_FILE_BYTES {
-                return Err(format!("object '{}' exceeds the write limit", key));
-            }
-        }
         if objects.len() <= 1 {
             return objects
                 .into_iter()
@@ -496,9 +662,6 @@ impl BundleObjectStore for S3BundleObjectStore {
         expectation: &CasExpectation,
         bytes: &[u8],
     ) -> Result<CasOutcome, String> {
-        if bytes.len() as u64 > MAX_FILE_BYTES {
-            return Err(format!("object '{}' exceeds the write limit", key));
-        }
         if let CasExpectation::Match(etag) = expectation {
             validate_expected_etag(etag)?;
         }
@@ -540,19 +703,41 @@ enum PutAttempt {
     Ambiguous(String),
 }
 
-fn immutable_existing_outcome(
-    key: &ObjectKey,
-    intended_bytes: &[u8],
-    existing: StoredObject,
-) -> Result<ImmutablePutOutcome, String> {
-    if existing.bytes == intended_bytes {
-        Ok(ImmutablePutOutcome::AlreadyPresent)
-    } else {
-        Err(format!(
-            "immutable object '{}' already exists with different bytes",
-            key
-        ))
+enum S3StageOutcome {
+    Missing,
+    Mismatch { etag: String },
+    Verified(VerifiedBody),
+}
+
+impl S3StageOutcome {
+    fn etag(&self) -> Option<&str> {
+        match self {
+            Self::Missing => None,
+            Self::Mismatch { etag } => Some(etag),
+            Self::Verified(body) => Some(body.etag()),
+        }
     }
+
+    fn into_public(self) -> StageOutcome {
+        match self {
+            Self::Missing => StageOutcome::Missing,
+            Self::Mismatch { .. } => StageOutcome::Mismatch,
+            Self::Verified(body) => StageOutcome::Verified(body),
+        }
+    }
+}
+
+async fn abort_and_drain<T: 'static>(join_set: &mut tokio::task::JoinSet<T>) {
+    join_set.abort_all();
+    while join_set.join_next().await.is_some() {}
+}
+
+fn expected_object(bytes: &[u8]) -> Result<ExpectedObject, String> {
+    Ok(ExpectedObject {
+        size: u64::try_from(bytes.len())
+            .map_err(|_| "S3 object size cannot fit in u64".to_string())?,
+        sha256: sha256_bytes(bytes),
+    })
 }
 
 fn key_is_under_prefix(key: &ObjectKey, prefix: &ObjectPrefix) -> bool {
@@ -641,10 +826,11 @@ fn normalize_etag(etag: &str) -> String {
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex_lower(&Sha256::digest(bytes))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn validated_service_etag(raw: &str, key: &str) -> Result<String, String> {
@@ -682,22 +868,80 @@ mod tests {
     use aws_sdk_s3::config::{Credentials, Region};
     use aws_sdk_s3::Config as S3Config;
     use aws_smithy_http_client::{tls, Builder as HttpClientBuilder};
-    use http_body_util::{BodyExt, Full};
-    use hyper::body::{Bytes as HyperBytes, Incoming};
+    use http_body_util::BodyExt;
+    use hyper::body::{Body, Bytes as HyperBytes, Frame, Incoming, SizeHint};
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Method, Request, Response, StatusCode};
     use hyper_util::rt::TokioIo;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
     use std::convert::Infallible;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
 
     const BUCKET: &str = "bundle-tests";
 
     struct TestS3 {
         endpoint: String,
         objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+        get_behaviors: Arc<Mutex<BTreeMap<String, GetBehavior>>>,
         server: tokio::task::JoinHandle<()>,
+    }
+
+    #[derive(Clone)]
+    struct GetBehavior {
+        chunks: Vec<Vec<u8>>,
+        declared_length: Option<u64>,
+        stall_after_chunks: bool,
+    }
+
+    struct TestBody {
+        chunks: VecDeque<HyperBytes>,
+        stall_after_chunks: bool,
+    }
+
+    impl TestBody {
+        fn full(bytes: impl Into<HyperBytes>) -> Self {
+            Self {
+                chunks: VecDeque::from([bytes.into()]),
+                stall_after_chunks: false,
+            }
+        }
+
+        fn streaming(chunks: Vec<Vec<u8>>, stall_after_chunks: bool) -> Self {
+            Self {
+                chunks: chunks.into_iter().map(HyperBytes::from).collect(),
+                stall_after_chunks,
+            }
+        }
+    }
+
+    impl Body for TestBody {
+        type Data = HyperBytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            if let Some(chunk) = self.chunks.pop_front() {
+                return Poll::Ready(Some(Ok(Frame::data(chunk))));
+            }
+            if self.stall_after_chunks {
+                Poll::Pending
+            } else {
+                Poll::Ready(None)
+            }
+        }
+
+        fn is_end_stream(&self) -> bool {
+            self.chunks.is_empty() && !self.stall_after_chunks
+        }
+
+        fn size_hint(&self) -> SizeHint {
+            SizeHint::default()
+        }
     }
 
     impl TestS3 {
@@ -707,16 +951,20 @@ mod tests {
                 .expect("bind test S3");
             let endpoint = format!("http://{}", listener.local_addr().expect("test S3 address"));
             let objects = Arc::new(Mutex::new(BTreeMap::new()));
+            let get_behaviors = Arc::new(Mutex::new(BTreeMap::new()));
             let server_objects = objects.clone();
+            let server_get_behaviors = get_behaviors.clone();
             let server = tokio::spawn(async move {
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
                         break;
                     };
                     let objects = server_objects.clone();
+                    let get_behaviors = server_get_behaviors.clone();
                     tokio::spawn(async move {
-                        let service =
-                            service_fn(move |request| test_s3_request(request, objects.clone()));
+                        let service = service_fn(move |request| {
+                            test_s3_request(request, objects.clone(), get_behaviors.clone())
+                        });
                         let _ = http1::Builder::new()
                             .serve_connection(TokioIo::new(stream), service)
                             .await;
@@ -726,6 +974,7 @@ mod tests {
             Self {
                 endpoint,
                 objects,
+                get_behaviors,
                 server,
             }
         }
@@ -735,6 +984,23 @@ mod tests {
                 .lock()
                 .expect("test S3 lock")
                 .insert(key, bytes);
+        }
+
+        fn seed_streaming(
+            &self,
+            key: String,
+            chunks: Vec<Vec<u8>>,
+            declared_length: Option<u64>,
+            stall_after_chunks: bool,
+        ) {
+            self.get_behaviors.lock().expect("test S3 lock").insert(
+                key,
+                GetBehavior {
+                    chunks,
+                    declared_length,
+                    stall_after_chunks,
+                },
+            );
         }
 
         fn store(&self) -> S3BundleObjectStore {
@@ -768,6 +1034,13 @@ mod tests {
         tokio::task::spawn_blocking(operation)
             .await
             .expect("blocking store operation")
+    }
+
+    fn test_upload_key(name: &str) -> ObjectKey {
+        ObjectKey::parse(format!(
+            ".mallard/v1/repositories/0123456789abcdef0123456789abcdef/_uploads/tests/{name}"
+        ))
+        .unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -810,7 +1083,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn immutable_get_and_cas_preserve_service_etags() {
+    async fn immutable_metadata_staging_and_cas_preserve_service_etags() {
         let server = TestS3::start().await;
         let store = server.store();
         let immutable = ObjectKey::parse(
@@ -841,14 +1114,33 @@ mod tests {
         .await
         .is_err());
 
-        let store_for_get = store.clone();
-        let immutable_for_get = immutable.clone();
-        let found = blocking(move || store_for_get.get(&immutable_for_get))
+        let store_for_metadata = store.clone();
+        let immutable_for_metadata = immutable.clone();
+        let found = blocking(move || store_for_metadata.get_metadata(&immutable_for_metadata, 3))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(found.bytes, b"one");
         assert_eq!(found.etag, sha256_bytes(b"one"));
+
+        let store_for_stage = store.clone();
+        let immutable_for_stage = immutable.clone();
+        let staged = blocking(move || {
+            store_for_stage.stage_verified(
+                &immutable_for_stage,
+                &ExpectedObject {
+                    size: 3,
+                    sha256: sha256_bytes(b"one"),
+                },
+            )
+        })
+        .await
+        .unwrap();
+        let StageOutcome::Verified(staged) = staged else {
+            panic!("immutable body should verify")
+        };
+        assert_eq!(staged.read_bounded(3, "test object").unwrap(), b"one");
+        assert_eq!(staged.etag(), sha256_bytes(b"one"));
 
         let head = ObjectKey::parse(
             ".mallard/v1/repositories/0123456789abcdef0123456789abcdef/_head.json",
@@ -905,6 +1197,218 @@ mod tests {
                 etag: sha256_bytes(b"head-two")
             }
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metadata_get_streams_chunks_and_enforces_the_caller_bound() {
+        let server = TestS3::start().await;
+        let key = test_upload_key("metadata.json");
+        server.seed_streaming(
+            key.as_str().to_string(),
+            vec![b"{\"a".to_vec(), b"\":1}".to_vec()],
+            None,
+            false,
+        );
+        let store = server.store();
+
+        let store_for_get = store.clone();
+        let key_for_get = key.clone();
+        let metadata = blocking(move || store_for_get.get_metadata(&key_for_get, 7))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.bytes, b"{\"a\":1}");
+        assert_eq!(metadata.etag, sha256_bytes(b"{\"a\":1}"));
+
+        let store_for_bound = store.clone();
+        let key_for_bound = key.clone();
+        let error = blocking(move || store_for_bound.get_metadata(&key_for_bound, 6))
+            .await
+            .unwrap_err();
+        assert!(error.contains("exceeds its read limit"), "{error}");
+
+        let missing = test_upload_key("missing.json");
+        assert!(blocking(move || store.get_metadata(&missing, 32))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verified_staging_handles_streamed_size_and_digest_boundaries() {
+        let server = TestS3::start().await;
+        let exact = test_upload_key("exact");
+        server.seed_streaming(
+            exact.as_str().to_string(),
+            vec![b"ab".to_vec(), b"cde".to_vec()],
+            None,
+            false,
+        );
+        let declared_mismatch = test_upload_key("declared-mismatch");
+        server.seed_streaming(
+            declared_mismatch.as_str().to_string(),
+            vec![b"abcde".to_vec()],
+            Some(6),
+            false,
+        );
+        let overrun = test_upload_key("overrun");
+        server.seed_streaming(
+            overrun.as_str().to_string(),
+            vec![b"abc".to_vec(), b"d".to_vec()],
+            None,
+            false,
+        );
+        let short = test_upload_key("short");
+        server.seed_streaming(
+            short.as_str().to_string(),
+            vec![b"ab".to_vec()],
+            None,
+            false,
+        );
+        let wrong_digest = test_upload_key("wrong-digest");
+        server.seed_streaming(
+            wrong_digest.as_str().to_string(),
+            vec![b"abc".to_vec()],
+            None,
+            false,
+        );
+        let empty = test_upload_key("empty");
+        server.seed_streaming(empty.as_str().to_string(), Vec::new(), None, false);
+        let store = server.store();
+
+        let store_for_exact = store.clone();
+        let exact_for_stage = exact.clone();
+        let exact_outcome = blocking(move || {
+            store_for_exact.stage_verified(
+                &exact_for_stage,
+                &ExpectedObject {
+                    size: 5,
+                    sha256: sha256_bytes(b"abcde"),
+                },
+            )
+        })
+        .await
+        .unwrap();
+        let StageOutcome::Verified(exact_body) = exact_outcome else {
+            panic!("chunked exact body should verify")
+        };
+        assert_eq!(
+            exact_body.read_bounded(5, "streamed test body").unwrap(),
+            b"abcde"
+        );
+        assert_eq!(exact_body.etag(), sha256_bytes(b"abcde"));
+
+        for key in [declared_mismatch, overrun, short] {
+            let store_for_stage = store.clone();
+            let outcome = blocking(move || {
+                store_for_stage.stage_verified(
+                    &key,
+                    &ExpectedObject {
+                        size: 3,
+                        sha256: sha256_bytes(b"abc"),
+                    },
+                )
+            })
+            .await
+            .unwrap();
+            assert!(matches!(outcome, StageOutcome::Mismatch));
+        }
+
+        let store_for_digest = store.clone();
+        let digest_outcome = blocking(move || {
+            store_for_digest.stage_verified(
+                &wrong_digest,
+                &ExpectedObject {
+                    size: 3,
+                    sha256: sha256_bytes(b"xyz"),
+                },
+            )
+        })
+        .await
+        .unwrap();
+        assert!(matches!(digest_outcome, StageOutcome::Mismatch));
+
+        let empty_outcome = blocking(move || {
+            store.stage_verified(
+                &empty,
+                &ExpectedObject {
+                    size: 0,
+                    sha256: sha256_bytes(b""),
+                },
+            )
+        })
+        .await
+        .unwrap();
+        let StageOutcome::Verified(empty_body) = empty_outcome else {
+            panic!("empty streamed body should verify")
+        };
+        assert_eq!(empty_body.read_bounded(0, "empty test body").unwrap(), b"");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streamed_staging_uses_an_inactivity_timeout_and_bulk_preserves_order() {
+        let server = TestS3::start().await;
+        let stalled = test_upload_key("stalled");
+        server.seed_streaming(
+            stalled.as_str().to_string(),
+            vec![b"a".to_vec()],
+            None,
+            true,
+        );
+        let mut store = server.store();
+        store.request_timeout = Duration::from_millis(40);
+        let store_for_stall = store.clone();
+        let error = blocking(move || {
+            store_for_stall.stage_verified(
+                &stalled,
+                &ExpectedObject {
+                    size: 2,
+                    sha256: sha256_bytes(b"ab"),
+                },
+            )
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("inactivity"), "{error}");
+
+        let requests = (0..8)
+            .map(|index| {
+                let key = test_upload_key(&format!("bulk-{index}"));
+                let bytes = format!("payload-{index}").into_bytes();
+                server.seed_streaming(
+                    key.as_str().to_string(),
+                    vec![bytes[..3].to_vec(), bytes[3..].to_vec()],
+                    None,
+                    false,
+                );
+                (
+                    key,
+                    ExpectedObject {
+                        size: bytes.len() as u64,
+                        sha256: sha256_bytes(&bytes),
+                    },
+                    bytes,
+                )
+            })
+            .collect::<Vec<_>>();
+        let stage_requests = requests
+            .iter()
+            .map(|(key, expected, _)| (key.clone(), expected.clone()))
+            .collect::<Vec<_>>();
+        let outcomes = blocking(move || store.stage_many_verified(&stage_requests))
+            .await
+            .unwrap();
+        assert_eq!(outcomes.len(), requests.len());
+        for (outcome, (_, _, expected_bytes)) in outcomes.into_iter().zip(requests) {
+            let StageOutcome::Verified(body) = outcome else {
+                panic!("bulk body should verify")
+            };
+            assert_eq!(
+                body.read_bounded(expected_bytes.len() as u64, "bulk test body")
+                    .unwrap(),
+                expected_bytes
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1028,7 +1532,8 @@ mod tests {
     async fn test_s3_request(
         request: Request<Incoming>,
         objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
-    ) -> Result<Response<Full<HyperBytes>>, Infallible> {
+        get_behaviors: Arc<Mutex<BTreeMap<String, GetBehavior>>>,
+    ) -> Result<Response<TestBody>, Infallible> {
         let method = request.method().clone();
         let path = request.uri().path().trim_start_matches('/').to_string();
         let query = request.uri().query().unwrap_or("").to_string();
@@ -1056,6 +1561,16 @@ mod tests {
 
         if method == Method::GET && key.is_empty() && query.contains("list-type=2") {
             return Ok(list_response(&query, &objects));
+        }
+        if method == Method::GET {
+            if let Some(behavior) = get_behaviors
+                .lock()
+                .expect("test S3 lock")
+                .get(key)
+                .cloned()
+            {
+                return Ok(streaming_object_response(StatusCode::OK, behavior));
+            }
         }
 
         let mut objects = objects.lock().expect("test S3 lock");
@@ -1090,7 +1605,7 @@ mod tests {
     fn list_response(
         query: &str,
         objects: &Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
-    ) -> Response<Full<HyperBytes>> {
+    ) -> Response<TestBody> {
         let prefix = query_value(query, "prefix").unwrap_or_default();
         let start_after =
             query_value(query, "start-after").or_else(|| query_value(query, "continuation-token"));
@@ -1133,7 +1648,8 @@ mod tests {
         Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/xml")
-            .body(Full::new(HyperBytes::from(xml)))
+            .header("content-length", xml.len())
+            .body(TestBody::full(xml))
             .unwrap()
     }
 
@@ -1141,22 +1657,47 @@ mod tests {
         status: StatusCode,
         body: Vec<u8>,
         etag_bytes: Option<&[u8]>,
-    ) -> Response<Full<HyperBytes>> {
-        let mut response = Response::builder().status(status);
+    ) -> Response<TestBody> {
+        let mut response = Response::builder()
+            .status(status)
+            .header("content-length", body.len());
         if let Some(bytes) = etag_bytes {
             response = response.header("etag", format!("\"{}\"", sha256_bytes(bytes)));
         }
-        response.body(Full::new(HyperBytes::from(body))).unwrap()
+        response.body(TestBody::full(body)).unwrap()
     }
 
-    fn xml_error(status: StatusCode, code: &str) -> Response<Full<HyperBytes>> {
+    fn streaming_object_response(status: StatusCode, behavior: GetBehavior) -> Response<TestBody> {
+        let all_bytes = behavior
+            .chunks
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut response = Response::builder()
+            .status(status)
+            .header("etag", format!("\"{}\"", sha256_bytes(&all_bytes)));
+        if let Some(length) = behavior.declared_length {
+            response = response.header("content-length", length);
+        }
+        response
+            .body(TestBody::streaming(
+                behavior.chunks,
+                behavior.stall_after_chunks,
+            ))
+            .unwrap()
+    }
+
+    fn xml_error(status: StatusCode, code: &str) -> Response<TestBody> {
+        let body = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>{}</Code><Message>{}</Message></Error>",
+            code, code
+        );
         Response::builder()
             .status(status)
             .header("content-type", "application/xml")
-            .body(Full::new(HyperBytes::from(format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>{}</Code><Message>{}</Message></Error>",
-                code, code
-            ))))
+            .header("content-length", body.len())
+            .body(TestBody::full(body))
             .unwrap()
     }
 

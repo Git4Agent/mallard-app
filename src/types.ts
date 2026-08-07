@@ -18,7 +18,7 @@ export interface ActivityLogContext {
   storage_id?: string;
   storage_name?: string;
   resource_id?: string;
-  generation?: number;
+  revision?: number;
 }
 
 export interface LogLine {
@@ -156,9 +156,10 @@ export interface LocalProjectRegistration {
   repository_fingerprint?: string | null;
   recipe: BundleRecipe;
   recipe_bases: Record<string, {
-    generation: number;
+    revision: number;
     manifest_sha256: string;
-    commit_id?: string | null;
+    manifest_size: number;
+    commit_id: string;
     recipe_revision: number;
     binding_revision?: number | null;
     last_pull_at?: number | null;
@@ -267,7 +268,7 @@ export interface MaterializationRecord {
   local_project_id: string;
   storage_id: string;
   bundle_id: string;
-  generation: number;
+  revision: number;
   commit_id: string;
   manifest_sha256: string;
   binding_revision: number;
@@ -282,16 +283,6 @@ export interface ProjectDetail {
   links: ProjectStorageLink[];
   binding?: ProjectBinding | null;
   materializations: MaterializationRecord[];
-}
-
-export interface ProjectDiscovery {
-  project_root: string;
-  display_name: string;
-  inventory: ResourceInventory;
-  repository_fingerprint?: string | null;
-  providers?: ProjectProvider[];
-  profile_ids: Partial<Record<ProjectProvider, string>>;
-  warnings?: string[];
 }
 
 export type DraftProfileSelection =
@@ -326,10 +317,6 @@ export interface ProjectSetupDraft {
   profiles: Partial<Record<ProjectProvider, DraftProfileSelection>>;
   storage?: DraftStorageSelection | null;
   repository: DraftRepositoryChoice;
-  selected_resource_ids: string[];
-  discovery_signature: string;
-  /** Digest of the provider homes `discovery_signature` was taken against. */
-  discovery_profile_signature: string;
   revision: number;
   created_at: number;
   updated_at: number;
@@ -357,7 +344,7 @@ export interface CreateSetupDraftResult {
 }
 
 export interface SetupSectionStatus {
-  section: "project" | "profiles" | "storage" | "repository" | "resources" | string;
+  section: "project" | "profiles" | "storage" | "repository" | string;
   state: "ready" | "attention" | "blocked" | string;
   message?: string | null;
 }
@@ -365,14 +352,7 @@ export interface SetupSectionStatus {
 export interface SetupDraftInspection {
   draft: ProjectSetupDraft;
   sections: SetupSectionStatus[];
-  inventory?: ResourceInventory | null;
-  fresh_discovery_signature?: string | null;
-  fresh_profile_signature?: string | null;
-  /** Saved against different provider homes; never true with selection_stale. */
-  profile_changed: boolean;
-  selection_stale: boolean;
   can_finalize: boolean;
-  warnings?: string[];
 }
 
 export interface ProviderProfile {
@@ -519,7 +499,7 @@ export interface ResourceStatusReport {
   project: string;
   storage: string;
   bundle_id?: string | null;
-  generation?: number;
+  revision?: number;
   statuses: Record<string, ProjectResourceState | string> | BundleResourceStatus[];
   warnings?: string[];
 }
@@ -575,7 +555,7 @@ export interface ProjectContentInventory {
   project_root: string;
   eligibility: ProjectFileSyncEligibility;
   review_token?: string | null;
-  storage_generation?: number | null;
+  storage_revision?: number | null;
   preference_revision: number;
   excluded_resource_ids: string[];
   entries: ProjectContentEntry[];
@@ -590,7 +570,7 @@ export interface ProjectOperationResult {
   message: string;
   operation_id?: string;
   resources_changed?: number;
-  generation?: number;
+  revision?: number;
   results?: Array<{
     resource_id: string;
     state: string;
@@ -602,7 +582,7 @@ export interface RemoteBundleSummary {
   bundle_id: string;
   display_name: string;
   kind?: string;
-  generation?: number;
+  revision?: number;
   updated_at?: number;
   resource_count?: number;
   providers?: ProjectProvider[];
@@ -625,24 +605,24 @@ export interface BundleSnapshotSummary extends RemoteBundleSummary {
 export type PushDestinationStatus =
   | {
     state: "ready";
-    generation?: number;
+    revision?: number;
   }
   | {
     state: "remote_history_missing";
-    base_generation: number;
+    base_revision: number;
   }
   | {
     state: "remote_history_replaced";
-    base_generation: number;
-    remote_generation: number;
+    base_revision: number;
+    remote_revision: number;
     base_manifest_sha256: string;
     remote_manifest_sha256: string;
   }
   | {
     state: "requires_pull";
     reason: "remote_without_base" | "binding_changed" | "remote_advanced";
-    remote_generation: number;
-    base_generation?: number;
+    remote_revision: number;
+    base_revision?: number;
   }
   | {
     state: "unavailable";
@@ -656,11 +636,11 @@ export type PushDestinationStatus =
  */
 export type RemoteContinuity =
   | { state: "fresh" }
-  | { state: "remote_missing"; base_generation: number }
-  | { state: "unreviewed"; remote_generation: number }
-  | { state: "in_sync"; generation: number }
-  | { state: "advanced"; base_generation: number; remote_generation: number }
-  | { state: "replaced"; base_generation: number; remote_generation: number }
+  | { state: "remote_missing"; base_revision: number }
+  | { state: "unreviewed"; remote_revision: number }
+  | { state: "in_sync"; revision: number }
+  | { state: "advanced"; base_revision: number; remote_revision: number }
+  | { state: "replaced"; base_revision: number; remote_revision: number }
   | { state: "unknown"; message: string };
 
 /**
@@ -789,7 +769,7 @@ export interface ConversationPlanAction {
   source_resource_id?: string | null;
   proposed_provider_thread_id?: string | null;
   required_codec: string;
-  pinned_generation: number;
+  pinned_revision: number;
   pinned_commit_id: string;
   pinned_manifest_sha256: string;
   pinned_lineage_digest?: string | null;
@@ -812,7 +792,7 @@ export interface RestorePlan {
   host_id: string;
   replica_id: string;
   expected_host_identity_revision: number;
-  generation: number;
+  revision: number;
   commit_id: string;
   manifest_sha256: string;
   binding_revision: number;
@@ -848,7 +828,7 @@ export interface RestoreResult {
   plan_id?: string | null;
   /**
    * Present only on restore applies. `false` means the reviewed baseline
-   * could not advance to the plan's generation because required changes
+   * could not advance to the plan's revision because required changes
    * were skipped — Push stays gated until they are pulled.
    */
   reviewed_base_advanced?: boolean;
@@ -1055,8 +1035,8 @@ export interface ThreadSyncComparison {
   project_id: string;
   storage_id: string;
   storage_name: string;
-  generation?: number | null;
-  base_generation?: number | null;
+  revision?: number | null;
+  base_revision?: number | null;
   compared_at: number;
   entries: ThreadSyncEntry[];
   counts: ThreadSyncCounts;

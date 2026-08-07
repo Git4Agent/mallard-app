@@ -70,7 +70,7 @@ const restorePlan: RestorePlan = {
   host_id: binding.host_id,
   replica_id: binding.replica_id,
   expected_host_identity_revision: 0,
-  generation: 1,
+  revision: 1,
   commit_id: "commit-restore",
   manifest_sha256: "a".repeat(64),
   binding_revision: binding.revision,
@@ -102,8 +102,8 @@ test("a replacement storage history offers unlinking from Pull review", () => {
         ...restorePlan,
         remote_continuity: {
           state: "replaced",
-          base_generation: 1,
-          remote_generation: 2,
+          base_revision: 1,
+          remote_revision: 2,
         },
       }}
       binding={binding}
@@ -174,7 +174,7 @@ function conversationAction(
     thread_id: "thread-cloud",
     source_resource_id: "codex:conversation:thread-cloud",
     required_codec: "codex.lineage.v2",
-    pinned_generation: restorePlan.generation,
+    pinned_revision: restorePlan.revision,
     pinned_commit_id: restorePlan.commit_id,
     pinned_manifest_sha256: restorePlan.manifest_sha256,
     expected_local_target: { state: "absent" },
@@ -1216,7 +1216,7 @@ test("an all-optional plan keeps Pull enabled for the acknowledge-only apply", (
 
 test("a plan with nothing to review acknowledges without opening the review", () => {
   // The storage-card Pull must work when the storage only moved its
-  // generation: planRestore runs the empty apply itself instead of opening
+  // revision: planRestore runs the empty apply itself instead of opening
   // an empty review the user has to click through. A replaced history is
   // never adopted silently.
   const source = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
@@ -1228,7 +1228,7 @@ test("a plan with nothing to review acknowledges without opening the review", ()
 test("the storage-card Pull button applies the open review", () => {
   // The card button is the review's footer primary, not a focus shortcut:
   // with nothing selected it still applies, because the empty apply is how a
-  // generation-only storage change is acknowledged. The review reports its
+  // revision-only storage change is acknowledged. The review reports its
   // primary upward under the footer's own gating, and the card runs it the
   // same way the push card button runs its onContinue.
   const view = readFileSync("src/components/project-sync/RestorePlanView.tsx", "utf8");
@@ -1247,7 +1247,7 @@ test("the storage-card Pull button applies the open review", () => {
   const applyEnd = sync.indexOf("const saveStorageConfig");
   assert.ok(applyStart !== -1 && applyEnd > applyStart, "applyReview precedes saveStorageConfig");
   const applyBody = sync.slice(applyStart, applyEnd);
-  assert.match(applyBody, /hostWorkflowGeneration\.current === workflowGeneration\) setBusy\(false\)/);
+  assert.match(applyBody, /hostWorkflowEpoch\.current === workflowEpoch\) setBusy\(false\)/);
   assert.doesNotMatch(applyBody, /restoreRequest\.current === requestId\) setBusy/);
 
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");

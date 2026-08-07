@@ -108,7 +108,7 @@ again with `tt4` — is a fast-forward, not a conflict:
   `sub_agent_activity` events are `event_msg` records and do not perturb
   lineage digests.
 - `tt1–tt3` are unchanged → sha-deduped, no re-upload. `tt4` uploads. The new
-  generation's manifest lists parent + 4 children.
+  revision's manifest lists parent + 4 children.
 - The destination Pull fast-forwards the parent, no-ops `tt1–tt3` (present,
   same sha), and writes `tt4` under its original ID.
 
@@ -260,7 +260,7 @@ In `src-tauri/src/sync_tests/thread_variants/`:
   remapped parent) is unknown until Step 0 variant 4; the Step 4 rewrite
   covers it either way.
 - Transcript exposure: checking a parent now syncs its children's content.
-  The "+N subagent transcripts" label is the disclosure; bundle generations
+  The "+N subagent transcripts" label is the disclosure; bundle revisions
   are immutable, so unchecking later does not erase prior pushes.
 
 ## Sizing

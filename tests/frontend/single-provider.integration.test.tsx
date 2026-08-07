@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import ProjectBindingEditor from "../../src/components/project-sync/ProjectBindingEditor";
-import { shouldShowResourcesSection } from "../../src/components/project-sync/ProjectSetupWorkspace";
 import ProjectLinksWorkspace, {
   projectPullActionLabel,
   projectPushActionLabel,
@@ -444,29 +443,4 @@ test("a detached project can reopen setup without linked storage", () => {
     />,
   );
   assert.doesNotMatch(activeHtml, />Confirm setup<\/button>|>Set up project<\/button>/);
-});
-
-test("setup hides Sync contents when it has neither a choice to offer nor anything to report", () => {
-  const quiet = {
-    choiceAvailable: false,
-    discovering: false,
-    warningCount: 0,
-    resourcesState: "ready",
-    selectionResetNoticeVisible: false,
-  };
-  // A connected remote repo owns the recipe, and an empty discovery leaves
-  // nothing to tick: either way the heading would stand over one sentence.
-  assert.equal(shouldShowResourcesSection(quiet), false);
-  // Before the first inspection lands there is no section status at all.
-  assert.equal(shouldShowResourcesSection({ ...quiet, resourcesState: null }), false);
-
-  // Anything the user can act on, or that the backend flagged, keeps it open.
-  assert.equal(shouldShowResourcesSection({ ...quiet, choiceAvailable: true }), true);
-  assert.equal(shouldShowResourcesSection({ ...quiet, discovering: true }), true);
-  assert.equal(shouldShowResourcesSection({ ...quiet, warningCount: 1 }), true);
-  // "blocked" covers discovery failure and the missing-profile gate;
-  // "attention" covers selection drift.
-  assert.equal(shouldShowResourcesSection({ ...quiet, resourcesState: "blocked" }), true);
-  assert.equal(shouldShowResourcesSection({ ...quiet, resourcesState: "attention" }), true);
-  assert.equal(shouldShowResourcesSection({ ...quiet, selectionResetNoticeVisible: true }), true);
 });

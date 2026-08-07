@@ -44,15 +44,15 @@ backends (stub S3 + local folder), harness `Machine`/`TestCloud`,
   cloud profile P. A pushes v1 → B pulls → B edits, pushes v2 → A pulls.
   Then machine N (a real second machine) links the same P, pulls, edits,
   pushes v3; A and B pull. Assert: all three replicas converge at every
-  hop (`assert_converged` for A/B via profile reads + N), generations
+  hop (`assert_converged` for A/B via profile reads + N), revisions
   advance linearly (no conflict siblings — edits are sequential), and
   M holds two distinct baseline files for P while N holds one.
 
 - **S28 — per-link statuses over the SHARED cloud cache.**
   The cloud cache stays keyed `(storage, cloud profile)` — one sibling's
   push refreshes it for both links; statuses must still differ per link
-  because baselines don't. A and B both synced at gen 1. A edits + pushes
-  (gen 2, cache updated by A's push). Without B pulling:
+  because baselines don't. A and B both synced at rev 1. A edits + pushes
+  (rev 2, cache updated by A's push). Without B pulling:
   `get_file_statuses(profile=B)` → the file is `cloud-ahead` for B and
   `synced` for A. After B pulls, both `synced`. Guards the
   baseline-per-link × cache-shared interplay that made the old design
@@ -70,7 +70,7 @@ backends (stub S3 + local folder), harness `Machine`/`TestCloud`,
 ### B. Picker / resolve semantics
 
 - **S30 — pick an existing profile among several (the myconf4 fix).**
-  Storage holds P1 (411-file stand-in: a few files, gen ≥ 1) and P2
+  Storage holds P1 (411-file stand-in: a few files, rev ≥ 1) and P2
   (empty), both root `.claude` — the exact post-bug layout. Fresh root C
   linked with `cloud: { profile_id: P1, pinned: true }` (what the picker
   writes). Pull: C receives exactly P1's files (including
@@ -82,7 +82,7 @@ backends (stub S3 + local folder), harness `Machine`/`TestCloud`,
 - **S31 — the auto path (`cloud: {}`) is only safe alone.**
   (a) One candidate in storage → auto links it, `pinned: false`, no
   creation. (b) Two candidates → push/pull errors "pin one explicitly",
-  storage untouched (no third profile, generations unchanged). Documents
+  storage untouched (no third profile, revisions unchanged). Documents
   why the UI always writes an explicit pick and why "Automatic" in the pin
   field is fine for the single-profile common case.
 
@@ -90,7 +90,7 @@ backends (stub S3 + local folder), harness `Machine`/`TestCloud`,
   Storage already holds one `.claude` profile. Root D linked the way the
   fixed picker writes create-new: fresh pinned id + deduped label. Push:
   a NEW profile exists at that exact id with label "Claude 2", the old
-  profile's head/generation untouched, D's baseline keyed to the new id.
+  profile's head/revision untouched, D's baseline keyed to the new id.
   Also assert `list_sync_profiles` (the probe the UI consumes) returns
   both with distinct labels.
 

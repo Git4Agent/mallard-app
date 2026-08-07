@@ -11,6 +11,7 @@ import {
   StorageEditor,
 } from "../../src/components/project-sync/StorageSettings";
 import {
+  StorageRepositoryDetails,
   StorageRepositoryRow,
   StorageSettingsMeta,
 } from "../../src/components/project-sync/ProjectLinksWorkspace";
@@ -87,7 +88,7 @@ test("R2 S3 API URLs map to and from an Account ID and bucket", () => {
   assert.equal(parseR2S3ApiUrl(`${fullUrl}/nested`), null);
 });
 
-test("cloud storage editor exposes the guided R2 form instead of generic S3 fields", () => {
+test("cloud storage editor keeps a one-line guide and states each example once", () => {
   const html = renderToStaticMarkup(
     <StorageEditor
       storage={r2Storage()}
@@ -97,25 +98,35 @@ test("cloud storage editor exposes the guided R2 form instead of generic S3 fiel
   );
 
   assert.match(html, /Cloudflare R2/);
-  assert.match(html, /Connect a Cloudflare R2 bucket/);
-  assert.doesNotMatch(html, /sync-r2-guide-icon/);
-  assert.match(html, /Create an R2 bucket/);
-  assert.match(html, /Create R2 credentials/);
-  assert.match(html, /Find your Account ID/);
+  // The four-part guide block is gone; one line carries the requirement, the
+  // doc link, and the only unrecoverable fact.
+  assert.match(html, /sync-r2-guide/);
+  assert.match(html, /Object Read &amp; Write/);
+  assert.match(html, /Setup guide/);
+  assert.match(html, /Secret shown once/);
+  assert.doesNotMatch(html, /Connect a Cloudflare R2 bucket/);
+  assert.doesNotMatch(html, /Create an R2 bucket/);
   assert.match(html, /Bucket name/);
   assert.match(html, /Access Key ID/);
   assert.match(html, /Secret Access Key/);
   assert.match(html, /S3 API URL/);
-  assert.match(html, /9cc0c910ec\*\*\*41511aca1\.r2\.cloudflarestorage\.com\/agent/);
-  assert.match(html, /codex-sync-backups/);
-  assert.match(html, /023e…c353/);
-  assert.match(html, /4a2b…91ef/);
-  assert.match(html, /a1B2…x9Y0/);
+  // Each example appears exactly once, as the placeholder — no doubled hint.
+  assert.equal((html.match(/9cc0c910ec\*\*\*41511aca1\.r2\.cloudflarestorage\.com\/agent/g) ?? []).length, 1);
+  assert.equal((html.match(/codex-sync-backups/g) ?? []).length, 1);
+  assert.equal((html.match(/023e105f4ecef8ad9ca31a8372d0c353/g) ?? []).length, 1);
+  assert.equal((html.match(/4a2b…91ef/g) ?? []).length, 1);
+  assert.equal((html.match(/a1B2…x9Y0/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /-hint"/);
+  // The secret can be shown while typing, and the empty form says so.
+  assert.match(html, /sync-secret-reveal/);
+  assert.match(html, />Show</);
+  assert.match(html, /type="password"/);
+  assert.match(html, /0 of 5 set/);
   assert.doesNotMatch(html, />S3 \/ R2</);
   assert.doesNotMatch(html, />Region</);
 });
 
-test("local storage keeps browse and save actions in the path row", () => {
+test("local storage keeps browse in the path row and save in the footer", () => {
   const html = renderToStaticMarkup(
     <StorageEditor
       storage={{ ...r2Storage(), id: "storage-local", kind: "local", local_dir: "/tmp/storage" }}
@@ -125,7 +136,10 @@ test("local storage keeps browse and save actions in the path row", () => {
     />,
   );
 
-  assert.match(html, /<div><input[^>]*\/tmp\/storage[^>]*><button[^>]*>.*Browse…<\/button><button[^>]*>Save storage<\/button><\/div>/);
+  assert.match(html, /<div><input[^>]*\/tmp\/storage[^>]*><button[^>]*>.*Browse…<\/button><\/div>/);
+  assert.match(html, /sync-storage-editor-footer[^>]*><button type="button">Save storage<\/button>/);
+  // The field counter belongs to the R2 branch; a single path needs no tally.
+  assert.doesNotMatch(html, /of 5 set/);
   assert.doesNotMatch(html, /sync-storage-primary-action/);
 });
 
@@ -143,24 +157,79 @@ test("configured storage can move name editing into its page heading", () => {
   assert.match(html, /Cloudflare R2/);
 });
 
-test("repository rows keep metadata behind an icon disclosure", () => {
+test("repository rows spell their chips and fold full details behind the history chevron", () => {
   const bundle: RemoteBundleSummary = {
     bundle_id: "440ed684dbb6034cf32c3bdf04a8f0ea",
     display_name: "mallardInternal",
-    generation: 3,
+    revision: 3,
     resource_count: 9,
     updated_at: Date.now() - 29 * 60 * 1000,
+    providers: ["codex", "claude"],
+    repository_fingerprint: "3f9c1a77b2e845d06c1fa2b9d47e8350",
   };
   const html = renderToStaticMarkup(<StorageRepositoryRow bundle={bundle} />);
 
-  assert.match(html, /<details[^>]*sync-storage-repository-row/);
-  assert.match(html, /Show details for mallardInternal/);
-  assert.match(html, /sync-storage-repository-details-icon/);
-  assert.match(html, />Repository ID</);
-  assert.match(html, />Generation</);
-  assert.match(html, />Resources</);
-  assert.match(html, />Updated</);
-  assert.doesNotMatch(html, /Generation 3/);
+  assert.match(html, /sync-storage-repository-item/);
+  assert.match(html, /sync-storage-repository-row/);
+  assert.match(html, /mallardInternal/);
+  // Chips spell their words — no Rev/Upd abbreviations anywhere on the row.
+  assert.match(html, /sync-storage-repo-chip[^>]*><span>Revision<\/span><b>3<\/b>/);
+  assert.match(html, /sync-storage-repo-chip[^>]*><span>Updated<\/span><b>29m ago<\/b>/);
+  assert.doesNotMatch(html, /<span>Rev<\/span>/);
+  assert.doesNotMatch(html, /<span>Upd<\/span>/);
+  // The id lives in the fold now: no stub on the collapsed row, and the fold
+  // itself is closed until the history table's own toggle opens it.
+  assert.doesNotMatch(html, /440ed684…a8f0ea/);
+  assert.doesNotMatch(html, /sync-storage-repository-details/);
+  assert.match(html, /sync-history-commit-toggle/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /aria-controls="repo-details-440ed684dbb6034cf32c3bdf04a8f0ea"/);
+  assert.match(html, /aria-label="Show details for mallardInternal"/);
+});
+
+test("repository rows wear the git folder icon exactly when a fingerprint marks a git remote", () => {
+  const bundle: RemoteBundleSummary = {
+    bundle_id: "440ed684dbb6034cf32c3bdf04a8f0ea",
+    display_name: "mallardInternal",
+    repository_fingerprint: "3f9c1a77b2e845d06c1fa2b9d47e8350",
+  };
+  const iconSvg = (html: string) =>
+    html.match(/sync-storage-repository-icon"><svg.*?<\/svg>/)?.[0];
+
+  const gitIcon = iconSvg(renderToStaticMarkup(<StorageRepositoryRow bundle={bundle} />));
+  const plainIcon = iconSvg(renderToStaticMarkup(
+    <StorageRepositoryRow bundle={{ ...bundle, repository_fingerprint: null }} />,
+  ));
+  assert.ok(gitIcon && plainIcon);
+  assert.notEqual(gitIcon, plainIcon);
+});
+
+test("the details fold carries the complete id and skips absent facts", () => {
+  const bundle: RemoteBundleSummary = {
+    bundle_id: "440ed684dbb6034cf32c3bdf04a8f0ea",
+    display_name: "mallardInternal",
+    revision: 3,
+    resource_count: 9,
+    updated_at: 1_754_400_000,
+    providers: ["codex", "claude"],
+    repository_fingerprint: "3f9c1a77b2e845d06c1fa2b9d47e8350",
+  };
+  const html = renderToStaticMarkup(<StorageRepositoryDetails bundle={bundle} />);
+
+  assert.match(html, /Repository ID<\/dt><dd><code>440ed684dbb6034cf32c3bdf04a8f0ea<\/code>/);
+  assert.match(html, /<dt>Updated<\/dt>/);
+  assert.match(html, /<dt>Resources<\/dt><dd>9<\/dd>/);
+  assert.match(html, /<dt>Agents<\/dt><dd>Codex · Claude<\/dd>/);
+  assert.match(html, /Fingerprint<\/dt><dd><code>3f9c1a77b2e845d06c1fa2b9d47e8350<\/code>/);
+
+  // Absent facts don't render — no dash placeholders.
+  const bare = renderToStaticMarkup(
+    <StorageRepositoryDetails
+      bundle={{ bundle_id: "440ed684dbb6034cf32c3bdf04a8f0ea", display_name: "mallardInternal" }}
+    />,
+  );
+  assert.match(bare, /Repository ID/);
+  assert.doesNotMatch(bare, /Updated|Resources|Agents|Fingerprint|—/);
 });
 
 test("storage settings identify the destination with its storage icon", () => {

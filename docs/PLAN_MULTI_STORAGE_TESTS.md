@@ -104,10 +104,10 @@ Walk + asserts:
    links have distinct baselines. No file at the bare v1 `{profile_id}`
    key.
 3. **Fan-out staleness.** Edit a c1 file (length change), push **only**
-   c1→Personal: Personal's codex generation bumps, Team's is unchanged.
+   c1→Personal: Personal's codex revision bumps, Team's is unchanged.
    `get_file_statuses` with `link = c1→Team` reports the file pending;
    with `link = c1→Personal` reports synced (statuses are per link, §6 of
-   the plan). Push c1→Team → generations converge, "up to date" after.
+   the plan). Push c1→Team → revisions converge, "up to date" after.
 4. **No cross-talk.** After all pushes: a1's distinguishing rel never
    appears in Team's `001/.claude` manifest, a2's never in Personal's, and
    a1/a2 file bytes on disk are untouched by each other's pushes.
@@ -132,7 +132,7 @@ From S21's end state: save a config **without** the a1→Personal link
 - That link's baseline + cloud cache are deleted; the other three baselines
   and both storage dirs are byte-untouched (orphan philosophy).
 - Relink (save with the link back, same pin): first push re-verifies by
-  hash — "up to date", generation unchanged, **zero conflict siblings**
+  hash — "up to date", revision unchanged, **zero conflict siblings**
   (the §3.2 "safe by construction" claim).
 - Then edit + push works as a normal change.
 

@@ -49,7 +49,7 @@ export interface SyncOutcomeStat {
   icon: IconName;
   value?: string;
   label: string;
-  /** Renders "Generation 6" rather than "6 generation". */
+  /** Renders "Revision 6" rather than "6 revision". */
   lead?: boolean;
 }
 
@@ -136,8 +136,8 @@ export function buildPushOutcome({
     ...(held.length > 0
       ? [{ icon: "git-compare-arrows" as const, value: String(held.length), label: "held for Pull" }]
       : []),
-    ...(result.generation != null
-      ? [{ icon: "git-branch" as const, label: "Generation", value: String(result.generation), lead: true }]
+    ...(result.revision != null
+      ? [{ icon: "git-branch" as const, label: "Revision", value: String(result.revision), lead: true }]
       : []),
   ];
 
@@ -312,7 +312,7 @@ export function buildPullOutcome({
         label: "failed",
       }]
       : []),
-    { icon: "git-branch", label: "Generation", value: String(plan.generation), lead: true },
+    { icon: "git-branch", label: "Revision", value: String(plan.revision), lead: true },
   ];
 
   const action: SyncOutcomeAction | undefined = restartable && appRefresh

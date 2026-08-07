@@ -87,8 +87,8 @@ The managed provider preserves the current portable layout and schema:
     |-- _head.json
     |-- _tag.json
     |-- _objects/<payload-sha256>
-    |-- _manifests/<generation>-<commit-id>.json
-    `-- _commits/<generation>-<commit-id>.json
+    |-- _manifests/<revision>-<commit-id>.json
+    `-- _commits/<revision>-<commit-id>.json
 ```
 
 `_uploads/` remains only a reserved logical namespace. The current publisher
@@ -1675,7 +1675,7 @@ publish order remain the trust boundary.
 3. Fetch and decrypt the immutable manifest.
 4. Let the current bundle engine build the review plan.
 5. Fetch/decrypt only approved payload objects.
-6. Preserve all current revision, digest, generation, expiry, backup, and
+6. Preserve all current configuration revision, bundle revision, digest, expiry, backup, and
    explicit-approval checks before local apply.
 
 Managed cloud does not weaken Pull review or add a server-triggered apply path.

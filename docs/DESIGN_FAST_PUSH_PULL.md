@@ -39,7 +39,7 @@ Six decisions:
 
 - Make the cost of a Push or Pull proportional to **what changed**, not to
   the size of the project's history.
-- Keep every existing correctness gate byte-for-byte: pinned generation,
+- Keep every existing correctness gate byte-for-byte: pinned revision,
   commit ID, manifest SHA, conditional-write CAS, `expected_local_target`
   digests, and the apply-time re-capture.
 - Introduce no new hash construction and no new trust relationship. Every
@@ -105,7 +105,7 @@ round trips — to publish one file.
   It is empty at every app start, and the `BundleId` component prevents
   reuse across bundles that share content.
 - Manifests are immutable and content-addressed
-  (`_manifests/{generation}-{commit_id}.json`, verified against
+  (`_manifests/{revision}-{commit_id}.json`, verified against
   `head.manifest_sha256`) but are re-downloaded on every
   `inspect_optional_with_token`
   ([bundle_engine.rs:1395](../src-tauri/src/project_sync/bundle_engine.rs#L1395)),
@@ -231,7 +231,7 @@ flowchart LR
     end
     subgraph remote["Storage"]
         HEAD["_head — <b>never cached</b>"]
-        MAN["_manifests/&lt;gen&gt;-&lt;commit&gt;.json"]
+        MAN["_manifests/&lt;rev&gt;-&lt;commit&gt;.json"]
         PAY["_objects/&lt;sha256&gt;"]
     end
 
@@ -283,7 +283,7 @@ push-action building through exactly one consumer —
 relation ([conversation_sync.rs:287](../src-tauri/src/project_sync/conversation_sync.rs#L287)).
 Supplying the relation directly removes the last reason to open a stored
 transcript on the Push path. Every other pinned field a Push action carries
-(`pinned_generation`, `pinned_commit_id`, `pinned_manifest_sha256`,
+(`pinned_revision`, `pinned_commit_id`, `pinned_manifest_sha256`,
 `pinned_lineage_digest`, `pinned_semantic_digest`) comes from the manifest
 or from the local capture.
 
@@ -301,7 +301,7 @@ content-witnessed:
   them.
 
 The snapshot is pinned for the whole planning call, and apply re-checks
-generation, commit ID, and manifest SHA. If the head moves between classify
+revision, commit ID, and manifest SHA. If the head moves between classify
 and fetch, apply fails closed exactly as it does today.
 
 **Subagent tripwire is preserved.** Pull planning refuses stored subagent

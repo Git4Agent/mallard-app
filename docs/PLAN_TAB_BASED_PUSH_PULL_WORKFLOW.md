@@ -124,9 +124,9 @@ The Review step must:
 - Separate `included` from `will change`.
 - Link each warning back to the affected tab and row.
 - Disable Push while storage-newer, diverged, unknown, or blocked resources remain unresolved.
-- Offer `Pull and review` when a newer storage generation blocks Push.
-- Prevent an accidental empty publication. An empty generation requires a separate explicit confirmation.
-- State the destination and expected next generation when known.
+- Offer `Pull and review` when a newer storage revision blocks Push.
+- Prevent an accidental empty publication. An empty revision requires a separate explicit confirmation.
+- State the destination and expected next revision when known.
 
 ### Push execution
 
@@ -138,7 +138,7 @@ After confirmation:
 4. Save the per-storage recipe only after publication succeeds.
 5. Refresh Sessions, Skills, Plugins, and storage comparison data.
 
-On success, exit review mode and show a compact message such as `Pushed generation 4 · 14 resources`. Detailed events remain available in Log.
+On success, exit review mode and show a compact message such as `Pushed revision 4 · 14 resources`. Detailed events remain available in Log.
 
 If the storage head changes during review, keep the user's selection, return to Review, and show `Storage changed while you were reviewing. Refresh before pushing.`
 
@@ -146,9 +146,9 @@ If the storage head changes during review, keep the user's selection, return to 
 
 ### Entry and immutable plan
 
-Clicking Pull fetches the selected storage generation and creates the existing immutable restore plan. The UI may change presentation, but it must preserve the current plan alignment and approval guarantees:
+Clicking Pull fetches the selected storage revision and creates the existing immutable restore plan. The UI may change presentation, but it must preserve the current plan alignment and approval guarantees:
 
-- Restore and dependency plans refer to the same storage, bundle, generation, manifest, and binding revision.
+- Restore and dependency plans refer to the same storage, bundle, revision, manifest, and binding revision.
 - The plan expires and must be refreshed if its snapshot becomes stale.
 - No local mutation occurs before the final Apply action.
 
@@ -192,7 +192,7 @@ Use the Plugins list to approve installation intent.
 Summarize the selected restore and installation actions.
 
 ```text
-Pull generation 4 from Local storage 0
+Pull revision 4 from Local storage 0
 
 Sessions        3 to restore    1 keep local
 Skills          2 to restore
@@ -210,7 +210,7 @@ The Review step also contains:
 - A concise list of unresolved approvals or blockers.
 - Readiness issues that will remain after the selected actions.
 - A direct link back to the affected tab or resource.
-- The local project root, assigned profile, source storage, and generation.
+- The local project root, assigned profile, source storage, and revision.
 
 The primary action is disabled when no action is selected. Skipped optional tools do not prevent restoring safe project data, but the result must clearly state that setup remains incomplete.
 

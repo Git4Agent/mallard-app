@@ -285,7 +285,7 @@ Compute SHA-256 from a versioned, length-delimited encoding, never `Debug`
 formatting or incidental JSON order. Include:
 
 - storage ID and operation fingerprint, bundle, host, replica, host-identity
-  revision, generation, commit, manifest, and binding pins;
+  revision, bundle revision, commit, manifest, and binding pins;
 - action ID and resource ID;
 - every tagged action-kind field;
 - for `ConversationPlanAction`, direction, action/reason/relation, provider,
@@ -394,7 +394,7 @@ are additive Tauri response fields and do not change a persistent schema.
 `CaptureFailpoint::AfterReviewValidatedBeforeCapture` atomically replaces a
 reviewed file with secret-shaped, private-key, executable, and
 conversation-reassignment variants. Every case must leave the remote head,
-generation, and object set unchanged.
+revision, and object set unchanged.
 
 **Done when**
 

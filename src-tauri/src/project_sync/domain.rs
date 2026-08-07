@@ -21,8 +21,8 @@ pub const PUSH_PLAN_SCHEMA: u32 = 1;
 pub const BUNDLE_SCHEMA: u32 = 1;
 pub const RECIPE_SCHEMA: u32 = 1;
 pub const RESTORE_PLAN_SCHEMA: u32 = 1;
-pub const SETUP_DRAFT_SCHEMA: u32 = 1;
-pub const SETUP_TRANSACTION_SCHEMA: u32 = 1;
+pub const SETUP_DRAFT_SCHEMA: u32 = 2;
+pub const SETUP_TRANSACTION_SCHEMA: u32 = 2;
 pub const MAX_SETUP_DRAFTS: usize = 64;
 
 pub const MAX_PROJECTS: usize = 1_024;
@@ -37,7 +37,6 @@ pub const MAX_CONVERSATION_BINDINGS: usize = 100_000;
 pub const MAX_ORIGIN_ALIASES: usize = 20_000;
 pub const MAX_CONVERSATION_JOURNAL_OPERATIONS: usize = 10_000;
 pub const MAX_LOGICAL_PATH_BYTES: usize = 1_024;
-pub const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_CONVERSATION_FILE_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_PROJECT_CONTENT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_PROJECT_CONTENT_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
@@ -78,13 +77,13 @@ pub fn absent_bundle_head_pin() -> (u64, String, String) {
 }
 
 fn validate_bundle_head_pin(
-    generation: u64,
+    revision: u64,
     commit_id: &str,
     manifest_sha256: &str,
 ) -> Result<(), String> {
     validate_named_id("bundle head pin commit", commit_id)?;
     validate_sha256("bundle head pin manifest", manifest_sha256)?;
-    let is_absent = generation == 0;
+    let is_absent = revision == 0;
     let uses_absent_values =
         commit_id == ABSENT_BUNDLE_COMMIT_ID && manifest_sha256.bytes().all(|byte| byte == b'0');
     if is_absent != uses_absent_values {
@@ -780,8 +779,9 @@ impl BundleRecipe {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RecipeBase {
-    pub generation: u64,
+    pub revision: u64,
     pub manifest_sha256: String,
+    pub manifest_size: u64,
     /// Immutable commit that established this reviewed base. It lets status
     /// views reload the exact historical manifest after the storage head
     /// advances, and names the manifest the continuity probe checks for
@@ -801,6 +801,9 @@ pub struct RecipeBase {
 impl RecipeBase {
     pub fn validate(&self) -> Result<(), String> {
         validate_sha256("recipe base manifest", &self.manifest_sha256)?;
+        if self.manifest_size == 0 {
+            return Err("recipe base manifest size must be nonzero".to_string());
+        }
         validate_named_id("recipe base commit", &self.commit_id)?;
         Ok(())
     }
@@ -816,22 +819,22 @@ pub enum RemoteContinuity {
     /// No remote history and no recorded base: a first publication target.
     Fresh,
     /// A base is recorded but the remote holds no history at all.
-    RemoteMissing { base_generation: u64 },
+    RemoteMissing { base_revision: u64 },
     /// Remote history exists but this replica has never reviewed a base.
-    Unreviewed { remote_generation: u64 },
+    Unreviewed { remote_revision: u64 },
     /// The head names exactly the manifest this replica last synced.
-    InSync { generation: u64 },
+    InSync { revision: u64 },
     /// The recorded base is still part of the remote history; a pull
     /// fast-forwards onto it.
     Advanced {
-        base_generation: u64,
-        remote_generation: u64,
+        base_revision: u64,
+        remote_revision: u64,
     },
     /// The remote no longer contains the recorded base: the history this
     /// replica synced was replaced, not extended.
     Replaced {
-        base_generation: u64,
-        remote_generation: u64,
+        base_revision: u64,
+        remote_revision: u64,
     },
     /// The probe could not reach the store; no verdict is claimed.
     Unknown { message: String },
@@ -839,12 +842,12 @@ pub enum RemoteContinuity {
 
 /// Classify remote history continuity from content witnesses alone.
 ///
-/// The probe runs only in the generation-ahead arm and must read the store —
+/// The probe runs only in the revision-ahead arm and must read the store —
 /// never a local cache, whose contents witness nothing about the remote —
 /// reporting whether the base manifest is still present with exactly the
-/// recorded digest. Every other row is decided for free: equal generations
+/// recorded digest. Every other row is decided for free: equal revisions
 /// with different digests cannot share a lineage (a lineage commits each
-/// generation exactly once), and generations never regress within one.
+/// revision exactly once), and revisions never regress within one.
 pub fn classify_remote_continuity(
     observed_head: Option<&BundleHead>,
     base: Option<&RecipeBase>,
@@ -853,37 +856,37 @@ pub fn classify_remote_continuity(
     match (observed_head, base) {
         (None, None) => RemoteContinuity::Fresh,
         (None, Some(base)) => RemoteContinuity::RemoteMissing {
-            base_generation: base.generation,
+            base_revision: base.revision,
         },
         (Some(head), None) => RemoteContinuity::Unreviewed {
-            remote_generation: head.generation,
+            remote_revision: head.revision,
         },
         (Some(head), Some(base)) => {
-            if head.generation == base.generation {
+            if head.revision == base.revision {
                 if head.manifest_sha256 == base.manifest_sha256 {
                     RemoteContinuity::InSync {
-                        generation: head.generation,
+                        revision: head.revision,
                     }
                 } else {
                     RemoteContinuity::Replaced {
-                        base_generation: base.generation,
-                        remote_generation: head.generation,
+                        base_revision: base.revision,
+                        remote_revision: head.revision,
                     }
                 }
-            } else if head.generation < base.generation {
+            } else if head.revision < base.revision {
                 RemoteContinuity::Replaced {
-                    base_generation: base.generation,
-                    remote_generation: head.generation,
+                    base_revision: base.revision,
+                    remote_revision: head.revision,
                 }
             } else {
                 match probe(base) {
                     Ok(true) => RemoteContinuity::Advanced {
-                        base_generation: base.generation,
-                        remote_generation: head.generation,
+                        base_revision: base.revision,
+                        remote_revision: head.revision,
                     },
                     Ok(false) => RemoteContinuity::Replaced {
-                        base_generation: base.generation,
-                        remote_generation: head.generation,
+                        base_revision: base.revision,
+                        remote_revision: head.revision,
                     },
                     Err(message) => RemoteContinuity::Unknown { message },
                 }
@@ -1534,7 +1537,7 @@ pub struct LocalConversationBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_observed_semantic_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_generation: Option<u64>,
+    pub source_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_manifest_sha256: Option<String>,
     pub revision: u64,
@@ -1601,9 +1604,9 @@ impl LocalConversationBinding {
                 validate_sha256(label, digest)?;
             }
         }
-        if self.source_generation.is_some() != self.source_manifest_sha256.is_some() {
+        if self.source_revision.is_some() != self.source_manifest_sha256.is_some() {
             return Err(
-                "conversation binding source generation and manifest must be pinned together"
+                "conversation binding source revision and manifest must be pinned together"
                     .to_string(),
             );
         }
@@ -2105,7 +2108,7 @@ impl ConversationJournalTarget {
 pub struct ConversationCloudAnchor {
     pub storage_id: StorageId,
     pub bundle_id: BundleId,
-    pub generation: u64,
+    pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
 }
@@ -2378,9 +2381,9 @@ pub enum DraftRepositoryChoice {
     },
 }
 
-/// A resumable, machine-local project setup draft.  Drafts hold selections
-/// and preallocated identities only — never discovered file contents, remote
-/// listings, or resource payloads; those are rescanned on resume.
+/// A resumable, machine-local project setup draft. Drafts hold configuration
+/// choices and preallocated identities only — never discovered resources,
+/// remote listings, or payloads.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProjectSetupDraft {
     pub schema: u32,
@@ -2400,18 +2403,6 @@ pub struct ProjectSetupDraft {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<DraftStorageSelection>,
     pub repository: DraftRepositoryChoice,
-    /// Resource IDs checked in the setup inventory.
-    #[serde(default)]
-    pub selected_resource_ids: Vec<ResourceId>,
-    /// Digest over the discovered candidate IDs at selection time.  A changed
-    /// signature flags the saved selection for re-review, never silent reuse.
-    #[serde(default)]
-    pub discovery_signature: String,
-    /// Digest over the provider home paths the discovery signature was taken
-    /// against.  Repointing a profile changes what is discoverable at all, so
-    /// that is a re-derive, not the drift `discovery_signature` reports.
-    #[serde(default)]
-    pub discovery_profile_signature: String,
     pub revision: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -2465,18 +2456,6 @@ impl ProjectSetupDraft {
             if let Some(fingerprint) = repository_fingerprint {
                 validate_sha256("draft remote repository fingerprint", fingerprint)?;
             }
-        }
-        if self.selected_resource_ids.len() > MAX_RESOURCES {
-            return Err(format!("draft exceeds {} resources", MAX_RESOURCES));
-        }
-        if !self.discovery_signature.is_empty() {
-            validate_sha256("draft discovery signature", &self.discovery_signature)?;
-        }
-        if !self.discovery_profile_signature.is_empty() {
-            validate_sha256(
-                "draft discovery profile signature",
-                &self.discovery_profile_signature,
-            )?;
         }
         if let Some(error) = &self.last_error {
             if error.len() > 4_096 || error.chars().any(char::is_control) {
@@ -3022,7 +3001,7 @@ pub struct ConversationPlanAction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_provider_thread_id: Option<String>,
     pub required_codec: String,
-    pub pinned_generation: u64,
+    pub pinned_revision: u64,
     pub pinned_commit_id: String,
     pub pinned_manifest_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3044,7 +3023,7 @@ pub struct ConversationPlanAction {
 impl ConversationPlanAction {
     pub fn validate(&self) -> Result<(), String> {
         validate_bundle_head_pin(
-            self.pinned_generation,
+            self.pinned_revision,
             &self.pinned_commit_id,
             &self.pinned_manifest_sha256,
         )?;
@@ -3184,7 +3163,7 @@ pub struct ConversationPushPlan {
     pub expected_project_binding_revision: u64,
     pub expected_bindings_document_revision: u64,
     pub expected_profile_revision: u64,
-    pub generation: u64,
+    pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
     pub created_at: u64,
@@ -3201,7 +3180,7 @@ impl ConversationPushPlan {
                 self.schema_version
             ));
         }
-        validate_bundle_head_pin(self.generation, &self.commit_id, &self.manifest_sha256)?;
+        validate_bundle_head_pin(self.revision, &self.commit_id, &self.manifest_sha256)?;
         if self.created_at > self.expires_at || self.actions.len() > MAX_ACTIONS {
             return Err("invalid conversation push-plan lifetime or action count".to_string());
         }
@@ -3213,7 +3192,7 @@ impl ConversationPushPlan {
                 || action.replica_id != self.replica_id
                 || action.local_project_id != self.local_project_id
                 || action.provider_profile_id != self.provider_profile_id
-                || action.pinned_generation != self.generation
+                || action.pinned_revision != self.revision
                 || action.pinned_commit_id != self.commit_id
                 || action.pinned_manifest_sha256 != self.manifest_sha256
                 || action.expected_host_identity_revision != self.expected_host_identity_revision
@@ -3511,9 +3490,6 @@ impl BundleDirectoryEntry {
 impl BundleFileEntry {
     pub fn validate(&self) -> Result<(), String> {
         validate_sha256("bundle file", &self.sha256)?;
-        if self.size > MAX_FILE_BYTES {
-            return Err(format!("bundle file exceeds {} bytes", MAX_FILE_BYTES));
-        }
         if self.object_key.is_empty()
             || self.object_key.len() > 2_048
             || self.object_key.starts_with('/')
@@ -3598,10 +3574,11 @@ pub struct BundleHead {
     pub schema_version: u32,
     pub bundle_id: BundleId,
     pub kind: BundleKind,
-    pub generation: u64,
+    pub revision: u64,
     pub commit_id: String,
     pub manifest_key: String,
     pub manifest_sha256: String,
+    pub manifest_size: u64,
     pub updated_at: u64,
 }
 
@@ -3615,6 +3592,9 @@ impl BundleHead {
         }
         validate_named_id("commit id", &self.commit_id)?;
         validate_sha256("head manifest", &self.manifest_sha256)?;
+        if self.manifest_size == 0 {
+            return Err("head manifest size must be nonzero".to_string());
+        }
         if self.manifest_key.is_empty()
             || self.manifest_key.starts_with('/')
             || self.manifest_key.contains("..")
@@ -3629,7 +3609,7 @@ impl BundleHead {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BundleManifest {
     pub schema_version: u32,
-    pub generation: u64,
+    pub revision: u64,
     pub commit_id: String,
     pub updated_at: u64,
     pub bundle: BundleIdentity,
@@ -4040,7 +4020,7 @@ impl BundleManifest {
         if self.schema_version != head.schema_version
             || self.bundle.bundle_id != head.bundle_id
             || self.bundle.kind != head.kind
-            || self.generation != head.generation
+            || self.revision != head.revision
             || self.commit_id != head.commit_id
         {
             return Err("bundle head and manifest identity differ".to_string());
@@ -4212,7 +4192,7 @@ pub struct RestorePlan {
     pub host_id: HostId,
     pub replica_id: ReplicaId,
     pub expected_host_identity_revision: u64,
-    pub generation: u64,
+    pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
     pub binding_revision: u64,
@@ -4292,7 +4272,7 @@ impl RestorePlan {
             if action.direction != ConversationPlanDirection::Pull
                 || action.host_id != self.host_id
                 || action.replica_id != self.replica_id
-                || action.pinned_generation != self.generation
+                || action.pinned_revision != self.revision
                 || action.pinned_commit_id != self.commit_id
                 || action.pinned_manifest_sha256 != self.manifest_sha256
                 || action.expected_host_identity_revision != self.expected_host_identity_revision
@@ -4400,7 +4380,7 @@ pub struct ConversationApplyReceipt {
     pub semantic_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_file_sha256_after: Option<String>,
-    pub cloud_generation: u64,
+    pub cloud_revision: u64,
     pub cloud_commit_id: String,
     pub cloud_manifest_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4519,7 +4499,7 @@ pub struct MaterializationRecord {
     pub local_project_id: LocalProjectId,
     pub storage_id: StorageId,
     pub bundle_id: BundleId,
-    pub generation: u64,
+    pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
     pub binding_revision: u64,
@@ -4603,11 +4583,29 @@ mod tests {
     #[test]
     fn recipe_base_defaults_sync_activity_timestamps() {
         let base: RecipeBase = serde_json::from_str(
-            r#"{"generation":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","commit_id":"commit-1","recipe_revision":2}"#,
+            r#"{"revision":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_size":123,"commit_id":"commit-1","recipe_revision":2}"#,
         )
         .unwrap();
+        assert_eq!(base.manifest_size, 123);
         assert_eq!(base.last_pull_at, None);
         assert_eq!(base.last_push_at, None);
+    }
+
+    #[test]
+    fn recipe_base_requires_manifest_size() {
+        assert!(serde_json::from_str::<RecipeBase>(
+            r#"{"revision":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","commit_id":"commit-1","recipe_revision":2}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn recipe_base_rejects_zero_manifest_size() {
+        let base: RecipeBase = serde_json::from_str(
+            r#"{"revision":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_size":0,"commit_id":"commit-1","recipe_revision":2}"#,
+        )
+        .unwrap();
+        assert!(base.validate().unwrap_err().contains("must be nonzero"));
     }
 
     /// The commit ID names the manifest the continuity probe checks, so a
@@ -4616,9 +4614,26 @@ mod tests {
     #[test]
     fn recipe_base_requires_an_immutable_commit_id() {
         assert!(serde_json::from_str::<RecipeBase>(
-            r#"{"generation":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","recipe_revision":2}"#,
+            r#"{"revision":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_size":123,"recipe_revision":2}"#,
         )
         .is_err());
+    }
+
+    #[test]
+    fn bundle_head_requires_manifest_size() {
+        assert!(serde_json::from_str::<BundleHead>(
+            r#"{"schema_version":1,"bundle_id":"0123456789abcdef0123456789abcdef","kind":"project","revision":1,"commit_id":"commit-1","manifest_key":"bundles/0123456789abcdef0123456789abcdef/manifests/commit-1.json","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updated_at":1}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn bundle_head_rejects_zero_manifest_size() {
+        let head: BundleHead = serde_json::from_str(
+            r#"{"schema_version":1,"bundle_id":"0123456789abcdef0123456789abcdef","kind":"project","revision":1,"commit_id":"commit-1","manifest_key":"bundles/0123456789abcdef0123456789abcdef/manifests/commit-1.json","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_size":0,"updated_at":1}"#,
+        )
+        .unwrap();
+        assert!(head.validate().unwrap_err().contains("must be nonzero"));
     }
 
     fn bundle_id() -> BundleId {
@@ -4663,7 +4678,7 @@ mod tests {
     fn project_content_manifest() -> BundleManifest {
         let mut manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA,
-            generation: 1,
+            revision: 1,
             commit_id: "commit-project-content".to_string(),
             updated_at: 1,
             bundle: BundleIdentity {
@@ -4894,7 +4909,7 @@ mod tests {
     }
 
     #[test]
-    fn every_mallard_contract_is_reset_to_schema_one() {
+    fn baseline_contracts_remain_schema_one() {
         for (name, schema) in [
             ("local config", LOCAL_SCHEMA),
             ("machine projects", MACHINE_PROJECT_SCHEMA),
@@ -4908,8 +4923,6 @@ mod tests {
             ("bundle", BUNDLE_SCHEMA),
             ("recipe", RECIPE_SCHEMA),
             ("restore plan", RESTORE_PLAN_SCHEMA),
-            ("setup draft", SETUP_DRAFT_SCHEMA),
-            ("setup transaction", SETUP_TRANSACTION_SCHEMA),
             (
                 "project content preferences",
                 PROJECT_CONTENT_PREFERENCES_SCHEMA,
@@ -4917,6 +4930,8 @@ mod tests {
         ] {
             assert_eq!(schema, 1, "{name} must start at schema 1");
         }
+        assert_eq!(SETUP_DRAFT_SCHEMA, 2);
+        assert_eq!(SETUP_TRANSACTION_SCHEMA, 2);
 
         let current = SyncConfig::default();
         current.validate().unwrap();
@@ -5075,7 +5090,7 @@ mod tests {
         );
         let manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA,
-            generation: 1,
+            revision: 1,
             commit_id: "commit-1".to_string(),
             updated_at: 1,
             bundle: BundleIdentity {
@@ -5591,7 +5606,7 @@ mod tests {
         };
         BundleManifest {
             schema_version: BUNDLE_SCHEMA,
-            generation: 2,
+            revision: 2,
             commit_id: "commit-conversation".to_string(),
             updated_at: 2,
             bundle: BundleIdentity {

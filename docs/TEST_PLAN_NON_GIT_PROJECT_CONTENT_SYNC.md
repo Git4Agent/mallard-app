@@ -131,7 +131,7 @@ Every scenario should be able to capture and compare four independent views:
    never follows links.
 2. **Local link metadata** — recipe resource IDs, exclusion IDs, preference
    revision, binding revision, and reviewed base commit.
-3. **Remote snapshot** — head generation/commit, manifest file and directory
+3. **Remote snapshot** — head revision/commit, manifest file and directory
    entries, tombstones, object hashes, and head-linked commit chain.
 4. **Operation record** — planned actions, approvals, blockers, backups,
    receipts, activity counts, and sanitized error messages.
@@ -197,8 +197,8 @@ Check these invariants after every applicable scenario:
 | INV-12 | Required directories are created shallowest-first; final modes/mtimes are applied deepest-first after children. |
 | INV-13 | A selected future child is never inferred from an earlier directory selection; it is considered only by a later explicit scan. |
 | INV-14 | Project-content selections and exclusions cannot cross project-storage links. |
-| INV-15 | Mtime-only changes do not publish a generation or cause a repeated Pull; safe mode-only changes do. |
-| INV-16 | A no-op Push/Pull is idempotent: no generation, receipt, backup, or local preference revision changes. |
+| INV-15 | Mtime-only changes do not publish a revision or cause a repeated Pull; safe mode-only changes do. |
+| INV-16 | A no-op Push/Pull is idempotent: no bundle revision, receipt, backup, or local preference revision changes. |
 | INV-17 | Initializing Git after review fails closed before publish or local mutation. |
 | INV-18 | Corrupt, incomplete, unsupported, or malicious remote state fails before any local project-content mutation. |
 | INV-19 | Skipping project content cannot prevent explicitly selected session/tool work from completing. |
@@ -273,7 +273,7 @@ resource IDs, byte hashes, sizes, safe modes, and informational source mtimes.
 It must not contain local exclusions, an absolute project root, ownership,
 ACLs, xattrs, or local link IDs.
 
-Change only a file mtime and Push: no generation advances. Change only its
+Change only a file mtime and Push: no revision advances. Change only its
 safe mode and Push: a reviewed update is published. Repeat for a directory.
 Set set-id bits on a supported platform and assert they are stripped.
 
@@ -401,7 +401,7 @@ not change local selection metadata.
 
 For stub S3, stall a successful head response. Re-reading the head and finding
 A's exact commit reports success once and persists local link metadata once;
-it must not duplicate a generation or tombstone.
+it must not duplicate a revision or tombstone.
 
 ### IT-P0-14 — Corrupt or malicious remote state applies nothing
 
@@ -438,7 +438,7 @@ local recipe/preferences are saved. The result must say that remote
 publication succeeded and local metadata repair is needed; it must not report
 the Push as wholly absent. A reload must recognize the published commit,
 repair or reconstruct the link metadata through a reviewed recovery path, and
-must not republish the same generation or repeat a deletion.
+must not republish the same revision or repeat a deletion.
 
 This scenario is a design gate: implementation may not ship with an
 ambiguous generic error that encourages a blind retry.
@@ -484,10 +484,10 @@ row is one independently named test or one clearly labelled subcase.
 | META-05 | Selected file with unselected ancestor request | Backend inserts/requires the ancestor or rejects the forged request. |
 | META-06 | Object byte length disagrees with manifest size | Remote state rejected. |
 | META-07 | Object SHA disagrees with file entry | Remote state rejected before write. |
-| META-08 | File mtime changes only | No new reviewed digest or generation. |
-| META-09 | Directory mtime changes only | No new reviewed digest or generation. |
-| META-10 | File executable bit changes | Reviewed metadata update and generation. |
-| META-11 | Directory safe mode changes | Reviewed metadata update and generation. |
+| META-08 | File mtime changes only | No new reviewed digest or revision. |
+| META-09 | Directory mtime changes only | No new reviewed digest or revision. |
+| META-10 | File executable bit changes | Reviewed metadata update and revision. |
+| META-11 | Directory safe mode changes | Reviewed metadata update and revision. |
 | META-12 | Setuid/setgid/sticky inputs | Only documented safe bits survive; set-id bits never restore. |
 | META-13 | Filesystem cannot apply a source mtime exactly | Pull succeeds with best-effort status and no future sync loop. |
 | META-14 | Filesystem has coarse mtime precision | Repeated scan remains synced. |
@@ -575,7 +575,7 @@ row is one independently named test or one clearly labelled subcase.
 | STATE-16 | Two writers add disjoint paths | CAS retry preserves both exact trees after revalidation. |
 | STATE-17 | Two writers update same path | Loser returns to review; no generic conflict-copy behavior. |
 | STATE-18 | Writer removes path while another updates it | Explicit divergence; neither action silently wins. |
-| STATE-19 | Ten repeated no-op scans/pushes | Generation and commit chain remain unchanged. |
+| STATE-19 | Ten repeated no-op scans/pushes | Revision and commit chain remain unchanged. |
 | STATE-20 | Late-joining Machine C | One reviewed Pull can reproduce the complete selected tree. |
 
 ### 7.6 Path, credential, and content safety
@@ -718,7 +718,7 @@ content in chunks and keep it only in temporary directories.
 | STRESS-14 | 5,000 empty directories | Empty-directory manifest/Pull round trip without placeholder objects. |
 | STRESS-15 | 5,000 tracked files removed in 500 directories | Exact tombstones; approved deletes files then empty dirs; no recursion. |
 | STRESS-16 | 1,000 adds, 1,000 updates, 1,000 explicit removes | Review totals, manifest, objects, and receipts agree. |
-| STRESS-17 | 100 unchanged scans | No preference revision, generation, object, or memory growth trend. |
+| STRESS-17 | 100 unchanged scans | No preference revision, bundle revision, object, or memory growth trend. |
 | STRESS-18 | 100 Push/Pull convergence cycles | Final trees/bases match; no repeated mtime/mode churn. |
 | STRESS-19 | 10,000 explicit exclusions | Bounded metadata, deterministic selection, Reset remains usable. |
 | STRESS-20 | Exclusion/resource limit reached | Clear actionable error; existing metadata is not silently pruned. |
@@ -729,12 +729,12 @@ content in chunks and keep it only in temporary directories.
 | --- | --- | --- |
 | STRESS-21 | Ten disjoint external writers around head CAS | Published head chain is valid; final reviewed union contains every accepted path. |
 | STRESS-22 | Ten writers contend on one path | One reviewed winner; every loser becomes stale/diverged without lost bytes. |
-| STRESS-23 | Repeated ambiguous S3 head responses | Each committed generation recognized exactly once. |
+| STRESS-23 | Repeated ambiguous S3 head responses | Each committed revision recognized exactly once. |
 | STRESS-24 | Fault at each Push injection point | Head/local preference invariants hold at every phase. |
 | STRESS-25 | Fault at each Pull injection point | Backups, journal, receipts, and retry state remain coherent. |
 | STRESS-26 | File continuously changes during capture | Bounded retry/failure; never publish mixed bytes. |
 | STRESS-27 | Target continuously changes during Apply | Bounded stale failure; never overwrite the moving target. |
-| STRESS-28 | 50 restart/review/retry cycles | No duplicate deletion, generation, backup corruption, or stuck temporary mode. |
+| STRESS-28 | 50 restart/review/retry cycles | No duplicate deletion, revision, backup corruption, or stuck temporary mode. |
 | STRESS-29 | Three machines, 1,000 seeded random operations | Model oracle and all machine/storage snapshots agree after convergence. |
 | STRESS-30 | Seven-day scheduled seed rotation | Every failure prints seed and minimal operation trace for exact replay. |
 

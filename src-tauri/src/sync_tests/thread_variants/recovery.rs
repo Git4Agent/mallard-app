@@ -88,8 +88,8 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
             Box::new(|value| value.host_identity_revision += 1),
         ),
         (
-            ConversationStalePin::Generation,
-            Box::new(|value| value.generation += 1),
+            ConversationStalePin::Revision,
+            Box::new(|value| value.revision += 1),
         ),
         (
             ConversationStalePin::Commit,
@@ -227,10 +227,10 @@ fn every_typed_action_rejects_a_stale_plan_before_apply() {
             relation,
         );
         action.validate().unwrap();
-        current.generation += 1;
+        current.revision += 1;
         assert_eq!(
             validate_conversation_action_pins(&action, &current),
-            Err(ConversationStalePin::Generation),
+            Err(ConversationStalePin::Revision),
             "{direction:?} {action_type:?}",
         );
     }
@@ -259,7 +259,7 @@ fn reviewed_push_plan_is_immutable_restart_readable_and_scope_pinned() {
         expected_project_binding_revision: action.expected_project_binding_revision,
         expected_bindings_document_revision: action.expected_bindings_document_revision,
         expected_profile_revision: action.expected_profile_revision,
-        generation: action.pinned_generation,
+        revision: action.pinned_revision,
         commit_id: action.pinned_commit_id.clone(),
         manifest_sha256: action.pinned_manifest_sha256.clone(),
         created_at: 1_000,
@@ -301,7 +301,7 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
         cloud: Some(ConversationCloudAnchor {
             storage_id: world.storage_id.clone(),
             bundle_id: world.bundle_id.clone(),
-            generation: 1,
+            revision: 1,
             commit_id: "commit-a".to_string(),
             manifest_sha256: "a".repeat(64),
         }),
@@ -372,7 +372,7 @@ fn journal_rejects_duplicate_operation_ids() {
         cloud: Some(ConversationCloudAnchor {
             storage_id: world.storage_id.clone(),
             bundle_id: world.bundle_id.clone(),
-            generation: 2,
+            revision: 2,
             commit_id: "commit-a".to_string(),
             manifest_sha256: "a".repeat(64),
         }),
@@ -638,7 +638,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
             } => (lineage_digest, semantic_digest),
             other => panic!("checkpoint transcript is not resumable: {other:?}"),
         };
-        // The binding starts pinned at the generation-1 content; a committed
+        // The binding starts pinned at the revision-1 content; a committed
         // publication must advance the pin to the pushed digests, because
         // manifest-only refresh reads the pin as "nothing local is unsaved".
         let initial_analysis = analyze_codex_transcript(&initial_thread.transcript);
@@ -667,7 +667,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                     last_observed_head_message_id: Some("m-a".to_string()),
                     last_observed_lineage_digest: Some(initial_lineage.clone()),
                     last_observed_semantic_digest: Some(initial_semantic.clone()),
-                    source_generation: Some(initial.snapshot.head.generation),
+                    source_revision: Some(initial.snapshot.head.revision),
                     source_manifest_sha256: Some(initial.snapshot.head.manifest_sha256.clone()),
                     revision: 0,
                     created_at: 10,
@@ -694,7 +694,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
             &scope,
             "operation-cloud-checkpoint",
             "plan-cloud-checkpoint",
-            initial.snapshot.head.generation,
+            initial.snapshot.head.revision,
             initial.snapshot.head.commit_id,
             initial.snapshot.head.manifest_sha256,
             &thread_id,
@@ -722,12 +722,12 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
             .inspect(&world.bundle_id)
             .unwrap()
             .head
-            .generation
+            .revision
             == 2
         {
             let snapshot = world.engine().inspect(&world.bundle_id).unwrap();
             Some(ConversationCloudPublication {
-                generation: snapshot.head.generation,
+                revision: snapshot.head.revision,
                 commit_id: snapshot.head.commit_id,
                 manifest_sha256: snapshot.head.manifest_sha256,
             })
@@ -750,10 +750,10 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
         let final_bindings = reopened.load_conversation_bindings().unwrap();
         let final_receipts = reopened.load_materializations().unwrap();
         if publication_committed {
-            assert_eq!(final_snapshot.head.generation, 2, "{checkpoint:?}");
+            assert_eq!(final_snapshot.head.revision, 2, "{checkpoint:?}");
             assert_eq!(final_bindings.bindings.len(), 1);
             assert_eq!(
-                final_bindings.bindings[0].source_generation,
+                final_bindings.bindings[0].source_revision,
                 Some(2),
                 "{checkpoint:?}",
             );
@@ -781,8 +781,8 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                 usize::from(checkpoint != ConversationFailpoint::AfterCleanup),
             );
         } else {
-            assert_eq!(final_snapshot.head.generation, 1, "{checkpoint:?}");
-            assert_eq!(final_bindings.bindings[0].source_generation, Some(1));
+            assert_eq!(final_snapshot.head.revision, 1, "{checkpoint:?}");
+            assert_eq!(final_bindings.bindings[0].source_revision, Some(1));
             // An uncommitted publication leaves the pin untouched.
             assert_eq!(
                 final_bindings.bindings[0]
@@ -1812,7 +1812,7 @@ impl CodexDivergenceFixture {
                     last_observed_head_message_id: Some("m3".to_string()),
                     last_observed_lineage_digest: Some(local_lineage_digest.clone()),
                     last_observed_semantic_digest: Some(local_semantic_digest.clone()),
-                    source_generation: Some(6),
+                    source_revision: Some(6),
                     source_manifest_sha256: Some("e".repeat(64)),
                     revision: 0,
                     created_at: 10,
@@ -1840,7 +1840,7 @@ impl CodexDivergenceFixture {
             cloud: Some(ConversationCloudAnchor {
                 storage_id: StorageId::parse("storage-codex-divergence").unwrap(),
                 bundle_id,
-                generation: 7,
+                revision: 7,
                 commit_id: "commit-codex-divergence".to_string(),
                 manifest_sha256: "a".repeat(64),
             }),
@@ -2370,7 +2370,7 @@ fn push_operation(
     scope: &InstalledScope,
     operation_id: &str,
     plan_id: &str,
-    generation: u64,
+    revision: u64,
     commit_id: String,
     manifest_sha256: String,
     thread_id: &ThreadId,
@@ -2389,7 +2389,7 @@ fn push_operation(
         cloud: Some(ConversationCloudAnchor {
             storage_id: world.storage_id.clone(),
             bundle_id: world.bundle_id.clone(),
-            generation,
+            revision,
             commit_id,
             manifest_sha256,
         }),
@@ -2421,7 +2421,7 @@ fn cloud_publication(
     outcome: crate::project_sync::bundle_engine::PublishedBundle,
 ) -> ConversationCloudPublication {
     ConversationCloudPublication {
-        generation: outcome.snapshot.head.generation,
+        revision: outcome.snapshot.head.revision,
         commit_id: outcome.snapshot.head.commit_id,
         manifest_sha256: outcome.snapshot.head.manifest_sha256,
     }
@@ -2545,7 +2545,7 @@ impl MaterializationFixture {
                 storage_id: crate::project_sync::domain::StorageId::parse("storage-materialize")
                     .unwrap(),
                 bundle_id,
-                generation: 7,
+                revision: 7,
                 commit_id: "commit-materialize".to_string(),
                 manifest_sha256: "a".repeat(64),
             }),
@@ -2757,7 +2757,7 @@ fn diverged_forked_witness_requires_stamp_pair_fork_and_prefix() {
         last_observed_head_message_id: None,
         last_observed_lineage_digest: None,
         last_observed_semantic_digest: None,
-        source_generation: None,
+        source_revision: None,
         source_manifest_sha256: None,
         revision: 1,
         created_at: 10,

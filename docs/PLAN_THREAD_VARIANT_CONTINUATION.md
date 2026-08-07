@@ -121,7 +121,7 @@ Three values must remain independent.
 
 `primary_variant_id` controls which shared version the bundle presents first.
 Only an explicitly reviewed cloud Promote action may change it. Publication
-uses compare-and-swap against the reviewed head generation and manifest digest.
+uses compare-and-swap against the reviewed head revision and manifest digest.
 
 ### Local preferred branch
 
@@ -157,7 +157,7 @@ quiescence mechanism. Without that proof, the action is deferred or stored-only.
 - Portable identity for one logical conversation.
 - Shared by every variant of that conversation.
 - Assigned before the first known fork.
-- Stable across replicas and storage generations.
+- Stable across replicas and storage revisions.
 - Contains no local path, profile ID, credential, or machine identity.
 
 ### `variant_id`
@@ -421,7 +421,7 @@ and journal details.
 
 | Existing type or document | Schema-5/local change |
 | --- | --- |
-| `BundleHead` | Set `schema_version = 5`; generation and CAS semantics stay unchanged |
+| `BundleHead` | Set `schema_version = 5`; revision and CAS semantics stay unchanged |
 | `BundleManifest` | Set schema 5; add `conversation_groups` and `published_by_origin` |
 | `CommitRecord` | Set schema 5 and add untrusted `published_by_origin` provenance |
 | `BundleTag` | Set schema 5 and count variant-addressed resources; do not expose host provenance in discovery tags |
@@ -483,7 +483,7 @@ documents.
 | `created_at` | `u64` | Portable timestamp |
 | `updated_at` | `u64` | Must be at least `created_at` |
 
-The group has no independent revision. The bundle generation and manifest
+The group has no independent revision. The bundle revision and manifest
 head CAS are the concurrency authority.
 
 #### `ConversationVariant`
@@ -721,7 +721,7 @@ revision checked by every mutation.
 | `last_observed_head_message_id` | Optional `MessageId` | Cached observation |
 | `last_observed_lineage_digest` | Optional SHA-256 | Cached observation |
 | `last_observed_semantic_digest` | Optional SHA-256 | Cached observation |
-| `source_generation` | Optional `u64` | Last applied cloud generation |
+| `source_revision` | Optional `u64` | Last applied cloud revision |
 | `source_manifest_sha256` | Optional SHA-256 | Last applied manifest |
 | `revision` | `u64` | Per-binding optimistic concurrency |
 | `created_at` | `u64` | |
@@ -799,7 +799,7 @@ Each operation contains only machine-local data:
 | `direction` | Pull or Push |
 | `phase` | Prepared, Staged, CloudPublished, ProviderCommitted, LocalCommitted, RecoveryRequired |
 | `storage_id`, `bundle_id` | Reviewed destination/source |
-| `generation`, `commit_id`, `manifest_sha256` | Cloud pin or published result |
+| `revision`, `commit_id`, `manifest_sha256` | Cloud pin or published result |
 | `host_id`, `replica_id` | Installation and local-replica scope |
 | `local_project_id`, `provider_profile_id` | Project/profile scope |
 | `conflict_group_id` | Logical conversation |
@@ -848,7 +848,7 @@ ConversationPlanAction
   source_resource_id?
   proposed_provider_thread_id?
   required_codec
-  pinned_generation
+  pinned_revision
   pinned_commit_id
   pinned_manifest_sha256
   pinned_lineage_digest?
@@ -893,7 +893,7 @@ ConversationApplyReceipt
   lineage_digest?
   semantic_digest?
   local_file_sha256_after?
-  cloud_generation
+  cloud_revision
   cloud_commit_id
   cloud_manifest_sha256
   published_origin_host_token?
@@ -1180,7 +1180,7 @@ provider-ID matches without content proof, and unknown lineage block recovery.
 3. Build the next manifest by retaining reviewed cloud variants.
 4. Publish immutable objects, manifest, and commit.
 5. CAS the cloud head.
-6. Record the published generation/commit in the journal.
+6. Record the published revision/commit in the journal.
 7. Finalize the local binding and receipt.
 
 A failed CAS leaves a stable local-only variant for review and retry. A

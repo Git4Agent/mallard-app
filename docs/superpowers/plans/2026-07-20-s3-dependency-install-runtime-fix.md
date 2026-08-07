@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Keep S3 credentials and transport construction in the existing configured S3 client.
-- Preserve storage ID, bundle ID, generation, commit, manifest hash, replica, and binding revision validation before installation.
+- Preserve storage ID, bundle ID, revision, commit, manifest hash, replica, and binding revision validation before installation.
 - Preserve the existing plugin identifier and argument allowlists.
 - Do not convert the bundle engine or bundle-store trait to async.
 - Do not invoke an external provider CLI from the regression test.

@@ -438,9 +438,9 @@ Distinguish "no network", "credentials rejected", "bucket missing", and "CAS
 conflict" in the UI with distinct remediation. Today they all surface as generic
 strings (see #15).
 
-**49. Add a "what changed" diff view between generations.** `P2 · M · high`
-The commit chain already links generations and records file delta counts. A
-generation-to-generation diff — threads added, messages appended, files changed
+**49. Add a "what changed" diff view between revisions.** `P2 · M · high`
+The commit chain already links revisions and records file delta counts. A
+revision-to-revision diff — threads added, messages appended, files changed
 — makes bundle history *browsable* rather than merely *valid*.
 
 **50. Export a session to Markdown/HTML/PDF.** `P2 · M · medium`
@@ -468,10 +468,10 @@ warned they lack a distributed lock (§11). Add WebDAV and explicit
 Nextcloud/ownCloud support (as claude-sync does) so self-hosters have a
 first-class path that *does* lock properly.
 
-**54. Add per-project retention and pruning of old generations.**
+**54. Add per-project retention and pruning of old revisions.**
 `P2 · M · medium`
 The commit chain is unbounded and every push writes a full manifest. Add a
-retention policy (keep N generations, keep all tagged) with garbage collection
+retention policy (keep N revisions, keep all tagged) with garbage collection
 of unreferenced `_uploads/` objects.
 
 **55. Reclaim orphaned upload objects after a failed CAS.** `P2 · M · medium`
@@ -589,7 +589,7 @@ membership, roles, or per-user permissions on a shared bucket. Before any team
 sells this internally, they need answers on access control and audit.
 
 **77. Add a shared-bucket audit trail.** `P3 · M · medium`
-Who published which generation, when, from which host. Origin tokens are already
+Who published which revision, when, from which host. Origin tokens are already
 in the manifest; surface them as a readable, filterable history.
 
 **78. Add conflict-resolution presets.** `P3 · M · medium`
@@ -719,13 +719,13 @@ both the product's differentiation and its most defensible position.
 ## Competitive landscape
 
 Researched July 31, 2026. Mallard's differentiation is real: **no competitor has
-immutable, content-addressed, CAS-published generations with a reviewed apply
+immutable, content-addressed, CAS-published revisions with a reviewed apply
 plan.** Most are "rsync with encryption". The gap runs the other way on
 encryption, distribution, and automation.
 
 | Project | Form | Overlap | What they do better | What Mallard does better |
 | --- | --- | --- | --- | --- |
-| [claude-sync](https://github.com/tawanorg/claude-sync) (237★, Go, MIT) | CLI | Very high | **age E2E encryption**, Argon2 key derivation, 6+ storage backends incl. WebDAV, gzip, npm distribution | Review-before-apply, immutable generations, integrity verification, commit mapping, GUI |
+| [claude-sync](https://github.com/tawanorg/claude-sync) (237★, Go, MIT) | CLI | Very high | **age E2E encryption**, Argon2 key derivation, 6+ storage backends incl. WebDAV, gzip, npm distribution | Review-before-apply, immutable revisions, integrity verification, commit mapping, GUI |
 | [aisync](https://github.com/dantelex/aisync) | CLI | High | 4 agents (Claude/Codex/OpenCode/Cursor), works over iCloud/Dropbox/Drive | Correctness under concurrency, explicit conflict semantics, safety invariants |
 | [session-sync](https://github.com/npow/session-sync) | Hooks + CLI | Medium | Real-time cross-*format* translation (Claude ⇄ Codex ⇄ Amp ⇄ Gemini) via lifecycle hooks | Durability, portability across machines, verified restore |
 | [Mori](https://github.com/fjwood69/mori) | MCP server | Medium | Agents *consume* the shared memory at session start (`/brief`); zero-instrumentation capture | Verifiable storage, exact transcript fidelity, no lossy distillation |

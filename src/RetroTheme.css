@@ -305,7 +305,15 @@ body {
 .sync-setup-workspace .sync-field-grid label > span,
 .sync-setup-workspace .sync-agent-choice button strong,
 .sync-bundle-recommended,
-.sync-divergence-choice button {
+.sync-divergence-choice button,
+.sync-storage-editor-title,
+.sync-storage-repositories-heading h2,
+.sync-field-name,
+.sync-storage-repository-details > dt,
+.sync-storage-repo-chip > span,
+.sync-r2-guide-warning,
+.sync-r2-guide > .btn-link,
+.sync-secret-reveal {
   font-family: var(--font-pixel);
   /* One weight exists, and synthesis is off, so asking for anything heavier
      here would be a declaration that quietly does nothing. Pixel hierarchy is
@@ -319,9 +327,19 @@ body {
    values. Uppercase micro-labels keep their air with whole-pixel tracking. */
 .sync-eyebrow,
 .sync-draft-badge,
-.sync-bundle-recommended {
+.sync-bundle-recommended,
+.sync-field-name,
+.sync-storage-repository-details > dt,
+.sync-storage-repo-chip > span,
+.sync-r2-guide-warning {
   font-size: var(--type-3xs);
   letter-spacing: 1px;
+}
+
+/* Chrome names for the storage panels, one step under the page heading. */
+.sync-storage-editor-title,
+.sync-storage-repositories-heading h2 {
+  font-size: var(--type-md);
 }
 
 .settings-section-title {
@@ -604,6 +622,14 @@ summary {
 .sync-app input::placeholder,
 .sync-app textarea::placeholder {
   color: var(--text-3);
+}
+
+/* The storage editor states each example once, as the placeholder — which
+   makes it content, not a hint behind a visible value. --text-3 measures
+   3.4:1 (light) / 3.9:1 (dark) on the field; --text-2 clears 4.5:1 in both. */
+.sync-storage-fields input::placeholder,
+.sync-folder-field input::placeholder {
+  color: var(--text-2);
 }
 
 /* Desktop shell */
@@ -1925,7 +1951,8 @@ summary {
   justify-self: end;
 }
 
-/* The completed sync's own fold — the one control still wearing this class. */
+/* The shared fold control: the completed sync's banner and the storage card's
+   repository rows both wear it. */
 .sync-history-commit-toggle {
   width: var(--sync-history-commit-actions-column);
   min-width: var(--sync-history-commit-actions-column);
@@ -2367,7 +2394,6 @@ summary {
 .sidebar-section-action:active:not(:disabled),
 .sync-inline-action-close:active:not(:disabled),
 .sync-storage-settings-icon:active:not(:disabled),
-.sync-setup-resource-toggle:active:not(:disabled),
 .log-panel-actions .btn:active:not(:disabled),
 .sync-modal-header .btn:active:not(:disabled),
 .sync-inline-action-header .btn:active:not(:disabled) {
@@ -2517,7 +2543,8 @@ summary {
 
 .sync-storage-card > header,
 .sync-resource-group-header,
-.sync-storage-repositories-heading {
+.sync-storage-repositories-heading,
+.sync-r2-guide {
   border-bottom-color: var(--border);
   background: var(--surface-subtle);
 }
@@ -2803,16 +2830,10 @@ summary {
 }
 
 .sync-folder-field,
-.sync-r2-guide,
-.sync-r2-fields,
 .sync-storage-checks label {
   border-color: var(--border-mid);
   border-radius: 4px;
   background: var(--surface-row);
-}
-
-.sync-r2-guide ol li::marker {
-  color: var(--accent);
 }
 
 .sync-result-summary,
@@ -3210,16 +3231,14 @@ summary {
   }
 }
 
+/* Nothing about the sidebar responds to this breakpoint: its width comes from
+   --sync-sidebar-width, which the drag handle owns, so the rail is the same
+   size at 800px as it is at 1400px. The wordmark and the brand padding used to
+   shrink here, which meant the logo restyled itself while the rail it sits in
+   never moved. Only workspace content — which really does lose room as the
+   window narrows — belongs in this block. The sidebar's own responsive step is
+   the 720px icon rail below, where the rail genuinely does collapse. */
 @media (max-width: 860px) {
-  .sync-sidebar-brand {
-    padding-right: 14px;
-    padding-left: 14px;
-  }
-
-  .sync-sidebar-brand strong {
-    font-size: 23px;
-  }
-
   .sync-project-links-page {
     padding-right: 18px;
     padding-left: 18px;

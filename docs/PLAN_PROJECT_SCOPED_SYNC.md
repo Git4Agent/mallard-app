@@ -314,7 +314,7 @@ struct RecipeDraft {
 }
 
 struct RecipeBase {
-    generation: u64,
+    revision: u64,
     recipe_sha256: String,
 }
 ```
@@ -597,7 +597,7 @@ struct MaterializationRecord {
     provider: String,
     provider_home: String,
     state: String, // active | detached
-    source_generation: u64,
+    source_revision: u64,
     applied_receipt_ids: Vec<String>,
 }
 ```
@@ -642,7 +642,7 @@ struct ApplyReceipt {
     plan_id: String,
     storage_id: String,
     bundle_id: String,
-    generation: u64,
+    revision: u64,
     resource_id: String,
     action_id: String,
     source_digest: String,
@@ -701,8 +701,8 @@ Reuse the immutable-history design under a clean namespace:
   v1/repositories/<bundle-id>/
     _head.json
     _tag.json
-    _manifests/<generation>-<commit-id>.json
-    _commits/<generation>-<commit-id>.json
+    _manifests/<revision>-<commit-id>.json
+    _commits/<revision>-<commit-id>.json
     _uploads/<upload-id>/
       _upload.json
       files/<logical-path>
@@ -715,7 +715,7 @@ struct BundleHead {
     schema_version: u32,
     bundle_id: String,
     kind: String, // "project"
-    generation: u64,
+    revision: u64,
     commit_id: String,
     manifest_key: String,
     commit_key: String,
@@ -729,7 +729,7 @@ The manifest includes both files and typed resources:
 ```rust
 struct BundleManifest {
     schema_version: u32,
-    generation: u64,
+    revision: u64,
     commit_id: String,
     updated_at: u64,
     bundle: BundleIdentity,
@@ -791,7 +791,7 @@ absolute upload paths.
    missing requirement, and blocker.
 7. Let the user approve safe files, plugin installs, standalone skills, hooks,
    and MCP definitions independently.
-8. Pin the plan to storage ID, bundle ID, generation, commit ID, manifest hash,
+8. Pin the plan to storage ID, bundle ID, revision, commit ID, manifest hash,
    binding revision, provider codec versions, and target precondition digests;
    revalidate all of them immediately before mutation.
 9. Back up affected target files, apply file actions atomically, then invoke

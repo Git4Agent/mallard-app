@@ -42,7 +42,7 @@ exactly like a second machine. Consequences:
 ### 1. Two-step link picker — `src/components/SyncPanel.tsx`
 
 "Link another storage" → pick a storage → pick a cloud profile inside it
-(from the `list_sync_profiles` probe): label, short id, generation, file
+(from the `list_sync_profiles` probe): label, short id, revision, file
 count, or **"Create new profile"** (the old auto-create, now explicit).
 Picking an existing profile writes `cloud: { root, profile_id, profile_label,
 pinned: true }` — no backend change; pinned resolution already honors it.
@@ -66,7 +66,7 @@ the picker and linkage lines.
 
 - `sync_tests` S26 (both backends): two local roots share one cloud profile —
   independent baseline files; a stale sibling's push converges to the newer
-  generation instead of republishing old bytes; divergent edits produce a
+  revision instead of republishing old bytes; divergent edits produce a
   normal conflict sibling.
 - Unit: `unique_profile_label_suffixes_taken_names`; the former
   "fight over baselines" validation test now asserts shared targets are valid.

@@ -99,7 +99,7 @@ export interface PullRequiredCopy {
 
 /**
  * Customer-facing copy for a destination that has to be pulled before it can
- * accept a push. The reason codes are lineage vocabulary — generations, bases,
+ * accept a push. The reason codes are lineage vocabulary — revisions, bases,
  * replicas — and none of it means anything to the person holding a blocked
  * Push. The callout says which storage moved, what a Pull would show, and why
  * pushing first is unsafe; the numbers stay on the detail line so support can
@@ -108,8 +108,8 @@ export interface PullRequiredCopy {
 export function pullRequiredCopy(
   reason: "remote_without_base" | "binding_changed" | "remote_advanced",
   storageName: string | null | undefined,
-  remoteGeneration: number,
-  baseGeneration: number | null | undefined,
+  remoteRevision: number,
+  baseRevision: number | null | undefined,
   changedConversationCount = 0,
 ): PullRequiredCopy {
   const storage = storageName?.trim() || "this storage";
@@ -117,7 +117,7 @@ export function pullRequiredCopy(
   // figures abbreviated to what support actually reads off a screenshot. The
   // footer button says what to do, so the sentence only has to say what is
   // there and what pushing past it would cost.
-  const detail = `Generation ${remoteGeneration} · ${baseGeneration != null ? `reviewed ${baseGeneration}` : "never reviewed"}`;
+  const detail = `Revision ${remoteRevision} · ${baseRevision != null ? `reviewed ${baseRevision}` : "never reviewed"}`;
   if (reason === "remote_advanced") {
     return {
       title: "Storage has newer changes",

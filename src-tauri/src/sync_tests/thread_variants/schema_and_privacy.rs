@@ -4,7 +4,7 @@ use crate::project_sync::domain::{
     BundleId, ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
     ConversationMaterializationState, ConversationPlanActionType, ConversationPlanDirection,
     ConversationRelation, LocalConversationBinding, LogicalPath, OriginHostAlias, Provider,
-    ReplicaId, ThreadId, Tombstone, TombstoneTarget, MAX_FILE_BYTES,
+    ReplicaId, ThreadId, Tombstone, TombstoneTarget,
 };
 use std::fs;
 
@@ -167,6 +167,13 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
     );
     let baseline = published.snapshot.manifest;
     baseline.validate().unwrap();
+    let mut large_file_manifest = baseline.clone();
+    let large_path = large_file_manifest.conversations[&thread_id()].files[0]
+        .logical_path
+        .clone();
+    large_file_manifest.files.get_mut(&large_path).unwrap().size = 512 * 1024 * 1024 + 1;
+    large_file_manifest.validate().unwrap();
+
     let mut mutations: Vec<Box<dyn Fn(&mut crate::project_sync::domain::BundleManifest)>> =
         Vec::new();
     mutations.push(Box::new(|manifest| {
@@ -269,12 +276,6 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
             .insert("oversized".to_string(), "x".repeat(4_097));
     }));
     mutations.push(Box::new(|manifest| {
-        let path = manifest.conversations[&thread_id()].files[0]
-            .logical_path
-            .clone();
-        manifest.files.get_mut(&path).unwrap().size = MAX_FILE_BYTES + 1;
-    }));
-    mutations.push(Box::new(|manifest| {
         let tombstone = Tombstone {
             target: TombstoneTarget::ConversationThread {
                 thread_id: thread_id(),
@@ -327,7 +328,7 @@ fn local_bindings_reject_duplicate_provider_thread_ownership_profile_wide() {
         last_observed_head_message_id: None,
         last_observed_lineage_digest: None,
         last_observed_semantic_digest: None,
-        source_generation: None,
+        source_revision: None,
         source_manifest_sha256: None,
         revision: 0,
         created_at: 1,

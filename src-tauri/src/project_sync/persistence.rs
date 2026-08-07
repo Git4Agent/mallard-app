@@ -954,7 +954,7 @@ impl LocalStateRepository {
         Ok((documents, warnings))
     }
 
-    /// Restore plans are immutable, generation-pinned documents.  Reusing a
+    /// Restore plans are immutable, revision-pinned documents.  Reusing a
     /// plan ID is always an error instead of replacing an approval surface.
     pub fn save_restore_plan(&self, plan: &RestorePlan) -> Result<(), String> {
         let _guard = persistence_guard(&self.root)?;
@@ -2310,7 +2310,7 @@ mod tests {
                 last_observed_head_message_id: None,
                 last_observed_lineage_digest: None,
                 last_observed_semantic_digest: None,
-                source_generation: None,
+                source_revision: None,
                 source_manifest_sha256: None,
                 revision: 0,
                 created_at: 1,

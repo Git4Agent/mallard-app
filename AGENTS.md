@@ -123,7 +123,7 @@ Treat safety behavior as part of the product contract:
 - Push publication must remain immutable and SHA-256 verified; mutable heads
   require compare-and-swap semantics.
 - Pull and dependency apply operations must remain plan-based and explicitly
-  approved. Keep revision, digest, generation, and expiry checks intact.
+  approved. Keep revision, digest, and expiry checks intact.
 - Deletion is opt-in. File deletion must verify the expected local digest;
   directory deletion must target only an exact empty directory and must never
   become recursive.

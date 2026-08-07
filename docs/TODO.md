@@ -60,7 +60,7 @@ From [PLAN_LEGACY_ROLLOUT_BLOCKED_THREADS.md](PLAN_LEGACY_ROLLOUT_BLOCKED_THREAD
       repository as `Advanced` when the reset kept old files (`rsync`
       without `--delete` over the storage dir, or an S3 rollback of
       `_head`'s latest version only) and the new lineage overtook the
-      base's generation. Degrades safely (pull is offered; pins and
+      base's revision. Degrades safely (pull is offered; pins and
       apply-time verification hold) but the diagnosis is wrong: no
       replaced-history warning, and purged content can be innocently
       re-pushed. Fix: row 7 requires *ancestry* via
