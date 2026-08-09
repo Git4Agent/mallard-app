@@ -1,13 +1,48 @@
 import { useId, useRef, useState } from "react";
 import Icon, { type IconName } from "../Icons";
-import type { SyncOutcome, SyncOutcomeRowStatus } from "./syncOutcome";
 
-const ROW_PRESENTATION: Record<SyncOutcomeRowStatus, { icon: IconName; className: string; label: string }> = {
-  synced: { icon: "check-circle", className: "synced", label: "Synced" },
-  held: { icon: "git-compare-arrows", className: "diverged", label: "Held for Pull" },
-  forked: { icon: "git-fork", className: "diverged-forked", label: "Forked" },
-  failed: { icon: "octagon-x", className: "unavailable", label: "Failed" },
-};
+/** Per-row status treatment supplied by the owning feature's view model. */
+export interface SyncOutcomeRowPresentation {
+  icon: IconName;
+  className: string;
+  label: string;
+}
+
+/**
+ * One outcome row. The shared renderer knows nothing about threads,
+ * resources, or catalogs: an optional monospace identifier, an optional
+ * counted annotation mark, and a timestamp are the whole vocabulary.
+ */
+export interface SyncOutcomeRowView {
+  key: string;
+  title: string;
+  presentation: SyncOutcomeRowPresentation;
+  /** Why this row did not land the way the others did. */
+  reason?: string | null;
+  identifier?: string | null;
+  annotation?: { icon: IconName; count: number; title: string } | null;
+  updatedAt?: number | null;
+}
+
+export interface SyncOutcomeStatView {
+  icon: IconName;
+  value?: string;
+  label: string;
+  /** Renders "Revision 6" rather than "6 revision". */
+  lead?: boolean;
+}
+
+export interface SyncOutcomeView {
+  tone: "success" | "warning";
+  title: string;
+  stats: SyncOutcomeStatView[];
+  rows: SyncOutcomeRowView[];
+  action?: { label: string; icon: IconName; title?: string } | null;
+  /** A clean result folds itself away; one holding a decision opens. */
+  defaultOpen: boolean;
+  /** Support detail, behind its own disclosure inside the fold. */
+  technical: Array<{ label: string; value: string }>;
+}
 
 function formatTime(seconds: number): string {
   return new Date(seconds * 1_000).toLocaleString(undefined, {
@@ -19,44 +54,44 @@ function formatTime(seconds: number): string {
 }
 
 /**
- * The completed Push or Pull, as a section of the storage card: full width, no
+ * The completed operation, as a section of the storage card: full width, no
  * outline of its own, one divider above, and its tint to say where it starts.
- * The summary line reads without opening; the sessions are lines inside the
- * same box, divided rather than boxed. The fold control is the history table's
- * own toggle — chevron-down closed, chevron-up open.
+ * The summary line reads without opening; the rows are lines inside the same
+ * box, divided rather than boxed. The fold control is the history table's own
+ * toggle — chevron-down closed, chevron-up open.
  */
 export default function SyncOutcomeNotice({
-  outcome,
+  view,
   busy = false,
   onAction,
   onDismiss,
 }: {
-  outcome: SyncOutcome;
+  view: SyncOutcomeView;
   busy?: boolean;
-  onAction: (outcome: SyncOutcome) => void;
+  onAction?: () => void;
   onDismiss: () => void;
 }) {
-  const [open, setOpen] = useState(outcome.defaultOpen);
+  const [open, setOpen] = useState(view.defaultOpen);
   // A new outcome re-arms the fold to its own default: a clean push after a
   // warning pull must fold itself away even though the component survives.
-  const rendered = useRef(outcome);
-  if (rendered.current !== outcome) {
-    rendered.current = outcome;
-    setOpen(outcome.defaultOpen);
+  const rendered = useRef(view);
+  if (rendered.current !== view) {
+    rendered.current = view;
+    setOpen(view.defaultOpen);
   }
   const bodyId = `sync-outcome-body-${useId().replace(/:/g, "")}`;
 
   return (
     <div
       role="status"
-      className={`sync-callout sync-outcome-notice ${outcome.tone}${open ? "" : " collapsed"}`}
+      className={`sync-callout sync-outcome-notice ${view.tone}${open ? "" : " collapsed"}`}
     >
       <div className="sync-outcome-head">
-        <Icon name={outcome.tone === "success" ? "check-circle" : "alert-triangle"} size={18} />
+        <Icon name={view.tone === "success" ? "check-circle" : "alert-triangle"} size={18} />
         <span className="sync-outcome-summary">
-          <strong>{outcome.title}</strong>
+          <strong>{view.title}</strong>
           <span className="sync-outcome-stats">
-            {outcome.stats.map((stat) => (
+            {view.stats.map((stat) => (
               <span key={`${stat.label}:${stat.value ?? ""}`} className="sync-outcome-stat">
                 <Icon name={stat.icon} size={12} />
                 {stat.lead
@@ -66,17 +101,17 @@ export default function SyncOutcomeNotice({
             ))}
           </span>
         </span>
-        {outcome.action && (
+        {view.action && onAction && (
           <span className="sync-outcome-actions">
             <button
               type="button"
               className="btn btn-ghost"
               disabled={busy}
-              title={outcome.action.kind === "restart_codex" ? outcome.action.title : undefined}
-              onClick={() => onAction(outcome)}
+              title={view.action.title}
+              onClick={onAction}
             >
-              <Icon name={outcome.action.kind === "open_pull" ? "download" : "refresh"} size={13} />
-              {outcome.action.label}
+              <Icon name={view.action.icon} size={13} />
+              {view.action.label}
             </button>
           </span>
         )}
@@ -86,7 +121,7 @@ export default function SyncOutcomeNotice({
             className="sync-history-commit-toggle"
             aria-expanded={open}
             aria-controls={bodyId}
-            aria-label={`${open ? "Collapse" : "Expand"} the session list`}
+            aria-label={`${open ? "Collapse" : "Expand"} the result list`}
             onClick={() => setOpen((value) => !value)}
           >
             <Icon name={open ? "chevron-up" : "chevron-down"} size={12} />
@@ -104,9 +139,9 @@ export default function SyncOutcomeNotice({
       </div>
       <div className="sync-outcome-body" id={bodyId}>
         <div className="sync-history-thread-list sync-outcome-threads">
-          {outcome.rows.map((row) => {
-            const presentation = ROW_PRESENTATION[row.status];
-            const forkCount = row.forkCount ?? 0;
+          {view.rows.map((row) => {
+            const presentation = row.presentation;
+            const annotation = row.annotation ?? null;
             return (
               <article key={row.key} className="sync-history-thread-card">
                 <div className="sync-history-thread-topline">
@@ -135,26 +170,26 @@ export default function SyncOutcomeNotice({
                     )}
                   </div>
                 </div>
-                {(row.threadId || row.updatedAt != null || forkCount > 0) && (
+                {(row.identifier || row.updatedAt != null || annotation) && (
                   <div className="sync-history-session-details">
                     <div className="sync-history-session-summary">
-                      {/* Line 2 is which one it is: the whole thread id — never
-                          an 8-character stub — with the fork provenance and the
-                          stamp beside it. */}
+                      {/* Line 2 is which one it is: the whole identifier —
+                          never a truncated stub — with the annotation mark
+                          and the stamp beside it. */}
                       <div className="sync-history-thread-meta">
-                        {row.threadId && (
+                        {row.identifier && (
                           <span className="sync-outcome-threadid">
-                            <code>{row.threadId}</code>
+                            <code>{row.identifier}</code>
                           </span>
                         )}
-                        {forkCount > 0 && (
+                        {annotation && (
                           <span
                             className="sync-outcome-forkmark"
-                            title={`Forked ${forkCount} ${forkCount === 1 ? "time" : "times"} before this sync`}
-                            aria-label={`Forked ${forkCount} ${forkCount === 1 ? "time" : "times"}`}
+                            title={annotation.title}
+                            aria-label={annotation.title}
                           >
-                            <Icon name="git-fork" size={11} />
-                            {forkCount}
+                            <Icon name={annotation.icon} size={11} />
+                            {annotation.count}
                           </span>
                         )}
                         {row.updatedAt != null && (
@@ -172,11 +207,11 @@ export default function SyncOutcomeNotice({
             );
           })}
         </div>
-        {outcome.tone === "warning" && outcome.technical.length > 0 && (
+        {view.tone === "warning" && view.technical.length > 0 && (
           <details className="sync-fork-technical">
             <summary>Technical results</summary>
             <dl>
-              {outcome.technical.map((entry) => (
+              {view.technical.map((entry) => (
                 <div key={`${entry.label}:${entry.value}`}>
                   <dt>{entry.label}</dt>
                   <dd>{entry.value}</dd>

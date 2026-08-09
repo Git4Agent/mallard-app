@@ -1,7 +1,7 @@
 import type {
   ConversationPlanAction,
   ConversationResolutionSelection,
-  ProjectProvider,
+  ProviderKey,
   RestoreAction,
   RestorePlan,
 } from "../../types";
@@ -14,7 +14,7 @@ export interface PullReviewItem {
   category: PullReviewCategory;
   title: string;
   detail: string;
-  provider: ProjectProvider | null;
+  provider: ProviderKey | null;
   restoreActions: RestoreAction[];
   conversationActions: ConversationPlanAction[];
   projectContentPath: string | null;
@@ -39,7 +39,7 @@ function finalPathPart(value: string): string {
 function restoreActionCopy(action: RestoreAction): {
   title: string;
   detail: string;
-  provider: ProjectProvider | null;
+  provider: ProviderKey | null;
   category: PullReviewCategory;
   projectContentPath?: string;
   projectContentEntryType?: "file" | "directory";
@@ -129,7 +129,7 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
     category: PullReviewCategory,
     title: string,
     detail: string,
-    provider: ProjectProvider | null,
+    provider: ProviderKey | null,
   ) => {
     const existing = items.get(resourceId);
     if (existing) {

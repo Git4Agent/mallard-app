@@ -23,8 +23,10 @@ import type {
   ProjectBinding,
   ProjectContentInventory,
   ProjectDetail,
-  ProjectProvider,
   ProjectStorageLink,
+  ProjectSyncConfigChangedEvent,
+  ProviderDescriptor,
+  ProviderKey,
   ProviderProfile,
   ProviderProfileSummary,
   PushDestinationStatus,
@@ -53,12 +55,24 @@ import PushResourceWorkspace, {
 } from "./PushResourceWorkspace";
 import ProjectSetupWorkspace, { type SetupCompletion } from "./ProjectSetupWorkspace";
 import ProjectSidebar from "./ProjectSidebar";
+import type {
+  ActiveProjectSubview,
+  OpenSessionDetailRequest,
+} from "./session-detail/sessionDetailModel";
+import StorageCatalogPage, {
+  type CatalogStorageOption,
+} from "../storage-catalog/StorageCatalogPage";
+import AddCatalogScopeWorkspace from "../storage-catalog/AddCatalogScopeWorkspace";
+import { storageCatalogApi } from "../storage-catalog/api";
+import type { CatalogScopeView } from "../storage-catalog/types";
+import { catalogScopeLabel, catalogKindMeta, errorMessage as catalogErrorMessage } from "../storage-catalog/model";
 import RestorePlanView, { type PullReviewPrimary } from "./RestorePlanView";
 import StartupLoadingScreen, { type StartupStage } from "./StartupLoadingScreen";
-import { type SyncReviewStep } from "./SyncReviewTabs";
+import { type SyncReviewStep } from "./reviewSteps";
 import { buildPullReviewItems } from "./pullReviewModel";
 import { buildPullOutcome, buildPushOutcome, type SyncOutcome } from "./syncOutcome";
 import { projectSyncApi } from "./api";
+import { r2S3ApiUrl } from "./StorageSettings";
 import {
   applyPullReview,
   beginPullReview,
@@ -87,6 +101,58 @@ const EMPTY_CONFIG: SyncConfig = {
   projects: [],
   links: [],
 };
+
+function sameStorageConfig(left: SyncConfig["storages"][number], right: SyncConfig["storages"][number]): boolean {
+  return left.id === right.id
+    && left.name === right.name
+    && left.kind === right.kind
+    && left.bucket === right.bucket
+    && left.access_key_id === right.access_key_id
+    && left.secret_access_key === right.secret_access_key
+    && left.account_id === right.account_id
+    && left.s3_endpoint === right.s3_endpoint
+    && left.region === right.region
+    && left.local_dir === right.local_dir
+    && left.supports_conditional_writes === right.supports_conditional_writes
+    && left.included_default_exclusions.length === right.included_default_exclusions.length
+    && left.included_default_exclusions.every((value, index) => (
+      value === right.included_default_exclusions[index]
+    ));
+}
+
+export function applyStorageDraft(
+  storages: SyncConfig["storages"],
+  draft: SyncConfig["storages"][number],
+  expectedBaseline: SyncConfig["storages"][number] | null,
+): SyncConfig["storages"] {
+  const existing = storages.find((candidate) => candidate.id === draft.id) ?? null;
+  if (expectedBaseline) {
+    if (
+      expectedBaseline.id !== draft.id
+      || !existing
+      || !sameStorageConfig(existing, expectedBaseline)
+    ) {
+      throw new Error(
+        "This storage changed outside the editor. Reload its current configuration before saving.",
+      );
+    }
+  } else if (existing) {
+    throw new Error(
+      "A storage with this identifier was added outside the editor. Reload before saving.",
+    );
+  }
+  return existing
+    ? storages.map((candidate) => candidate.id === draft.id ? draft : candidate)
+    : [...storages, draft];
+}
+
+export function shouldReloadConfigRevision(
+  currentRevision: number,
+  eventRevision: number,
+  hasValidSnapshot: boolean,
+): boolean {
+  return !hasValidSnapshot || eventRevision > currentRevision;
+}
 
 const PROJECT_SIDEBAR_WIDTH_KEY = "mallard.project-sidebar-width";
 const PROJECT_SIDEBAR_VISIBILITY_KEY = "mallard.project-sidebar-visible";
@@ -216,7 +282,7 @@ function upsertBinding(bindings: ProjectBinding[], binding: ProjectBinding): Pro
     : [...bindings, binding];
 }
 
-function defaultProfileIds(): Partial<Record<ProjectProvider, string>> {
+function defaultProfileIds(): Record<ProviderKey, string> {
   return {};
 }
 
@@ -251,15 +317,23 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [repositoryKinds, setRepositoryKinds] = useState<Record<string, boolean>>({});
   const [bindings, setBindings] = useState<ProjectBinding[]>([]);
   const [profiles, setProfiles] = useState<ProviderProfileSummary[]>([]);
+  const [agentProviders, setAgentProviders] = useState<ProviderDescriptor[]>([]);
   const [conversationPathAudits, setConversationPathAudits] = useState<Record<string, CodexConversationPathAudit>>({});
   const [conversationPathAuditErrors, setConversationPathAuditErrors] = useState<Record<string, string>>({});
   const [conversationPathAuditLoading, setConversationPathAuditLoading] = useState(true);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [activeProjectSubview, setActiveProjectSubview] = useState<ActiveProjectSubview>({ kind: "overview" });
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [inventory, setInventory] = useState<ResourceInventoryModel | null>(null);
   const [readiness, setReadiness] = useState<BundleReadiness | null>(null);
   const [activeStorageByProject, setActiveStorageByProject] = useState<Record<string, string>>(storedActiveStorages);
   const [activeStorageSettingsId, setActiveStorageSettingsId] = useState<string | null>(null);
+  // The Catalog menu starts empty and grows one row per (provider profile ×
+  // resource kind) the user adds. Each registered resource owns its own
+  // storage links; there is no storage-wide Catalog selection.
+  const [catalogScopes, setCatalogScopes] = useState<CatalogScopeView[]>([]);
+  const [catalogScopeId, setCatalogScopeId] = useState<string | null>(null);
+  const [addingCatalogScope, setAddingCatalogScope] = useState(false);
   const [storageIssues, setStorageIssues] = useState<Record<string, string>>({});
   const [storageEditorRequest, setStorageEditorRequest] = useState<
     | { mode: "open"; storageId: string; settingsExpanded: boolean; requestId: number }
@@ -341,7 +415,56 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const restoreRequest = useRef(0);
   const shellRequest = useRef(0);
   const hostWorkflowEpoch = useRef(0);
+  const configRef = useRef<SyncConfig>(EMPTY_CONFIG);
+  const configSnapshotValidRef = useRef(false);
+  const configEventRequest = useRef(0);
   const readyHostIdentity = useRef<{ hostId: string; revision: number } | null>(null);
+
+  const adoptConfigSnapshot = useCallback((saved: SyncConfig) => {
+    if (
+      configSnapshotValidRef.current
+      && saved.revision < configRef.current.revision
+    ) return;
+    configRef.current = saved;
+    configSnapshotValidRef.current = true;
+    setConfig(saved);
+    setRegistrations(saved.projects);
+    setDetail((current) => {
+      if (!current) return current;
+      const savedProject = saved.projects.find((candidate) => (
+        candidate.local_project_id === current.project.local_project_id
+      ));
+      return {
+        ...current,
+        project: savedProject ?? current.project,
+        links: saved.links.filter((link) => (
+          link.local_project_id === current.project.local_project_id
+        )),
+      };
+    });
+    setActiveStorageByProject((current) => Object.fromEntries(Object.entries(current).filter(
+      ([localProjectId, storageId]) => saved.links.some((link) => (
+        link.local_project_id === localProjectId && link.storage_id === storageId
+      )),
+    )));
+  }, []);
+
+  const closeProjectSubview = useCallback(() => {
+    setActiveProjectSubview({ kind: "overview" });
+  }, []);
+
+  const openSessionDetail = useCallback((
+    projectId: string,
+    request: OpenSessionDetailRequest,
+  ) => {
+    setActiveProjectSubview({
+      kind: "session_detail",
+      localProjectId: projectId,
+      resourceId: request.resourceId,
+      occurrenceKey: request.occurrenceKey,
+      initialCheckpointId: request.initialCheckpointId,
+    });
+  }, []);
 
   const toggleSidebar = useCallback(() => {
     sidebarResizeRef.current = null;
@@ -371,6 +494,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       return Object.keys(next).length === Object.keys(current).length ? current : next;
     });
   }, [config.storages]);
+
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
 
   useEffect(() => {
     activityOpenRef.current = activityOpen;
@@ -511,6 +638,42 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     };
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    const unlisten = listen<ProjectSyncConfigChangedEvent>(
+      "project-sync-config-changed",
+      (event) => {
+        if (!shouldReloadConfigRevision(
+          configRef.current.revision,
+          event.payload.revision,
+          configSnapshotValidRef.current,
+        )) return;
+        const requestId = ++configEventRequest.current;
+        void projectSyncApi.getConfig().then((nextConfig) => {
+          if (
+            disposed
+            || requestId !== configEventRequest.current
+            || nextConfig.schema !== PROJECT_SYNC_SCHEMA
+            || !shouldReloadConfigRevision(
+              configRef.current.revision,
+              nextConfig.revision,
+              configSnapshotValidRef.current,
+            )
+          ) return;
+          adoptConfigSnapshot(nextConfig);
+        }).catch(() => {
+          // The native watcher validates before emitting. A transient read
+          // failure leaves the current, already validated snapshot visible.
+        });
+      },
+    );
+    return () => {
+      disposed = true;
+      configEventRequest.current += 1;
+      void unlisten.then((dispose) => dispose());
+    };
+  }, [adoptConfigSnapshot]);
+
   const openActivity = () => {
     activityOpenRef.current = true;
     setActivityOpen(true);
@@ -620,11 +783,33 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const activeDraftSummary = setupDraftId
     ? setupDrafts.find((candidate) => candidate.draft_id === setupDraftId) ?? null
     : null;
+  const activeCatalogScope = catalogScopeId && !setupDraftId && !addingCatalogScope
+    ? catalogScopes.find((candidate) => candidate.scope.scope_id === catalogScopeId) ?? null
+    : null;
+  const catalogStorages: CatalogStorageOption[] = config.storages.map((storage) => ({
+    id: storage.id,
+    name: storage.name,
+    kind: storage.kind,
+  }));
+  // The project workspace names itself in its path bar, so the titlebar stays
+  // silent there and speaks only for the screens that carry no trail.
   const workspaceTitle = activeDraftSummary?.display_name
-    ?? (activeSummary ? projectLabel(activeSummary) : "Projects");
-  const workspaceIcon = !activeDraftSummary && activeSummary?.is_git_repository === true
-    ? "git-folder"
-    : "folder";
+    ?? (addingCatalogScope ? "Add Catalog row" : null)
+    ?? (activeCatalogScope ? catalogScopeLabel(activeCatalogScope.scope, activeCatalogScope.profile) : null)
+    ?? (activeSummary ? null : "Projects");
+  const workspaceIcon = activeDraftSummary
+    ? "folder"
+    : addingCatalogScope
+      ? "catalog"
+      : activeCatalogScope
+        ? catalogKindMeta(activeCatalogScope.scope.resource_kind).icon
+        : "folder";
+  // The project workspace renders a path bar that doubles as the titlebar.
+  const showsPathBar = !activeDraftSummary
+    && !addingCatalogScope
+    && !activeCatalogScope
+    && !!activeSummary
+    && !setupDraftId;
   const restoreProfileLabel = restoreBinding
     ? [...new Set(Object.values(restoreBinding.profile_ids)
       .map((profileId) => profiles.find((profile) => profile.profile_id === profileId)?.display_name)
@@ -643,6 +828,28 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const activeStorageId = activeProjectId
     ? activeStorageByProject[activeProjectId] ?? projectLinks[0]?.storage_id ?? null
     : null;
+  useEffect(() => {
+    setActiveProjectSubview((current) => {
+      if (current.kind !== "session_detail") return current;
+      const leftProjectWorkspace = current.localProjectId !== activeProjectId
+        || setupDraftId != null
+        || addingCatalogScope
+        || catalogScopeId != null
+        || activeStorageSettingsId != null
+        || pendingPush != null
+        || restorePlan != null;
+      return leftProjectWorkspace ? { kind: "overview" } : current;
+    });
+  }, [
+    activeProjectId,
+    activeStorageId,
+    activeStorageSettingsId,
+    addingCatalogScope,
+    catalogScopeId,
+    pendingPush,
+    restorePlan,
+    setupDraftId,
+  ]);
   const clearHostScopedWorkflows = useCallback(() => {
     hostWorkflowEpoch.current += 1;
     restoreRequest.current += 1;
@@ -666,7 +873,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setCompletedPullResourceIds(new Set());
     setFailedPullResourceIds(new Set());
     setSetupDraftId(null);
+    setAddingCatalogScope(false);
+    setCatalogScopeId(null);
     setSetupDrafts([]);
+    setCatalogScopes([]);
+    setActiveProjectSubview({ kind: "overview" });
     setActiveProjectId(null);
     setDetail(null);
     setInventory(null);
@@ -678,6 +889,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setConversationPathAudits({});
     setConversationPathAuditErrors({});
     setConversationPathAuditLoading(false);
+    configRef.current = EMPTY_CONFIG;
+    configSnapshotValidRef.current = false;
     setConfig(EMPTY_CONFIG);
     setError(null);
     setBackendError(null);
@@ -776,10 +989,25 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           `Expected project sync schema ${PROJECT_SYNC_SCHEMA}, received schema ${nextConfig.schema}`,
         );
       }
-      setConfig(nextConfig);
+      if (
+        configSnapshotValidRef.current
+        && nextConfig.revision < configRef.current.revision
+      ) {
+        nextConfig = configRef.current;
+      } else {
+        configRef.current = nextConfig;
+        configSnapshotValidRef.current = true;
+        setConfig(nextConfig);
+      }
     } catch (reason) {
       failures.push(`Configuration: ${errorMessage(reason)}`);
-      setConfig(EMPTY_CONFIG);
+      if (configSnapshotValidRef.current) {
+        nextConfig = configRef.current;
+      } else {
+        configRef.current = EMPTY_CONFIG;
+        configSnapshotValidRef.current = false;
+        setConfig(EMPTY_CONFIG);
+      }
     }
     setStartupStage("repair");
     try {
@@ -803,6 +1031,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
     await refreshSetupDrafts(requestId);
     if (shellRequest.current !== requestId) return unavailableResult();
+    await refreshCatalogScopes(requestId);
+    if (shellRequest.current !== requestId) return unavailableResult();
     try {
       const nextRepositoryKinds = await projectSyncApi.listProjectRepositoryKinds();
       if (shellRequest.current !== requestId) return unavailableResult();
@@ -812,6 +1042,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setRepositoryKinds({});
     }
     setStartupStage("providers");
+    try {
+      const nextAgentProviders = await projectSyncApi.listAgentProviders();
+      if (shellRequest.current !== requestId) return unavailableResult();
+      setAgentProviders(nextAgentProviders);
+    } catch (reason) {
+      failures.push(`Agent providers: ${errorMessage(reason)}`);
+      setAgentProviders([]);
+    }
     try {
       nextProfiles = await projectSyncApi.listProviderProfiles();
       if (shellRequest.current !== requestId) return unavailableResult();
@@ -1048,6 +1286,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   }, [appMenuOpen]);
 
   const selectProject = async (projectId: string, preferredStorage?: string | null) => {
+    closeProjectSubview();
     setActiveProjectId(projectId);
     await loadProjectData(projectId, config, preferredStorage);
   };
@@ -1056,12 +1295,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     if (!config.links.some((link) => (
       link.local_project_id === projectId && link.storage_id === storageId
     ))) return;
+    closeProjectSubview();
     setActiveProjectId(projectId);
     setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
   };
 
   const createProfileAtPath = async (
-    provider: ProjectProvider,
+    provider: ProviderKey,
     path: string,
     workflowEpoch = hostWorkflowEpoch.current,
   ): Promise<ProviderProfile | null> => {
@@ -1094,7 +1334,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  const chooseAndCreateProfile = async (provider: ProjectProvider): Promise<ProviderProfile | null> => {
+  const chooseAndCreateProfile = async (provider: ProviderKey): Promise<ProviderProfile | null> => {
     const workflowEpoch = hostWorkflowEpoch.current;
     const picked = await open({ directory: true, multiple: false });
     if (
@@ -1124,9 +1364,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   };
 
   const closeWorkspaceSettings = () => {
+    closeProjectSubview();
     setPendingPush(null);
     setPushError(null);
     if (restorePlan) closePullReview();
+    // The Catalog page counts as a workspace overlay: navigating to a
+    // project or draft leaves it the same way it leaves storage settings.
+    setCatalogScopeId(null);
+    setAddingCatalogScope(false);
     setStorageEditorRequest((current) => ({
       mode: "close",
       requestId: (current?.requestId ?? 0) + 1,
@@ -1154,6 +1399,78 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       await refreshSetupDrafts(undefined, workflowEpoch);
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+    } finally {
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
+    }
+  };
+
+  const refreshCatalogScopes = async (shellRequestId?: number, workflowEpoch?: number) => {
+    const requestedWorkflowEpoch = workflowEpoch ?? hostWorkflowEpoch.current;
+    if (
+      (shellRequestId !== undefined && shellRequest.current !== shellRequestId)
+      || hostWorkflowEpoch.current !== requestedWorkflowEpoch
+    ) return;
+    try {
+      const listed = await storageCatalogApi.listScopes();
+      if (
+        (shellRequestId !== undefined && shellRequest.current !== shellRequestId)
+        || hostWorkflowEpoch.current !== requestedWorkflowEpoch
+      ) return;
+      setCatalogScopes(listed);
+    } catch {
+      // The menu is a convenience surface; the rest of the shell stays usable.
+    }
+  };
+
+  /** Opens the Add-row workspace: Kind, then provider home, and nothing else. */
+  const beginAddCatalogScope = () => {
+    setError(null);
+    closeWorkspaceSettings();
+    setSetupDraftId(null);
+    setAddingCatalogScope(true);
+  };
+
+  const openCatalogScope = (scopeId: string) => {
+    setError(null);
+    closeWorkspaceSettings();
+    setSetupDraftId(null);
+    setCatalogScopeId(scopeId);
+  };
+
+  const completeAddCatalogScope = async (scope: CatalogScopeView, workflowEpoch: number) => {
+    if (hostWorkflowEpoch.current !== workflowEpoch) return;
+    setAddingCatalogScope(false);
+    setCatalogScopeId(scope.scope.scope_id);
+    notify(`${catalogScopeLabel(scope.scope, scope.profile)} added to the Catalog.`);
+    await refreshCatalogScopes(undefined, workflowEpoch);
+  };
+
+  const removeCatalogScope = async (scopeId: string) => {
+    const workflowEpoch = hostWorkflowEpoch.current;
+    const scope = catalogScopes.find((candidate) => candidate.scope.scope_id === scopeId);
+    if (!scope) {
+      await refreshCatalogScopes(undefined, workflowEpoch);
+      return;
+    }
+    const label = catalogScopeLabel(scope.scope, scope.profile);
+    const approved = await confirm(
+      `Remove the “${label}” row from the Catalog?\n\nOnly the menu row is removed. No provider or storage content is touched.`,
+      { title: "Remove Catalog row" },
+    );
+    if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await storageCatalogApi.deleteScope(scopeId, scope.scope.revision);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      if (catalogScopeId === scopeId) setCatalogScopeId(null);
+      await refreshCatalogScopes(undefined, workflowEpoch);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      notify(`${label} removed — no provider or storage content touched.`);
+    } catch (reason) {
+      if (hostWorkflowEpoch.current === workflowEpoch) {
+        setError(catalogErrorMessage(reason));
+      }
     } finally {
       if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
@@ -1549,7 +1866,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         projectSyncApi.getProject(projectId),
       ]);
       if (stale()) return;
-      if (nextConfig.schema === PROJECT_SYNC_SCHEMA) setConfig(nextConfig);
+      if (nextConfig.schema === PROJECT_SYNC_SCHEMA) {
+        if (
+          !configSnapshotValidRef.current
+          || nextConfig.revision >= configRef.current.revision
+        ) {
+          configRef.current = nextConfig;
+          configSnapshotValidRef.current = true;
+          setConfig(nextConfig);
+        }
+      }
       if (!nextDetail) return;
       setDetail(nextDetail);
       setRegistrations((current) => upsertProject(current, nextDetail.project));
@@ -1809,7 +2135,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // Manual-fork checkpoints belong to the Activity page, not to a Pull
       // review; only a pull-origin checkpoint carries the plan this flow
       // resumes.
-      const pullCheckpoints = (pendingDivergence?.codex_fork_checkpoints ?? []).filter(
+      const pullCheckpoints = (pendingDivergence?.fork_checkpoints ?? []).filter(
         (checkpoint) => checkpoint.origin === "pull_preserve" && checkpoint.plan_id != null,
       );
       const pendingCheckpoint = pullCheckpoints[0];
@@ -2169,6 +2495,67 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setFailedPullResourceIds(new Set());
   };
 
+  // Window-level controls: the theme toggle and the app menu. They belong to
+  // the window, not to any screen, so whichever bar is at the top carries them
+  // — the titlebar on most screens, the path bar in the project workspace.
+  const windowActions = (
+    <div className="sync-titlebar-actions">
+      <button
+        type="button"
+        className="sync-theme-button"
+        onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
+        title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+        aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+      >
+        <Icon name={theme === "dark" ? "moon" : "sun"} size={18} />
+      </button>
+      <div ref={appMenuRef} className={`storage-link-overflow${appMenuOpen ? " open" : ""}`}>
+        <button
+          type="button"
+          className="storage-link-more"
+          aria-haspopup="menu"
+          aria-expanded={appMenuOpen}
+          aria-controls="sync-app-actions-menu"
+          title="App actions"
+          aria-label="App actions"
+          onClick={() => setAppMenuOpen((current) => !current)}
+        >
+          <Icon name="more" size={16} />
+        </button>
+        <div
+          id="sync-app-actions-menu"
+          className="storage-link-actions-menu"
+          role="menu"
+          aria-label="App actions"
+          hidden={!appMenuOpen}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="storage-link-actions-menu-item"
+            disabled={loading || busy}
+            title="Reload all Mallard data from disk and storage; project files are not modified"
+            onClick={() => {
+              setAppMenuOpen(false);
+              void refresh();
+            }}
+          >
+            <Icon name="refresh" size={14} className={loading ? "icon-spin" : undefined} />
+            <span>Reload app data</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // One way into a project, shared by the sidebar and the path bar's repo crumb.
+  const openProject = (projectId: string) => {
+    setSetupDraftId(null);
+    closeWorkspaceSettings();
+    if (restorePlan) closePullReview();
+    void selectProject(projectId);
+  };
+
   const configureProjectBinding = (projectId: string) => {
     const project = registrations.find((candidate) => candidate.local_project_id === projectId);
     if (!project) return;
@@ -2429,24 +2816,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (hostWorkflowEpoch.current !== workflowEpoch) return false;
       const saved = await projectSyncApi.saveConfig(update(current));
       if (hostWorkflowEpoch.current !== workflowEpoch) return false;
-      setConfig(saved);
-      setRegistrations(saved.projects);
-      setDetail((current) => {
-        if (!current) return current;
-        const savedProject = saved.projects.find((candidate) => (
-          candidate.local_project_id === current.project.local_project_id
-        ));
-        return {
-          ...current,
-          project: savedProject ?? current.project,
-          links: saved.links.filter((link) => link.local_project_id === current.project.local_project_id),
-        };
-      });
-      setActiveStorageByProject((current) => Object.fromEntries(Object.entries(current).filter(
-        ([localProjectId, storageId]) => saved.links.some((link) => (
-          link.local_project_id === localProjectId && link.storage_id === storageId
-        )),
-      )));
+      adoptConfigSnapshot(saved);
       notify(successNotice);
       return true;
     } catch (reason) {
@@ -2457,14 +2827,53 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  const saveInlineStorage = async (storage: SyncConfig["storages"][number]) => {
+  const saveInlineStorage = async (
+    storage: SyncConfig["storages"][number],
+    expectedBaseline: SyncConfig["storages"][number] | null,
+  ) => {
+    const isNewR2 = storage.kind === "s3"
+      && !configRef.current.storages.some((candidate) => candidate.id === storage.id);
+    if (isNewR2) {
+      const apiUrl = r2S3ApiUrl(storage.account_id, storage.bucket, storage.s3_endpoint);
+      if (!apiUrl) {
+        setError("Enter a valid Cloudflare R2 S3 API URL before connecting.");
+        return false;
+      }
+      const workflowEpoch = hostWorkflowEpoch.current;
+      setBusy(true);
+      setError(null);
+      try {
+        const result = await projectSyncApi.connectR2Storage({
+          name: storage.name,
+          api_url: apiUrl,
+          access_key_id: storage.access_key_id,
+          secret_access_key: storage.secret_access_key,
+          expected_config_revision: configRef.current.revision,
+        });
+        if (hostWorkflowEpoch.current !== workflowEpoch) return false;
+        const saved = await projectSyncApi.getConfig();
+        if (
+          saved.schema !== PROJECT_SYNC_SCHEMA
+          || saved.revision < result.config_revision
+          || !saved.storages.some((candidate) => candidate.id === result.storage_id)
+        ) {
+          throw new Error("R2 connected, but its committed configuration could not be refreshed.");
+        }
+        if (hostWorkflowEpoch.current !== workflowEpoch) return false;
+        adoptConfigSnapshot(saved);
+        notify(`Connected ${storage.name || "Cloudflare R2"}.`);
+        return true;
+      } catch (reason) {
+        if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+        return false;
+      } finally {
+        if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
+      }
+    }
     return saveStorageConfig((current) => {
-      const exists = current.storages.some((candidate) => candidate.id === storage.id);
       return {
         ...current,
-        storages: exists
-          ? current.storages.map((candidate) => candidate.id === storage.id ? storage : candidate)
-          : [...current.storages, storage],
+        storages: applyStorageDraft(current.storages, storage, expectedBaseline),
       };
     });
   };
@@ -2502,7 +2911,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   };
 
   const openNewStorageConfiguration = () => {
+    closeProjectSubview();
     setSetupDraftId(null);
+    setAddingCatalogScope(false);
+    setCatalogScopeId(null);
     setPendingPush(null);
     setPushError(null);
     if (restorePlan) closePullReview();
@@ -2511,6 +2923,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       storageKind: "local",
       requestId: (current?.requestId ?? 0) + 1,
     }));
+  };
+
+  /** The nav button lands on the first row; with no rows yet it opens Add. */
+  const openCatalogMenu = () => {
+    const first = catalogScopes[0]?.scope.scope_id ?? null;
+    if (first) openCatalogScope(first);
+    else beginAddCatalogScope();
   };
 
   const safePushSelection = pendingPush
@@ -2736,16 +3155,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         storageIssues={storageIssues}
         activeProjectId={activeProjectId}
         activeStorageId={activeStorageSettingsId}
+        catalogScopes={catalogScopes}
+        activeCatalogScopeId={activeCatalogScope?.scope.scope_id ?? null}
+        addingCatalogScope={addingCatalogScope}
         loading={loading}
         busy={busy || !!inlineStorageReview}
         activityOpen={activityOpen}
         unreadLogs={unreadLogs}
-        onSelectProject={(id) => {
-          setSetupDraftId(null);
-          closeWorkspaceSettings();
-          if (restorePlan) closePullReview();
-          void selectProject(id);
-        }}
+        onSelectProject={openProject}
         onRemoveProject={(id) => void removeProject(id)}
         onToggleActivity={() => {
           const next = !activityOpen;
@@ -2755,7 +3172,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         }}
         onAddProject={() => void beginAddProject()}
         onOpenStorage={(storageId, settingsExpanded) => {
+          closeProjectSubview();
           setSetupDraftId(null);
+          setAddingCatalogScope(false);
+          setCatalogScopeId(null);
           setPendingPush(null);
           setPushError(null);
           if (restorePlan) closePullReview();
@@ -2768,6 +3188,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         }}
         onRemoveStorage={(storageId) => void removeStorage(storageId)}
         onAddStorage={openNewStorageConfiguration}
+        onOpenCatalogMenu={openCatalogMenu}
+        onOpenCatalogScope={openCatalogScope}
+        onAddCatalogScope={beginAddCatalogScope}
+        onRemoveCatalogScope={(scopeId) => void removeCatalogScope(scopeId)}
       />
 
       <div
@@ -2788,60 +3212,23 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       />
 
       <div className={`sync-workspace${activityOpen ? " logs-open" : ""}${resizingLog ? " resizing-log" : ""}`}>
+        {/* The project workspace merges the window chrome into its path bar, so
+            there is one row at the top instead of a named strip above an empty
+            one. Every other screen still gets a titlebar of its own. */}
+        {showsPathBar ? null : (
         <header className="sync-titlebar" data-tauri-drag-region>
-          <div className="sync-titlebar-context" data-tauri-drag-region title={workspaceTitle}>
-            <Icon name={workspaceIcon} size={16} />
-            <strong>{workspaceTitle}</strong>
+          <div className="sync-titlebar-context" data-tauri-drag-region title={workspaceTitle ?? undefined}>
+            {workspaceTitle && (
+              <>
+                <Icon name={workspaceIcon} size={16} />
+                <strong>{workspaceTitle}</strong>
+              </>
+            )}
             {activeDraftSummary && <span>Draft setup</span>}
           </div>
-          <div className="sync-titlebar-actions">
-            <button
-              type="button"
-              className="sync-theme-button"
-              onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
-              title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-            >
-              <Icon name={theme === "dark" ? "moon" : "sun"} size={18} />
-            </button>
-            <div ref={appMenuRef} className={`storage-link-overflow${appMenuOpen ? " open" : ""}`}>
-              <button
-                type="button"
-                className="storage-link-more"
-                aria-haspopup="menu"
-                aria-expanded={appMenuOpen}
-                aria-controls="sync-app-actions-menu"
-                title="App actions"
-                aria-label="App actions"
-                onClick={() => setAppMenuOpen((current) => !current)}
-              >
-                <Icon name="more" size={16} />
-              </button>
-              <div
-                id="sync-app-actions-menu"
-                className="storage-link-actions-menu"
-                role="menu"
-                aria-label="App actions"
-                hidden={!appMenuOpen}
-              >
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="storage-link-actions-menu-item"
-                  disabled={loading || busy}
-                  title="Reload all Mallard data from disk and storage; project files are not modified"
-                  onClick={() => {
-                    setAppMenuOpen(false);
-                    void refresh();
-                  }}
-                >
-                  <Icon name="refresh" size={14} className={loading ? "icon-spin" : undefined} />
-                  <span>Reload app data</span>
-                </button>
-              </div>
-            </div>
-          </div>
+          {windowActions}
         </header>
+        )}
 
         {backendError && (
           <div className="sync-backend-banner">
@@ -2865,10 +3252,30 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           </div>
         )}
 
+        {addingCatalogScope ? (
+          <AddCatalogScopeWorkspace
+            workflowEpoch={hostWorkflowEpoch.current}
+            isWorkflowCurrent={(epoch) => hostWorkflowEpoch.current === epoch}
+            busy={busy}
+            onClose={() => setAddingCatalogScope(false)}
+            onCreated={(scope, epoch) => void completeAddCatalogScope(scope, epoch)}
+          />
+        ) : activeCatalogScope ? (
+          <StorageCatalogPage
+            key={activeCatalogScope.scope.scope_id}
+            scope={activeCatalogScope}
+            storages={catalogStorages}
+            onScopeGone={() => {
+              setCatalogScopeId(null);
+              void refreshCatalogScopes();
+            }}
+          />
+        ) : (
         <ProjectLinksWorkspace
             projects={projects}
             activeProjectId={activeProjectId}
             activeStorageId={activeStorageId}
+            activeProjectSubview={activeProjectSubview}
             bindings={bindings}
             profiles={profiles}
             storages={config.storages}
@@ -2881,6 +3288,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             conversationPathAuditLoading={conversationPathAuditLoading}
             fetchProgress={fetchProgress}
             onSelectStorage={(projectId, storageId) => selectStorage(projectId, storageId)}
+            onOpenSessionDetail={openSessionDetail}
+            onCloseSessionDetail={closeProjectSubview}
             onLinkStorage={(projectId, storageId) => linkStorage(projectId, storageId)}
             onUnlinkStorage={(projectId, storageId) => unlinkStorage(projectId, storageId)}
             onPush={(projectId, storageId) => openPushChooser(projectId, storageId)}
@@ -2890,6 +3299,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onRenameProject={(projectId, alias) => renameProject(projectId, alias)}
             onRefresh={() => void refresh()}
             onAddProject={() => void beginAddProject()}
+            onSelectProject={openProject}
+            windowActions={windowActions}
             onOpenStorageSettings={openNewStorageConfiguration}
             onSaveStorage={saveInlineStorage}
             storageEditorRequest={storageEditorRequest}
@@ -2909,6 +3320,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                 isWorkflowCurrent={(workflowEpoch) => (
                   hostWorkflowEpoch.current === workflowEpoch
                 )}
+                providers={agentProviders}
                 profiles={profiles}
                 projects={projects}
                 storages={config.storages}
@@ -2922,6 +3334,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
               />
             ) : null}
           />
+        )}
 
         <div
           className={`log-drawer sync-log-drawer${activityOpen ? " open" : ""}`}
@@ -2979,8 +3392,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       {editingBinding && (
         <ProjectBindingEditor
           title={`Project setup for ${activeSummary ? projectLabel(activeSummary) : "project"}`}
-          description="Choose this machine's checkout and one agent profile: Codex or Claude. Existing files and provider state are never moved or deleted."
+          description="Choose this machine's checkout and the agent profiles this project uses. Existing files and provider state are never moved or deleted."
           binding={editingBinding}
+          providers={agentProviders}
           profiles={profiles}
           busy={busy}
           error={error}

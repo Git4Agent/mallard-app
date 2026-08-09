@@ -6,24 +6,124 @@ import type {
 import packageMetadata from "../../../package.json";
 import type { LocalProjectSummary, SetupDraftSummary, StorageConfig } from "../../types";
 import Icon from "../Icons";
+import { catalogKindMeta, catalogScopeLabel } from "../storage-catalog/model";
+import type { CatalogScopeView } from "../storage-catalog/types";
 import { projectLabel } from "./model";
+
+/* Both gutters down the sections box drag — they are the same 3px of frame
+   colour, so a fixed Catalog row read as a handle and answered to nothing.
+   The two panes above divide the elastic space by share. Catalog does not: it
+   holds one row per (provider home × kind) the user has added — unbounded —
+   so it is sized to its contents up to a 40% cap until the lower handle pins
+   it, and the list scrolls past either limit rather than squeezing Projects
+   and Storages onto their floors. */
+type SectionLayout = {
+  headHeight: number | null;
+  projectShare: number;
+  catalogHeight: number | null;
+};
+/* 0 is the head over Projects, 1 Projects over Storages, 2 Storages over
+   Catalog — top to bottom, the order they appear down the rail. */
+type SectionHandle = 0 | 1 | 2;
 
 const SIDEBAR_SECTION_SPLIT_KEY = "mallard.sidebar-section-split";
 const DEFAULT_PROJECT_SHARE = 0.56;
 const MIN_SECTION_SHARE = 0.2;
+export const MIN_PANE_HEIGHT = 96;
+const SECTION_KEYBOARD_STEP = 12;
 
 function clampSectionShare(value: number): number {
   return Math.min(1 - MIN_SECTION_SHARE, Math.max(MIN_SECTION_SHARE, value));
 }
 
-function storedProjectShare(): number {
-  if (typeof window === "undefined") return DEFAULT_PROJECT_SHARE;
+/* Catalog floors at the same MIN_PANE_HEIGHT as the panes above it — pinned
+   under its contents it scrolls like they do, rather than refusing to move. The
+   ceiling stops once Storages, the pane this handle actually borders, is down to
+   its own floor, so the handle never starts eating Projects instead. */
+export function catalogHeightRange(boxHeight: number, projectsHeight: number): [number, number] {
+  return [MIN_PANE_HEIGHT, Math.max(MIN_PANE_HEIGHT, boxHeight - 6 - projectsHeight - MIN_PANE_HEIGHT)];
+}
+
+function clampCatalogHeight(value: number, boxHeight: number, projectsHeight: number): number {
+  const [min, max] = catalogHeightRange(boxHeight, projectsHeight);
+  return Math.min(max, Math.max(min, value));
+}
+
+/* Projects and Storages split what Catalog leaves behind, so pinning Catalog
+   changes the meaning of a fixed share and drags the gutter above it along.
+   Re-solving the share against the new elastic space keeps Projects on exactly
+   the pixels it had, which is what makes this handle move one gutter only. */
+export function shareHolding(projectsHeight: number, boxHeight: number, catalogHeight: number): number {
+  const elastic = boxHeight - 6 - catalogHeight;
+  return elastic > 0 ? clampSectionShare(projectsHeight / elastic) : DEFAULT_PROJECT_SHARE;
+}
+
+/* The head's handle changes the size of the whole box beneath it, which moves
+   both gutters below unless the share is re-solved. Holding Storages on its
+   pixels leaves Projects — the pane this handle borders — to absorb the change,
+   and Catalog is sized in its own right so it never moves either way. */
+export function shareHoldingStorages(
+  storagesHeight: number,
+  boxHeight: number,
+  catalogHeight: number,
+): number {
+  const elastic = boxHeight - 6 - catalogHeight;
+  return elastic > 0 ? clampSectionShare(1 - storagesHeight / elastic) : DEFAULT_PROJECT_SHARE;
+}
+
+/* The head can shed height down to its wordmark plus one nav row — below that a
+   row would be unreachable — and gains nothing past its natural content height,
+   which is only empty tile. The nav scrolls in between. */
+function headHeightRange(head: HTMLElement): [number, number] {
+  const rowOf = (selector: string) => head.querySelector<HTMLElement>(selector)?.offsetHeight ?? 0;
+  const nav = head.querySelector<HTMLElement>(".sync-primary-nav");
+  const navStyle = nav ? getComputedStyle(nav) : null;
+  const navChrome = navStyle
+    ? Number.parseFloat(navStyle.paddingTop) + Number.parseFloat(navStyle.paddingBottom)
+    : 0;
+  // Everything above the nav, plus the tile's own borders. Both ends are then
+  // measured off the nav's scroll height rather than the head's — the head
+  // reports whatever the pin already gave it, so a shortened head would keep
+  // lowering its own ceiling and could never be dragged back open.
+  const above = rowOf(".sync-sidebar-drag") + rowOf(".sync-sidebar-brand")
+    + head.offsetHeight - head.clientHeight;
+  const min = above + navChrome + (nav?.querySelector<HTMLElement>("button")?.offsetHeight ?? 0);
+  return [min, Math.max(min, above + (nav?.scrollHeight ?? 0))];
+}
+
+function storedSectionLayout(): SectionLayout {
+  const fallback: SectionLayout = {
+    headHeight: null,
+    projectShare: DEFAULT_PROJECT_SHARE,
+    catalogHeight: null,
+  };
+  if (typeof window === "undefined") return fallback;
+  let stored = "";
   try {
-    const value = Number.parseFloat(window.localStorage.getItem(SIDEBAR_SECTION_SPLIT_KEY) ?? "");
-    return Number.isFinite(value) ? clampSectionShare(value) : DEFAULT_PROJECT_SHARE;
+    stored = window.localStorage.getItem(SIDEBAR_SECTION_SPLIT_KEY) ?? "";
   } catch {
-    return DEFAULT_PROJECT_SHARE;
+    return fallback;
   }
+  const [share, height, head] = stored.split(",");
+  const parsedShare = Number.parseFloat(share);
+  if (!Number.isFinite(parsedShare)) return fallback;
+  const parsedHeight = Number.parseFloat(height);
+  const parsedHead = Number.parseFloat(head);
+  return {
+    headHeight: Number.isFinite(parsedHead) ? parsedHead : null,
+    projectShare: clampSectionShare(parsedShare),
+    catalogHeight: Number.isFinite(parsedHeight) ? Math.max(MIN_PANE_HEIGHT, parsedHeight) : null,
+  };
+}
+
+/* Whole fr factors, not the shares themselves. Grid gives a track whose flex
+   factor is below 1 only that fraction of the leftover space — so once a pane
+   bottoms out on its 96px floor and the factors still in play add up to less
+   than 1, the rows stop filling the box and leave dead space under the last
+   pane. Scaled to 100 the remaining factor is always well over 1. */
+function elasticRows(projectShare: number): string {
+  const projects = projectShare * 100;
+  return `minmax(${MIN_PANE_HEIGHT}px, ${projects}fr) 3px minmax(${MIN_PANE_HEIGHT}px, ${100 - projects}fr)`;
 }
 
 interface Props {
@@ -35,6 +135,9 @@ interface Props {
   storageIssues?: Record<string, string>;
   activeProjectId: string | null;
   activeStorageId: string | null;
+  catalogScopes: CatalogScopeView[];
+  activeCatalogScopeId: string | null;
+  addingCatalogScope: boolean;
   loading: boolean;
   busy: boolean;
   activityOpen: boolean;
@@ -48,6 +151,10 @@ interface Props {
   onOpenStorage: (storageId: string, settingsExpanded: boolean) => void;
   onRemoveStorage: (storageId: string) => void;
   onAddStorage: () => void;
+  onOpenCatalogMenu: () => void;
+  onOpenCatalogScope: (scopeId: string) => void;
+  onAddCatalogScope: () => void;
+  onRemoveCatalogScope: (scopeId: string) => void;
 }
 
 export default function ProjectSidebar({
@@ -59,6 +166,9 @@ export default function ProjectSidebar({
   storageIssues = {},
   activeProjectId,
   activeStorageId,
+  catalogScopes,
+  activeCatalogScopeId,
+  addingCatalogScope,
   loading,
   busy,
   activityOpen,
@@ -72,21 +182,65 @@ export default function ProjectSidebar({
   onOpenStorage,
   onRemoveStorage,
   onAddStorage,
+  onOpenCatalogMenu,
+  onOpenCatalogScope,
+  onAddCatalogScope,
+  onRemoveCatalogScope,
 }: Props) {
-  const [projectShare, setProjectShare] = useState(storedProjectShare);
+  const [sectionLayout, setSectionLayout] = useState<SectionLayout>(storedSectionLayout);
   const [resizingSections, setResizingSections] = useState(false);
   const sectionsRef = useRef<HTMLDivElement>(null);
-  const sectionResizeRef = useRef<{ pointerId: number; top: number; height: number } | null>(null);
+  const headRef = useRef<HTMLDivElement>(null);
+  const sectionResizeRef = useRef<
+    {
+      pointerId: number;
+      handle: SectionHandle;
+      top: number;
+      bottom: number;
+      height: number;
+      projects: number;
+      storages: number;
+      catalog: number;
+      headTop: number;
+      headStart: number;
+      headRange: [number, number];
+    } | null
+  >(null);
+
+  /* The list is fixed, so its height is the one number the pin must respect. It
+     is read off the laid-out rows rather than the pane, which reports whatever
+     the pin already gave it. */
+  const paneHeight = (selector: string) => sectionsRef.current
+    ?.querySelector<HTMLElement>(selector)
+    ?.getBoundingClientRect().height ?? MIN_PANE_HEIGHT;
+
+  const catalogContentHeight = () => {
+    const pane = sectionsRef.current?.querySelector<HTMLElement>(".sidebar-catalog-pane");
+    if (!pane) return MIN_PANE_HEIGHT;
+    const heading = pane.querySelector<HTMLElement>(".sidebar-section-heading");
+    const list = pane.querySelector<HTMLElement>(".sidebar-profile-list");
+    const style = getComputedStyle(pane);
+    // The tile's own border and padding sit outside the rows it holds, so they
+    // count toward the floor as well — a pin measured without them shaves the
+    // bottom row by a hair.
+    const chrome = pane.offsetHeight - pane.clientHeight
+      + Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom);
+    return (heading?.offsetHeight ?? 0) + (list?.scrollHeight ?? 0) + chrome;
+  };
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(SIDEBAR_SECTION_SPLIT_KEY, String(projectShare));
+      const pixels = (value: number | null) => (value === null ? "auto" : String(Math.round(value)));
+      window.localStorage.setItem(
+        SIDEBAR_SECTION_SPLIT_KEY,
+        `${sectionLayout.projectShare},${pixels(sectionLayout.catalogHeight)},${pixels(sectionLayout.headHeight)}`,
+      );
     } catch {
       // The splitter still works for this session when browser storage is unavailable.
     }
-  }, [projectShare]);
+  }, [sectionLayout]);
 
-  const startSectionResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+  const startSectionResize = (event: ReactPointerEvent<HTMLDivElement>, handle: SectionHandle) => {
     if (event.button !== 0) return;
     const bounds = sectionsRef.current?.getBoundingClientRect();
     if (!bounds || bounds.height <= 0) return;
@@ -94,8 +248,16 @@ export default function ProjectSidebar({
     event.currentTarget.setPointerCapture(event.pointerId);
     sectionResizeRef.current = {
       pointerId: event.pointerId,
+      handle,
       top: bounds.top,
+      bottom: bounds.bottom,
       height: bounds.height,
+      projects: paneHeight(".sidebar-project-pane"),
+      storages: paneHeight(".sidebar-storage-pane"),
+      catalog: paneHeight(".sidebar-catalog-pane"),
+      headTop: headRef.current?.getBoundingClientRect().top ?? 0,
+      headStart: headRef.current?.getBoundingClientRect().height ?? 0,
+      headRange: headRef.current ? headHeightRange(headRef.current) : [0, 0],
     };
     setResizingSections(true);
   };
@@ -103,7 +265,35 @@ export default function ProjectSidebar({
   const continueSectionResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     const resize = sectionResizeRef.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
-    setProjectShare(clampSectionShare((event.clientY - resize.top) / resize.height));
+    if (resize.handle === 0) {
+      // The head is a flex tile above the box, so this handle sets its height
+      // directly. The rail is a fixed column, so whatever the head takes the box
+      // below loses — re-solve the share against that new box so Storages keeps
+      // its pixels and only Projects, the pane this handle borders, gives way.
+      const [min, max] = resize.headRange;
+      const height = Math.min(max, Math.max(min, event.clientY - resize.headTop));
+      const box = resize.height - (height - resize.headStart);
+      setSectionLayout((current) => ({
+        ...current,
+        headHeight: height,
+        projectShare: shareHoldingStorages(resize.storages, box, resize.catalog),
+      }));
+      return;
+    }
+    if (resize.handle === 1) {
+      const share = clampSectionShare((event.clientY - resize.top) / resize.height);
+      setSectionLayout((current) => ({ ...current, projectShare: share }));
+      return;
+    }
+    // The lowest handle sets the Catalog pane's own height, measured up from the
+    // bottom of the box, and re-solves the share so Projects keeps the pixels it
+    // started with — only Storages, the pane this handle borders, gives way.
+    const height = clampCatalogHeight(resize.bottom - event.clientY, resize.height, resize.projects);
+    setSectionLayout((current) => ({
+      ...current,
+      projectShare: shareHolding(resize.projects, resize.height, height),
+      catalogHeight: height,
+    }));
   };
 
   const finishSectionResize = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -115,16 +305,86 @@ export default function ProjectSidebar({
     }
   };
 
-  const resizeSectionsWithKeyboard = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    let nextShare: number | null = null;
-    if (event.key === "ArrowUp") nextShare = projectShare - 0.05;
-    if (event.key === "ArrowDown") nextShare = projectShare + 0.05;
-    if (event.key === "Home") nextShare = MIN_SECTION_SHARE;
-    if (event.key === "End") nextShare = 1 - MIN_SECTION_SHARE;
-    if (nextShare === null) return;
+  const resizeSectionsWithKeyboard = (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+    handle: SectionHandle,
+  ) => {
+    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    setProjectShare(clampSectionShare(nextShare));
+    if (handle === 0) {
+      const head = headRef.current;
+      if (!head) return;
+      const [min, max] = headHeightRange(head);
+      const from = sectionLayout.headHeight ?? head.getBoundingClientRect().height;
+      const next = event.key === "ArrowUp" ? from - SECTION_KEYBOARD_STEP
+        : event.key === "ArrowDown" ? from + SECTION_KEYBOARD_STEP
+        : event.key === "Home" ? min
+        : max;
+      setSectionLayout((current) => ({ ...current, headHeight: Math.min(max, Math.max(min, next)) }));
+      return;
+    }
+    if (handle === 1) {
+      const share = sectionLayout.projectShare;
+      const next = event.key === "ArrowUp" ? share - 0.05
+        : event.key === "ArrowDown" ? share + 0.05
+        : event.key === "Home" ? MIN_SECTION_SHARE
+        : 1 - MIN_SECTION_SHARE;
+      setSectionLayout((current) => ({ ...current, projectShare: clampSectionShare(next) }));
+      return;
+    }
+    const box = sectionsRef.current?.getBoundingClientRect().height ?? 0;
+    const projects = paneHeight(".sidebar-project-pane");
+    const [min, max] = catalogHeightRange(box, projects);
+    const current = sectionLayout.catalogHeight ?? catalogContentHeight();
+    const next = event.key === "ArrowUp" ? current + SECTION_KEYBOARD_STEP
+      : event.key === "ArrowDown" ? current - SECTION_KEYBOARD_STEP
+      : event.key === "Home" ? max
+      : min;
+    const height = clampCatalogHeight(next, box, projects);
+    setSectionLayout((layout) => ({
+      ...layout,
+      projectShare: shareHolding(projects, box, height),
+      catalogHeight: height,
+    }));
   };
+
+  const resetSection = (handle: SectionHandle) => {
+    if (handle === 0) {
+      // Back to the height its own rows ask for.
+      setSectionLayout((current) => ({ ...current, headHeight: null }));
+      return;
+    }
+    if (handle === 1) {
+      setSectionLayout((current) => ({ ...current, projectShare: DEFAULT_PROJECT_SHARE }));
+      return;
+    }
+    // Back to fitting its contents exactly — the state a fixed list wants — and
+    // holding Projects where it is, the same as a drag of this handle.
+    const box = sectionsRef.current?.getBoundingClientRect().height ?? 0;
+    const projects = sectionsRef.current
+      ?.querySelector<HTMLElement>(".sidebar-project-pane")
+      ?.getBoundingClientRect().height ?? MIN_PANE_HEIGHT;
+    setSectionLayout((current) => ({
+      ...current,
+      projectShare: shareHolding(projects, box, catalogContentHeight()),
+      catalogHeight: null,
+    }));
+  };
+
+  /* Every gutter wears the same handle; only what it resizes differs. */
+  const dividerProps = (handle: SectionHandle, label: string) => ({
+    className: "sidebar-section-divider",
+    role: "separator",
+    "aria-label": label,
+    "aria-orientation": "horizontal" as const,
+    tabIndex: 0,
+    onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => startSectionResize(event, handle),
+    onPointerMove: continueSectionResize,
+    onPointerUp: finishSectionResize,
+    onPointerCancel: finishSectionResize,
+    onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => resizeSectionsWithKeyboard(event, handle),
+    onDoubleClick: () => resetSection(handle),
+  });
 
   const primaryStorageId = activeStorageId && storages.some((storage) => storage.id === activeStorageId)
     ? activeStorageId
@@ -132,7 +392,13 @@ export default function ProjectSidebar({
 
   return (
     <aside id="project-sidebar" className="sync-sidebar">
-      <div className="sync-sidebar-head">
+      <div
+        ref={headRef}
+        className="sync-sidebar-head"
+        style={sectionLayout.headHeight === null
+          ? undefined
+          : { height: `${sectionLayout.headHeight}px`, flexBasis: `${sectionLayout.headHeight}px` }}
+      >
         <div className="sync-sidebar-drag" data-tauri-drag-region />
         <div className="sync-sidebar-brand" data-tauri-drag-region>
           <img className="sync-brand-logo" src="/mallard-logo-duck.svg" alt="" data-tauri-drag-region />
@@ -142,11 +408,19 @@ export default function ProjectSidebar({
         <nav className="sync-primary-nav" aria-label="Project sync navigation">
           <button
             type="button"
-            className={!activeStorageId ? "active" : undefined}
+            className={!activeStorageId && !activeCatalogScopeId && !addingCatalogScope ? "active" : undefined}
             onClick={() => activeProjectId && onSelectProject(activeProjectId)}
             disabled={busy}
           >
             <Icon name="folder" size={15} /> Projects
+          </button>
+          <button
+            type="button"
+            className={activeCatalogScopeId || addingCatalogScope ? "active" : undefined}
+            onClick={onOpenCatalogMenu}
+            disabled={busy}
+          >
+            <Icon name="catalog" size={15} /> Catalog
           </button>
           <button
             type="button"
@@ -171,10 +445,19 @@ export default function ProjectSidebar({
       </div>
 
       <div
+        {...dividerProps(0, "Resize navigation and Projects sections")}
+        className="sidebar-section-divider sidebar-head-divider"
+        aria-valuenow={sectionLayout.headHeight === null ? undefined : Math.round(sectionLayout.headHeight)}
+        aria-valuetext={sectionLayout.headHeight === null
+          ? "Navigation height: fits contents"
+          : `Navigation height: ${Math.round(sectionLayout.headHeight)} pixels`}
+      />
+
+      <div
         ref={sectionsRef}
         className={`sync-sidebar-sections sidebar-settings-sections${resizingSections ? " resizing" : ""}`}
         style={{
-          gridTemplateRows: `minmax(96px, ${projectShare}fr) 3px minmax(96px, ${1 - projectShare}fr)`,
+          gridTemplateRows: `${elasticRows(sectionLayout.projectShare)} 3px ${sectionLayout.catalogHeight === null ? "fit-content(40%)" : `${sectionLayout.catalogHeight}px`}`,
         }}
       >
         <section className="sidebar-split-pane sidebar-project-pane" aria-label="Projects">
@@ -245,13 +528,13 @@ export default function ProjectSidebar({
                 <Icon name="plus" size={15} /> Add your first project
               </button>
             ) : projects.map((project) => {
-              const profileRequired = Object.keys(project.profile_ids ?? {}).length !== 1;
+              const profileRequired = Object.keys(project.profile_ids ?? {}).length === 0;
               const label = projectLabel(project);
               const aliased = label !== project.display_name;
               return (
                 <div
                   key={project.local_project_id}
-                  className={`sidebar-profile-item${!activeDraftId && !activeStorageId && activeProjectId === project.local_project_id ? " active" : ""}${profileRequired ? " needs-profile" : ""}`}
+                  className={`sidebar-profile-item${!activeDraftId && !activeStorageId && !activeCatalogScopeId && !addingCatalogScope && activeProjectId === project.local_project_id ? " active" : ""}${profileRequired ? " needs-profile" : ""}`}
                 >
                   <button
                     type="button"
@@ -292,20 +575,10 @@ export default function ProjectSidebar({
         </section>
 
         <div
-          className="sidebar-section-divider"
-          role="separator"
-          aria-label="Resize Projects and Storages sections"
-          aria-orientation="horizontal"
+          {...dividerProps(1, "Resize Projects and Storages sections")}
           aria-valuemin={Math.round(MIN_SECTION_SHARE * 100)}
           aria-valuemax={Math.round((1 - MIN_SECTION_SHARE) * 100)}
-          aria-valuenow={Math.round(projectShare * 100)}
-          tabIndex={0}
-          onPointerDown={startSectionResize}
-          onPointerMove={continueSectionResize}
-          onPointerUp={finishSectionResize}
-          onPointerCancel={finishSectionResize}
-          onKeyDown={resizeSectionsWithKeyboard}
-          onDoubleClick={() => setProjectShare(DEFAULT_PROJECT_SHARE)}
+          aria-valuenow={Math.round(sectionLayout.projectShare * 100)}
         />
 
         <section className="sidebar-split-pane sidebar-storage-pane" aria-label="Storages">
@@ -376,6 +649,76 @@ export default function ProjectSidebar({
                       aria-label={usage > 0
                         ? `Cannot remove ${storageName} while it is linked to a project`
                         : `Remove ${storageName}`}
+                    >
+                      <Icon name="trash" size={13} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <div
+          {...dividerProps(2, "Resize Storages and Catalog sections")}
+          aria-valuemin={MIN_PANE_HEIGHT}
+          aria-valuenow={sectionLayout.catalogHeight === null ? undefined : Math.round(sectionLayout.catalogHeight)}
+          aria-valuetext={sectionLayout.catalogHeight === null
+            ? "Catalog height: fits contents"
+            : `Catalog height: ${Math.round(sectionLayout.catalogHeight)} pixels`}
+        />
+
+        <section className="sidebar-split-pane sidebar-catalog-pane" aria-label="Catalog">
+          <div className="sidebar-section-heading">
+            <div className="sidebar-section-label">
+              <span className="sidebar-section-title">Catalog</span>
+            </div>
+            <button
+              type="button"
+              className="sidebar-section-action sidebar-add-action"
+              onClick={onAddCatalogScope}
+              disabled={busy}
+              title="Add a row: one resource kind from one provider home"
+              aria-label="Add Catalog row"
+            >
+              <Icon name="plus" size={16} />
+            </button>
+          </div>
+          <div className="sidebar-profile-list">
+            {catalogScopes.length === 0 ? (
+              <button
+                type="button"
+                className="sync-sidebar-empty"
+                onClick={onAddCatalogScope}
+                disabled={busy}
+              >
+                <Icon name="plus" size={15} /> Add your first row
+              </button>
+            ) : catalogScopes.map((scope) => {
+              const label = catalogScopeLabel(scope.scope, scope.profile);
+              return (
+                <div
+                  key={scope.scope.scope_id}
+                  className={`sidebar-profile-item${activeCatalogScopeId === scope.scope.scope_id ? " active" : ""}`}
+                >
+                  <button
+                    type="button"
+                    className="sidebar-profile-main"
+                    onClick={() => onOpenCatalogScope(scope.scope.scope_id)}
+                    disabled={busy}
+                    title={`${label} — ${scope.profile.configured_home}`}
+                  >
+                    <Icon name={catalogKindMeta(scope.scope.resource_kind).icon} size={16} />
+                    <span>{label}</span>
+                  </button>
+                  <div className="sidebar-profile-actions">
+                    <button
+                      type="button"
+                      className="sidebar-profile-remove"
+                      onClick={() => onRemoveCatalogScope(scope.scope.scope_id)}
+                      disabled={busy}
+                      title={`Remove the ${label} row; no provider or storage content is touched`}
+                      aria-label={`Remove the ${label} row`}
                     >
                       <Icon name="trash" size={13} />
                     </button>

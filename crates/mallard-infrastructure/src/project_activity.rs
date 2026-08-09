@@ -1,0 +1,1764 @@
+//! Provider-neutral project Activity: local session discovery for every
+//! bound provider, verified remote-session metadata for every provider scope
+//! (bound or not), Git mapping over normalized evidence, and safe session
+//! actions dispatched through the registered adapters.
+//!
+//! Local-only concerns stay local: titles, summaries, and Git relations are
+//! recomputed on demand and never enter portable bundles. Viewing a remote
+//! session never advances any scope base and never writes to a provider
+//! home.
+
+use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
+use crate::providers::{
+    ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionActionRequest,
+    SessionActionSurface, SessionDiscoveryContext, SessionFileSummary,
+};
+use crate::storage_core::ConfiguredObjectStore;
+use mallard_domain::{
+    conversation_resource_id, initial_conversation_thread_id, BindingState, BundleSnapshot,
+    LocalProjectId, MaterializationStatus, ProviderKey, StorageId, SyncScopeKey,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const DEFAULT_HISTORY_WINDOW_DAYS: u64 = 7;
+const DAY_SECS: u64 = 24 * 60 * 60;
+const MAX_GIT_COMMITS: usize = 10_000;
+const MAX_COMMIT_LIMIT: usize = 500;
+const DEFAULT_COMMIT_LIMIT: usize = 100;
+const ACTIVE_WINDOW_SECS: u64 = 300;
+const ACTIVITY_CACHE_SCHEMA: u32 = 1;
+const MAX_ACTIVITY_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_ACTIVITY_CACHE_ENTRIES: usize = 50_000;
+
+/// How one provider participates in this project's Activity.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAccessState {
+    /// Bound with a readable home: full local discovery and actions.
+    BoundReady,
+    /// Bound but the profile is currently unreadable; rows fail closed.
+    BoundUnavailable,
+    /// Present remotely, not bound locally: rows are visible, never
+    /// selectable or actionable.
+    ViewOnly,
+    /// Present remotely with no registered adapter: generic metadata only.
+    Unsupported,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProviderActivityState {
+    pub provider: ProviderKey,
+    pub display_name: String,
+    pub access: ProviderAccessState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSourceState {
+    LocalOnly,
+    RemoteOnly,
+    LocalAndRemote,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProjectSessionSummary {
+    /// The frontend key and selection identity. Different providers may use
+    /// the same native session ID, so this is never the native ID alone.
+    pub resource_id: String,
+    pub provider: ProviderKey,
+    pub provider_display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_thread_id: Option<String>,
+    pub source: SessionSourceState,
+    pub access: ProviderAccessState,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub started_at: u64,
+    pub ended_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_sha: Option<String>,
+    pub is_active: bool,
+    pub user_round_count: u64,
+    pub agent_message_count: u64,
+    pub tool_call_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    pub metrics_complete: bool,
+    #[serde(default)]
+    pub actions: Vec<SessionActionDescriptor>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CommitSessionReference {
+    pub resource_id: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GitCommitSummary {
+    pub sha: String,
+    pub short_sha: String,
+    pub committed_at: u64,
+    pub subject: String,
+    #[serde(default)]
+    pub session_refs: Vec<CommitSessionReference>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GitBranchSummary {
+    pub name: String,
+    pub is_current: bool,
+    pub available: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GitHistoryPage {
+    pub selected_branch: String,
+    pub branches: Vec<GitBranchSummary>,
+    pub commits: Vec<GitCommitSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repository_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub unique_session_count: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UnmappedSessionReference {
+    pub resource_id: String,
+    pub reason: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StorageSyncSummary {
+    pub storage_id: String,
+    pub storage_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pull_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_push_at: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProjectActivity {
+    pub project_id: String,
+    pub sessions: Vec<ProjectSessionSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitHistoryPage>,
+    #[serde(default)]
+    pub unmapped: Vec<UnmappedSessionReference>,
+    #[serde(default)]
+    pub providers: Vec<ProviderActivityState>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    pub window_start: u64,
+    pub window_end: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<u64>,
+    #[serde(default)]
+    pub storage_sync: Vec<StorageSyncSummary>,
+}
+
+// ---------------------------------------------------------------------------
+// Project resolution
+// ---------------------------------------------------------------------------
+
+pub struct ResolvedProviderHome {
+    pub profile_id: mallard_domain::LocalProviderProfileId,
+    pub home: PathBuf,
+}
+
+pub struct ResolvedActivityProject {
+    pub project_id: LocalProjectId,
+    pub bundle_id: mallard_domain::BundleId,
+    pub project_root: PathBuf,
+    pub binding: mallard_domain::ProjectBinding,
+    /// Bound providers with a currently readable canonical home.
+    pub homes: BTreeMap<ProviderKey, ResolvedProviderHome>,
+    /// Bound providers whose profile failed to resolve, with the reason.
+    /// These rows fail closed without blocking other providers.
+    pub unavailable: BTreeMap<ProviderKey, String>,
+}
+
+/// Resolve the project, binding, and every bound provider home. A provider
+/// whose profile is missing or moved lands in `unavailable` instead of
+/// failing the whole resolution: an unreadable Claude profile must not
+/// prevent safe Codex activity, and the reverse holds too.
+pub fn resolve_activity_project(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+) -> Result<ResolvedActivityProject, String> {
+    let config = repository.load_config()?;
+    let project = config.project(local_project_id).ok_or_else(|| {
+        "project is not registered; unfinished setup drafts have no history".to_string()
+    })?;
+    let state = repository.load_bindings()?;
+    let binding = state
+        .bindings
+        .iter()
+        .find(|binding| {
+            &binding.local_project_id == local_project_id && binding.state == BindingState::Active
+        })
+        .ok_or_else(|| "project has no active binding on this machine".to_string())?;
+
+    let project_root = fs::canonicalize(&binding.project_root)
+        .map_err(|error| format!("resolve project root '{}': {error}", binding.project_root))?;
+    if project_root.as_path() != Path::new(&binding.canonical_project_root) {
+        return Err(
+            "project root changed since the binding was saved; open Project Settings".to_string(),
+        );
+    }
+    let mut homes = BTreeMap::new();
+    let mut unavailable = BTreeMap::new();
+    for (provider, profile_id) in &binding.profile_ids {
+        let resolved = state
+            .profiles
+            .iter()
+            .find(|profile| &profile.profile_id == profile_id && &profile.provider == provider)
+            .ok_or_else(|| {
+                format!(
+                    "project's {} profile is missing; open Project Settings",
+                    provider
+                )
+            })
+            .and_then(|profile| {
+                let home = fs::canonicalize(&profile.path).map_err(|error| {
+                    format!("resolve {} profile '{}': {error}", provider, profile.path)
+                })?;
+                if home.as_path() != Path::new(&profile.canonical_path) {
+                    return Err(format!(
+                        "{} profile path changed; open Project Settings",
+                        provider
+                    ));
+                }
+                Ok(ResolvedProviderHome {
+                    profile_id: profile.profile_id.clone(),
+                    home,
+                })
+            });
+        match resolved {
+            Ok(home) => {
+                homes.insert(provider.clone(), home);
+            }
+            Err(reason) => {
+                unavailable.insert(provider.clone(), reason);
+            }
+        }
+    }
+    Ok(ResolvedActivityProject {
+        project_id: local_project_id.clone(),
+        bundle_id: project.bundle_id.clone(),
+        project_root,
+        binding: binding.clone(),
+        homes,
+        unavailable,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Local discovery with the activity cache
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ActivityCacheEntry {
+    size: u64,
+    modified_nanos: u64,
+    summary: SessionFileSummary,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct ActivityCache {
+    schema: u32,
+    #[serde(default)]
+    entries: BTreeMap<String, ActivityCacheEntry>,
+}
+
+/// One locally discovered provider session with its bounded summary.
+#[derive(Clone, Debug)]
+pub struct LocalSessionRecord {
+    pub provider: ProviderKey,
+    pub session_id: String,
+    pub relative_cwd: String,
+    pub physical_path: PathBuf,
+    pub display_name: String,
+    pub summary: SessionFileSummary,
+    pub is_active: bool,
+}
+
+fn modified_nanos(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+fn modified_secs(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn load_activity_cache(root: &Path, path: &Path, warnings: &mut Vec<String>) -> ActivityCache {
+    match read_json_bounded::<ActivityCache>(root, path, MAX_ACTIVITY_CACHE_BYTES) {
+        Ok(Some(cache))
+            if cache.schema == ACTIVITY_CACHE_SCHEMA
+                && cache.entries.len() <= MAX_ACTIVITY_CACHE_ENTRIES =>
+        {
+            cache
+        }
+        Ok(Some(_)) => ActivityCache {
+            schema: ACTIVITY_CACHE_SCHEMA,
+            entries: BTreeMap::new(),
+        },
+        Ok(None) => ActivityCache {
+            schema: ACTIVITY_CACHE_SCHEMA,
+            entries: BTreeMap::new(),
+        },
+        Err(error) => {
+            warnings.push(format!(
+                "Ignored unreadable local activity cache '{}': {error}",
+                path.display()
+            ));
+            ActivityCache {
+                schema: ACTIVITY_CACHE_SCHEMA,
+                entries: BTreeMap::new(),
+            }
+        }
+    }
+}
+
+/// Discover and summarize every project-owned local session for the bound
+/// providers, sharing one bounded on-disk cache across providers.
+pub fn scan_local_sessions(
+    repository: &LocalStateRepository,
+    registry: &ProviderRegistry,
+    resolved: &ResolvedActivityProject,
+    force_revalidate: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<LocalSessionRecord>, String> {
+    let cache_path = repository.root().join("activity_cache.json");
+    let mut cache = load_activity_cache(repository.root(), &cache_path, warnings);
+    let now = now_secs();
+    let mut records = Vec::new();
+    let mut seen_cache_keys = BTreeSet::new();
+    for (provider, home) in &resolved.homes {
+        let Some(adapter) = registry.sessions(provider) else {
+            warnings.push(format!(
+                "provider '{}' is bound but has no registered adapter",
+                provider
+            ));
+            continue;
+        };
+        let context = SessionDiscoveryContext {
+            provider_home: &home.home,
+            project_root: &resolved.project_root,
+            excluded_roots: &[],
+        };
+        let discovery = match adapter.discover(&context) {
+            Ok(discovery) => discovery,
+            Err(error) => {
+                warnings.push(format!("{} discovery failed: {}", provider, error));
+                continue;
+            }
+        };
+        warnings.extend(discovery.warnings);
+        let mut by_session: BTreeMap<String, LocalSessionRecord> = BTreeMap::new();
+        for session in discovery.sessions {
+            let metadata = match fs::metadata(&session.physical_path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    warnings.push(format!(
+                        "Cannot read '{}': {error}",
+                        session.physical_path.display()
+                    ));
+                    continue;
+                }
+            };
+            let cache_key = format!(
+                "{}\u{0}{}\u{0}{}",
+                provider,
+                home.home.display(),
+                session.physical_path.display()
+            );
+            seen_cache_keys.insert(cache_key.clone());
+            let file_nanos = modified_nanos(&metadata);
+            let cached = (!force_revalidate)
+                .then(|| cache.entries.get(&cache_key))
+                .flatten()
+                .filter(|entry| entry.size == metadata.len() && entry.modified_nanos == file_nanos)
+                .map(|entry| entry.summary.clone());
+            let summary = match cached {
+                Some(summary) => summary,
+                None => match adapter.summarize_file(&session.physical_path) {
+                    Ok(summary) => {
+                        cache.entries.insert(
+                            cache_key,
+                            ActivityCacheEntry {
+                                size: metadata.len(),
+                                modified_nanos: file_nanos,
+                                summary: summary.clone(),
+                            },
+                        );
+                        summary
+                    }
+                    Err(error) => {
+                        warnings.push(format!(
+                            "Skipped '{}': {error}",
+                            session.physical_path.display()
+                        ));
+                        continue;
+                    }
+                },
+            };
+            if summary.is_internal_subagent {
+                continue;
+            }
+            let record = LocalSessionRecord {
+                provider: provider.clone(),
+                session_id: session.session_id.clone(),
+                relative_cwd: session.relative_cwd,
+                physical_path: session.physical_path,
+                display_name: session.display_name,
+                is_active: now.saturating_sub(modified_secs(&metadata)) < ACTIVE_WINDOW_SECS,
+                summary,
+            };
+            let replace = by_session
+                .get(&record.session_id)
+                .is_none_or(|previous| record_is_preferred(&record, previous));
+            if replace {
+                by_session.insert(record.session_id.clone(), record);
+            }
+        }
+        records.extend(by_session.into_values());
+    }
+    cache
+        .entries
+        .retain(|key, _| seen_cache_keys.contains(key) || !key_belongs_to_project(key, resolved));
+    if cache.entries.len() > MAX_ACTIVITY_CACHE_ENTRIES {
+        warnings.push(format!(
+            "Local activity cache exceeded {MAX_ACTIVITY_CACHE_ENTRIES} entries and was reset"
+        ));
+        cache.entries.clear();
+    }
+    cache.schema = ACTIVITY_CACHE_SCHEMA;
+    if let Err(error) = write_json_atomic(
+        repository.root(),
+        &cache_path,
+        &cache,
+        MAX_ACTIVITY_CACHE_BYTES,
+    ) {
+        warnings.push(format!(
+            "Could not update local activity cache '{}': {error}",
+            cache_path.display()
+        ));
+    }
+    Ok(records)
+}
+
+fn key_belongs_to_project(key: &str, resolved: &ResolvedActivityProject) -> bool {
+    resolved.homes.iter().any(|(provider, home)| {
+        key.starts_with(&format!("{}\u{0}{}\u{0}", provider, home.home.display()))
+    })
+}
+
+fn record_is_preferred(candidate: &LocalSessionRecord, current: &LocalSessionRecord) -> bool {
+    candidate
+        .summary
+        .metrics_complete
+        .cmp(&current.summary.metrics_complete)
+        .then_with(|| {
+            candidate
+                .summary
+                .ended_at
+                .unwrap_or(0)
+                .cmp(&current.summary.ended_at.unwrap_or(0))
+        })
+        .is_gt()
+}
+
+// ---------------------------------------------------------------------------
+// Remote-session metadata
+// ---------------------------------------------------------------------------
+
+/// One remote conversation row read from a verified manifest. Reading these
+/// is not acknowledgment: no scope base moves and no provider file is
+/// touched.
+#[derive(Clone, Debug)]
+pub struct RemoteSessionRecord {
+    pub provider: ProviderKey,
+    pub thread_id: mallard_domain::ThreadId,
+    pub source_thread_id: Option<String>,
+    pub display_title: Option<String>,
+    pub presentation: mallard_domain::SessionPresentation,
+}
+
+pub fn remote_sessions_from_snapshot(snapshot: &BundleSnapshot) -> Vec<RemoteSessionRecord> {
+    snapshot
+        .manifest
+        .all_conversations()
+        .filter_map(|(scope, thread_id, thread)| match scope {
+            SyncScopeKey::Provider(provider) => Some(RemoteSessionRecord {
+                provider: provider.clone(),
+                thread_id: thread_id.clone(),
+                source_thread_id: thread.source_thread_id.clone(),
+                display_title: thread.display_title.clone(),
+                presentation: thread.presentation.clone(),
+            }),
+            SyncScopeKey::Project => None,
+        })
+        .collect()
+}
+
+/// Fetch the verified current snapshot for one linked storage, for remote
+/// Activity rows. Errors are reported as warnings by the caller so a broken
+/// storage cannot hide local history.
+pub fn fetch_activity_snapshot(
+    repository: &LocalStateRepository,
+    storage_id: &StorageId,
+    bundle_id: &mallard_domain::BundleId,
+) -> Result<Option<BundleSnapshot>, String> {
+    let config = repository.load_config()?;
+    let storage = config
+        .storages
+        .iter()
+        .find(|storage| &storage.id == storage_id)
+        .ok_or_else(|| format!("storage '{}' is not configured", storage_id))?;
+    let store = ConfiguredObjectStore::from_config(storage)?;
+    let engine = crate::bundle_engine::BundleEngine::open(store, storage.id.clone())?;
+    engine.inspect_optional(bundle_id)
+}
+
+// ---------------------------------------------------------------------------
+// Merged Activity
+// ---------------------------------------------------------------------------
+
+fn provider_access(
+    registry: &ProviderRegistry,
+    resolved: &ResolvedActivityProject,
+    provider: &ProviderKey,
+) -> ProviderAccessState {
+    if resolved.homes.contains_key(provider) {
+        ProviderAccessState::BoundReady
+    } else if resolved.unavailable.contains_key(provider) {
+        ProviderAccessState::BoundUnavailable
+    } else if registry.contains(provider) {
+        ProviderAccessState::ViewOnly
+    } else {
+        ProviderAccessState::Unsupported
+    }
+}
+
+fn provider_display_name(registry: &ProviderRegistry, provider: &ProviderKey) -> String {
+    registry
+        .get(provider)
+        .map(|adapter| adapter.descriptor().display_name)
+        .unwrap_or_else(|| provider.to_string())
+}
+
+fn short_id(value: &str) -> &str {
+    value.get(..8).unwrap_or(value)
+}
+
+/// Merge local bound-provider sessions with all remote provider slices by
+/// provider and logical thread identity, then sort deterministically by
+/// activity time, provider key, and resource ID.
+pub fn merge_activity_sessions(
+    registry: &ProviderRegistry,
+    repository: &LocalStateRepository,
+    resolved: &ResolvedActivityProject,
+    local: Vec<LocalSessionRecord>,
+    remote: Vec<RemoteSessionRecord>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<ProjectSessionSummary>, String> {
+    let bindings = repository.load_conversation_bindings()?;
+    let mut thread_by_session: BTreeMap<(ProviderKey, String), mallard_domain::ThreadId> =
+        BTreeMap::new();
+    for binding in &bindings.bindings {
+        if binding.local_project_id != resolved.project_id {
+            continue;
+        }
+        let Some(provider_thread_id) = &binding.provider_thread_id else {
+            continue;
+        };
+        let Some(provider) = resolved
+            .binding
+            .profile_ids
+            .iter()
+            .find(|(_, profile_id)| **profile_id == binding.provider_profile_id)
+            .map(|(provider, _)| provider.clone())
+        else {
+            continue;
+        };
+        thread_by_session.insert(
+            (provider, provider_thread_id.clone()),
+            binding.thread_id.clone(),
+        );
+    }
+
+    let mut rows: BTreeMap<String, ProjectSessionSummary> = BTreeMap::new();
+    for record in local {
+        let thread_id = thread_by_session
+            .get(&(record.provider.clone(), record.session_id.clone()))
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                initial_conversation_thread_id(
+                    &resolved.bundle_id,
+                    &record.provider,
+                    &record.session_id,
+                )
+            });
+        let thread_id = match thread_id {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                warnings.push(format!(
+                    "session '{}' has no portable identity: {}",
+                    record.session_id, error
+                ));
+                continue;
+            }
+        };
+        let resource_id = conversation_resource_id(&record.provider, &thread_id)?;
+        let access = provider_access(registry, resolved, &record.provider);
+        let title = record
+            .summary
+            .title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .or_else(|| {
+                (record.display_name != record.session_id).then(|| record.display_name.clone())
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "{} session {}",
+                    provider_display_name(registry, &record.provider),
+                    short_id(&record.session_id)
+                )
+            });
+        let actions = registry
+            .sessions(&record.provider)
+            .map(|adapter| {
+                adapter.available_actions(&SessionActionContext {
+                    provider_session_id: &record.session_id,
+                    is_local: access == ProviderAccessState::BoundReady,
+                    transcript_path: Some(&record.physical_path),
+                    surface: SessionActionSurface::Activity,
+                })
+            })
+            .unwrap_or_default();
+        let started_at = record.summary.started_at.unwrap_or(0);
+        let ended_at = record
+            .summary
+            .ended_at
+            .unwrap_or(started_at)
+            .max(started_at);
+        rows.insert(
+            resource_id.to_string(),
+            ProjectSessionSummary {
+                resource_id: resource_id.to_string(),
+                provider: record.provider.clone(),
+                provider_display_name: provider_display_name(registry, &record.provider),
+                provider_session_id: Some(record.session_id),
+                logical_thread_id: Some(thread_id.to_string()),
+                source: SessionSourceState::LocalOnly,
+                access,
+                title,
+                summary: record.summary.summary.clone(),
+                started_at,
+                ended_at,
+                working_directory: Some(resolved.project_root.to_string_lossy().into_owned()),
+                relative_cwd: Some(record.relative_cwd),
+                branch: record.summary.branch.clone(),
+                recorded_sha: record.summary.recorded_sha.clone(),
+                is_active: record.is_active,
+                user_round_count: record.summary.user_rounds,
+                agent_message_count: record.summary.agent_messages,
+                tool_call_count: record.summary.tool_calls,
+                total_tokens: record.summary.total_tokens,
+                metrics_complete: record.summary.metrics_complete,
+                actions,
+            },
+        );
+    }
+
+    for record in remote {
+        let resource_id = conversation_resource_id(&record.provider, &record.thread_id)?;
+        let key = resource_id.to_string();
+        if let Some(existing) = rows.get_mut(&key) {
+            existing.source = SessionSourceState::LocalAndRemote;
+            if existing.title.is_empty() {
+                if let Some(title) = &record.display_title {
+                    existing.title = title.clone();
+                }
+            }
+            continue;
+        }
+        let access = provider_access(registry, resolved, &record.provider);
+        let title = record
+            .display_title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "{} session {}",
+                    provider_display_name(registry, &record.provider),
+                    short_id(
+                        record
+                            .source_thread_id
+                            .as_deref()
+                            .unwrap_or(record.thread_id.as_str())
+                    )
+                )
+            });
+        let started_at = record.presentation.started_at.unwrap_or(0);
+        let ended_at = record
+            .presentation
+            .ended_at
+            .unwrap_or(started_at)
+            .max(started_at);
+        rows.insert(
+            key.clone(),
+            ProjectSessionSummary {
+                resource_id: key,
+                provider: record.provider.clone(),
+                provider_display_name: provider_display_name(registry, &record.provider),
+                provider_session_id: record.source_thread_id.clone(),
+                logical_thread_id: Some(record.thread_id.to_string()),
+                source: SessionSourceState::RemoteOnly,
+                access,
+                title,
+                summary: None,
+                started_at,
+                ended_at,
+                working_directory: None,
+                relative_cwd: record.presentation.relative_cwd.clone(),
+                branch: record.presentation.branch.clone(),
+                recorded_sha: record.presentation.recorded_sha.clone(),
+                is_active: false,
+                user_round_count: record.presentation.metrics.user_rounds,
+                agent_message_count: record.presentation.metrics.agent_messages,
+                tool_call_count: record.presentation.metrics.tool_calls,
+                total_tokens: record.presentation.metrics.total_tokens,
+                metrics_complete: record.presentation.metrics.complete,
+                actions: Vec::new(),
+            },
+        );
+    }
+
+    let mut sessions: Vec<ProjectSessionSummary> = rows.into_values().collect();
+    sessions.sort_by(|left, right| {
+        right
+            .ended_at
+            .cmp(&left.ended_at)
+            .then_with(|| left.provider.cmp(&right.provider))
+            .then_with(|| left.resource_id.cmp(&right.resource_id))
+    });
+    Ok(sessions)
+}
+
+// ---------------------------------------------------------------------------
+// The complete Activity view
+// ---------------------------------------------------------------------------
+
+/// Recompute a project's Activity: local sessions for every bound provider,
+/// remote sessions for every provider scope when a storage is named, Git
+/// mapping over normalized evidence, and per-provider access states.
+#[allow(clippy::too_many_arguments)]
+pub fn get_project_activity(
+    repository: &LocalStateRepository,
+    registry: &ProviderRegistry,
+    local_project_id: &LocalProjectId,
+    storage_id: Option<&StorageId>,
+    branch: Option<&str>,
+    before_time: Option<u64>,
+    window_days: Option<u64>,
+    force_revalidate: bool,
+) -> Result<ProjectActivity, String> {
+    let resolved = resolve_activity_project(repository, local_project_id)?;
+    let mut warnings = Vec::new();
+    let local = scan_local_sessions(
+        repository,
+        registry,
+        &resolved,
+        force_revalidate,
+        &mut warnings,
+    )?;
+    let remote = match storage_id {
+        Some(storage_id) => {
+            match fetch_activity_snapshot(repository, storage_id, &resolved.bundle_id) {
+                Ok(Some(snapshot)) => remote_sessions_from_snapshot(&snapshot),
+                Ok(None) => Vec::new(),
+                Err(error) => {
+                    warnings.push(format!(
+                        "remote sessions are unavailable from '{}': {}",
+                        storage_id, error
+                    ));
+                    Vec::new()
+                }
+            }
+        }
+        None => Vec::new(),
+    };
+    let remote_providers = remote
+        .iter()
+        .map(|record| record.provider.clone())
+        .collect::<BTreeSet<_>>();
+    let all_sessions = merge_activity_sessions(
+        registry,
+        repository,
+        &resolved,
+        local,
+        remote,
+        &mut warnings,
+    )?;
+
+    let window_end = before_time.unwrap_or_else(|| now_secs().saturating_add(1));
+    let window_days = window_days
+        .unwrap_or(DEFAULT_HISTORY_WINDOW_DAYS)
+        .clamp(1, 90);
+    let window_start = window_end.saturating_sub(window_days.saturating_mul(DAY_SECS));
+    let sessions = all_sessions
+        .iter()
+        .filter(|session| session.ended_at >= window_start && session.ended_at < window_end)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let recorded_branches = all_sessions
+        .iter()
+        .filter_map(|session| session.branch.as_ref())
+        .filter(|branch| !branch.trim().is_empty())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut git = discover_git_history_with_recorded_branches(
+        &resolved.project_root,
+        branch,
+        None,
+        DEFAULT_COMMIT_LIMIT,
+        &recorded_branches,
+    )?;
+    let mut unmapped = Vec::new();
+    let git_page = if let Some(discovery) = git.as_mut() {
+        let github_repository_url = discover_github_repository_url(&resolved.project_root);
+        let all_commits = if discovery.selected_ref_available {
+            load_first_parent_commits(
+                &resolved.project_root,
+                &discovery.selected_branch,
+                MAX_GIT_COMMITS + 1,
+            )?
+        } else {
+            Vec::new()
+        };
+        let was_truncated = all_commits.len() > MAX_GIT_COMMITS;
+        let mut all_commits = all_commits
+            .into_iter()
+            .take(MAX_GIT_COMMITS)
+            .collect::<Vec<_>>();
+        if was_truncated {
+            warnings.push(format!(
+                "Git history was limited to the newest {MAX_GIT_COMMITS} first-parent commits"
+            ));
+        }
+        let selected_branch = discovery.selected_branch.clone();
+        let mapping = map_sessions_to_commits(&sessions, &mut all_commits, &selected_branch);
+        unmapped = mapping.unmapped;
+        let visible_commits = all_commits
+            .iter()
+            .filter(|commit| {
+                (commit.committed_at >= window_start && commit.committed_at < window_end)
+                    || !commit.session_refs.is_empty()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        Some(GitHistoryPage {
+            selected_branch: discovery.selected_branch.clone(),
+            branches: discovery.branches.clone(),
+            commits: visible_commits,
+            github_repository_url,
+            next_cursor: None,
+            unique_session_count: mapping.unique_session_count,
+        })
+    } else {
+        None
+    };
+
+    // Per-provider access rows: every bound provider plus every remote-only
+    // provider, so view-only and unsupported states render distinctly.
+    let mut provider_keys = resolved
+        .binding
+        .profile_ids
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    provider_keys.extend(remote_providers);
+    let providers = provider_keys
+        .into_iter()
+        .map(|provider| ProviderActivityState {
+            display_name: provider_display_name(registry, &provider),
+            access: provider_access(registry, &resolved, &provider),
+            detail: resolved.unavailable.get(&provider).cloned(),
+            provider,
+        })
+        .collect();
+
+    let has_older_sessions = all_sessions
+        .iter()
+        .any(|session| session.ended_at < window_start);
+    Ok(ProjectActivity {
+        project_id: resolved.project_id.to_string(),
+        sessions,
+        git: git_page,
+        unmapped,
+        providers,
+        warnings,
+        window_start,
+        window_end,
+        next_before: has_older_sessions.then_some(window_start),
+        storage_sync: project_storage_sync(repository, local_project_id)?,
+    })
+}
+
+fn project_storage_sync(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+) -> Result<Vec<StorageSyncSummary>, String> {
+    let config = repository.load_config()?;
+    let materializations = repository.load_materializations()?;
+    let mut result = Vec::new();
+    for link in config
+        .links
+        .iter()
+        .filter(|link| &link.local_project_id == local_project_id)
+    {
+        let storage_name = config
+            .storages
+            .iter()
+            .find(|storage| storage.id == link.storage_id)
+            .map(|storage| storage.name.clone())
+            .unwrap_or_else(|| link.storage_id.to_string());
+        let historical_pull = materializations
+            .records
+            .iter()
+            .filter(|record| {
+                &record.local_project_id == local_project_id
+                    && record.storage_id == link.storage_id
+                    && record.status == MaterializationStatus::Complete
+            })
+            .map(|record| record.applied_at)
+            .max();
+        let last_pull_at = link
+            .scope_bases
+            .values()
+            .filter_map(|base| base.last_pull_at)
+            .max()
+            .or(historical_pull);
+        let last_push_at = link
+            .scope_bases
+            .values()
+            .filter_map(|base| base.last_push_at)
+            .max();
+        result.push(StorageSyncSummary {
+            storage_id: link.storage_id.to_string(),
+            storage_name,
+            last_pull_at,
+            last_push_at,
+        });
+    }
+    result.sort_by(|left, right| left.storage_name.cmp(&right.storage_name));
+    Ok(result)
+}
+
+pub fn list_project_repository_kinds(
+    repository: &LocalStateRepository,
+) -> Result<BTreeMap<String, bool>, String> {
+    let config = repository.load_config()?;
+    let bindings = repository.load_bindings()?;
+    Ok(config
+        .projects
+        .iter()
+        .filter_map(|project| {
+            let root = bindings
+                .bindings
+                .iter()
+                .find(|binding| {
+                    binding.local_project_id == project.local_project_id
+                        && binding.state == BindingState::Active
+                })
+                .and_then(|binding| fs::canonicalize(&binding.project_root).ok())?;
+            let is_git =
+                git_output(&root, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|output| {
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).trim() == "true"
+                });
+            Some((project.local_project_id.to_string(), is_git))
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Session details and actions
+// ---------------------------------------------------------------------------
+
+/// Parse the provider key and thread id out of one conversation resource id
+/// (`<provider>:conversation:<thread>`).
+pub fn parse_conversation_resource_id(
+    resource_id: &str,
+) -> Result<(ProviderKey, mallard_domain::ThreadId), String> {
+    let mut parts = resource_id.splitn(3, ':');
+    let provider = parts
+        .next()
+        .ok_or_else(|| "resource id is empty".to_string())?;
+    let class = parts.next();
+    let thread = parts.next();
+    if class != Some("conversation") {
+        return Err(format!(
+            "'{}' is not a conversation resource id",
+            resource_id
+        ));
+    }
+    let thread = thread.ok_or_else(|| format!("'{}' has no thread id", resource_id))?;
+    Ok((
+        ProviderKey::parse(provider)?,
+        mallard_domain::ThreadId::parse(thread)?,
+    ))
+}
+
+/// Execute one safe provider session action. The backend re-resolves the
+/// registered adapter and validates project ownership before anything runs;
+/// the opaque action id never carries executable text.
+pub fn execute_project_session_action(
+    repository: &LocalStateRepository,
+    registry: &ProviderRegistry,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+    action_id: &str,
+    before_launch: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    let (provider, thread_id) = parse_conversation_resource_id(resource_id)?;
+    let resolved = resolve_activity_project(repository, local_project_id)?;
+    let bindings = repository.load_conversation_bindings()?;
+    let session_for_thread = bindings
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.local_project_id == resolved.project_id && binding.thread_id == thread_id
+        })
+        .and_then(|binding| binding.provider_thread_id.clone());
+    let adapter = registry.require_sessions(&provider)?;
+    let home = resolved.homes.get(&provider).ok_or_else(|| {
+        format!(
+            "provider '{}' is not bound with a readable profile on this machine",
+            provider
+        )
+    })?;
+    let context = SessionDiscoveryContext {
+        provider_home: &home.home,
+        project_root: &resolved.project_root,
+        excluded_roots: &[],
+    };
+    let discovery = adapter.discover(&context)?;
+    let session = discovery
+        .sessions
+        .into_iter()
+        .find(|session| {
+            Some(&session.session_id) == session_for_thread.as_ref()
+                || initial_conversation_thread_id(
+                    &resolved.bundle_id,
+                    &provider,
+                    &session.session_id,
+                )
+                .map(|derived| derived == thread_id)
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| "session does not belong to the selected project".to_string())?;
+    let mut request = SessionActionRequest {
+        action_id,
+        provider_home: &home.home,
+        project_root: &resolved.project_root,
+        provider_session_id: &session.session_id,
+        transcript_path: Some(&session.physical_path),
+        before_launch,
+    };
+    adapter.execute_action(&mut request).map(|_| ())
+}
+
+/// Deep-link guard: revalidate that one session belongs to the project
+/// without launching anything.
+pub fn validate_session_ownership(
+    repository: &LocalStateRepository,
+    registry: &ProviderRegistry,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+) -> Result<(), String> {
+    let (provider, thread_id) = parse_conversation_resource_id(resource_id)?;
+    let resolved = resolve_activity_project(repository, local_project_id)?;
+    let bindings = repository.load_conversation_bindings()?;
+    let session_for_thread = bindings
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.local_project_id == resolved.project_id && binding.thread_id == thread_id
+        })
+        .and_then(|binding| binding.provider_thread_id.clone());
+    let adapter = registry.require_sessions(&provider)?;
+    let home = resolved
+        .homes
+        .get(&provider)
+        .ok_or_else(|| format!("provider '{}' is not bound on this machine", provider))?;
+    let context = SessionDiscoveryContext {
+        provider_home: &home.home,
+        project_root: &resolved.project_root,
+        excluded_roots: &[],
+    };
+    let discovery = adapter.discover(&context)?;
+    discovery
+        .sessions
+        .into_iter()
+        .find(|session| {
+            Some(&session.session_id) == session_for_thread.as_ref()
+                || initial_conversation_thread_id(
+                    &resolved.bundle_id,
+                    &provider,
+                    &session.session_id,
+                )
+                .map(|derived| derived == thread_id)
+                .unwrap_or(false)
+        })
+        .map(|_| ())
+        .ok_or_else(|| "session does not belong to the selected project".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Git discovery and mapping over normalized evidence
+// ---------------------------------------------------------------------------
+
+struct MappingResult {
+    unmapped: Vec<UnmappedSessionReference>,
+    unique_session_count: usize,
+}
+
+struct GitDiscovery {
+    selected_branch: String,
+    selected_ref_available: bool,
+    branches: Vec<GitBranchSummary>,
+    #[allow(dead_code)]
+    commits: Vec<GitCommitSummary>,
+    #[allow(dead_code)]
+    next_cursor: Option<String>,
+}
+
+fn discover_git_history_with_recorded_branches(
+    project_root: &Path,
+    requested_branch: Option<&str>,
+    before_commit: Option<&str>,
+    limit: usize,
+    recorded_branches: &BTreeSet<String>,
+) -> Result<Option<GitDiscovery>, String> {
+    let inside = git_output(project_root, &["rev-parse", "--is-inside-work-tree"])
+        .ok()
+        .filter(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+        });
+    if inside.is_none() {
+        return Ok(None);
+    }
+    let current = git_output(project_root, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|name| !name.is_empty());
+    let listed = git_output(
+        project_root,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    )?;
+    if !listed.status.success() {
+        return Err(git_error("enumerate local branches", &listed));
+    }
+    let available_names = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    let mut names = available_names.clone();
+    if let Some(current) = &current {
+        names.insert(current.clone());
+    }
+    names.extend(recorded_branches.iter().cloned());
+    let selected = if let Some(requested) = requested_branch {
+        if !names.contains(requested) {
+            return Err(
+                "branch is not one of the repository's enumerated local branches".to_string(),
+            );
+        }
+        requested.to_string()
+    } else if let Some(current) = &current {
+        current.clone()
+    } else {
+        names
+            .iter()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "HEAD".to_string())
+    };
+    let branches = names
+        .into_iter()
+        .map(|name| GitBranchSummary {
+            is_current: current.as_deref() == Some(name.as_str()),
+            available: available_names.contains(&name) || current.as_deref() == Some(name.as_str()),
+            name,
+        })
+        .collect::<Vec<_>>();
+
+    // An unborn current branch has a symbolic HEAD but no refs/heads entry
+    // until its first commit.
+    let selected_ref_available = available_names.contains(&selected);
+    let all = if selected_ref_available {
+        load_first_parent_commits(project_root, &selected, MAX_GIT_COMMITS + 1)?
+    } else {
+        Vec::new()
+    };
+    let start = if let Some(cursor) = before_commit {
+        validate_sha(cursor)?;
+        all.iter()
+            .position(|commit| commit.sha.eq_ignore_ascii_case(cursor))
+            .map(|position| position + 1)
+            .ok_or_else(|| {
+                "commit cursor is not on the selected branch's first-parent history".to_string()
+            })?
+    } else {
+        0
+    };
+    let limit = limit.clamp(1, MAX_COMMIT_LIMIT);
+    let commits = all
+        .iter()
+        .skip(start)
+        .take(limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let next_cursor = if start + commits.len() < all.len() {
+        commits.last().map(|commit| commit.sha.clone())
+    } else {
+        None
+    };
+    Ok(Some(GitDiscovery {
+        selected_branch: selected,
+        selected_ref_available,
+        branches,
+        commits,
+        next_cursor,
+    }))
+}
+
+fn load_first_parent_commits(
+    project_root: &Path,
+    branch: &str,
+    limit: usize,
+) -> Result<Vec<GitCommitSummary>, String> {
+    let count = limit.min(MAX_GIT_COMMITS + 1).to_string();
+    let branch_ref = if branch == "HEAD" {
+        "HEAD".to_string()
+    } else {
+        format!("refs/heads/{branch}")
+    };
+    let output = git_output(
+        project_root,
+        &[
+            "log",
+            "--first-parent",
+            "--date-order",
+            "--format=%H%x1f%ct%x1f%s",
+            "-n",
+            &count,
+            &branch_ref,
+            "--",
+        ],
+    )?;
+    if !output.status.success() {
+        return Err(git_error("read first-parent history", &output));
+    }
+    let mut commits = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.splitn(3, '\u{1f}');
+        let Some(sha) = fields.next() else { continue };
+        let Some(time) = fields.next().and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        let subject = fields.next().unwrap_or_default().to_string();
+        if validate_sha(sha).is_err() {
+            continue;
+        }
+        commits.push(GitCommitSummary {
+            sha: sha.to_ascii_lowercase(),
+            short_sha: sha.chars().take(12).collect(),
+            committed_at: time,
+            subject,
+            session_refs: Vec::new(),
+        });
+    }
+    Ok(commits)
+}
+
+/// Map sessions onto the first-parent rail from normalized evidence alone:
+/// activity interval, recorded branch, and recorded SHA. No provider
+/// branches — every provider's adapter normalized its own Git evidence
+/// upstream.
+fn map_sessions_to_commits(
+    sessions: &[ProjectSessionSummary],
+    commits: &mut [GitCommitSummary],
+    selected_branch: &str,
+) -> MappingResult {
+    let mut mapped_sessions = BTreeSet::new();
+    let mut unmapped = Vec::new();
+    let rail_index = commits
+        .iter()
+        .enumerate()
+        .map(|(index, commit)| (commit.sha.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    for session in sessions {
+        // A recorded branch is authoritative routing metadata: a session
+        // from another named branch must never appear on this branch's rail.
+        if session
+            .branch
+            .as_deref()
+            .is_some_and(|branch| branch != selected_branch)
+        {
+            continue;
+        }
+        let successor = match session
+            .recorded_sha
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .and_then(|sha| rail_index.get(&sha).copied())
+        {
+            Some(recorded_index) => (0..recorded_index)
+                .rev()
+                .find(|&index| commits[index].committed_at >= session.ended_at),
+            None => commits
+                .iter()
+                .enumerate()
+                .filter(|(_, commit)| commit.committed_at >= session.ended_at)
+                .min_by_key(|(_, commit)| commit.committed_at)
+                .map(|(index, _)| index),
+        };
+        let Some(index) = successor else {
+            let reason = if commits.is_empty() {
+                "The selected branch has no available first-parent commits"
+            } else {
+                "No commit has been made on this branch since the session's last activity"
+            };
+            unmapped.push(UnmappedSessionReference {
+                resource_id: session.resource_id.clone(),
+                reason: reason.to_string(),
+            });
+            continue;
+        };
+        mapped_sessions.insert(session.resource_id.clone());
+        commits[index].session_refs.push(CommitSessionReference {
+            resource_id: session.resource_id.clone(),
+        });
+    }
+    let session_order = sessions
+        .iter()
+        .map(|session| (session.resource_id.as_str(), session))
+        .collect::<BTreeMap<_, _>>();
+    for commit in commits.iter_mut() {
+        commit.session_refs.sort_by(|left, right| {
+            match (
+                session_order.get(left.resource_id.as_str()),
+                session_order.get(right.resource_id.as_str()),
+            ) {
+                (Some(left_session), Some(right_session)) => right_session
+                    .ended_at
+                    .cmp(&left_session.ended_at)
+                    .then_with(|| left_session.started_at.cmp(&right_session.started_at))
+                    .then_with(|| left.resource_id.cmp(&right.resource_id)),
+                _ => left.resource_id.cmp(&right.resource_id),
+            }
+        });
+    }
+    MappingResult {
+        unmapped,
+        unique_session_count: mapped_sessions.len(),
+    }
+}
+
+fn discover_github_repository_url(project_root: &Path) -> Option<String> {
+    let output = git_output(
+        project_root,
+        &["config", "--get-regexp", r"^remote\..*\.url$"],
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut fallback = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some(separator) = line.find(char::is_whitespace) else {
+            continue;
+        };
+        let key = &line[..separator];
+        let value = line[separator..].trim();
+        let Some(remote_name) = key
+            .strip_prefix("remote.")
+            .and_then(|value| value.strip_suffix(".url"))
+        else {
+            continue;
+        };
+        let Some(repository_url) = normalize_github_repository_url(value) else {
+            continue;
+        };
+        if remote_name.eq_ignore_ascii_case("origin") {
+            return Some(repository_url);
+        }
+        fallback.get_or_insert(repository_url);
+    }
+    fallback
+}
+
+pub fn normalize_github_repository_url(remote_url: &str) -> Option<String> {
+    let remote_url = remote_url.trim();
+    if remote_url.is_empty()
+        || remote_url
+            .chars()
+            .any(|character| matches!(character, '\r' | '\n' | '\0' | '?' | '#' | '\\'))
+    {
+        return None;
+    }
+
+    let path = if let Some((scheme, remainder)) = remote_url.split_once("://") {
+        if !matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "https" | "http" | "ssh" | "git"
+        ) {
+            return None;
+        }
+        let (authority, path) = remainder.split_once('/')?;
+        let host_with_port = authority.rsplit('@').next()?;
+        let host = if let Some((host, port)) = host_with_port.rsplit_once(':') {
+            if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            host
+        } else {
+            host_with_port
+        };
+        if !host.eq_ignore_ascii_case("github.com") {
+            return None;
+        }
+        path
+    } else {
+        let (authority, path) = remote_url.split_once(':')?;
+        let (_, host) = authority.rsplit_once('@')?;
+        if !host.eq_ignore_ascii_case("github.com") {
+            return None;
+        }
+        path
+    };
+
+    let path = path.trim_matches('/');
+    let mut segments = path.split('/');
+    let owner = segments.next()?;
+    let repository = segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+    let repository = repository.strip_suffix(".git").unwrap_or(repository);
+    if !valid_github_path_segment(owner) || !valid_github_path_segment(repository) {
+        return None;
+    }
+    Some(format!("https://github.com/{owner}/{repository}"))
+}
+
+fn valid_github_path_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn validate_sha(value: &str) -> Result<(), String> {
+    ((value.len() == 40 || value.len() == 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some(())
+        .ok_or_else(|| "commit cursor must be a full hexadecimal Git object id".to_string())
+}
+
+#[allow(dead_code)]
+fn cwd_belongs_to_project(cwd: &Path, project_root: &Path) -> bool {
+    if !cwd.is_absolute()
+        || cwd
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return false;
+    }
+    let resolved = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    resolved == project_root || resolved.starts_with(project_root)
+}
+
+#[allow(dead_code)]
+fn value_alias<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
+    names.iter().find_map(|name| value.get(*name))
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Result<Output, String> {
+    Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(|error| format!("run Git for '{}': {error}", root.display()))
+}
+
+fn git_error(action: &str, output: &Output) -> String {
+    let detail = String::from_utf8_lossy(&output.stderr);
+    format!("Git could not {action}: {}", detail.trim())
+}
+
+#[cfg(test)]
+mod activity_only_tests {
+    use super::*;
+    use crate::providers::{
+        AgentProviderAdapter, DivergenceStyle, MaterializationTargetRequest, PlannedProviderTarget,
+        ProviderCapabilityLevel, ProviderDescriptor, SessionActionOutcome, SessionAnalysis,
+        SessionEventDetail, SessionFileMetadata, SessionRewriteRequest, SessionTimelineContext,
+        SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
+    };
+    use mallard_domain::{BundleId, HostId, LocalProviderProfileId, ProjectBinding, ReplicaId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct InstrumentedAdapter {
+        provider: ProviderKey,
+        transcript: PathBuf,
+        project_root: PathBuf,
+        summary_calls: Arc<AtomicUsize>,
+        timeline_calls: Arc<AtomicUsize>,
+    }
+
+    impl AgentProviderAdapter for InstrumentedAdapter {
+        fn descriptor(&self) -> ProviderDescriptor {
+            ProviderDescriptor {
+                key: self.provider.clone(),
+                display_name: "Instrumented".to_string(),
+                profile_label: "Instrumented profile".to_string(),
+                default_profile_directory: None,
+                setup_default: false,
+                capabilities: ProviderCapabilityLevel::ActivityOnly,
+                adapter_version: 1,
+            }
+        }
+
+        fn sessions(&self) -> Option<&dyn crate::providers::SessionAdapter> {
+            Some(self)
+        }
+    }
+
+    impl crate::providers::SessionAdapter for InstrumentedAdapter {
+        fn codec_key(&self) -> &str {
+            "instrumented.v1"
+        }
+
+        fn codec_version(&self) -> u32 {
+            1
+        }
+
+        fn capability(&self) -> ProviderCapabilityLevel {
+            ProviderCapabilityLevel::ActivityOnly
+        }
+
+        fn divergence_style(&self) -> DivergenceStyle {
+            DivergenceStyle::AdapterFileFork
+        }
+
+        fn discover(
+            &self,
+            _context: &SessionDiscoveryContext<'_>,
+        ) -> Result<crate::providers::SessionDiscovery, String> {
+            Ok(crate::providers::SessionDiscovery {
+                sessions: vec![crate::providers::DiscoveredSession {
+                    session_id: "session-1".to_string(),
+                    relative_cwd: ".".to_string(),
+                    physical_path: self.transcript.clone(),
+                    display_name: "Session one".to_string(),
+                    blocked_reason: None,
+                }],
+                ..Default::default()
+            })
+        }
+
+        fn scan_metadata(&self, _path: &Path) -> Result<SessionFileMetadata, String> {
+            Ok(SessionFileMetadata {
+                session_id: "session-1".to_string(),
+                cwd: self.project_root.clone(),
+                is_internal_subagent: false,
+            })
+        }
+
+        fn analyze(&self, _bytes: &[u8]) -> SessionAnalysis {
+            panic!("Activity must not analyze transcript bytes")
+        }
+
+        fn rewrite(&self, _request: &SessionRewriteRequest<'_>) -> Result<Vec<u8>, String> {
+            panic!("Activity must not rewrite transcript bytes")
+        }
+
+        fn materialization_targets(
+            &self,
+            _request: &MaterializationTargetRequest<'_>,
+        ) -> Result<Vec<PlannedProviderTarget>, String> {
+            panic!("Activity must not plan materialization")
+        }
+
+        fn summarize_file(&self, _path: &Path) -> Result<SessionFileSummary, String> {
+            self.summary_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(SessionFileSummary {
+                session_id: "session-1".to_string(),
+                title: Some("One".to_string()),
+                summary: None,
+                started_at: Some(1),
+                ended_at: Some(2),
+                branch: None,
+                recorded_sha: None,
+                recorded_branches: BTreeSet::new(),
+                user_rounds: 1,
+                agent_messages: 1,
+                tool_calls: 0,
+                total_tokens: None,
+                metrics_complete: true,
+                is_internal_subagent: false,
+            })
+        }
+
+        fn build_timeline_index(
+            &self,
+            _path: &Path,
+            _context: &SessionTimelineContext<'_>,
+        ) -> Result<SessionTimelineIndex, String> {
+            self.timeline_calls.fetch_add(1, Ordering::SeqCst);
+            Err("timeline must not run for Activity".to_string())
+        }
+
+        fn read_timeline_page(
+            &self,
+            _path: &Path,
+            _index: &SessionTimelineIndex,
+            _query: &SessionTimelineQuery,
+        ) -> Result<SessionTimelinePageSlice, String> {
+            self.timeline_calls.fetch_add(1, Ordering::SeqCst);
+            Err("timeline must not run for Activity".to_string())
+        }
+
+        fn read_event_detail(
+            &self,
+            _path: &Path,
+            _index: &SessionTimelineIndex,
+            _event_id: &str,
+        ) -> Result<SessionEventDetail, String> {
+            self.timeline_calls.fetch_add(1, Ordering::SeqCst);
+            Err("timeline must not run for Activity".to_string())
+        }
+
+        fn available_actions(
+            &self,
+            _context: &SessionActionContext<'_>,
+        ) -> Vec<SessionActionDescriptor> {
+            Vec::new()
+        }
+
+        fn execute_action(
+            &self,
+            _request: &mut SessionActionRequest<'_>,
+        ) -> Result<SessionActionOutcome, String> {
+            Err("instrumented adapter has no actions".to_string())
+        }
+    }
+
+    #[test]
+    fn activity_cache_miss_calls_summary_but_no_rich_timeline_method() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path().join("provider");
+        let project_root = temporary.path().join("project");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = home.join("session.jsonl");
+        fs::write(&transcript, b"{}\n").unwrap();
+        let repository = LocalStateRepository::from_home_dir(temporary.path()).unwrap();
+        let provider = ProviderKey::parse("instrumented").unwrap();
+        let profile_id = LocalProviderProfileId::parse("profile-test").unwrap();
+        let project_id = LocalProjectId::parse("project-test").unwrap();
+        let bundle_id = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let summary_calls = Arc::new(AtomicUsize::new(0));
+        let timeline_calls = Arc::new(AtomicUsize::new(0));
+        let registry = ProviderRegistry::from_adapters(vec![Arc::new(InstrumentedAdapter {
+            provider: provider.clone(),
+            transcript,
+            project_root: project_root.clone(),
+            summary_calls: summary_calls.clone(),
+            timeline_calls: timeline_calls.clone(),
+        })]);
+        let resolved = ResolvedActivityProject {
+            project_id: project_id.clone(),
+            bundle_id: bundle_id.clone(),
+            project_root: project_root.clone(),
+            binding: ProjectBinding {
+                host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+                replica_id: ReplicaId::parse("replica-test").unwrap(),
+                local_project_id: project_id,
+                bundle_id,
+                project_root: project_root.to_string_lossy().into_owned(),
+                canonical_project_root: fs::canonicalize(&project_root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                profile_ids: BTreeMap::from([(provider.clone(), profile_id.clone())]),
+                state: BindingState::Active,
+                revision: 0,
+                updated_at: 1,
+            },
+            homes: BTreeMap::from([(
+                provider,
+                ResolvedProviderHome {
+                    profile_id,
+                    home: fs::canonicalize(&home).unwrap(),
+                },
+            )]),
+            unavailable: BTreeMap::new(),
+        };
+        let mut warnings = Vec::new();
+        let rows =
+            scan_local_sessions(&repository, &registry, &resolved, false, &mut warnings).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(timeline_calls.load(Ordering::SeqCst), 0);
+    }
+}

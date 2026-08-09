@@ -21,9 +21,11 @@ pub const PUSH_PLAN_SCHEMA: u32 = 1;
 pub const BUNDLE_SCHEMA: u32 = 1;
 pub const RECIPE_SCHEMA: u32 = 1;
 pub const RESTORE_PLAN_SCHEMA: u32 = 1;
-pub const SETUP_DRAFT_SCHEMA: u32 = 2;
-pub const SETUP_TRANSACTION_SCHEMA: u32 = 2;
+pub const SETUP_DRAFT_SCHEMA: u32 = 1;
+pub const SETUP_TRANSACTION_SCHEMA: u32 = 1;
 pub const MAX_SETUP_DRAFTS: usize = 64;
+/// Bound on provider scopes in one manifest (the project scope is separate).
+pub const MAX_PROVIDER_SCOPES: usize = 64;
 
 pub const MAX_PROJECTS: usize = 1_024;
 pub const MAX_STORAGES: usize = 128;
@@ -529,19 +531,169 @@ pub fn validate_absolute_clean_path(label: &str, value: &str) -> Result<(), Stri
     Ok(())
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum Provider {
-    Codex,
-    Claude,
+/// Validated agent-provider identity. Providers are registered keys, not a
+/// closed enum: structural validation accepts any well-formed key so unknown
+/// remote provider scopes stay readable and preservable, while commands that
+/// mutate local provider state must additionally resolve the key through the
+/// compile-time adapter registry.
+///
+/// Keys use a bounded lowercase ASCII namespace: the first character is a
+/// letter, later characters are `[a-z0-9._-]`, the final character is a
+/// letter or digit, and `..` never appears. This keeps every key safe as one
+/// logical-namespace component before the normal logical-path validation
+/// runs.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(try_from = "String", into = "String")]
+pub struct ProviderKey(String);
+
+fn validate_bounded_key(label: &str, value: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    let valid = (1..=64).contains(&bytes.len())
+        && bytes.first().is_some_and(u8::is_ascii_lowercase)
+        && bytes
+            .last()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(byte)
+        })
+        && !value.contains("..");
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} must be 1-64 lowercase ASCII key characters: '{}'",
+            label,
+            value.escape_debug()
+        ))
+    }
 }
 
-impl Provider {
-    pub fn as_str(self) -> &'static str {
+impl ProviderKey {
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        validate_bounded_key("provider key", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ProviderKey {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<ProviderKey> for String {
+    fn from(value: ProviderKey) -> String {
+        value.0
+    }
+}
+
+impl fmt::Display for ProviderKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Presentation-oriented provider resource subtype such as `session`,
+/// `memory`, `todo`, or `file-history`. Core behavior keys off
+/// [`ResourceKind`], ownership, and adapter capabilities — never off this
+/// string.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(try_from = "String", into = "String")]
+pub struct ResourceTypeKey(String);
+
+impl ResourceTypeKey {
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        validate_bounded_key("provider resource type", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ResourceTypeKey {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<ResourceTypeKey> for String {
+    fn from(value: ResourceTypeKey) -> String {
+        value.0
+    }
+}
+
+impl fmt::Display for ResourceTypeKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// One independently revisioned portion of a portable repository: the shared
+/// project slice or one provider's slice.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SyncScopeKey {
+    Project,
+    Provider(ProviderKey),
+}
+
+impl SyncScopeKey {
+    pub fn provider(key: ProviderKey) -> Self {
+        Self::Provider(key)
+    }
+
+    pub fn provider_key(&self) -> Option<&ProviderKey> {
         match self {
-            Self::Codex => "codex",
-            Self::Claude => "claude",
+            Self::Project => None,
+            Self::Provider(key) => Some(key),
         }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        if value == "project" {
+            return Ok(Self::Project);
+        }
+        if let Some(key) = value.strip_prefix("provider:") {
+            return Ok(Self::Provider(ProviderKey::parse(key)?));
+        }
+        Err(format!("unknown sync scope '{}'", value.escape_debug()))
+    }
+
+    pub fn canonical(&self) -> String {
+        match self {
+            Self::Project => "project".to_string(),
+            Self::Provider(key) => format!("provider:{}", key),
+        }
+    }
+}
+
+impl fmt::Display for SyncScopeKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.canonical())
+    }
+}
+
+impl Serialize for SyncScopeKey {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.canonical())
+    }
+}
+
+impl<'de> Deserialize<'de> for SyncScopeKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -606,23 +758,25 @@ impl StorageConfig {
     }
 }
 
+/// Generic resource classes. Provider identity lives in
+/// [`ResourceDescriptor::provider`], never in the kind, so registering a new
+/// provider adds no variant here.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
-    CodexConversation,
-    ClaudeConversation,
+    Conversation,
+    ProviderState,
     ProjectContentFile,
     ProjectContentDirectory,
-    ProjectMemory,
     Requirement,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ResourceScope {
-    Project,
-    ProviderState,
-    Requirement,
+impl ResourceKind {
+    /// The sync scope this kind of resource belongs to: provider-owned kinds
+    /// live in their provider's scope, everything else in the project scope.
+    pub fn requires_provider(self) -> bool {
+        matches!(self, Self::Conversation | Self::ProviderState)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -666,8 +820,10 @@ pub struct ResourceDescriptor {
     pub resource_id: ResourceId,
     pub kind: ResourceKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<Provider>,
-    pub scope: ResourceScope,
+    pub provider: Option<ProviderKey>,
+    /// Presentation-only provider subtype (`session`, `memory`, `todo`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_resource_type: Option<ResourceTypeKey>,
     pub display_name: String,
     pub provenance: Provenance,
     pub apply_policy: ApplyPolicy,
@@ -682,6 +838,18 @@ impl ResourceDescriptor {
     pub fn validate(&self) -> Result<(), String> {
         validate_display_text("resource display name", &self.display_name, false)?;
         self.provenance.validate()?;
+        if self.kind.requires_provider() != self.provider.is_some() {
+            return Err(format!(
+                "resource '{}' provider does not match its kind",
+                self.resource_id
+            ));
+        }
+        if self.provider.is_none() && self.provider_resource_type.is_some() {
+            return Err(format!(
+                "resource '{}' has a provider subtype without a provider",
+                self.resource_id
+            ));
+        }
         if self.codec_version == 0 {
             return Err(format!(
                 "resource '{}' has codec version 0",
@@ -777,35 +945,118 @@ impl BundleRecipe {
     }
 }
 
+/// The repository-level manifest coordinates a reviewed scope base was
+/// established against. It lets status views reload the exact historical
+/// manifest after the storage head advances, and names the manifest the
+/// continuity probe checks for lineage membership.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RecipeBase {
+pub struct RepositoryBase {
     pub revision: u64,
+    pub commit_id: String,
     pub manifest_sha256: String,
     pub manifest_size: u64,
-    /// Immutable commit that established this reviewed base. It lets status
-    /// views reload the exact historical manifest after the storage head
-    /// advances, and names the manifest the continuity probe checks for
-    /// lineage membership — which is why it is required, not optional.
-    pub commit_id: String,
-    pub recipe_revision: u64,
-    /// The machine binding that established this reviewed remote base. Older
-    /// experimental bases deserialize as `None` and cannot authorize Push.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binding_revision: Option<u64>,
+}
+
+impl RepositoryBase {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_sha256("repository base manifest", &self.manifest_sha256)?;
+        if self.manifest_size == 0 {
+            return Err("repository base manifest size must be nonzero".to_string());
+        }
+        validate_named_id("repository base commit", &self.commit_id)?;
+        Ok(())
+    }
+}
+
+/// The machine-local last reviewed revision and content digest for one sync
+/// scope. Continuity, Push authority, and Pull fast-forwarding are decided
+/// per scope so unrelated providers never block each other.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ScopeBase {
+    pub scope: SyncScopeKey,
+    pub scope_revision: u64,
+    pub scope_sha256: String,
+    pub reviewed_in: RepositoryBase,
+    /// The machine binding revision that established this reviewed base.
+    pub binding_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_pull_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_push_at: Option<u64>,
 }
 
-impl RecipeBase {
+impl ScopeBase {
     pub fn validate(&self) -> Result<(), String> {
-        validate_sha256("recipe base manifest", &self.manifest_sha256)?;
-        if self.manifest_size == 0 {
-            return Err("recipe base manifest size must be nonzero".to_string());
+        validate_sha256("scope base content", &self.scope_sha256)?;
+        if self.scope_revision == 0 {
+            return Err("scope base revision must be nonzero".to_string());
         }
-        validate_named_id("recipe base commit", &self.commit_id)?;
-        Ok(())
+        self.reviewed_in.validate()
+    }
+}
+
+/// Scope-level continuity between one reviewed scope base and the verified
+/// current manifest. No probe is needed: global repository continuity has
+/// already established lineage, and scope revisions are internal to it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ScopeContinuity {
+    /// No remote scope and no reviewed base: first publication target.
+    Fresh,
+    /// A base is recorded but the current manifest has no such scope.
+    RemoteMissing { base_revision: u64 },
+    /// The remote scope exists but this replica never reviewed it.
+    Unreviewed { remote_revision: u64 },
+    /// The remote scope is exactly the reviewed base.
+    InSync { revision: u64 },
+    /// The remote scope advanced past the reviewed base.
+    Advanced {
+        base_revision: u64,
+        remote_revision: u64,
+    },
+    /// The remote scope no longer extends the reviewed base.
+    Replaced {
+        base_revision: u64,
+        remote_revision: u64,
+    },
+}
+
+/// Classify one scope's continuity from the verified current manifest's
+/// scope coordinates and the recorded scope base.
+pub fn classify_scope_continuity(
+    remote: Option<(u64, &str)>,
+    base: Option<&ScopeBase>,
+) -> ScopeContinuity {
+    match (remote, base) {
+        (None, None) => ScopeContinuity::Fresh,
+        (None, Some(base)) => ScopeContinuity::RemoteMissing {
+            base_revision: base.scope_revision,
+        },
+        (Some((remote_revision, _)), None) => ScopeContinuity::Unreviewed { remote_revision },
+        (Some((remote_revision, remote_sha256)), Some(base)) => {
+            if remote_revision == base.scope_revision {
+                if remote_sha256 == base.scope_sha256 {
+                    ScopeContinuity::InSync {
+                        revision: remote_revision,
+                    }
+                } else {
+                    ScopeContinuity::Replaced {
+                        base_revision: base.scope_revision,
+                        remote_revision,
+                    }
+                }
+            } else if remote_revision < base.scope_revision {
+                ScopeContinuity::Replaced {
+                    base_revision: base.scope_revision,
+                    remote_revision,
+                }
+            } else {
+                ScopeContinuity::Advanced {
+                    base_revision: base.scope_revision,
+                    remote_revision,
+                }
+            }
+        }
     }
 }
 
@@ -850,8 +1101,8 @@ pub enum RemoteContinuity {
 /// revision exactly once), and revisions never regress within one.
 pub fn classify_remote_continuity(
     observed_head: Option<&BundleHead>,
-    base: Option<&RecipeBase>,
-    probe: &mut dyn FnMut(&RecipeBase) -> Result<bool, String>,
+    base: Option<&RepositoryBase>,
+    probe: &mut dyn FnMut(&RepositoryBase) -> Result<bool, String>,
 ) -> RemoteContinuity {
     match (observed_head, base) {
         (None, None) => RemoteContinuity::Fresh,
@@ -908,8 +1159,6 @@ pub struct LocalProjectRegistration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_fingerprint: Option<String>,
     pub recipe: BundleRecipe,
-    #[serde(default)]
-    pub recipe_bases: BTreeMap<StorageId, RecipeBase>,
     pub revision: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -925,9 +1174,6 @@ impl LocalProjectRegistration {
             validate_sha256("repository fingerprint", fingerprint)?;
         }
         self.recipe.validate()?;
-        for base in self.recipe_bases.values() {
-            base.validate()?;
-        }
         if self.created_at > self.updated_at {
             return Err(format!(
                 "project '{}' has invalid timestamps",
@@ -949,6 +1195,11 @@ pub struct ProjectStorageLink {
     /// have never pushed fall back to the project's default recipe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<BundleRecipe>,
+    /// Machine-local reviewed bases, one per sync scope. A scope that was
+    /// merely viewed has no entry; only an approved Push, Pull, or explicit
+    /// provider-scoped acknowledgment may advance one.
+    #[serde(default)]
+    pub scope_bases: BTreeMap<SyncScopeKey, ScopeBase>,
     /// Machine-local, destination-specific decisions for generic project
     /// content. These preferences are never serialized into a remote bundle.
     #[serde(default)]
@@ -1070,8 +1321,7 @@ fn validate_project_content_descriptor_identity(
             ));
         }
     }
-    if descriptor.scope != ResourceScope::Project
-        || descriptor.apply_policy != ApplyPolicy::ExplicitReview
+    if descriptor.apply_policy != ApplyPolicy::ExplicitReview
         || descriptor.codec_version != 1
         || descriptor.provider.is_some()
         || descriptor.relative_cwd.is_some()
@@ -1164,22 +1414,27 @@ impl SyncConfig {
             if let Some(recipe) = &link.recipe {
                 recipe.validate()?;
             }
+            if link.scope_bases.len() > MAX_PROVIDER_SCOPES + 1 {
+                return Err(format!(
+                    "link '{}'/'{}' has too many scope bases",
+                    link.local_project_id, link.storage_id
+                ));
+            }
+            for (scope, base) in &link.scope_bases {
+                if scope != &base.scope {
+                    return Err(format!(
+                        "link scope base key '{}' does not match its scope '{}'",
+                        scope, base.scope
+                    ));
+                }
+                base.validate()?;
+            }
             link.project_content_preferences.validate()?;
             if !cells.insert((link.local_project_id.clone(), link.storage_id.clone())) {
                 return Err(format!(
                     "duplicate project/storage link '{}'/ '{}'",
                     link.local_project_id, link.storage_id
                 ));
-            }
-        }
-        for project in &self.projects {
-            for storage_id in project.recipe_bases.keys() {
-                if !storage_ids.contains(storage_id) {
-                    return Err(format!(
-                        "project '{}' has a recipe base for unknown storage '{}'",
-                        project.local_project_id, storage_id
-                    ));
-                }
             }
         }
         Ok(())
@@ -1256,9 +1511,10 @@ fn validate_host_label(label: &str, value: &str) -> Result<(), String> {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProviderProfile {
     pub profile_id: LocalProviderProfileId,
-    pub provider: Provider,
+    pub provider: ProviderKey,
     pub display_name: String,
-    /// The exact CODEX_HOME or CLAUDE_CONFIG_DIR spelling selected locally.
+    /// The exact provider-home spelling selected locally (for example a
+    /// `CODEX_HOME` or `CLAUDE_CONFIG_DIR` directory).
     pub path: String,
     /// Canonical path captured when the profile was created.
     pub canonical_path: String,
@@ -1292,14 +1548,11 @@ pub struct ProjectBinding {
     pub project_root: String,
     /// Canonical path captured when the binding was validated.
     pub canonical_project_root: String,
+    /// The bound providers. Machine state persists profile IDs only; runtime
+    /// provider homes are resolved through the profile catalog into an
+    /// operation context, never stored on the binding.
     #[serde(default)]
-    pub profile_ids: BTreeMap<Provider, LocalProviderProfileId>,
-    /// Runtime-only resolved provider homes. Machine state persists profile
-    /// IDs; commands populate these fields after revalidating the catalog.
-    #[serde(skip)]
-    pub codex_home: Option<String>,
-    #[serde(skip)]
-    pub claude_home: Option<String>,
+    pub profile_ids: BTreeMap<ProviderKey, LocalProviderProfileId>,
     pub state: BindingState,
     pub revision: u64,
     pub updated_at: u64,
@@ -1309,12 +1562,6 @@ impl ProjectBinding {
     pub fn validate_structure(&self) -> Result<(), String> {
         validate_absolute_clean_path("project root", &self.project_root)?;
         validate_absolute_clean_path("canonical project root", &self.canonical_project_root)?;
-        if let Some(path) = &self.codex_home {
-            validate_absolute_clean_path("Codex home", path)?;
-        }
-        if let Some(path) = &self.claude_home {
-            validate_absolute_clean_path("Claude home", path)?;
-        }
         Ok(())
     }
 }
@@ -1862,9 +2109,11 @@ impl CodexDivergenceOperation {
             pinned_cloud_title: self.pinned_cloud_title.clone(),
             desired_fork_name: self.desired_fork_name.clone(),
             desired_original_name: self.desired_original_name.clone(),
-            codex_executable: self.codex_executable.clone(),
-            codex_executable_sha256: self.codex_executable_sha256.clone(),
-            available_executors: self.available_executors.clone(),
+            execution: DivergenceExecution::CodexNativeFork {
+                codex_executable: self.codex_executable.clone(),
+                codex_executable_sha256: self.codex_executable_sha256.clone(),
+                available_executors: self.available_executors.clone(),
+            },
         };
         plan.validate(source_thread_id)?;
         validate_absolute_clean_path(
@@ -2050,12 +2299,107 @@ impl CodexDivergenceOperation {
     }
 }
 
+/// A divergence preserved by the provider adapter as a plain file fork: the
+/// local branch is rewritten to a fresh provider session identity and written
+/// beside the source before the approved replacement. No external executor is
+/// involved, so there is no attempt ladder and no acknowledgment checkpoint.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AdapterDivergenceOperation {
+    pub origin: ForkOrigin,
+    pub resolution: ConversationDivergenceResolution,
+    pub local_branch_preserved: bool,
+    pub preserved_thread_id: ThreadId,
+    pub source_provider_thread_id: String,
+    pub source_transcript_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_provider_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_transcript_sha256: Option<String>,
+    pub local_lineage_digest: String,
+    pub local_semantic_digest: String,
+    pub local_message_count: u64,
+}
+
+impl AdapterDivergenceOperation {
+    fn validate(&self, source_thread_id: &ThreadId) -> Result<(), String> {
+        if &self.preserved_thread_id == source_thread_id {
+            return Err("adapter divergence must mint a distinct preserved thread".to_string());
+        }
+        validate_provider_thread_id(
+            "adapter divergence source provider thread",
+            &self.source_provider_thread_id,
+        )?;
+        validate_absolute_clean_path(
+            "adapter divergence source transcript",
+            &self.source_transcript_path,
+        )?;
+        validate_sha256(
+            "adapter divergence local lineage",
+            &self.local_lineage_digest,
+        )?;
+        validate_sha256(
+            "adapter divergence local semantics",
+            &self.local_semantic_digest,
+        )?;
+        if self.local_message_count == 0 {
+            return Err("adapter divergence requires a nonzero local chain".to_string());
+        }
+        let fork_pins = [
+            self.fork_provider_thread_id.is_some(),
+            self.fork_transcript_path.is_some(),
+            self.fork_transcript_sha256.is_some(),
+        ];
+        if fork_pins.iter().any(|present| *present != fork_pins[0]) {
+            return Err("adapter divergence fork pins must be paired".to_string());
+        }
+        match self.resolution {
+            ConversationDivergenceResolution::PreserveLocalWithNativeFork => {
+                if !fork_pins[0] {
+                    return Err("preserved adapter divergence lacks its fork pins".to_string());
+                }
+            }
+            ConversationDivergenceResolution::UseCloudOnly => {
+                if fork_pins[0] {
+                    return Err("cloud-only adapter divergence carries fork state".to_string());
+                }
+            }
+        }
+        if let Some(thread_id) = &self.fork_provider_thread_id {
+            validate_provider_thread_id("adapter divergence fork provider thread", thread_id)?;
+            if thread_id == &self.source_provider_thread_id {
+                return Err("adapter divergence fork reuses the source provider thread".to_string());
+            }
+        }
+        if let Some(path) = &self.fork_transcript_path {
+            validate_absolute_clean_path("adapter divergence fork transcript", path)?;
+            if path == &self.source_transcript_path {
+                return Err("adapter divergence fork overwrites its source transcript".to_string());
+            }
+        }
+        if let Some(digest) = &self.fork_transcript_sha256 {
+            validate_sha256("adapter divergence fork transcript", digest)?;
+        }
+        if self.origin == ForkOrigin::Manual
+            && self.resolution != ConversationDivergenceResolution::PreserveLocalWithNativeFork
+        {
+            return Err("manual adapter fork must preserve the local branch".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", content = "details", rename_all = "snake_case")]
+// The divergence payloads dwarf the marker variants by design; boxing them
+// would change every construction site for no serialized-contract gain.
+#[allow(clippy::large_enum_variant)]
 pub enum ConversationSyncOperationKind {
     CloudPublication,
     ProviderMaterialization,
     CodexDivergence(CodexDivergenceOperation),
+    AdapterDivergence(AdapterDivergenceOperation),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -2135,7 +2479,7 @@ pub struct ConversationSyncOperation {
     pub replica_id: ReplicaId,
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
-    pub provider: Provider,
+    pub provider: ProviderKey,
     pub thread_id: ThreadId,
     pub operation: ConversationSyncOperationKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2173,8 +2517,19 @@ impl ConversationSyncOperation {
         }
     }
 
+    pub fn adapter_divergence(&self) -> Option<&AdapterDivergenceOperation> {
+        match &self.operation {
+            ConversationSyncOperationKind::AdapterDivergence(divergence) => Some(divergence),
+            _ => None,
+        }
+    }
+
     pub fn fork_origin(&self) -> Option<ForkOrigin> {
-        self.divergence().map(|divergence| divergence.origin)
+        match &self.operation {
+            ConversationSyncOperationKind::CodexDivergence(divergence) => Some(divergence.origin),
+            ConversationSyncOperationKind::AdapterDivergence(divergence) => Some(divergence.origin),
+            _ => None,
+        }
     }
 
     pub fn cloud_anchor(&self) -> Result<&ConversationCloudAnchor, String> {
@@ -2266,7 +2621,7 @@ impl ConversationSyncOperation {
             }
             ConversationSyncOperationKind::CodexDivergence(divergence) => {
                 if self.direction != ConversationPlanDirection::Pull
-                    || self.provider != Provider::Codex
+                    || self.provider.as_str() != "codex"
                 {
                     return Err("invalid Codex divergence journal scope".to_string());
                 }
@@ -2286,6 +2641,39 @@ impl ConversationSyncOperation {
                     }
                 }
                 divergence.validate(&self.thread_id, self.phase)?;
+            }
+            ConversationSyncOperationKind::AdapterDivergence(divergence) => {
+                if self.direction != ConversationPlanDirection::Pull {
+                    return Err("invalid adapter divergence journal scope".to_string());
+                }
+                if !matches!(
+                    self.phase,
+                    ConversationSyncPhase::Prepared
+                        | ConversationSyncPhase::ReplacementStaged
+                        | ConversationSyncPhase::ProviderCommitted
+                        | ConversationSyncPhase::BindingsCommitted
+                        | ConversationSyncPhase::LocalCommitted
+                        | ConversationSyncPhase::RecoveryRequired
+                ) {
+                    return Err("adapter divergence has an invalid phase".to_string());
+                }
+                match divergence.origin {
+                    ForkOrigin::PullPreserve => {
+                        if self.cloud.is_none() {
+                            return Err(
+                                "pull divergence operation requires a cloud anchor".to_string()
+                            );
+                        }
+                    }
+                    ForkOrigin::Manual => {
+                        if self.cloud.is_some() {
+                            return Err(
+                                "manual adapter fork operation carries no cloud anchor".to_string()
+                            );
+                        }
+                    }
+                }
+                divergence.validate(&self.thread_id)?;
             }
         }
         let mut targets = BTreeSet::new();
@@ -2357,6 +2745,9 @@ pub enum DraftProfileSelection {
 /// drafts require the same private file permissions as the config itself.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// A pending storage necessarily carries the whole connection form; boxing
+// the draft-only payload buys nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum DraftStorageSelection {
     Existing { storage_id: StorageId },
     Pending { storage: StorageConfig },
@@ -2398,8 +2789,11 @@ pub struct ProjectSetupDraft {
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_fingerprint: Option<String>,
+    /// One entry per enabled provider. An absent key means the provider is
+    /// disabled for this project; selecting or editing one provider never
+    /// removes another entry.
     #[serde(default)]
-    pub profiles: BTreeMap<Provider, DraftProfileSelection>,
+    pub profiles: BTreeMap<ProviderKey, DraftProfileSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<DraftStorageSelection>,
     pub repository: DraftRepositoryChoice,
@@ -2546,10 +2940,8 @@ impl BundleIdentity {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct CapturedWith {
     pub app_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_version: Option<String>,
+    #[serde(default)]
+    pub provider_versions: BTreeMap<ProviderKey, String>,
     #[serde(default)]
     pub codec_versions: BTreeMap<String, u32>,
 }
@@ -2593,12 +2985,81 @@ pub struct ConversationFileRef {
     pub role: ConversationFileRole,
 }
 
+/// Proven, bounded session activity counters. `complete` is false whenever a
+/// bounded parse could not account for every record.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionMetrics {
+    #[serde(default)]
+    pub user_rounds: u64,
+    #[serde(default)]
+    pub agent_messages: u64,
+    #[serde(default)]
+    pub tool_calls: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub complete: bool,
+}
+
+/// Bounded provider-neutral presentation metadata stored with each portable
+/// conversation so remote sessions render in Activity without payload reads.
+/// Never a chat preview: transcript content requires an explicit, verified,
+/// bounded fetch.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionPresentation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_sha: Option<String>,
+    #[serde(default)]
+    pub metrics: SessionMetrics,
+}
+
+impl SessionPresentation {
+    fn validate(&self) -> Result<(), String> {
+        if let Some(branch) = &self.branch {
+            validate_display_text("session branch", branch, false)?;
+        }
+        if let Some(sha) = &self.recorded_sha {
+            if sha.is_empty()
+                || sha.len() > 64
+                || !sha
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err("session recorded sha must be bounded lowercase hex".to_string());
+            }
+        }
+        if let Some(relative) = &self.relative_cwd {
+            let invalid_component = relative != "."
+                && Path::new(relative)
+                    .components()
+                    .any(|component| matches!(component, Component::CurDir | Component::ParentDir));
+            if relative.is_empty()
+                || relative.len() > 1_024
+                || Path::new(relative).is_absolute()
+                || invalid_component
+            {
+                return Err("session presentation has an invalid relative cwd".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ConversationThread {
     pub thread_id: ThreadId,
-    pub provider: Provider,
+    pub provider: ProviderKey,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_title: Option<String>,
+    pub presentation: SessionPresentation,
     pub resource_id: ResourceId,
     #[serde(default)]
     pub files: Vec<ConversationFileRef>,
@@ -2632,8 +3093,9 @@ impl ConversationThread {
         if let Some(title) = &self.display_title {
             validate_display_text("conversation title", title, false)?;
         }
+        self.presentation.validate()?;
         validate_display_text("conversation lineage codec", &self.lineage_codec, false)?;
-        let expected_resource_id = conversation_resource_id(self.provider, &self.thread_id)?;
+        let expected_resource_id = conversation_resource_id(&self.provider, &self.thread_id)?;
         if self.resource_id != expected_resource_id {
             return Err(format!(
                 "conversation thread '{}' has non-canonical resource id '{}'",
@@ -2648,12 +3110,13 @@ impl ConversationThread {
         }
         let mut paths = BTreeSet::new();
         let mut transcript_count = 0_usize;
-        let canonical_transcript = conversation_transcript_path(self.provider, &self.thread_id)?;
+        let canonical_transcript = conversation_transcript_path(&self.provider, &self.thread_id)?;
         let canonical_prefix = format!(
             "state/conversations/{}/{}/",
             self.provider.as_str(),
             self.thread_id
         );
+        let sidecar_prefix = format!("{}sidecars/", canonical_prefix);
         for file in &self.files {
             file.role.validate()?;
             if file.role == ConversationFileRole::Transcript {
@@ -2661,6 +3124,15 @@ impl ConversationThread {
                 if file.logical_path != canonical_transcript {
                     return Err(format!(
                         "conversation thread '{}' has non-canonical transcript path '{}'",
+                        self.thread_id, file.logical_path
+                    ));
+                }
+            }
+            if let ConversationFileRole::Sidecar { sidecar_kind } = &file.role {
+                let expected_prefix = format!("{}{}/", sidecar_prefix, sidecar_kind);
+                if !file.logical_path.as_str().starts_with(&expected_prefix) {
+                    return Err(format!(
+                        "conversation thread '{}' sidecar '{}' is outside its sidecar namespace",
                         self.thread_id, file.logical_path
                     ));
                 }
@@ -2818,6 +3290,24 @@ pub enum CodexForkExecutor {
     NativePty,
 }
 
+/// How a reviewed divergence preservation would be executed. The Codex
+/// native fork drives the provider's own fork machinery through an executor
+/// ladder; an adapter file fork is a deterministic rewrite-and-write
+/// performed by the registered provider adapter.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DivergenceExecution {
+    CodexNativeFork {
+        codex_executable: String,
+        codex_executable_sha256: String,
+        available_executors: Vec<CodexForkExecutor>,
+    },
+    AdapterFileFork {
+        fork_provider_thread_id: String,
+        fork_transcript_path: String,
+    },
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ConversationDivergencePlan {
     pub available_resolutions: Vec<ConversationDivergenceResolution>,
@@ -2838,9 +3328,7 @@ pub struct ConversationDivergencePlan {
     pub desired_fork_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desired_original_name: Option<String>,
-    pub codex_executable: String,
-    pub codex_executable_sha256: String,
-    pub available_executors: Vec<CodexForkExecutor>,
+    pub execution: DivergenceExecution,
 }
 
 impl ConversationDivergencePlan {
@@ -2873,7 +3361,7 @@ impl ConversationDivergencePlan {
             );
         }
         validate_provider_thread_id(
-            "Codex divergence source provider thread",
+            "conversation divergence source provider thread",
             &self.source_provider_thread_id,
         )?;
         validate_sha256(
@@ -2887,44 +3375,96 @@ impl ConversationDivergencePlan {
             "conversation divergence local semantics",
             &self.local_semantic_digest,
         )?;
-        for (label, title) in [
-            (
-                "conversation divergence local title",
-                self.pinned_local_title.as_deref(),
-            ),
-            (
-                "conversation divergence cloud title",
-                self.pinned_cloud_title.as_deref(),
-            ),
-            (
-                "conversation divergence original title",
-                self.desired_original_name.as_deref(),
-            ),
-        ] {
-            if let Some(title) = title {
-                validate_codex_thread_name(label, title)?;
+        match &self.execution {
+            DivergenceExecution::CodexNativeFork {
+                codex_executable,
+                codex_executable_sha256,
+                available_executors,
+            } => {
+                for (label, title) in [
+                    (
+                        "conversation divergence local title",
+                        self.pinned_local_title.as_deref(),
+                    ),
+                    (
+                        "conversation divergence cloud title",
+                        self.pinned_cloud_title.as_deref(),
+                    ),
+                    (
+                        "conversation divergence original title",
+                        self.desired_original_name.as_deref(),
+                    ),
+                ] {
+                    if let Some(title) = title {
+                        validate_codex_thread_name(label, title)?;
+                    }
+                }
+                validate_codex_thread_name(
+                    "conversation divergence preserved title",
+                    &self.desired_fork_name,
+                )?;
+                validate_absolute_clean_path(
+                    "conversation divergence Codex executable",
+                    codex_executable,
+                )?;
+                validate_sha256(
+                    "conversation divergence Codex executable",
+                    codex_executable_sha256,
+                )?;
+                let expected = [
+                    CodexForkExecutor::AppServerStdio,
+                    CodexForkExecutor::NativePty,
+                ];
+                if available_executors.as_slice() != expected {
+                    return Err(
+                        "conversation divergence executors must be app-server then native PTY"
+                            .to_string(),
+                    );
+                }
             }
-        }
-        validate_codex_thread_name(
-            "conversation divergence preserved title",
-            &self.desired_fork_name,
-        )?;
-        validate_absolute_clean_path(
-            "conversation divergence Codex executable",
-            &self.codex_executable,
-        )?;
-        validate_sha256(
-            "conversation divergence Codex executable",
-            &self.codex_executable_sha256,
-        )?;
-        let expected = [
-            CodexForkExecutor::AppServerStdio,
-            CodexForkExecutor::NativePty,
-        ];
-        if self.available_executors != expected {
-            return Err(
-                "conversation divergence executors must be app-server then native PTY".to_string(),
-            );
+            DivergenceExecution::AdapterFileFork {
+                fork_provider_thread_id,
+                fork_transcript_path,
+            } => {
+                for (label, title) in [
+                    (
+                        "conversation divergence local title",
+                        self.pinned_local_title.as_deref(),
+                    ),
+                    (
+                        "conversation divergence cloud title",
+                        self.pinned_cloud_title.as_deref(),
+                    ),
+                ] {
+                    if let Some(title) = title {
+                        validate_display_text(label, title, false)?;
+                    }
+                }
+                validate_display_text(
+                    "conversation divergence preserved title",
+                    &self.desired_fork_name,
+                    false,
+                )?;
+                if self.desired_original_name.is_some() {
+                    return Err(
+                        "adapter file fork cannot rename the source conversation".to_string()
+                    );
+                }
+                validate_provider_thread_id(
+                    "conversation divergence fork provider thread",
+                    fork_provider_thread_id,
+                )?;
+                if fork_provider_thread_id == &self.source_provider_thread_id {
+                    return Err(
+                        "conversation divergence fork reuses the source provider thread"
+                            .to_string(),
+                    );
+                }
+                validate_absolute_clean_path(
+                    "conversation divergence fork transcript",
+                    fork_transcript_path,
+                )?;
+            }
         }
         Ok(())
     }
@@ -2988,7 +3528,7 @@ pub struct ConversationPlanAction {
     pub action: ConversationPlanActionType,
     pub reason_code: ConversationReasonCode,
     pub relation: ConversationRelation,
-    pub provider: Provider,
+    pub provider: ProviderKey,
     pub host_id: HostId,
     pub replica_id: ReplicaId,
     pub local_project_id: LocalProjectId,
@@ -3004,6 +3544,10 @@ pub struct ConversationPlanAction {
     pub pinned_revision: u64,
     pub pinned_commit_id: String,
     pub pinned_manifest_sha256: String,
+    /// The reviewed provider-scope coordinates this action was planned
+    /// against. Zero revision with an all-zero digest pins an absent scope.
+    pub pinned_scope_revision: u64,
+    pub pinned_scope_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_lineage_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3027,6 +3571,14 @@ impl ConversationPlanAction {
             &self.pinned_commit_id,
             &self.pinned_manifest_sha256,
         )?;
+        validate_sha256("conversation plan scope digest", &self.pinned_scope_sha256)?;
+        if (self.pinned_scope_revision == 0)
+            != self.pinned_scope_sha256.bytes().all(|byte| byte == b'0')
+        {
+            return Err(
+                "conversation plan scope pin has inconsistent absent coordinates".to_string(),
+            );
+        }
         validate_display_text("conversation plan codec", &self.required_codec, false)?;
         for (label, digest) in [
             (
@@ -3109,12 +3661,20 @@ impl ConversationPlanAction {
         }
         match (&self.action, &self.divergence) {
             (ConversationPlanActionType::ResolveDivergence, Some(divergence)) => {
-                if self.provider != Provider::Codex
-                    || self.relation != ConversationRelation::Diverged
+                if self.relation != ConversationRelation::Diverged
                     || self.proposed_provider_thread_id.is_some()
                 {
                     return Err(
                         "conversation divergence plan has an invalid action scope".to_string()
+                    );
+                }
+                if matches!(
+                    divergence.execution,
+                    DivergenceExecution::CodexNativeFork { .. }
+                ) && self.provider.as_str() != "codex"
+                {
+                    return Err(
+                        "Codex native fork execution requires the codex provider".to_string()
                     );
                 }
                 divergence.validate(&self.thread_id)?;
@@ -3149,6 +3709,9 @@ impl ConversationPlanAction {
     }
 }
 
+/// A reviewed multi-provider Push plan. Provider and profile pins live on
+/// every action, never at the top level, so one plan can carry actions for
+/// several providers with independent profile revisions.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ConversationPushPlan {
     pub schema_version: u32,
@@ -3158,11 +3721,9 @@ pub struct ConversationPushPlan {
     pub host_id: HostId,
     pub replica_id: ReplicaId,
     pub local_project_id: LocalProjectId,
-    pub provider_profile_id: LocalProviderProfileId,
     pub expected_host_identity_revision: u64,
     pub expected_project_binding_revision: u64,
     pub expected_bindings_document_revision: u64,
-    pub expected_profile_revision: u64,
     pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
@@ -3185,25 +3746,41 @@ impl ConversationPushPlan {
             return Err("invalid conversation push-plan lifetime or action count".to_string());
         }
         let mut action_ids = BTreeSet::new();
+        let mut provider_scope_pins: BTreeMap<ProviderKey, (u64, String)> = BTreeMap::new();
         for action in &self.actions {
             action.validate()?;
             if action.direction != ConversationPlanDirection::Push
                 || action.host_id != self.host_id
                 || action.replica_id != self.replica_id
                 || action.local_project_id != self.local_project_id
-                || action.provider_profile_id != self.provider_profile_id
                 || action.pinned_revision != self.revision
                 || action.pinned_commit_id != self.commit_id
                 || action.pinned_manifest_sha256 != self.manifest_sha256
                 || action.expected_host_identity_revision != self.expected_host_identity_revision
                 || action.expected_bindings_document_revision
                     != self.expected_bindings_document_revision
-                || action.expected_profile_revision != self.expected_profile_revision
                 || action.expected_project_binding_revision
                     != self.expected_project_binding_revision
                 || action.expires_at != self.expires_at
             {
                 return Err("conversation push-plan action pins disagree with the plan".to_string());
+            }
+            let scope_pin = (
+                action.pinned_scope_revision,
+                action.pinned_scope_sha256.clone(),
+            );
+            if let Some(previous) = provider_scope_pins.insert(action.provider.clone(), scope_pin) {
+                if previous
+                    != (
+                        action.pinned_scope_revision,
+                        action.pinned_scope_sha256.clone(),
+                    )
+                {
+                    return Err(format!(
+                        "conversation push-plan pins two scope states for provider '{}'",
+                        action.provider
+                    ));
+                }
             }
             if !action_ids.insert(action.action_id.clone()) {
                 return Err(format!(
@@ -3230,9 +3807,9 @@ pub fn classify_conversation_relation(
     cloud: Option<&[CanonicalConversationMessage]>,
 ) -> ConversationRelation {
     match (local, cloud) {
-        (None, None) => return ConversationRelation::BothMissing,
-        (None, Some(_)) => return ConversationRelation::LocalMissing,
-        (Some(_), None) => return ConversationRelation::CloudMissing,
+        (None, None) => ConversationRelation::BothMissing,
+        (None, Some(_)) => ConversationRelation::LocalMissing,
+        (Some(_), None) => ConversationRelation::CloudMissing,
         (Some(local), Some(cloud)) => {
             if validate_conversation_chain(local).is_err()
                 || validate_conversation_chain(cloud).is_err()
@@ -3425,7 +4002,7 @@ fn stable_conversation_id(prefix: &str, domain: &str, fields: &[&[u8]]) -> Resul
 /// local conversation stable before its first publication commits a binding.
 pub fn initial_conversation_thread_id(
     bundle_id: &BundleId,
-    provider: Provider,
+    provider: &ProviderKey,
     provider_thread_id: &str,
 ) -> Result<ThreadId, String> {
     if provider_thread_id.is_empty()
@@ -3446,14 +4023,14 @@ pub fn initial_conversation_thread_id(
 }
 
 pub fn conversation_resource_id(
-    provider: Provider,
+    provider: &ProviderKey,
     thread_id: &ThreadId,
 ) -> Result<ResourceId, String> {
     ResourceId::parse(format!("{}:conversation:{}", provider.as_str(), thread_id))
 }
 
 pub fn conversation_transcript_path(
-    provider: Provider,
+    provider: &ProviderKey,
     thread_id: &ThreadId,
 ) -> Result<LogicalPath, String> {
     LogicalPath::parse(format!(
@@ -3461,6 +4038,27 @@ pub fn conversation_transcript_path(
         provider.as_str(),
         thread_id
     ))
+}
+
+pub fn conversation_sidecar_path(
+    provider: &ProviderKey,
+    thread_id: &ThreadId,
+    sidecar_kind: &str,
+    file_name: &str,
+) -> Result<LogicalPath, String> {
+    LogicalPath::parse(format!(
+        "state/conversations/{}/{}/sidecars/{}/{}",
+        provider.as_str(),
+        thread_id,
+        sidecar_kind,
+        file_name
+    ))
+}
+
+/// The bounded namespace for provider state that is not owned by one
+/// conversation, such as provider memory.
+pub fn provider_state_path_prefix(provider: &ProviderKey) -> String {
+    format!("state/providers/{}/", provider.as_str())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -3610,16 +4208,20 @@ impl BundleHead {
     }
 }
 
+/// One independently revisioned slice of a portable repository. Every
+/// reference inside a scope must stay inside that scope: conversations may
+/// only name files of their own provider scope, provider resources cannot
+/// point into another provider, and project content lives only in the
+/// project scope.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct BundleManifest {
-    pub schema_version: u32,
+pub struct BundleScope {
     pub revision: u64,
-    pub commit_id: String,
-    pub updated_at: u64,
-    pub bundle: BundleIdentity,
+    /// Canonical content digest of this scope. Computed by
+    /// [`BundleScope::compute_content_sha256`]; excludes itself and covers
+    /// the scope key, revision, and all live and tombstoned content.
+    pub content_sha256: String,
     pub recipe: BundleRecipe,
     pub captured_with: CapturedWith,
-    pub published_by_origin: PortableOrigin,
     #[serde(default)]
     pub conversations: BTreeMap<ThreadId, ConversationThread>,
     #[serde(default)]
@@ -3632,24 +4234,86 @@ pub struct BundleManifest {
     pub tombstones: BTreeMap<String, Tombstone>,
 }
 
-impl BundleManifest {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != BUNDLE_SCHEMA {
-            return Err(format!(
-                "unsupported bundle manifest schema {}",
-                self.schema_version
-            ));
+/// The canonical encoding hashed into a scope's `content_sha256`. Field
+/// order is fixed by this struct and every collection is an ordered map, so
+/// `serde_json` serialization is deterministic. Changing this layout changes
+/// every scope digest and is a contract change.
+#[derive(Serialize)]
+struct BundleScopeDigestView<'a> {
+    scope: String,
+    revision: u64,
+    recipe: &'a BundleRecipe,
+    captured_with: &'a CapturedWith,
+    conversations: &'a BTreeMap<ThreadId, ConversationThread>,
+    resources: &'a BTreeMap<ResourceId, ResourceDescriptor>,
+    files: &'a BTreeMap<LogicalPath, BundleFileEntry>,
+    directories: &'a BTreeMap<LogicalPath, BundleDirectoryEntry>,
+    tombstones: &'a BTreeMap<String, Tombstone>,
+}
+
+impl BundleScope {
+    /// Build a scope and seal its canonical content digest.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sealed(
+        scope: &SyncScopeKey,
+        revision: u64,
+        recipe: BundleRecipe,
+        captured_with: CapturedWith,
+        conversations: BTreeMap<ThreadId, ConversationThread>,
+        resources: BTreeMap<ResourceId, ResourceDescriptor>,
+        files: BTreeMap<LogicalPath, BundleFileEntry>,
+        directories: BTreeMap<LogicalPath, BundleDirectoryEntry>,
+        tombstones: BTreeMap<String, Tombstone>,
+    ) -> Result<Self, String> {
+        let mut built = Self {
+            revision,
+            content_sha256: "0".repeat(64),
+            recipe,
+            captured_with,
+            conversations,
+            resources,
+            files,
+            directories,
+            tombstones,
+        };
+        built.content_sha256 = built.compute_content_sha256(scope)?;
+        Ok(built)
+    }
+
+    pub fn compute_content_sha256(&self, scope: &SyncScopeKey) -> Result<String, String> {
+        let view = BundleScopeDigestView {
+            scope: scope.canonical(),
+            revision: self.revision,
+            recipe: &self.recipe,
+            captured_with: &self.captured_with,
+            conversations: &self.conversations,
+            resources: &self.resources,
+            files: &self.files,
+            directories: &self.directories,
+            tombstones: &self.tombstones,
+        };
+        let bytes = serde_json::to_vec(&view)
+            .map_err(|error| format!("encode scope '{}' digest view: {}", scope, error))?;
+        Ok(hex_lower(&Sha256::digest(&bytes)))
+    }
+
+    fn validate(&self, scope: &SyncScopeKey) -> Result<(), String> {
+        if self.revision == 0 {
+            return Err(format!("scope '{}' has a zero revision", scope));
         }
-        self.published_by_origin.validate()?;
-        validate_named_id("commit id", &self.commit_id)?;
-        self.bundle.validate()?;
+        validate_sha256("scope content", &self.content_sha256)?;
+        let computed = self.compute_content_sha256(scope)?;
+        if computed != self.content_sha256 {
+            return Err(format!("scope '{}' content digest mismatch", scope));
+        }
         self.recipe.validate()?;
         if self.resources.len() > MAX_RESOURCES
             || self.files.len() > MAX_FILES
             || self.directories.len() > MAX_FILES
             || self.tombstones.len() > MAX_FILES
+            || self.conversations.len() > MAX_RESOURCES
         {
-            return Err("bundle manifest exceeds collection limits".to_string());
+            return Err(format!("scope '{}' exceeds collection limits", scope));
         }
         for (id, descriptor) in &self.resources {
             if id != &descriptor.resource_id {
@@ -3657,13 +4321,37 @@ impl BundleManifest {
             }
             descriptor.validate()?;
         }
-        self.validate_conversations()?;
         let recipe_ids = self.recipe.selected_ids();
         let resource_ids: BTreeSet<_> = self.resources.keys().cloned().collect();
         if recipe_ids != resource_ids {
-            return Err("manifest recipe and live resources differ".to_string());
+            return Err(format!(
+                "scope '{}' recipe and live resources differ",
+                scope
+            ));
         }
-        let mut folded_paths = BTreeMap::<String, (&LogicalPath, &'static str)>::new();
+        match scope {
+            SyncScopeKey::Project => self.validate_project_scope(),
+            SyncScopeKey::Provider(provider) => self.validate_provider_scope(provider),
+        }
+    }
+
+    fn validate_project_scope(&self) -> Result<(), String> {
+        if !self.conversations.is_empty() {
+            return Err("project scope cannot contain conversations".to_string());
+        }
+        for descriptor in self.resources.values() {
+            if !matches!(
+                descriptor.kind,
+                ResourceKind::ProjectContentFile
+                    | ResourceKind::ProjectContentDirectory
+                    | ResourceKind::Requirement
+            ) {
+                return Err(format!(
+                    "project scope cannot hold {:?} resource '{}'",
+                    descriptor.kind, descriptor.resource_id
+                ));
+            }
+        }
         let mut file_owners = BTreeMap::<ResourceId, usize>::new();
         let mut directory_owners = BTreeMap::<ResourceId, usize>::new();
         let mut project_content_bytes = 0_u64;
@@ -3695,18 +4383,15 @@ impl BundleManifest {
                     ));
                 }
             }
-            let folded = path.as_str().to_lowercase();
-            if let Some((previous, previous_kind)) =
-                folded_paths.insert(folded, (path, "directory"))
-            {
-                return Err(format!(
-                    "portable path collision between {} '{}' and directory '{}'",
-                    previous_kind, previous, path
-                ));
-            }
         }
         for (path, entry) in &self.files {
             entry.validate()?;
+            if path.as_str().starts_with("state/") {
+                return Err(format!(
+                    "project scope cannot hold provider-state file '{}'",
+                    path
+                ));
+            }
             let descriptor = self.resources.get(&entry.resource_id).ok_or_else(|| {
                 format!(
                     "file '{}' references missing resource '{}'",
@@ -3714,13 +4399,6 @@ impl BundleManifest {
                 )
             })?;
             *file_owners.entry(entry.resource_id.clone()).or_default() += 1;
-            let folded = path.as_str().to_lowercase();
-            if let Some((previous, previous_kind)) = folded_paths.insert(folded, (path, "file")) {
-                return Err(format!(
-                    "portable path collision between {} '{}' and file '{}'",
-                    previous_kind, previous, path
-                ));
-            }
             if descriptor.kind == ResourceKind::ProjectContentFile {
                 validate_project_content_descriptor_identity(descriptor, path, "file")?;
                 if entry.size > MAX_PROJECT_CONTENT_FILE_BYTES {
@@ -3774,21 +4452,6 @@ impl BundleManifest {
                 _ => {}
             }
         }
-        for path in self.files.keys() {
-            let components: Vec<_> = path.as_str().split('/').collect();
-            for end in 1..components.len() {
-                let ancestor = components[..end].join("/").to_lowercase();
-                if let Some((existing, kind)) = folded_paths.get(&ancestor) {
-                    if *kind == "directory" {
-                        continue;
-                    }
-                    return Err(format!(
-                        "manifest file '{}' is ancestor of '{}'",
-                        existing, path
-                    ));
-                }
-            }
-        }
         for (key, tombstone) in &self.tombstones {
             tombstone.validate()?;
             if key != &tombstone.canonical_key() {
@@ -3809,6 +4472,12 @@ impl BundleManifest {
                 } => {
                     if self.files.contains_key(logical_path) {
                         return Err(format!("live file '{}' also has a tombstone", logical_path));
+                    }
+                    if logical_path.as_str().starts_with("state/") {
+                        return Err(format!(
+                            "project scope cannot tombstone provider file '{}'",
+                            logical_path
+                        ));
                     }
                     if self.resources.contains_key(resource_id)
                         && !self.recipe.entries.contains_key(resource_id)
@@ -3877,27 +4546,41 @@ impl BundleManifest {
                     }
                 }
                 TombstoneTarget::ConversationThread { thread_id } => {
-                    if self.conversations.contains_key(thread_id) {
-                        return Err(format!(
-                            "live conversation thread '{}' also has a tombstone",
-                            thread_id
-                        ));
-                    }
-                    if tombstone.last_sha256.is_none() {
-                        return Err(format!(
-                            "conversation thread tombstone '{}' lacks its last digest",
-                            thread_id
-                        ));
-                    }
+                    return Err(format!(
+                        "project scope cannot tombstone conversation thread '{}'",
+                        thread_id
+                    ));
                 }
             }
         }
         Ok(())
     }
 
-    fn validate_conversations(&self) -> Result<(), String> {
-        if self.conversations.len() > MAX_RESOURCES {
-            return Err("bundle has too many conversation threads".to_string());
+    fn validate_provider_scope(&self, provider: &ProviderKey) -> Result<(), String> {
+        if !self.directories.is_empty() {
+            return Err(format!(
+                "provider scope '{}' cannot contain directory entries",
+                provider
+            ));
+        }
+        let conversation_prefix = format!("state/conversations/{}/", provider);
+        let state_prefix = provider_state_path_prefix(provider);
+        for descriptor in self.resources.values() {
+            if descriptor.provider.as_ref() != Some(provider) {
+                return Err(format!(
+                    "provider scope '{}' cannot hold resource '{}' of another provider",
+                    provider, descriptor.resource_id
+                ));
+            }
+            if !matches!(
+                descriptor.kind,
+                ResourceKind::Conversation | ResourceKind::ProviderState
+            ) {
+                return Err(format!(
+                    "provider scope '{}' cannot hold {:?} resource '{}'",
+                    provider, descriptor.kind, descriptor.resource_id
+                ));
+            }
         }
         let mut thread_resources = BTreeSet::new();
         let mut referenced_files = BTreeMap::<LogicalPath, ResourceId>::new();
@@ -3909,6 +4592,12 @@ impl BundleManifest {
                 ));
             }
             thread.validate()?;
+            if &thread.provider != provider {
+                return Err(format!(
+                    "conversation thread '{}' belongs to provider '{}', not scope '{}'",
+                    thread_id, thread.provider, provider
+                ));
+            }
             if !thread_resources.insert(thread.resource_id.clone()) {
                 return Err(format!(
                     "conversation resource '{}' belongs to multiple threads",
@@ -3921,11 +4610,9 @@ impl BundleManifest {
                     thread_id, thread.resource_id
                 )
             })?;
-            let expected_kind = match thread.provider {
-                Provider::Codex => ResourceKind::CodexConversation,
-                Provider::Claude => ResourceKind::ClaudeConversation,
-            };
-            if descriptor.kind != expected_kind || descriptor.provider != Some(thread.provider) {
+            if descriptor.kind != ResourceKind::Conversation
+                || descriptor.provider.as_ref() != Some(provider)
+            {
                 return Err(format!(
                     "conversation thread '{}' disagrees with its resource provider",
                     thread_id
@@ -3976,23 +4663,55 @@ impl BundleManifest {
                     ));
                 }
             }
-            if self
-                .directories
-                .values()
-                .any(|entry| entry.resource_id == thread.resource_id)
-            {
-                return Err(format!(
-                    "conversation resource '{}' cannot own a directory entry",
-                    thread.resource_id
-                ));
-            }
         }
         for (resource_id, descriptor) in &self.resources {
-            if descriptor.kind == ResourceKind::CodexConversation
+            if descriptor.kind == ResourceKind::Conversation
                 && !thread_resources.contains(resource_id)
             {
                 return Err(format!(
                     "conversation resource '{}' belongs to no live thread",
+                    resource_id
+                ));
+            }
+        }
+        for (path, entry) in &self.files {
+            entry.validate()?;
+            let in_conversations = path.as_str().starts_with(&conversation_prefix);
+            let in_state = path.as_str().starts_with(&state_prefix);
+            if !in_conversations && !in_state {
+                return Err(format!(
+                    "provider scope '{}' cannot hold file '{}' outside its namespaces",
+                    provider, path
+                ));
+            }
+            let descriptor = self.resources.get(&entry.resource_id).ok_or_else(|| {
+                format!(
+                    "file '{}' references missing resource '{}'",
+                    path, entry.resource_id
+                )
+            })?;
+            if in_state && descriptor.kind != ResourceKind::ProviderState {
+                return Err(format!(
+                    "provider-state file '{}' must be owned by a provider-state resource",
+                    path
+                ));
+            }
+            if in_conversations && descriptor.kind != ResourceKind::Conversation {
+                return Err(format!(
+                    "conversation-namespace file '{}' must be owned by a conversation resource",
+                    path
+                ));
+            }
+        }
+        for (resource_id, descriptor) in &self.resources {
+            if descriptor.kind == ResourceKind::ProviderState
+                && !self
+                    .files
+                    .values()
+                    .any(|entry| &entry.resource_id == resource_id)
+            {
+                return Err(format!(
+                    "provider-state resource '{}' owns no files",
                     resource_id
                 ));
             }
@@ -4015,7 +4734,275 @@ impl BundleManifest {
                 cursor = parent;
             }
         }
+        for (key, tombstone) in &self.tombstones {
+            tombstone.validate()?;
+            if key != &tombstone.canonical_key() {
+                return Err(format!("non-canonical tombstone key '{}'", key));
+            }
+            match &tombstone.target {
+                TombstoneTarget::Resource { resource_id } => {
+                    if self.resources.contains_key(resource_id) {
+                        return Err(format!(
+                            "live resource '{}' also has a tombstone",
+                            resource_id
+                        ));
+                    }
+                }
+                TombstoneTarget::File {
+                    resource_id,
+                    logical_path,
+                } => {
+                    if self.files.contains_key(logical_path) {
+                        return Err(format!("live file '{}' also has a tombstone", logical_path));
+                    }
+                    if !logical_path.as_str().starts_with(&conversation_prefix)
+                        && !logical_path.as_str().starts_with(&state_prefix)
+                    {
+                        return Err(format!(
+                            "provider scope '{}' cannot tombstone file '{}' outside its namespaces",
+                            provider, logical_path
+                        ));
+                    }
+                    if self.resources.contains_key(resource_id)
+                        && !self.recipe.entries.contains_key(resource_id)
+                    {
+                        return Err(format!("invalid file tombstone resource '{}'", resource_id));
+                    }
+                }
+                TombstoneTarget::ConversationThread { thread_id } => {
+                    if self.conversations.contains_key(thread_id) {
+                        return Err(format!(
+                            "live conversation thread '{}' also has a tombstone",
+                            thread_id
+                        ));
+                    }
+                    if tombstone.last_sha256.is_none() {
+                        return Err(format!(
+                            "conversation thread tombstone '{}' lacks its last digest",
+                            thread_id
+                        ));
+                    }
+                }
+                TombstoneTarget::ProjectContentFile { logical_path, .. }
+                | TombstoneTarget::ProjectContentDirectory { logical_path, .. } => {
+                    return Err(format!(
+                        "provider scope '{}' cannot tombstone project content '{}'",
+                        provider, logical_path
+                    ));
+                }
+            }
+        }
         Ok(())
+    }
+}
+
+/// A portable repository manifest composed of independently revisioned sync
+/// scopes. The manifest-level revision and commit identify one global CAS
+/// publication; each scope carries its own revision and content digest so
+/// unrelated providers never block each other.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BundleManifest {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub commit_id: String,
+    pub updated_at: u64,
+    pub bundle: BundleIdentity,
+    pub published_by_origin: PortableOrigin,
+    #[serde(default)]
+    pub scopes: BTreeMap<SyncScopeKey, BundleScope>,
+}
+
+impl BundleManifest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != BUNDLE_SCHEMA {
+            return Err(format!(
+                "unsupported bundle manifest schema {}",
+                self.schema_version
+            ));
+        }
+        self.published_by_origin.validate()?;
+        validate_named_id("commit id", &self.commit_id)?;
+        self.bundle.validate()?;
+        let provider_scope_count = self
+            .scopes
+            .keys()
+            .filter(|scope| matches!(scope, SyncScopeKey::Provider(_)))
+            .count();
+        if provider_scope_count > MAX_PROVIDER_SCOPES {
+            return Err(format!(
+                "bundle manifest exceeds {} provider scopes",
+                MAX_PROVIDER_SCOPES
+            ));
+        }
+        let mut total_resources = 0_usize;
+        let mut total_files = 0_usize;
+        let mut total_directories = 0_usize;
+        let mut total_tombstones = 0_usize;
+        for (scope_key, scope) in &self.scopes {
+            scope.validate(scope_key)?;
+            total_resources = total_resources.saturating_add(scope.resources.len());
+            total_files = total_files.saturating_add(scope.files.len());
+            total_directories = total_directories.saturating_add(scope.directories.len());
+            total_tombstones = total_tombstones.saturating_add(scope.tombstones.len());
+        }
+        if total_resources > MAX_RESOURCES
+            || total_files > MAX_FILES
+            || total_directories > MAX_FILES
+            || total_tombstones > MAX_FILES
+        {
+            return Err("bundle manifest exceeds collection limits".to_string());
+        }
+        let mut folded_paths = BTreeMap::<String, (LogicalPath, &'static str)>::new();
+        let mut thread_ids = BTreeSet::new();
+        let mut resource_ids = BTreeSet::new();
+        for scope in self.scopes.values() {
+            for thread_id in scope.conversations.keys() {
+                if !thread_ids.insert(thread_id.clone()) {
+                    return Err(format!(
+                        "conversation thread '{}' appears in multiple scopes",
+                        thread_id
+                    ));
+                }
+            }
+            for resource_id in scope.resources.keys() {
+                if !resource_ids.insert(resource_id.clone()) {
+                    return Err(format!(
+                        "resource '{}' appears in multiple scopes",
+                        resource_id
+                    ));
+                }
+            }
+            for path in scope.directories.keys() {
+                let folded = path.as_str().to_lowercase();
+                if let Some((previous, previous_kind)) =
+                    folded_paths.insert(folded, (path.clone(), "directory"))
+                {
+                    return Err(format!(
+                        "portable path collision between {} '{}' and directory '{}'",
+                        previous_kind, previous, path
+                    ));
+                }
+            }
+            for path in scope.files.keys() {
+                let folded = path.as_str().to_lowercase();
+                if let Some((previous, previous_kind)) =
+                    folded_paths.insert(folded, (path.clone(), "file"))
+                {
+                    return Err(format!(
+                        "portable path collision between {} '{}' and file '{}'",
+                        previous_kind, previous, path
+                    ));
+                }
+            }
+        }
+        for scope in self.scopes.values() {
+            for path in scope.files.keys() {
+                let components: Vec<_> = path.as_str().split('/').collect();
+                for end in 1..components.len() {
+                    let ancestor = components[..end].join("/").to_lowercase();
+                    if let Some((existing, kind)) = folded_paths.get(&ancestor) {
+                        if *kind == "directory" {
+                            continue;
+                        }
+                        return Err(format!(
+                            "manifest file '{}' is ancestor of '{}'",
+                            existing, path
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn scope(&self, key: &SyncScopeKey) -> Option<&BundleScope> {
+        self.scopes.get(key)
+    }
+
+    pub fn provider_scope(&self, provider: &ProviderKey) -> Option<&BundleScope> {
+        self.scopes.get(&SyncScopeKey::Provider(provider.clone()))
+    }
+
+    pub fn provider_scopes(&self) -> impl Iterator<Item = (&ProviderKey, &BundleScope)> {
+        self.scopes.iter().filter_map(|(key, scope)| match key {
+            SyncScopeKey::Provider(provider) => Some((provider, scope)),
+            SyncScopeKey::Project => None,
+        })
+    }
+
+    pub fn all_resources(&self) -> impl Iterator<Item = (&ResourceId, &ResourceDescriptor)> {
+        self.scopes
+            .values()
+            .flat_map(|scope| scope.resources.iter())
+    }
+
+    pub fn all_files(&self) -> impl Iterator<Item = (&LogicalPath, &BundleFileEntry)> {
+        self.scopes.values().flat_map(|scope| scope.files.iter())
+    }
+
+    pub fn all_directories(&self) -> impl Iterator<Item = (&LogicalPath, &BundleDirectoryEntry)> {
+        self.scopes
+            .values()
+            .flat_map(|scope| scope.directories.iter())
+    }
+
+    pub fn all_conversations(
+        &self,
+    ) -> impl Iterator<Item = (&SyncScopeKey, &ThreadId, &ConversationThread)> {
+        self.scopes.iter().flat_map(|(key, scope)| {
+            scope
+                .conversations
+                .iter()
+                .map(move |(thread_id, thread)| (key, thread_id, thread))
+        })
+    }
+
+    pub fn all_tombstones(&self) -> impl Iterator<Item = (&SyncScopeKey, &String, &Tombstone)> {
+        self.scopes.iter().flat_map(|(key, scope)| {
+            scope
+                .tombstones
+                .iter()
+                .map(move |(tombstone_key, tombstone)| (key, tombstone_key, tombstone))
+        })
+    }
+
+    pub fn find_conversation(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<(&SyncScopeKey, &ConversationThread)> {
+        self.scopes.iter().find_map(|(key, scope)| {
+            scope
+                .conversations
+                .get(thread_id)
+                .map(|thread| (key, thread))
+        })
+    }
+
+    pub fn find_resource(
+        &self,
+        resource_id: &ResourceId,
+    ) -> Option<(&SyncScopeKey, &ResourceDescriptor)> {
+        self.scopes.iter().find_map(|(key, scope)| {
+            scope
+                .resources
+                .get(resource_id)
+                .map(|descriptor| (key, descriptor))
+        })
+    }
+
+    pub fn find_file(&self, path: &LogicalPath) -> Option<(&SyncScopeKey, &BundleFileEntry)> {
+        self.scopes
+            .iter()
+            .find_map(|(key, scope)| scope.files.get(path).map(|entry| (key, entry)))
+    }
+
+    /// The scope coordinates the continuity and mutation-firewall layers
+    /// compare: `(revision, content_sha256)` per present scope.
+    pub fn scope_coordinates(&self) -> BTreeMap<SyncScopeKey, (u64, String)> {
+        self.scopes
+            .iter()
+            .map(|(key, scope)| (key.clone(), (scope.revision, scope.content_sha256.clone())))
+            .collect()
     }
 
     pub fn validate_against_head(&self, head: &BundleHead) -> Result<(), String> {
@@ -4087,7 +5074,7 @@ pub enum RestoreActionKind {
         logical_path: LogicalPath,
     },
     MaterializeConversation {
-        provider: Provider,
+        provider: ProviderKey,
         logical_path: LogicalPath,
     },
     Manual {
@@ -4321,6 +5308,81 @@ pub struct CodexDivergenceReceipt {
     pub inventory_refresh_status: CodexInventoryRefreshStatus,
 }
 
+/// Receipt for an adapter file fork: the preserved branch was rewritten to a
+/// fresh provider session and written beside the source before replacement.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AdapterDivergenceReceipt {
+    pub resolution: ConversationDivergenceResolution,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_provider_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_transcript_path: Option<String>,
+}
+
+impl AdapterDivergenceReceipt {
+    fn validate(&self) -> Result<(), String> {
+        let preserved = [
+            self.preserved_thread_id.is_some(),
+            self.preserved_provider_thread_id.is_some(),
+            self.fork_transcript_path.is_some(),
+        ];
+        match self.resolution {
+            ConversationDivergenceResolution::PreserveLocalWithNativeFork => {
+                if preserved.contains(&false) {
+                    return Err("preserved adapter divergence receipt is incomplete".to_string());
+                }
+            }
+            ConversationDivergenceResolution::UseCloudOnly => {
+                if preserved.contains(&true) {
+                    return Err(
+                        "cloud-only adapter divergence receipt carries fork state".to_string()
+                    );
+                }
+            }
+        }
+        if let Some(thread_id) = &self.preserved_provider_thread_id {
+            validate_provider_thread_id("preserved provider thread", thread_id)?;
+        }
+        if let Some(path) = &self.fork_transcript_path {
+            validate_absolute_clean_path("preserved fork transcript", path)?;
+        }
+        Ok(())
+    }
+}
+
+/// Which divergence machinery produced a conversation receipt.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DivergenceReceiptKind {
+    CodexNativeFork(CodexDivergenceReceipt),
+    AdapterFileFork(AdapterDivergenceReceipt),
+}
+
+impl DivergenceReceiptKind {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::CodexNativeFork(receipt) => receipt.validate(),
+            Self::AdapterFileFork(receipt) => receipt.validate(),
+        }
+    }
+
+    pub fn resolution(&self) -> ConversationDivergenceResolution {
+        match self {
+            Self::CodexNativeFork(receipt) => receipt.resolution,
+            Self::AdapterFileFork(receipt) => receipt.resolution,
+        }
+    }
+
+    pub fn preserved_thread_id(&self) -> Option<&ThreadId> {
+        match self {
+            Self::CodexNativeFork(receipt) => receipt.preserved_thread_id.as_ref(),
+            Self::AdapterFileFork(receipt) => receipt.preserved_thread_id.as_ref(),
+        }
+    }
+}
+
 impl CodexDivergenceReceipt {
     fn validate(&self) -> Result<(), String> {
         match self.resolution {
@@ -4393,7 +5455,7 @@ pub struct ConversationApplyReceipt {
     pub published_origin_replica_token: Option<OriginReplicaToken>,
     pub journal_operation_id: ConversationOperationId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub divergence: Option<CodexDivergenceReceipt>,
+    pub divergence: Option<DivergenceReceiptKind>,
 }
 
 impl ConversationApplyReceipt {
@@ -4581,1230 +5643,4 @@ impl Materializations {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn recipe_base_defaults_sync_activity_timestamps() {
-        let base: RecipeBase = serde_json::from_str(
-            r#"{"revision":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_size":123,"commit_id":"commit-1","recipe_revision":2}"#,
-        )
-        .unwrap();
-        assert_eq!(base.manifest_size, 123);
-        assert_eq!(base.last_pull_at, None);
-        assert_eq!(base.last_push_at, None);
-    }
-
-    #[test]
-    fn recipe_base_requires_manifest_size() {
-        assert!(serde_json::from_str::<RecipeBase>(
-            r#"{"revision":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","commit_id":"commit-1","recipe_revision":2}"#,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn recipe_base_rejects_zero_manifest_size() {
-        let base: RecipeBase = serde_json::from_str(
-            r#"{"revision":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_size":0,"commit_id":"commit-1","recipe_revision":2}"#,
-        )
-        .unwrap();
-        assert!(base.validate().unwrap_err().contains("must be nonzero"));
-    }
-
-    /// The commit ID names the manifest the continuity probe checks, so a
-    /// base without one is invalid rather than quietly unprobeable
-    /// (DESIGN_REMOTE_HISTORY_CONTINUITY.md cutover step 1).
-    #[test]
-    fn recipe_base_requires_an_immutable_commit_id() {
-        assert!(serde_json::from_str::<RecipeBase>(
-            r#"{"revision":1,"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_size":123,"recipe_revision":2}"#,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn bundle_head_requires_manifest_size() {
-        assert!(serde_json::from_str::<BundleHead>(
-            r#"{"schema_version":1,"bundle_id":"0123456789abcdef0123456789abcdef","kind":"project","revision":1,"commit_id":"commit-1","manifest_key":"bundles/0123456789abcdef0123456789abcdef/manifests/commit-1.json","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updated_at":1}"#,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn bundle_head_rejects_zero_manifest_size() {
-        let head: BundleHead = serde_json::from_str(
-            r#"{"schema_version":1,"bundle_id":"0123456789abcdef0123456789abcdef","kind":"project","revision":1,"commit_id":"commit-1","manifest_key":"bundles/0123456789abcdef0123456789abcdef/manifests/commit-1.json","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_size":0,"updated_at":1}"#,
-        )
-        .unwrap();
-        assert!(head.validate().unwrap_err().contains("must be nonzero"));
-    }
-
-    fn bundle_id() -> BundleId {
-        BundleId::parse("0123456789abcdef0123456789abcdef").unwrap()
-    }
-
-    fn resource_id(value: &str) -> ResourceId {
-        ResourceId::parse(value).unwrap()
-    }
-
-    fn portable_origin() -> PortableOrigin {
-        PortableOrigin {
-            origin_host_token: OriginHostToken::parse("a".repeat(64)).unwrap(),
-            origin_replica_token: OriginReplicaToken::parse("b".repeat(64)).unwrap(),
-            shared_label: None,
-        }
-    }
-
-    fn project_content_descriptor(entry_type: &str, relative_path: &str) -> ResourceDescriptor {
-        let logical_path = LogicalPath::parse(format!("project/{}", relative_path)).unwrap();
-        let (_, resource_id) = project_content_identity(entry_type, &logical_path).unwrap();
-        ResourceDescriptor {
-            resource_id,
-            kind: match entry_type {
-                "file" => ResourceKind::ProjectContentFile,
-                "dir" => ResourceKind::ProjectContentDirectory,
-                _ => panic!("unsupported test entry type"),
-            },
-            provider: None,
-            scope: ResourceScope::Project,
-            display_name: relative_path.to_string(),
-            provenance: Provenance::ProjectLocal {
-                relative_path: relative_path.to_string(),
-            },
-            apply_policy: ApplyPolicy::ExplicitReview,
-            relative_cwd: None,
-            codec_version: 1,
-            metadata: BTreeMap::new(),
-        }
-    }
-
-    fn project_content_manifest() -> BundleManifest {
-        let mut manifest = BundleManifest {
-            schema_version: BUNDLE_SCHEMA,
-            revision: 1,
-            commit_id: "commit-project-content".to_string(),
-            updated_at: 1,
-            bundle: BundleIdentity {
-                bundle_id: bundle_id(),
-                display_name: "Project".to_string(),
-                kind: BundleKind::Project,
-                repository_fingerprint: None,
-            },
-            recipe: BundleRecipe::default(),
-            captured_with: CapturedWith::default(),
-            published_by_origin: portable_origin(),
-            conversations: BTreeMap::new(),
-            resources: BTreeMap::new(),
-            files: BTreeMap::new(),
-            directories: BTreeMap::new(),
-            tombstones: BTreeMap::new(),
-        };
-        for relative_path in ["docs", "docs/specs", "docs/empty"] {
-            let descriptor = project_content_descriptor("dir", relative_path);
-            let resource_id = descriptor.resource_id.clone();
-            manifest.recipe.entries.insert(
-                resource_id.clone(),
-                RecipeEntry {
-                    resource_id: resource_id.clone(),
-                    apply_policy: ApplyPolicy::ExplicitReview,
-                    required: relative_path != "docs/empty",
-                },
-            );
-            manifest.resources.insert(resource_id.clone(), descriptor);
-            manifest.directories.insert(
-                LogicalPath::parse(format!("project/{}", relative_path)).unwrap(),
-                BundleDirectoryEntry {
-                    resource_id,
-                    mode: Some(0o755),
-                    source_mtime: 1,
-                },
-            );
-        }
-        let descriptor = project_content_descriptor("file", "docs/specs/a.md");
-        let resource_id = descriptor.resource_id.clone();
-        manifest.recipe.entries.insert(
-            resource_id.clone(),
-            RecipeEntry {
-                resource_id: resource_id.clone(),
-                apply_policy: ApplyPolicy::ExplicitReview,
-                required: false,
-            },
-        );
-        manifest.resources.insert(resource_id.clone(), descriptor);
-        manifest.files.insert(
-            LogicalPath::parse("project/docs/specs/a.md").unwrap(),
-            BundleFileEntry {
-                resource_id,
-                sha256: "a".repeat(64),
-                size: 1,
-                source_mtime: 1,
-                object_key: "_uploads/upload-1/files/project/docs/specs/a.md".to_string(),
-                mode: Some(0o644),
-            },
-        );
-        manifest
-    }
-
-    #[test]
-    fn ids_fail_closed_during_deserialization() {
-        assert!(BundleId::parse("../escape").is_err());
-        assert!(BundleId::parse("ABCDEF0123456789ABCDEF0123456789").is_err());
-        assert!(ResourceId::parse("skill:release").is_ok());
-        assert!(ResourceId::parse("Skill/Release").is_err());
-        assert!(serde_json::from_str::<BundleId>("\"../../etc/passwd\"").is_err());
-    }
-
-    #[test]
-    fn initial_conversation_ids_are_stable_and_bundle_scoped() {
-        let first = initial_conversation_thread_id(
-            &bundle_id(),
-            Provider::Codex,
-            "019f742a-a206-7932-876c-9db8d8ce575a",
-        )
-        .unwrap();
-        assert_eq!(
-            first,
-            initial_conversation_thread_id(
-                &bundle_id(),
-                Provider::Codex,
-                "019f742a-a206-7932-876c-9db8d8ce575a",
-            )
-            .unwrap()
-        );
-        assert_ne!(
-            first,
-            initial_conversation_thread_id(
-                &BundleId::parse("11111111111111111111111111111111").unwrap(),
-                Provider::Codex,
-                "019f742a-a206-7932-876c-9db8d8ce575a",
-            )
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn host_identity_and_scoped_origin_tokens_have_fixed_validated_encodings() {
-        assert!(HostId::parse("00112233445566778899aabbccddeeff").is_ok());
-        assert!(HostId::parse("00112233445566778899AABBCCDDEEFF").is_err());
-        assert!(HostId::parse("short").is_err());
-
-        let host_id = HostId::parse("00112233445566778899aabbccddeeff").unwrap();
-        let bundle = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
-        let replica = ReplicaId::parse("replica-a").unwrap();
-        let host_token = derive_origin_host_token(&host_id, &bundle).unwrap();
-        let replica_token = derive_origin_replica_token(&host_id, &bundle, &replica).unwrap();
-
-        // Golden vectors freeze the domain-separated u64-length-prefixed
-        // encoding used by every portable-bundle writer.
-        assert_eq!(
-            host_token.as_str(),
-            "a4ab94f1dfb193b63b7b1862aa6c9cabe17ff1c463287f2958281527c75bc62d"
-        );
-        assert_eq!(
-            replica_token.as_str(),
-            "0399716f9fe42796b64a32c5763e91334d58017c93f0c6dd56590320530edd07"
-        );
-        assert_eq!(
-            derive_origin_host_token(&host_id, &bundle).unwrap(),
-            host_token
-        );
-        assert_ne!(
-            derive_origin_host_token(
-                &host_id,
-                &BundleId::parse("11111111111111111111111111111111").unwrap()
-            )
-            .unwrap(),
-            host_token
-        );
-        assert_ne!(
-            derive_origin_replica_token(&host_id, &bundle, &ReplicaId::parse("replica-b").unwrap())
-                .unwrap(),
-            replica_token
-        );
-        assert_ne!(
-            derive_origin_host_token(
-                &HostId::parse("ffeeddccbbaa99887766554433221100").unwrap(),
-                &bundle
-            )
-            .unwrap(),
-            host_token
-        );
-    }
-
-    #[test]
-    fn origin_labels_are_bounded_local_presentation_only() {
-        let token = OriginHostToken::parse("7f3a".repeat(16)).unwrap();
-        assert_eq!(fallback_origin_host_label(&token), "Host 7F3A");
-        let valid = PortableOrigin {
-            origin_host_token: token,
-            origin_replica_token: OriginReplicaToken::parse("ab".repeat(32)).unwrap(),
-            shared_label: Some("Work laptop".to_string()),
-        };
-        valid.validate().unwrap();
-        let mut invalid = valid;
-        invalid.shared_label = Some("x".repeat(129));
-        assert!(invalid.validate().is_err());
-    }
-
-    #[test]
-    fn logical_paths_are_portable_and_namespace_bounded() {
-        assert!(LogicalPath::parse("project/.agents/skills/release/SKILL.md").is_ok());
-        assert!(LogicalPath::parse("state/claude/projects/root/session.jsonl").is_ok());
-        for path in [
-            "/project/a",
-            "project/../secret",
-            "project/a\\b",
-            "project/CON/file",
-            "unknown/file",
-            "state",
-        ] {
-            assert!(LogicalPath::parse(path).is_err(), "{}", path);
-        }
-    }
-
-    #[test]
-    fn config_rejects_split_bundle_identity_and_duplicate_cells() {
-        let storage = StorageConfig {
-            id: StorageId::parse("personal").unwrap(),
-            name: "Personal".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: "/tmp/project-sync-store".to_string(),
-            included_default_exclusions: Vec::new(),
-            supports_conditional_writes: None,
-        };
-        let project = LocalProjectRegistration {
-            local_project_id: LocalProjectId::parse("project-a").unwrap(),
-            bundle_id: bundle_id(),
-            display_name: "Project A".to_string(),
-            local_alias: None,
-            repository_fingerprint: None,
-            recipe: BundleRecipe::default(),
-            recipe_bases: BTreeMap::new(),
-            revision: 0,
-            created_at: 1,
-            updated_at: 1,
-        };
-        let mut config = SyncConfig {
-            schema: LOCAL_SCHEMA,
-            revision: 0,
-            storages: vec![storage],
-            projects: vec![project.clone()],
-            links: vec![ProjectStorageLink {
-                local_project_id: project.local_project_id.clone(),
-                storage_id: StorageId::parse("personal").unwrap(),
-                bundle_id: BundleId::parse("11111111111111111111111111111111").unwrap(),
-                recipe: None,
-                project_content_preferences: Default::default(),
-                pinned: false,
-                created_at: 1,
-            }],
-        };
-        assert!(config.validate().unwrap_err().contains("differs"));
-        config.links[0].bundle_id = bundle_id();
-        config.links.push(config.links[0].clone());
-        assert!(config.validate().unwrap_err().contains("duplicate"));
-    }
-
-    #[test]
-    fn baseline_contracts_remain_schema_one() {
-        for (name, schema) in [
-            ("local config", LOCAL_SCHEMA),
-            ("machine projects", MACHINE_PROJECT_SCHEMA),
-            ("host identity", HOST_IDENTITY_SCHEMA),
-            ("conversation bindings", CONVERSATION_BINDINGS_SCHEMA),
-            (
-                "conversation sync journal",
-                CONVERSATION_SYNC_JOURNAL_SCHEMA,
-            ),
-            ("conversation push plan", PUSH_PLAN_SCHEMA),
-            ("bundle", BUNDLE_SCHEMA),
-            ("recipe", RECIPE_SCHEMA),
-            ("restore plan", RESTORE_PLAN_SCHEMA),
-            (
-                "project content preferences",
-                PROJECT_CONTENT_PREFERENCES_SCHEMA,
-            ),
-        ] {
-            assert_eq!(schema, 1, "{name} must start at schema 1");
-        }
-        assert_eq!(SETUP_DRAFT_SCHEMA, 2);
-        assert_eq!(SETUP_TRANSACTION_SCHEMA, 2);
-
-        let current = SyncConfig::default();
-        current.validate().unwrap();
-
-        for unsupported_schema in [2, 3] {
-            let mut unsupported = current.clone();
-            unsupported.schema = unsupported_schema;
-            let error = unsupported.validate().unwrap_err();
-            assert!(
-                error.contains("unsupported project-sync schema"),
-                "{unsupported_schema}: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn active_bindings_share_a_checkout_only_through_distinct_provider_configs() {
-        let project = |id: &str, bundle: &str| LocalProjectRegistration {
-            local_project_id: LocalProjectId::parse(id).unwrap(),
-            bundle_id: BundleId::parse(bundle).unwrap(),
-            display_name: id.to_string(),
-            local_alias: None,
-            repository_fingerprint: None,
-            recipe: BundleRecipe::default(),
-            recipe_bases: BTreeMap::new(),
-            revision: 0,
-            created_at: 1,
-            updated_at: 1,
-        };
-        let config = SyncConfig {
-            schema: LOCAL_SCHEMA,
-            revision: 0,
-            storages: Vec::new(),
-            projects: vec![
-                project("project-a", "0123456789abcdef0123456789abcdef"),
-                project("project-b", "11111111111111111111111111111111"),
-            ],
-            links: Vec::new(),
-        };
-        let profile = |id: &str, path: &str| ProviderProfile {
-            profile_id: LocalProviderProfileId::parse(id).unwrap(),
-            provider: Provider::Codex,
-            display_name: id.to_string(),
-            path: path.to_string(),
-            canonical_path: path.to_string(),
-            revision: 0,
-            created_at: 1,
-            updated_at: 1,
-        };
-        let binding = |replica: &str, project: &str, bundle: &str, profile: &str| ProjectBinding {
-            host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
-            replica_id: ReplicaId::parse(replica).unwrap(),
-            local_project_id: LocalProjectId::parse(project).unwrap(),
-            bundle_id: BundleId::parse(bundle).unwrap(),
-            project_root: "/home/user/projects/health-game".to_string(),
-            canonical_project_root: "/home/user/projects/health-game".to_string(),
-            profile_ids: BTreeMap::from([(
-                Provider::Codex,
-                LocalProviderProfileId::parse(profile).unwrap(),
-            )]),
-            codex_home: None,
-            claude_home: None,
-            state: BindingState::Active,
-            revision: 0,
-            updated_at: 1,
-        };
-        let mut machine = MachineProjectState {
-            schema: MACHINE_PROJECT_SCHEMA,
-            revision: 0,
-            profiles: vec![
-                profile("profile-main", "/home/user/.codex"),
-                profile("profile-alt", "/home/user/conf2/.codex"),
-            ],
-            bindings: vec![
-                binding(
-                    "replica-a",
-                    "project-a",
-                    "0123456789abcdef0123456789abcdef",
-                    "profile-main",
-                ),
-                binding(
-                    "replica-b",
-                    "project-b",
-                    "11111111111111111111111111111111",
-                    "profile-alt",
-                ),
-            ],
-        };
-        machine.validate(&config).unwrap();
-        machine.bindings[1].profile_ids = BTreeMap::from([(
-            Provider::Codex,
-            LocalProviderProfileId::parse("profile-main").unwrap(),
-        )]);
-        let error = machine.validate(&config).unwrap_err();
-        assert!(error.contains("same provider config"), "{}", error);
-    }
-
-    #[test]
-    fn recipe_key_is_identity_and_digest_is_only_version_metadata() {
-        let id = resource_id("memo:release");
-        let mut recipe = BundleRecipe::default();
-        recipe.entries.insert(
-            id.clone(),
-            RecipeEntry {
-                resource_id: id,
-                apply_policy: ApplyPolicy::ExplicitReview,
-                required: false,
-            },
-        );
-        assert!(recipe.validate().is_ok());
-        let encoded = serde_json::to_string(&recipe).unwrap();
-        assert!(encoded.contains("memo:release"));
-        assert!(!encoded.contains("source_digest"));
-    }
-
-    #[test]
-    fn manifest_requires_recipe_resource_and_file_referential_integrity() {
-        let id = resource_id("memory:claude");
-        let path = LogicalPath::parse("state/claude/memory/MEMORY.md").unwrap();
-        let mut recipe = BundleRecipe::default();
-        recipe.entries.insert(
-            id.clone(),
-            RecipeEntry {
-                resource_id: id.clone(),
-                apply_policy: ApplyPolicy::Merge,
-                required: false,
-            },
-        );
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            id.clone(),
-            ResourceDescriptor {
-                resource_id: id.clone(),
-                kind: ResourceKind::ProjectMemory,
-                provider: Some(Provider::Claude),
-                scope: ResourceScope::ProviderState,
-                display_name: "Claude memory".to_string(),
-                provenance: Provenance::Unknown,
-                apply_policy: ApplyPolicy::Merge,
-                relative_cwd: None,
-                codec_version: 1,
-                metadata: BTreeMap::new(),
-            },
-        );
-        let mut files = BTreeMap::new();
-        files.insert(
-            path,
-            BundleFileEntry {
-                resource_id: id,
-                sha256: "a".repeat(64),
-                size: 1,
-                source_mtime: 1,
-                object_key: "_uploads/upload-1/files/state/claude/memory/MEMORY.md".to_string(),
-                mode: Some(0o644),
-            },
-        );
-        let manifest = BundleManifest {
-            schema_version: BUNDLE_SCHEMA,
-            revision: 1,
-            commit_id: "commit-1".to_string(),
-            updated_at: 1,
-            bundle: BundleIdentity {
-                bundle_id: bundle_id(),
-                display_name: "Project".to_string(),
-                kind: BundleKind::Project,
-                repository_fingerprint: None,
-            },
-            recipe,
-            captured_with: CapturedWith::default(),
-            published_by_origin: portable_origin(),
-            conversations: BTreeMap::new(),
-            resources,
-            files,
-            directories: BTreeMap::new(),
-            tombstones: BTreeMap::new(),
-        };
-        assert!(manifest.validate().is_ok());
-        let mut broken = manifest.clone();
-        broken.resources.clear();
-        assert!(broken.validate().is_err());
-    }
-
-    #[test]
-    fn project_content_manifest_validates_exact_tree_identity() {
-        let manifest = project_content_manifest();
-        manifest.validate().unwrap();
-
-        let mut unsupported = manifest.clone();
-        unsupported.schema_version = BUNDLE_SCHEMA + 1;
-        assert!(unsupported.validate().unwrap_err().contains("unsupported"));
-
-        let mut missing_ancestor = manifest.clone();
-        let docs = LogicalPath::parse("project/docs").unwrap();
-        let docs_resource = missing_ancestor
-            .directories
-            .remove(&docs)
-            .unwrap()
-            .resource_id;
-        missing_ancestor.resources.remove(&docs_resource);
-        missing_ancestor.recipe.entries.remove(&docs_resource);
-        assert!(missing_ancestor
-            .validate()
-            .unwrap_err()
-            .contains("lacks directory entry"));
-
-        let mut orphan = manifest.clone();
-        orphan
-            .files
-            .remove(&LogicalPath::parse("project/docs/specs/a.md").unwrap());
-        assert!(orphan
-            .validate()
-            .unwrap_err()
-            .contains("must own exactly one file"));
-
-        let mut forged = manifest.clone();
-        let file_id = forged.files.values().next().unwrap().resource_id.clone();
-        forged.resources.get_mut(&file_id).unwrap().provenance = Provenance::ProjectLocal {
-            relative_path: "docs/specs/other.md".to_string(),
-        };
-        assert!(forged
-            .validate()
-            .unwrap_err()
-            .contains("mismatched path provenance"));
-    }
-
-    #[test]
-    fn project_content_manifest_rejects_path_collision_and_oversized_file() {
-        let mut collision = project_content_manifest();
-        let descriptor = project_content_descriptor("file", "docs/empty");
-        let resource_id = descriptor.resource_id.clone();
-        collision.recipe.entries.insert(
-            resource_id.clone(),
-            RecipeEntry {
-                resource_id: resource_id.clone(),
-                apply_policy: ApplyPolicy::ExplicitReview,
-                required: false,
-            },
-        );
-        collision.resources.insert(resource_id.clone(), descriptor);
-        collision.files.insert(
-            LogicalPath::parse("project/docs/empty").unwrap(),
-            BundleFileEntry {
-                resource_id,
-                sha256: "b".repeat(64),
-                size: 1,
-                source_mtime: 1,
-                object_key: "_uploads/upload-1/files/project/docs/empty".to_string(),
-                mode: Some(0o644),
-            },
-        );
-        assert!(collision.validate().unwrap_err().contains("path collision"));
-
-        let mut oversized = project_content_manifest();
-        oversized.files.values_mut().next().unwrap().size = MAX_PROJECT_CONTENT_FILE_BYTES + 1;
-        assert!(oversized.validate().unwrap_err().contains("exceeds"));
-    }
-
-    #[test]
-    fn project_content_tombstones_are_typed_and_path_bound() {
-        let mut manifest = project_content_manifest();
-        let path = LogicalPath::parse("project/docs/specs/a.md").unwrap();
-        let entry = manifest.files.remove(&path).unwrap();
-        manifest.resources.remove(&entry.resource_id);
-        manifest.recipe.entries.remove(&entry.resource_id);
-        let tombstone = Tombstone {
-            target: TombstoneTarget::ProjectContentFile {
-                resource_id: entry.resource_id,
-                logical_path: path,
-            },
-            last_sha256: Some(entry.sha256),
-            deleted_at: 2,
-        };
-        manifest
-            .tombstones
-            .insert(tombstone.canonical_key(), tombstone);
-        manifest.validate().unwrap();
-
-        let key = manifest.tombstones.keys().next().unwrap().clone();
-        let tombstone = manifest.tombstones.get_mut(&key).unwrap();
-        if let TombstoneTarget::ProjectContentFile { resource_id, .. } = &mut tombstone.target {
-            *resource_id = project_content_descriptor("file", "docs/specs/other.md").resource_id;
-        }
-        let changed = manifest.tombstones.remove(&key).unwrap();
-        manifest.tombstones.insert(changed.canonical_key(), changed);
-        assert!(manifest.validate().unwrap_err().contains("does not match"));
-    }
-
-    #[test]
-    fn executable_restore_actions_cannot_be_implicitly_approved() {
-        let action = RestoreAction {
-            action_id: ActionId::parse("action-1").unwrap(),
-            resource_id: resource_id("project:file:docs-readme"),
-            kind: RestoreActionKind::WriteProjectFile {
-                logical_path: LogicalPath::parse("project/docs/README.md").unwrap(),
-                mode: 0o644,
-                source_mtime: 1,
-            },
-            target_path: None,
-            source_sha256: None,
-            expected_target_sha256: None,
-            expected_target_mode: None,
-            materialized_sha256: None,
-            requires_explicit_approval: false,
-        };
-        assert!(action.validate().unwrap_err().contains("explicit approval"));
-    }
-
-    fn canonical_message(
-        id: &str,
-        parent: Option<&str>,
-        semantic_byte: char,
-    ) -> CanonicalConversationMessage {
-        CanonicalConversationMessage {
-            message_id: MessageId::parse(id).unwrap(),
-            parent_message_id: parent.map(|value| MessageId::parse(value).unwrap()),
-            semantic_fingerprint: semantic_byte.to_string().repeat(64),
-        }
-    }
-
-    #[test]
-    fn conversation_relation_matrix_uses_ids_parentage_and_semantics() {
-        let base = vec![
-            canonical_message("m-a", None, 'a'),
-            canonical_message("m-b", Some("m-a"), 'b'),
-        ];
-        let local = vec![
-            canonical_message("m-a", None, 'a'),
-            canonical_message("m-b", Some("m-a"), 'b'),
-            canonical_message("m-local", Some("m-b"), 'c'),
-        ];
-        let cloud = vec![
-            canonical_message("m-a", None, 'a'),
-            canonical_message("m-b", Some("m-a"), 'b'),
-            canonical_message("m-cloud", Some("m-b"), 'd'),
-        ];
-
-        assert_eq!(
-            classify_conversation_relation(Some(&base), Some(&base)),
-            ConversationRelation::Identical
-        );
-        assert_eq!(
-            classify_conversation_relation(Some(&local), Some(&base)),
-            ConversationRelation::CloudPrefixOfLocal
-        );
-        assert_eq!(
-            classify_conversation_relation(Some(&base), Some(&cloud)),
-            ConversationRelation::LocalPrefixOfCloud
-        );
-        assert_eq!(
-            classify_conversation_relation(Some(&local), Some(&cloud)),
-            ConversationRelation::Diverged
-        );
-        assert_eq!(
-            classify_conversation_relation(None, Some(&cloud)),
-            ConversationRelation::LocalMissing
-        );
-        assert_eq!(
-            classify_conversation_relation(Some(&local), None),
-            ConversationRelation::CloudMissing
-        );
-        assert_eq!(
-            classify_conversation_relation(None, None),
-            ConversationRelation::BothMissing
-        );
-
-        let same_text_different_id = vec![canonical_message("other", None, 'a')];
-        assert_eq!(
-            classify_conversation_relation(Some(&base[..1]), Some(&same_text_different_id),),
-            ConversationRelation::Diverged
-        );
-
-        let mut reused_id = base.clone();
-        reused_id[1].semantic_fingerprint = "e".repeat(64);
-        assert_eq!(
-            classify_conversation_relation(Some(&base), Some(&reused_id)),
-            ConversationRelation::Unknown
-        );
-
-        let mut broken_parent = base.clone();
-        broken_parent[1].parent_message_id = None;
-        assert_eq!(
-            classify_conversation_relation(Some(&base), Some(&broken_parent)),
-            ConversationRelation::Unknown
-        );
-    }
-
-    #[test]
-    fn conversation_digests_separate_lineage_from_semantics() {
-        let first = vec![
-            canonical_message("m-a", None, 'a'),
-            canonical_message("m-b", Some("m-a"), 'b'),
-        ];
-        let mut semantic_change = first.clone();
-        semantic_change[1].semantic_fingerprint = "c".repeat(64);
-        let different_lineage = vec![
-            canonical_message("m-a", None, 'a'),
-            canonical_message("m-c", Some("m-a"), 'b'),
-        ];
-
-        let first_digests = conversation_chain_digests(&first).unwrap();
-        let semantic_digests = conversation_chain_digests(&semantic_change).unwrap();
-        let lineage_digests = conversation_chain_digests(&different_lineage).unwrap();
-        assert_eq!(first_digests.0, semantic_digests.0);
-        assert_ne!(first_digests.1, semantic_digests.1);
-        assert_ne!(first_digests.0, lineage_digests.0);
-        assert_ne!(first_digests.1, lineage_digests.1);
-    }
-
-    fn refresh_meta(chain: &[CanonicalConversationMessage]) -> ((String, String), u64) {
-        (
-            conversation_chain_digests(chain).unwrap(),
-            chain.len() as u64,
-        )
-    }
-
-    fn cloud_meta<'a>(pair: &'a (String, String), count: u64) -> RefreshCloudMeta<'a> {
-        RefreshCloudMeta {
-            message_count: count,
-            lineage_digest: &pair.0,
-            semantic_digest: &pair.1,
-        }
-    }
-
-    /// Every row of the decision table in
-    /// docs/DESIGN_MANIFEST_ONLY_THREAD_REFRESH.md, straight down the table.
-    /// Row 1 (tombstones) and row 5's binding-only variant live in the
-    /// review layer; everything else is the classifier's contract.
-    #[test]
-    fn manifest_only_refresh_covers_every_decision_row() {
-        let shared = vec![
-            canonical_message("m-a", None, 'a'),
-            canonical_message("m-b", Some("m-a"), 'b'),
-        ];
-        let extended = {
-            let mut chain = shared.clone();
-            chain.push(canonical_message("m-c", Some("m-b"), 'c'));
-            chain
-        };
-        let (shared_pair, shared_count) = refresh_meta(&shared);
-        let (extended_pair, extended_count) = refresh_meta(&extended);
-        let branched = vec![
-            canonical_message("m-a", None, 'a'),
-            canonical_message("m-x", Some("m-a"), '4'),
-            canonical_message("m-y", Some("m-x"), '5'),
-        ];
-        let (branched_pair, _) = refresh_meta(&branched);
-
-        // Rows 2-4: presence.
-        assert_eq!(
-            classify_thread_refresh(RefreshLocalState::Missing, None, None),
-            ConversationRelation::BothMissing
-        );
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Missing,
-                Some(cloud_meta(&shared_pair, shared_count)),
-                None
-            ),
-            ConversationRelation::LocalMissing
-        );
-        assert_eq!(
-            classify_thread_refresh(RefreshLocalState::Chain(&shared), None, None),
-            ConversationRelation::CloudMissing
-        );
-        // Row 5: bound but uncapturable holds the row.
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Uncapturable,
-                Some(cloud_meta(&shared_pair, shared_count)),
-                None
-            ),
-            ConversationRelation::Unknown
-        );
-        // Row 6: digest-pair equality is sync.
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(&shared),
-                Some(cloud_meta(&shared_pair, shared_count)),
-                None
-            ),
-            ConversationRelation::Identical
-        );
-        // Rows 7-8: longer local proves ancestry with a prefix pair or goes
-        // to review.
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(&extended),
-                Some(cloud_meta(&shared_pair, shared_count)),
-                None
-            ),
-            ConversationRelation::CloudPrefixOfLocal
-        );
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(&branched),
-                Some(cloud_meta(&shared_pair, shared_count)),
-                None
-            ),
-            ConversationRelation::Diverged
-        );
-        // Rows 9-10: shorter local fast-forwards only when the pin proves
-        // nothing local is unsaved.
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(&shared),
-                Some(cloud_meta(&extended_pair, extended_count)),
-                Some((&shared_pair.0, &shared_pair.1))
-            ),
-            ConversationRelation::LocalPrefixOfCloud
-        );
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(&shared),
-                Some(cloud_meta(&extended_pair, extended_count)),
-                Some((&branched_pair.0, &branched_pair.1))
-            ),
-            ConversationRelation::Diverged
-        );
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(&shared),
-                Some(cloud_meta(&extended_pair, extended_count)),
-                None
-            ),
-            ConversationRelation::Diverged
-        );
-        // Row 11: equal counts with different content cannot fast-forward.
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(&branched),
-                Some(cloud_meta(&extended_pair, extended_count)),
-                None
-            ),
-            ConversationRelation::Diverged
-        );
-    }
-
-    /// The loss scenarios that defeated the timestamp- and position-based
-    /// refresh designs, kept as regressions so they cannot return.  Each
-    /// comment names the design the scenario broke.
-    #[test]
-    fn manifest_only_refresh_defeats_the_recorded_loss_scenarios() {
-        let synced = vec![
-            canonical_message("m-a", None, 'a'),
-            canonical_message("m-b", Some("m-a"), 'b'),
-            canonical_message("m-c", Some("m-b"), 'c'),
-        ];
-        let (synced_pair, _) = refresh_meta(&synced);
-        let cloud_extended = {
-            let mut chain = synced.clone();
-            chain.push(canonical_message("m-d", Some("m-c"), 'd'));
-            chain.push(canonical_message("m-e", Some("m-d"), 'e'));
-            chain
-        };
-        let (cloud_pair, cloud_count) = refresh_meta(&cloud_extended);
-
-        // Two-machine ping-pong: A pushed (pin moved), B pushed on top.  A's
-        // refresh must read cloud-outstanding, not divergent — the pull-time
-        // timestamp design classified this happy path as divergence.
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(&synced),
-                Some(cloud_meta(&cloud_pair, cloud_count)),
-                Some((&synced_pair.0, &synced_pair.1))
-            ),
-            ConversationRelation::LocalPrefixOfCloud
-        );
-
-        // Edit-and-resubmit that regrows to the synced length: the
-        // position-pin design read pin == length as clean and clobbered the
-        // local branch with a pull.
-        let regrown = vec![
-            canonical_message("m-a", None, 'a'),
-            canonical_message("m-b", Some("m-a"), 'b'),
-            canonical_message("m-r", Some("m-b"), '7'),
-        ];
-        assert_eq!(refresh_meta(&regrown).1, synced.len() as u64);
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(&regrown),
-                Some(cloud_meta(&cloud_pair, cloud_count)),
-                Some((&synced_pair.0, &synced_pair.1))
-            ),
-            ConversationRelation::Diverged
-        );
-
-        // Truncation below the last-synced state: unspecified in both
-        // rejected designs, drifting toward a destructive pull.
-        let truncated = &synced[..2];
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(truncated),
-                Some(cloud_meta(&cloud_pair, cloud_count)),
-                Some((&synced_pair.0, &synced_pair.1))
-            ),
-            ConversationRelation::Diverged
-        );
-
-        // Never synced on this replica: the 'max' timestamp sentinel
-        // auto-classified this as cloud-outstanding and replaced local
-        // content that had never been saved anywhere.
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(&synced),
-                Some(cloud_meta(&cloud_pair, cloud_count)),
-                None
-            ),
-            ConversationRelation::Diverged
-        );
-
-        // Equal-length force-replace over a pin-clean local: review, never a
-        // silent replace.
-        let replaced = vec![
-            canonical_message("m-a", None, 'a'),
-            canonical_message("m-b", Some("m-a"), 'b'),
-            canonical_message("m-z", Some("m-b"), '9'),
-        ];
-        let (replaced_pair, replaced_count) = refresh_meta(&replaced);
-        assert_eq!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(&synced),
-                Some(cloud_meta(&replaced_pair, replaced_count)),
-                Some((&synced_pair.0, &synced_pair.1))
-            ),
-            ConversationRelation::Diverged
-        );
-    }
-
-    fn conversation_manifest() -> BundleManifest {
-        let bundle = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
-        let thread_id = ThreadId::parse("thread-0123456789abcdef0123456789abcdef").unwrap();
-        let resource_id = conversation_resource_id(Provider::Codex, &thread_id).unwrap();
-        let transcript_path = conversation_transcript_path(Provider::Codex, &thread_id).unwrap();
-        let chain = vec![
-            canonical_message("m-a", None, 'a'),
-            canonical_message("m-b", Some("m-a"), 'b'),
-        ];
-        let (lineage_digest, semantic_digest) = conversation_chain_digests(&chain).unwrap();
-        let thread = ConversationThread {
-            thread_id: thread_id.clone(),
-            provider: Provider::Codex,
-            display_title: Some("Conversation".to_string()),
-            resource_id: resource_id.clone(),
-            files: vec![ConversationFileRef {
-                logical_path: transcript_path.clone(),
-                role: ConversationFileRole::Transcript,
-            }],
-            lineage_status: ConversationLineageStatus::Complete,
-            lineage_codec: "codex-lineage-v1".to_string(),
-            head_message_id: Some(MessageId::parse("m-b").unwrap()),
-            message_count: 2,
-            lineage_digest,
-            semantic_digest,
-            forked_from: None,
-            source_thread_id: Some("thread-a".to_string()),
-            created_by_origin: None,
-            last_updated_by_origin: None,
-            created_at: 1,
-            updated_at: 1,
-        };
-        let descriptor = ResourceDescriptor {
-            resource_id: resource_id.clone(),
-            kind: ResourceKind::CodexConversation,
-            provider: Some(Provider::Codex),
-            scope: ResourceScope::ProviderState,
-            display_name: "Conversation".to_string(),
-            provenance: Provenance::Unknown,
-            apply_policy: ApplyPolicy::SafeFile,
-            relative_cwd: Some(".".to_string()),
-            codec_version: 1,
-            metadata: BTreeMap::new(),
-        };
-        BundleManifest {
-            schema_version: BUNDLE_SCHEMA,
-            revision: 2,
-            commit_id: "commit-conversation".to_string(),
-            updated_at: 2,
-            bundle: BundleIdentity {
-                bundle_id: bundle,
-                display_name: "Project".to_string(),
-                kind: BundleKind::Project,
-                repository_fingerprint: None,
-            },
-            recipe: BundleRecipe {
-                schema_version: RECIPE_SCHEMA,
-                revision: 1,
-                entries: BTreeMap::from([(
-                    resource_id.clone(),
-                    RecipeEntry {
-                        resource_id: resource_id.clone(),
-                        apply_policy: ApplyPolicy::SafeFile,
-                        required: false,
-                    },
-                )]),
-            },
-            captured_with: CapturedWith {
-                app_version: "test".to_string(),
-                codex_version: Some("test".to_string()),
-                claude_version: None,
-                codec_versions: BTreeMap::from([("codex-lineage-v1".to_string(), 1)]),
-            },
-            published_by_origin: PortableOrigin {
-                origin_host_token: OriginHostToken::parse("a".repeat(64)).unwrap(),
-                origin_replica_token: OriginReplicaToken::parse("b".repeat(64)).unwrap(),
-                shared_label: None,
-            },
-            conversations: BTreeMap::from([(thread_id.clone(), thread)]),
-            resources: BTreeMap::from([(resource_id.clone(), descriptor)]),
-            files: BTreeMap::from([(
-                transcript_path,
-                BundleFileEntry {
-                    resource_id,
-                    sha256: "c".repeat(64),
-                    size: 10,
-                    source_mtime: 1,
-                    object_key: "_uploads/upload-1/files/transcript.jsonl".to_string(),
-                    mode: Some(0o600),
-                },
-            )]),
-            directories: BTreeMap::new(),
-            tombstones: BTreeMap::new(),
-        }
-    }
-
-    /// Manifest-only refresh classifies from the count and digest pair, so a
-    /// conversation entry without valid metadata may not exist at all.
-    #[test]
-    fn manifest_rejects_conversations_without_refresh_metadata() {
-        let manifest = conversation_manifest();
-        manifest.validate().unwrap();
-
-        let mut unproven = manifest.clone();
-        unproven
-            .conversations
-            .values_mut()
-            .next()
-            .unwrap()
-            .lineage_status = ConversationLineageStatus::Unknown {
-            reason_code: "missing-parent".to_string(),
-        };
-        assert!(unproven
-            .validate()
-            .unwrap_err()
-            .contains("unproven lineage"));
-
-        let mut empty = manifest.clone();
-        empty
-            .conversations
-            .values_mut()
-            .next()
-            .unwrap()
-            .message_count = 0;
-        assert!(empty
-            .validate()
-            .unwrap_err()
-            .contains("incomplete lineage metadata"));
-
-        let mut malformed = manifest;
-        malformed
-            .conversations
-            .values_mut()
-            .next()
-            .unwrap()
-            .lineage_digest = "not-a-digest".to_string();
-        assert!(malformed
-            .validate()
-            .unwrap_err()
-            .contains("not a lowercase SHA-256"));
-    }
-
-    #[test]
-    fn manifest_enforces_conversation_referential_integrity() {
-        let manifest = conversation_manifest();
-        manifest.validate().unwrap();
-
-        let mut missing_file = manifest.clone();
-        missing_file.files.clear();
-        assert!(missing_file
-            .validate()
-            .unwrap_err()
-            .contains("missing file"));
-
-        let mut wrong_provider = manifest.clone();
-        wrong_provider
-            .conversations
-            .values_mut()
-            .next()
-            .unwrap()
-            .provider = Provider::Claude;
-        assert!(wrong_provider
-            .validate()
-            .unwrap_err()
-            .contains("non-canonical resource id"));
-
-        let mut duplicate_transcript = manifest.clone();
-        let thread = duplicate_transcript
-            .conversations
-            .values_mut()
-            .next()
-            .unwrap();
-        let duplicate = thread.files[0].clone();
-        thread.files.push(duplicate);
-        assert!(duplicate_transcript
-            .validate()
-            .unwrap_err()
-            .contains("repeats file"));
-
-        let mut non_canonical_transcript = manifest.clone();
-        non_canonical_transcript
-            .conversations
-            .values_mut()
-            .next()
-            .unwrap()
-            .files[0]
-            .logical_path = LogicalPath::parse("state/codex/sessions/thread-a.jsonl").unwrap();
-        assert!(non_canonical_transcript
-            .validate()
-            .unwrap_err()
-            .contains("non-canonical transcript path"));
-
-        let mut self_fork = manifest.clone();
-        {
-            let thread = self_fork.conversations.values_mut().next().unwrap();
-            thread.forked_from = Some(thread.thread_id.clone());
-        }
-        assert!(self_fork
-            .validate()
-            .unwrap_err()
-            .contains("cannot fork from itself"));
-
-        let mut cyclic_forks = manifest.clone();
-        let first_id = cyclic_forks.conversations.keys().next().unwrap().clone();
-        let second_id = ThreadId::parse("thread-11111111111111111111111111111111").unwrap();
-        let second_resource_id = conversation_resource_id(Provider::Codex, &second_id).unwrap();
-        let second_path = conversation_transcript_path(Provider::Codex, &second_id).unwrap();
-        let mut second_thread = cyclic_forks.conversations.get(&first_id).unwrap().clone();
-        second_thread.thread_id = second_id.clone();
-        second_thread.resource_id = second_resource_id.clone();
-        second_thread.files[0].logical_path = second_path.clone();
-        second_thread.forked_from = Some(first_id.clone());
-        cyclic_forks
-            .conversations
-            .get_mut(&first_id)
-            .unwrap()
-            .forked_from = Some(second_id.clone());
-        let mut second_descriptor = cyclic_forks.resources.values().next().unwrap().clone();
-        second_descriptor.resource_id = second_resource_id.clone();
-        let mut second_file = cyclic_forks.files.values().next().unwrap().clone();
-        second_file.resource_id = second_resource_id.clone();
-        cyclic_forks.conversations.insert(second_id, second_thread);
-        cyclic_forks
-            .resources
-            .insert(second_resource_id.clone(), second_descriptor);
-        cyclic_forks.files.insert(second_path, second_file);
-        cyclic_forks.recipe.entries.insert(
-            second_resource_id.clone(),
-            RecipeEntry {
-                resource_id: second_resource_id,
-                apply_policy: ApplyPolicy::SafeFile,
-                required: false,
-            },
-        );
-        assert!(cyclic_forks
-            .validate()
-            .unwrap_err()
-            .contains("ancestry contains a cycle"));
-
-        let mut unsupported = manifest;
-        unsupported.schema_version = BUNDLE_SCHEMA + 1;
-        assert!(unsupported.validate().unwrap_err().contains("unsupported"));
-    }
-}
+mod tests;

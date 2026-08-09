@@ -3,17 +3,17 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import Icon from "../../src/components/Icons";
-import ProjectChatHistoryPage, {
+import ProjectActivityPage, {
   BranchPicker,
   ForkActivityPanel,
   ProjectChatHistoryContent,
-  ThreadMetrics,
+  SessionMetrics,
   refreshActivityAndHandleForkFeedback,
-  threadDebugCopyText,
-  threadSyncPresentation,
-} from "../../src/components/project-sync/ProjectChatHistoryPage";
+  sessionDebugCopyText,
+  sessionSyncPresentation,
+  unresolvedSyncPresentation,
+} from "../../src/components/project-sync/ProjectActivityPage";
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
-import { pushSelectableResourceIds } from "../../src/components/project-sync/PushResourceWorkspace";
 import { sessionName } from "../../src/components/project-sync/syncOutcome";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../../src/components/project-sync/ThreadStatusIcon";
 import { createSingleFlight } from "../../src/components/project-sync/api";
@@ -33,23 +33,70 @@ const project = {
   revision: 1,
 };
 
-const history = {
+const binding = {
+  host_id: "00112233445566778899aabbccddeeff",
+  replica_id: "replica",
+  local_project_id: project.local_project_id,
+  bundle_id: project.bundle_id,
+  project_root: project.project_root,
+  canonical_project_root: project.project_root,
+  profile_ids: { codex: "profile-codex" },
+  state: "active",
+  revision: 1,
+  updated_at: 2,
+};
+
+const CODEX_SESSION_ID = "019f7798-5437-7632-9dbc-5b589cf68bf0";
+const codexResourceId = `codex:conversation:${CODEX_SESSION_ID}`;
+
+function codexActions(enabled = true) {
+  const disabledReason = enabled ? null : "This session is not materialized locally.";
+  return [
+    {
+      action_id: "codex.open_in_app",
+      kind: "open_in_app" as const,
+      label: "Open in Codex",
+      enabled,
+      disabled_reason: disabledReason,
+    },
+    {
+      action_id: "codex.open_in_terminal",
+      kind: "open_in_terminal" as const,
+      label: "Open in Terminal",
+      enabled,
+      disabled_reason: disabledReason,
+    },
+  ];
+}
+
+const codexSession = {
+  resource_id: codexResourceId,
+  provider: "codex",
+  provider_display_name: "Codex",
+  provider_session_id: CODEX_SESSION_ID,
+  logical_thread_id: CODEX_SESSION_ID,
+  source: "local_only" as const,
+  access: "bound_ready" as const,
+  title: "Add Git history mapping",
+  summary: "Map project-owned sessions onto the first-parent rail.",
+  started_at: 1_752_800_000,
+  ended_at: 1_752_803_600,
+  working_directory: "/Users/test/projects/mallard/packages/desktop",
+  relative_cwd: "packages/desktop",
+  branch: "main",
+  recorded_sha: "a".repeat(40),
+  is_active: false,
+  user_round_count: 3,
+  agent_message_count: 5,
+  tool_call_count: 8,
+  total_tokens: 24800,
+  metrics_complete: true,
+  actions: codexActions(),
+};
+
+const activity = {
   project_id: project.local_project_id,
-  threads: [{
-    thread_id: "019f7798-5437-7632-9dbc-5b589cf68bf0",
-    working_directory: "/Users/test/projects/mallard/packages/desktop",
-    title: "Add Git history mapping",
-    summary: "Map project-owned Codex sessions onto the first-parent rail.",
-    started_at: 1_752_800_000,
-    ended_at: 1_752_803_600,
-    branch: "main",
-    recorded_sha: "a".repeat(40),
-    user_round_count: 3,
-    agent_message_count: 5,
-    tool_call_count: 8,
-    total_tokens: 24800,
-    metrics_complete: true,
-  }],
+  sessions: [codexSession],
   git: {
     selected_branch: "main",
     branches: [{ name: "main", is_current: true, available: true }],
@@ -59,17 +106,17 @@ const history = {
       short_sha: "bbbbbbb",
       committed_at: 1_752_802_000,
       subject: "Add project-scoped history",
-      thread_refs: [{ thread_id: "019f7798-5437-7632-9dbc-5b589cf68bf0" }],
+      session_refs: [{ resource_id: codexResourceId }],
     }],
-    unique_thread_count: 1,
+    unique_session_count: 1,
     next_cursor: null,
   },
   unmapped: [],
+  providers: [{ provider: "codex", display_name: "Codex", access: "bound_ready" as const }],
   warnings: [],
   window_start: 1_750_000_000,
   window_end: 1_753_000_000,
   next_before: 1_750_000_000,
-  codex_home: "/Users/test/config/mallard/.codex",
   storage_sync: [{
     storage_id: "storage-1",
     storage_name: "Local storage 1",
@@ -77,6 +124,35 @@ const history = {
     last_push_at: 1_752_800_000,
   }],
 };
+
+const contentDefaults = {
+  project,
+  binding,
+  loading: false,
+  loadingMore: false,
+  actionError: null,
+  actionBusyResourceId: null,
+  onBranchChange: () => undefined,
+  onRefresh: () => undefined,
+  onLoadMore: () => undefined,
+  onSessionAction: () => undefined,
+};
+
+function emptyComparison(overrides: Record<string, unknown> = {}) {
+  return {
+    project_id: project.local_project_id,
+    storage_id: "storage-1",
+    storage_name: "Local storage 1",
+    compared_at: 1_752_804_000,
+    entries: [],
+    counts: { synced: 0, local: 0, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
+    scopes: [],
+    provider_errors: {},
+    warnings: [],
+    remote_continuity: { state: "in_sync", revision: 1 },
+    ...overrides,
+  };
+}
 
 test("a completed fork renders as a rail event carrying the thread it created", () => {
   const html = renderToStaticMarkup(
@@ -144,7 +220,7 @@ test("a completed fork renders as a rail event carrying the thread it created", 
         plan_id: null,
         action_id: null,
         thread_id: "thread-manual-fork",
-        source_provider_thread_id: history.threads[0].thread_id,
+        source_provider_thread_id: CODEX_SESSION_ID,
         suggested_fork_name: "Fork title",
         status: "fork_unacknowledged",
         message: "Mallard did not acknowledge the Codex fork.",
@@ -250,9 +326,9 @@ test("the branch picker exposes branch state without using the native select men
   assert.doesNotMatch(html, /<select/);
 });
 
-test("thread indicators use the quiet desktop sync vocabulary", () => {
-  const presentation = (state: Parameters<typeof threadSyncPresentation>[0]["state"]) => (
-    threadSyncPresentation({ state } as Parameters<typeof threadSyncPresentation>[0], "Storage")
+test("session indicators use the quiet desktop sync vocabulary", () => {
+  const presentation = (state: Parameters<typeof sessionSyncPresentation>[0]["state"]) => (
+    sessionSyncPresentation({ state } as Parameters<typeof sessionSyncPresentation>[0], "Storage")
   );
 
   assert.deepEqual(
@@ -273,37 +349,49 @@ test("thread indicators use the quiet desktop sync vocabulary", () => {
     ],
   );
 
-  const unknown = threadSyncPresentation({
+  const unknown = sessionSyncPresentation({
     state: "unknown",
     status_detail: "Conversation ancestry could not be proven safely.",
-  } as Parameters<typeof threadSyncPresentation>[0], "Storage");
+  } as Parameters<typeof sessionSyncPresentation>[0], "Storage");
   assert.match(unknown.label, /ancestry could not be proven safely/i);
   assert.doesNotMatch(unknown.label, /baseline/i);
 
-  const pending = threadSyncPresentation({
+  const pending = sessionSyncPresentation({
     state: "synced",
     status_detail: "A fork checkpoint is pending.",
     push_decision: {
       action: "blocked",
       reason_code: "resolution_pending",
     },
-  } as Parameters<typeof threadSyncPresentation>[0], "Storage");
+  } as Parameters<typeof sessionSyncPresentation>[0], "Storage");
   assert.deepEqual(
     { status: pending.status, className: pending.className },
     { status: "pending", className: "pending" },
   );
 
-  const unavailable = threadSyncPresentation({
+  const unavailable = sessionSyncPresentation({
     state: "local_only",
     push_decision: {
       action: "blocked",
       reason_code: "codec_unsupported",
     },
-  } as Parameters<typeof threadSyncPresentation>[0], "Storage");
+  } as Parameters<typeof sessionSyncPresentation>[0], "Storage");
   assert.deepEqual(
     { status: unavailable.status, className: unavailable.className },
     { status: "unavailable", className: "unavailable" },
   );
+
+  // Provider naming in hold copy comes from the entry, never from a
+  // hard-coded provider branch: a Claude entry speaks Claude.
+  const claudeBlocked = sessionSyncPresentation({
+    state: "local_only",
+    provider_display_name: "Claude",
+    push_decision: {
+      action: "blocked",
+      reason_code: "codec_unsupported",
+    },
+  } as Parameters<typeof sessionSyncPresentation>[0], "Storage");
+  assert.match(claudeBlocked.label, /older Claude version/);
 
   const css = readFileSync("src/App.css", "utf8");
   assert.match(css, /\.sync-thread-sync-indicator\.synced \{ color: var\(--thread-status-synced\); \}/);
@@ -353,6 +441,21 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
       color: "#85878e",
       glyph: "M7 11h10v3h-10Z",
     },
+    // The three neutrals say "no verdict yet", so they take --text-3 rather
+    // than a signal hue: a colour here would claim an answer the comparison has
+    // not given, and on an unlinked project one of these is on every row.
+    untracked: {
+      color: "var(--text-3)",
+      glyph: "M8 8h8v8H8ZM10 14h4v-4h-4Z",
+    },
+    checking: {
+      color: "var(--text-3)",
+      glyph: "M6 11h3v3H6Z",
+    },
+    unknown: {
+      color: "var(--text-3)",
+      glyph: "M9 6h6v2H9ZM13 8h2v3h-2ZM11 11h4v2h-4ZM11 13h2v2h-2ZM11 16h2v2h-2Z",
+    },
   };
   const statuses = Object.keys(expected) as ThreadStatusIconName[];
 
@@ -371,6 +474,12 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
     assert.doesNotMatch(html, /--thread-status-glyph/);
   }
 
+  // Three dots, animated in turn: one glyph pulsing as a whole reads as an
+  // alarm, a cycle reads as work in progress.
+  const checkingHtml = renderToStaticMarkup(<ThreadStatusIcon status="checking" />);
+  assert.match(checkingHtml, /class="thread-status-icon-dots"/);
+  assert.equal((checkingHtml.match(/<path fill="currentColor"/g) ?? []).length, 3);
+
   const css = readFileSync("src/App.css", "utf8");
   for (const status of statuses) {
     assert.match(css, new RegExp(`\\.thread-status-icon\\[data-thread-status="${status}"\\]`));
@@ -378,36 +487,155 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
   for (const { color } of Object.values(expected)) {
     assert.ok(css.includes(color));
   }
+  assert.match(css, /\.thread-status-icon-dots > path \{[^}]*animation: thread-status-dot/s);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.thread-status-icon-dots > path \{ animation: none;/s);
+});
+
+test("a row with no comparison entry names why, instead of drawing nothing", () => {
+  const base = {
+    comparisonLoaded: true,
+    comparisonLoading: false,
+    comparisonError: null,
+    storageName: "R2 storage 1",
+    hasBoundProvider: true,
+  };
+
+  // Loading wins: a refresh nulls the comparison, and the badges used to blink
+  // out and back on every one of them.
+  assert.deepEqual(
+    unresolvedSyncPresentation({ ...base, comparisonLoading: true }),
+    { status: "checking", className: "checking", label: "Comparing with R2 storage 1…" },
+  );
+  const failed = unresolvedSyncPresentation({ ...base, comparisonError: "NoSuchBucket: mallard-prod" });
+  assert.equal(failed.status, "unknown");
+  assert.match(failed.label, /NoSuchBucket: mallard-prod/);
+
+  // No storage and no bound profile are both "untracked", but they are not the
+  // same sentence — one is fixed by linking, the other by connecting.
+  const noStorage = unresolvedSyncPresentation({ ...base, storageName: null, comparisonLoaded: false });
+  assert.equal(noStorage.status, "untracked");
+  assert.match(noStorage.label, /Link a storage/);
+  const noProfile = unresolvedSyncPresentation({ ...base, hasBoundProvider: false, comparisonLoaded: false });
+  assert.equal(noProfile.status, "untracked");
+  assert.match(noProfile.label, /Connect an agent profile/);
+
+  // A comparison exists and this row is simply not in it — view-only, or an
+  // adapter this Mallard version does not have.
+  const uncovered = unresolvedSyncPresentation(base);
+  assert.equal(uncovered.status, "unknown");
+  assert.match(uncovered.label, /cannot read this session well enough to match it/);
+
+  // Every branch resolves; none can return null.
+  for (const status of ["checking", "unknown", "untracked"] as const) {
+    assert.ok(status.length > 0);
+  }
+});
+
+test("every row leads with exactly one glyph, so the titles form a column", () => {
+  // The bug this guards: the badge was conditional, and the empty "uncommitted"
+  // placeholder that stood in for it was later rendered *beside* it instead of
+  // instead of it. Either way some rows got a different number of leading
+  // boxes, and their titles sat 26px off every other row's. Measured in a
+  // browser at the time: titleX was [64, 38] before the fix and [38] after.
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} />,
+  );
+  const titles = html.match(/<div class="sync-history-thread-title">[\s\S]*?<(?:button|strong)/g) ?? [];
+  assert.ok(titles.length > 0, "no rows rendered");
+  for (const lead of titles) {
+    const badges = (lead.match(/class="sync-thread-sync-indicator/g) ?? []).length;
+    assert.equal(badges, 1, `exactly one status badge before the title: ${lead}`);
+    // Nothing else may claim a leading 18px box on a plain browse row.
+    assert.doesNotMatch(lead, /sync-history-thread-kind|sync-history-branch-state current/);
+  }
+});
+
+test("fresh storage matches portable Activity rows to capture-resource comparisons", () => {
+  const syncResourceId = `codex:session:${CODEX_SESSION_ID}`;
+  const decision = (action: string, selectable: boolean) => ({
+    action,
+    reason_code: "cloud_missing",
+    selectable,
+    selected_by_default: selectable,
+    requires_explicit_approval: false,
+  });
+  const comparison = emptyComparison({
+    counts: { synced: 0, local: 1, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
+    entries: [{
+      provider: "codex",
+      provider_display_name: "Codex",
+      access: "bound_ready",
+      thread_id: CODEX_SESSION_ID,
+      resource_id: syncResourceId,
+      display_name: codexSession.title,
+      state: "local_only",
+      local_present: true,
+      storage_present: false,
+      cloud_thread_id: CODEX_SESSION_ID,
+      provider_thread_id: CODEX_SESSION_ID,
+      push_decision: decision("create_cloud", true),
+      pull_decision: decision("keep_local", false),
+    }],
+  });
+  const browseHtml = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      embedded
+      activity={{ ...activity, git: null }}
+      comparison={comparison}
+      activeStorageName="Local storage 1"
+    />,
+  );
+
+  assert.match(browseHtml, /aria-label="Only on this computer\. Push to save it in Local storage 1\."/);
+  assert.doesNotMatch(browseHtml, /cannot read this session well enough to match it/);
+
+  let resolutionResourceId: string | null = null;
+  const reviewHtml = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      embedded
+      activity={{ ...activity, git: null }}
+      comparison={comparison}
+      activeStorageName="Local storage 1"
+      selectionMode="push"
+      selectedResourceIds={new Set([syncResourceId])}
+      selectableResourceIds={new Set([syncResourceId])}
+      onToggleResource={() => undefined}
+      rowResolution={(resourceId) => {
+        resolutionResourceId = resourceId;
+        return null;
+      }}
+    />,
+  );
+
+  assert.match(reviewHtml, /aria-label="Exclude Add Git history mapping"/);
+  assert.match(reviewHtml, /<input[^>]*checked=""/);
+  assert.equal(resolutionResourceId, syncResourceId);
+});
+
+test("an unlinked project still draws a badge on every row", () => {
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} />,
+  );
+  const rows = html.match(/<article class="sync-history-thread-card[^"]*">/g) ?? [];
+  assert.ok(rows.length > 0);
+  assert.equal(
+    (html.match(/class="sync-thread-sync-indicator untracked"/g) ?? []).length,
+    rows.length,
+    "one untracked badge per row when there is no storage to compare against",
+  );
+  assert.match(html, /aria-label="Only on this Mac\. Link a storage to compare and sync it\."/);
 });
 
 test("refreshing project activity uses the centered pixel refresh icon", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={history}
+      {...contentDefaults}
+      activity={activity}
       loading
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
       comparisonLoading
       activeStorageName="R2 storage 1"
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
     />,
   );
 
@@ -468,7 +696,6 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   const pressExempt = retroCssPress.match(/\.sync-history-thread-actions \.sync-history-launch-action:active[\s\S]*?\{[^}]*\}/)?.[0] ?? "";
   assert.match(pressExempt, /transform: none;/);
   for (const selector of [
-    "\\.sync-history-chat-toggle:active",
     "\\.sync-history-debug-trigger:active",
     "\\.sync-history-commit-toggle:active",
     "\\.sync-history-icon-action:active",
@@ -523,7 +750,7 @@ test("Push and Pull reviews use only the outer workspace scroll", () => {
   const workspaceSource = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   const pushSource = readFileSync("src/components/project-sync/PushResourceWorkspace.tsx", "utf8");
   const pullSource = readFileSync("src/components/project-sync/RestorePlanView.tsx", "utf8");
-  const tabsSource = readFileSync("src/components/project-sync/SyncReviewTabs.tsx", "utf8");
+  const tabsSource = readFileSync("src/components/sync-review/SyncReviewTabs.tsx", "utf8");
 
   assert.match(workspaceRule, /overflow-y:\s*auto/);
   assert.doesNotMatch(workspaceRule, /overflow:\s*hidden/);
@@ -559,7 +786,7 @@ test("the combined project header stays aligned with Storage and shares its divi
   assert.match(storageGroupRule, /border-top:\s*1px/);
 });
 
-test("history requests share concurrent work but not completed results", async () => {
+test("activity requests share concurrent work but not completed results", async () => {
   const singleFlight = createSingleFlight();
   let starts = 0;
   let resolveRequest!: (value: string) => void;
@@ -571,55 +798,35 @@ test("history requests share concurrent work but not completed results", async (
     return pending;
   };
 
-  const first = singleFlight("project-history", start);
-  const duplicate = singleFlight("project-history", start);
+  const first = singleFlight("project-activity", start);
+  const duplicate = singleFlight("project-activity", start);
   assert.strictEqual(first, duplicate);
   assert.equal(starts, 1);
 
   resolveRequest("complete");
   assert.deepEqual(await Promise.all([first, duplicate]), ["complete", "complete"]);
-  assert.equal(await singleFlight("project-history", async () => {
+  assert.equal(await singleFlight("project-activity", async () => {
     starts += 1;
     return "refreshed";
   }), "refreshed");
   assert.equal(starts, 2);
 });
 
-test("history content uses the local alias and renders commit/thread actions", () => {
+test("activity content uses the local alias and renders commit and session rows", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={history}
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
-      onToggleDetails={() => undefined}
+      {...contentDefaults}
+      activity={activity}
+      onOpenSessionDetail={() => undefined}
     />,
   );
   const commitHeading = html.match(/<div class="sync-history-commit-heading">([\s\S]*?)<\/div>/)?.[1] ?? "";
   assert.doesNotMatch(html, /Project Name/);
   assert.match(html, /Mallard local/);
   assert.match(html, /sync-history-project-context/);
-  assert.match(html, /title="Codex configuration:/);
-  assert.match(html, /\/Users\/test\/config\/mallard\/\.codex/);
+  // The provider-neutral page no longer prints a provider home path; identity
+  // and provenance live in the per-row debug panel instead.
+  assert.doesNotMatch(html, /Codex configuration:/);
   assert.match(html, /Local storage 1/);
   assert.match(html, /aria-label="Last pull:/);
   assert.match(html, /aria-label="Last push:/);
@@ -636,7 +843,7 @@ test("history content uses the local alias and renders commit/thread actions", (
   // The fold lives in the rail, before the heading in the DOM, not in a
   // trailing actions column — the heading carries no buttons at all.
   assert.doesNotMatch(commitHeading, /sync-history-commit-actions|sync-history-commit-toggle/);
-  assert.match(html, /class="sync-history-spine-fold"[^>]*aria-label="Collapse commit bbbbbbb"[^>]*aria-expanded="true"[^>]*aria-controls="commit-threads-bbbbbbb"/);
+  assert.match(html, /class="sync-history-spine-fold"[^>]*aria-label="Collapse commit bbbbbbb"[^>]*aria-expanded="true"[^>]*aria-controls="commit-sessions-bbbbbbb"/);
   assert.match(html, /class="sync-history-spine-fold"[^>]*>\s*<svg[^>]*data-icon="chevron-down"/);
   assert.ok(html.indexOf("sync-history-spine-fold") < html.indexOf('class="sync-history-commit-heading"'), "the fold precedes the content it controls");
   // Identifier before stamp: the linked sha chip leads with the external-link
@@ -644,111 +851,103 @@ test("history content uses the local alias and renders commit/thread actions", (
   assert.match(html, /<a class="sync-history-commit-link"[^>]+><svg[^>]*data-icon="external-link"[\s\S]*?<code>bbbbbbb<\/code><\/a><time dateTime=/);
   assert.match(html, new RegExp(`href="https://github\\.com/Git4Agent/mallard/commit/${"b".repeat(40)}"`));
   assert.match(html, /aria-label="Open commit bbbbbbb on GitHub"/);
+  // Provider identity is the mark on the button that opens that provider, not a
+  // text pill: a pill is as wide as the name it holds, so with more than one
+  // provider in the list the titles stopped lining up row to row.
+  assert.doesNotMatch(html, /sync-history-branch-state current" title="[^"]*session"/);
+  assert.match(html, /aria-label="Open in Codex"><svg[^>]*data-icon="openai"/);
+  // No location line. "On this Mac" was on every row of an unlinked project and
+  // never varied; on a linked one the status badge already encodes it.
+  assert.doesNotMatch(html, /sync-history-stored-thread-location/);
+  assert.doesNotMatch(html, /On this Mac/);
   assert.doesNotMatch(html, /sync-history-thread-updated/);
   assert.doesNotMatch(html, /aria-label="Updated [^"]+"/);
   assert.doesNotMatch(html, /aria-label="Show session details"/);
-  assert.doesNotMatch(html, /aria-label="Hide session details"/);
   // Both endpoints are announced together on the single visible stamp.
   assert.match(html, /aria-label="Started [^"]+\. Ended [^"]+"/);
   assert.match(html, /aria-label="User turns: 3"/);
   assert.match(html, /data-tooltip="Total tokens · 24\.8K"/);
-  // A session lives in exactly one place on the rail now, so the old
-  // "appears under N commits" metric is gone.
-  assert.doesNotMatch(html, /Appears under|Commit appearances/);
   assert.match(html, /aria-label="1 session linked to commits"/);
-  assert.match(html, /aria-label="Load chat history"/);
+  assert.match(html, /class="sync-history-session-title-button"/);
+  assert.match(html, /aria-label="View session details"/);
   assert.doesNotMatch(html, /during session|after session|started from/);
-  assert.doesNotMatch(html, /Map project-owned Codex sessions onto/);
-  assert.doesNotMatch(html, /aria-label="Show conversation details"/);
+  assert.doesNotMatch(html, /Map project-owned sessions onto/);
+  // Row actions come from the backend descriptors, labelled by the adapter.
   assert.match(html, /aria-label="Open in Codex"/);
   assert.match(html, /aria-label="Open in Terminal"/);
-  assert.match(html, /aria-label="Show thread debug info"/);
+  // The action icon is keyed off the descriptor kind, not off a provider mark.
+  // The knot is back on the open button, where it sat before the row went
+  // provider-neutral — but keyed off the provider now, not hardcoded, and the
+  // legacy hand-tuned class is gone.
+  assert.doesNotMatch(html, /sync-openai-icon/);
+  assert.match(html, /aria-label="Show session debug info"/);
   assert.match(html, /aria-haspopup="dialog"/);
-  assert.match(html, /aria-label="Thread debug info"/);
-  assert.match(html, /aria-label="Copy thread id"/);
+  assert.match(html, /aria-label="Session debug info"/);
+  assert.match(html, /aria-label="Copy resource id"/);
+  assert.match(html, /aria-label="Copy provider session id"/);
   assert.match(html, /aria-label="Copy working directory"/);
-  assert.match(html, /aria-label="Copy codex home"/);
+  assert.doesNotMatch(html, /aria-label="Copy codex home"/);
   assert.match(html, /\/Users\/test\/projects\/mallard\/packages\/desktop/);
+  assert.match(html, new RegExp(`<code>${codexResourceId}</code>`));
   assert.match(html, />Copy all</);
-  assert.ok(
-    html.indexOf('data-tooltip="Tool calls · 8"')
-      < html.indexOf('aria-label="Show thread debug info"'),
-  );
-  // Line 2 order: readouts, the divider, then the clickable pair — debug info
-  // and the transcript chevron — with the stamp closing the line at the card
-  // edge so it forms one column with every other stamp on the page.
+  // Line 1 carries the backend actions only — the ways to open this session
+  // somewhere else. The two row-level clickables belong to line 2.
   {
-    const row = html.slice(html.indexOf('class="sync-history-session-summary"'));
+    const cluster = html.slice(
+      html.indexOf('class="sync-history-thread-actions"'),
+      html.indexOf('class="sync-history-session-summary"'),
+    );
     const positions = [
+      cluster.indexOf('aria-label="Open in Codex"'),
+      cluster.indexOf('aria-label="Open in Terminal"'),
+    ];
+    assert.ok(positions.every((position) => position >= 0), `cluster pieces missing: ${positions}`);
+    assert.deepEqual(positions, [...positions].sort((a, b) => a - b), "cluster order is open, then terminal");
+    assert.doesNotMatch(cluster, /Show session debug info|View session details/);
+  }
+  // Line 2 reads readouts │ debug detail ……… stamp: a rule parts the glyphs you
+  // can only hover from the two you can click, and the stamp still closes the
+  // line at the card edge so it forms one column with every other stamp.
+  {
+    const row = html.slice(
+      html.indexOf('class="sync-history-session-summary"'),
+      html.indexOf("</article>", html.indexOf('class="sync-history-session-summary"')),
+    );
+    const order = [
       row.indexOf('class="sync-history-thread-meta"'),
-      row.indexOf('class="sync-history-actions-divider"'),
-      row.indexOf('aria-label="Show thread debug info"'),
-      row.indexOf('aria-label="Load chat history"'),
+      row.indexOf("sync-history-actions-divider"),
+      row.indexOf('aria-label="Show session debug info"'),
+      row.indexOf('aria-label="View session details"'),
       row.indexOf("sync-history-thread-time-end"),
     ];
-    assert.ok(positions.every((position) => position >= 0), `line-2 pieces missing: ${positions}`);
-    assert.deepEqual(positions, [...positions].sort((a, b) => a - b), "line-2 order is readouts, divider, debug, chevron, stamp");
+    assert.ok(order.every((position) => position >= 0), `line 2 pieces missing: ${order}`);
+    assert.deepEqual(order, [...order].sort((a, b) => a - b), "readouts, rule, debug, detail, stamp last");
   }
-  assert.match(html, /aria-label="Load chat history"[^>]*aria-expanded="false"[^>]*>\s*<svg[^>]*data-icon="chevron-down"/);
-  assert.doesNotMatch(html, /aria-label="Load chat history"[^>]*>\s*<svg[^>]*data-icon="message"/);
-  assert.match(html, /sync-openai-icon/);
+  // The rule is decorative — it must not be announced as content.
+  assert.match(html, /<span class="sync-history-actions-divider" aria-hidden="true"><\/span>/);
+  assert.match(html, /aria-label="View session details"[^>]*>\s*<svg[^>]*data-icon="chevron-right"/);
+  assert.doesNotMatch(html, /aria-label="View session details"[^>]*aria-expanded=/);
   assert.doesNotMatch(html, /aria-label="1 sessions"/);
   assert.doesNotMatch(html, />Open in Codex</);
   assert.doesNotMatch(html, /> Open in Terminal</);
-  assert.doesNotMatch(html, />Load chat history</);
-  assert.doesNotMatch(html, /Show chat details/);
+  assert.doesNotMatch(html, /Load chat history|sync-history-chat-details/);
 });
 
 test("changed storage history explains the recovery path and exposes only unlink", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
+      {...contentDefaults}
       embedded
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={history}
-      comparison={{
-        project_id: project.local_project_id,
-        storage_id: "storage-1",
-        storage_name: "Local storage 1",
+      activity={activity}
+      comparison={emptyComparison({
         revision: 2,
         base_revision: 1,
-        compared_at: 3,
-        entries: [],
-        counts: {
-          synced: 0,
-          local: 0,
-          storage: 0,
-          diverged: 0,
-          unavailable: 0,
-          unknown: 0,
-        },
-        warnings: [],
         remote_continuity: {
           state: "replaced",
           base_revision: 1,
           remote_revision: 2,
         },
-      }}
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
+      })}
       onUnlinkStorage={() => undefined}
     />,
   );
@@ -767,29 +966,8 @@ test("changed storage history explains the recovery path and exposes only unlink
 test("commit hashes remain plain text without a GitHub remote", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={{ ...history, git: { ...history.git, github_repository_url: null } }}
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
+      {...contentDefaults}
+      activity={{ ...activity, git: { ...activity.git, github_repository_url: null } }}
     />,
   );
 
@@ -799,14 +977,14 @@ test("commit hashes remain plain text without a GitHub remote", () => {
 });
 
 test("permanent session summaries label every metric icon", () => {
-  const html = renderToStaticMarkup(<ThreadMetrics thread={history.threads[0]} />);
+  const html = renderToStaticMarkup(<SessionMetrics session={codexSession} />);
   const endedTime = html.match(/sync-history-thread-time-end[\s\S]*?<time[^>]*>([^<]+)<\/time>/)?.[1] ?? "";
 
   // The row anchors on the last activity — the more useful end of the interval
   // — plus how long it ran. Start is that minus the duration, and both ends are
   // spelled out in full in the accessible label and tooltip.
-  assert.match(html, new RegExp(`<time dateTime="${new Date(history.threads[0].ended_at * 1_000).toISOString()}"`));
-  assert.doesNotMatch(html, new RegExp(`<time dateTime="${new Date(history.threads[0].started_at * 1_000).toISOString()}"`));
+  assert.match(html, new RegExp(`<time dateTime="${new Date(codexSession.ended_at * 1_000).toISOString()}"`));
+  assert.doesNotMatch(html, new RegExp(`<time dateTime="${new Date(codexSession.started_at * 1_000).toISOString()}"`));
   assert.match(html, /aria-label="Started [^"]+\. (?:Ended|Last activity) [^"]+"/);
   assert.match(endedTime, / at /);
   assert.match(endedTime, /\d{4}/);
@@ -825,7 +1003,7 @@ test("permanent session summaries label every metric icon", () => {
 test("a sub-minute session still reports how long it ran", () => {
   const startedAt = Math.floor(new Date(2026, 7, 1, 18, 53, 0).getTime() / 1_000);
   const html = renderToStaticMarkup(
-    <ThreadMetrics thread={{ ...history.threads[0], started_at: startedAt, ended_at: startedAt + 41 }} />,
+    <SessionMetrics session={{ ...codexSession, started_at: startedAt, ended_at: startedAt + 41 }} />,
   );
   const ended = html.match(/sync-history-thread-time-end[\s\S]*?<time[^>]*>([^<]+)<\/time>/)?.[1] ?? "";
 
@@ -840,7 +1018,7 @@ test("a sub-minute session still reports how long it ran", () => {
 test("a session with no measurable duration renders a single timestamp", () => {
   const startedAt = Math.floor(new Date(2026, 7, 1, 18, 53, 0).getTime() / 1_000);
   const html = renderToStaticMarkup(
-    <ThreadMetrics thread={{ ...history.threads[0], started_at: startedAt, ended_at: startedAt }} />,
+    <SessionMetrics session={{ ...codexSession, started_at: startedAt, ended_at: startedAt }} />,
   );
 
   assert.match(html, /sync-history-thread-time-end/);
@@ -853,7 +1031,7 @@ test("a session that crosses midnight still resolves to an unambiguous end", () 
   const startedAt = Math.floor(new Date(2026, 6, 30, 23, 55).getTime() / 1_000);
   const endedAt = Math.floor(new Date(2026, 6, 31, 0, 5).getTime() / 1_000);
   const html = renderToStaticMarkup(
-    <ThreadMetrics thread={{ ...history.threads[0], started_at: startedAt, ended_at: endedAt }} />,
+    <SessionMetrics session={{ ...codexSession, started_at: startedAt, ended_at: endedAt }} />,
   );
   const endedTime = html.match(/sync-history-thread-time-end[\s\S]*?<time[^>]*>([^<]+)<\/time>/)?.[1] ?? "";
 
@@ -866,24 +1044,28 @@ test("a session that crosses midnight still resolves to an unambiguous end", () 
   assert.match(html, /aria-label="Started [^"]+\. Ended [^"]+2026[^"]*"/);
 });
 
-test("thread icon actions stay compact and the clickable pair trails the readouts", () => {
+test("session actions stay compact and trail the readouts", () => {
   const css = readFileSync("src/App.css", "utf8");
   const retro = readFileSync("src/RetroTheme.css", "utf8");
   const metaRule = css.match(/\.sync-history-session-summary \.sync-history-thread-meta\s*\{[^}]+\}/s)?.[0] ?? "";
-  const chatRule = css.match(/\.sync-history-chat-toggle\s*\{[^}]+\}/s)?.[0] ?? "";
   const launchRule = css.match(/\.sync-history-thread-actions \.sync-history-launch-action\s*\{[^}]+\}/s)?.[0] ?? "";
-  const dividerRule = css.match(/\.sync-history-actions-divider\s*\{[^}]+\}/s)?.[0] ?? "";
   const debugMenuRule = css.match(/\.sync-history-debug-menu\s*\{[^}]+\}/s)?.[0] ?? "";
   const debugPopoverRule = css.match(/\.sync-history-debug-popover\s*\{[^}]+\}/s)?.[0] ?? "";
 
   assert.match(metaRule, /flex:\s*0 1 auto/);
-  assert.match(chatRule, /width:\s*24px/);
-  assert.match(chatRule, /padding:\s*0/);
   assert.match(launchRule, /width:\s*28px/);
   assert.match(launchRule, /padding:\s*0/);
-  // The debug button sits behind a hairline rule, and the stamp — a direct
-  // child of the summary row — claims the remaining gap before the chevron.
-  assert.match(dividerRule, /width:\s*1px/);
+  // The debug panel and the detail chevron sit on line 2 after the readouts, so
+  // a hairline has to part what you hover from what you click. It is a plain
+  // 1px rule, never a glyph that could read as another readout.
+  assert.match(css, /\.sync-history-actions-divider\s*\{[^}]*width: 1px;[^}]*height: 14px;[^}]*flex: 0 0 auto;[^}]*background: var\(--border-mid\);/s);
+  assert.match(css, /\.sync-history-row-clickables\s*\{[^}]*display: flex;[^}]*flex: 0 0 auto;/s);
+  // The inert provider mark takes a launch button's box, so the cluster is the
+  // same width whether or not the row can be opened.
+  assert.match(
+    retro,
+    /\.sync-history-thread-actions \.sync-history-launch-action,\s*\n\.sync-history-thread-actions \.sync-history-provider-inert\s*\{[^}]*width:\s*22px;/s,
+  );
   assert.match(retro, /\.sync-history-session-summary > \.sync-history-thread-time-end\s*\{[^}]*margin-left: auto;/s);
   assert.doesNotMatch(retro, /\.sync-history-session-summary \.sync-history-thread-meta\s*\{[^}]*flex:\s*1/s, "the readouts must not stretch into the clickables");
   // The menu is deliberately static so the popover anchors to the row instead
@@ -895,126 +1077,85 @@ test("thread icon actions stay compact and the clickable pair trails the readout
   assert.doesNotMatch(debugPopoverRule, /100vw/);
 });
 
-test("thread debug copy text keeps complete local identifiers", () => {
+test("session debug copy text keeps complete portable identifiers", () => {
   assert.equal(
-    threadDebugCopyText(
-      history.threads[0].thread_id,
-      history.threads[0].working_directory,
-      history.codex_home,
+    sessionDebugCopyText(
+      codexResourceId,
+      CODEX_SESSION_ID,
+      codexSession.working_directory,
     ),
     [
-      `Thread ID: ${history.threads[0].thread_id}`,
-      `Working directory: ${history.threads[0].working_directory}`,
-      `Codex home: ${history.codex_home}`,
+      `Resource ID: ${codexResourceId}`,
+      `Provider session ID: ${CODEX_SESSION_ID}`,
+      `Working directory: ${codexSession.working_directory}`,
+    ].join("\n"),
+  );
+  // A remote-only row can lack a provider-native id; the copy says so rather
+  // than printing a blank.
+  assert.equal(
+    sessionDebugCopyText("claude:conversation:thread-1", null, "/Users/test/projects/mallard"),
+    [
+      "Resource ID: claude:conversation:thread-1",
+      "Provider session ID: Not recorded",
+      "Working directory: /Users/test/projects/mallard",
     ].join("\n"),
   );
 });
 
-test("chat history remains independently collapsible under the permanent summary", () => {
-  const thread = history.threads[0];
+test("browse-mode session titles navigate without retaining the inline preview", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
+      {...contentDefaults}
       embedded
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={{ ...history, git: null }}
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
-      detailsByThread={{
-        [thread.thread_id]: {
-          loading: false,
-          error: null,
-          page: {
-            thread_id: thread.thread_id,
-            turns: [{ ordinal: 1, role: "user", timestamp: thread.started_at, preview: "Nested conversation preview" }],
-            next_cursor: 10,
-          },
-        },
-      }}
-      openDetailOccurrences={new Set([thread.thread_id])}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
-      onToggleDetails={() => undefined}
+      activity={{ ...activity, git: null }}
+      onOpenSessionDetail={() => undefined}
     />,
   );
 
-  assert.doesNotMatch(html, /aria-label="Hide session details"/);
-  assert.doesNotMatch(html, /conversation details/);
-  assert.match(html, /aria-label="Hide chat history"/);
+  assert.match(html, /class="sync-history-session-title-button"[^>]*>Add Git history mapping</);
+  assert.match(html, /aria-label="View session details"/);
   assert.match(html, /data-tooltip="User turns · 3"/);
-  assert.match(html, /Load 10 older messages/);
-  assert.ok(html.indexOf("Load 10 older messages") < html.indexOf("Nested conversation preview"));
-  assert.match(html, /Nested conversation preview/);
+  assert.doesNotMatch(html, /sync-history-chat-details|Load 10 older messages|Nested conversation preview/);
+  assert.doesNotMatch(html, /aria-expanded="(?:true|false)"[^>]*View session details/);
 });
 
-test("embedded history follows the project workspace without repeating project controls", () => {
-  const historyWithUncommitted = {
-    ...history,
-    threads: [{
-      ...history.threads[0],
+test("embedded activity follows the project workspace without repeating project controls", () => {
+  const activityWithUncommitted = {
+    ...activity,
+    sessions: [{
+      ...codexSession,
       title: "Test conversation — fork · 2026-08-01 09:00Z",
     }],
     unmapped: [{
-      thread_id: history.threads[0].thread_id,
+      resource_id: codexResourceId,
       reason: "No subsequent commit",
     }],
   };
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
+      {...contentDefaults}
       embedded
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={historyWithUncommitted}
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
+      activity={activityWithUncommitted}
     />,
   );
 
   assert.match(html, /sync-history-embedded/);
-  assert.match(html, /<h2[^>]*sync-history-embedded-title[^>]*>.*Git history/s);
+  // The workspace path bar's section crumb is the visible name for this page,
+  // so the embedded header keeps its controls and drops its title; the region
+  // still carries an accessible name.
+  assert.doesNotMatch(html, /sync-history-embedded-title/);
+  assert.match(html, /aria-label="Git history"/);
   assert.match(html, /class="sync-history-timeline has-uncommitted"/);
   assert.match(html, /<h2 id="uncommitted-heading"><svg[^>]*data-icon="edit"[^>]*>.*<\/svg>Uncommitted<\/h2>/s);
   // The unmapped reason is bookkeeping, not something the reader needs on screen.
   assert.doesNotMatch(html, /No subsequent commit/);
-  // The slot is reserved — an 18px box the status badge lands in without
-  // moving the title — but it draws nothing: the group heading carries the
-  // pencil, so the rows stay blank until statuses arrive.
-  assert.match(html, /class="sync-history-thread-kind uncommitted" aria-hidden="true"><\/span>/);
-  assert.doesNotMatch(html, /class="sync-history-thread-kind uncommitted"[^>]*>\s*<svg/s);
+  // The empty placeholder is gone. It existed to reserve the 18px box while
+  // the status badge could be absent; the badge is never absent now, and a
+  // second glyph beside it pushed these rows' titles 26px right of every other
+  // row's — measured, not guessed. The group heading still carries the pencil.
+  assert.doesNotMatch(html, /sync-history-thread-kind/);
+  const uncommittedRow = html.slice(html.indexOf('id="uncommitted-list"'));
+  assert.match(uncommittedRow, /class="sync-thread-sync-indicator untracked"/);
   assert.match(html, /<strong title="Test conversation — fork · 2026-08-01 09:00Z">Test conversation — fork<\/strong>/);
   // The count badge is gone from the heading; the fold control carries the
   // count so the group is still announced with its size.
@@ -1024,7 +1165,6 @@ test("embedded history follows the project workspace without repeating project c
   assert.doesNotMatch(html, /sync-history-status-legend/);
   assert.doesNotMatch(html, /Cloud outstanding/);
   assert.doesNotMatch(html, />Commit history</);
-  assert.doesNotMatch(html, /aria-label="1 thread"/);
   assert.doesNotMatch(html, /Sessions not linked to a commit/);
   assert.doesNotMatch(html, /<main/);
   assert.doesNotMatch(html, /aria-label="Project settings"/);
@@ -1032,70 +1172,33 @@ test("embedded history follows the project workspace without repeating project c
   assert.doesNotMatch(html, /Local storage 1/);
 });
 
-test("embedded non-Git history uses one Codex threads heading", () => {
+test("embedded non-Git activity is named once, and not on screen", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
+      {...contentDefaults}
       embedded
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={{ ...history, git: null }}
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
+      activity={{ ...activity, git: null }}
     />,
   );
 
-  assert.equal(html.match(/Codex threads/g)?.length, 1);
+  // The path bar says "Sessions" once. Nothing here repeats it as a heading,
+  // and only the outer region carries it as an accessible name — the list
+  // inside would otherwise announce the same word a second time.
+  assert.doesNotMatch(html, />Sessions</);
+  assert.equal(html.match(/aria-label="Sessions"/g)?.length, 1);
   assert.doesNotMatch(html, />Activity</);
-  assert.match(html, /aria-label="1 thread"/);
+  assert.doesNotMatch(html, /Codex threads/);
+  assert.match(html, /aria-label="1 session"/);
 });
 
 test("selection review removes repeated history and storage labels", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
+      {...contentDefaults}
       embedded
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={history}
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
+      activity={activity}
       activeStorageName="R2 storage 2"
       selectionMode="push"
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
     />,
   );
 
@@ -1116,127 +1219,71 @@ test("selection review removes repeated history and storage labels", () => {
   assert.match(compactHeadingRule, /margin-top:\s*8px/);
 });
 
-test("Push review removes selection controls and gutters from non-uploadable sessions", () => {
-  const syncedThread = history.threads[0];
-  const localAheadThread = {
-    ...syncedThread,
-    thread_id: "019f7798-5437-7632-9dbc-5b589cf68bf1",
+test("Push review renders checkboxes only for selectable bound-ready rows", () => {
+  const localAheadId = "019f7798-5437-7632-9dbc-5b589cf68bf1";
+  const localAheadResourceId = `codex:conversation:${localAheadId}`;
+  const syncedSyncResourceId = `codex:session:${CODEX_SESSION_ID}`;
+  const localAheadSyncResourceId = `codex:session:${localAheadId}`;
+  const localAheadSession = {
+    ...codexSession,
+    resource_id: localAheadResourceId,
+    provider_session_id: localAheadId,
+    logical_thread_id: localAheadId,
     title: "Continue local work",
-    started_at: syncedThread.started_at + 1,
-    ended_at: syncedThread.ended_at + 1,
+    started_at: codexSession.started_at + 1,
+    ended_at: codexSession.ended_at + 1,
   };
-  const syncedResourceId = `codex:session:${syncedThread.thread_id}`;
-  const localAheadResourceId = `codex:session:${localAheadThread.thread_id}`;
-  const resources = [
-    {
-      resource_id: syncedResourceId,
-      kind: "conversation",
-      provider: "codex",
-      scope: "provider_state",
-      display_name: syncedThread.title,
-      provenance: { kind: "conversation" as const },
-      apply_policy: "safe_file" as const,
-      codec_version: 1,
-      metadata: {},
-      category: "conversations",
-    },
-    {
-      resource_id: localAheadResourceId,
-      kind: "conversation",
-      provider: "codex",
-      scope: "provider_state",
-      display_name: localAheadThread.title,
-      provenance: { kind: "conversation" as const },
-      apply_policy: "safe_file" as const,
-      codec_version: 1,
-      metadata: {},
-      category: "conversations",
-    },
-  ];
-  const comparison = {
-    project_id: project.local_project_id,
-    storage_id: "storage-1",
-    storage_name: "Local storage 1",
-    compared_at: 1_752_804_000,
+  const decision = (action: string, selectable: boolean) => ({
+    action,
+    reason_code: "identical",
+    selectable,
+    selected_by_default: selectable,
+    requires_explicit_approval: false,
+  });
+  const comparison = emptyComparison({
     counts: { synced: 1, local: 1, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
-    warnings: [],
     entries: [
       {
-        thread_id: syncedThread.thread_id,
-        resource_id: syncedResourceId,
-        display_name: syncedThread.title,
-        state: "synced" as const,
+        provider: "codex",
+        provider_display_name: "Codex",
+        access: "bound_ready",
+        thread_id: CODEX_SESSION_ID,
+        resource_id: syncedSyncResourceId,
+        display_name: codexSession.title,
+        state: "synced",
         local_present: true,
         storage_present: true,
-        push_decision: {
-          action: "no_op" as const,
-          reason_code: "identical" as const,
-          selectable: false,
-          selected_by_default: false,
-          requires_explicit_approval: false,
-        },
-        pull_decision: {
-          action: "no_op" as const,
-          reason_code: "identical" as const,
-          selectable: false,
-          selected_by_default: false,
-          requires_explicit_approval: false,
-        },
+        cloud_thread_id: CODEX_SESSION_ID,
+        provider_thread_id: CODEX_SESSION_ID,
+        push_decision: decision("no_op", false),
+        pull_decision: decision("no_op", false),
       },
       {
-        thread_id: localAheadThread.thread_id,
-        resource_id: localAheadResourceId,
-        display_name: localAheadThread.title,
-        state: "local_ahead" as const,
+        provider: "codex",
+        provider_display_name: "Codex",
+        access: "bound_ready",
+        thread_id: localAheadId,
+        resource_id: localAheadSyncResourceId,
+        display_name: localAheadSession.title,
+        state: "local_ahead",
         local_present: true,
         storage_present: true,
-        push_decision: {
-          action: "fast_forward_cloud" as const,
-          reason_code: "cloud_prefix_of_local" as const,
-          selectable: true,
-          selected_by_default: true,
-          requires_explicit_approval: false,
-        },
-        pull_decision: {
-          action: "keep_local" as const,
-          reason_code: "cloud_prefix_of_local" as const,
-          selectable: false,
-          selected_by_default: false,
-          requires_explicit_approval: false,
-        },
+        cloud_thread_id: localAheadId,
+        provider_thread_id: localAheadId,
+        push_decision: { ...decision("fast_forward_cloud", true), reason_code: "cloud_prefix_of_local" },
+        pull_decision: { ...decision("keep_local", false), reason_code: "cloud_prefix_of_local" },
       },
     ],
-  };
+  });
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
+      {...contentDefaults}
       embedded
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={{ ...history, git: null, threads: [syncedThread, localAheadThread] }}
+      activity={{ ...activity, git: null, sessions: [codexSession, localAheadSession] }}
       comparison={comparison}
       activeStorageName="Local storage 1"
       selectionMode="push"
-      selectableResourceIds={pushSelectableResourceIds(resources, comparison)}
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
+      selectableResourceIds={new Set([localAheadSyncResourceId])}
     />,
   );
 
@@ -1248,82 +1295,91 @@ test("Push review removes selection controls and gutters from non-uploadable ses
   assert.equal((html.match(/type="checkbox"/g) ?? []).length, 1);
   assert.equal((html.match(/sync-sync-selectable-row/g) ?? []).length, 1);
   assert.doesNotMatch(html, /sync-selection-placeholder/);
+  // The fork maintenance action never renders inside a review selection.
+  assert.doesNotMatch(html, /aria-label="Fork in Codex"/);
 });
 
-test("selected storage adds directional indicators and storage-only threads", () => {
-  const comparison = {
-    project_id: project.local_project_id,
-    storage_id: "storage-1",
-    storage_name: "Local storage 1",
+test("selected storage adds directional indicators and remote-only session rows", () => {
+  const remoteId = "019f7798-5437-7632-9dbc-5b589cf68bf1";
+  const remoteResourceId = `codex:conversation:${remoteId}`;
+  const localSyncResourceId = `codex:session:${CODEX_SESSION_ID}`;
+  const remoteSyncResourceId = `codex:session:${remoteId}`;
+  const olderId = "019f7798-5437-7632-9dbc-5b589cf68bf2";
+  const remoteSession = {
+    ...codexSession,
+    resource_id: remoteResourceId,
+    provider_session_id: null,
+    logical_thread_id: remoteId,
+    source: "remote_only" as const,
+    title: "Improve cloud thread titles",
+    started_at: 1_752_802_000,
+    ended_at: 1_752_802_500,
+    working_directory: null,
+    actions: [],
+  };
+  const comparison = emptyComparison({
     revision: 4,
     base_revision: 3,
-    compared_at: 1_752_804_000,
     counts: { synced: 0, local: 2, storage: 1, diverged: 0, unavailable: 0, unknown: 0 },
-    warnings: [],
     entries: [
       {
-        thread_id: history.threads[0].thread_id,
-        resource_id: `codex:session:${history.threads[0].thread_id}`,
-        display_name: history.threads[0].thread_id,
-        state: "local_ahead" as const,
+        provider: "codex",
+        provider_display_name: "Codex",
+        access: "bound_ready",
+        thread_id: CODEX_SESSION_ID,
+        resource_id: localSyncResourceId,
+        display_name: codexSession.title,
+        state: "local_ahead",
         local_present: true,
         storage_present: true,
-        local_updated_at: history.threads[0].ended_at,
-        storage_updated_at: history.threads[0].ended_at - 60,
+        cloud_thread_id: CODEX_SESSION_ID,
+        provider_thread_id: CODEX_SESSION_ID,
+        local_updated_at: codexSession.ended_at,
+        storage_updated_at: codexSession.ended_at - 60,
       },
       {
-        thread_id: "019f7798-5437-7632-9dbc-5b589cf68bf1",
-        resource_id: "codex:session:019f7798-5437-7632-9dbc-5b589cf68bf1",
+        provider: "codex",
+        provider_display_name: "Codex",
+        access: "bound_ready",
+        thread_id: remoteId,
+        resource_id: remoteSyncResourceId,
         display_name: "Improve cloud thread titles",
-        state: "storage_only" as const,
+        state: "storage_only",
         local_present: false,
         storage_present: true,
+        cloud_thread_id: remoteId,
         storage_updated_at: 1_752_802_500,
       },
       {
-        thread_id: "019f7798-5437-7632-9dbc-5b589cf68bf2",
-        resource_id: "codex:session:019f7798-5437-7632-9dbc-5b589cf68bf2",
-        display_name: "019f7798-5437-7632-9dbc-5b589cf68bf2",
-        state: "local_ahead" as const,
+        provider: "codex",
+        provider_display_name: "Codex",
+        access: "bound_ready",
+        thread_id: olderId,
+        resource_id: `codex:session:${olderId}`,
+        display_name: olderId,
+        state: "local_ahead",
         local_present: true,
         storage_present: true,
-        local_updated_at: history.window_start - 60,
-        storage_updated_at: history.window_start - 120,
+        cloud_thread_id: olderId,
+        provider_thread_id: olderId,
+        local_updated_at: activity.window_start - 60,
+        storage_updated_at: activity.window_start - 120,
       },
     ],
-  };
+  });
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
+      {...contentDefaults}
       embedded
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={{ ...history, git: null }}
+      activity={{ ...activity, git: null, sessions: [codexSession, remoteSession] }}
       comparison={comparison}
       activeStorageName="Local storage 1"
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
     />,
   );
 
-  assert.match(html, /aria-label="Comparing threads with Local storage 1"/);
+  // The storage lens is gone from the embedded header: the path bar's root
+  // crumb is the one place that names the storage being compared against.
+  assert.doesNotMatch(html, /sync-history-storage-lens/);
   assert.match(html, /aria-label="Visible thread comparison with Local storage 1"/);
   assert.match(html, /title="1 local thread change"/);
   assert.doesNotMatch(html, /title="2 local thread changes"/);
@@ -1333,15 +1389,13 @@ test("selected storage adds directional indicators and storage-only threads", ()
   assert.match(html, /sync-thread-sync-indicator storage[^>]+aria-label="Only in Local storage 1\.[^"]+"[^>]*><svg[^>]+>/);
   assert.doesNotMatch(html, /sync-thread-sync-glyph/);
   assert.match(html, /Improve cloud thread titles/);
-  assert.match(html, /sync-history-stored-thread-meta/);
-  // Line 2 matches the completed sync's rows: the whole thread id — never a
-  // stub, no chip, no title reveal — inline inside its wrapper so one click
-  // copies it whole, with the <time> beside it.
-  assert.match(html, /class="sync-history-stored-thread-id"><code>019f7798-5437-7632-9dbc-5b589cf68bf1<\/code><\/span>/);
-  assert.doesNotMatch(html, /<code title="019f7798-/);
-  assert.match(html, /sync-history-stored-thread-meta[^>]*>[\s\S]*?<time[^>]*>[^<]+<\/time>/);
-  assert.doesNotMatch(html, /Stored thread 019f7798/);
-  assert.match(html, /aria-label="2 threads"/);
+  // The remote-only row says where it lives through its badge, not a location
+  // line: "Only in Local storage 1. Pull to download it here." is asserted
+  // above, and the row keeps its provider mark inert because it has no open
+  // action to hang it on.
+  assert.doesNotMatch(html, /sync-history-stored-thread-location/);
+  assert.match(html, /class="sync-history-launch-action sync-history-provider-inert"/);
+  assert.match(html, /aria-label="2 sessions"/);
   assert.ok(
     html.indexOf('aria-label="Newer on this computer. Push to update Local storage 1."')
       < html.indexOf("Add Git history mapping"),
@@ -1351,59 +1405,37 @@ test("selected storage adds directional indicators and storage-only threads", ()
       < html.indexOf("Improve cloud thread titles"),
   );
 
+  // The title/location stack is gone with the location line, so the title is a
+  // direct flex child of the row again and needs no wrapper.
   const css = readFileSync("src/App.css", "utf8");
-  const storedCopyRule = css.match(/\.sync-history-stored-thread-copy\s*\{[^}]+\}/s)?.[0] ?? "";
-  assert.match(storedCopyRule, /flex-direction:\s*column/);
+  assert.doesNotMatch(css, /sync-history-stored-thread-copy/);
 });
 
 test("unavailable sessions explain why they cannot be synced", () => {
-  const thread = history.threads[0];
-  const comparison = {
-    project_id: project.local_project_id,
-    storage_id: "storage-1",
-    storage_name: "Local storage 1",
-    compared_at: 1_752_804_000,
+  const comparison = emptyComparison({
     counts: { synced: 0, local: 0, storage: 0, diverged: 0, unavailable: 1, unknown: 0 },
-    warnings: [],
     entries: [{
-      thread_id: thread.thread_id,
-      resource_id: `codex:session:${thread.thread_id}`,
-      display_name: thread.thread_id,
-      state: "unavailable" as const,
+      provider: "codex",
+      provider_display_name: "Codex",
+      access: "bound_ready",
+      thread_id: CODEX_SESSION_ID,
+      resource_id: `codex:session:${CODEX_SESSION_ID}`,
+      display_name: CODEX_SESSION_ID,
+      state: "unavailable",
       local_present: true,
       storage_present: false,
+      provider_thread_id: CODEX_SESSION_ID,
       status_detail: "Session file exceeds the 100 MiB per-file sync limit.",
-      local_updated_at: thread.ended_at,
+      local_updated_at: codexSession.ended_at,
     }],
-  };
+  });
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
+      {...contentDefaults}
       embedded
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={{ ...history, git: null }}
+      activity={{ ...activity, git: null }}
       comparison={comparison}
       activeStorageName="Local storage 1"
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
     />,
   );
 
@@ -1412,75 +1444,337 @@ test("unavailable sessions explain why they cannot be synced", () => {
   assert.doesNotMatch(html, /can.t tell which copy is newer/);
 });
 
-test("non-Git history renders a flat Codex thread list", () => {
+test("mixed-provider rows sort deterministically and never collide on native ids", () => {
+  // Both providers use the very same provider-native session id: only the
+  // resource id — provider-qualified — may key the rows.
+  const nativeId = "0000aaaa-1111-2222-3333-444455556666";
+  const codexSyncResourceId = `codex:session:${nativeId}`;
+  const claudeSyncResourceId = `claude:session:${nativeId}`;
+  const codexTwin = {
+    ...codexSession,
+    resource_id: `codex:conversation:${nativeId}`,
+    provider_session_id: nativeId,
+    logical_thread_id: nativeId,
+    title: "Codex twin",
+  };
+  const claudeTwin = {
+    ...codexSession,
+    resource_id: `claude:conversation:${nativeId}`,
+    provider: "claude",
+    provider_display_name: "Claude",
+    provider_session_id: nativeId,
+    logical_thread_id: nativeId,
+    title: "Claude twin",
+    actions: [{
+      action_id: "claude.open_in_terminal",
+      kind: "open_in_terminal" as const,
+      label: "Open in Terminal",
+      enabled: true,
+      disabled_reason: null,
+    }],
+  };
+  const mixedActivity = {
+    ...activity,
+    git: null,
+    // Deliberately unsorted: the page re-applies the deterministic order
+    // (latest first, then provider key, then resource id).
+    sessions: [codexTwin, claudeTwin],
+    providers: [
+      { provider: "codex", display_name: "Codex", access: "bound_ready" as const },
+      { provider: "claude", display_name: "Claude", access: "bound_ready" as const },
+    ],
+  };
+  const decision = {
+    action: "create_cloud",
+    reason_code: "cloud_missing",
+    selectable: true,
+    selected_by_default: true,
+    requires_explicit_approval: false,
+  };
+  const comparison = emptyComparison({
+    entries: [
+      {
+        provider: "codex",
+        provider_display_name: "Codex",
+        access: "bound_ready",
+        thread_id: nativeId,
+        resource_id: codexSyncResourceId,
+        display_name: codexTwin.title,
+        state: "local_only",
+        local_present: true,
+        storage_present: false,
+        cloud_thread_id: nativeId,
+        provider_thread_id: nativeId,
+        push_decision: decision,
+        pull_decision: { ...decision, action: "keep_local", selectable: false, selected_by_default: false },
+      },
+      {
+        provider: "claude",
+        provider_display_name: "Claude",
+        access: "bound_ready",
+        thread_id: nativeId,
+        resource_id: claudeSyncResourceId,
+        display_name: claudeTwin.title,
+        state: "local_only",
+        local_present: true,
+        storage_present: false,
+        cloud_thread_id: nativeId,
+        provider_thread_id: nativeId,
+        push_decision: decision,
+        pull_decision: { ...decision, action: "keep_local", selectable: false, selected_by_default: false },
+      },
+    ],
+  });
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
-      project={{ ...project, local_alias: null }}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={{ ...history, git: null }}
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyThreadId={null}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
+      {...contentDefaults}
+      embedded
+      activity={mixedActivity}
+      comparison={comparison}
+      activeStorageName="Local storage 1"
+      selectionMode="push"
+      selectableResourceIds={new Set([codexSyncResourceId, claudeSyncResourceId])}
+      selectedResourceIds={new Set([claudeSyncResourceId])}
     />,
   );
-  const headingIndex = html.indexOf('id="codex-sessions-heading"');
-  const headingEndIndex = html.indexOf("</h2>", headingIndex);
-  const openAiIconIndex = html.indexOf("sync-openai-icon", headingIndex);
 
-  assert.match(html, /Codex threads/);
+  // Same ended_at, so the provider key breaks the tie: claude before codex.
+  assert.ok(html.indexOf("Claude twin") < html.indexOf("Codex twin"), "provider key orders equal timestamps");
+  // Each row wears its own provider's mark. Codex reuses the ChatGPT knot
+  // already in the sheet; Claude Code has no canonical crisp-edge geometry yet
+  // and ships a placeholder burst. The Claude twin offers no open action, so
+  // its mark renders inert rather than vanishing — identity does not disable.
+  assert.match(html, /aria-label="Open in Codex"><svg[^>]*data-icon="openai"/);
+  assert.match(
+    html,
+    /class="sync-history-launch-action sync-history-provider-inert"[^>]*title="Claude session"[^>]*><svg[^>]*data-icon="claude"/,
+  );
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 2);
+  // Selection is keyed by resource id, so ticking the Claude twin cannot
+  // leak onto the Codex twin that shares its native id.
+  assert.match(html, /<input[^>]*aria-label="Exclude Claude twin"[^>]*checked=""/);
+  const codexInput = html.match(/<input[^>]*aria-label="Include Codex twin"[^>]*>/)?.[0] ?? "";
+  assert.notEqual(codexInput, "");
+  assert.doesNotMatch(codexInput, /checked=""/);
+});
+
+test("view-only rows keep their badge and copy but never a checkbox", () => {
+  const claudeRemote = {
+    ...codexSession,
+    resource_id: "claude:conversation:claude-thread-1",
+    provider: "claude",
+    provider_display_name: "Claude",
+    provider_session_id: null,
+    logical_thread_id: "claude-thread-1",
+    source: "remote_only" as const,
+    access: "view_only" as const,
+    title: "Claude remote session",
+    working_directory: null,
+    actions: [],
+  };
+  const unsupportedRemote = {
+    ...claudeRemote,
+    resource_id: "mystery:conversation:thread-9",
+    provider: "mystery",
+    provider_display_name: "mystery",
+    logical_thread_id: "thread-9",
+    access: "unsupported" as const,
+    title: "Unknown provider session",
+    ended_at: claudeRemote.ended_at - 10,
+  };
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      embedded
+      activity={{
+        ...activity,
+        git: null,
+        sessions: [claudeRemote, unsupportedRemote],
+        providers: [
+          { provider: "codex", display_name: "Codex", access: "bound_ready" as const },
+          { provider: "claude", display_name: "Claude", access: "view_only" as const, detail: "Sessions were published from another machine." },
+        ],
+      }}
+      activeStorageName="Local storage 1"
+      selectionMode="pull"
+      // Even a listed resource id must not produce a checkbox without
+      // bound-ready access: visibility is not permission.
+      selectableResourceIds={new Set([claudeRemote.resource_id, unsupportedRemote.resource_id])}
+    />,
+  );
+
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 0);
+  assert.doesNotMatch(html, /sync-sync-selectable-row/);
+  assert.match(html, /class="sync-history-branch-state history-only"[^>]*>View only</);
+  assert.match(html, /View only — connect a Claude profile to sync this session\./);
+  assert.match(html, /View only — this Mallard version has no adapter for mystery sessions\./);
+  // The per-provider notice strip explains the access state once, with the
+  // backend's detail carried along.
+  assert.match(html, /sync-history-provider-notice/);
+  assert.match(html, /<strong>Claude<\/strong> — View only — connect a Claude profile to sync these sessions\. Sessions were published from another machine\./);
+  // Review rows and storage-only rows never navigate or download implicitly.
+  assert.doesNotMatch(html, /sync-history-session-title-button|aria-label="View session details"/);
+});
+
+test("session actions render from backend descriptors with disabled reasons", () => {
+  const heldSession = {
+    ...codexSession,
+    resource_id: "codex:conversation:held-thread",
+    provider_session_id: "held-thread",
+    logical_thread_id: "held-thread",
+    title: "Held session",
+    ended_at: codexSession.ended_at - 100,
+    actions: [
+      ...codexActions(false),
+      {
+        action_id: "codex.fork-session",
+        kind: "fork_session" as const,
+        label: "Fork in Codex",
+        enabled: false,
+        disabled_reason: "This session is not materialized locally.",
+      },
+    ],
+  };
+  const forkableSession = {
+    ...codexSession,
+    actions: [
+      ...codexActions(),
+      {
+        action_id: "codex.fork-session",
+        kind: "fork_session" as const,
+        label: "Fork in Codex",
+        enabled: true,
+        disabled_reason: null,
+      },
+    ],
+  };
+  const browseHtml = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      embedded
+      activity={{ ...activity, git: null, sessions: [forkableSession, heldSession] }}
+    />,
+  );
+
+  // Enabled actions carry their adapter label. Open wears the provider's own
+  // mark — it is the row's identity as well as its button; the other kinds are
+  // the action, not the agent, so they keep a generic glyph.
+  const openButton = browseHtml.match(/<button[^>]*aria-label="Open in Codex"[^>]*>[\s\S]*?<\/button>/g) ?? [];
+  assert.equal(openButton.length, 2);
+  assert.match(openButton[0] ?? "", /data-icon="openai"/);
+  assert.doesNotMatch(browseHtml, /data-icon="play"/);
+  assert.doesNotMatch(openButton[0] ?? "", /disabled=""/);
+  assert.match(openButton[1] ?? "", /disabled=""/);
+  // A disabled action explains itself in its title.
+  assert.match(openButton[1] ?? "", /title="This session is not materialized locally\."/);
+  const terminalButtons = browseHtml.match(/<button[^>]*aria-label="Open in Terminal"[^>]*>[\s\S]*?<\/button>/g) ?? [];
+  assert.match(terminalButtons[0] ?? "", /data-icon="terminal"/);
+  const forkButtons = browseHtml.match(/<button[^>]*aria-label="Fork in Codex"[^>]*>[\s\S]*?<\/button>/g) ?? [];
+  assert.equal(forkButtons.length, 2);
+  assert.match(forkButtons[0] ?? "", /data-icon="git-fork"/);
+
+  // Selection reviews hide only the fork maintenance action; open actions
+  // stay so a held row can still be inspected in its own app.
+  const reviewHtml = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      embedded
+      activity={{ ...activity, git: null, sessions: [forkableSession, heldSession] }}
+      selectionMode="push"
+      selectableResourceIds={new Set()}
+    />,
+  );
+  assert.doesNotMatch(reviewHtml, /aria-label="Fork in Codex"/);
+  assert.equal((reviewHtml.match(/aria-label="Open in Codex"/g) ?? []).length, 2);
+});
+
+test("provider comparison failures render isolated warnings", () => {
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      embedded
+      activity={{
+        ...activity,
+        git: null,
+        providers: [
+          { provider: "codex", display_name: "Codex", access: "bound_ready" as const },
+          { provider: "claude", display_name: "Claude", access: "bound_ready" as const },
+        ],
+      }}
+      comparison={emptyComparison({
+        provider_errors: { claude: "The Claude profile is locked by another process." },
+      })}
+      activeStorageName="Local storage 1"
+    />,
+  );
+
+  assert.match(html, /sync-history-provider-error/);
+  assert.match(html, /role="alert"/);
+  assert.match(html, /<strong>Claude<\/strong> comparison failed: The Claude profile is locked by another process\./);
+  // The failure is isolated: the healthy provider's rows still render.
+  assert.match(html, /Add Git history mapping/);
+  assert.doesNotMatch(html, /<strong>Codex<\/strong> comparison failed/);
+});
+
+test("non-Git activity renders a flat session list", () => {
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      project={{ ...project, local_alias: null }}
+      activity={{ ...activity, git: null }}
+    />,
+  );
+  const headingIndex = html.indexOf('id="project-sessions-heading"');
+  const headingEndIndex = html.indexOf("</h2>", headingIndex);
+  const messageIconIndex = html.indexOf('data-icon="message"', headingIndex);
+
+  assert.match(html, />Sessions</);
+  assert.doesNotMatch(html, /Codex threads/);
   assert.ok(headingIndex >= 0);
-  assert.ok(openAiIconIndex > headingIndex);
-  assert.ok(openAiIconIndex < headingEndIndex);
+  assert.ok(messageIconIndex > headingIndex);
+  assert.ok(messageIconIndex < headingEndIndex);
   assert.doesNotMatch(html, /Branch/);
 });
 
-test("an invalid persisted Codex profile stays in the project workspace", () => {
+test("a project without a bound provider profile stays in the workspace", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
-      project={project}
-      binding={{
-        host_id: "00112233445566778899aabbccddeeff",
-        replica_id: "replica",
-        local_project_id: project.local_project_id,
-        bundle_id: project.bundle_id,
-        project_root: project.project_root,
-        canonical_project_root: project.project_root,
-        profile_ids: { codex: "profile-codex" },
-        state: "active",
-        revision: 1,
-        updated_at: 2,
-      }}
-      history={null}
-      loading={false}
-      loadingMore={false}
-      actionError="Codex profile path changed."
-      actionBusyThreadId={null}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
+      {...contentDefaults}
+      binding={null}
+      activity={null}
+      actionError="Provider profile path changed."
     />,
   );
   assert.match(html, /role="alert"/);
+  assert.match(html, /No agent profile is connected\./);
+  assert.doesNotMatch(html, /No Codex profile is connected/);
   assert.doesNotMatch(html, /Open Project Settings|Project settings/);
+});
+
+test("the page speaks only the provider-neutral activity contracts", () => {
+  const source = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
+
+  // New command surface only.
+  assert.match(source, /getProjectActivity\(/);
+  assert.match(source, /executeProjectSessionAction\(/);
+  assert.match(source, /getSessionSyncComparison\(/);
+  assert.match(source, /onOpenSessionDetail/);
+  assert.doesNotMatch(source, /getProjectSessionDetails|getProjectChatHistory|getProjectChatThreadDetails|openCodexThreadInApp|openCodexThreadInTerminal|getThreadSyncComparison/);
+
+  // RestoreResult.codex_fork_checkpoints was renamed; the checkpoint panel
+  // must consume the new field.
+  assert.match(source, /\.fork_checkpoints/);
+  assert.doesNotMatch(source, /codex_fork_checkpoints/);
+
+  // Retained Codex maintenance is reached through the generic action
+  // descriptor kind, never through a provider-key comparison in common flow.
+  assert.match(source, /"fork_session"/);
+  assert.doesNotMatch(source, /===\s*"codex"|"codex"\s*===/);
+  assert.doesNotMatch(source, /provider_ids\?\.codex|profile_ids\?\.codex/);
+
+  // Rows key and select by the provider-qualified resource id.
+  assert.match(source, /session\.resource_id/);
+  assert.doesNotMatch(source, /codex:session:/);
 });
 
 test("the Git project icon uses the downloaded pixel-folder language", () => {
@@ -1561,7 +1855,7 @@ test("theme controls use the compact Pixelarticons sun and moon pair", () => {
 });
 
 test("history launch actions share one pixel construction", () => {
-  for (const name of ["git-fork", "terminal"] as const) {
+  for (const name of ["git-fork", "terminal", "play"] as const) {
     const html = renderToStaticMarkup(<Icon name={name} size={14} />);
     assert.match(html, /icon-pixel-fill/, `${name} must match the history launch action family`);
     assert.match(html, /fill="currentColor"/);
@@ -1596,15 +1890,6 @@ test("the external-link glyph survives the size the commit chip renders it at", 
   // Redrawn in-house, so it must not claim the sourced provenance.
   assert.doesNotMatch(html, /icon-pixelarticons/);
   assert.match(html, /icon-pixel-fill/);
-  assert.doesNotMatch(html, /<(?:circle|ellipse|line|polyline)\b/);
-});
-
-test("ChatGPT actions use the recognizable knot mark with crisp pixel rendering", () => {
-  const html = renderToStaticMarkup(<Icon name="openai" size={14} />);
-  assert.match(html, /icon-chatgpt-mark/);
-  assert.match(html, /transform="translate\(1 1\) scale\(0\.06875\)"/);
-  assert.match(html, /fill="currentColor"/);
-  assert.match(html, /shape-rendering="crispEdges"/);
   assert.doesNotMatch(html, /<(?:circle|ellipse|line|polyline)\b/);
 });
 
@@ -1707,6 +1992,9 @@ test("completed projects use their main row for history and only mark Git reposi
       storages={[]}
       storageUsage={{}}
       activeProjectId={project.local_project_id}
+      catalogScopes={[]}
+      activeCatalogScopeId={null}
+      addingCatalogScope={false}
       loading={false}
       busy={false}
       activityOpen={false}
@@ -1721,6 +2009,10 @@ test("completed projects use their main row for history and only mark Git reposi
       onOpenStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
+      onOpenCatalogMenu={() => undefined}
+      onOpenCatalogScope={() => undefined}
+      onAddCatalogScope={() => undefined}
+      onRemoveCatalogScope={() => undefined}
     />,
   );
   // The brand row and the product footer are the same mark now, so it appears
@@ -1740,18 +2032,178 @@ test("completed projects use their main row for history and only mark Git reposi
   );
   const projectsNavIndex = primaryNav.indexOf(" Projects</button>");
   const storagesNavIndex = primaryNav.indexOf(" Storages</button>");
+  const catalogNavIndex = primaryNav.indexOf(" Catalog</button>");
   const logsNavIndex = primaryNav.indexOf(" Logs</button>");
   assert.ok(projectsNavIndex >= 0);
-  assert.ok(storagesNavIndex > projectsNavIndex);
+  // Catalog is a destination like Projects and Storages, so it joins them in
+  // the nav; Logs stays last because it toggles a drawer instead of navigating.
+  assert.ok(catalogNavIndex > projectsNavIndex);
+  assert.ok(storagesNavIndex > catalogNavIndex);
   assert.ok(logsNavIndex > storagesNavIndex);
   assert.match(html, /aria-label="Storages"/);
   assert.match(html, />Storages<\/span>/);
+  // Every seam down the rail is a handle — each one is the same 3px of frame
+  // colour, so any that did nothing read as a handle that was simply broken.
+  assert.match(html, /role="separator" aria-label="Resize navigation and Projects sections" aria-orientation="horizontal"/);
+  assert.match(html, /aria-valuetext="Navigation height: fits contents"/);
   assert.match(html, /role="separator" aria-label="Resize Projects and Storages sections" aria-orientation="horizontal"/);
+  assert.match(html, /role="separator" aria-label="Resize Storages and Catalog sections" aria-orientation="horizontal"/);
   assert.match(html, /aria-valuenow="56"/);
+  // Catalog is content-sized (capped at 40% of the box), so it reports fitting
+  // its contents until the handle pins it to a height rather than carrying a
+  // share of the box.
+  assert.match(html, /aria-valuetext="Catalog height: fits contents"/);
   assert.doesNotMatch(html, /sidebar-section-count/);
   assert.doesNotMatch(html, /Git Based|Non-Git Based/);
   assert.doesNotMatch(html, /Project settings for Mallard local/);
   assert.doesNotMatch(html, /View history for draft repo/);
+});
+
+test("the project menu accepts multiple bound provider profiles", () => {
+  const html = renderToStaticMarkup(
+    <ProjectSidebar
+      projects={[
+        {
+          ...project,
+          local_project_id: "project-multiple-profiles",
+          local_alias: "Multiple profiles",
+          profile_ids: {
+            codex: "profile-codex",
+            claude: "profile-claude",
+          },
+        },
+        {
+          ...project,
+          local_project_id: "project-no-profile",
+          local_alias: "No profile",
+          profile_ids: {},
+        },
+      ]}
+      drafts={[]}
+      activeDraftId={null}
+      storages={[]}
+      storageUsage={{}}
+      activeProjectId="project-multiple-profiles"
+      activeStorageId={null}
+      catalogScopes={[]}
+      activeCatalogScopeId={null}
+      addingCatalogScope={false}
+      loading={false}
+      busy={false}
+      activityOpen={false}
+      unreadLogs={0}
+      onSelectProject={() => undefined}
+      onRemoveProject={() => undefined}
+      onSelectDraft={() => undefined}
+      onDiscardDraft={() => undefined}
+      onToggleActivity={() => undefined}
+      onAddProject={() => undefined}
+      onOpenStorage={() => undefined}
+      onRemoveStorage={() => undefined}
+      onAddStorage={() => undefined}
+      onOpenCatalogMenu={() => undefined}
+      onOpenCatalogScope={() => undefined}
+      onAddCatalogScope={() => undefined}
+      onRemoveCatalogScope={() => undefined}
+    />,
+  );
+
+  const multipleProfilesRow = html.slice(
+    html.lastIndexOf('<div class="sidebar-profile-item', html.indexOf("Multiple profiles")),
+    html.indexOf("</div>", html.indexOf("Multiple profiles")),
+  );
+  const noProfileRow = html.slice(
+    html.lastIndexOf('<div class="sidebar-profile-item', html.indexOf("No profile")),
+    html.indexOf("</div>", html.indexOf("No profile")),
+  );
+
+  assert.doesNotMatch(multipleProfilesRow, /needs-profile|sync-sidebar-profile-warning/);
+  assert.match(noProfileRow, /needs-profile/);
+  assert.match(noProfileRow, /sync-sidebar-profile-warning/);
+  assert.equal((html.match(/sync-sidebar-profile-warning/g) ?? []).length, 1);
+});
+
+test("the Catalog pane starts empty and lists one row per added scope", () => {
+  const scopeView = (
+    scopeId: string,
+    resourceKind: "agent_skill" | "plugin_install_intent" | "codex_pet_v1" | "codex_pet_v2",
+    displayName: string,
+  ) => ({
+    scope: {
+      scope_id: scopeId,
+      provider: "codex" as const,
+      profile_id: `catprofile-${displayName}`,
+      resource_kind: resourceKind,
+      revision: 1,
+      created_at: 1,
+      updated_at: 1,
+    },
+    profile: {
+      profile_id: `catprofile-${displayName}`,
+      provider_key: "codex" as const,
+      display_name: displayName,
+      configured_home: `/Users/user/${displayName}`,
+      revision: 1,
+      created_at: 1,
+      updated_at: 1,
+    },
+  });
+  const render = (scopes: ReturnType<typeof scopeView>[], activeScopeId: string | null) =>
+    renderToStaticMarkup(
+      <ProjectSidebar
+        projects={[project]}
+        drafts={[]}
+        activeDraftId={null}
+        storages={[]}
+        storageUsage={{}}
+        activeProjectId={null}
+        activeStorageId={null}
+        catalogScopes={scopes}
+        activeCatalogScopeId={activeScopeId}
+        addingCatalogScope={false}
+        loading={false}
+        busy={false}
+        activityOpen={false}
+        unreadLogs={0}
+        onSelectProject={() => undefined}
+        onRemoveProject={() => undefined}
+        onSelectDraft={() => undefined}
+        onDiscardDraft={() => undefined}
+        onToggleActivity={() => undefined}
+        onAddProject={() => undefined}
+        onOpenStorage={() => undefined}
+        onRemoveStorage={() => undefined}
+        onAddStorage={() => undefined}
+        onOpenCatalogMenu={() => undefined}
+        onOpenCatalogScope={() => undefined}
+        onAddCatalogScope={() => undefined}
+        onRemoveCatalogScope={() => undefined}
+      />,
+    );
+
+  // Fresh state: no permanent Skills/Plugins/Pets rows, just the Add prompt.
+  const emptyHtml = render([], null);
+  const emptyPane = emptyHtml.slice(emptyHtml.indexOf('aria-label="Catalog"'));
+  assert.match(emptyPane, /aria-label="Add Catalog row"/);
+  assert.match(emptyPane, /Add your first row/);
+  assert.doesNotMatch(emptyPane, /<span>Skills<\/span>|<span>Plugins<\/span>|<span>Pets<\/span>/);
+
+  // Two Codex configs give the same kind two distinct rows, labelled by
+  // config name; pet v1 and v2 from one config are two separate rows.
+  const html = render([
+    scopeView("catscope-1", "agent_skill", "Codex home"),
+    scopeView("catscope-2", "agent_skill", "conf2"),
+    scopeView("catscope-3", "codex_pet_v1", "Codex home"),
+    scopeView("catscope-4", "codex_pet_v2", "Codex home"),
+  ], "catscope-2");
+  const pane = html.slice(html.indexOf('aria-label="Catalog"'));
+  assert.match(pane, /<span>Skills · Codex home<\/span>/);
+  assert.match(pane, /<span>Skills · conf2<\/span>/);
+  assert.match(pane, /<span>Pets v1 · Codex home<\/span>/);
+  assert.match(pane, /<span>Pets v2 · Codex home<\/span>/);
+  assert.match(pane, /sidebar-profile-item active[^]*?Skills · conf2/);
+  assert.match(pane, /aria-label="Remove the Skills · conf2 row"/);
+  assert.doesNotMatch(pane, /Add your first row/);
 });
 
 test("the sidebar locks project and storage navigation during a sync workflow", () => {
@@ -1777,6 +2229,9 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
       storageIssues={{ "storage-1": "Storage folder unavailable." }}
       activeProjectId={project.local_project_id}
       activeStorageId={null}
+      catalogScopes={[]}
+      activeCatalogScopeId={null}
+      addingCatalogScope={false}
       loading={false}
       busy
       activityOpen={false}
@@ -1791,6 +2246,10 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
       onOpenStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
+      onOpenCatalogMenu={() => undefined}
+      onOpenCatalogScope={() => undefined}
+      onAddCatalogScope={() => undefined}
+      onRemoveCatalogScope={() => undefined}
     />,
   );
 
@@ -1809,4 +2268,4 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
   assert.doesNotMatch(html, /Legacy profiles|Open legacy/);
 });
 
-void ProjectChatHistoryPage;
+void ProjectActivityPage;

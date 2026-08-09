@@ -1,12 +1,13 @@
 # Design: Storage-scoped Codex and Claude catalog
 
-**Status:** proposed clean-break design
+**Status:** historical; superseded by
+[`PLAN_DRAFT_LINKED_CATALOG_RESOURCES.md`](./PLAN_DRAFT_LINKED_CATALOG_RESOURCES.md)
 
 **Date:** 2026-08-07
 
 **Scope:** Codex and Claude global skills and plugins, plus Codex v1 and v2 pets
 
-**Authority:** self-contained design for this feature
+**Authority:** historical reference only; do not implement
 
 ## 1. Decision
 

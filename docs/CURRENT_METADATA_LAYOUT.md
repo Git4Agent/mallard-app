@@ -1,9 +1,9 @@
 # Mallard Current Metadata Layout
 
-**Code snapshot:** August 6, 2026<br>
+**Code snapshot:** August 7, 2026<br>
 **Application version:** 0.1.2<br>
-**Scope:** the active implementation in this repository, including the
-pull-first Codex divergence work currently in the working tree.
+**Scope:** the active project-sync and scope-rowed Library implementations in
+this repository.
 
 This document describes what Mallard stores today, where it stores it, which
 identities connect the local and portable sides, and which data never crosses
@@ -20,16 +20,19 @@ Mallard has three separate data domains:
 2. **Provider and project data** under the selected project root,
    `CODEX_HOME`, and `CLAUDE_CONFIG_DIR`. Mallard reads selected content from
    these locations and materializes approved Pull results back into them.
-3. **Portable bundle storage** in either a local folder or an S3-compatible
-   bucket. Both backends use the same `.mallard/v1/repositories/<bundle-id>/`
-   object layout.
+3. **Portable storage** in either a local folder or an S3-compatible bucket.
+   Project bundles use `.mallard/v1/repositories/<bundle-id>/`; independent
+   Library resources use `.mallard/v1/library/<resource-repository-id>/`.
 
-The portable anchor is `bundle_id`. Local project, storage, host, replica, and
-profile IDs do not appear in the bundle. A mutable bundle head points to an
-immutable manifest, commit record, and content-addressed payload objects.
+The portable anchor is `bundle_id` for a project or `resource_repository_id`
+for one Library resource. Local project, storage, host, replica, profile,
+registration, and link IDs do not appear in portable documents. A mutable
+head points to an immutable manifest, commit record, and content-addressed
+payload objects.
 
-All active local and portable schemas are version 1. There is no migration or
-backward-compatibility reader in the supported path.
+All active local and portable schemas are version 1. Compatibility is a clean
+cutover: there is no backward-compatibility support, migration, legacy
+execution path, or retained dead code for the removed storage-wide catalog.
 
 ## 2. Boundary map
 
@@ -44,9 +47,9 @@ Machine-private control plane
                               v
 
 Portable storage
-<local storage folder or S3/R2 bucket>/.mallard/v1/repositories/<bundle-id>/
-  portable identity, recipe, resource metadata, conversation metadata,
-  tombstones, and selected payload bytes
+<local storage folder or S3/R2 bucket>/.mallard/v1/
+  repositories/<bundle-id>/       project bundle snapshots
+  library/<resource-repository-id>/ one typed Library resource
 
                               ^
                               |
@@ -80,8 +83,13 @@ on demand.
 |-- conversation_bindings.json
 |-- conversation_sync_journal.json
 |-- materializations.json
-|-- dependency_applications.json
-|-- chat_history_cache.json
+|-- activity_cache.json
+|-- catalog_resource_profiles.json
+|-- catalog_scopes.json
+|-- catalog_resources.json
+|-- catalog_resource_materializations.json
+|-- catalog_resource_preservations.json
+|-- catalog_resource_operations.json
 |-- host_rotation.json                         # transient recovery journal
 |
 |-- project_drafts/
@@ -90,9 +98,9 @@ on demand.
 |   `-- <draft-id>.json
 |-- restore_plans/
 |   `-- <plan-id>.json
-|-- dependency_plans/
-|   `-- <plan-id>.json
 |-- conversation_push_plans/
+|   `-- <plan-id>.json
+|-- catalog_resource_plans/
 |   `-- <plan-id>.json
 |
 |-- conversation_operations/
@@ -100,9 +108,17 @@ on demand.
 |       `-- <target-index>.payload
 |-- backups/
 |   |-- <plan-id>/...
+|   |-- catalog_resources/
+|   |   `-- <plan-id>/...
 |   |-- conversations/
 |   |   `-- <operation-id>/<target-index>.bak
 |   `-- pathrepair-<id>/...
+|
+|-- locks/
+|   |-- catalog-state.lock
+|   `-- provider-<canonical-path-sha256>.lock
+|-- catalog_quarantine/
+|   `-- <document>-<timestamp>.quarantined
 |
 |-- host_recovery_quarantine/
 |   `-- <category>-<generated-id>.quarantined
@@ -123,13 +139,18 @@ on demand.
 | `conversation_bindings.json` | Local-to-portable conversation identity map | Mallard thread ID, provider thread ID, project/replica/profile scope, materialization state, observed file/lineage/semantic hashes, source manifest pin, `forked_from`, local origin aliases | No |
 | `conversation_sync_journal.json` | Crash-recoverable conversation transactions | In-flight Push publication, Pull materialization, and Codex divergence operations with phases, target paths, expectations, backups, executor outcomes, and revision/hash pins | No |
 | `materializations.json` | Durable Pull history | Plan and bundle coordinates, status, action receipts, absolute targets, backup paths, conversation receipts, errors | No |
-| `dependency_applications.json` | Durable dependency-apply history | Plan and bundle coordinates plus per-action applied/skipped/failed/blocked receipts | No |
-| `chat_history_cache.json` | Local Codex history acceleration | File size/mtime keys, parsed ownership, cwd, Git/session metrics, and identities; cached title, summary, and chat text are deliberately omitted | No |
+| `activity_cache.json` | Local session-history acceleration for every bound provider | File size/mtime keys, provider key, parsed ownership, cwd, Git/session metrics, and identities; cached title, summary, and chat text are deliberately omitted | No |
+| `catalog_resource_profiles.json` | Machine-local Codex/Claude Library profiles | Provider key, display name, configured `CODEX_HOME`/`CLAUDE_CONFIG_DIR` path, revisions | No |
+| `catalog_scopes.json` | User-added Catalog menu rows | One row per (profile × resource kind); membership over registrations is derived, never stored | No |
+| `catalog_resources.json` | Resource registrations and independent storage links | Provider/profile identity, typed local target, remote resource-repository ID, accepted head/content base, revisions | No |
+| `catalog_resource_plans/<plan-id>.json` | Immutable per-resource Push/Pull/Fork reviews | Digest-pinned action, preservation-copy pins, profile/root/link revisions, expiry | No |
+| `catalog_resource_materializations.json` | Verified per-target Library receipts | Cross-storage claim edges keyed by canonical target identity with content digests and outcomes | No |
+| `catalog_resource_preservations.json` | Named-copy preservation witnesses | Source/preserved targets, digests, and operation IDs used for idempotent recovery | No |
+| `catalog_resource_operations.json` | Library mutation journal | In-flight and recent directory/preservation/fork/plugin operations with phases, paths, and terminal outcomes | No |
 
 `sync_config.json` currently stores S3/R2 access-key material directly in its
-private JSON document; it is not stored in the OS keychain. A pending storage
-inside a setup draft can also contain credentials. These files therefore
-belong to the private machine boundary even when the configured storage is
+private JSON document; it is not stored in the OS keychain. It therefore
+belongs to the private machine boundary even when the configured storage is
 shared.
 
 ### 3.2 Project, storage, and provider records
@@ -205,12 +226,13 @@ error.
 | Directory | Document | What it pins |
 | --- | --- | --- |
 | `restore_plans/` | `RestorePlan` | Host/replica, storage/bundle, revision, commit, manifest hash, binding revision, expiry, absolute targets, expected target state, selected file/conversation actions |
-| `dependency_plans/` | `DependencyPlan` | The same remote and binding coordinates plus reviewed install/check actions, warnings, and blockers |
 | `conversation_push_plans/` | `ConversationPushPlan` | Host/replica/project/profile revisions, current or absent head coordinates, conversation relations/actions, target expectations, lineage/semantic pins, expiry |
+| `catalog_resource_plans/` | `CatalogResourcePlanDocument` | Exactly one Library registration/link or Fork source, provider/root/storage/head revisions, local and remote digests, cross-storage claim pins, exact action, and expiry |
 
-Restore and dependency plans normally expire after 24 hours. Completed
-results live in `materializations.json` and
-`dependency_applications.json`; plans are not themselves portable history.
+Restore and Library resource plans normally expire after 24 hours. Completed
+project results live in `materializations.json`; Library outcomes and recovery
+state live in the claim, preservation, and operation documents. Plans are not
+themselves portable history.
 
 Setup has two local layers:
 
@@ -221,6 +243,10 @@ Setup has two local layers:
 - `setup_transactions/<draft-id>.json` is the deterministic finalize intent
   written before mutating the permanent config and binding documents. It
   makes interrupted finalization idempotently recoverable.
+
+The Library needs neither layer: adding a Catalog row records one scope in
+`catalog_scopes.json`, and linking a resource lands its registration and
+storage link in `catalog_resources.json` in a single locked mutation.
 
 ### 3.5 Conversation operation payloads and backups
 
@@ -239,10 +265,11 @@ If an existing provider target is replaced, its backup is stored at
 the intent directory and stage files and retires the journal operation.
 Backups needed by durable receipts remain local.
 
-Normal restore backups are grouped under `backups/<plan-id>/`. Custom-skill
-restores may also keep a directory backup and a local journal in that plan
-directory. Codex path-repair operations use a generated `pathrepair-*`
-directory.
+Normal restore backups are grouped under `backups/<plan-id>/`. Library
+skill/pet replacement backups use
+`backups/catalog_resources/<plan-id>/`; their operation metadata stays in
+`catalog_resource_operations.json`. Codex path-repair operations use a
+generated `pathrepair-*` directory.
 
 ### 3.6 Pull-first Codex divergence metadata
 
@@ -295,13 +322,15 @@ cannot silently overwrite one another.
 
 `host_operation.lock` is a broader, non-blocking OS lock held across
 host-sensitive multi-document workflows such as setup, host rotation,
-publication, restore/dependency apply, and conversation materialization. It
+publication, restore apply, and conversation materialization. It
 prevents two individually valid operations from interleaving across config,
 provider files, and cloud state. The guard explicitly unlocks on drop.
 
 The activity log has its own `_activity.lock`. A local-folder bundle store has
 a separate `.mallard/.storage.lock`; that lock protects the portable storage
-folder, not `~/.mallard`.
+folder, not `~/.mallard`. Library documents use `locks/catalog-state.lock`,
+and each filesystem or plugin mutation holds the canonical provider-target
+lock `locks/provider-<canonical-path-sha256>.lock`.
 
 Local JSON persistence uses:
 
@@ -328,14 +357,19 @@ reactivate them.
 | `project_drafts/<id>.json` | 4 MiB |
 | `setup_transactions/<id>.json` | 8 MiB |
 | `restore_plans/<id>.json` | 64 MiB |
-| `dependency_plans/<id>.json` | 16 MiB |
 | `conversation_push_plans/<id>.json` | 64 MiB |
 | `conversation_bindings.json` | 64 MiB |
 | `conversation_sync_journal.json` | 64 MiB |
 | `materializations.json` | 64 MiB |
-| `dependency_applications.json` | 64 MiB |
 | `host_rotation.json` | 192 MiB |
-| `chat_history_cache.json` | 32 MiB / 50,000 entries |
+| `activity_cache.json` | 32 MiB / 50,000 entries |
+| `catalog_resource_profiles.json` | 1 MiB |
+| `catalog_scopes.json` | 1 MiB |
+| `catalog_resources.json` | 16 MiB |
+| `catalog_resource_plans/<id>.json` | 64 MiB |
+| `catalog_resource_materializations.json` | 16 MiB |
+| `catalog_resource_preservations.json` | 8 MiB |
+| `catalog_resource_operations.json` | 16 MiB |
 | One activity entry | 16 KiB |
 | One activity segment | 10 MiB |
 | Default activity retention | 30 days / 100 MiB total |
@@ -374,10 +408,12 @@ under:
 <CLAUDE_CONFIG_DIR>/projects/.../memory/...
 ```
 
-The active implementation does not capture or restore user-global agent
-customizations. The former repository-scoped skill/plugin feature was removed;
-its storage-scoped, multi-provider replacement is only a proposal in
-`DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md`.
+User-global agent customizations travel through the scope-rowed Library:
+standalone Codex and Claude Agent Skills from `<CODEX_HOME>/skills`,
+`$HOME/.agents/skills` (resolved only for the default `~/.codex` config), and
+`<CLAUDE_CONFIG_DIR>/skills`, portable plugin install intent, and distinct
+Codex v1/v2 pets from `<CODEX_HOME>/pets`. The Library is independent of every
+project and repository bundle; project capture never enumerates those roots.
 
 ### Project root
 
@@ -397,22 +433,37 @@ The local-folder and S3/R2 adapters expose the same object keys:
     |-- .storage.lock                         # local-folder backend only
     |-- _storage.json
     `-- v1/
-        `-- repositories/
-            `-- <bundle-id>/
-                |-- _head.json
-                |-- _tag.json
+        |-- repositories/
+        |   `-- <bundle-id>/
+        |       |-- _head.json
+        |       |-- _tag.json
+        |       |-- _objects/
+        |       |   `-- <payload-sha256>
+        |       |-- _manifests/
+        |       |   `-- <revision>-<commit-id>.json
+        |       |-- _commits/
+        |       |   `-- <revision>-<commit-id>.json
+        |       `-- _uploads/                 # reserved for project bundles
+        `-- library/
+            `-- <resource-repository-id>/
+                |-- _tag.json                 # immutable, create-only discovery
+                |-- _head.json                # authoritative CAS pointer
                 |-- _objects/
                 |   `-- <payload-sha256>
                 |-- _manifests/
                 |   `-- <revision>-<commit-id>.json
-                |-- _commits/
-                |   `-- <revision>-<commit-id>.json
-                `-- _uploads/                 # reserved; not used by today's publisher
+                `-- _commits/
+                    `-- <revision>-<commit-id>.json
 ```
 
-The current publisher writes payloads to `_objects/<sha256>`. `_uploads/` is
-still accepted by the object-key validator as a reserved namespace, but no
-production publication path writes the older upload-tree shape.
+The `repositories/` and `library/` constructors are closed and mutually
+isolated. The removed `.mallard/v1/catalog/` namespace is rejected by the
+object-key validator and is never read, listed, converted, deleted, or used as
+a fallback. No migration or compatibility detector exists.
+
+Both publishers write payloads to `_objects/<sha256>`. `_uploads/` remains a
+reserved project-bundle namespace, but no production publication path writes
+that older upload-tree shape. Library resources never use `_uploads/`.
 
 ### 5.1 Storage marker
 
@@ -425,7 +476,7 @@ production publication path writes the older upload-tree shape.
 Opening either backend verifies this marker before reading or publishing
 repositories.
 
-### 5.2 Mutable head
+### 5.2 Project bundle mutable head
 
 `_head.json` is the only authoritative mutable pointer for a bundle. Its
 schema-1 fields are:
@@ -452,7 +503,7 @@ not inferred from S3 `Content-Length`, an extra `HEAD` request, or received
 bytes. Existing state without the field is unsupported and must be cleared;
 there is no migration or compatibility reader.
 
-### 5.3 Discovery tag
+### 5.3 Project bundle discovery tag
 
 `_tag.json` is a mutable, non-authoritative listing summary:
 
@@ -471,7 +522,7 @@ It is refreshed with CAS after a successful head update. The refresh is
 best-effort, so a tag may lag the authoritative head. Remote repository
 listing currently discovers `_tag.json` objects and sorts them by bundle ID.
 
-### 5.4 Immutable manifest
+### 5.4 Project bundle immutable manifest
 
 Every manifest is a complete live snapshot:
 
@@ -522,7 +573,52 @@ mtime, but no object key. Tombstones are typed as resource, resource file,
 project-content file, project-content directory, or conversation thread.
 File tombstones may carry the last known SHA-256.
 
-### 5.5 Typed conversation metadata
+### 5.5 Library resource repository
+
+Each Library repository contains exactly one typed resource and advances
+independently from every other Library resource and project bundle. Its
+immutable `_tag.json` contains:
+
+```text
+schema_version
+repository_id
+provider                     # codex | claude
+resource_kind                # agent_skill | plugin_install_intent |
+                             # codex_pet_v1 | codex_pet_v2
+resource_id
+stable_identity_sha256
+display_name
+optional scope_label
+created_at
+```
+
+The tag is listing metadata only. Opening a remote choice verifies the tag,
+head, manifest, resource identity, exact sizes, hashes, and objects. The
+Library `_head.json` pins the resource repository, revision, commit,
+manifest key, manifest SHA-256, exact manifest size, and update time.
+
+The immutable manifest records the repository/revision/commit coordinates,
+capture version, privacy-preserving publisher origin, and one closed
+`CatalogResource`: Agent Skill, plugin install intent, Codex pet v1, or Codex
+pet v2. The immutable commit records the same manifest coordinates, previous
+commit when present, and publisher origin. The head is the only visibility
+boundary and advances with compare-and-swap.
+
+Plugin resources contain semantic provider-native installation intent and no
+payload directory. Skills store their bounded regular-file tree; pets store
+one validated PNG or WebP atlas. Pet v1 and v2 are different resource IDs,
+resource kinds, registrations, links, and remote repositories. The user opens
+and operates the desired v1 or v2 link explicitly; Mallard performs no format
+conversion or combined implicit selection.
+
+Machine-local registrations and links hold provider paths, storage IDs, and
+accepted comparison bases. Portable Library documents contain none of those
+machine-local values. Pull reviews pin cross-storage claims; a target claimed
+at another digest can only be preserved as a named semantic copy, explicitly
+overwritten with acknowledgement, or skipped. Plugins offer overwrite or
+skip only.
+
+### 5.6 Typed conversation metadata
 
 A portable conversation entry contains:
 
@@ -552,7 +648,7 @@ Codex conversations this typed namespace. Other selected provider resources,
 including current Claude conversation/state capture, remain generic resources
 under their provider logical namespaces.
 
-### 5.6 Other logical namespaces
+### 5.7 Other project-bundle logical namespaces
 
 Current capture can produce:
 
@@ -571,16 +667,16 @@ typed publication path rewrites selected Codex transcripts into the canonical
 `state/conversations/codex/...` namespace. Absolute source paths are never
 used as resource identity or object keys.
 
-### 5.7 Immutable payload objects
+### 5.8 Immutable payload objects
 
 `_objects/<sha256>` stores raw selected file bytes. Objects are:
 
 - immutable;
 - verified after write;
 - content-addressed by SHA-256;
-- deduplicated within one bundle; and
-- scoped below one `bundle_id`, so equal content in different bundles still
-  has separate object keys.
+- deduplicated within one project bundle or Library repository; and
+- scoped below one `bundle_id` or `resource_repository_id`, so equal content
+  in different repositories still has separate object keys.
 
 The manifest, not the object path alone, supplies ownership, size, logical
 path, source mtime, and safe mode.
@@ -607,7 +703,7 @@ types, and eager planning/apply wrappers do not exist.
 There is no generic 512 MiB payload-object ceiling. Resource-specific capture
 limits and aggregate capture budgets still apply where listed below.
 
-### 5.8 Immutable commit record
+### 5.9 Project bundle immutable commit record
 
 Each `_commits/<revision>-<commit-id>.json` stores:
 
@@ -643,6 +739,12 @@ One publication performs:
 7. Compare-and-swap `_head.json` with the same manifest size and hash.
 8. Best-effort compare-and-swap `_tag.json`.
 9. Commit the corresponding local bindings and reviewed base.
+
+For one Library link, the same immutable-object and CAS ordering applies to
+exactly one `library/<resource-repository-id>/` head. Its create-only tag is
+written once, and only that link's accepted head/content base advances after
+publication succeeds. A concurrent head change makes the reviewed plan stale
+or is resolved by verified read-back; it never advances another resource.
 
 Local-folder CAS is serialized by `.mallard/.storage.lock`; its ETag is the
 SHA-256 of the current bytes. S3/R2 uses service ETags with
@@ -697,6 +799,11 @@ payload is safe. Shared storage should be treated as private user data.
 
 - `bundle_id`: exactly 32 lowercase hexadecimal characters from 128 random
   bits.
+- `resource_repository_id`: `library-` plus exactly 32 lowercase hexadecimal
+  characters from 128 random bits.
+- Library registration, link, scope, plan, action, commit, and operation IDs:
+  closed prefixes plus fixed lowercase hexadecimal suffixes.
+- Library resource ID: `resource-` plus a 64-character identity SHA-256.
 - `host_id`: exactly 32 lowercase hexadecimal characters and private.
 - origin host/replica token: exactly 64 lowercase hexadecimal characters.
 - Mallard named IDs: 1-128 lowercase ASCII identifier characters.
@@ -709,6 +816,14 @@ payload is safe. Shared storage should be treated as private user data.
 - aggregate selected capture/project content: at most 512 MiB.
 - conversation bindings: at most 100,000.
 - active conversation journal operations: at most 10,000.
+- Library resources: at most 512 registrations/links per document.
+- one standalone skill: at most 256 regular files, 2 MiB per file, and 16 MiB
+  total.
+- one pet manifest: at most 16 KiB; one pet atlas: at most 8 MiB compressed
+  and 16 MiB decoded.
+- one Library revision: at most 256 MiB of payload bytes.
+- Library claims: at most 4,096; preservation witnesses: at most 512; recent
+  operations: at most 256.
 
 There is no generic portable-object size cap. Manifest-declared sizes are
 exact integrity coordinates, while the remaining per-resource and aggregate
@@ -729,28 +844,39 @@ are authoritative.
 
 ## 10. Code sources
 
-- [`domain.rs`](../src-tauri/src/project_sync/domain.rs): schemas, IDs,
+- [`mallard-domain/src/lib.rs`](../crates/mallard-domain/src/lib.rs): schemas, IDs,
   portable manifest, plans, journals, bindings, receipts, and limits.
-- [`persistence.rs`](../src-tauri/src/project_sync/persistence.rs):
+- [`persistence.rs`](../crates/mallard-infrastructure/src/persistence.rs):
   `~/.mallard` paths, bounded JSON, revisions, atomic writes, locks, host
   rotation, and quarantine.
-- [`provider_capture.rs`](../src-tauri/src/project_sync/provider_capture.rs):
+- [`provider_capture.rs`](../crates/mallard-infrastructure/src/provider_capture.rs):
   physical-to-logical path mapping, resource discovery, capture, filtering,
   and portable descriptor conversion.
 - [`commands.rs`](../src-tauri/src/project_sync/commands.rs): cross-document
   orchestration, typed Codex publication, and local/remote commit order.
-- [`conversation_materialization.rs`](../src-tauri/src/project_sync/conversation_materialization.rs):
+- [`conversation_materialization.rs`](../crates/mallard-infrastructure/src/conversation_materialization.rs):
   intent payloads, provider-side stages, backups, recovery phases, native fork
   execution, and journal cleanup.
-- [`bundle_engine.rs`](../src-tauri/src/project_sync/bundle_engine.rs):
+- [`bundle_engine.rs`](../crates/mallard-infrastructure/src/bundle_engine.rs):
   portable keys, marker/head/tag/manifest/commit formats, immutable objects,
   CAS, lazy verified-body access, restore plans, streamed apply, and backups.
-- [`s3_store.rs`](../src-tauri/src/project_sync/s3_store.rs): S3/R2 ETag,
-  conditional-write, chunk-to-tempfile staging, inactivity timeout, and
-  pagination behavior.
-- [`chat_history.rs`](../src-tauri/src/project_sync/chat_history.rs):
-  local-only history cache and Codex index/session scanning.
+- [`s3_store.rs`](../crates/mallard-infrastructure/src/storage_core/s3_store.rs):
+  S3/R2 ETag, conditional-write, chunk-to-tempfile staging, inactivity
+  timeout, and pagination behavior.
+- [`project_activity.rs`](../crates/mallard-infrastructure/src/project_activity.rs):
+  local-only activity cache and provider session scanning through the
+  registered adapters.
 - [`activity_log.rs`](../src-tauri/src/activity_log.rs): local JSONL event
   schema, redaction, segmentation, locking, and retention.
+- [`storage_catalog/domain.rs`](../src-tauri/src/storage_catalog/domain.rs):
+  Library resource identities, strict schemas, scopes, registrations, links,
+  claims, and per-resource plans.
+- [`storage_catalog/resource_engine.rs`](../src-tauri/src/storage_catalog/resource_engine.rs):
+  Library tag listing, immutable objects/manifests/commits, verified reads,
+  head CAS, and continuity checks.
+- [`storage_catalog/persistence.rs`](../src-tauri/src/storage_catalog/persistence.rs):
+  independent bounded Library state, quarantine, target locks, and backups.
+- [`storage_catalog/resource_commands.rs`](../src-tauri/src/storage_catalog/resource_commands.rs):
+  scope rows, per-resource linking, and per-link Push/Pull/Refresh/Fork.
 - [`src/types.ts`](../src/types.ts): frontend DTO mirror of serialized Rust
   contracts.

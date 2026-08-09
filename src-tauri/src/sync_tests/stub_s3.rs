@@ -31,6 +31,9 @@ fn sha256_bytes(bytes: &[u8]) -> String {
         .collect()
 }
 
+// The hook and request-record surfaces are fault-injection scaffolding;
+// individual suites use different subsets of them.
+#[allow(dead_code)]
 pub enum HookAction {
     /// Run before the precondition is evaluated — e.g. publish a competing
     /// commit so the CAS fails exactly like a lost race.
@@ -47,6 +50,7 @@ struct CondPutHook {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct RequestRecord {
     pub method: String,
     pub key: String,
@@ -115,12 +119,14 @@ impl StubS3 {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_ignore_conditions(&self, value: bool) {
         self.state.ignore_conditions.store(value, Ordering::SeqCst);
     }
 
     /// Arm a hook on the next `remaining` conditional PUTs whose key ends
     /// with `key_suffix`.
+    #[allow(dead_code)]
     pub fn add_conditional_put_hook(&self, key_suffix: &str, remaining: usize, action: HookAction) {
         self.state.inner.lock().unwrap().hooks.push(CondPutHook {
             key_suffix: key_suffix.to_string(),
@@ -359,9 +365,9 @@ async fn handle(
                 if !fail && conditional && !state.ignore_conditions.load(Ordering::SeqCst) {
                     if let Some(expected) = &if_match {
                         let expected = expected.trim().trim_matches('"');
-                        fail = !current
+                        fail = current
                             .as_ref()
-                            .is_some_and(|data| sha256_bytes(data) == expected);
+                            .is_none_or(|data| sha256_bytes(data) != expected);
                     }
                     if if_none_match.as_deref().map(str::trim) == Some("*") && current.is_some() {
                         fail = true;

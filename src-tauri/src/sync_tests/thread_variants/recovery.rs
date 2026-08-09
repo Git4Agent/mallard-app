@@ -1,4 +1,4 @@
-use super::harness::{sha256, TranscriptBuilder, VariantWorld};
+use super::harness::{codex, sha256, TranscriptBuilder, VariantWorld};
 use super::relation_matrix::reviewed_action;
 use crate::project_sync::codex_native_fork::CodexForkExecutionRequest;
 use crate::project_sync::commands::{
@@ -25,10 +25,11 @@ use crate::project_sync::domain::{
     ConversationFileRole, ConversationJournalTarget, ConversationMaterializationState,
     ConversationNameStatus, ConversationOperationId, ConversationPlanActionType,
     ConversationPlanDirection, ConversationPushPlan, ConversationReasonCode, ConversationRelation,
-    ConversationSyncOperation, ConversationSyncOperationKind, ConversationSyncPhase, ForkOrigin,
-    ForkStamp, LocalConversationBinding, LocalProjectId, LocalProjectRegistration,
-    LocalProviderProfileId, PlanId, ProjectBinding, Provider, ProviderProfile, ReplicaId,
-    StorageId, TargetExpectation, ThreadId, PUSH_PLAN_SCHEMA,
+    ConversationSyncOperation, ConversationSyncOperationKind, ConversationSyncPhase,
+    DivergenceReceiptKind, ForkOrigin, ForkStamp, LocalConversationBinding, LocalProjectId,
+    LocalProjectRegistration, LocalProviderProfileId, PlanId, ProjectBinding, ProviderKey,
+    ProviderProfile, ReplicaId, SessionPresentation, StorageId, TargetExpectation, ThreadId,
+    PUSH_PLAN_SCHEMA,
 };
 use crate::project_sync::persistence::LocalStateRepository;
 use crate::project_sync::provider_capture::{
@@ -48,10 +49,11 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
         ConversationReasonCode::LocalPrefixOfCloud,
         ConversationRelation::LocalPrefixOfCloud,
     );
-    let cases: Vec<(
+    type StaleCase = (
         ConversationStalePin,
         Box<dyn Fn(&mut crate::project_sync::conversation_sync::ConversationApplyContext)>,
-    )> = vec![
+    );
+    let cases: Vec<StaleCase> = vec![
         (
             ConversationStalePin::Expired,
             Box::new(|value| value.now = 9_999),
@@ -100,6 +102,14 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
             Box::new(|value| value.manifest_sha256 = "e".repeat(64)),
         ),
         (
+            ConversationStalePin::ScopeRevision,
+            Box::new(|value| value.scope_revision += 1),
+        ),
+        (
+            ConversationStalePin::ScopeDigest,
+            Box::new(|value| value.scope_sha256 = "e".repeat(64)),
+        ),
+        (
             ConversationStalePin::LineageDigest,
             Box::new(|value| value.lineage_digest = Some("e".repeat(64))),
         ),
@@ -138,7 +148,7 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
         ),
         (
             ConversationStalePin::Codec,
-            Box::new(|value| value.codec = "codex.lineage.v2".to_string()),
+            Box::new(|value| value.codec = "codex.lineage.unsupported".to_string()),
         ),
         (
             ConversationStalePin::ProviderQuiescence,
@@ -254,11 +264,9 @@ fn reviewed_push_plan_is_immutable_restart_readable_and_scope_pinned() {
         host_id: action.host_id.clone(),
         replica_id: action.replica_id.clone(),
         local_project_id: action.local_project_id.clone(),
-        provider_profile_id: action.provider_profile_id.clone(),
         expected_host_identity_revision: action.expected_host_identity_revision,
         expected_project_binding_revision: action.expected_project_binding_revision,
         expected_bindings_document_revision: action.expected_bindings_document_revision,
-        expected_profile_revision: action.expected_profile_revision,
         revision: action.pinned_revision,
         commit_id: action.pinned_commit_id.clone(),
         manifest_sha256: action.pinned_manifest_sha256.clone(),
@@ -312,7 +320,7 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
             "profile-a",
         )
         .unwrap(),
-        provider: Provider::Codex,
+        provider: codex(),
         thread_id: ThreadId::parse("thread-journal").unwrap(),
         operation: ConversationSyncOperationKind::ProviderMaterialization,
         binding_forked_from: None,
@@ -383,7 +391,7 @@ fn journal_rejects_duplicate_operation_ids() {
             "profile-a",
         )
         .unwrap(),
-        provider: Provider::Codex,
+        provider: codex(),
         thread_id: ThreadId::parse("thread-journal").unwrap(),
         operation: ConversationSyncOperationKind::CloudPublication,
         binding_forked_from: None,
@@ -413,7 +421,6 @@ fn journal_rejects_duplicate_operation_ids() {
         .unwrap()
         .operations
         .is_empty());
-    let _ = Provider::Codex;
 }
 
 #[test]
@@ -614,7 +621,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
             origin.clone(),
             10,
         );
-        let initial = world.publish(&[initial_thread.clone()], origin.clone(), 10);
+        let initial = world.publish(std::slice::from_ref(&initial_thread), origin.clone(), 10);
         let scope = install_scope(
             &world.repo_a,
             &world.bundle_id,
@@ -894,9 +901,12 @@ fn committed_codex_provider_files_materialize_resume_and_rebind_one_variant() {
     assert_eq!(committed_sidecar["thread_id"], "destination-thread");
     assert_eq!(committed_sidecar["cwd"], project_root);
 
+    let registry = crate::project_sync::providers::ProviderRegistry::production();
     let mut capture_request = CaptureRequest::for_project(PathBuf::from(&project_root));
-    capture_request.codex_home = Some(provider_root);
-    let inventory = discover_project(&capture_request).unwrap();
+    capture_request
+        .provider_homes
+        .insert(codex(), provider_root);
+    let inventory = discover_project(registry, &capture_request).unwrap();
     let conversation = inventory
         .resources
         .iter()
@@ -904,6 +914,7 @@ fn committed_codex_provider_files_materialize_resume_and_rebind_one_variant() {
         .unwrap();
     assert!(conversation.blocked_reason.is_none());
     let captured = capture_selected(
+        registry,
         &capture_request,
         &BTreeSet::from([conversation.resource_id.clone()]),
     )
@@ -933,6 +944,7 @@ fn committed_codex_provider_files_materialize_resume_and_rebind_one_variant() {
     continued.push(b'\n');
     fs::write(&fixture.targets[0].target_path, &continued).unwrap();
     let recaptured = capture_selected(
+        registry,
         &capture_request,
         &BTreeSet::from(["codex:session:destination-thread".to_string()]),
     )
@@ -1050,8 +1062,8 @@ fn unacknowledged_codex_checkpoint_is_rehydrated_after_reopening() {
         crate::project_sync::commands::RestoreApplyStatus::ForkUnacknowledged
     ));
     assert_eq!(pending.plan_id, fixture.operation.plan_id.clone());
-    assert_eq!(pending.codex_fork_checkpoints.len(), 1);
-    let checkpoint = &pending.codex_fork_checkpoints[0];
+    assert_eq!(pending.fork_checkpoints.len(), 1);
+    let checkpoint = &pending.fork_checkpoints[0];
     assert_eq!(checkpoint.operation_id, fixture.operation.operation_id);
     assert_eq!(checkpoint.plan_id, fixture.operation.plan_id.clone());
     assert_eq!(checkpoint.thread_id, fixture.operation.thread_id);
@@ -1101,20 +1113,17 @@ fn multiple_pending_codex_checkpoints_surface_as_an_ordered_queue() {
     .unwrap()
     .unwrap();
     assert!(!pending.success);
-    assert_eq!(pending.codex_fork_checkpoints.len(), 2);
+    assert_eq!(pending.fork_checkpoints.len(), 2);
     assert_eq!(
-        pending.codex_fork_checkpoints[0].operation_id,
+        pending.fork_checkpoints[0].operation_id,
         fixture.operation.operation_id
     );
     assert_eq!(
-        pending.codex_fork_checkpoints[1].operation_id,
+        pending.fork_checkpoints[1].operation_id,
         second.operation_id
     );
-    assert_eq!(
-        pending.codex_fork_checkpoints[1].thread_id,
-        second.thread_id
-    );
-    for checkpoint in &pending.codex_fork_checkpoints {
+    assert_eq!(pending.fork_checkpoints[1].thread_id, second.thread_id);
+    for checkpoint in &pending.fork_checkpoints {
         assert!(matches!(
             checkpoint.status,
             crate::project_sync::commands::RestoreApplyStatus::ForkUnacknowledged
@@ -1152,9 +1161,9 @@ fn a_thread_with_a_pending_checkpoint_rejects_a_second_operation() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(pending.codex_fork_checkpoints.len(), 1);
+    assert_eq!(pending.fork_checkpoints.len(), 1);
     assert_eq!(
-        pending.codex_fork_checkpoints[0].operation_id,
+        pending.fork_checkpoints[0].operation_id,
         fixture.operation.operation_id
     );
     assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.local_bytes);
@@ -1199,10 +1208,13 @@ fn cloud_only_codex_divergence_replaces_original_without_creating_a_fork() {
     );
     let divergence = receipt.divergence.unwrap();
     assert_eq!(
-        divergence.resolution,
+        divergence.resolution(),
         ConversationDivergenceResolution::UseCloudOnly
     );
-    assert!(divergence.preserved_thread_id.is_none());
+    assert!(divergence.preserved_thread_id().is_none());
+    let DivergenceReceiptKind::CodexNativeFork(divergence) = &divergence else {
+        panic!("Codex divergence machinery produced a non-Codex receipt: {divergence:?}");
+    };
     assert!(divergence.preserved_provider_thread_id.is_none());
     assert!(divergence.executor.is_none());
     assert_eq!(
@@ -1476,7 +1488,7 @@ fn changed_verified_fork_blocks_original_replacement_during_recovery() {
     .unwrap()
     .unwrap();
     assert_eq!(
-        pending.codex_fork_checkpoints[0].status,
+        pending.fork_checkpoints[0].status,
         crate::project_sync::commands::RestoreApplyStatus::RecoveryRequired
     );
 }
@@ -1848,7 +1860,7 @@ impl CodexDivergenceFixture {
             replica_id: scope.replica_id.clone(),
             local_project_id: scope.project_id.clone(),
             provider_profile_id: scope.profile_id.clone(),
-            provider: Provider::Codex,
+            provider: codex(),
             thread_id: source_thread_id.clone(),
             operation: ConversationSyncOperationKind::CodexDivergence(CodexDivergenceOperation {
                 origin: ForkOrigin::PullPreserve,
@@ -2159,7 +2171,14 @@ done
             receipt.semantic_digest.as_deref(),
             Some(self.cloud_semantic_digest.as_str())
         );
-        let divergence = receipt.divergence.as_ref().unwrap();
+        let DivergenceReceiptKind::CodexNativeFork(divergence) =
+            receipt.divergence.as_ref().unwrap()
+        else {
+            panic!(
+                "Codex divergence machinery produced a non-Codex receipt: {:?}",
+                receipt.divergence
+            );
+        };
         assert_eq!(
             divergence.resolution,
             ConversationDivergenceResolution::PreserveLocalWithNativeFork
@@ -2286,7 +2305,7 @@ pub(super) fn install_scope(
     suffix: &str,
     replica: &str,
 ) -> InstalledScope {
-    install_scope_for_provider(repository, bundle_id, suffix, replica, Provider::Codex)
+    install_scope_for_provider(repository, bundle_id, suffix, replica, codex())
 }
 
 pub(super) fn install_scope_for_provider(
@@ -2294,7 +2313,7 @@ pub(super) fn install_scope_for_provider(
     bundle_id: &BundleId,
     suffix: &str,
     replica: &str,
-    provider: Provider,
+    provider: ProviderKey,
 ) -> InstalledScope {
     let identity = repository.load_or_create_host_identity().unwrap();
     let home = repository.root().parent().unwrap();
@@ -2316,7 +2335,6 @@ pub(super) fn install_scope_for_provider(
                 local_alias: None,
                 repository_fingerprint: None,
                 recipe: BundleRecipe::default(),
-                recipe_bases: BTreeMap::new(),
                 revision: 0,
                 created_at: 1,
                 updated_at: 1,
@@ -2328,7 +2346,7 @@ pub(super) fn install_scope_for_provider(
         .mutate_bindings(|_, machine| {
             machine.profiles.push(ProviderProfile {
                 profile_id: profile_id.clone(),
-                provider,
+                provider: provider.clone(),
                 display_name: format!("{} {suffix}", provider.as_str()),
                 path: provider_root.to_string_lossy().into_owned(),
                 canonical_path: provider_root.to_string_lossy().into_owned(),
@@ -2343,9 +2361,7 @@ pub(super) fn install_scope_for_provider(
                 bundle_id: bundle_id.clone(),
                 project_root: project_root.to_string_lossy().into_owned(),
                 canonical_project_root: project_root.to_string_lossy().into_owned(),
-                profile_ids: BTreeMap::from([(provider, profile_id.clone())]),
-                codex_home: None,
-                claude_home: None,
+                profile_ids: BTreeMap::from([(provider.clone(), profile_id.clone())]),
                 state: BindingState::Active,
                 revision: 0,
                 updated_at: 1,
@@ -2397,7 +2413,7 @@ fn push_operation(
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
-        provider: Provider::Codex,
+        provider: codex(),
         thread_id: thread_id.clone(),
         operation: ConversationSyncOperationKind::CloudPublication,
         binding_forked_from: None,
@@ -2456,7 +2472,6 @@ impl MaterializationFixture {
             local_alias: None,
             repository_fingerprint: None,
             recipe: BundleRecipe::default(),
-            recipe_bases: BTreeMap::new(),
             revision: 0,
             created_at: 1,
             updated_at: 1,
@@ -2466,7 +2481,7 @@ impl MaterializationFixture {
             .mutate_bindings(|_, machine| {
                 machine.profiles.push(ProviderProfile {
                     profile_id: profile_id.clone(),
-                    provider: Provider::Codex,
+                    provider: codex(),
                     display_name: "Codex fixture".to_string(),
                     path: provider_root.to_string_lossy().into_owned(),
                     canonical_path: provider_root.to_string_lossy().into_owned(),
@@ -2481,9 +2496,7 @@ impl MaterializationFixture {
                     bundle_id: bundle_id.clone(),
                     project_root: project_root.to_string_lossy().into_owned(),
                     canonical_project_root: project_root.to_string_lossy().into_owned(),
-                    profile_ids: BTreeMap::from([(Provider::Codex, profile_id.clone())]),
-                    codex_home: None,
-                    claude_home: None,
+                    profile_ids: BTreeMap::from([(codex(), profile_id.clone())]),
                     state: BindingState::Active,
                     revision: 0,
                     updated_at: 1,
@@ -2553,7 +2566,7 @@ impl MaterializationFixture {
             replica_id,
             local_project_id,
             provider_profile_id: profile_id,
-            provider: Provider::Codex,
+            provider: codex(),
             thread_id: ThreadId::parse("thread-materialize").unwrap(),
             operation: ConversationSyncOperationKind::ProviderMaterialization,
             binding_forked_from: None,
@@ -2700,19 +2713,22 @@ fn preservation_review(bytes: &[u8], provider_thread_id: &str) -> LocalThreadRev
         binding: None,
         binding_resolution: BindingResolution::Bound,
         resource_id: conversation_resource_id(
-            Provider::Codex,
+            &codex(),
             &ThreadId::parse("thread-preservation-review").unwrap(),
         )
         .unwrap(),
         descriptor: None,
         conversation: provider_capture::CapturedConversation {
-            provider: provider_capture::Provider::Codex,
+            provider: codex(),
             lineage_codec: "codex-jsonl".to_string(),
             source_thread_id: Some(provider_thread_id.to_string()),
             source_cwd: analysis.source_cwd.clone(),
             transcript_logical_path: logical_path.clone(),
+            source_physical_path: None,
+            sidecar_files: Vec::new(),
             record_count: analysis.record_count,
             lineage: analysis.lineage,
+            presentation: SessionPresentation::default(),
         },
         transcript: provider_capture::CapturedFile {
             logical_path,
@@ -2744,7 +2760,7 @@ fn diverged_forked_witness_requires_stamp_pair_fork_and_prefix() {
         forked_at: 40,
     };
     let binding = LocalConversationBinding {
-        host_id: crate::project_sync::domain::HostId::parse(&"1".repeat(32)).unwrap(),
+        host_id: crate::project_sync::domain::HostId::parse("1".repeat(32)).unwrap(),
         replica_id: ReplicaId::parse("replica-preservation").unwrap(),
         local_project_id: LocalProjectId::parse("project-preservation").unwrap(),
         provider_profile_id: LocalProviderProfileId::parse("profile-preservation").unwrap(),

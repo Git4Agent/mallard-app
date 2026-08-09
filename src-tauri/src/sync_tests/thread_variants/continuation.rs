@@ -1,5 +1,6 @@
 use super::harness::{
-    assert_manifest_consistent, chain, sha256, PublishedFixture, ThreadSpec, VariantWorld,
+    assert_manifest_consistent, chain, codex, codex_scope, sha256, PublishedFixture, ThreadSpec,
+    VariantWorld,
 };
 use super::recovery::{install_scope, InstalledScope};
 use crate::project_sync::commands::ThreadSyncState;
@@ -15,11 +16,12 @@ use crate::project_sync::domain::{
     ConversationCloudAnchor, ConversationFileRole, ConversationMaterializationState,
     ConversationOperationId, ConversationPlanActionType, ConversationPlanDirection,
     ConversationRelation, ConversationSyncOperation, ConversationSyncOperationKind,
-    ConversationSyncPhase, LocalConversationBinding, PlanId, TargetExpectation, ThreadId,
+    ConversationSyncPhase, LocalConversationBinding, PlanId, SessionPresentation,
+    TargetExpectation, ThreadId,
 };
 use crate::project_sync::persistence::LocalStateRepository;
 use crate::project_sync::provider_capture::{
-    CapturedConversation, CapturedFile, CapturedResources, Provider as CaptureProvider,
+    CapturedConversation, CapturedFile, CapturedResources,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -36,7 +38,7 @@ fn current_schema_true_noop_does_not_publish_or_change_provenance() {
         origin_a.clone(),
         10,
     );
-    let first = world.publish(&[thread.clone()], origin_a.clone(), 10);
+    let first = world.publish(std::slice::from_ref(&thread), origin_a.clone(), 10);
     assert!(first.published);
     let first_head = first.snapshot.head.clone();
     let first_manifest = first.snapshot.manifest.clone();
@@ -87,17 +89,16 @@ fn bound_thread_push_updates_only_its_thread() {
     );
     t2.forked_from = Some(t1_id.clone());
     let first = world.publish(&[t1.clone(), t2.clone()], origin_a, 10);
-    let t1_path = first.snapshot.manifest.conversations[&t1_id].files[0]
+    let first_scope = codex_scope(&first.snapshot.manifest);
+    let t1_path = first_scope.conversations[&t1_id].files[0]
         .logical_path
         .clone();
-    let t2_path = first.snapshot.manifest.conversations[&t2_id].files[0]
+    let t2_path = first_scope.conversations[&t2_id].files[0]
         .logical_path
         .clone();
-    let t1_entry = first.snapshot.manifest.files[&t1_path].clone();
-    let t2_entry = first.snapshot.manifest.files[&t2_path].clone();
-    let t1_descriptor = first.snapshot.manifest.resources
-        [&first.snapshot.manifest.files[&t1_path].resource_id]
-        .clone();
+    let t1_entry = first_scope.files[&t1_path].clone();
+    let t2_entry = first_scope.files[&t2_path].clone();
+    let t1_descriptor = first_scope.resources[&first_scope.files[&t1_path].resource_id].clone();
 
     let mut advanced_t2 = t2;
     advanced_t2.transcript = chain(
@@ -114,16 +115,11 @@ fn bound_thread_push_updates_only_its_thread() {
     let second = world.publish(&[t1, advanced_t2], origin_b, 20);
     assert!(second.published);
     assert_eq!(second.snapshot.head.revision, 2);
-    assert_eq!(second.snapshot.manifest.files[&t1_path], t1_entry);
-    assert_eq!(
-        second.snapshot.manifest.resources[&t1_entry.resource_id],
-        t1_descriptor
-    );
-    assert_eq!(
-        second.snapshot.manifest.conversations[&t2_id].forked_from,
-        Some(t1_id)
-    );
-    assert_ne!(second.snapshot.manifest.files[&t2_path], t2_entry);
+    let second_scope = codex_scope(&second.snapshot.manifest);
+    assert_eq!(second_scope.files[&t1_path], t1_entry);
+    assert_eq!(second_scope.resources[&t1_entry.resource_id], t1_descriptor);
+    assert_eq!(second_scope.conversations[&t2_id].forked_from, Some(t1_id));
+    assert_ne!(second_scope.files[&t2_path], t2_entry);
     assert_manifest_consistent(&world);
 }
 
@@ -243,7 +239,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         "operation-continuation-a-first",
         20,
     );
-    assert_eq!(after_a.manifest.conversations.len(), 2);
+    assert_eq!(codex_scope(&after_a.manifest).conversations.len(), 2);
 
     let b_active_before_pull = fs::read(&b_active_path).unwrap();
     let b_incoming_t1 = materialize_thread(
@@ -296,7 +292,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         30,
     );
     assert_eq!(after_b.head.revision, 3);
-    assert_eq!(after_b.manifest.conversations.len(), 2);
+    assert_eq!(codex_scope(&after_b.manifest).conversations.len(), 2);
 
     let a_active_before_pull = fs::read(&a_active_path).unwrap();
     let a_incoming_t2 = materialize_thread(
@@ -522,13 +518,16 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     captured.conversations.insert(
         resource_id.clone(),
         CapturedConversation {
-            provider: CaptureProvider::Codex,
+            provider: codex(),
             lineage_codec: CODEX_LINEAGE_CODEC_KEY.to_string(),
             source_thread_id: Some("local-v2".to_string()),
             source_cwd: Some(scope.provider_root.to_string_lossy().into_owned()),
             transcript_logical_path: transcript_path.clone(),
+            source_physical_path: None,
+            sidecar_files: Vec::new(),
             record_count,
             lineage: local_analysis.lineage,
+            presentation: SessionPresentation::default(),
         },
     );
     captured.files.insert(
@@ -626,7 +625,7 @@ fn current_schema_comparison_recovers_one_unbound_compatible_ancestor_without_pr
         10,
     );
     world.publish(
-        &[cloud.clone()],
+        std::slice::from_ref(&cloud),
         world.origin(&world.repo_a, "replica-a"),
         10,
     );
@@ -648,13 +647,16 @@ fn current_schema_comparison_recovers_one_unbound_compatible_ancestor_without_pr
     captured.conversations.insert(
         resource_id.clone(),
         CapturedConversation {
-            provider: CaptureProvider::Codex,
+            provider: codex(),
             lineage_codec: CODEX_LINEAGE_CODEC_KEY.to_string(),
             source_thread_id: Some("different-local-provider-id".to_string()),
             source_cwd: Some(scope.project_root.to_string_lossy().into_owned()),
             transcript_logical_path: transcript_path.clone(),
+            source_physical_path: None,
+            sidecar_files: Vec::new(),
             record_count,
             lineage: analysis.lineage,
+            presentation: SessionPresentation::default(),
         },
     );
     captured.files.insert(
@@ -818,7 +820,7 @@ fn publish_bound_thread(
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
-        provider: crate::project_sync::domain::Provider::Codex,
+        provider: codex(),
         thread_id: bound_thread_id.clone(),
         operation: ConversationSyncOperationKind::CloudPublication,
         binding_forked_from: None,
@@ -922,7 +924,7 @@ fn materialize_thread(
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
-        provider: crate::project_sync::domain::Provider::Codex,
+        provider: codex(),
         thread_id: thread_id.clone(),
         operation: ConversationSyncOperationKind::ProviderMaterialization,
         binding_forked_from: None,

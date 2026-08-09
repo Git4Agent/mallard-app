@@ -14,11 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use walkdir::{DirEntry, WalkDir};
 
-use crate::chat_history::parse_session_index_titles;
-use crate::codex_rollout::session_meta_is_internal_subagent;
-use crate::conversation_codec::{
-    analyze_codex_transcript, CodecLineage, CodecUnknownReason, CODEX_LINEAGE_CODEC_KEY,
-};
+use crate::conversation_codec::CodecLineage;
 use mallard_domain as domain;
 
 const MAX_DISCOVERED_FILES: usize = 20_000;
@@ -36,20 +32,13 @@ fn capture_file_limit(kind: &CaptureResourceKind) -> u64 {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum Provider {
-    Codex,
-    Claude,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureResourceKind {
     ProjectContentFile,
     ProjectContentDirectory,
     Conversation,
-    Memory,
+    ProviderState,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -65,7 +54,9 @@ pub struct ResourceCandidate {
     pub resource_id: String,
     pub kind: CaptureResourceKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<Provider>,
+    pub provider: Option<domain::ProviderKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_resource_type: Option<String>,
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relative_cwd: Option<String>,
@@ -128,25 +119,43 @@ pub struct CapturedResources {
     pub conversations: BTreeMap<String, CapturedConversation>,
     pub unavailable_resource_ids: Vec<String>,
     pub warnings: Vec<String>,
-    pub excluded_codex_subagent_ids: BTreeSet<String>,
+    /// Provider-native session ids excluded as internal subagents, keyed by
+    /// provider.
+    pub excluded_subagent_session_ids: BTreeMap<domain::ProviderKey, BTreeSet<String>>,
+}
+
+/// A sidecar file consolidated under its conversation resource.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapturedSidecarRef {
+    pub logical_path: String,
+    pub sidecar_kind: String,
+    /// Path relative to the provider's sidecar-kind directory. Materialization
+    /// derives destination names from this.
+    pub relative_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedConversation {
-    pub provider: Provider,
+    pub provider: domain::ProviderKey,
     pub lineage_codec: String,
     pub source_thread_id: Option<String>,
     pub source_cwd: Option<String>,
     pub transcript_logical_path: String,
+    /// Machine-local transcript source. Never serialized into a bundle;
+    /// reviewed plans use it to pin local target expectations.
+    pub source_physical_path: Option<PathBuf>,
+    #[allow(clippy::struct_field_names)]
+    pub sidecar_files: Vec<CapturedSidecarRef>,
     pub record_count: usize,
     pub lineage: CodecLineage,
+    pub presentation: domain::SessionPresentation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureRequest {
     pub project_root: PathBuf,
-    pub codex_home: Option<PathBuf>,
-    pub claude_home: Option<PathBuf>,
+    /// One home per bound provider, resolved from the selected profiles.
+    pub provider_homes: BTreeMap<domain::ProviderKey, PathBuf>,
     /// Canonical nested registrations owned by other bundles. A session whose
     /// cwd falls below one is excluded from this project's inventory.
     pub excluded_project_roots: Vec<PathBuf>,
@@ -163,8 +172,7 @@ impl CaptureRequest {
     pub fn for_project(project_root: impl Into<PathBuf>) -> Self {
         Self {
             project_root: project_root.into(),
-            codex_home: None,
-            claude_home: None,
+            provider_homes: BTreeMap::new(),
             excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
@@ -188,10 +196,20 @@ struct SourceDirectory {
     logical_path: String,
 }
 
+/// Conversation identity discovered by a provider adapter, retained so
+/// capture can run the typed codec and consolidate sidecars.
+#[derive(Clone, Debug)]
+struct DiscoveredConversationMeta {
+    provider: domain::ProviderKey,
+    transcript_logical_path: String,
+    sidecars: Vec<CapturedSidecarRef>,
+}
+
 #[derive(Clone, Debug)]
 struct DiscoveredResource {
     descriptor: ResourceCandidate,
     files: Vec<SourceFile>,
+    conversation: Option<DiscoveredConversationMeta>,
 }
 
 /// One full provider walk. Fields stay private to this module: callers hold
@@ -205,8 +223,8 @@ pub struct Discovery {
     warnings: Vec<String>,
     ignored_count: usize,
     blocked_count: usize,
-    excluded_codex_subagent_ids: BTreeSet<String>,
-    excluded_codex_subagent_resource_ids: BTreeSet<String>,
+    excluded_subagent_session_ids: BTreeMap<domain::ProviderKey, BTreeSet<String>>,
+    excluded_subagent_resource_ids: BTreeSet<String>,
 }
 
 impl Discovery {
@@ -225,16 +243,19 @@ impl Discovery {
         }
     }
 
-    pub fn excluded_codex_subagent_resource_ids(&self) -> &BTreeSet<String> {
-        &self.excluded_codex_subagent_resource_ids
+    pub fn excluded_subagent_resource_ids(&self) -> &BTreeSet<String> {
+        &self.excluded_subagent_resource_ids
     }
 }
 
 /// Discover resources without retaining file bytes. Absolute source paths are
 /// kept only inside this module and never become resource identity.
 #[cfg(any(test, feature = "test-support"))]
-pub fn discover_project(request: &CaptureRequest) -> Result<ProjectInventory, String> {
-    Ok(discover_full(request)?.project_inventory())
+pub fn discover_project(
+    registry: &crate::providers::ProviderRegistry,
+    request: &CaptureRequest,
+) -> Result<ProjectInventory, String> {
+    Ok(discover_full(registry, request)?.project_inventory())
 }
 
 /// Capture exactly the live resource IDs selected by the persistent recipe.
@@ -242,17 +263,19 @@ pub fn discover_project(request: &CaptureRequest) -> Result<ProjectInventory, St
 /// turned into deselections or tombstones.
 #[cfg(any(test, feature = "test-support"))]
 pub fn capture_selected(
+    registry: &crate::providers::ProviderRegistry,
     request: &CaptureRequest,
     selected_resource_ids: &BTreeSet<String>,
 ) -> Result<CapturedResources, String> {
-    let discovery = discover_full(request)?;
-    capture_from_discovery(request, &discovery, selected_resource_ids)
+    let discovery = discover_full(registry, request)?;
+    capture_from_discovery(registry, request, &discovery, selected_resource_ids)
 }
 
 /// `capture_selected` over an existing Discovery. Only the walk and its
 /// derived candidates are shared: file bytes and metadata are re-read at
 /// call time, so captured content is always current.
 pub fn capture_from_discovery(
+    registry: &crate::providers::ProviderRegistry,
     request: &CaptureRequest,
     discovery: &Discovery,
     selected_resource_ids: &BTreeSet<String>,
@@ -260,7 +283,7 @@ pub fn capture_from_discovery(
     let canonical_project = canonical_existing_dir(&request.project_root, "project root")?;
     let mut result = CapturedResources {
         warnings: discovery.warnings.clone(),
-        excluded_codex_subagent_ids: discovery.excluded_codex_subagent_ids.clone(),
+        excluded_subagent_session_ids: discovery.excluded_subagent_session_ids.clone(),
         ..CapturedResources::default()
     };
     let mut total_bytes = 0_u64;
@@ -400,53 +423,50 @@ pub fn capture_from_discovery(
         };
 
         let content_sha256 = resource_digest(&resource_files, captured_directory.as_ref());
-        if discovered.descriptor.kind == CaptureResourceKind::Conversation {
-            let provider = discovered.descriptor.provider.unwrap_or(Provider::Codex);
-            if let Some(transcript) = resource_files.first() {
-                let (lineage_codec, source_thread_id, source_cwd, record_count, lineage) =
-                    match provider {
-                        Provider::Codex if resource_files.len() == 1 => {
-                            let analysis = analyze_codex_transcript(&transcript.bytes);
-                            (
-                                CODEX_LINEAGE_CODEC_KEY.to_string(),
-                                analysis.source_thread_id,
-                                analysis.source_cwd,
-                                analysis.record_count,
-                                analysis.lineage,
-                            )
-                        }
-                        Provider::Codex => (
-                            CODEX_LINEAGE_CODEC_KEY.to_string(),
-                            None,
-                            None,
-                            0,
-                            CodecLineage::Unknown {
-                                reason: CodecUnknownReason::UnsupportedCodec,
-                            },
-                        ),
-                        Provider::Claude => (
-                            "claude.lineage.unavailable".to_string(),
-                            None,
-                            None,
-                            0,
-                            CodecLineage::Unknown {
-                                reason: CodecUnknownReason::UnsupportedCodec,
-                            },
-                        ),
-                    };
-                result.conversations.insert(
-                    resource_id.clone(),
-                    CapturedConversation {
-                        provider,
-                        lineage_codec,
-                        source_thread_id,
-                        source_cwd,
-                        transcript_logical_path: transcript.logical_path.clone(),
-                        record_count,
-                        lineage,
-                    },
-                );
-            }
+        if let Some(conversation_meta) = &discovered.conversation {
+            let adapter = registry.require_sessions(&conversation_meta.provider)?;
+            let transcript = resource_files
+                .iter()
+                .find(|file| file.logical_path == conversation_meta.transcript_logical_path)
+                .ok_or_else(|| {
+                    format!("conversation '{}' transcript was not captured", resource_id)
+                })?;
+            let transcript_source = discovered
+                .files
+                .iter()
+                .find(|source| source.logical_path == conversation_meta.transcript_logical_path)
+                .ok_or_else(|| {
+                    format!(
+                        "conversation '{}' transcript source is missing",
+                        resource_id
+                    )
+                })?;
+            let analysis = adapter.analyze(&transcript.bytes);
+            let presentation = match adapter.summarize_file(&transcript_source.physical_path) {
+                Ok(file_summary) => session_presentation(
+                    &file_summary,
+                    discovered.descriptor.relative_cwd.as_deref(),
+                ),
+                Err(_) => domain::SessionPresentation {
+                    relative_cwd: discovered.descriptor.relative_cwd.clone(),
+                    ..domain::SessionPresentation::default()
+                },
+            };
+            result.conversations.insert(
+                resource_id.clone(),
+                CapturedConversation {
+                    provider: conversation_meta.provider.clone(),
+                    lineage_codec: adapter.codec_key().to_string(),
+                    source_thread_id: analysis.source_provider_session_id,
+                    source_cwd: analysis.source_cwd,
+                    transcript_logical_path: conversation_meta.transcript_logical_path.clone(),
+                    source_physical_path: Some(transcript_source.physical_path.clone()),
+                    sidecar_files: conversation_meta.sidecars.clone(),
+                    record_count: analysis.record_count,
+                    lineage: analysis.lineage,
+                    presentation,
+                },
+            );
         }
         result.resources.insert(
             resource_id.clone(),
@@ -462,20 +482,56 @@ pub fn capture_from_discovery(
     Ok(result)
 }
 
+/// Bounded, provider-neutral presentation metadata for one captured
+/// conversation. Recorded SHAs are dropped unless they already satisfy the
+/// portable lowercase-hex contract.
+fn session_presentation(
+    file_summary: &crate::providers::SessionFileSummary,
+    relative_cwd: Option<&str>,
+) -> domain::SessionPresentation {
+    let recorded_sha = file_summary.recorded_sha.clone().filter(|sha| {
+        !sha.is_empty()
+            && sha.len() <= 64
+            && sha
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    });
+    let branch = file_summary
+        .branch
+        .clone()
+        .filter(|branch| !branch.trim().is_empty() && branch.len() <= 1_024);
+    domain::SessionPresentation {
+        started_at: file_summary.started_at,
+        ended_at: file_summary.ended_at,
+        relative_cwd: relative_cwd.map(str::to_string),
+        branch,
+        recorded_sha,
+        metrics: domain::SessionMetrics {
+            user_rounds: file_summary.user_rounds,
+            agent_messages: file_summary.agent_messages,
+            tool_calls: file_summary.tool_calls,
+            total_tokens: file_summary.total_tokens,
+            complete: file_summary.metrics_complete,
+        },
+    }
+}
+
 /// Domain-facing capture entry point. The recipe remains the sole selection
 /// authority; no transient UI filter is accepted here.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn capture_recipe(
+    registry: &crate::providers::ProviderRegistry,
     request: &CaptureRequest,
     recipe: &domain::BundleRecipe,
 ) -> Result<CapturedResources, String> {
-    let discovery = discover_full(request)?;
-    capture_recipe_from_discovery(request, &discovery, recipe)
+    let discovery = discover_full(registry, request)?;
+    capture_recipe_from_discovery(registry, request, &discovery, recipe)
 }
 
 /// `capture_recipe` over an existing Discovery, sharing one walk between
 /// selection persistence, freshness checks, and the byte capture.
 pub fn capture_recipe_from_discovery(
+    registry: &crate::providers::ProviderRegistry,
     request: &CaptureRequest,
     discovery: &Discovery,
     recipe: &domain::BundleRecipe,
@@ -486,7 +542,7 @@ pub fn capture_recipe_from_discovery(
         .keys()
         .map(|id| id.as_str().to_string())
         .collect();
-    capture_from_discovery(request, discovery, &selected)
+    capture_from_discovery(registry, request, discovery, &selected)
 }
 
 /// Convert captured descriptors into the shared current domain model. This
@@ -499,14 +555,7 @@ pub fn domain_resources(
     for resource in captured.resources.values() {
         let candidate = &resource.descriptor;
         let resource_id = domain::ResourceId::parse(candidate.resource_id.clone())?;
-        let provider = candidate.provider.map(domain_provider);
-        let kind = domain_kind(&candidate.kind, candidate.provider);
-        let scope = match candidate.kind {
-            CaptureResourceKind::Conversation | CaptureResourceKind::Memory => {
-                domain::ResourceScope::ProviderState
-            }
-            _ => domain::ResourceScope::Project,
-        };
+        let kind = domain_kind(&candidate.kind);
         let provenance = match candidate.kind {
             CaptureResourceKind::ProjectContentFile
             | CaptureResourceKind::ProjectContentDirectory => {
@@ -529,8 +578,12 @@ pub fn domain_resources(
         let descriptor = domain::ResourceDescriptor {
             resource_id: resource_id.clone(),
             kind,
-            provider,
-            scope,
+            provider: candidate.provider.clone(),
+            provider_resource_type: candidate
+                .provider_resource_type
+                .as_deref()
+                .map(domain::ResourceTypeKey::parse)
+                .transpose()?,
             display_name: candidate.display_name.clone(),
             provenance,
             apply_policy: domain_apply_policy(&candidate.apply_policy),
@@ -544,24 +597,14 @@ pub fn domain_resources(
     Ok(resources)
 }
 
-fn domain_provider(provider: Provider) -> domain::Provider {
-    match provider {
-        Provider::Codex => domain::Provider::Codex,
-        Provider::Claude => domain::Provider::Claude,
-    }
-}
-
-fn domain_kind(kind: &CaptureResourceKind, provider: Option<Provider>) -> domain::ResourceKind {
+fn domain_kind(kind: &CaptureResourceKind) -> domain::ResourceKind {
     match kind {
         CaptureResourceKind::ProjectContentFile => domain::ResourceKind::ProjectContentFile,
         CaptureResourceKind::ProjectContentDirectory => {
             domain::ResourceKind::ProjectContentDirectory
         }
-        CaptureResourceKind::Conversation => match provider {
-            Some(Provider::Claude) => domain::ResourceKind::ClaudeConversation,
-            _ => domain::ResourceKind::CodexConversation,
-        },
-        CaptureResourceKind::Memory => domain::ResourceKind::ProjectMemory,
+        CaptureResourceKind::Conversation => domain::ResourceKind::Conversation,
+        CaptureResourceKind::ProviderState => domain::ResourceKind::ProviderState,
     }
 }
 
@@ -574,7 +617,10 @@ fn domain_apply_policy(policy: &CaptureApplyPolicy) -> domain::ApplyPolicy {
 }
 
 /// The one full provider walk behind every inventory and capture view.
-pub fn discover_full(request: &CaptureRequest) -> Result<Discovery, String> {
+pub fn discover_full(
+    registry: &crate::providers::ProviderRegistry,
+    request: &CaptureRequest,
+) -> Result<Discovery, String> {
     let canonical_project = canonical_existing_dir(&request.project_root, "project root")?;
     let excluded_roots = request
         .excluded_project_roots
@@ -597,8 +643,8 @@ pub fn discover_full(request: &CaptureRequest) -> Result<Discovery, String> {
         warnings: Vec::new(),
         ignored_count: 0,
         blocked_count: 0,
-        excluded_codex_subagent_ids: BTreeSet::new(),
-        excluded_codex_subagent_resource_ids: BTreeSet::new(),
+        excluded_subagent_session_ids: BTreeMap::new(),
+        excluded_subagent_resource_ids: BTreeSet::new(),
     };
     if request.include_project_content {
         discover_generic_project_content(
@@ -608,11 +654,15 @@ pub fn discover_full(request: &CaptureRequest) -> Result<Discovery, String> {
             &mut discovery,
         )?;
     }
-    if let Some(home) = &request.codex_home {
-        discover_codex(home, &canonical_project, &excluded_roots, &mut discovery)?;
-    }
-    if let Some(home) = &request.claude_home {
-        discover_claude(home, &canonical_project, &excluded_roots, &mut discovery)?;
+    for (provider, home) in &request.provider_homes {
+        let adapter = registry.require_sessions(provider)?;
+        let context = crate::providers::SessionDiscoveryContext {
+            provider_home: home,
+            project_root: &canonical_project,
+            excluded_roots: &excluded_roots,
+        };
+        let session_discovery = adapter.discover(&context)?;
+        install_provider_discovery(&mut discovery, provider, session_discovery)?;
     }
     if discovery.resources.len() > MAX_DISCOVERED_FILES {
         return Err(format!(
@@ -621,6 +671,152 @@ pub fn discover_full(request: &CaptureRequest) -> Result<Discovery, String> {
         ));
     }
     Ok(discovery)
+}
+
+/// Fold one adapter's discovery into the shared candidate set: session
+/// resources with consolidated sidecars, provider-state resources, warnings,
+/// and subagent exclusions. Resource IDs and logical namespaces are composed
+/// here so every provider follows one identity scheme.
+fn install_provider_discovery(
+    discovery: &mut Discovery,
+    provider: &domain::ProviderKey,
+    result: crate::providers::SessionDiscovery,
+) -> Result<(), String> {
+    discovery.warnings.extend(result.warnings);
+    for excluded in result.excluded_subagent_session_ids {
+        let resource_id = format!("{}:session:{}", provider, resource_id_component(&excluded));
+        discovery
+            .excluded_subagent_session_ids
+            .entry(provider.clone())
+            .or_default()
+            .insert(excluded);
+        if discovery.excluded_subagent_resource_ids.insert(resource_id) {
+            discovery.ignored_count = discovery.ignored_count.saturating_add(1);
+        }
+    }
+    let mut sidecars_by_session: BTreeMap<String, Vec<crate::providers::DiscoveredSidecar>> =
+        BTreeMap::new();
+    for sidecar in result.sidecars {
+        sidecars_by_session
+            .entry(sidecar.session_id.clone())
+            .or_default()
+            .push(sidecar);
+    }
+    for session in result.sessions {
+        let component = resource_id_component(&session.session_id);
+        let resource_id = format!("{}:session:{}", provider, component);
+        let transcript_logical = format!(
+            "state/providers/{}/sessions/{}/transcript.jsonl",
+            provider, component
+        );
+        let mut files = vec![SourceFile {
+            physical_path: session.physical_path,
+            logical_path: transcript_logical.clone(),
+            opaque_content: true,
+            derived_bytes: None,
+        }];
+        let mut logical_paths = vec![transcript_logical.clone()];
+        let mut blocked_reason = session.blocked_reason;
+        let mut sidecar_refs = Vec::new();
+        for sidecar in sidecars_by_session
+            .remove(&session.session_id)
+            .unwrap_or_default()
+        {
+            let logical = format!(
+                "state/providers/{}/sessions/{}/sidecars/{}/{}",
+                provider, component, sidecar.sidecar_kind, sidecar.file_name
+            );
+            if blocked_reason.is_none() {
+                blocked_reason = sidecar.blocked_reason;
+            }
+            files.push(SourceFile {
+                physical_path: sidecar.physical_path,
+                logical_path: logical.clone(),
+                opaque_content: true,
+                derived_bytes: None,
+            });
+            logical_paths.push(logical.clone());
+            sidecar_refs.push(CapturedSidecarRef {
+                logical_path: logical,
+                sidecar_kind: sidecar.sidecar_kind,
+                relative_path: sidecar.file_name,
+            });
+        }
+        insert_resource(
+            discovery,
+            DiscoveredResource {
+                descriptor: ResourceCandidate {
+                    metadata: BTreeMap::new(),
+                    resource_id,
+                    kind: CaptureResourceKind::Conversation,
+                    provider: Some(provider.clone()),
+                    provider_resource_type: Some("session".to_string()),
+                    display_name: session.display_name,
+                    relative_cwd: Some(session.relative_cwd),
+                    apply_policy: CaptureApplyPolicy::SafeFile,
+                    selected_by_default: true,
+                    blocked_reason,
+                    logical_paths,
+                },
+                files,
+                conversation: Some(DiscoveredConversationMeta {
+                    provider: provider.clone(),
+                    transcript_logical_path: transcript_logical,
+                    sidecars: sidecar_refs,
+                }),
+            },
+        )?;
+    }
+    for state in result.state_resources {
+        let resource_id = format!(
+            "{}:{}:{}",
+            provider,
+            state.resource_type,
+            resource_id_component(&state.state_component)
+        );
+        let files = state
+            .files
+            .into_iter()
+            .map(|file| SourceFile {
+                physical_path: file.physical_path,
+                logical_path: format!("state/providers/{}/{}", provider, file.logical_suffix),
+                opaque_content: true,
+                derived_bytes: None,
+            })
+            .collect::<Vec<_>>();
+        if files.is_empty() {
+            continue;
+        }
+        let logical_paths = files
+            .iter()
+            .map(|file| file.logical_path.clone())
+            .collect::<Vec<_>>();
+        insert_resource(
+            discovery,
+            DiscoveredResource {
+                descriptor: ResourceCandidate {
+                    metadata: BTreeMap::new(),
+                    resource_id,
+                    kind: CaptureResourceKind::ProviderState,
+                    provider: Some(provider.clone()),
+                    provider_resource_type: Some(state.resource_type),
+                    display_name: state.display_name,
+                    relative_cwd: state.relative_cwd,
+                    apply_policy: if state.merge_apply {
+                        CaptureApplyPolicy::Merge
+                    } else {
+                        CaptureApplyPolicy::SafeFile
+                    },
+                    selected_by_default: true,
+                    blocked_reason: state.blocked_reason,
+                    logical_paths,
+                },
+                files,
+                conversation: None,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -742,10 +938,7 @@ fn discover_generic_project_content(
             )?;
             continue;
         }
-        if relative
-            .split('/')
-            .any(|component| denied_file_name(component))
-        {
+        if relative.split('/').any(denied_file_name) {
             add_blocked_project_content_candidate(
                 discovery,
                 &relative,
@@ -810,6 +1003,7 @@ fn add_project_content_directory(
                 resource_id: resource_id.clone(),
                 kind: CaptureResourceKind::ProjectContentDirectory,
                 provider: None,
+                provider_resource_type: None,
                 display_name: relative.to_string(),
                 relative_cwd: None,
                 apply_policy: CaptureApplyPolicy::Review,
@@ -819,6 +1013,7 @@ fn add_project_content_directory(
                 metadata,
             },
             files: Vec::new(),
+            conversation: None,
         },
     )?;
     discovery.directories.insert(
@@ -891,6 +1086,7 @@ fn add_project_content_file(
                 resource_id,
                 kind: CaptureResourceKind::ProjectContentFile,
                 provider: None,
+                provider_resource_type: None,
                 display_name: relative.to_string(),
                 relative_cwd: None,
                 apply_policy: CaptureApplyPolicy::Review,
@@ -905,6 +1101,7 @@ fn add_project_content_file(
                 opaque_content: true,
                 derived_bytes: None,
             }],
+            conversation: None,
         },
     )
 }
@@ -927,6 +1124,7 @@ fn add_blocked_project_content_candidate(
                 resource_id,
                 kind: CaptureResourceKind::ProjectContentFile,
                 provider: None,
+                provider_resource_type: None,
                 display_name: relative.to_string(),
                 relative_cwd: None,
                 apply_policy: CaptureApplyPolicy::Review,
@@ -936,6 +1134,7 @@ fn add_blocked_project_content_candidate(
                 metadata,
             },
             files: Vec::new(),
+            conversation: None,
         },
     )
 }
@@ -1124,357 +1323,21 @@ fn glob_path_matches(pattern: &str, value: &str) -> bool {
     )
 }
 
-fn discover_codex(
-    home: &Path,
-    project_root: &Path,
-    excluded_roots: &[PathBuf],
-    discovery: &mut Discovery,
-) -> Result<(), String> {
-    let canonical_home = canonical_existing_dir(home, "Codex home")?;
-    let mut selected_thread_ids = BTreeSet::new();
-    for directory in ["sessions", "archived_sessions"] {
-        let state_root = canonical_home.join(directory);
-        if !state_root.exists() {
-            continue;
-        }
-        for entry in WalkDir::new(&state_root)
-            .follow_links(false)
-            .max_depth(8)
-            .into_iter()
-            .filter_entry(provider_walk_entry)
-        {
-            let entry = entry.map_err(|e| format!("walk Codex {}: {}", directory, e))?;
-            if !entry.file_type().is_file()
-                || entry.path().extension().and_then(|value| value.to_str()) != Some("jsonl")
-            {
-                continue;
-            }
-            let meta = match scan_jsonl_metadata(entry.path(), Provider::Codex) {
-                Ok(meta) => meta,
-                Err(error) => {
-                    discovery.warnings.push(format!(
-                        "ignored Codex session '{}': {}",
-                        entry.path().display(),
-                        error
-                    ));
-                    continue;
-                }
-            };
-            let Some(relative_cwd) = owned_relative_cwd(project_root, &meta.cwd, excluded_roots)?
-            else {
-                continue;
-            };
-            let session_id = resource_id_component(&meta.session_id);
-            let resource_id = format!("codex:session:{}", session_id);
-            if meta.is_internal_subagent {
-                // TODO(sync-subagent-task): Parent/child rollout graphs need
-                // atomic selection and complete parent-ID rewriting before
-                // they can be portable. See docs/TODO.md.
-                discovery
-                    .excluded_codex_subagent_ids
-                    .insert(meta.session_id);
-                if discovery
-                    .excluded_codex_subagent_resource_ids
-                    .insert(resource_id)
-                {
-                    discovery.ignored_count = discovery.ignored_count.saturating_add(1);
-                }
-                continue;
-            }
-            selected_thread_ids.insert(meta.session_id.clone());
-            let state_relative = normalized_relative(&state_root, entry.path())?;
-            let logical_path = format!("state/codex/{}/{}", directory, state_relative);
-
-            // Codex can briefly leave the same transcript in both `sessions`
-            // and `archived_sessions` while an archive operation settles. A
-            // session ID is the stable resource identity, so keep the active
-            // `sessions` copy discovered first and ignore later copies. This
-            // must not make an otherwise valid Pull review unusable.
-            if directory == "archived_sessions" {
-                if let Some(existing_path) = discovery
-                    .resources
-                    .get(&resource_id)
-                    .and_then(|resource| resource.files.first())
-                    .map(|file| file.physical_path.display().to_string())
-                {
-                    discovery.warnings.push(format!(
-                        "ignored duplicate Codex session '{}' at '{}'; using '{}'",
-                        meta.session_id,
-                        entry.path().display(),
-                        existing_path,
-                    ));
-                    continue;
-                }
-            }
-
-            insert_resource(
-                discovery,
-                DiscoveredResource {
-                    descriptor: ResourceCandidate {
-                        metadata: BTreeMap::new(),
-                        resource_id: resource_id.clone(),
-                        kind: CaptureResourceKind::Conversation,
-                        provider: Some(Provider::Codex),
-                        display_name: meta.session_id,
-                        relative_cwd: Some(relative_cwd),
-                        apply_policy: CaptureApplyPolicy::SafeFile,
-                        selected_by_default: true,
-                        blocked_reason: inspect_candidate_files_with_limit(
-                            &canonical_home,
-                            &[entry.path().to_path_buf()],
-                            domain::MAX_CONVERSATION_FILE_BYTES,
-                        )
-                        .err(),
-                        logical_paths: vec![logical_path.clone()],
-                    },
-                    files: vec![SourceFile {
-                        physical_path: entry.path().to_path_buf(),
-                        logical_path,
-                        opaque_content: true,
-                        derived_bytes: None,
-                    }],
-                },
-            )?;
-        }
-    }
-
-    let index = canonical_home.join("session_index.jsonl");
-    if !selected_thread_ids.is_empty() && index.is_file() {
-        // The index is local provider state, not a portable resource. Read only
-        // the selected rows to enrich the typed conversation titles; Pull
-        // materialization maintains the destination index transactionally.
-        let filtered = filter_jsonl_by_ids(&index, &selected_thread_ids)?;
-        if !filtered.is_empty() {
-            for (thread_id, title) in parse_session_index_titles(&filtered) {
-                let resource_id = format!("codex:session:{}", resource_id_component(&thread_id));
-                if let Some(resource) = discovery.resources.get_mut(&resource_id) {
-                    resource.descriptor.display_name = title;
-                }
-            }
-        }
-    }
-    Ok(())
+/// Provider-specific rules for the bounded head-of-file metadata scan.
+/// Adapters supply these; the scan loop itself is provider-neutral.
+pub struct MetadataScanSpec {
+    /// Whether one parsed record is authoritative session metadata, given
+    /// its lowercased `type` and the full record.
+    pub authoritative: fn(&str, &serde_json::Value) -> bool,
+    pub id_keys_authoritative: &'static [&'static str],
+    pub id_keys_fallback: &'static [&'static str],
+    pub detect_subagent: fn(&serde_json::Value) -> bool,
 }
 
-fn discover_claude(
-    home: &Path,
-    project_root: &Path,
-    excluded_roots: &[PathBuf],
-    discovery: &mut Discovery,
-) -> Result<(), String> {
-    let canonical_home = canonical_existing_dir(home, "Claude home")?;
-    let projects = canonical_home.join("projects");
-    if !projects.exists() {
-        return Ok(());
-    }
-    let mut session_ids = BTreeSet::new();
-    for entry in WalkDir::new(&projects)
-        .follow_links(false)
-        .min_depth(2)
-        .max_depth(3)
-        .into_iter()
-        .filter_entry(provider_walk_entry)
-    {
-        let entry = entry.map_err(|e| format!("walk Claude projects: {}", e))?;
-        if !entry.file_type().is_file()
-            || entry.path().extension().and_then(|value| value.to_str()) != Some("jsonl")
-        {
-            continue;
-        }
-        let meta = match scan_jsonl_metadata(entry.path(), Provider::Claude) {
-            Ok(meta) => meta,
-            Err(error) => {
-                discovery.warnings.push(format!(
-                    "ignored Claude session '{}': {}",
-                    entry.path().display(),
-                    error
-                ));
-                continue;
-            }
-        };
-        let Some(relative_cwd) = owned_relative_cwd(project_root, &meta.cwd, excluded_roots)?
-        else {
-            continue;
-        };
-        session_ids.insert(meta.session_id.clone());
-        let relative_key = relative_cwd_key(&relative_cwd);
-        let file_name = entry
-            .path()
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| format!("non-UTF-8 Claude session name: {}", entry.path().display()))?;
-        let logical_path = format!("state/claude/projects/{}/{}", relative_key, file_name);
-        let resource_id = format!("claude:session:{}", resource_id_component(&meta.session_id));
-        insert_resource(
-            discovery,
-            DiscoveredResource {
-                descriptor: ResourceCandidate {
-                    metadata: BTreeMap::new(),
-                    resource_id: resource_id.clone(),
-                    kind: CaptureResourceKind::Conversation,
-                    provider: Some(Provider::Claude),
-                    display_name: meta.session_id,
-                    relative_cwd: Some(relative_cwd),
-                    apply_policy: CaptureApplyPolicy::SafeFile,
-                    selected_by_default: true,
-                    blocked_reason: inspect_candidate_files_with_limit(
-                        &canonical_home,
-                        &[entry.path().to_path_buf()],
-                        domain::MAX_CONVERSATION_FILE_BYTES,
-                    )
-                    .err(),
-                    logical_paths: vec![logical_path.clone()],
-                },
-                files: vec![SourceFile {
-                    physical_path: entry.path().to_path_buf(),
-                    logical_path,
-                    opaque_content: true,
-                    derived_bytes: None,
-                }],
-            },
-        )?;
-    }
-
-    // Sidecars are associated only through an already-proven session ID.
-    for (directory, kind) in [
-        ("file-history", CaptureResourceKind::Conversation),
-        ("todos", CaptureResourceKind::Conversation),
-    ] {
-        let sidecar_root = canonical_home.join(directory);
-        if !sidecar_root.exists() {
-            continue;
-        }
-        for entry in WalkDir::new(&sidecar_root)
-            .follow_links(false)
-            .max_depth(4)
-            .into_iter()
-            .filter_entry(provider_walk_entry)
-        {
-            let entry = entry.map_err(|e| format!("walk Claude {}: {}", directory, e))?;
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let relative = normalized_relative(&sidecar_root, entry.path())?;
-            let Some(session_id) = session_ids
-                .iter()
-                .find(|id| relative.contains(id.as_str()))
-                .cloned()
-            else {
-                continue;
-            };
-            let resource_id = format!(
-                "claude:{}:{}",
-                directory,
-                resource_id_component(&session_id)
-            );
-            let logical_path = format!("state/claude/{}/{}", directory, relative);
-            insert_resource(
-                discovery,
-                DiscoveredResource {
-                    descriptor: ResourceCandidate {
-                        metadata: BTreeMap::new(),
-                        resource_id: resource_id.clone(),
-                        kind: kind.clone(),
-                        provider: Some(Provider::Claude),
-                        display_name: format!("Claude {} for {}", directory, session_id),
-                        relative_cwd: None,
-                        apply_policy: CaptureApplyPolicy::SafeFile,
-                        selected_by_default: true,
-                        blocked_reason: inspect_candidate_files_with_limit(
-                            &canonical_home,
-                            &[entry.path().to_path_buf()],
-                            domain::MAX_CONVERSATION_FILE_BYTES,
-                        )
-                        .err(),
-                        logical_paths: vec![logical_path.clone()],
-                    },
-                    files: vec![SourceFile {
-                        physical_path: entry.path().to_path_buf(),
-                        logical_path,
-                        opaque_content: true,
-                        derived_bytes: None,
-                    }],
-                },
-            )?;
-        }
-    }
-
-    // Project memories live within a verified bucket. We discover them only
-    // when a session in that bucket proved project ownership.
-    let mut bucket_roots = BTreeMap::<PathBuf, String>::new();
-    for resource in discovery.resources.values() {
-        if resource.descriptor.provider == Some(Provider::Claude)
-            && resource.descriptor.kind == CaptureResourceKind::Conversation
-        {
-            for source in &resource.files {
-                if source.physical_path.starts_with(&projects) {
-                    if let Some(parent) = source.physical_path.parent() {
-                        if let Some(relative_cwd) = &resource.descriptor.relative_cwd {
-                            bucket_roots.insert(parent.to_path_buf(), relative_cwd.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    for (bucket, relative_cwd) in bucket_roots {
-        let memory = bucket.join("memory");
-        if !memory.exists() {
-            continue;
-        }
-        let files = collect_regular_tree_files(&canonical_home, memory)?;
-        if files.is_empty() {
-            continue;
-        }
-        let relative_key = relative_cwd_key(&relative_cwd);
-        let resource_id = format!("claude:memory:{}", resource_id_component(&relative_cwd));
-        let logical_prefix = format!("state/claude/memory/{}", relative_key);
-        let logical_paths = files
-            .iter()
-            .map(|path| {
-                normalized_relative(&bucket.join("memory"), path)
-                    .map(|rel| format!("{}/{}", logical_prefix, rel))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        insert_resource(
-            discovery,
-            DiscoveredResource {
-                descriptor: ResourceCandidate {
-                    metadata: BTreeMap::new(),
-                    resource_id: resource_id.clone(),
-                    kind: CaptureResourceKind::Memory,
-                    provider: Some(Provider::Claude),
-                    display_name: "Claude project memory".to_string(),
-                    relative_cwd: Some(relative_cwd),
-                    apply_policy: CaptureApplyPolicy::Merge,
-                    selected_by_default: true,
-                    blocked_reason: inspect_candidate_files(&canonical_home, &files).err(),
-                    logical_paths: logical_paths.clone(),
-                },
-                files: files
-                    .into_iter()
-                    .zip(logical_paths)
-                    .map(|(physical_path, logical_path)| SourceFile {
-                        physical_path,
-                        logical_path,
-                        opaque_content: true,
-                        derived_bytes: None,
-                    })
-                    .collect(),
-            },
-        )?;
-    }
-    Ok(())
-}
-
-#[derive(Debug)]
-pub struct SessionMetadata {
-    pub session_id: String,
-    pub(crate) cwd: PathBuf,
-    pub(crate) is_internal_subagent: bool,
-}
-
-pub fn scan_jsonl_metadata(path: &Path, provider: Provider) -> Result<SessionMetadata, String> {
+pub fn scan_session_metadata_with(
+    path: &Path,
+    spec: &MetadataScanSpec,
+) -> Result<crate::providers::SessionFileMetadata, String> {
     let file = fs::File::open(path).map_err(|e| format!("open: {}", e))?;
     let mut reader = BufReader::new(file);
     let mut total = 0_usize;
@@ -1512,34 +1375,12 @@ pub fn scan_jsonl_metadata(path: &Path, provider: Provider) -> Result<SessionMet
                 "projectPath",
             ],
         );
-        let authoritative = match provider {
-            Provider::Codex => event_type.contains("session_meta"),
-            Provider::Claude => {
-                event_type.contains("system")
-                    || event_type.contains("init")
-                    || value.get("sessionId").is_some()
-            }
-        };
-        let is_internal_subagent =
-            provider == Provider::Codex && session_meta_is_internal_subagent(&value);
-        let id = match provider {
-            // Modern Codex subagent metadata carries both `id` (this
-            // transcript) and `session_id` (its parent). Prefer `id` on the
-            // authoritative session_meta record so parent and child sessions
-            // remain distinct resources. Keep the older fallback precedence
-            // for non-authoritative compatibility records.
-            Provider::Codex if authoritative => find_string_for_keys(
-                &value,
-                &["id", "thread_id", "threadId", "session_id", "sessionId"],
-            ),
-            Provider::Codex => find_string_for_keys(
-                &value,
-                &["thread_id", "threadId", "session_id", "sessionId", "id"],
-            ),
-            Provider::Claude => find_string_for_keys(
-                &value,
-                &["sessionId", "session_id", "threadId", "thread_id", "id"],
-            ),
+        let authoritative = (spec.authoritative)(&event_type, &value);
+        let is_internal_subagent = (spec.detect_subagent)(&value);
+        let id = if authoritative {
+            find_string_for_keys(&value, spec.id_keys_authoritative)
+        } else {
+            find_string_for_keys(&value, spec.id_keys_fallback)
         };
         if fallback_cwd.is_none() {
             fallback_cwd = cwd.clone();
@@ -1559,12 +1400,11 @@ pub fn scan_jsonl_metadata(path: &Path, provider: Provider) -> Result<SessionMet
     let cwd = fallback_cwd.ok_or_else(|| "cwd was not found in bounded metadata".to_string())?;
     validated_session_metadata(id, cwd, fallback_is_internal_subagent)
 }
-
 fn validated_session_metadata(
     id: String,
     cwd: String,
     is_internal_subagent: bool,
-) -> Result<SessionMetadata, String> {
+) -> Result<crate::providers::SessionFileMetadata, String> {
     if id.is_empty()
         || id.len() > 512
         || id.chars().any(char::is_control)
@@ -1578,7 +1418,7 @@ fn validated_session_metadata(
     if !cwd.is_absolute() {
         return Err("session cwd is not absolute".to_string());
     }
-    Ok(SessionMetadata {
+    Ok(crate::providers::SessionFileMetadata {
         session_id: id,
         cwd,
         is_internal_subagent,
@@ -1611,7 +1451,7 @@ fn find_string_for_keys(value: &serde_json::Value, keys: &[&str]) -> Option<Stri
     }
 }
 
-fn owned_relative_cwd(
+pub(crate) fn owned_relative_cwd(
     project_root: &Path,
     cwd: &Path,
     excluded_roots: &[PathBuf],
@@ -1639,7 +1479,7 @@ fn owned_relative_cwd(
     }
 }
 
-fn filter_jsonl_by_ids(path: &Path, ids: &BTreeSet<String>) -> Result<Vec<u8>, String> {
+pub(crate) fn filter_jsonl_by_ids(path: &Path, ids: &BTreeSet<String>) -> Result<Vec<u8>, String> {
     let meta = fs::metadata(path).map_err(|e| format!("inspect '{}': {}", path.display(), e))?;
     if meta.len() > MAX_FILE_BYTES {
         return Err(format!(
@@ -1682,11 +1522,14 @@ fn insert_resource(discovery: &mut Discovery, resource: DiscoveredResource) -> R
     Ok(())
 }
 
-fn inspect_candidate_files(approved_root: &Path, files: &[PathBuf]) -> Result<(), String> {
+pub(crate) fn inspect_candidate_files(
+    approved_root: &Path,
+    files: &[PathBuf],
+) -> Result<(), String> {
     inspect_candidate_files_with_limit(approved_root, files, MAX_FILE_BYTES)
 }
 
-fn inspect_candidate_files_with_limit(
+pub(crate) fn inspect_candidate_files_with_limit(
     approved_root: &Path,
     files: &[PathBuf],
     max_file_bytes: u64,
@@ -1760,11 +1603,8 @@ fn validate_source_file(
     if request.include_project_content {
         approved_roots.push(canonical_project.to_path_buf());
     }
-    if let Some(home) = &request.codex_home {
-        approved_roots.push(canonical_existing_dir(home, "Codex home")?);
-    }
-    if let Some(home) = &request.claude_home {
-        approved_roots.push(canonical_existing_dir(home, "Claude home")?);
+    for (provider, home) in &request.provider_homes {
+        approved_roots.push(canonical_existing_dir(home, &format!("{} home", provider))?);
     }
     let Some(approved_root) = approved_roots
         .into_iter()
@@ -1816,7 +1656,10 @@ fn validate_source_directory(
     Ok(())
 }
 
-fn collect_regular_tree_files(approved_root: &Path, tree: PathBuf) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn collect_regular_tree_files(
+    approved_root: &Path,
+    tree: PathBuf,
+) -> Result<Vec<PathBuf>, String> {
     let meta =
         fs::symlink_metadata(&tree).map_err(|e| format!("inspect '{}': {}", tree.display(), e))?;
     if meta.file_type().is_symlink() {
@@ -1826,7 +1669,7 @@ fn collect_regular_tree_files(approved_root: &Path, tree: PathBuf) -> Result<Vec
         ));
     }
     if meta.is_file() {
-        inspect_candidate_files(approved_root, &[tree.clone()])?;
+        inspect_candidate_files(approved_root, std::slice::from_ref(&tree))?;
         return Ok(vec![tree]);
     }
     if !meta.is_dir() {
@@ -1942,7 +1785,7 @@ fn reject_unsafe_ancestors(path: &Path, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn canonical_existing_dir(path: &Path, label: &str) -> Result<PathBuf, String> {
+pub(crate) fn canonical_existing_dir(path: &Path, label: &str) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err(format!("{} must be absolute: '{}'", label, path.display()));
     }
@@ -1958,7 +1801,7 @@ fn canonical_existing_dir(path: &Path, label: &str) -> Result<PathBuf, String> {
     fs::canonicalize(path).map_err(|e| format!("resolve {} '{}': {}", label, path.display(), e))
 }
 
-fn normalized_relative(root: &Path, path: &Path) -> Result<String, String> {
+pub(crate) fn normalized_relative(root: &Path, path: &Path) -> Result<String, String> {
     let relative = path
         .strip_prefix(root)
         .map_err(|_| format!("'{}' is outside '{}'", path.display(), root.display()))?;
@@ -2030,7 +1873,7 @@ fn is_windows_reserved(component: &str) -> bool {
             && stem.as_bytes()[3] != b'0')
 }
 
-fn provider_walk_entry(entry: &DirEntry) -> bool {
+pub(crate) fn provider_walk_entry(entry: &DirEntry) -> bool {
     if entry.depth() == 0 || !entry.file_type().is_dir() {
         return true;
     }
@@ -2132,7 +1975,7 @@ fn resource_digest(files: &[CapturedFile], directory: Option<&CapturedDirectory>
     hex_digest(hasher.finalize().as_slice())
 }
 
-fn resource_id_component(value: &str) -> String {
+pub(crate) fn resource_id_component(value: &str) -> String {
     let valid = !value.is_empty()
         && value.len() <= 72
         && value.bytes().all(|byte| {
@@ -2147,7 +1990,7 @@ fn resource_id_component(value: &str) -> String {
     }
 }
 
-fn relative_cwd_key(relative_cwd: &str) -> String {
+pub(crate) fn relative_cwd_key(relative_cwd: &str) -> String {
     if relative_cwd == "." {
         "_root".to_string()
     } else {
@@ -2208,11 +2051,24 @@ fn is_executable_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::ProviderRegistry;
     use std::io::Write;
 
     fn write(path: &Path, bytes: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
+    }
+
+    fn registry() -> &'static ProviderRegistry {
+        ProviderRegistry::production()
+    }
+
+    fn codex_key() -> domain::ProviderKey {
+        domain::ProviderKey::parse("codex").unwrap()
+    }
+
+    fn claude_key() -> domain::ProviderKey {
+        domain::ProviderKey::parse("claude").unwrap()
     }
 
     #[test]
@@ -2234,13 +2090,12 @@ mod tests {
 
         let request = CaptureRequest {
             project_root: project,
-            codex_home: Some(codex),
-            claude_home: None,
+            provider_homes: BTreeMap::from([(codex_key(), codex)]),
             excluded_project_roots: Vec::new(),
             include_project_content: true,
             excluded_content_roots: Vec::new(),
         };
-        let discovery = discover_full(&request).unwrap();
+        let discovery = discover_full(registry(), &request).unwrap();
         let all_ids: BTreeSet<String> = discovery
             .project_inventory()
             .resources
@@ -2249,8 +2104,8 @@ mod tests {
             .collect();
         assert!(all_ids.len() >= 2, "fixture must span several resources");
 
-        let direct = capture_selected(&request, &all_ids).unwrap();
-        let shared = capture_from_discovery(&request, &discovery, &all_ids).unwrap();
+        let direct = capture_selected(registry(), &request, &all_ids).unwrap();
+        let shared = capture_from_discovery(registry(), &request, &discovery, &all_ids).unwrap();
         assert_eq!(
             direct, shared,
             "the wrapper and the seam capture identically"
@@ -2263,8 +2118,9 @@ mod tests {
             .collect();
         let other_ids: BTreeSet<String> = all_ids.difference(&conversation_ids).cloned().collect();
         assert!(!conversation_ids.is_empty() && !other_ids.is_empty());
-        let first = capture_from_discovery(&request, &discovery, &conversation_ids).unwrap();
-        let second = capture_from_discovery(&request, &discovery, &other_ids).unwrap();
+        let first =
+            capture_from_discovery(registry(), &request, &discovery, &conversation_ids).unwrap();
+        let second = capture_from_discovery(registry(), &request, &discovery, &other_ids).unwrap();
         let union_files: BTreeSet<String> = first
             .files
             .keys()
@@ -2321,13 +2177,12 @@ mod tests {
 
         let request = CaptureRequest {
             project_root: project,
-            codex_home: Some(codex),
-            claude_home: Some(claude),
+            provider_homes: BTreeMap::from([(codex_key(), codex), (claude_key(), claude)]),
             excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let codex = inventory
             .resources
             .iter()
@@ -2344,7 +2199,10 @@ mod tests {
             .find(|resource| resource.resource_id == "claude:session:session-a")
             .unwrap();
         assert_eq!(claude.relative_cwd.as_deref(), Some("."));
-        assert!(claude.logical_paths[0].contains("/_root/"));
+        assert_eq!(
+            claude.logical_paths[0],
+            "state/providers/claude/sessions/session-a/transcript.jsonl"
+        );
     }
 
     #[test]
@@ -2384,13 +2242,12 @@ mod tests {
 
         let request = CaptureRequest {
             project_root: project,
-            codex_home: Some(codex),
-            claude_home: None,
+            provider_homes: BTreeMap::from([(codex_key(), codex)]),
             excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let at_limit = inventory
             .resources
             .iter()
@@ -2441,13 +2298,12 @@ mod tests {
 
         let request = CaptureRequest {
             project_root: project,
-            codex_home: Some(codex),
-            claude_home: None,
+            provider_homes: BTreeMap::from([(codex_key(), codex)]),
             excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
-        let discovery = discover_full(&request).unwrap();
+        let discovery = discover_full(registry(), &request).unwrap();
         let inventory = discovery.project_inventory();
         let conversation_ids = inventory
             .resources
@@ -2466,7 +2322,7 @@ mod tests {
             "codex:session:child-source".to_string(),
             "codex:session:child-thread-source".to_string(),
         ]);
-        let captured = capture_from_discovery(&request, &discovery, &selected).unwrap();
+        let captured = capture_from_discovery(registry(), &request, &discovery, &selected).unwrap();
         assert!(captured
             .resources
             .contains_key("codex:session:parent-thread"));
@@ -2478,11 +2334,14 @@ mod tests {
             ]
         );
         assert_eq!(
-            captured.excluded_codex_subagent_ids,
-            BTreeSet::from([
-                "child-source".to_string(),
-                "child-thread-source".to_string(),
-            ])
+            captured.excluded_subagent_session_ids,
+            BTreeMap::from([(
+                codex_key(),
+                BTreeSet::from([
+                    "child-source".to_string(),
+                    "child-thread-source".to_string(),
+                ]),
+            )])
         );
     }
 
@@ -2508,13 +2367,12 @@ mod tests {
 
         let request = CaptureRequest {
             project_root: project,
-            codex_home: Some(codex),
-            claude_home: None,
+            provider_homes: BTreeMap::from([(codex_key(), codex)]),
             excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let matching = inventory
             .resources
             .iter()
@@ -2522,7 +2380,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(matching.len(), 1);
-        assert!(matching[0].logical_paths[0].starts_with("state/codex/sessions/"));
+        assert!(matching[0].logical_paths[0].starts_with("state/providers/codex/sessions/"));
         assert!(inventory
             .warnings
             .iter()
@@ -2555,7 +2413,7 @@ mod tests {
         let scan = |root: &Path| {
             let mut request = CaptureRequest::for_project(root);
             request.include_project_content = true;
-            let inventory = discover_project(&request).unwrap();
+            let inventory = discover_project(registry(), &request).unwrap();
             let by_path = inventory
                 .resources
                 .iter()
@@ -2587,7 +2445,7 @@ mod tests {
             .values()
             .map(|(resource_id, _)| resource_id.clone())
             .collect::<BTreeSet<_>>();
-        let captured = capture_selected(&first_request, &selected).unwrap();
+        let captured = capture_selected(registry(), &first_request, &selected).unwrap();
         assert_eq!(
             captured.files["project/docs/specs/a.md"].bytes,
             b"portable spec"
@@ -2620,7 +2478,7 @@ mod tests {
         let mut request = CaptureRequest::for_project(&project);
         request.include_project_content = true;
         request.excluded_project_roots = vec![project.join("child-project")];
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let generic = inventory
             .resources
             .iter()
@@ -2674,7 +2532,7 @@ mod tests {
 
         let mut request = CaptureRequest::for_project(&project);
         request.include_project_content = true;
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         for path in ["original.txt", "hard-link.txt", "outside-link.txt"] {
             let resource = inventory
                 .resources
@@ -2709,7 +2567,7 @@ mod tests {
 
         let mut request = CaptureRequest::for_project(&project);
         request.include_project_content = true;
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let oversized = inventory
             .resources
             .iter()
@@ -2740,7 +2598,7 @@ mod tests {
         }
         let mut request = CaptureRequest::for_project(&project);
         request.include_project_content = true;
-        let error = discover_project(&request).unwrap_err();
+        let error = discover_project(registry(), &request).unwrap_err();
         assert!(error.contains("exceeds 20000 resources"), "{error}");
     }
 }

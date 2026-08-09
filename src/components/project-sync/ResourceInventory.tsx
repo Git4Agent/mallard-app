@@ -75,7 +75,7 @@ function ResourceRow({
         <span className="sync-resource-copy">
           <strong>{resource.display_name}</strong>
           <span>
-            {providerLabel(resource.provider)} · {resource.scope.replace(/_/g, " ")}
+            {providerLabel(resource.provider)} · {(resource.provider_resource_type ?? resource.kind).replace(/_/g, " ")}
           </span>
         </span>
         <span className="sync-resource-meta">

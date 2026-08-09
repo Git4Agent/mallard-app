@@ -40,6 +40,32 @@ const HOST_ROTATION_SCHEMA: u32 = 1;
 
 static PERSISTENCE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Whether a focused config transaction changed the document. Returning
+/// [`Unchanged`](ConfigMutation::Unchanged) preserves the current revision and
+/// avoids an unnecessary atomic rewrite, which is required for idempotent
+/// command retries.
+pub enum ConfigMutation<T> {
+    Unchanged(T),
+    Changed(T),
+}
+
+/// Separates a caller's transactional decision from persistence failures.
+/// Application services can therefore retain typed conflict errors without
+/// parsing repository error strings.
+pub enum ConfigTransactionError<E> {
+    Mutation(E),
+    Persistence(String),
+}
+
+impl<E> ConfigTransactionError<E> {
+    pub fn into_persistence(self) -> Option<String> {
+        match self {
+            Self::Mutation(_) => None,
+            Self::Persistence(message) => Some(message),
+        }
+    }
+}
+
 struct PersistenceGuard {
     _process: std::sync::MutexGuard<'static, ()>,
     _file: fs::File,
@@ -615,6 +641,36 @@ impl LocalStateRepository {
         config.validate()?;
         write_json_atomic(&self.root, &self.config_path(), &config, MAX_CONFIG_BYTES)?;
         Ok(result)
+    }
+
+    /// Run one focused config transaction and return the exact document that
+    /// was observed or committed while `persistence.lock` is still held.
+    ///
+    /// Network work must happen before entering this method. The closure is
+    /// intentionally limited to an in-memory decision so the cross-process
+    /// persistence lock is never held across remote I/O.
+    pub fn transact_config<T, E>(
+        &self,
+        mutate: impl FnOnce(&mut SyncConfig) -> Result<ConfigMutation<T>, E>,
+    ) -> Result<(T, SyncConfig), ConfigTransactionError<E>> {
+        let _guard = persistence_guard(&self.root).map_err(ConfigTransactionError::Persistence)?;
+        let mut config = self
+            .load_config_unlocked()
+            .map_err(ConfigTransactionError::Persistence)?;
+        let decision = mutate(&mut config).map_err(ConfigTransactionError::Mutation)?;
+        match decision {
+            ConfigMutation::Unchanged(result) => Ok((result, config)),
+            ConfigMutation::Changed(result) => {
+                config.schema = mallard_domain::LOCAL_SCHEMA;
+                config.revision = config.revision.saturating_add(1);
+                config
+                    .validate()
+                    .map_err(ConfigTransactionError::Persistence)?;
+                write_json_atomic(&self.root, &self.config_path(), &config, MAX_CONFIG_BYTES)
+                    .map_err(ConfigTransactionError::Persistence)?;
+                Ok((result, config))
+            }
+        }
     }
 
     pub fn load_bindings(&self) -> Result<MachineProjectState, String> {
@@ -2122,7 +2178,7 @@ fn write_bytes_atomic(
     }
     temporary
         .as_file_mut()
-        .write_all(&bytes)
+        .write_all(bytes)
         .map_err(|error| format!("write temporary '{}': {}", path.display(), error))?;
     temporary
         .as_file_mut()
@@ -2140,9 +2196,13 @@ mod tests {
     use mallard_domain::{
         generated_named_id, BindingState, BundleId, BundleRecipe, ConversationMaterializationState,
         LocalConversationBinding, LocalProjectRegistration, LocalProviderProfileId,
-        OriginHostAlias, ProjectBinding, Provider, ProviderProfile, ThreadId, LOCAL_SCHEMA,
+        OriginHostAlias, ProjectBinding, ProviderKey, ProviderProfile, ThreadId, LOCAL_SCHEMA,
     };
     use std::collections::BTreeMap;
+
+    fn codex_key() -> ProviderKey {
+        ProviderKey::parse("codex").unwrap()
+    }
 
     fn repository(temp: &tempfile::TempDir) -> LocalStateRepository {
         LocalStateRepository::from_home_dir(temp.path()).unwrap()
@@ -2156,7 +2216,6 @@ mod tests {
             local_alias: None,
             repository_fingerprint: None,
             recipe: BundleRecipe::default(),
-            recipe_bases: BTreeMap::new(),
             revision: 0,
             created_at: 1,
             updated_at: 1,
@@ -2181,7 +2240,7 @@ mod tests {
         repo.mutate_bindings(|_, machine| {
             machine.profiles.push(ProviderProfile {
                 profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
-                provider: Provider::Codex,
+                provider: codex_key(),
                 display_name: "Codex".to_string(),
                 path: profile_root.to_string_lossy().into_owned(),
                 canonical_path: profile_root.to_string_lossy().into_owned(),
@@ -2197,11 +2256,9 @@ mod tests {
                 project_root: project_root.to_string_lossy().into_owned(),
                 canonical_project_root: project_root.to_string_lossy().into_owned(),
                 profile_ids: BTreeMap::from([(
-                    Provider::Codex,
+                    codex_key(),
                     LocalProviderProfileId::parse("profile-a").unwrap(),
                 )]),
-                codex_home: None,
-                claude_home: None,
                 state: BindingState::Active,
                 revision: 0,
                 updated_at: 1,
@@ -2275,6 +2332,46 @@ mod tests {
     }
 
     #[test]
+    fn config_transaction_returns_the_exact_committed_document() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let (project_id, committed) = repo
+            .transact_config(|config| {
+                config.projects.push(project());
+                Ok::<_, String>(ConfigMutation::Changed(
+                    config.projects[0].local_project_id.clone(),
+                ))
+            })
+            .unwrap_or_else(|error| match error {
+                ConfigTransactionError::Mutation(error)
+                | ConfigTransactionError::Persistence(error) => panic!("{error}"),
+            });
+
+        assert_eq!(project_id.as_str(), "project-a");
+        assert_eq!(committed.revision, 1);
+        assert_eq!(committed.projects.len(), 1);
+        assert_eq!(repo.load_config().unwrap(), committed);
+    }
+
+    #[test]
+    fn unchanged_config_transaction_is_idempotent_without_a_revision_bump() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let first = repo.save_config(SyncConfig::default()).unwrap();
+
+        let (value, observed) = repo
+            .transact_config(|_| Ok::<_, String>(ConfigMutation::Unchanged("already-present")))
+            .unwrap_or_else(|error| match error {
+                ConfigTransactionError::Mutation(error)
+                | ConfigTransactionError::Persistence(error) => panic!("{error}"),
+            });
+
+        assert_eq!(value, "already-present");
+        assert_eq!(observed, first);
+        assert_eq!(repo.load_config().unwrap().revision, 1);
+    }
+
+    #[test]
     fn machine_mutations_cannot_strand_conversation_scope() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
@@ -2287,7 +2384,7 @@ mod tests {
         repo.mutate_bindings(|_, machine| {
             machine.profiles.push(ProviderProfile {
                 profile_id: second_profile_id.clone(),
-                provider: Provider::Codex,
+                provider: codex_key(),
                 display_name: "Second Codex".to_string(),
                 path: second_profile_root.to_string_lossy().into_owned(),
                 canonical_path: second_profile_root.to_string_lossy().into_owned(),
@@ -2331,14 +2428,14 @@ mod tests {
         let error = repo
             .mutate_bindings(|_, machine| {
                 machine.bindings[0].profile_ids =
-                    BTreeMap::from([(Provider::Codex, second_profile_id.clone())]);
+                    BTreeMap::from([(codex_key(), second_profile_id.clone())]);
                 Ok(())
             })
             .unwrap_err();
         assert!(error.contains("scope is stale"));
         let after_profile_change = repo.load_bindings().unwrap();
         assert_eq!(
-            after_profile_change.bindings[0].profile_ids[&Provider::Codex],
+            after_profile_change.bindings[0].profile_ids[&codex_key()],
             first_profile_id
         );
 

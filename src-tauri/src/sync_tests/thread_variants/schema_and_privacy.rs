@@ -1,11 +1,11 @@
-use super::harness::{chain, ThreadSpec, VariantWorld};
-use crate::project_sync::bundle_engine::BundleObjectStore;
+use super::harness::{chain, codex_scope, codex_scope_key, ThreadSpec, VariantWorld};
 use crate::project_sync::domain::{
-    BundleId, ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
-    ConversationMaterializationState, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationRelation, LocalConversationBinding, LogicalPath, OriginHostAlias, Provider,
-    ReplicaId, ThreadId, Tombstone, TombstoneTarget,
+    BundleId, BundleManifest, BundleScope, ConversationFileRef, ConversationFileRole,
+    ConversationLineageStatus, ConversationMaterializationState, ConversationPlanActionType,
+    ConversationPlanDirection, ConversationRelation, LocalConversationBinding, LogicalPath,
+    OriginHostAlias, ProviderKey, ReplicaId, ThreadId, Tombstone, TombstoneTarget,
 };
+use crate::project_sync::storage_core::ObjectStore;
 use std::fs;
 
 #[test]
@@ -167,115 +167,113 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
     );
     let baseline = published.snapshot.manifest;
     baseline.validate().unwrap();
-    let mut large_file_manifest = baseline.clone();
-    let large_path = large_file_manifest.conversations[&thread_id()].files[0]
+    let large_path = codex_scope(&baseline).conversations[&thread_id()].files[0]
         .logical_path
         .clone();
-    large_file_manifest.files.get_mut(&large_path).unwrap().size = 512 * 1024 * 1024 + 1;
+    let large_file_manifest = mutate_codex_scope(&baseline, |scope| {
+        scope.files.get_mut(&large_path).unwrap().size = 512 * 1024 * 1024 + 1;
+    });
     large_file_manifest.validate().unwrap();
 
-    let mut mutations: Vec<Box<dyn Fn(&mut crate::project_sync::domain::BundleManifest)>> =
-        Vec::new();
-    mutations.push(Box::new(|manifest| {
-        let thread = manifest.conversations.remove(&thread_id()).unwrap();
-        manifest
+    type ScopeMutation = Box<dyn Fn(&mut BundleScope)>;
+    let mut mutations: Vec<ScopeMutation> = Vec::new();
+    mutations.push(Box::new(|scope| {
+        let thread = scope.conversations.remove(&thread_id()).unwrap();
+        scope
             .conversations
             .insert(ThreadId::parse("thread-wrong").unwrap(), thread);
     }));
-    mutations.push(Box::new(|manifest| {
-        manifest
+    mutations.push(Box::new(|scope| {
+        scope
             .conversations
             .get_mut(&thread_id())
             .unwrap()
             .files
             .clear();
     }));
-    mutations.push(Box::new(|manifest| {
-        let thread = manifest.conversations.get_mut(&thread_id()).unwrap();
+    mutations.push(Box::new(|scope| {
+        let thread = scope.conversations.get_mut(&thread_id()).unwrap();
         let path = thread.files[0].logical_path.clone();
         thread.files.push(ConversationFileRef {
             logical_path: path,
             role: ConversationFileRole::Transcript,
         });
     }));
-    mutations.push(Box::new(|manifest| {
-        let thread = manifest.conversations.get_mut(&thread_id()).unwrap();
+    mutations.push(Box::new(|scope| {
+        let thread = scope.conversations.get_mut(&thread_id()).unwrap();
         thread.lineage_status = ConversationLineageStatus::Unknown {
             reason_code: "parser_gap".to_string(),
         };
     }));
-    mutations.push(Box::new(|manifest| {
-        manifest
+    mutations.push(Box::new(|scope| {
+        scope
             .conversations
             .get_mut(&thread_id())
             .unwrap()
             .lineage_codec = "codex.lineage.missing".to_string();
     }));
-    mutations.push(Box::new(|manifest| {
-        manifest
-            .conversations
-            .get_mut(&thread_id())
-            .unwrap()
-            .provider = Provider::Claude;
+    mutations.push(Box::new(|scope| {
+        scope.conversations.get_mut(&thread_id()).unwrap().provider =
+            ProviderKey::parse("claude").unwrap();
     }));
-    mutations.push(Box::new(|manifest| {
-        let thread = &manifest.conversations[&thread_id()];
+    mutations.push(Box::new(|scope| {
+        let thread = &scope.conversations[&thread_id()];
         let path = thread.files[0].logical_path.clone();
-        manifest.files.remove(&path);
+        scope.files.remove(&path);
     }));
-    mutations.push(Box::new(|manifest| {
-        let resource_id = manifest.conversations[&thread_id()].resource_id.clone();
-        manifest.resources.remove(&resource_id);
+    mutations.push(Box::new(|scope| {
+        let resource_id = scope.conversations[&thread_id()].resource_id.clone();
+        scope.resources.remove(&resource_id);
     }));
-    mutations.push(Box::new(|manifest| {
-        manifest
+    mutations.push(Box::new(|scope| {
+        scope
             .conversations
             .get_mut(&thread_id())
             .unwrap()
             .head_message_id = None;
     }));
-    mutations.push(Box::new(|manifest| {
-        let thread = manifest.conversations.get_mut(&thread_id()).unwrap();
+    mutations.push(Box::new(|scope| {
+        let thread = scope.conversations.get_mut(&thread_id()).unwrap();
         thread.forked_from = Some(thread.thread_id.clone());
     }));
-    mutations.push(Box::new(|manifest| {
+    mutations.push(Box::new(|scope| {
         let v2 = ThreadId::parse("thread-v2").unwrap();
-        let v1_resource = manifest.conversations[&thread_id()].resource_id.clone();
-        manifest.conversations.get_mut(&v2).unwrap().resource_id = v1_resource;
+        let v1_resource = scope.conversations[&thread_id()].resource_id.clone();
+        scope.conversations.get_mut(&v2).unwrap().resource_id = v1_resource;
     }));
-    mutations.push(Box::new(|manifest| {
+    mutations.push(Box::new(|scope| {
         let v2 = ThreadId::parse("thread-v2").unwrap();
-        let v1_path = manifest.conversations[&thread_id()].files[0]
+        let v1_path = scope.conversations[&thread_id()].files[0]
             .logical_path
             .clone();
-        manifest.conversations.get_mut(&v2).unwrap().files[0].logical_path = v1_path;
+        scope.conversations.get_mut(&v2).unwrap().files[0].logical_path = v1_path;
     }));
-    mutations.push(Box::new(|manifest| {
-        let v1 = &manifest.conversations[&thread_id()];
-        let entry = manifest.files[&v1.files[0].logical_path].clone();
-        manifest.files.insert(
+    mutations.push(Box::new(|scope| {
+        let v1 = &scope.conversations[&thread_id()];
+        let entry = scope.files[&v1.files[0].logical_path].clone();
+        scope.files.insert(
             LogicalPath::parse("state/conversations/codex/thread-v1/undeclared.json").unwrap(),
             entry,
         );
     }));
-    mutations.push(Box::new(|manifest| {
+    mutations.push(Box::new(|scope| {
         let v2 = ThreadId::parse("thread-v2").unwrap();
-        manifest.conversations.remove(&v2);
+        scope.conversations.remove(&v2);
     }));
-    mutations.push(Box::new(|manifest| {
-        let resource = manifest.conversations[&thread_id()].resource_id.clone();
-        manifest.recipe.entries.remove(&resource);
+    mutations.push(Box::new(|scope| {
+        let resource = scope.conversations[&thread_id()].resource_id.clone();
+        scope.recipe.entries.remove(&resource);
     }));
-    mutations.push(Box::new(|manifest| {
-        let resource = manifest.conversations[&thread_id()].resource_id.clone();
-        manifest
+    mutations.push(Box::new(|scope| {
+        let resource = scope.conversations[&thread_id()].resource_id.clone();
+        scope
             .resources
             .get_mut(&resource)
             .unwrap()
             .metadata
             .insert("oversized".to_string(), "x".repeat(4_097));
     }));
-    mutations.push(Box::new(|manifest| {
+    mutations.push(Box::new(|scope| {
         let tombstone = Tombstone {
             target: TombstoneTarget::ConversationThread {
                 thread_id: thread_id(),
@@ -283,14 +281,16 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
             last_sha256: Some("a".repeat(64)),
             deleted_at: 20,
         };
-        manifest
+        scope
             .tombstones
             .insert(tombstone.canonical_key(), tombstone);
     }));
 
     for (index, mutate) in mutations.into_iter().enumerate() {
-        let mut invalid = baseline.clone();
-        mutate(&mut invalid);
+        // The scope digest is resealed over the corrupted content, so every
+        // rejection below comes from the reference rule itself and not from
+        // a trivially stale content digest.
+        let invalid = mutate_codex_scope(&baseline, |scope| mutate(scope));
         assert!(
             invalid.validate().is_err(),
             "mutation {index} unexpectedly validated"
@@ -298,11 +298,23 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
     }
 
     let mut serialized = serde_json::to_value(&baseline).unwrap();
-    serialized["conversations"][thread_id().as_str()]["files"][0]["role"] =
-        serde_json::json!({"kind": "unrecognized_provider_role"});
-    assert!(
-        serde_json::from_value::<crate::project_sync::domain::BundleManifest>(serialized).is_err()
-    );
+    serialized["scopes"][codex_scope_key().canonical()]["conversations"][thread_id().as_str()]
+        ["files"][0]["role"] = serde_json::json!({"kind": "unrecognized_provider_role"});
+    assert!(serde_json::from_value::<BundleManifest>(serialized).is_err());
+}
+
+/// Apply one corruption to the manifest's Codex scope and reseal that
+/// scope's content digest so validation exercises the structural rules.
+fn mutate_codex_scope(
+    baseline: &BundleManifest,
+    mutate: impl FnOnce(&mut BundleScope),
+) -> BundleManifest {
+    let mut manifest = baseline.clone();
+    let scope_key = codex_scope_key();
+    let scope = manifest.scopes.get_mut(&scope_key).unwrap();
+    mutate(scope);
+    scope.content_sha256 = scope.compute_content_sha256(&scope_key).unwrap();
+    manifest
 }
 
 #[test]

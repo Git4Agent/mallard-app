@@ -15,7 +15,8 @@ import type {
 import RestorePlanView, {
   pullSelectableResourceIds,
 } from "../../src/components/project-sync/RestorePlanView";
-import SyncOutcomeNotice from "../../src/components/project-sync/SyncOutcomeNotice";
+import SyncOutcomeNotice from "../../src/components/sync-review/SyncOutcomeNotice";
+import { syncOutcomeView } from "../../src/components/project-sync/syncOutcome";
 import { buildPullOutcome, type SyncOutcome } from "../../src/components/project-sync/syncOutcome";
 import {
   buildPullReviewItems,
@@ -35,7 +36,7 @@ import {
  */
 function renderOutcome(outcome: SyncOutcome) {
   return renderToStaticMarkup(
-    <SyncOutcomeNotice outcome={outcome} onAction={() => undefined} onDismiss={() => undefined} />,
+    <SyncOutcomeNotice view={syncOutcomeView(outcome)} onAction={() => undefined} onDismiss={() => undefined} />,
   );
 }
 
@@ -173,7 +174,7 @@ function conversationAction(
     provider_profile_id: "profile-codex",
     thread_id: "thread-cloud",
     source_resource_id: "codex:conversation:thread-cloud",
-    required_codec: "codex.lineage.v2",
+    required_codec: "codex.lineage.v1",
     pinned_revision: restorePlan.revision,
     pinned_commit_id: restorePlan.commit_id,
     pinned_manifest_sha256: restorePlan.manifest_sha256,
@@ -405,8 +406,8 @@ test("unacknowledged fork checkpoints expose only an explicit retry", () => {
     plan_id: conflictPlan.plan_id,
     applied_action_ids: [],
     failed_actions: [],
-    codex_divergences: [],
-    codex_fork_checkpoints: [{
+    divergences: [],
+    fork_checkpoints: [{
       operation_id: "operation-divergence",
       origin: "pull_preserve",
       plan_id: conflictPlan.plan_id,
@@ -535,7 +536,7 @@ test("unacknowledged fork checkpoints expose only an explicit retry", () => {
     ...checkpoint,
     status: "recovery_required",
     message: "The acknowledged fork needs recovery.",
-    codex_fork_checkpoints: checkpoint.codex_fork_checkpoints.map((item) => ({
+    fork_checkpoints: checkpoint.fork_checkpoints.map((item) => ({
       ...item,
       status: "recovery_required",
       message: "The acknowledged fork needs recovery.",
@@ -584,8 +585,8 @@ test("a fork checkpoint queue retries one fork at a time in the same review", ()
     plan_id: conflictPlan.plan_id,
     applied_action_ids: [],
     failed_actions: [],
-    codex_divergences: [],
-    codex_fork_checkpoints: [
+    divergences: [],
+    fork_checkpoints: [
       {
         operation_id: "operation-divergence-first",
         origin: "pull_preserve",
@@ -712,7 +713,7 @@ test("completed divergence reports the preserved fork, its naming outcome, refre
     plan_id: conflictPlan.plan_id,
     applied_action_ids: [action.action_id],
     failed_actions: [],
-    codex_fork_checkpoints: [],
+    fork_checkpoints: [],
     codex_app_refresh: {
       operation_id: "operation-divergence",
       app_kind: "codex",
@@ -720,7 +721,7 @@ test("completed divergence reports the preserved fork, its naming outcome, refre
       state: "restart_available",
       message: "Codex App may need a restart to refresh its conversation list.",
     },
-    codex_divergences: [{
+    divergences: [{
       action_id: action.action_id,
       original_thread_id: "thread-shared",
       original_provider_thread_id: "019fac21-4aba-7fc2-bb7d-df711c950987",
@@ -794,14 +795,14 @@ test("completed divergence reports the preserved fork, its naming outcome, refre
   // app that can be restarted, from an apply that finished.
   assert.equal(outcomeFor({
     ...completed,
-    codex_divergences: completed.codex_divergences.map((divergence) => ({
+    divergences: completed.divergences.map((divergence) => ({
       ...divergence,
       preserved_provider_thread_id: null,
     })),
   }).action, undefined, "a fork with no child thread has nothing for Codex to reload");
   assert.equal(outcomeFor({
     ...completed,
-    codex_divergences: completed.codex_divergences.map((divergence) => ({
+    divergences: completed.divergences.map((divergence) => ({
       ...divergence,
       resolution: "use_cloud_only" as const,
     })),
@@ -1125,7 +1126,7 @@ test("conversation conflicts become one-time keep-local decisions without blocki
           plan_id: keepLocalOnlyPlan.plan_id,
           applied_action_ids: [],
           failed_actions: [],
-          codex_divergences: [],
+          divergences: [],
         };
       },
       getRestoreReadiness: async () => {
@@ -1157,8 +1158,8 @@ test("the Apply coordinator sends the empty apply for an acknowledge-only Pull",
           reviewed_base_advanced: true,
           applied_action_ids: [],
           failed_actions: [],
-          codex_fork_checkpoints: [],
-          codex_divergences: [],
+          fork_checkpoints: [],
+          divergences: [],
         };
       },
       getRestoreReadiness: async () => {
@@ -1317,8 +1318,8 @@ test("a completed apply that could not advance the baseline says so", () => {
     reviewed_base_advanced: false,
     applied_action_ids: [],
     failed_actions: [],
-    codex_fork_checkpoints: [],
-    codex_divergences: [],
+    fork_checkpoints: [],
+    divergences: [],
   };
   const outcomeFor = (result: RestoreResult) => buildPullOutcome({
     projectId: binding.local_project_id,
@@ -1424,7 +1425,7 @@ test("the Apply coordinator restores then verifies, rejecting selections outside
     plan_id: restorePlan.plan_id,
     applied_action_ids: ["action-session"],
     failed_actions: [],
-    codex_divergences: [],
+    divergences: [],
   };
   const ready: BundleReadiness = { bundle_id: binding.bundle_id, state: "ready", issues: [] };
   const calls: string[] = [];
@@ -1510,8 +1511,8 @@ test("an unacknowledged fork checkpoint defers only its thread while readiness p
     plan_id: conflictPlan.plan_id,
     applied_action_ids: [],
     failed_actions: [],
-    codex_divergences: [],
-    codex_fork_checkpoints: [{
+    divergences: [],
+    fork_checkpoints: [{
       operation_id: "operation-divergence",
       origin: "pull_preserve",
       plan_id: conflictPlan.plan_id,

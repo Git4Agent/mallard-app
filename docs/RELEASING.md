@@ -1,10 +1,13 @@
 # Releasing Mallard
 
-Mallard is distributed as one Apple Silicon DMG through GitHub Releases. A
-pushed `v*` tag starts `.github/workflows/release.yml`; the workflow builds for
-`aarch64-apple-darwin` and creates a draft release for manual inspection.
+Mallard is distributed through GitHub Releases as an Apple Silicon DMG and a
+Windows x64 NSIS installer. A pushed `v*` tag starts
+`.github/workflows/release.yml`. The Apple Silicon job builds
+`aarch64-apple-darwin` and creates the draft release first. Only after that job
+succeeds does the Windows job build `x86_64-pc-windows-msvc`, verify a temporary
+installation, and upload its installer to the same draft.
 
-## Signing and macOS approval
+## Signing and platform approval
 
 Mallard does not currently have an Apple Developer Program certificate. Its
 macOS bundle therefore uses Tauri's explicit ad-hoc identity (`-`). This gives
@@ -21,6 +24,11 @@ If that validation fails, the GitHub release draft is not created or updated.
 Ad-hoc signing does not prevent Gatekeeper warnings; testers must approve the
 application manually.
 
+The Windows NSIS installer is currently unsigned. Windows may show a Microsoft
+Defender SmartScreen warning, and testers must review and approve that prompt
+manually. The workflow does not produce automatic-update metadata and does not
+claim an Authenticode or Developer ID signature.
+
 ## Install the DMG
 
 1. Download the Apple Silicon DMG from the GitHub Release.
@@ -32,6 +40,18 @@ application manually.
 
 Do not tell users that this build is notarized or signed by an identified Apple
 developer.
+
+## Install on Windows
+
+1. Download the Windows x64 NSIS `.exe` from the same GitHub Release.
+2. Run the installer and review any SmartScreen warning before choosing to
+   continue.
+3. Launch Mallard from the Start menu and confirm the storage workspace opens.
+
+The installer places `mallard-cli.exe` inside Mallard's installation directory
+for the app's agent-assisted workflow. It does not add the CLI to `PATH`, edit a
+PowerShell profile, or modify shell startup configuration. Mallard passes an
+absolute packaged path to an agent instead.
 
 ## Prepare version 0.1.2
 
@@ -51,7 +71,7 @@ npm run build
 cargo check --workspace
 ```
 
-## Build and verify locally
+## Build and verify locally on macOS
 
 Build the same Apple Silicon DMG locally before creating the release tag:
 
@@ -78,8 +98,38 @@ codesign -dvvv \
 ```
 
 The DMG verification must succeed, `file` must report an `arm64` executable,
-and `codesign` must report a valid ad-hoc signature. Install this local DMG and
-complete the manual Gatekeeper approval flow before creating the tag.
+and `codesign` must report a valid ad-hoc signature. The automated verifier also
+runs the packaged `mallard-cli --help` from the mounted image and from a
+temporary installed location. Install this local DMG and complete the manual
+Gatekeeper approval flow before creating the tag.
+
+## Build and verify locally on Windows
+
+Run these commands from PowerShell on an x64 Windows machine:
+
+```powershell
+npm run tauri build -- `
+  --target x86_64-pc-windows-msvc `
+  --bundles nsis
+
+./scripts/verify-windows-bundle.ps1 `
+  -BundleDirectory "target/x86_64-pc-windows-msvc/release/bundle/nsis" `
+  -TemporaryRoot $env:TEMP
+```
+
+The verifier requires exactly one generated NSIS installer, installs it
+silently into a new bounded temporary directory, requires the installed
+`mallard-cli.exe`, and checks that its `--help` command exits successfully with
+the expected command surface. Cleanup runs the installed Tauri `uninstall.exe`
+silently from a copy outside the install directory, waits for it with a bounded
+timeout, and requires the temporary installation and its current-user uninstall
+registry entry to be gone. The verification install passes Tauri's `/NS` flag,
+so it creates no Start menu or desktop shortcuts. It also verifies that process,
+user, and machine `PATH` values did not change, then removes only its own
+verification directory.
+The GitHub-hosted Windows machine is ephemeral if a Windows platform failure
+prevents the normal cleanup. The installer itself remains in the target bundle
+directory for manual inspection and upload.
 
 ## Create the GitHub draft
 
@@ -91,7 +141,9 @@ git tag v0.1.2
 git push origin v0.1.2
 ```
 
-Wait for the single Apple Silicon job. Inspect the draft release, download and
-install its DMG on an Apple Silicon Mac, and publish the draft only after that
-artifact passes the same checks. Do not replace an artifact for an existing
+Wait for both release jobs. The Windows job is deliberately ordered after the
+Apple Silicon job so the draft exists before the second artifact is uploaded.
+Inspect the draft release, download and install the DMG on an Apple Silicon Mac,
+and install the NSIS artifact on Windows x64. Publish the draft only after both
+artifacts pass the same checks. Do not replace an artifact for an existing
 version; fix the problem, increment the version, and create a new release.

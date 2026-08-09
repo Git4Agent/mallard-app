@@ -14,6 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+mallard-application = { path = "../crates/mallard-application" }
 mallard-domain = { path = "../crates/mallard-domain" }
 mallard-infrastructure = { path = "../crates/mallard-infrastructure" }
 tauri = { version = "2", features = [] }

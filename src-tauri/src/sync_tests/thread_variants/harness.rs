@@ -1,25 +1,42 @@
 use crate::project_sync::bundle_engine::{
-    BundleBytes, BundleEngine, BundleObjectStore, CapturedBundleFile, HeadToken,
-    LocalBundleObjectStore, PublishBundleRequest, PublishExpectation,
+    self, BundleBytes, BundleEngine, CapturedBundleFile, HeadToken, PublishBundleRequest,
+    PublishExpectation, ScopePublishInput,
 };
 use crate::project_sync::conversation_codec::{
     analyze_codex_transcript, CodecLineage, CODEX_LINEAGE_CODEC_KEY,
 };
 use crate::project_sync::domain::{
     conversation_resource_id, conversation_transcript_path, ApplyPolicy, BundleId, BundleIdentity,
-    BundleKind, BundleRecipe, BundleSnapshot, CapturedWith, ConversationFileRef,
-    ConversationFileRole, ConversationLineageStatus, ConversationThread, PortableOrigin,
-    Provenance, Provider, RecipeEntry, ReplicaId, ResourceDescriptor, ResourceKind, ResourceScope,
-    StorageId, ThreadId,
+    BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot, CapturedWith,
+    ConversationFileRef, ConversationFileRole, ConversationLineageStatus, ConversationThread,
+    PortableOrigin, Provenance, ProviderKey, RecipeEntry, ReplicaId, ResourceDescriptor,
+    ResourceKind, SessionPresentation, StorageId, SyncScopeKey, ThreadId,
 };
 use crate::project_sync::persistence::LocalStateRepository;
+use crate::project_sync::storage_core::{LocalObjectStore, ObjectStore};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 
+pub fn codex() -> ProviderKey {
+    ProviderKey::parse("codex").unwrap()
+}
+
+pub fn codex_scope_key() -> SyncScopeKey {
+    SyncScopeKey::Provider(codex())
+}
+
+/// The manifest's Codex provider scope. Post-redesign manifests are scoped,
+/// so thread fixtures published by this harness always land here.
+pub fn codex_scope(manifest: &BundleManifest) -> &BundleScope {
+    manifest
+        .provider_scope(&codex())
+        .expect("manifest has no Codex provider scope")
+}
+
 pub struct VariantWorld {
     _temp: tempfile::TempDir,
-    pub store: LocalBundleObjectStore,
+    pub store: LocalObjectStore,
     pub storage_id: StorageId,
     pub bundle_id: BundleId,
     pub repo_a: LocalStateRepository,
@@ -34,7 +51,7 @@ pub struct PublishedFixture {
     pub head_token: HeadToken,
 }
 
-pub fn publish_with_head<S: BundleObjectStore>(
+pub fn publish_with_head<S: ObjectStore>(
     engine: &BundleEngine<S>,
     request: PublishBundleRequest,
 ) -> Result<PublishedFixture, String> {
@@ -66,7 +83,7 @@ impl VariantWorld {
         for path in [&store_root, &home_a, &home_b, &home_fresh] {
             fs::create_dir_all(path).unwrap();
         }
-        let store = LocalBundleObjectStore::open(&store_root).unwrap();
+        let store = LocalObjectStore::open(&store_root).unwrap();
         let repo_a = LocalStateRepository::from_home_dir(&home_a).unwrap();
         let repo_b = LocalStateRepository::from_home_dir(&home_b).unwrap();
         let repo_fresh = LocalStateRepository::from_home_dir(&home_fresh).unwrap();
@@ -84,7 +101,7 @@ impl VariantWorld {
         }
     }
 
-    pub fn engine(&self) -> BundleEngine<LocalBundleObjectStore> {
+    pub fn engine(&self) -> BundleEngine<LocalObjectStore> {
         BundleEngine::open(self.store.clone(), self.storage_id.clone()).unwrap()
     }
 
@@ -167,14 +184,35 @@ impl ThreadSpec {
     }
 }
 
+/// The reviewed `(revision, content_sha256)` pin for one scope of the
+/// previous manifest, or the absent-scope pin when the scope (or the whole
+/// manifest) does not exist yet.
+pub fn scope_pin(previous: Option<&BundleManifest>, scope_key: &SyncScopeKey) -> (u64, String) {
+    previous
+        .and_then(|manifest| manifest.scope(scope_key))
+        .map(|scope| (scope.revision, scope.content_sha256.clone()))
+        .unwrap_or_else(bundle_engine::absent_scope_pin)
+}
+
+pub fn harness_captured_with() -> CapturedWith {
+    CapturedWith {
+        app_version: "integration-test".to_string(),
+        provider_versions: BTreeMap::new(),
+        codec_versions: BTreeMap::from([(CODEX_LINEAGE_CODEC_KEY.to_string(), 1)]),
+    }
+}
+
 pub fn publish_request(
     bundle_id: BundleId,
     threads: &[ThreadSpec],
     publisher: PortableOrigin,
     updated_at: u64,
-    previous: Option<&crate::project_sync::domain::BundleManifest>,
+    previous: Option<&BundleManifest>,
     expected_head: PublishExpectation,
 ) -> PublishBundleRequest {
+    let provider = codex();
+    let scope_key = codex_scope_key();
+    let previous_scope = previous.and_then(|manifest| manifest.scope(&scope_key));
     let mut recipe = BundleRecipe::default();
     let mut resources = BTreeMap::new();
     let mut retained_files = BTreeMap::new();
@@ -182,8 +220,8 @@ pub fn publish_request(
     let mut conversations = BTreeMap::new();
     for spec in threads {
         let analysis = analyze_codex_transcript(&spec.transcript);
-        let resource_id = conversation_resource_id(Provider::Codex, &spec.thread_id).unwrap();
-        let logical_path = conversation_transcript_path(Provider::Codex, &spec.thread_id).unwrap();
+        let resource_id = conversation_resource_id(&provider, &spec.thread_id).unwrap();
+        let logical_path = conversation_transcript_path(&provider, &spec.thread_id).unwrap();
         // Post-cutover manifests carry only proven-lineage conversations, so
         // the fixture demands the same of its specs.
         let CodecLineage::Complete {
@@ -204,8 +242,9 @@ pub fn publish_request(
         );
         let thread = ConversationThread {
             thread_id: spec.thread_id.clone(),
-            provider: Provider::Codex,
+            provider: provider.clone(),
             display_title: Some(spec.title.clone()),
+            presentation: SessionPresentation::default(),
             resource_id: resource_id.clone(),
             files: vec![ConversationFileRef {
                 logical_path: logical_path.clone(),
@@ -228,9 +267,9 @@ pub fn publish_request(
             resource_id.clone(),
             ResourceDescriptor {
                 resource_id: resource_id.clone(),
-                kind: ResourceKind::CodexConversation,
-                provider: Some(Provider::Codex),
-                scope: ResourceScope::ProviderState,
+                kind: ResourceKind::Conversation,
+                provider: Some(provider.clone()),
+                provider_resource_type: None,
                 display_name: spec.title.clone(),
                 provenance: Provenance::Unknown,
                 apply_policy: ApplyPolicy::SafeFile,
@@ -254,7 +293,7 @@ pub fn publish_request(
             mode: Some(0o600),
         };
         let digest = sha256(&captured.bytes);
-        let retained = previous.and_then(|manifest| manifest.files.get(&logical_path));
+        let retained = previous_scope.and_then(|scope| scope.files.get(&logical_path));
         if let Some(entry) = retained.filter(|entry| {
             entry.resource_id == resource_id
                 && entry.sha256 == digest
@@ -268,6 +307,16 @@ pub fn publish_request(
         }
         conversations.insert(spec.thread_id.clone(), thread);
     }
+    let scope_input = ScopePublishInput {
+        recipe,
+        captured_with: harness_captured_with(),
+        conversations,
+        resources,
+        retained_files,
+        captured_files,
+        directories: BTreeMap::new(),
+        tombstones: BTreeMap::new(),
+    };
     PublishBundleRequest {
         identity: BundleIdentity {
             bundle_id,
@@ -275,20 +324,9 @@ pub fn publish_request(
             kind: BundleKind::Project,
             repository_fingerprint: None,
         },
-        recipe,
-        captured_with: CapturedWith {
-            app_version: "integration-test".to_string(),
-            codex_version: Some("fixture-v1".to_string()),
-            claude_version: None,
-            codec_versions: BTreeMap::from([(CODEX_LINEAGE_CODEC_KEY.to_string(), 1)]),
-        },
         published_by_origin: publisher,
-        conversations,
-        resources,
-        retained_files,
-        captured_files,
-        directories: BTreeMap::new(),
-        tombstones: BTreeMap::new(),
+        reviewed_scope_pins: BTreeMap::from([(scope_key.clone(), scope_pin(previous, &scope_key))]),
+        writable_scopes: BTreeMap::from([(scope_key, scope_input)]),
         expected_head,
         updated_at,
     }
@@ -296,7 +334,10 @@ pub fn publish_request(
 
 #[derive(Clone, Debug)]
 pub struct TranscriptBuilder {
+    // Retained on the builder for suites that re-derive expectations from it.
+    #[allow(dead_code)]
     thread_id: String,
+    #[allow(dead_code)]
     cwd: String,
     records: Vec<Value>,
     last_message_id: Option<String>,
@@ -397,8 +438,13 @@ pub fn assert_manifest_consistent(world: &VariantWorld) {
     let engine = world.engine();
     let snapshot = engine.inspect(&world.bundle_id).unwrap();
     assert_snapshot_consistent(&engine, &snapshot);
-    let live = snapshot.manifest.resources.len();
-    assert_eq!(live, snapshot.manifest.recipe.entries.len());
+    for (scope_key, scope) in &snapshot.manifest.scopes {
+        assert_eq!(
+            scope.resources.len(),
+            scope.recipe.entries.len(),
+            "scope '{scope_key}' recipe and live resources disagree"
+        );
+    }
     for repository in [&world.repo_a, &world.repo_b, &world.repo_fresh] {
         repository.load_config().unwrap();
         repository.load_bindings().unwrap();
@@ -425,13 +471,13 @@ pub fn assert_manifest_consistent(world: &VariantWorld) {
     }
 }
 
-pub fn assert_snapshot_consistent<S: BundleObjectStore>(
+pub fn assert_snapshot_consistent<S: ObjectStore>(
     engine: &BundleEngine<S>,
     snapshot: &BundleSnapshot,
 ) {
     snapshot.validate().unwrap();
-    let mut bytes = engine.byte_source(&snapshot, None, None);
-    for (path, entry) in &snapshot.manifest.files {
+    let mut bytes = engine.byte_source(snapshot, None, None);
+    for (path, entry) in snapshot.manifest.all_files() {
         let body = bytes.body(path).unwrap();
         assert_eq!(body.size(), entry.size);
         assert_eq!(body.sha256(), entry.sha256);

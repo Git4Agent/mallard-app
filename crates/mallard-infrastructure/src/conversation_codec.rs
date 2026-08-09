@@ -19,8 +19,8 @@ use mallard_domain::{
     MessageId,
 };
 
-pub const CODEX_LINEAGE_CODEC_KEY: &str = "codex.lineage.v2";
-pub const CODEX_CODEC_VERSION: u32 = 2;
+pub const CODEX_LINEAGE_CODEC_KEY: &str = "codex.lineage.v1";
+pub const CODEX_CODEC_VERSION: u32 = 1;
 
 #[cfg(test)]
 const MAX_TRANSCRIPT_BYTES: usize = mallard_domain::MAX_CONVERSATION_FILE_BYTES as usize;
@@ -525,11 +525,9 @@ fn rewrite_codex_value(
     let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
         return Ok(());
     };
-    if is_session {
-        if session_meta_id(payload) == Some(source_thread_id) {
-            for key in ["id", "thread_id", "threadId", "session_id", "sessionId"] {
-                rewrite_matching_string(payload, key, source_thread_id, destination_thread_id)?;
-            }
+    if is_session && session_meta_id(payload) == Some(source_thread_id) {
+        for key in ["id", "thread_id", "threadId", "session_id", "sessionId"] {
+            rewrite_matching_string(payload, key, source_thread_id, destination_thread_id)?;
         }
     }
     if is_session || is_turn {

@@ -1,7 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, copyFile, mkdir, readFile, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 const args = process.argv.slice(2);
@@ -24,9 +23,33 @@ async function runChecked(command, commandArgs) {
 
 function buildTarget(buildArgs) {
   const targetIndex = buildArgs.indexOf("--target");
-  const target = targetIndex >= 0 ? buildArgs[targetIndex + 1] : undefined;
-  if (targetIndex >= 0 && !target) throw new Error("--target requires a Rust target triple.");
+  const shortTargetIndex = buildArgs.indexOf("-t");
+  const inlineTargetArgument = buildArgs.find((arg) => arg.startsWith("--target="));
+  if (inlineTargetArgument !== undefined) {
+    const inlineTarget = inlineTargetArgument.slice("--target=".length);
+    if (!inlineTarget) throw new Error("--target requires a Rust target triple.");
+    return inlineTarget;
+  }
+  const index = targetIndex >= 0 ? targetIndex : shortTargetIndex;
+  const target = index >= 0 ? buildArgs[index + 1] : undefined;
+  if (index >= 0 && !target) throw new Error("--target requires a Rust target triple.");
   return target;
+}
+
+function capture(command, commandArgs) {
+  return new Promise((resolveCapture, rejectCapture) => {
+    execFile(command, commandArgs, { maxBuffer: 1024 * 1024 }, (error, stdout) => {
+      if (error) rejectCapture(error);
+      else resolveCapture(stdout);
+    });
+  });
+}
+
+async function rustHostTarget() {
+  const verboseVersion = await capture("rustc", ["-vV"]);
+  const host = verboseVersion.split(/\r?\n/).find((line) => line.startsWith("host: "))?.slice(6).trim();
+  if (!host) throw new Error("rustc -vV did not report a host target triple.");
+  return host;
 }
 
 function cargoTargetDirectory() {
@@ -61,29 +84,62 @@ async function macosDmgPath(buildArgs) {
   );
 }
 
-async function verifyMacosDmg(buildArgs) {
-  const dmgPath = await macosDmgPath(buildArgs);
-  if (!existsSync(dmgPath)) throw new Error(`Expected macOS DMG at ${dmgPath}.`);
+async function stageCliBinary(buildArgs) {
+  if (buildArgs[0] !== "build") return;
 
-  await runChecked("hdiutil", ["verify", dmgPath]);
+  const explicitTarget = buildTarget(buildArgs);
+  const configuredTarget = explicitTarget || process.env.CARGO_BUILD_TARGET;
+  const target = configuredTarget || await rustHostTarget();
+  if (target === "universal-apple-darwin") {
+    throw new Error("Universal macOS CLI staging is not supported; build one concrete Apple target at a time.");
+  }
+  const debug = buildArgs.includes("--debug") || buildArgs.includes("-d");
+  const profile = debug ? "debug" : "release";
+  const cargoArgs = ["build", "--locked", "-p", "mallard-cli"];
+  if (!debug) cargoArgs.push("--release");
+  if (explicitTarget) cargoArgs.push("--target", explicitTarget);
+  await runChecked("cargo", cargoArgs);
 
-  const mountPath = await mkdtemp(join(tmpdir(), "mallard-release-dmg-"));
-  let mounted = false;
+  const windows = target.includes("windows");
+  const extension = windows ? ".exe" : "";
+  const targetDirectory = await cargoTargetDirectory();
+  const source = join(
+    targetDirectory,
+    ...(configuredTarget ? [configuredTarget] : []),
+    profile,
+    `mallard-cli${extension}`,
+  );
+  if (!existsSync(source)) throw new Error(`Expected built Mallard CLI at ${source}.`);
+
+  const binariesDirectory = resolve("src-tauri", "binaries");
+  const destination = join(binariesDirectory, `mallard-cli-${target}${extension}`);
+  const temporary = `${destination}.tmp-${process.pid}`;
+  await mkdir(binariesDirectory, { recursive: true });
   try {
-    await runChecked("hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPath, dmgPath]);
-    mounted = true;
-
-    const appPath = join(mountPath, "Mallard.app");
-    if (!existsSync(appPath)) throw new Error(`Expected Mallard.app inside ${dmgPath}.`);
-
-    await runChecked("codesign", ["--verify", "--deep", "--strict", "--verbose=4", appPath]);
+    await copyFile(source, temporary);
+    if (!windows) await chmod(temporary, 0o755);
+    if (process.platform === "win32") await rm(destination, { force: true });
+    await rename(temporary, destination);
   } finally {
-    if (mounted) await runChecked("hdiutil", ["detach", mountPath]);
-    await rm(mountPath, { recursive: true, force: true });
+    await rm(temporary, { force: true });
   }
 }
 
-await runChecked(process.execPath, [tauriCliScript, ...args]);
+function withPackagedCliConfig(buildArgs) {
+  if (buildArgs[0] !== "build") return buildArgs;
+  const overlay = JSON.stringify({ bundle: { externalBin: ["binaries/mallard-cli"] } });
+  const separator = buildArgs.indexOf("--");
+  const insertAt = separator === -1 ? buildArgs.length : separator;
+  return [
+    ...buildArgs.slice(0, insertAt),
+    "--config",
+    overlay,
+    ...buildArgs.slice(insertAt),
+  ];
+}
+
+await stageCliBinary(args);
+await runChecked(process.execPath, [tauriCliScript, ...withPackagedCliConfig(args)]);
 
 if (process.env.MALLARD_VERIFY_MACOS_BUNDLE === "1") {
   if (process.platform !== "darwin") {
@@ -93,5 +149,7 @@ if (process.env.MALLARD_VERIFY_MACOS_BUNDLE === "1") {
     throw new Error("MALLARD_VERIFY_MACOS_BUNDLE requires the Tauri build command.");
   }
 
-  await verifyMacosDmg(args);
+  const dmgPath = await macosDmgPath(args);
+  if (!existsSync(dmgPath)) throw new Error(`Expected macOS DMG at ${dmgPath}.`);
+  await runChecked(process.execPath, [resolve("scripts", "verify-macos-bundle.mjs"), dmgPath]);
 }

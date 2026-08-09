@@ -1,7 +1,10 @@
 use super::harness::{
-    analyzed_chain, chain, publish_request, publish_with_head, sha256, ThreadSpec, VariantWorld,
+    analyzed_chain, chain, codex_scope, codex_scope_key, harness_captured_with, publish_request,
+    publish_with_head, scope_pin, sha256, ThreadSpec, VariantWorld,
 };
-use crate::project_sync::bundle_engine::{PublishBundleRequest, PublishExpectation};
+use crate::project_sync::bundle_engine::{
+    PublishBundleRequest, PublishExpectation, ScopePublishInput,
+};
 use crate::project_sync::conversation_sync::{
     recover_unique_compatible_binding_from_meta, BindingRecoveryResult,
     MetaBindingRecoveryCandidate,
@@ -117,22 +120,23 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
     };
     let mut delete_thread = publish_request(
         world.bundle_id.clone(),
-        &[t1.clone()],
+        std::slice::from_ref(&t1),
         origin.clone(),
         20,
         Some(&initial.snapshot.manifest),
         PublishExpectation::Match(initial.head_token),
     );
     delete_thread
+        .writable_scopes
+        .get_mut(&codex_scope_key())
+        .unwrap()
         .tombstones
         .insert(tombstone.canonical_key(), tombstone.clone());
     let engine = world.engine();
     let deleted = publish_with_head(&engine, delete_thread).unwrap();
     assert!(deleted.published);
     assert_eq!(
-        deleted
-            .snapshot
-            .manifest
+        codex_scope(&deleted.snapshot.manifest)
             .conversations
             .keys()
             .collect::<Vec<_>>(),
@@ -141,13 +145,16 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
 
     let mut repeated = publish_request(
         world.bundle_id.clone(),
-        &[t1.clone()],
+        std::slice::from_ref(&t1),
         origin.clone(),
         30,
         Some(&deleted.snapshot.manifest),
         PublishExpectation::Match(deleted.head_token),
     );
     repeated
+        .writable_scopes
+        .get_mut(&codex_scope_key())
+        .unwrap()
         .tombstones
         .insert(tombstone.canonical_key(), tombstone.clone());
     let repeated = publish_with_head(&engine, repeated).unwrap();
@@ -161,26 +168,31 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         last_sha256: Some(sha256(&t1.transcript)),
         deleted_at: 40,
     };
-    let mut tombstones = repeated.snapshot.manifest.tombstones.clone();
+    let mut tombstones = codex_scope(&repeated.snapshot.manifest).tombstones.clone();
     tombstones.insert(final_tombstone.canonical_key(), final_tombstone);
     let delete_all = PublishBundleRequest {
         identity: repeated.snapshot.manifest.bundle.clone(),
-        recipe: BundleRecipe::default(),
-        captured_with: repeated.snapshot.manifest.captured_with.clone(),
         published_by_origin: origin,
-        conversations: BTreeMap::new(),
-        resources: BTreeMap::new(),
-        retained_files: BTreeMap::new(),
-        captured_files: BTreeMap::new(),
-        directories: BTreeMap::new(),
-        tombstones,
+        reviewed_scope_pins: BTreeMap::from([(
+            codex_scope_key(),
+            scope_pin(Some(&repeated.snapshot.manifest), &codex_scope_key()),
+        )]),
+        writable_scopes: BTreeMap::from([(
+            codex_scope_key(),
+            ScopePublishInput {
+                recipe: BundleRecipe::default(),
+                captured_with: harness_captured_with(),
+                tombstones,
+                ..ScopePublishInput::default()
+            },
+        )]),
         expected_head: PublishExpectation::Match(repeated.head_token),
         updated_at: 40,
     };
     let deleted_all = publish_with_head(&engine, delete_all).unwrap();
     assert!(deleted_all.published);
-    assert!(deleted_all.snapshot.manifest.conversations.is_empty());
-    assert!(deleted_all.snapshot.manifest.resources.is_empty());
+    assert_eq!(deleted_all.snapshot.manifest.all_conversations().count(), 0);
+    assert_eq!(deleted_all.snapshot.manifest.all_resources().count(), 0);
 
     let mut modified_after_delete = ThreadSpec::new(
         t1_id.as_str(),
@@ -208,17 +220,14 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
     let resurrected = publish_with_head(&engine, resurrect).unwrap();
     assert!(resurrected.published);
     assert_eq!(resurrected.snapshot.head.revision, 4);
-    assert!(resurrected
-        .snapshot
-        .manifest
+    assert!(codex_scope(&resurrected.snapshot.manifest)
         .conversations
         .contains_key(&t1_id));
     assert!(!resurrected
         .snapshot
         .manifest
-        .tombstones
-        .values()
-        .any(|tombstone| {
+        .all_tombstones()
+        .any(|(_, _, tombstone)| {
             matches!(
                 &tombstone.target,
                 TombstoneTarget::ConversationThread { thread_id }

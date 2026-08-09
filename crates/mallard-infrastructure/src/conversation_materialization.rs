@@ -17,7 +17,7 @@ use crate::codex_native_fork::{
     CodexForkExecutionRequest, CodexNameStatus, CodexPostCommitPresentationRequest,
     CodexThreadRenameRequest, ForkPhaseObserver, VerifiedNativeFork,
 };
-use crate::conversation_codec::{analyze_codex_transcript, CodecLineage};
+use crate::conversation_codec::CodecLineage;
 use crate::persistence::LocalStateRepository;
 use mallard_domain::{
     conversation_resource_id, ActionId, ActionStatus, ApplyReceipt, CodexDivergenceReceipt,
@@ -64,6 +64,9 @@ pub struct CodexDivergenceMaterializationRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// The committed receipt dwarfs the checkpoint variant by design; boxing it
+// would ripple through every caller for no behavioral gain.
+#[allow(clippy::large_enum_variant)]
 pub enum CodexDivergenceApplyOutcome {
     Committed(ConversationApplyReceipt),
     /// A manual-origin fork adopted and stamped; no cloud state, binding pin,
@@ -433,6 +436,30 @@ pub fn apply_conversation_materialization_locked(
     if request.operation.operation != ConversationSyncOperationKind::ProviderMaterialization {
         return Err("generic materialization cannot execute a Codex divergence".to_string());
     }
+    run_generic_materialization(repository, request, failpoints)
+}
+
+/// Apply one adapter file-fork divergence: the preserved branch is written
+/// beside the source and the reviewed replacement lands in the same
+/// crash-consistent operation. No external executor is involved, so the
+/// generic staged flow carries the whole ladder.
+pub fn apply_adapter_divergence_locked(
+    repository: &LocalStateRepository,
+    request: ConversationMaterializationRequest,
+    failpoints: &mut impl ConversationFailpoints,
+) -> Result<ConversationApplyReceipt, String> {
+    request.operation.validate()?;
+    if request.operation.adapter_divergence().is_none() {
+        return Err("adapter divergence requires an adapter divergence journal".to_string());
+    }
+    run_generic_materialization(repository, request, failpoints)
+}
+
+fn run_generic_materialization(
+    repository: &LocalStateRepository,
+    request: ConversationMaterializationRequest,
+    failpoints: &mut impl ConversationFailpoints,
+) -> Result<ConversationApplyReceipt, String> {
     validate_operation_scope(repository, &request.operation)?;
     ensure_provider_target_parents(repository, &request.operation, &request.targets)?;
     let (mut operation, payloads) = prepare_operation(repository, request)?;
@@ -839,10 +866,10 @@ fn finish_codex_divergence(
         }
         return Ok(outcome);
     }
-    return Err(format!(
+    Err(format!(
         "Codex divergence cannot continue safely from phase '{:?}'",
         operation.phase
-    ));
+    ))
 }
 
 fn manual_fork_outcome(
@@ -873,7 +900,8 @@ fn validate_fork_request(
         .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
     if operation.provider_thread_id.as_deref() != Some(&divergence.source_provider_thread_id)
         || fork.source_provider_thread_id != divergence.source_provider_thread_id
-        || fork.source_transcript_path != PathBuf::from(&divergence.source_transcript_path)
+        || fork.source_transcript_path.as_path()
+            != std::path::Path::new(&divergence.source_transcript_path)
         || fork.source_transcript_sha256 != operation.expected_local_digest.as_deref().unwrap_or("")
         || fork.local_lineage_digest != divergence.local_lineage_digest
         || fork.local_semantic_digest != divergence.local_semantic_digest
@@ -1197,7 +1225,7 @@ fn commit_preserved_fork_binding(
             let source_index = document
                 .bindings
                 .iter()
-                .position(|binding| source_scope(binding))
+                .position(source_scope)
                 .ok_or_else(|| "conversation divergence source binding disappeared".to_string())?;
             let source = &document.bindings[source_index];
             if source.revision != operation.expected_binding_revision.unwrap_or(u64::MAX)
@@ -1334,10 +1362,13 @@ fn complete_post_commit_presentation_task(
             .filter_map(|receipt| receipt.conversation.as_mut())
             .find(|conversation| conversation.journal_operation_id == task.operation_id)
             .ok_or_else(|| "deferred Codex presentation receipt disappeared".to_string())?;
-        let divergence = conversation
+        let mallard_domain::DivergenceReceiptKind::CodexNativeFork(divergence) = conversation
             .divergence
             .as_mut()
-            .ok_or_else(|| "deferred Codex presentation lacks a divergence receipt".to_string())?;
+            .ok_or_else(|| "deferred Codex presentation lacks a divergence receipt".to_string())?
+        else {
+            return Err("deferred Codex presentation receipt is not a native fork".to_string());
+        };
         if let Some(status) = outcome.fork_name_status.as_ref() {
             divergence.fork_name_status = Some(map_name_status(status));
         }
@@ -1363,7 +1394,10 @@ fn dispatch_post_commit_presentation(
         let _ = complete_post_commit_presentation_task(&repository, &task);
         return;
     }
-    #[cfg(not(test))]
+    // Test builds (including dependent crates' suites via `test-support`)
+    // must not spawn the detached presentation thread: receipts would race
+    // the assertions that pin the deferred naming contract.
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         let _ = std::thread::Builder::new()
             .name("mallard-codex-presentation".to_string())
@@ -1371,7 +1405,7 @@ fn dispatch_post_commit_presentation(
                 let _ = complete_post_commit_presentation_task(&repository, &task);
             });
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         let _ = (repository, task);
     }
@@ -1599,6 +1633,7 @@ fn prepare_operation(
         operation.operation,
         ConversationSyncOperationKind::ProviderMaterialization
             | ConversationSyncOperationKind::CodexDivergence(_)
+            | ConversationSyncOperationKind::AdapterDivergence(_)
     ) {
         return Err("provider materialization requires a materialization journal".to_string());
     }
@@ -2048,19 +2083,33 @@ fn verify_target_role_set(
         .iter()
         .filter(|target| target.role == ConversationFileRole::ProviderIndexFragment)
         .count();
-    if transcripts != 1 {
-        return Err("resumable conversation requires exactly one transcript".to_string());
+    // An adapter file fork writes the preserved branch beside the source in
+    // the same operation: exactly two transcripts (fork, then replacement).
+    let expected_transcripts = if operation
+        .adapter_divergence()
+        .is_some_and(|divergence| divergence.fork_provider_thread_id.is_some())
+    {
+        2
+    } else {
+        1
+    };
+    if transcripts != expected_transcripts {
+        return Err(format!(
+            "resumable conversation requires exactly {} transcript(s)",
+            expected_transcripts
+        ));
     }
-    // The Codex index row is conditional presentation metadata, written
-    // only when the cloud thread carries a real title, so creates and
-    // replacements alike allow at most one fragment.
-    if operation.provider == mallard_domain::Provider::Codex && indexes > 1 {
-        return Err("Codex conversations allow at most one index fragment".to_string());
-    }
-    // Claude has no provider index: the projects directory listing is the
-    // index, so a resumable Claude materialization is exactly one transcript.
-    if operation.provider == mallard_domain::Provider::Claude && indexes != 0 {
-        return Err("Claude conversations have no provider index fragment".to_string());
+    // Provider index rows are conditional presentation metadata (Codex keeps
+    // `session_index.jsonl`); the registered adapter declares how many one
+    // operation may carry. Providers without an index allow none.
+    let adapter =
+        crate::providers::ProviderRegistry::production().require_sessions(&operation.provider)?;
+    if indexes > adapter.index_fragment_limit() {
+        return Err(format!(
+            "{} conversations allow at most {} index fragment(s)",
+            operation.provider,
+            adapter.index_fragment_limit()
+        ));
     }
     Ok(())
 }
@@ -2079,57 +2128,48 @@ fn verify_provider_payload(
         )
     })?;
     match &target.role {
-        ConversationFileRole::Transcript
-            if operation.provider == mallard_domain::Provider::Claude =>
-        {
-            // Claude transcripts have no lineage codec. Verify what can be
-            // proven without one: bounded JSONL structure, and that the
-            // staged file's authoritative session metadata names exactly the
-            // reviewed destination session in the reviewed project.
-            if operation.lineage_digest.is_some() || operation.semantic_digest.is_some() {
-                return Err(
-                    "Claude conversations cannot pin lineage digests without a codec".to_string(),
-                );
-            }
-            for line in bytes
-                .split(|byte| *byte == b'\n')
-                .filter(|line| !line.is_empty())
-            {
-                if line.len() > 1024 * 1024 {
-                    return Err("Claude transcript row exceeds one MiB".to_string());
-                }
-                serde_json::from_slice::<serde_json::Value>(line)
-                    .map_err(|_| "Claude transcript contains malformed JSON".to_string())?;
-            }
-            let meta = crate::provider_capture::scan_jsonl_metadata(
-                path,
-                crate::provider_capture::Provider::Claude,
-            )
-            .map_err(|error| format!("staged Claude transcript metadata: {error}"))?;
-            if Some(meta.session_id.as_str()) != operation.provider_thread_id.as_deref() {
-                return Err("staged Claude transcript has the wrong session id".to_string());
-            }
-            let machine = repository.load_bindings()?;
-            let project = machine
-                .bindings
-                .iter()
-                .find(|binding| {
-                    binding.host_id == operation.host_id
-                        && binding.replica_id == operation.replica_id
-                        && binding.local_project_id == operation.local_project_id
-                })
-                .ok_or_else(|| "staged transcript project replica disappeared".to_string())?;
-            if meta.cwd != project.project_root && meta.cwd != project.canonical_project_root {
-                return Err("staged Claude transcript has the wrong project cwd".to_string());
-            }
-        }
         ConversationFileRole::Transcript => {
-            if operation.provider != mallard_domain::Provider::Codex {
-                return Err("unsupported resumable conversation provider".to_string());
+            // Typed verification through the registered adapter: the staged
+            // bytes must re-analyze to the reviewed destination session in
+            // the reviewed project with exactly the pinned lineage and
+            // semantic digests. No provider ever falls back to generic
+            // copying.
+            let adapter = crate::providers::ProviderRegistry::production()
+                .require_sessions(&operation.provider)?;
+            let analysis = adapter.analyze(&bytes);
+            // An adapter file fork's preserved-branch target verifies against
+            // the fork identity and the reviewed LOCAL digests instead.
+            if let Some(divergence) = operation.adapter_divergence() {
+                if divergence.fork_transcript_path.as_deref() == Some(target.target_path.as_str()) {
+                    if analysis.source_provider_session_id.as_deref()
+                        != divergence.fork_provider_thread_id.as_deref()
+                    {
+                        return Err(
+                            "staged fork transcript has the wrong provider session id".to_string()
+                        );
+                    }
+                    match analysis.lineage {
+                        CodecLineage::Complete {
+                            lineage_digest,
+                            semantic_digest,
+                            ..
+                        } if lineage_digest == divergence.local_lineage_digest
+                            && semantic_digest == divergence.local_semantic_digest => {}
+                        _ => {
+                            return Err("staged fork transcript changed the preserved local branch"
+                                .to_string())
+                        }
+                    }
+                    return Ok(());
+                }
             }
-            let analysis = analyze_codex_transcript(&bytes);
-            if analysis.source_thread_id.as_deref() != operation.provider_thread_id.as_deref() {
-                return Err("staged Codex transcript has the wrong provider thread id".to_string());
+            if analysis.source_provider_session_id.as_deref()
+                != operation.provider_thread_id.as_deref()
+            {
+                return Err(format!(
+                    "staged {} transcript has the wrong provider session id",
+                    operation.provider
+                ));
             }
             let machine = repository.load_bindings()?;
             let project = machine
@@ -2144,7 +2184,10 @@ fn verify_provider_payload(
             if analysis.source_cwd.as_deref() != Some(project.project_root.as_str())
                 && analysis.source_cwd.as_deref() != Some(project.canonical_project_root.as_str())
             {
-                return Err("staged Codex transcript has the wrong project cwd".to_string());
+                return Err(format!(
+                    "staged {} transcript has the wrong project cwd",
+                    operation.provider
+                ));
             }
             match analysis.lineage {
                 CodecLineage::Complete {
@@ -2154,9 +2197,10 @@ fn verify_provider_payload(
                 } if Some(&lineage_digest) == operation.lineage_digest.as_ref()
                     && Some(&semantic_digest) == operation.semantic_digest.as_ref() => {}
                 _ => {
-                    return Err(
-                        "staged Codex transcript changed lineage or semantic content".to_string(),
-                    )
+                    return Err(format!(
+                        "staged {} transcript changed lineage or semantic content",
+                        operation.provider
+                    ))
                 }
             }
         }
@@ -2165,7 +2209,9 @@ fn verify_provider_payload(
                 .provider_thread_id
                 .as_deref()
                 .ok_or_else(|| "provider index lacks a destination thread id".to_string())?;
-            validate_codex_index_fragment(&bytes, thread_id)?;
+            crate::providers::ProviderRegistry::production()
+                .require_sessions(&operation.provider)?
+                .verify_index_fragment(&bytes, thread_id)?;
         }
         ConversationFileRole::Sidecar { .. } => {
             serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -2173,91 +2219,6 @@ fn verify_provider_payload(
         }
     }
     Ok(())
-}
-
-fn validate_codex_index_fragment(bytes: &[u8], thread_id: &str) -> Result<(), String> {
-    let mut row_count = 0_usize;
-    let mut destination_count = 0_usize;
-    for line in bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        if line.len() > 1024 * 1024 {
-            return Err("Codex index row exceeds one MiB".to_string());
-        }
-        let value: serde_json::Value = serde_json::from_slice(line)
-            .map_err(|_| "Codex index fragment contains malformed JSON".to_string())?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| "Codex index fragment row is not an object".to_string())?;
-        let id = object
-            .get("id")
-            .or_else(|| object.get("session_id"))
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "Codex index fragment row lacks a thread id".to_string())?;
-        if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
-            return Err("Codex index fragment has an invalid thread id".to_string());
-        }
-        if id == thread_id {
-            // Rows Mallard appends must match the provider schema exactly;
-            // pre-existing rows stay Codex's business. In particular, the
-            // append-only index can contain multiple rename rows for another
-            // thread ID.
-            let named = object
-                .get("thread_name")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|name| {
-                    !name.trim().is_empty()
-                        && name.len() <= 1024
-                        && !name.chars().any(char::is_control)
-                });
-            let updated = object
-                .get("updated_at")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok());
-            if !named || !updated {
-                return Err(
-                    "Codex index destination row must carry a thread name and an RFC 3339 \
-                     update time"
-                        .to_string(),
-                );
-            }
-        }
-        destination_count += usize::from(id == thread_id);
-        row_count += 1;
-    }
-    if row_count == 0 || destination_count != 1 {
-        return Err(
-            "Codex index target must contain exactly one destination thread row".to_string(),
-        );
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod codex_index_fragment_tests {
-    use super::validate_codex_index_fragment;
-
-    #[test]
-    fn accepts_repeated_pre_existing_ids_in_append_only_index() {
-        let bytes = br#"{"id":"existing","thread_name":"Before"}
-{"id":"existing","thread_name":"After"}
-{"id":"destination","thread_name":"Imported","updated_at":"2026-07-31T22:00:03.000000Z"}
-"#;
-
-        validate_codex_index_fragment(bytes, "destination").unwrap();
-    }
-
-    #[test]
-    fn rejects_more_than_one_destination_row() {
-        let bytes = br#"{"id":"destination","thread_name":"Imported","updated_at":"2026-07-31T22:00:03.000000Z"}
-{"id":"destination","thread_name":"Imported again","updated_at":"2026-07-31T22:01:03.000000Z"}
-"#;
-
-        assert!(validate_codex_index_fragment(bytes, "destination")
-            .unwrap_err()
-            .contains("exactly one destination"));
-    }
 }
 
 fn commit_provider_targets(
@@ -2411,6 +2372,64 @@ fn commit_binding(
         }
 
         let binding_target_thread_id = operation.binding_target_thread_id();
+        if let Some(divergence) = operation.adapter_divergence() {
+            if let (Some(fork_provider_thread_id), Some(fork_transcript_path), Some(fork_sha256)) = (
+                divergence.fork_provider_thread_id.clone(),
+                divergence.fork_transcript_path.clone(),
+                divergence.fork_transcript_sha256.clone(),
+            ) {
+                let fork_exists = document.bindings.iter().any(|binding| {
+                    binding.host_id == operation.host_id
+                        && binding.replica_id == operation.replica_id
+                        && binding.local_project_id == operation.local_project_id
+                        && binding.provider_profile_id == operation.provider_profile_id
+                        && binding.thread_id == divergence.preserved_thread_id
+                });
+                if !fork_exists {
+                    document.bindings.push(LocalConversationBinding {
+                        host_id: operation.host_id.clone(),
+                        replica_id: operation.replica_id.clone(),
+                        local_project_id: operation.local_project_id.clone(),
+                        provider_profile_id: operation.provider_profile_id.clone(),
+                        thread_id: divergence.preserved_thread_id.clone(),
+                        forked_from: Some(binding_target_thread_id.clone()),
+                        fork_stamp: None,
+                        provider_thread_id: Some(fork_provider_thread_id.clone()),
+                        materialization_state: ConversationMaterializationState::Resumable,
+                        last_observed_file_sha256: Some(fork_sha256.clone()),
+                        last_observed_head_message_id: None,
+                        last_observed_lineage_digest: Some(
+                            divergence.local_lineage_digest.clone(),
+                        ),
+                        last_observed_semantic_digest: Some(
+                            divergence.local_semantic_digest.clone(),
+                        ),
+                        source_revision: None,
+                        source_manifest_sha256: None,
+                        revision: 0,
+                        created_at: operation.updated_at,
+                        updated_at: operation.updated_at,
+                    });
+                }
+                if let Some(source) = document.bindings.iter_mut().find(|binding| {
+                    binding.host_id == operation.host_id
+                        && binding.replica_id == operation.replica_id
+                        && binding.local_project_id == operation.local_project_id
+                        && binding.provider_profile_id == operation.provider_profile_id
+                        && binding.thread_id == *binding_target_thread_id
+                }) {
+                    source.fork_stamp = Some(mallard_domain::ForkStamp {
+                        fork_thread_id: divergence.preserved_thread_id.clone(),
+                        fork_provider_thread_id,
+                        fork_transcript_path,
+                        lineage_digest: divergence.local_lineage_digest.clone(),
+                        semantic_digest: divergence.local_semantic_digest.clone(),
+                        message_count: divergence.local_message_count,
+                        forked_at: operation.updated_at,
+                    });
+                }
+            }
+        }
         if let Some(binding) = document.bindings.iter_mut().find(|binding| {
             binding.host_id == operation.host_id
                 && binding.replica_id == operation.replica_id
@@ -2524,7 +2543,7 @@ fn commit_receipt(
             .map(Ok)
             .unwrap_or_else(|| stable_action_id(&operation.operation_id))?;
         let resource_id =
-            conversation_resource_id(operation.provider, operation.binding_target_thread_id())?;
+            conversation_resource_id(&operation.provider, operation.binding_target_thread_id())?;
         let apply_receipt = ApplyReceipt {
             action_id,
             resource_id,
@@ -2606,9 +2625,18 @@ fn conversation_receipt(
         published_origin_host_token: None,
         published_origin_replica_token: None,
         journal_operation_id: operation.operation_id.clone(),
-        divergence: operation
-            .divergence()
-            .map(|divergence| CodexDivergenceReceipt {
+        divergence: divergence_receipt_kind(operation),
+    }
+}
+
+/// The typed divergence receipt for one committed operation, covering both
+/// the Codex native-fork ladder and adapter file forks.
+fn divergence_receipt_kind(
+    operation: &ConversationSyncOperation,
+) -> Option<mallard_domain::DivergenceReceiptKind> {
+    if let Some(divergence) = operation.divergence() {
+        return Some(mallard_domain::DivergenceReceiptKind::CodexNativeFork(
+            CodexDivergenceReceipt {
                 resolution: divergence.resolution,
                 preserved_thread_id: divergence
                     .fork_provider_thread_id
@@ -2624,8 +2652,23 @@ fn conversation_receipt(
                 desired_original_name: divergence.desired_original_name.clone(),
                 original_name_status: divergence.original_name_status,
                 inventory_refresh_status: divergence.inventory_refresh_status,
-            }),
+            },
+        ));
     }
+    if let Some(divergence) = operation.adapter_divergence() {
+        return Some(mallard_domain::DivergenceReceiptKind::AdapterFileFork(
+            mallard_domain::AdapterDivergenceReceipt {
+                resolution: divergence.resolution,
+                preserved_thread_id: divergence
+                    .fork_provider_thread_id
+                    .as_ref()
+                    .map(|_| divergence.preserved_thread_id.clone()),
+                preserved_provider_thread_id: divergence.fork_provider_thread_id.clone(),
+                fork_transcript_path: divergence.fork_transcript_path.clone(),
+            },
+        ));
+    }
+    None
 }
 
 fn cleanup_and_retire(

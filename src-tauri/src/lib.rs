@@ -1,5 +1,16 @@
+// The Tauri command surface is referenced only through `generate_handler!`
+// inside the `cfg(not(test))` runtime below, so the lib-test target would
+// otherwise flag every wrapper as dead. Production builds keep the full
+// dead-code gate.
+#[cfg(not(test))]
+use tauri::Manager as _;
+
+#[cfg_attr(test, allow(dead_code))]
 mod activity_log;
+#[cfg_attr(test, allow(dead_code))]
 mod project_sync;
+#[cfg_attr(test, allow(dead_code))]
+mod storage_catalog;
 
 #[cfg(test)]
 mod sync_tests;
@@ -20,6 +31,9 @@ pub fn run() {
                 "system.app_started",
                 "Mallard started",
             );
+            let watcher = project_sync::config_watcher::ConfigWatcher::start(app.handle().clone())
+                .map_err(std::io::Error::other)?;
+            app.manage(std::sync::Mutex::new(watcher));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -29,6 +43,8 @@ pub fn run() {
             activity_log::cleanup_activity_logs,
             activity_log::get_activity_log_folder,
             project_sync::commands::get_project_sync_config,
+            project_sync::commands::connect_r2_storage,
+            project_sync::commands::get_mallard_cli_path,
             project_sync::commands::save_project_sync_config,
             project_sync::commands::get_host_identity_status,
             project_sync::commands::update_host_display_name,
@@ -42,11 +58,12 @@ pub fn run() {
             project_sync::commands::get_project,
             project_sync::commands::get_local_project,
             project_sync::commands::list_project_repository_kinds,
-            project_sync::commands::get_project_chat_history,
-            project_sync::commands::get_project_chat_thread_details,
-            project_sync::commands::open_codex_thread_in_app,
-            project_sync::commands::open_codex_thread_in_terminal,
-            project_sync::commands::validate_codex_thread_ownership,
+            project_sync::commands::list_agent_providers,
+            project_sync::commands::get_project_activity,
+            project_sync::commands::get_project_session_detail,
+            project_sync::commands::get_project_session_timeline_page,
+            project_sync::commands::get_project_session_event_detail,
+            project_sync::commands::execute_project_session_action,
             project_sync::commands::register_local_project,
             project_sync::commands::remove_local_project,
             project_sync::commands::rename_local_project,
@@ -74,7 +91,7 @@ pub fn run() {
             project_sync::commands::list_remote_bundle_snapshots,
             project_sync::commands::find_remote_bundle_matches,
             project_sync::commands::get_bundle_status,
-            project_sync::commands::get_project_thread_sync_comparison,
+            project_sync::commands::get_project_session_sync_comparison,
             project_sync::commands::verify_bundle_objects,
             project_sync::commands::prepare_push_review,
             project_sync::commands::get_push_destination_status,
@@ -94,6 +111,26 @@ pub fn run() {
             project_sync::commands::discard_setup_draft,
             project_sync::commands::inspect_setup_draft,
             project_sync::commands::finalize_project_setup,
+            storage_catalog::resource_commands::list_catalog_capabilities,
+            storage_catalog::resource_commands::list_catalog_resource_profiles,
+            storage_catalog::resource_commands::save_catalog_resource_profile,
+            storage_catalog::resource_commands::delete_catalog_resource_profile,
+            storage_catalog::resource_commands::list_catalog_scopes,
+            storage_catalog::resource_commands::create_catalog_scope,
+            storage_catalog::resource_commands::delete_catalog_scope,
+            storage_catalog::resource_commands::list_catalog_scope_resources,
+            storage_catalog::resource_commands::link_catalog_scope_resource,
+            storage_catalog::resource_commands::get_catalog_resource,
+            storage_catalog::resource_commands::unlink_catalog_resource,
+            storage_catalog::resource_commands::remove_catalog_resource,
+            storage_catalog::resource_commands::inspect_catalog_resource_link,
+            storage_catalog::resource_commands::prepare_catalog_resource_push,
+            storage_catalog::resource_commands::publish_catalog_resource,
+            storage_catalog::resource_commands::prepare_catalog_resource_pull,
+            storage_catalog::resource_commands::apply_catalog_resource_pull,
+            storage_catalog::resource_commands::prepare_catalog_resource_fork,
+            storage_catalog::resource_commands::apply_catalog_resource_fork,
+            storage_catalog::resource_commands::get_catalog_resource_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

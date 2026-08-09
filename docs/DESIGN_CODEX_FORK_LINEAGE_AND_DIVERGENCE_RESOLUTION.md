@@ -436,7 +436,7 @@ an untrusted provider-home boundary or corrupt bindings document.
 Introduce a new codec key, for example:
 
 ```text
-codex.lineage.v2
+codex.lineage.v1
 ```
 
 The codec first consumes `CodexRolloutStructure`. Historical metadata no

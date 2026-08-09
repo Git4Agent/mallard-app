@@ -5,8 +5,9 @@ why—and makes that project knowledge portable across teammates and machines.
 
 Mallard was built for [OpenAI Build Week](https://openai.devpost.com/), a
 global week of building with Codex and GPT-5.6. It is a review-first desktop
-app for syncing selected, project-scoped Codex sessions and resources without
-copying an entire Codex home directory or credential store.
+app for syncing selected project-scoped agent sessions and independent global
+Library resources without copying an entire provider home or credential
+store.
 
 **[Project website](https://mallard-ai.com/)** ·
 **[Devpost submission](https://devpost.com/software/agentgithub)** ·
@@ -34,6 +35,21 @@ resources portable across teammates and machines.
   retain apply receipts.
 - Optionally syncs selected ordinary files and folders for non-Git projects.
   Git-managed project content continues to travel through Git.
+- Manages user-global Agent Skills, provider-native plugin install intent, and
+  Codex pets as independent Library resources. The Catalog menu starts empty
+  and grows one row per **(provider home × resource kind)** the user adds;
+  inside a row, each resource links to storages individually and then exposes
+  per-link Push, Pull, and Refresh plus local Fork for skills and pets.
+
+The first Library catalog supports Codex and Claude skills/plugins and Codex
+pet v1/v2. Pet formats are separate resources — and separate menu rows — and
+the user chooses the exact format to operate on. Skill discovery is limited to
+`<CODEX_HOME>/skills`, `$HOME/.agents/skills` (default `~/.codex` config
+only), and `<CLAUDE_CONFIG_DIR>/skills`; project-local skill directories are
+not scanned.
+
+Library resources use a clean cutover: there is no backward compatibility,
+migration, legacy execution path, or parallel storage-wide catalog.
 
 ## Quick Start for judges
 
@@ -72,6 +88,30 @@ details. Do not add them to this repository, a project file, or an issue.
 Credentials and machine-specific paths are stored only in Mallard's local
 metadata under `~/.mallard/`; they are never uploaded inside a portable
 project bundle.
+
+### Agent-assisted R2 setup and packaged CLI
+
+Builds produced from this source tree package `mallard-cli` inside both the
+macOS app and the Windows per-user installer. In **New storage → Cloudflare
+R2**, **Set up with an agent** copies the exact packaged executable path and a
+credential-free instruction. The installer does not modify PATH.
+
+The CLI can connect existing credentials, provision a new bucket and
+exact-bucket credential, verify a configured storage, and explicitly recover
+an interrupted setup:
+
+```sh
+mallard-cli storage r2 --help
+mallard-cli storage list
+mallard-cli storage verify <storage-id>
+mallard-cli storage r2 cleanup <setup-id>
+```
+
+Secret Access Keys and Cloudflare bootstrap tokens are accepted only through
+a hidden prompt or a bounded stdin option, never through command arguments or
+environment variables. See
+[PLAN_AGENT_ASSISTED_R2_SETUP.md](./docs/PLAN_AGENT_ASSISTED_R2_SETUP.md) for
+the security, recovery, and packaging contracts.
 
 ### Test Flow 1: Pull the public demo project
 
@@ -188,6 +228,7 @@ npm run build
 npm run test:frontend-integration
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml --lib
+npm run test:cli
 ```
 
 The Rust suite includes tests that bind localhost for the stub S3 transport;
@@ -195,17 +236,30 @@ restricted environments may require permission for that test server.
 
 ## Code map
 
-- `src/components/project-sync/` — project setup, history, storage, Push/Pull
+- `src/components/project-sync/` — project setup, Activity, storage, Push/Pull
   review, project files, and status UI.
 - `src/components/project-sync/api.ts` and `src/types.ts` — Tauri command and
   DTO contracts.
-- `src-tauri/src/project_sync/chat_history.rs` — Codex history parsing,
-  metrics, previews, and Git mapping.
-- `src-tauri/src/project_sync/provider_capture.rs` — Codex resource
-  discovery and no-follow project-content scanning.
-- `src-tauri/src/project_sync/bundle_engine.rs` — publish, fetch, integrity
-  checks, restore planning, backups, and apply.
-- `src-tauri/src/project_sync/s3_store.rs` — S3/R2 object-store adapter.
+- `crates/mallard-application/` — storage setup and Cloudflare provisioning
+  use cases shared by desktop and CLI adapters.
+- `crates/mallard-cli/` — the packaged storage CLI, hidden-input handling,
+  stable output schema, and process exit contract.
+- `crates/mallard-infrastructure/src/providers/` — the compile-time provider
+  registry and the Codex and Claude adapters (profiles, discovery, history,
+  codecs, materialization, and session actions).
+- `crates/mallard-infrastructure/src/project_activity.rs` — provider-neutral
+  Activity composition, session details, metrics, and Git mapping.
+- `crates/mallard-infrastructure/src/provider_capture.rs` — registry-driven
+  resource discovery and no-follow project-content scanning.
+- `crates/mallard-infrastructure/src/bundle_engine.rs` — scoped publish,
+  fetch, integrity checks, restore planning, backups, and apply.
+- `crates/mallard-infrastructure/src/storage_core/` — the shared object-store
+  transport, including the local-folder and S3/R2 stores.
+- `crates/mallard-infrastructure/src/r2_setup_journal.rs` — bounded,
+  non-secret recovery state for interrupted R2 probes and token cleanup.
+- `src/components/storage-catalog/` and `src-tauri/src/storage_catalog/` — the
+  independent scope-rowed Library UI, provider adapters, plans, persistence,
+  per-resource remote protocol, and journaled apply behavior.
 
 ## License
 

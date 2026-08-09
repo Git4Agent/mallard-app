@@ -9,6 +9,13 @@ const R2_BUCKET_DOC = "https://developers.cloudflare.com/r2/buckets/create-bucke
 const R2_CREDENTIALS_DOC = "https://developers.cloudflare.com/r2/api/tokens/";
 const CLOUDFLARE_ACCOUNT_ID_DOC = "https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/";
 
+export type R2Jurisdiction = "default" | "eu" | "fedramp";
+
+const R2_ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/i;
+const R2_BUCKET_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/;
+const R2_ENDPOINT_PATTERN = /^https:\/\/([0-9a-f]{32})(?:\.(eu|fedramp))?\.r2\.cloudflarestorage\.com$/i;
+const R2_S3_API_URL_PATTERN = /^https:\/\/([0-9a-f]{32})(?:\.(eu|fedramp))?\.r2\.cloudflarestorage\.com\/([^/?#%]+)$/i;
+
 async function openHelp(url: string) {
   try {
     await openUrl(url);
@@ -31,53 +38,78 @@ function HelpButton({ url, label }: { url: string; label: string }) {
   );
 }
 
-export function r2EndpointForAccount(accountId: string): string {
-  const account = accountId.trim();
-  return account ? `https://${account}.r2.cloudflarestorage.com` : "";
+export function isCloudflareR2AccountId(value: string): boolean {
+  return R2_ACCOUNT_ID_PATTERN.test(value.trim());
 }
 
-export function r2S3ApiUrl(accountId: string, bucket: string): string {
-  const endpoint = r2EndpointForAccount(accountId);
-  const bucketName = bucket.trim().replace(/^\/+|\/+$/g, "");
-  return endpoint && bucketName ? `${endpoint}/${encodeURIComponent(bucketName)}` : "";
+export function isCloudflareR2BucketName(value: string): boolean {
+  return R2_BUCKET_PATTERN.test(value);
 }
 
-export function parseR2S3ApiUrl(value: string): { accountId: string; bucket: string } | null {
-  let url: URL;
-  try {
-    url = new URL(value.trim());
-  } catch {
-    return null;
-  }
+export function r2EndpointForAccount(
+  accountId: string,
+  jurisdiction: R2Jurisdiction = "default",
+): string {
+  const account = accountId.trim().toLowerCase();
+  if (!isCloudflareR2AccountId(account)) return "";
+  const jurisdictionLabel = jurisdiction === "default" ? "" : `.${jurisdiction}`;
+  return `https://${account}${jurisdictionLabel}.r2.cloudflarestorage.com`;
+}
 
-  const suffix = ".r2.cloudflarestorage.com";
-  const hostname = url.hostname.toLowerCase();
-  const accountId = hostname.endsWith(suffix) ? hostname.slice(0, -suffix.length) : "";
-  const segments = url.pathname.split("/").filter(Boolean);
-  if (
-    url.protocol !== "https:"
-    || !!url.username
-    || !!url.password
-    || !!url.port
-    || !!url.search
-    || !!url.hash
-    || !accountId
-    || accountId.includes(".")
-    || segments.length !== 1
-  ) return null;
+export function parseR2Endpoint(value: string): {
+  accountId: string;
+  jurisdiction: R2Jurisdiction;
+} | null {
+  const match = R2_ENDPOINT_PATTERN.exec(value);
+  if (!match) return null;
+  return {
+    accountId: match[1].toLowerCase(),
+    jurisdiction: (match[2]?.toLowerCase() as Exclude<R2Jurisdiction, "default"> | undefined) ?? "default",
+  };
+}
 
-  try {
-    const bucket = decodeURIComponent(segments[0]).trim();
-    return bucket ? { accountId, bucket } : null;
-  } catch {
-    return null;
-  }
+export function r2S3ApiUrl(
+  accountId: string,
+  bucket: string,
+  storedEndpoint?: string,
+): string {
+  if (!isCloudflareR2BucketName(bucket)) return "";
+  const account = accountId.trim().toLowerCase();
+  const endpoint = storedEndpoint === undefined
+    ? r2EndpointForAccount(account)
+    : (() => {
+        const parsed = parseR2Endpoint(storedEndpoint);
+        return parsed?.accountId === account
+          ? r2EndpointForAccount(parsed.accountId, parsed.jurisdiction)
+          : "";
+      })();
+  return endpoint ? `${endpoint}/${bucket}` : "";
+}
+
+export function parseR2S3ApiUrl(value: string): {
+  accountId: string;
+  bucket: string;
+  jurisdiction: R2Jurisdiction;
+} | null {
+  const match = R2_S3_API_URL_PATTERN.exec(value);
+  if (!match) return null;
+  const bucket = match[3];
+  if (!isCloudflareR2BucketName(bucket)) return null;
+  return {
+    accountId: match[1].toLowerCase(),
+    bucket,
+    jurisdiction: (match[2]?.toLowerCase() as Exclude<R2Jurisdiction, "default"> | undefined) ?? "default",
+  };
 }
 
 export function storageConfigReady(storage: StorageConfig): boolean {
+  if (!storage.name?.trim()) return false;
   if (storage.kind === "local") return !!storage.local_dir?.trim();
-  return !!storage.bucket?.trim()
-    && !!storage.account_id?.trim()
+  const accountId = storage.account_id?.trim().toLowerCase() ?? "";
+  const endpoint = parseR2Endpoint(storage.s3_endpoint ?? "");
+  return isCloudflareR2BucketName(storage.bucket ?? "")
+    && isCloudflareR2AccountId(accountId)
+    && endpoint?.accountId === accountId
     && !!storage.access_key_id?.trim()
     && !!storage.secret_access_key?.trim();
 }
@@ -120,26 +152,37 @@ export function StorageEditor({
   showNameField?: boolean;
 }) {
   const set = (patch: Partial<StorageConfig>) => onChange({ ...storage, ...patch });
-  const derivedS3ApiUrl = r2S3ApiUrl(storage.account_id ?? "", storage.bucket ?? "");
+  const derivedS3ApiUrl = r2S3ApiUrl(
+    storage.account_id ?? "",
+    storage.bucket ?? "",
+    storage.s3_endpoint ?? "",
+  );
   const [s3ApiUrlDraft, setS3ApiUrlDraft] = useState(derivedS3ApiUrl);
   const [secretVisible, setSecretVisible] = useState(false);
   const editingS3ApiUrl = useRef(false);
+  const storedEndpoint = parseR2Endpoint(storage.s3_endpoint ?? "");
+  const jurisdiction = useRef<R2Jurisdiction>(storedEndpoint?.jurisdiction ?? "default");
   const parsedS3ApiUrl = parseR2S3ApiUrl(s3ApiUrlDraft);
   useEffect(() => {
     if (!editingS3ApiUrl.current) setS3ApiUrlDraft(derivedS3ApiUrl);
   }, [derivedS3ApiUrl]);
+  useEffect(() => {
+    const parsed = parseR2Endpoint(storage.s3_endpoint ?? "");
+    if (parsed) jurisdiction.current = parsed.jurisdiction;
+  }, [storage.s3_endpoint]);
   const setAccountId = (accountId: string) => set({
     account_id: accountId,
-    s3_endpoint: r2EndpointForAccount(accountId),
+    s3_endpoint: r2EndpointForAccount(accountId, jurisdiction.current),
     region: "auto",
   });
   const setS3ApiUrl = (value: string) => {
     setS3ApiUrlDraft(value);
     const parsed = parseR2S3ApiUrl(value);
+    if (parsed) jurisdiction.current = parsed.jurisdiction;
     set(parsed ? {
       account_id: parsed.accountId,
       bucket: parsed.bucket,
-      s3_endpoint: r2EndpointForAccount(parsed.accountId),
+      s3_endpoint: r2EndpointForAccount(parsed.accountId, parsed.jurisdiction),
       region: "auto",
     } : {
       account_id: "",
@@ -182,7 +225,8 @@ export function StorageEditor({
               name: storageNameForKind(storage.name, "s3"),
               kind: "s3",
               region: "auto",
-              s3_endpoint: r2EndpointForAccount(storage.account_id ?? ""),
+              s3_endpoint: storage.s3_endpoint
+                || r2EndpointForAccount(storage.account_id ?? "", jurisdiction.current),
             })}
             disabled={disabled}
           >
@@ -255,7 +299,11 @@ export function StorageEditor({
                 onBlur={() => {
                   editingS3ApiUrl.current = false;
                   if (parsedS3ApiUrl) {
-                    setS3ApiUrlDraft(r2S3ApiUrl(parsedS3ApiUrl.accountId, parsedS3ApiUrl.bucket));
+                    setS3ApiUrlDraft(r2S3ApiUrl(
+                      parsedS3ApiUrl.accountId,
+                      parsedS3ApiUrl.bucket,
+                      r2EndpointForAccount(parsedS3ApiUrl.accountId, parsedS3ApiUrl.jurisdiction),
+                    ));
                   }
                 }}
                 placeholder="Example: https://9cc0c910ec***41511aca1.r2.cloudflarestorage.com/agent"

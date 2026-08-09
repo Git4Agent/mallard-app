@@ -1,80 +1,81 @@
 # Plan: Agent-Assisted Cloudflare R2 Setup
 
-- **Status:** Proposed
-- **Date:** August 6, 2026
+- **Status:** Implemented; macOS DMG verified locally; Windows and live-cloud validation remain
+- **Last updated:** August 7, 2026
 - **Product scope:** User-owned Cloudflare R2 storage
-- **Implementation baseline:** Mallard 0.1.2, machine-local schema 1, portable
-  bundle schema 1
-- **Relevant code baseline:** `a5d41c5` and `6f39737`
+- **Platforms:** Apple Silicon macOS and x64 Windows
+- **State contract:** Clean schema-1 cutover; no migration or compatibility path
 
-## 1. Outcome
+## 1. Decision
 
-Mallard should let a user delegate Cloudflare R2 setup to a terminal coding
-agent without asking that agent to edit Mallard metadata or expose
-credentials in a prompt.
+Mallard ships its command-line interface inside the desktop installer and uses
+that CLI as the safe boundary between a terminal coding agent and Mallard's
+storage setup service.
 
-The completed experience is:
+The user can either connect an existing R2 bucket or let the CLI provision a
+new bucket and exact-bucket credential. The agent may coordinate the flow, but
+Mallard remains responsible for input validation, hidden secret input, remote
+capability checks, cleanup, concurrency control, and atomic local persistence.
+
+The implemented experience is:
 
 1. The user opens **New storage → Cloudflare R2**.
-2. The user chooses **Set up with an agent**.
-3. Mallard copies an instruction containing the exact packaged CLI path and
-   non-secret setup intent.
-4. The agent runs `mallard-cli`.
-5. The CLI either connects an existing R2 bucket or provisions a new one.
-6. The CLI verifies read, write, list, and conditional-write behavior.
-7. Mallard adds the storage through its normal revisioned, atomic persistence
-   layer.
-8. An already-running app shows the new storage without a restart.
+2. The user selects **Set up with an agent**.
+3. Mallard copies an instruction containing only the storage name and the
+   exact packaged CLI path.
+4. The agent inspects the CLI's R2 help and chooses connect or provision.
+5. The user enters the secret through a hidden terminal prompt. A bounded
+   stdin mode exists for automation; secrets are never accepted through an
+   argument or environment variable.
+6. Mallard verifies the destination's list, read, write, compare-and-swap,
+   stale-CAS rejection, delete, and absence behavior.
+7. The shared application service commits the storage through the existing
+   schema-1 repository lock and atomic writer.
+8. The open R2 setup page notices the new config revision, stays open, and
+   fills its fields from the exact committed storage without a restart.
 
-The agent orchestrates the task. Mallard remains the authority for validation,
-secret handling, connectivity checks, and local persistence.
+## 2. Clean-cutover policy
 
-## 2. Product boundaries
+This implementation deliberately has no migration or backward-compatibility
+branch. Before using it, development and test environments may clear their
+old `~/.mallard` state and old cloud objects as agreed for this cutover.
 
-This plan covers Cloudflare R2 owned by the user. It does not implement the
-Mallard-operated managed cloud described in
-[CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE_V2.md](CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE_V2.md).
+The active rules are:
 
-The first release targets packaged macOS builds. Windows follows after the
-command, storage-service, and event contracts are stable.
+- every `s3` storage is a canonical Cloudflare R2 destination;
+- generic AWS S3 and arbitrary S3-compatible endpoints are rejected;
+- a complete config cannot contain the same jurisdiction, account, and bucket
+  more than once;
+- direct connection treats the supplied value as an R2 S3 Secret Access Key;
+- Mallard never interprets or rewrites a supplied `cfat_...` bearer token;
+- provisioning persists the documented SHA-256-derived S3 secret, not the raw
+  Cloudflare token value;
+- schema 1 remains the only local and portable schema; and
+- projects, links, and bundle formats are unchanged.
 
-This plan does not:
+The feature does not:
 
-- provision generic AWS S3 or arbitrary S3-compatible services;
-- install Wrangler, npm, or other global tooling;
-- edit shell startup files or PATH automatically;
-- let an agent hand-edit `~/.mallard/sync_config.json`;
+- edit Mallard JSON by hand;
+- install Wrangler, npm, or other global tools;
+- edit shell startup files or PATH;
 - store a Cloudflare bootstrap token;
-- use expiring R2 temporary credentials as Mallard's persistent storage
-  credential;
-- delete a bucket automatically during rollback; or
-- change the portable bundle schema.
+- delete a bucket during rollback;
+- add an updater or signing system; or
+- implement Mallard-operated managed cloud storage.
 
-## 3. Experience design
+## 3. Supported CLI surface
 
-### 3.1 Connect an existing bucket
+The packaged executable is named `mallard-cli` on macOS and
+`mallard-cli.exe` on Windows.
 
-This is the minimum shippable path. The user already has:
-
-- an R2 S3 API URL;
-- an Access Key ID; and
-- a Secret Access Key.
-
-Mallard copies an instruction similar to:
+### 3.1 Inspect and verify storage
 
 ```text
-Set up the Cloudflare R2 storage “Team backup” in Mallard.
-
-Use this Mallard CLI:
-<absolute packaged CLI path>
-
-Run its interactive R2 connection flow. Do not edit Mallard JSON, place a
-secret in a command argument, or print credentials. When the CLI asks for the
-Secret Access Key, let me enter it through its hidden prompt. Finish by
-verifying the storage and confirming it appears in the running app.
+mallard-cli storage list
+mallard-cli storage verify <storage-id>
 ```
 
-The CLI command is:
+### 3.2 Connect an existing bucket
 
 ```text
 mallard-cli storage r2 connect \
@@ -83,643 +84,478 @@ mallard-cli storage r2 connect \
   --access-key-id "<id>"
 ```
 
-The secret is read from a hidden terminal prompt. Non-interactive callers may
-use `--secret-stdin`; there is no secret-valued command-line flag.
+The Secret Access Key is read from a hidden prompt. Automation may add
+`--secret-stdin` and provide exactly one bounded line on standard input.
 
-If an agent cannot give the user a private interactive prompt, it must hand
-the final command to the user instead of requesting the secret in chat.
-
-### 3.2 Provision a new bucket
-
-The follow-up path provisions R2 through Cloudflare's REST API:
+### 3.3 Provision a bucket and credential
 
 ```text
 mallard-cli storage r2 provision \
   --name "Team backup" \
-  --account-id "<account id>" \
+  --account-id "<32-hex-account-id>" \
   --bucket "team-backup" \
   --jurisdiction default
 ```
 
-The CLI requests a Cloudflare **Create additional tokens** bootstrap token
-through a hidden prompt. It does not use Wrangler authentication state.
+The Cloudflare bootstrap token is read from a hidden prompt. Automation may
+add `--bootstrap-token-stdin`.
 
-Provisioning:
+The bootstrap token must be created from Cloudflare's **Create additional
+tokens** template. It is used only against account-owned token endpoints and
+is never persisted.
 
-1. verifies the Cloudflare account and bootstrap token;
-2. creates or confirms the bucket;
-3. creates an R2 token scoped to that bucket;
-4. derives the token's S3 credentials;
-5. verifies the S3 destination;
-6. saves the derived R2 credentials in Mallard; and
-7. revokes every temporary provisioning token.
-
-The user performs Cloudflare's bootstrap-token creation once. Each later
-storage setup can then complete without copying an R2 Secret Access Key from
-the dashboard.
-
-### 3.3 Completion feedback
-
-Human output:
+### 3.4 Explicit recovery
 
 ```text
-Connected “Team backup”.
-Storage ID: storage-…
-Mallard config revision: 12
-Remote capability probe: passed
+mallard-cli storage r2 cleanup <setup-id>
 ```
 
-Machine output with `--json`:
+Cleanup also reads the bootstrap token through a hidden prompt or bounded
+`--bootstrap-token-stdin`. Repeating cleanup after successful reconciliation
+is safe.
 
-```json
-{
-  "schema": 1,
-  "status": "connected",
-  "storage_id": "storage-...",
-  "config_revision": 12,
-  "verified": true
-}
-```
+### 3.5 Output and exit contract
 
-Output must not contain the bucket, account ID, endpoint, Access Key ID,
-Secret Access Key, Cloudflare token ID, bootstrap token, or a local path.
+Human output reports only display names, Mallard storage/setup IDs, config
+revision, and sanitized status. `--json` emits schema-1 objects with a stable
+`status`; failures also include a stable `code`, numeric `exit_code`, and an
+optional sanitized `setup_id`.
 
-## 4. Current Mallard contracts
+Output never contains the bucket, account, endpoint, Access Key ID, Secret
+Access Key, token value, Cloudflare token ID, authorization header, or a local
+filesystem path.
 
-Implementation must use the active ProjectSync path:
-
-- `src-tauri/src/project_sync/`
-- `src/components/project-sync/`
-- `src/types.ts`
-
-The local document is `~/.mallard/sync_config.json` with schema 1:
-
-```text
-SyncConfig
-├── schema
-├── revision
-├── storages
-├── projects
-└── links
-```
-
-Relevant current behavior:
-
-- `LocalStateRepository` performs bounded, atomic JSON persistence.
-- `persistence.lock` already coordinates separate Mallard processes.
-- `save_config` enforces optimistic document revision checks.
-- `mutate_config` performs a locked read-modify-write.
-- the Tauri save path validates bindings and storage isolation before writing;
-- the frontend rebases storage-only saves on the latest config snapshot; and
-- `S3BundleObjectStore` is the production R2 client path.
-
-No replacement schema, compatibility file, or second persistence system is
-needed.
-
-## 5. Architecture
-
-### 5.1 Components
-
-Add:
-
-```text
-src-tauri/src/bin/mallard-cli.rs
-src-tauri/src/cli.rs
-src-tauri/src/project_sync/storage_setup.rs
-src-tauri/src/project_sync/config_watcher.rs
-```
-
-Add `cloudflare_r2_setup.rs` only when provisioning work starts.
-
-Responsibilities:
-
-| Component | Responsibility |
+| Exit | Meaning |
 | --- | --- |
-| `mallard-cli.rs` | Process entry point and exit status |
-| `cli.rs` | Argument parsing, hidden input, redacted output |
-| `storage_setup.rs` | R2 URL parsing, probe, de-duplication, config mutation |
-| `config_watcher.rs` | Detect newer config revisions and notify the frontend |
-| `cloudflare_r2_setup.rs` | Cloudflare API provisioning and recovery |
+| `0` | Success or verified idempotent result |
+| `2` | Invalid input |
+| `3` | Config revision, destination, or operation conflict |
+| `4` | Authentication or remote capability failure |
+| `5` | Local persistence failure |
+| `6` | Explicit remote cleanup required |
 
-`project_sync` remains private. `lib.rs` exposes only a narrow `pub mod cli`
-entry point required by the second binary.
+## 4. Implemented architecture
 
-The CLI must not instantiate a parallel DTO or persistence model. It calls
-the same crate-private storage service as the Tauri command.
-
-### 5.2 Shared R2 setup service
-
-The service accepts a typed request and returns a sanitized result:
-
-```rust
-struct ConnectR2StorageRequest {
-    name: String,
-    api_url: String,
-    access_key_id: String,
-    secret_access_key: SecretString,
-    expected_config_revision: Option<u64>,
-}
-
-struct ConnectStorageResult {
-    storage_id: String,
-    config_revision: u64,
-    verified: bool,
-}
-```
-
-Secret-bearing request types must not implement `Debug` or `Serialize`.
-
-The service:
-
-1. parses and canonicalizes the R2 API URL;
-2. constructs a pending `StorageConfig`;
-3. validates the pending storage;
-4. checks for an existing canonical destination;
-5. runs the full remote capability probe;
-6. mutates the config under `persistence.lock`;
-7. revalidates the complete local document;
-8. performs one atomic write and revision increment; and
-9. returns the exact committed revision.
-
-Add a repository mutation method that returns the saved `SyncConfig` while
-the persistence lock is still held. Loading the document again after
-`mutate_config` returns could observe another process's later revision.
-
-### 5.3 Tauri command
-
-Add a focused command:
+The implementation follows the workspace architecture instead of adding a
+second binary under `src-tauri`:
 
 ```text
-connect_r2_storage
+mallard-app/
+├── Cargo.toml
+├── crates/
+│   ├── mallard-domain/
+│   │   └── schema-1 storage and config domain types
+│   ├── mallard-application/
+│   │   └── src/
+│   │       ├── storage_setup.rs
+│   │       └── cloudflare_r2_setup.rs
+│   ├── mallard-infrastructure/
+│   │   └── src/
+│   │       ├── persistence.rs
+│   │       ├── r2_setup_journal.rs
+│   │       └── storage_core/
+│   │           └── s3_store.rs
+│   └── mallard-cli/
+│       ├── src/
+│       │   ├── args.rs
+│       │   ├── backend.rs
+│       │   ├── error.rs
+│       │   ├── lib.rs
+│       │   ├── main.rs
+│       │   └── output.rs
+│       └── tests/
+├── src-tauri/src/project_sync/
+│   ├── commands.rs
+│   └── config_watcher.rs
+├── src/components/project-sync/
+│   ├── ProjectLinksWorkspace.tsx
+│   ├── ProjectSync.tsx
+│   ├── StorageSettings.tsx
+│   └── api.ts
+├── scripts/
+│   ├── tauri-build.mjs
+│   ├── verify-macos-bundle.mjs
+│   └── verify-windows-bundle.ps1
+└── .github/workflows/release.yml
 ```
 
-The storage page uses this command when creating R2 storage. Local-folder
-creation and existing editing can keep the current full-document save until a
-separate refactor is justified.
-
-This gives the desktop app and CLI identical behavior:
-
-- the same URL parser;
-- the same credential normalization;
-- the same remote probe;
-- the same duplicate check;
-- the same atomic config mutation; and
-- the same sanitized error mapping.
-
-Register the command in `src-tauri/src/lib.rs` and expose it only through
-`projectSyncApi`.
-
-### 5.4 Endpoint model
-
-Cloudflare documents three R2 S3 endpoint forms:
+The dependency direction is:
 
 ```text
-https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-https://<ACCOUNT_ID>.eu.r2.cloudflarestorage.com
-https://<ACCOUNT_ID>.fedramp.r2.cloudflarestorage.com
+desktop adapter ─┐
+                 ├─> mallard-application ─> domain + infrastructure
+CLI adapter ─────┘
 ```
 
-Mallard's setup URL adds one bucket path segment:
+The desktop and CLI therefore share one parser, probe, de-duplication rule,
+transaction, provisioning state machine, error model, and recovery journal.
+
+## 5. Storage setup service
+
+`mallard-application/src/storage_setup.rs` owns the use case. Its
+secret-bearing requests intentionally do not implement `Debug`, `Clone`, or
+`Serialize`. Secret allocations use zeroizing wrappers.
+
+Direct connect performs this sequence:
+
+1. validate the display name and credential bounds;
+2. parse and canonicalize the R2 API URL;
+3. validate the complete clean-cutover storage document;
+4. reconcile a previously journaled probe for the destination;
+5. create a journal entry before starting a new probe;
+6. execute the exact R2 capability probe;
+7. open a locked config transaction;
+8. revalidate destination uniqueness and the complete document;
+9. add the storage or return the existing exact idempotent result;
+10. atomically persist exactly one new revision; and
+11. return the exact config committed while the lock was held.
+
+`LocalStateRepository::transact_config` distinguishes changed and unchanged
+results. It does not reload after releasing the lock, so a later writer cannot
+make the service report the wrong revision.
+
+A process-wide host-operation guard also covers the full connect, verify,
+provision, and cleanup operations. This prevents cleanup from racing another
+R2 setup while the ordinary persistence lock continues to protect the short
+config transaction.
+
+## 6. Canonical R2 destination
+
+Mallard accepts the current Cloudflare endpoint forms:
 
 ```text
-<endpoint>/<bucket>
+https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<bucket>
+https://<ACCOUNT_ID>.eu.r2.cloudflarestorage.com/<bucket>
+https://<ACCOUNT_ID>.fedramp.r2.cloudflarestorage.com/<bucket>
 ```
 
-The parser must reject:
+The parser requires:
 
-- non-HTTPS URLs;
-- embedded username or password;
-- ports, query strings, or fragments;
-- account IDs that are not exactly 32 hexadecimal characters;
-- missing or multiple bucket path segments;
-- bucket names outside Cloudflare's lowercase letter, number, hyphen, and
-  length rules;
-- public/custom R2 domains; and
-- endpoint/account/jurisdiction disagreement.
+- HTTPS;
+- exactly one 32-hex account label;
+- exactly one bucket path segment;
+- a 3–63 character lowercase bucket using letters, digits, and hyphens;
+- a letter or digit at both bucket boundaries; and
+- one of the three supported Cloudflare hosts.
 
-Canonical destination identity is:
+It rejects credentials, ports, queries, fragments, percent-encoded bucket
+aliases, multiple path segments, trailing slash aliases, public/custom R2
+domains, and surrounding whitespace.
+
+Canonical identity is:
 
 ```text
 (jurisdiction, lowercase account ID, exact bucket)
 ```
 
-Before agent setup supports EU or FedRAMP, update `StorageSettings.tsx` to
-derive its displayed API URL from the stored `s3_endpoint`. The current helper
-reconstructs the default endpoint from `account_id`, which would otherwise
-silently change jurisdiction during editing.
+The frontend mirrors these rules for immediate feedback. The backend remains
+authoritative, and full-document saves reject noncanonical or duplicate S3
+records.
 
-Backend parsing is authoritative. Frontend helpers mirror it for immediate
-feedback and share the same test vectors.
+## 7. Exact remote capability probe
 
-### 5.5 Remote capability probe
+Client construction or bucket metadata is not sufficient because Mallard
+depends on compare-and-swap writes for mutable heads.
 
-A successful client construction or bucket metadata request is insufficient.
-Mallard depends on conditional writes for safe mutable heads.
-
-The setup service uses the existing R2 client construction and a unique key
-under:
+The production S3/R2 adapter owns a dedicated probe under:
 
 ```text
-.mallard/v1/_setup_probes/<random setup id>
+.mallard/v1/_setup_probes/<setup-id>
 ```
 
-It must:
+The ordinary object-store namespace remains closed; the setup adapter alone
+may access this key family.
 
-1. perform a bounded list;
-2. create a small object with an absent precondition;
-3. read it back and verify its size and SHA-256;
-4. update it with the current ETag;
-5. confirm that the stale ETag is rejected;
-6. delete the exact probe object; and
-7. confirm absence.
+The probe:
 
-All calls use production timeouts and bounded responses.
+1. performs a bounded list;
+2. creates a small object with an absent precondition;
+3. reads it and verifies the exact bytes and SHA-256 digest;
+4. updates it using the current ETag;
+5. proves a stale ETag is rejected;
+6. deletes that exact object; and
+7. confirms it is absent.
 
-The local config is not changed unless the probe and cleanup both succeed.
-If cleanup fails, return a sanitized setup ID and cleanup-required error. Do
-not print the remote key or silently leave setup marked successful.
+Failure before a clean delete never commits local config. A cleanup failure
+returns exit 6 and the sanitized setup ID. The retry/cleanup path reconciles
+that exact known probe key; it never performs recursive deletion.
 
-Record that setup ID and probe stage in the same bounded, non-secret setup
-journal used by provisioning. A retry with the same destination must reconcile
-the known probe key before creating another one.
+## 8. Cloudflare provisioning state machine
 
-### 5.6 Live config refresh
+Provisioning uses Cloudflare's account-owned API token endpoints and R2 bucket
+API. Permission-group IDs are resolved from Cloudflare at runtime by exact
+name and exact scope; IDs are not hard-coded.
 
-Use the existing `notify` dependency.
+The bootstrap token is intentionally not used to inspect or create buckets.
+The implemented order is:
 
-The app watches the `~/.mallard` directory rather than the file itself because
-atomic persistence replaces `sync_config.json` by rename.
+1. validate account, bucket, jurisdiction, name, expected revision, and local
+   destination uniqueness;
+2. reconcile unfinished setup journals for that destination;
+3. resolve the account R2-write and bucket-item-write permission groups;
+4. create a 15-minute account-scoped `Workers R2 Storage Write` token;
+5. use that temporary token to inspect the bucket;
+6. create the bucket if absent; if creation races and returns conflict,
+   re-read and require the exact requested bucket;
+7. revoke the temporary token immediately, regardless of bucket outcome;
+8. create a durable `Workers R2 Storage Bucket Item Write` token scoped to
+   exactly one account, jurisdiction, and bucket;
+9. derive the S3 credentials in memory:
 
-On a relevant create, modify, or rename event:
+   ```text
+   Access Key ID     = created token response ID
+   Secret Access Key = lowercase hex SHA-256(created token value)
+   ```
 
-1. debounce the event burst;
-2. load the config under the normal persistence lock;
-3. validate it;
-4. compare its revision with the last emitted revision; and
-5. emit `project-sync-config-changed` with `{ revision }`.
+10. reconcile prior probes and execute the new capability probe;
+11. atomically commit the storage;
+12. adopt the final token only after confirming the committed config contains
+    its access ID;
+13. zeroize transient raw and derived secret allocations; and
+14. remove the completed journal.
 
-Never emit the config document; it contains credentials.
+The Cloudflare client uses rustls, HTTPS-only requests, disabled redirects,
+connect and whole-request timeouts, JSON content-type checks, bounded response
+bodies, fixed sanitized errors, and zeroized response buffers. Raw Cloudflare
+error bodies never cross the application boundary.
 
-`ProjectSync.tsx` listens for the event and fetches the config only when the
-event revision is newer than the React snapshot.
+## 9. Recovery journal
 
-The storage workspace must report whether its draft differs from its baseline:
-
-- a clean draft adopts the new storage snapshot;
-- a dirty draft stays unchanged and shows an external-change warning;
-- saving a dirty draft over an externally modified or removed storage is
-  blocked until the user reloads or explicitly reviews the conflict.
-
-An in-app save also produces a filesystem event. The revision comparison makes
-that event a no-op.
-
-### 5.7 CLI packaging
-
-Add `mallard-cli` as a second Rust binary. The repository's Tauri build wrapper
-must build it for the same target triple and release profile as the app, then
-place it at a deterministic generated bundle path.
-
-Do not commit compiled binaries.
-
-The storage page resolves the executable's packaged path and places it in the
-copied agent instruction. A bare command name is not the primary contract
-because `~/.local/bin` is not guaranteed to be on macOS PATH.
-
-An optional later action may install a copy at:
-
-```text
-~/.local/bin/mallard-cli
-```
-
-That action must use an atomic replacement, refuse to overwrite an unrelated
-file, show the final absolute path, and avoid editing shell configuration.
-
-## 6. Cloudflare provisioning
-
-### 6.1 Credential derivation
-
-Cloudflare documents the mapping from an API-created R2 token to S3
-credentials:
-
-```text
-Access Key ID     = token response id
-Secret Access Key = lowercase hex SHA-256(token response value)
-```
-
-Mallard persists only the derived S3 secret. It must not persist the raw token
-value, which is also a Cloudflare bearer credential.
-
-Permission-group IDs are resolved from Cloudflare's permission-groups API.
-Do not hard-code IDs or rely on display names as identifiers.
-
-The final token policy grants:
-
-```text
-Workers R2 Storage Bucket Item Write
-```
-
-to one exact bucket resource and jurisdiction.
-
-### 6.2 Provisioning state machine
-
-1. Validate account, bucket, jurisdiction, and local destination uniqueness.
-2. Verify the bootstrap token and account.
-3. Determine whether the bucket exists.
-4. If absent:
-   1. create a short-lived token with account-scoped
-      `Workers R2 Storage Write`;
-   2. create the bucket through the R2 REST API; and
-   3. revoke that token immediately.
-5. Create the final bucket-scoped R2 token.
-6. Derive its S3 credentials in memory.
-7. Run the remote capability probe.
-8. Commit the new `StorageConfig`.
-9. revoke any remaining temporary token;
-10. zeroize raw and derived transient secrets; and
-11. return the sanitized result.
-
-The bootstrap token should carry only token-creation permission. Cloudflare
-recommends a short lifetime and IP restrictions when practical.
-
-### 6.3 Partial failure
-
-Cloudflare and local persistence cannot share a transaction. Maintain a
-bounded local journal under:
+Provisioning and local persistence cannot form one distributed transaction.
+Mallard therefore keeps bounded, atomic, no-follow journal entries below:
 
 ```text
 ~/.mallard/r2_setup_transactions/
 ```
 
-The journal may contain:
+The journal records only:
 
-- setup ID;
-- account ID, bucket, and jurisdiction;
-- current stage;
-- created token IDs;
+- schema and setup ID;
+- account, bucket, and jurisdiction needed for exact recovery;
+- state and timestamps;
 - whether this flow created the bucket;
-- timestamps; and
-- a sanitized error code.
+- separate `temporary_token_id`, `final_token_id`, and `cleanup_token_id`
+  roles;
+- a sanitized error code; and
+- whether exact probe cleanup remains.
 
-It must not contain:
+It never records a token value, S3 secret, authorization header, HTTP body,
+signed request, credential-bearing config, or local absolute path.
 
-- bootstrap or R2 token values;
-- S3 secrets;
-- authorization headers;
-- raw HTTP bodies;
-- signed requests; or
-- local absolute paths.
+Recovery rules are:
 
-Recovery rules:
-
-- revoke a final token if verification or local persistence fails;
-- retain the journal if revocation cannot be confirmed;
-- let a retry reconcile known token IDs before continuing;
-- report a cleanup-required setup ID without exposing credentials;
-- never delete a bucket automatically; and
-- remove the journal only after the config commit and token cleanup are both
+- a token known to be adopted by the current config is never revoked;
+- an unadopted final token is revoked after probe or persistence failure;
+- a temporary account token is revoked immediately;
+- exact probe cleanup may use the configured credential or a new 15-minute,
+  exact-bucket cleanup token;
+- a cleanup token is journaled before use and revoked afterward;
+- any unconfirmed revocation preserves a cleanup-required journal;
+- a retry reconciles known token roles before creating more credentials;
+- the bucket is never automatically deleted; and
+- a journal is removed only when probe cleanup and token cleanup are both
   confirmed.
 
-## 7. Security requirements
+## 10. Desktop integration and concurrency
 
-These are release gates:
+The Tauri layer is deliberately thin:
 
-- No secret-valued command argument.
-- No secret in a copied agent instruction.
-- No secret in stdout, stderr, JSON, logs, journals, panics, or tests.
-- No raw Cloudflare response body in a surfaced error.
-- No manual JSON mutation by the CLI or agent.
-- No unbounded Cloudflare or S3 response.
-- No config commit before capability verification and probe cleanup.
-- No duplicate canonical R2 destination.
-- No change to projects or links while adding storage.
-- No config event containing credential-bearing fields.
-- No automatic bucket deletion.
-- Bootstrap tokens and raw token values use zeroizing in-memory wrappers.
-- The stored secret is the derived R2 S3 secret, not the raw Cloudflare token.
+- `connect_r2_storage` calls the shared direct-connect service;
+- `get_mallard_cli_path` resolves the packaged executable beside the running
+  desktop executable;
+- path resolution rejects missing, symlinked, non-file, or escaped siblings;
+  and
+- `save_project_sync_config` invokes the complete R2 destination validator for
+  existing-storage edits.
 
-Mallard currently stores R2 S3 credentials in its machine-local config. This
-feature preserves that behavior but must not broaden it. A future keychain
-migration is separate work.
+The storage workspace generates an agent instruction from only the normalized
+display name and CLI path. It tells the agent to quote the literal path, inspect
+R2 help, use connect or provision, and keep secrets out of arguments,
+environment variables, prompts, and output.
 
-If an explicitly saved existing configuration contains a raw `cfat_...` token
-value, the save path may verify and replace it with the derived SHA-256 S3
-secret. Do not perform that rewrite silently during startup.
+When the instruction is copied, the UI stores a bounded, credential-free
+marker containing the draft identity, redacted change fingerprint, requested
+name, and pre-existing storage IDs. If exactly one new same-name R2 storage
+appears while the draft stays clean, the editor switches to that committed
+storage, fills independent draft and baseline snapshots, remains expanded,
+and reports that the settings were filled automatically. A changed or
+ambiguous draft is preserved.
 
-## 8. Delivery plan
+Existing edits carry their exact baseline into save. The save is blocked when
+that storage was changed or removed externally, or when a new draft's ID now
+collides. This closes the time-of-check/time-of-use gap instead of blindly
+rebasing a dirty editor.
 
-### Phase 1 — Storage setup foundation
+## 11. Live config refresh
 
-Implement:
+Persistence replaces `sync_config.json` atomically, so the native watcher
+observes the parent `~/.mallard` directory.
 
-- backend R2 API URL parsing and canonicalization;
-- default, EU, and FedRAMP endpoint preservation in the UI;
-- shared setup request/result DTOs;
-- exact committed-config return from a locked mutation;
-- canonical destination de-duplication; and
-- the S3 capability probe.
+After a relevant create, modify, rename, or removal burst, it:
 
-Acceptance:
+1. debounces for 150 ms;
+2. loads and validates config through the normal repository lock;
+3. ignores malformed, duplicate, or older snapshots;
+4. emits `project-sync-config-changed` with only `{ revision }`; and
+5. keeps credentials behind the command boundary.
 
-- current manual R2 creation still works;
-- every supported endpoint round-trips without jurisdiction drift;
-- a failed or partially cleaned probe never changes the local config;
-- two concurrent adds cannot create duplicate destinations; and
-- tests use temporary homes and stub storage only.
+React fetches config only for a newer revision. It preserves a newer valid
+event-delivered snapshot when a concurrent shell load finishes late or fails.
+A malformed external document never replaces the active UI snapshot.
 
-### Phase 2 — Focused Tauri create command
+## 12. Packaging and release
 
-Implement:
+### 12.1 Shared build wrapper
 
-- `connect_r2_storage`;
-- `projectSyncApi.connectR2Storage`;
-- R2 creation through the shared service; and
-- current storage-page error and completion feedback.
+`scripts/tauri-build.mjs` builds `mallard-cli` with `cargo build --locked` for
+the same target and debug/release profile as Tauri. It stages the target-named
+sidecar expected by Tauri and injects `externalBin` through a final build-only
+config overlay.
 
-Acceptance:
+The base `tauri.conf.json` intentionally has no `externalBin`. Ordinary Cargo
+commands therefore do not depend on an uncommitted generated executable, and
+compiled sidecars are ignored by Git.
 
-- UI and service errors use actionable R2 language;
-- credentials are absent from errors and activity logs;
-- the config revision increments once;
-- projects and links are byte-for-byte unchanged; and
-- local-folder behavior is unchanged.
+### 12.2 macOS DMG
 
-### Phase 3 — Existing-credential CLI
+The Apple Silicon release job builds a DMG. Verification:
 
-Implement:
+- validates the DMG;
+- mounts it read-only;
+- checks the app and nested CLI signatures;
+- runs `mallard-cli --help` from the mounted image;
+- copies the complete app with `ditto` to a temporary installed location;
+- detaches the DMG; and
+- repeats signature and CLI checks from the installed copy.
 
-- `mallard-cli storage list`;
-- `mallard-cli storage r2 connect`;
-- `mallard-cli storage verify`;
-- hidden and stdin secret input;
-- redacted human and schema-1 JSON output; and
-- stable exit statuses.
+The current release remains ad-hoc signed and unnotarized; this work does not
+claim Apple notarization.
 
-Recommended exit statuses:
+### 12.3 Windows NSIS
 
-| Status | Meaning |
-| --- | --- |
-| `0` | Success or verified idempotent result |
-| `2` | Invalid input |
-| `3` | Config revision or destination conflict |
-| `4` | Authentication or remote capability failure |
-| `5` | Local persistence failure |
-| `6` | Remote cleanup required |
+The Windows job runs after macOS creates the draft release. It builds an x64
+MSVC NSIS installer in per-user mode.
 
-Acceptance:
+Verification refuses to disturb a pre-existing Mallard installation, installs
+to a bounded temporary directory, verifies the registered install location,
+proves process/user/machine PATH were not changed, runs
+`mallard-cli.exe --help`, uninstalls, and confirms the CLI, install directory,
+and uninstall registry key are removed.
 
-- a subprocess using a temporary home adds one valid storage;
-- simultaneous UI-style and CLI-style mutations preserve both changes;
-- the supplied secret canary appears nowhere in captured output or files;
-- forced termination exposes no partial config; and
-- the CLI never reads or writes a caller-selected config path.
+Only the verified installer is uploaded to the still-draft release, without
+clobbering an existing asset. The installer is currently unsigned; this work
+does not claim Windows code signing.
 
-### Phase 4 — Live refresh and agent entry point
+## 13. Security invariants
 
-Implement:
+These remain release gates:
 
-- config watcher lifecycle;
-- revision-only Tauri event;
-- frontend reload and dirty-draft conflict behavior;
-- **Set up with an agent**;
-- copied instruction generation; and
-- packaged CLI path resolution.
+- no secret-valued argument or environment-variable interface;
+- no secret in copied text, stdout, stderr, JSON, activity logs, journals,
+  panics, or fixtures;
+- no manual CLI or agent edit of Mallard metadata;
+- no config commit before verified probe cleanup;
+- no generic, noncanonical, or duplicate S3 destination;
+- no event payload containing config fields;
+- no unbounded Cloudflare or S3 response;
+- no redirect while sending Cloudflare bearer credentials;
+- no automatic bucket deletion;
+- no recursive probe cleanup;
+- no accidental revocation of an access ID adopted by committed config;
+- no test against a real `~/.mallard`, `~/.codex`, or `~/.claude`; and
+- no generated bundle, credential, or personal absolute path in Git.
 
-Acceptance:
+Mallard still stores the persistent R2 S3 credential in machine-local schema-1
+config. A future operating-system keychain change is separate scope.
 
-- an external config commit appears in the app within one second;
-- self-generated file events produce no duplicate notice;
-- a dirty draft is never overwritten or blindly rebased;
-- copied text contains the resolved CLI path and no secret; and
-- a malformed external config does not replace the active UI snapshot.
+## 14. Verification status
 
-### Phase 5 — macOS packaging
+Implemented automated coverage includes:
 
-Update:
+- strict default, EU, and FedRAMP parser vectors;
+- malformed URL, bucket, account, and alias rejection;
+- exact config revision, idempotency, duplicate, and concurrent-writer cases;
+- full-document clean-cutover validation;
+- every probe stage and cleanup failure class;
+- bounded/no-follow/atomic journal behavior;
+- Cloudflare permission, resource-policy, derivation, token-role, recovery,
+  and failure-injection tests;
+- CLI unit and subprocess tests, including secret canaries;
+- frontend endpoint, focused-create, watcher revision, dirty-draft conflict,
+  TOCTOU baseline, instruction, and agent reconciliation tests;
+- static macOS and Windows release-contract tests; and
+- packaged CLI help/signature/install/uninstall verification scripts.
 
-- `src-tauri/Cargo.toml`;
-- `scripts/tauri-build.mjs`;
-- Tauri bundle configuration; and
-- release-config tests.
+Required handoff commands are:
 
-Acceptance:
+```sh
+cargo fmt --all --check
+cargo check --workspace
+cargo test --workspace
+npm run build
+npm run test:frontend-integration
+npm run test:release-config
+npm run check:release-version
+git diff --check
+```
 
-- the CLI is present in the Apple Silicon DMG;
-- it runs from the mounted image and from a temporary installed location;
-- the app and nested CLI signatures verify;
-- release validation fails when the CLI build artifact is absent; and
-- the exact target triple used for the app is also used for the CLI.
+The Apple Silicon DMG gate passed locally on August 7, 2026: the release
+wrapper produced the DMG, verified its checksum, mounted it read-only, checked
+the app and nested CLI signatures and CLI help, copied the complete app to a
+temporary installed location, detached the image, and repeated those checks.
 
-### Phase 6 — Automated Cloudflare provisioning
+Two environment-dependent gates remain:
 
-Implement:
+1. run provisioning and cleanup against a disposable Cloudflare account and
+   bucket, with credentials kept out of logs; and
+2. let the release workflow execute the NSIS installer verifier on Windows.
 
-- Cloudflare REST client with TLS and JSON only;
-- permission-group resolution;
-- bucket creation;
-- short-lived provisioning-token lifecycle;
-- final bucket-scoped token creation;
-- S3 credential derivation;
-- recovery journal and cleanup command; and
-- failure-injection tests.
+The live smoke must revoke generated tokens, remove its disposable bucket only
+through explicit test teardown, and never use a personal production bucket.
 
-Acceptance:
+## 15. Definition of done
 
-- the bucket-existing and bucket-absent flows both complete;
-- the final policy references exactly one bucket;
-- temporary tokens are revoked on success;
-- every injected failure either cleans up or leaves a non-secret recovery
-  journal;
-- no raw token value reaches output or disk; and
-- a credential-gated disposable R2 smoke test passes.
+Source implementation is complete when all of the following hold:
 
-### Phase 7 — Windows
+- macOS and Windows packages contain the matching CLI executable;
+- the copied instruction uses the exact packaged path and contains no secret;
+- connect, provision, verify, cleanup, and list use one application service
+  boundary and one schema-1 repository;
+- R2 capabilities, including stale-CAS rejection, are proven before commit;
+- config mutation is locked, atomic, duplicate-safe, and reports the exact
+  committed revision;
+- the open R2 setup page adopts and fills a clean external storage addition;
+- dirty or ambiguous editor state is never overwritten;
+- every partial provisioning failure either cleans up or leaves a bounded,
+  non-secret recovery record;
+- the app never revokes an adopted final credential or deletes a bucket;
+- macOS installed-copy verification passes;
+- Windows install/help/uninstall verification passes; and
+- a disposable live R2 smoke passes.
 
-Implement and verify:
+## 16. References
 
-- `mallard-cli.exe` packaging;
-- hidden console input;
-- cross-process persistence locking;
-- atomic config replacement events;
-- absolute-path agent instructions; and
-- optional per-user installation without default PATH mutation.
+Mallard implementation:
 
-The config, CLI JSON, setup-service, and Cloudflare contracts remain
-cross-platform.
-
-## 9. Test plan
-
-### Rust unit and integration tests
-
-- Valid default, EU, and FedRAMP URLs.
-- Invalid scheme, host, account, path, port, query, fragment, and credentials.
-- New destination, idempotent retry, duplicate conflict, and revision
-  conflict.
-- Config collection bounds and malformed current documents.
-- Exact committed revision under concurrent writers.
-- Every capability-probe step and cleanup failure.
-- Secret-canary redaction across output, logs, journals, and error paths.
-- Cloudflare policy construction and credential derivation test vectors.
-- Every provisioning partial-failure boundary.
-
-### Frontend integration tests
-
-- Endpoint helpers preserve jurisdiction.
-- Current R2 field layout and progress count remain correct.
-- Focused create command payloads match Rust DTOs.
-- Watcher reload updates clean state.
-- Watcher reload preserves dirty state and blocks overwrite.
-- Copied instructions contain the provided executable path.
-- Copied instructions contain no credential values.
-
-### Release checks
-
-- `npm run build`
-- `npm run test:frontend-integration`
-- `cargo test --manifest-path src-tauri/Cargo.toml --lib`
-- CLI subprocess integration tests
-- `npm run test:release-config`
-- `MALLARD_VERIFY_MACOS_BUNDLE=1 npm run tauri build`
-
-A live R2 smoke test must use a disposable bucket/account, keep credentials out
-of CI logs, revoke generated tokens, and never point at a personal production
-bucket.
-
-## 10. Definition of done
-
-- A packaged macOS user can delegate R2 setup to a terminal agent from one
-  copied instruction.
-- The agent never edits Mallard JSON.
-- Secret values never enter the prompt, process arguments, output, logs, or
-  setup journal.
-- The UI and CLI call one schema-1 R2 setup service.
-- Mallard verifies list, read, write, conditional-write, stale-CAS rejection,
-  and cleanup before saving.
-- The config mutation uses the existing cross-process lock and atomic writer.
-- The running app shows the new storage within one second.
-- A dirty storage draft cannot be overwritten by an external change.
-- Default, EU, and FedRAMP endpoints round-trip without drift.
-- Automated provisioning creates a bucket-scoped final token and reconciles
-  every partial-failure state.
-- The packaged CLI is present, runnable, and signature-verified in the DMG.
-- Existing local-folder and R2 sync tests remain green.
-
-## 11. References
-
-Mallard:
-
-- [`domain.rs`](../src-tauri/src/project_sync/domain.rs)
-- [`persistence.rs`](../src-tauri/src/project_sync/persistence.rs)
+- [`storage_setup.rs`](../crates/mallard-application/src/storage_setup.rs)
+- [`cloudflare_r2_setup.rs`](../crates/mallard-application/src/cloudflare_r2_setup.rs)
+- [`r2_setup_journal.rs`](../crates/mallard-infrastructure/src/r2_setup_journal.rs)
+- [`s3_store.rs`](../crates/mallard-infrastructure/src/storage_core/s3_store.rs)
+- [`mallard-cli`](../crates/mallard-cli/)
 - [`commands.rs`](../src-tauri/src/project_sync/commands.rs)
-- [`s3_store.rs`](../src-tauri/src/project_sync/s3_store.rs)
-- [`StorageSettings.tsx`](../src/components/project-sync/StorageSettings.tsx)
+- [`config_watcher.rs`](../src-tauri/src/project_sync/config_watcher.rs)
+- [`ProjectLinksWorkspace.tsx`](../src/components/project-sync/ProjectLinksWorkspace.tsx)
 - [`ProjectSync.tsx`](../src/components/project-sync/ProjectSync.tsx)
+- [`StorageSettings.tsx`](../src/components/project-sync/StorageSettings.tsx)
+- [`tauri-build.mjs`](../scripts/tauri-build.mjs)
+- [`release.yml`](../.github/workflows/release.yml)
 
-Cloudflare:
+Cloudflare primary documentation:
 
 - [R2 authentication and S3 credential derivation](https://developers.cloudflare.com/r2/api/tokens/)
-- [Create API tokens through the API](https://developers.cloudflare.com/fundamentals/api/how-to/create-via-api/)
+- [Create tokens through the API](https://developers.cloudflare.com/fundamentals/api/how-to/create-via-api/)
 - [Create an account-owned token](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/methods/create/)
 - [Delete an account-owned token](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/methods/delete/)
+- [List account token permission groups](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/subresources/permission_groups/methods/list/)
 - [Create an R2 bucket](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/methods/create/)
-- [R2 S3 endpoint setup](https://developers.cloudflare.com/r2/get-started/s3/)
-- [R2 temporary credentials](https://developers.cloudflare.com/r2/api/s3/temporary-credentials/)
+- [Get an R2 bucket](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/methods/get/)

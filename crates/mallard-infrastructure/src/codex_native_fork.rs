@@ -452,6 +452,9 @@ fn app_server_error(method: &str, response: &Value) -> String {
     format!("Codex app-server {method} failed ({code})")
 }
 
+// Every argument is one pinned plan field; a params struct would only
+// restate the ConversationDivergencePlan it builds.
+#[allow(clippy::too_many_arguments)]
 pub fn build_divergence_plan(
     source_provider_thread_id: &str,
     local_lineage_digest: &str,
@@ -510,9 +513,11 @@ pub fn build_divergence_plan(
             ForkOrigin::PullPreserve => pinned_cloud_title,
             ForkOrigin::Manual => None,
         },
-        codex_executable: codex_executable.to_string_lossy().into_owned(),
-        codex_executable_sha256: executable_sha256,
-        available_executors,
+        execution: mallard_domain::DivergenceExecution::CodexNativeFork {
+            codex_executable: codex_executable.to_string_lossy().into_owned(),
+            codex_executable_sha256: executable_sha256,
+            available_executors,
+        },
     })
 }
 
@@ -917,18 +922,12 @@ pub fn complete_codex_post_commit_presentation(
             }
         }
     });
-    let original_name_status = if request.original_rename.is_none() {
-        CodexNameStatus::Unchanged
-    } else if let Some(error) = transport_error.clone() {
-        CodexNameStatus::Failed(format!(
+    let original_name_status = match (&request.original_rename, transport_error.clone()) {
+        (None, _) => CodexNameStatus::Unchanged,
+        (Some(_), Some(error)) => CodexNameStatus::Failed(format!(
             "skipped after the preserved-thread naming request failed: {error}"
-        ))
-    } else {
-        let rename = request
-            .original_rename
-            .as_ref()
-            .expect("checked original rename above");
-        match name_with_app_server_client(
+        )),
+        (Some(rename), None) => match name_with_app_server_client(
             &mut client,
             &rename.thread_id,
             rename.expected_current.as_deref(),
@@ -939,7 +938,7 @@ pub fn complete_codex_post_commit_presentation(
                 transport_error = Some(error.clone());
                 CodexNameStatus::Failed(error)
             }
-        }
+        },
     };
     let inventory_refreshed = transport_error.is_none()
         && refresh_codex_inventory_with_client(&mut client, &request.project_directory).is_ok();

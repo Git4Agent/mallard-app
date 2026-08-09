@@ -516,7 +516,7 @@ test("the pixel skin transitions nothing, so a tick cannot flicker its neighbour
 test("a row's status icon is keyed off its state, not off the selection", () => {
   // The icon sits beside the checkbox: keying it off the selection-dependent
   // decision phrase swapped the glyph under the very cursor that ticked it.
-  const source = readFileSync("src/components/project-sync/ProjectChatHistoryPage.tsx", "utf8");
+  const source = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
   const map = source.match(/const REVIEW_STATE_ICONS[\s\S]*?\};/)?.[0] ?? "";
   assert.match(map, /local_ahead: "upload"/, "the map is keyed by entry state");
   assert.match(map, /storage_ahead: "download"/);

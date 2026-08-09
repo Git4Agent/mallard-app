@@ -8,8 +8,10 @@ use mallard_infrastructure::persistence::LocalStateRepository;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 
+#[cfg(not(test))]
+use mallard_infrastructure::activity_log::day_for_timestamp;
+use mallard_infrastructure::activity_log::normalized_level_name;
 pub use mallard_infrastructure::activity_log::*;
-use mallard_infrastructure::activity_log::{day_for_timestamp, normalized_level_name};
 
 static PERSISTENCE_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 

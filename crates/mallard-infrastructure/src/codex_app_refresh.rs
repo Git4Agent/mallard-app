@@ -170,10 +170,10 @@ pub fn restart_after_pull(
             }
             thread::sleep(Duration::from_millis(250));
         }
-        return Err(format!(
+        Err(format!(
             "{} did not finish a graceful quit; Mallard did not force it closed",
             specification.app_name
-        ));
+        ))
     }
     #[cfg(not(target_os = "macos"))]
     {

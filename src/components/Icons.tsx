@@ -9,10 +9,12 @@ export type IconName =
   | "alert-triangle"
   | "badge-check"
   | "ban"
+  | "catalog"
   | "chevron-down"
   | "chevron-left"
   | "chevron-right"
   | "chevron-up"
+  | "claude"
   | "clock"
   | "cloud"
   | "cloud-off"
@@ -97,6 +99,14 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           <path d="M9 1h6v1h2v1h2v1h1v1h1v2h1v2h1v6h-1v2h-1v2h-1v1h-1v1h-2v1h-2v1H9v-1H7v-1H5v-1H4v-1H3v-2H2v-2H1V9h1V7h1V5h1V4h1V3h2V2h2V1Zm0 2v1H7v1H6l13 13v-1h1v-2h1V9h-1V7h-1V6h-1V5h-1V4h-2V3H9ZM5 6v1H4v2H3v6h1v2h1v1h1v1h1v1h2v1h6v-1h2v-1h1L5 6Z" />
         </g>
       )}
+      {name === "catalog" && (
+        <path
+          className="icon-pixel-fill"
+          fill="currentColor"
+          stroke="none"
+          d="M4 4h5v5H4ZM15 4h5v5h-5ZM4 15h5v5H4ZM15 15h5v5h-5Z"
+        />
+      )}
       {name === "cloud" && (
         <path className="icon-pixel-fill" fill="currentColor" stroke="none" d="M22 12v-1h-2V9h-1V8h-1V7h-3v1h-1V6h-1V5H8v1H7v1H6v1H5v3H2v1H1v5h1v1h1v1h2v1h14v-1h2v-1h1v-1h1v-5h-1Zm0 4h-1v1h-1v1h-2v1H6v-1H4v-1H3v-1H2v-3h1v-1h3V9h1V8h1V7h1V6h3v1h1v2h3V8h1v1h1v1h1v2h2v1h1v3Z" />
       )}
@@ -130,6 +140,22 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
       {name === "chevron-left" && <path className="icon-pixel-fill" fill="currentColor" stroke="none" d="M16 4v2h-1v1h-1v1h-1v1h-1v1h-1v4h1v1h1v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v-1h-1v-1H9v-1H8v-4h1V9h1V8h1V7h1V6h1V5h1V4h2Z" />}
       {name === "chevron-right" && <path className="icon-pixel-fill" fill="currentColor" stroke="none" d="M8 4h2v1h1v1h1v1h1v1h1v1h1v1h1v4h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H8v-2h1v-1h1v-1h1v-1h1v-1h1v-4h-1V9h-1V8h-1V7H9V6H8V4Z" />}
       {name === "chevron-up" && <path className="icon-pixel-fill" fill="currentColor" stroke="none" d="M10 8h4v1h1v1h1v1h1v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v-1h-1v-1h-4v1H9v1H8v1H7v1H6v1H4v-2h1v-1h1v-1h1v-1h1v-1h1V9h1V8Z" />}
+      {/* PLACEHOLDER for the Claude Code mark: an eight-ray tapered burst, rays
+          converging at the centre and widening to the tip. The taper is what
+          separates it from a generic asterisk and the part that still reads at
+          14px. Vector rather than pixel art, and geometricPrecision rather than
+          the sheet's crispEdges — the same call the ChatGPT knot makes, because
+          unantialiased diagonals shatter. Needs the canonical geometry and a
+          THIRD_PARTY_NOTICES.md entry before it can claim to be the real mark. */}
+      {name === "claude" && (
+        <path
+          className="icon-claude-mark"
+          fill="currentColor"
+          stroke="none"
+          shapeRendering="geometricPrecision"
+          d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"
+        />
+      )}
       {name === "clock" && (
         <g className="icon-pixel-fill" fill="currentColor" stroke="none">
           <path d="M22 9V7h-1V5h-1V4h-1V3h-2V2h-2V1H9v1H7v1H5v1H4v1H3v2H2v2H1v6h1v2h1v2h1v1h1v1h2v1h2v1h6v-1h2v-1h2v-1h1v-1h1v-2h1v-2h1V9h-1Zm-1 6h-1v2h-1v2h-2v1h-2v1H9v-1H7v-1H5v-2H4v-2H3V9h1V7h1V5h2V4h2V3h6v1h2v1h2v2h1v2h1v6Z" />

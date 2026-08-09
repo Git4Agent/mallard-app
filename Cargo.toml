@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "src-tauri",
+  "crates/mallard-application",
   "crates/mallard-cli",
   "crates/mallard-domain",
   "crates/mallard-infrastructure",

@@ -1,0 +1,1740 @@
+//! Provider-neutral, local-only rich session detail orchestration.
+//!
+//! Provider adapters own transcript syntax. This module owns registered
+//! project/profile resolution, local transcript ownership, metadata-only
+//! index caching, snapshot/cursor validation, Git checkpoint correlation,
+//! response bounds, and DTOs that may cross the Tauri boundary.
+
+use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
+use crate::project_activity::{parse_conversation_resource_id, resolve_activity_project};
+use crate::providers::{
+    ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionActionSurface,
+    SessionCheckpoint, SessionCount, SessionCountQuality, SessionDetailWarning,
+    SessionDiscoveryContext, SessionEventCounts, SessionEventDetail, SessionTimelineContext,
+    SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex, SessionTimelinePageSlice,
+    SessionTimelineQuery, SessionToolCategory,
+};
+use mallard_domain::{initial_conversation_thread_id, LocalProjectId, ProviderKey};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::UNIX_EPOCH;
+
+const TIMELINE_CACHE_SCHEMA: u32 = 1;
+const MAX_TIMELINE_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_TIMELINE_CACHE_ENTRIES: usize = 50_000;
+const MAX_TIMELINE_EVENTS: usize = 50_000;
+const MAX_TIMELINE_PAGE_EVENTS: usize = 50;
+const MAX_TIMELINE_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_EVENT_DETAIL_BYTES: usize = 64 * 1024;
+const MAX_IDENTIFIER_BYTES: usize = 512;
+const MAX_WARNING_BYTES: usize = 2 * 1024;
+const MAX_CHECKPOINT_COMMITS: usize = 10_000;
+const MAX_CHECKPOINT_BRANCHES: usize = 10_000;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionDetailErrorCode {
+    InvalidRequest,
+    NotFound,
+    NotLocal,
+    OwnershipChanged,
+    SnapshotChanged,
+    ProviderError,
+    ResponseTooLarge,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionDetailError {
+    pub code: SessionDetailErrorCode,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_snapshot_id: Option<String>,
+}
+
+impl SessionDetailError {
+    fn new(code: SessionDetailErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            current_snapshot_id: None,
+        }
+    }
+
+    fn snapshot_changed(current_snapshot_id: String) -> Self {
+        Self {
+            code: SessionDetailErrorCode::SnapshotChanged,
+            message: "The session changed; refresh before loading more events.".to_string(),
+            current_snapshot_id: Some(current_snapshot_id),
+        }
+    }
+}
+
+pub type SessionDetailResult<T> = Result<T, SessionDetailError>;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionDetailCapabilities {
+    pub intermediate_steps: bool,
+    pub checkpoints: bool,
+    pub tool_calls: bool,
+    pub event_detail: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionCheckpointJump {
+    pub event_id: String,
+    pub checkpoint: SessionCheckpoint,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProjectSessionDetail {
+    pub resource_id: String,
+    pub provider: ProviderKey,
+    pub provider_display_name: String,
+    pub provider_session_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
+    pub is_active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_sha: Option<String>,
+    pub tokens: SessionCount,
+    pub event_counts: SessionEventCounts,
+    pub capabilities: SessionDetailCapabilities,
+    #[serde(default)]
+    pub actions: Vec<SessionActionDescriptor>,
+    #[serde(default)]
+    pub checkpoint_jumps: Vec<SessionCheckpointJump>,
+    pub snapshot_id: String,
+    #[serde(default)]
+    pub warnings: Vec<SessionDetailWarning>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProjectSessionTimelinePage {
+    pub resource_id: String,
+    pub snapshot_id: String,
+    pub events: Vec<SessionTimelineEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<SessionDetailWarning>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectSessionTimelineRequest {
+    pub snapshot_id: String,
+    pub cursor: Option<String>,
+    pub anchor_event_id: Option<String>,
+    pub limit: Option<usize>,
+    pub included_event_kinds: BTreeSet<SessionTimelineEventKind>,
+    pub included_tool_categories: BTreeSet<SessionToolCategory>,
+    pub turn_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct TimelineCacheEntry {
+    resource_id: String,
+    provider: ProviderKey,
+    size: u64,
+    modified_nanos: u64,
+    timeline_version: u32,
+    index: SessionTimelineIndex,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct TimelineCache {
+    schema: u32,
+    #[serde(default)]
+    entries: BTreeMap<String, TimelineCacheEntry>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+struct TimelineCursor {
+    schema: u32,
+    provider: ProviderKey,
+    resource_id: String,
+    snapshot_id: String,
+    filter_fingerprint: String,
+    next_index: usize,
+}
+
+struct ResolvedLocalSession {
+    provider: ProviderKey,
+    resource_id: String,
+    project_root: PathBuf,
+    provider_home: PathBuf,
+    provider_session_id: String,
+    transcript_path: PathBuf,
+    display_name: String,
+    file_size: u64,
+    modified_nanos: u64,
+    is_active: bool,
+}
+
+enum CheckpointSupport {
+    Unsupported,
+    Supported(Option<SessionCheckpoint>),
+}
+
+static RESOURCE_LOCKS: OnceLock<Mutex<BTreeMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
+
+fn resource_lock(key: &str) -> Arc<Mutex<()>> {
+    let locks = RESOURCE_LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key.to_string(), Arc::downgrade(&lock));
+    lock
+}
+
+fn modified_nanos(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+fn modified_secs(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn hex_sha256(value: impl AsRef<[u8]>) -> String {
+    Sha256::digest(value.as_ref())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn snapshot_id(session: &ResolvedLocalSession, timeline_version: u32) -> String {
+    hex_sha256(format!(
+        "session-detail-v1\0{}\0{}\0{}\0{}\0{}",
+        session.provider,
+        session.resource_id,
+        session.file_size,
+        session.modified_nanos,
+        timeline_version
+    ))
+}
+
+fn cache_key(session: &ResolvedLocalSession) -> String {
+    hex_sha256(format!(
+        "timeline-cache-v1\0{}\0{}\0{}",
+        session.provider,
+        session.resource_id,
+        session.transcript_path.display()
+    ))
+}
+
+fn invalid_request(message: impl Into<String>) -> SessionDetailError {
+    SessionDetailError::new(SessionDetailErrorCode::InvalidRequest, message)
+}
+
+fn ensure_identifier(label: &str, value: &str) -> SessionDetailResult<()> {
+    if value.is_empty()
+        || value.len() > MAX_IDENTIFIER_BYTES
+        || value.chars().any(|character| character == '\0')
+    {
+        return Err(invalid_request(format!("{label} is invalid")));
+    }
+    Ok(())
+}
+
+fn safe_relative_path(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.is_absolute()
+        && !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetailResult<()> {
+    if index.events.len() > MAX_TIMELINE_EVENTS {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "The provider timeline exceeded Mallard's event limit.",
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    let mut calls_by_turn: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut summaries_by_turn = BTreeSet::new();
+    let mut previous_ordinal = None;
+    for event in &index.events {
+        ensure_identifier("event id", &event.event_id)?;
+        if event.kind == SessionTimelineEventKind::Checkpoint {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "Provider adapters cannot index Git checkpoint events.",
+            ));
+        }
+        if !ids.insert(event.event_id.as_str()) {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned duplicate timeline event IDs.",
+            ));
+        }
+        if previous_ordinal.is_some_and(|ordinal| event.ordinal <= ordinal) {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned an invalid timeline order.",
+            ));
+        }
+        previous_ordinal = Some(event.ordinal);
+        if event
+            .source
+            .offset
+            .checked_add(event.source.length)
+            .is_none_or(|end| end > file_size)
+        {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned an out-of-bounds timeline record.",
+            ));
+        }
+        if let Some(turn_id) = &event.turn_id {
+            ensure_identifier("turn id", turn_id)?;
+        }
+        if let Some(summary) = &event.turn_tool_summary {
+            if event.turn_id.as_deref() != Some(summary.turn_id.as_str())
+                || !summaries_by_turn.insert(summary.turn_id.as_str())
+            {
+                return Err(SessionDetailError::new(
+                    SessionDetailErrorCode::ProviderError,
+                    "The provider returned an invalid per-turn tool summary.",
+                ));
+            }
+        }
+        if let Some(parent) = &event.parent_event_id {
+            ensure_identifier("parent event id", parent)?;
+        }
+        if let Some(tool) = &event.tool {
+            if event.kind != SessionTimelineEventKind::ToolCall || event.turn_id.is_none() {
+                return Err(SessionDetailError::new(
+                    SessionDetailErrorCode::ProviderError,
+                    "The provider returned tool metadata on an invalid event.",
+                ));
+            }
+            ensure_identifier("tool call id", &tool.provider_call_id)?;
+            ensure_identifier("tool name", &tool.native_name)?;
+            if tool.result_source.is_some_and(|span| {
+                span.offset
+                    .checked_add(span.length)
+                    .is_none_or(|end| end > file_size)
+            }) {
+                return Err(SessionDetailError::new(
+                    SessionDetailErrorCode::ProviderError,
+                    "The provider returned an out-of-bounds tool result.",
+                ));
+            }
+            if tool
+                .affected_paths
+                .iter()
+                .any(|path| path.len() > 1024 || !safe_relative_path(path))
+            {
+                return Err(SessionDetailError::new(
+                    SessionDetailErrorCode::ProviderError,
+                    "The provider returned an unsafe affected path.",
+                ));
+            }
+            let turn_id = event.turn_id.as_deref().expect("checked above");
+            if !calls_by_turn
+                .entry(turn_id)
+                .or_default()
+                .insert(tool.provider_call_id.as_str())
+            {
+                return Err(SessionDetailError::new(
+                    SessionDetailErrorCode::ProviderError,
+                    "The provider returned a duplicate tool call for one turn.",
+                ));
+            }
+        } else if event.kind == SessionTimelineEventKind::ToolCall {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned a tool event without tool metadata.",
+            ));
+        }
+    }
+    for event in &index.events {
+        let Some(summary) = &event.turn_tool_summary else {
+            continue;
+        };
+        let known = calls_by_turn
+            .get(summary.turn_id.as_str())
+            .map(|calls| calls.len() as u64)
+            .unwrap_or(0);
+        if summary.tool_calls.value != Some(known) {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "A per-turn tool summary did not match its de-duplicated calls.",
+            ));
+        }
+    }
+    if calls_by_turn
+        .keys()
+        .any(|turn_id| !summaries_by_turn.contains(turn_id))
+    {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "A turn with tool calls was missing its de-duplicated tool summary.",
+        ));
+    }
+    if let (Some(total), Some(file_edits), Some(shell_calls), Some(reads), Some(other_tools)) = (
+        index.counts.tool_calls.value,
+        index.counts.file_edits.value,
+        index.counts.shell_calls.value,
+        index.counts.reads.value,
+        index.counts.other_tools.value,
+    ) {
+        if file_edits
+            .checked_add(shell_calls)
+            .and_then(|value| value.checked_add(reads))
+            .and_then(|value| value.checked_add(other_tools))
+            != Some(total)
+        {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "Tool category counts did not partition the unique tool total.",
+            ));
+        }
+    }
+    if index
+        .warnings
+        .iter()
+        .any(|warning| warning.code.len() > 128 || warning.message.len() > MAX_WARNING_BYTES)
+    {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "The provider returned an invalid timeline warning.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_page_slice(
+    slice: &SessionTimelinePageSlice,
+    index: &SessionTimelineIndex,
+    limit: usize,
+) -> SessionDetailResult<()> {
+    if slice.events.len() > limit {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "The provider returned too many timeline events.",
+        ));
+    }
+    if slice
+        .next_index
+        .is_some_and(|next| next > index.events.len())
+    {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "The provider returned an invalid timeline cursor.",
+        ));
+    }
+    for event in &slice.events {
+        ensure_identifier("event id", &event.event_id)?;
+        if event.kind == SessionTimelineEventKind::Checkpoint || event.checkpoint.is_some() {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "Provider adapters cannot create Git checkpoint events.",
+            ));
+        }
+        if let Some(tool) = &event.tool {
+            if tool
+                .argument_preview
+                .as_ref()
+                .is_some_and(|text| text.len() > 4096)
+                || tool
+                    .result_preview
+                    .as_ref()
+                    .is_some_and(|text| text.len() > 4096)
+                || tool
+                    .affected_paths
+                    .iter()
+                    .any(|path| path.len() > 1024 || !safe_relative_path(path))
+            {
+                return Err(SessionDetailError::new(
+                    SessionDetailErrorCode::ProviderError,
+                    "The provider returned an oversized or unsafe tool preview.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_local_session(
+    repository: &LocalStateRepository,
+    registry: &ProviderRegistry,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+) -> SessionDetailResult<ResolvedLocalSession> {
+    ensure_identifier("resource id", resource_id)?;
+    let (provider, thread_id) = parse_conversation_resource_id(resource_id)
+        .map_err(|_| invalid_request("The session resource ID is invalid."))?;
+    let resolved = resolve_activity_project(repository, local_project_id).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::OwnershipChanged,
+            "The project or its provider profile changed; open Project Settings.",
+        )
+    })?;
+    let adapter = registry.require_sessions(&provider).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::NotFound,
+            "No registered provider can read this session.",
+        )
+    })?;
+    let home = resolved.homes.get(&provider).ok_or_else(|| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::NotLocal,
+            "This session is not materialized in a readable local provider profile.",
+        )
+    })?;
+    let bindings = repository.load_conversation_bindings().map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::OwnershipChanged,
+            "Mallard could not revalidate this session's local ownership.",
+        )
+    })?;
+    let session_for_thread = bindings
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.local_project_id == resolved.project_id
+                && binding.thread_id == thread_id
+                && binding.provider_profile_id == home.profile_id
+        })
+        .and_then(|binding| binding.provider_thread_id.clone());
+    let context = SessionDiscoveryContext {
+        provider_home: &home.home,
+        project_root: &resolved.project_root,
+        excluded_roots: &[],
+    };
+    let discovery = adapter.discover(&context).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "The provider could not safely discover local sessions.",
+        )
+    })?;
+    let mut matches = Vec::new();
+    for session in discovery.sessions {
+        let identity_matches = session_for_thread
+            .as_ref()
+            .map(|expected| expected == &session.session_id)
+            .unwrap_or_else(|| {
+                initial_conversation_thread_id(&resolved.bundle_id, &provider, &session.session_id)
+                    .map(|derived| derived == thread_id)
+                    .unwrap_or(false)
+            });
+        if !identity_matches {
+            continue;
+        }
+        if ensure_identifier("provider session id", &session.session_id).is_err() {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned an invalid native session ID.",
+            ));
+        }
+        if session.blocked_reason.is_some() {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::OwnershipChanged,
+                "The provider blocked access to this local session.",
+            ));
+        }
+        let link_metadata = fs::symlink_metadata(&session.physical_path).map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::OwnershipChanged,
+                "The local session file is no longer readable.",
+            )
+        })?;
+        if link_metadata.file_type().is_symlink() || !link_metadata.file_type().is_file() {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::OwnershipChanged,
+                "The local session is not a regular no-follow file.",
+            ));
+        }
+        let canonical_path = fs::canonicalize(&session.physical_path).map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::OwnershipChanged,
+                "The local session path changed during validation.",
+            )
+        })?;
+        if !canonical_path.starts_with(&home.home) {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::OwnershipChanged,
+                "The local session escaped its registered provider profile.",
+            ));
+        }
+        let native = adapter.scan_metadata(&canonical_path).map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider could not revalidate this session's identity.",
+            )
+        })?;
+        if native.session_id != session.session_id || native.is_internal_subagent {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::OwnershipChanged,
+                "The local session identity changed since discovery.",
+            ));
+        }
+        if !cwd_belongs_to_project(&native.cwd, &resolved.project_root) {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::OwnershipChanged,
+                "The session no longer belongs to the selected project.",
+            ));
+        }
+        let metadata = fs::metadata(&canonical_path).map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::OwnershipChanged,
+                "The local session changed during validation.",
+            )
+        })?;
+        matches.push(ResolvedLocalSession {
+            provider: provider.clone(),
+            resource_id: resource_id.to_string(),
+            project_root: resolved.project_root.clone(),
+            provider_home: home.home.clone(),
+            provider_session_id: session.session_id,
+            transcript_path: canonical_path,
+            display_name: session.display_name,
+            file_size: metadata.len(),
+            modified_nanos: modified_nanos(&metadata),
+            is_active: now_secs().saturating_sub(modified_secs(&metadata)) < 300,
+        });
+    }
+    match matches.len() {
+        0 => Err(SessionDetailError::new(
+            SessionDetailErrorCode::NotLocal,
+            "This session is not materialized locally for the selected project.",
+        )),
+        1 => Ok(matches.remove(0)),
+        _ => Err(SessionDetailError::new(
+            SessionDetailErrorCode::OwnershipChanged,
+            "More than one local transcript matched this session; access was refused.",
+        )),
+    }
+}
+
+fn cwd_belongs_to_project(cwd: &Path, project_root: &Path) -> bool {
+    if !cwd.is_absolute()
+        || cwd
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return false;
+    }
+    fs::canonicalize(cwd)
+        .map(|resolved| resolved == project_root || resolved.starts_with(project_root))
+        .unwrap_or(false)
+}
+
+fn load_timeline_cache(
+    repository: &LocalStateRepository,
+) -> (TimelineCache, Vec<SessionDetailWarning>) {
+    let path = repository.root().join("session_timeline_cache.json");
+    match read_json_bounded::<TimelineCache>(repository.root(), &path, MAX_TIMELINE_CACHE_BYTES) {
+        Ok(Some(cache))
+            if cache.schema == TIMELINE_CACHE_SCHEMA
+                && cache.entries.len() <= MAX_TIMELINE_CACHE_ENTRIES =>
+        {
+            (cache, Vec::new())
+        }
+        Ok(_) => (
+            TimelineCache {
+                schema: TIMELINE_CACHE_SCHEMA,
+                entries: BTreeMap::new(),
+            },
+            Vec::new(),
+        ),
+        Err(_) => (
+            TimelineCache {
+                schema: TIMELINE_CACHE_SCHEMA,
+                entries: BTreeMap::new(),
+            },
+            vec![SessionDetailWarning {
+                code: "timeline_cache_ignored".to_string(),
+                message: "Mallard ignored an unreadable local timeline cache and rebuilt it."
+                    .to_string(),
+            }],
+        ),
+    }
+}
+
+fn refresh_file_state(session: &mut ResolvedLocalSession) -> SessionDetailResult<()> {
+    let link_metadata = fs::symlink_metadata(&session.transcript_path).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::OwnershipChanged,
+            "The local session file is no longer readable.",
+        )
+    })?;
+    if link_metadata.file_type().is_symlink() || !link_metadata.file_type().is_file() {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::OwnershipChanged,
+            "The local session is no longer a regular no-follow file.",
+        ));
+    }
+    let canonical = fs::canonicalize(&session.transcript_path).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::OwnershipChanged,
+            "The local session path changed during validation.",
+        )
+    })?;
+    if canonical != session.transcript_path || !canonical.starts_with(&session.provider_home) {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::OwnershipChanged,
+            "The local session path changed or escaped its provider profile.",
+        ));
+    }
+    let metadata = fs::metadata(&canonical).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::OwnershipChanged,
+            "The local session changed during validation.",
+        )
+    })?;
+    session.file_size = metadata.len();
+    session.modified_nanos = modified_nanos(&metadata);
+    session.is_active = now_secs().saturating_sub(modified_secs(&metadata)) < 300;
+    Ok(())
+}
+
+fn load_or_build_index(
+    repository: &LocalStateRepository,
+    registry: &ProviderRegistry,
+    session: &mut ResolvedLocalSession,
+) -> SessionDetailResult<(SessionTimelineIndex, String, Vec<SessionDetailWarning>)> {
+    let adapter = registry.require_sessions(&session.provider).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::NotFound,
+            "No registered provider can read this session.",
+        )
+    })?;
+    let timeline_version = adapter.timeline_version();
+    let lock = resource_lock(&session.resource_id);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (mut cache, mut warnings) = load_timeline_cache(repository);
+    let key = cache_key(session);
+
+    for attempt in 0..2 {
+        refresh_file_state(session)?;
+        let expected_size = session.file_size;
+        let expected_nanos = session.modified_nanos;
+        let current_snapshot_id = snapshot_id(session, timeline_version);
+        if let Some(entry) = cache.entries.get(&key).filter(|entry| {
+            entry.resource_id == session.resource_id
+                && entry.provider == session.provider
+                && entry.size == expected_size
+                && entry.modified_nanos == expected_nanos
+                && entry.timeline_version == timeline_version
+                && entry.index.parser_version == timeline_version
+        }) {
+            if validate_index(&entry.index, expected_size).is_ok() {
+                let index = entry.index.clone();
+                refresh_file_state(session)?;
+                if session.file_size == expected_size && session.modified_nanos == expected_nanos {
+                    return Ok((index, current_snapshot_id, warnings));
+                }
+                if attempt == 0 {
+                    continue;
+                }
+            }
+            cache.entries.remove(&key);
+        }
+
+        let context = SessionTimelineContext {
+            resource_id: &session.resource_id,
+            provider_session_id: &session.provider_session_id,
+            project_root: &session.project_root,
+        };
+        let index = adapter
+            .build_timeline_index(&session.transcript_path, &context)
+            .map_err(|_| {
+                SessionDetailError::new(
+                    SessionDetailErrorCode::ProviderError,
+                    "The provider could not build a safe timeline for this session.",
+                )
+            })?;
+        if index.parser_version != timeline_version {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned a timeline with an unexpected parser version.",
+            ));
+        }
+        validate_index(&index, expected_size)?;
+        refresh_file_state(session)?;
+        if session.file_size != expected_size || session.modified_nanos != expected_nanos {
+            if attempt == 0 {
+                continue;
+            }
+            return Err(SessionDetailError::snapshot_changed(snapshot_id(
+                session,
+                timeline_version,
+            )));
+        }
+        cache.entries.insert(
+            key.clone(),
+            TimelineCacheEntry {
+                resource_id: session.resource_id.clone(),
+                provider: session.provider.clone(),
+                size: expected_size,
+                modified_nanos: expected_nanos,
+                timeline_version,
+                index: index.clone(),
+            },
+        );
+        if cache.entries.len() > MAX_TIMELINE_CACHE_ENTRIES {
+            cache.entries.clear();
+            cache.entries.insert(
+                key.clone(),
+                TimelineCacheEntry {
+                    resource_id: session.resource_id.clone(),
+                    provider: session.provider.clone(),
+                    size: expected_size,
+                    modified_nanos: expected_nanos,
+                    timeline_version,
+                    index: index.clone(),
+                },
+            );
+            warnings.push(SessionDetailWarning {
+                code: "timeline_cache_reset".to_string(),
+                message: "Mallard reset an over-capacity local timeline cache.".to_string(),
+            });
+        }
+        cache.schema = TIMELINE_CACHE_SCHEMA;
+        if write_json_atomic(
+            repository.root(),
+            &repository.root().join("session_timeline_cache.json"),
+            &cache,
+            MAX_TIMELINE_CACHE_BYTES,
+        )
+        .is_err()
+        {
+            warnings.push(SessionDetailWarning {
+                code: "timeline_cache_write_failed".to_string(),
+                message: "Mallard could not update the local timeline cache.".to_string(),
+            });
+        }
+        return Ok((index, current_snapshot_id, warnings));
+    }
+    Err(SessionDetailError::new(
+        SessionDetailErrorCode::ProviderError,
+        "The session changed repeatedly while Mallard indexed it.",
+    ))
+}
+
+fn provider_display_name(registry: &ProviderRegistry, provider: &ProviderKey) -> String {
+    registry
+        .get(provider)
+        .map(|adapter| adapter.descriptor().display_name)
+        .unwrap_or_else(|| provider.to_string())
+}
+
+fn checkpoint_event_id(checkpoint: &SessionCheckpoint) -> String {
+    format!("checkpoint:{}", checkpoint.sha)
+}
+
+fn checkpoint_jump(checkpoint: SessionCheckpoint) -> SessionCheckpointJump {
+    SessionCheckpointJump {
+        event_id: checkpoint_event_id(&checkpoint),
+        checkpoint,
+    }
+}
+
+fn checkpoint_event(
+    index: &SessionTimelineIndex,
+    checkpoint: SessionCheckpoint,
+) -> SessionTimelineEvent {
+    SessionTimelineEvent {
+        event_id: checkpoint_event_id(&checkpoint),
+        ordinal: index
+            .events
+            .last()
+            .map(|event| event.ordinal.saturating_add(1))
+            .unwrap_or(0),
+        timestamp: Some(checkpoint.committed_at),
+        kind: SessionTimelineEventKind::Checkpoint,
+        quality: SessionCountQuality::Inferred,
+        turn_id: None,
+        turn_tool_summary: None,
+        parent_event_id: None,
+        text: None,
+        tool: None,
+        checkpoint: Some(checkpoint),
+    }
+}
+
+fn checkpoint_support(
+    project_root: &Path,
+    branch: Option<&str>,
+    recorded_sha: Option<&str>,
+    ended_at: Option<u64>,
+) -> SessionDetailResult<CheckpointSupport> {
+    let inside = git_output(project_root, &["rev-parse", "--is-inside-work-tree"])
+        .ok()
+        .is_some_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+        });
+    if !inside {
+        return Ok(CheckpointSupport::Unsupported);
+    }
+    let branch_count = format!("--count={MAX_CHECKPOINT_BRANCHES}");
+    let branches = git_output(
+        project_root,
+        &[
+            "for-each-ref",
+            &branch_count,
+            "--format=%(refname:short)",
+            "refs/heads",
+        ],
+    )
+    .map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "Git could not enumerate checkpoint branches.",
+        )
+    })?;
+    if !branches.status.success() {
+        return Ok(CheckpointSupport::Supported(None));
+    }
+    let available = String::from_utf8_lossy(&branches.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    let selected = match branch.filter(|name| available.contains(*name)) {
+        Some(branch) => Some(branch.to_string()),
+        None if branch.is_some() => None,
+        None => git_output(project_root, &["symbolic-ref", "--short", "-q", "HEAD"])
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|name| available.contains(name)),
+    };
+    let Some(selected) = selected else {
+        return Ok(CheckpointSupport::Supported(None));
+    };
+    let count = MAX_CHECKPOINT_COMMITS.to_string();
+    let branch_ref = format!("refs/heads/{selected}");
+    let output = git_output(
+        project_root,
+        &[
+            "log",
+            "--first-parent",
+            "--date-order",
+            "--format=%H%x1f%ct%x1f%<(500,trunc)%s",
+            "-n",
+            &count,
+            &branch_ref,
+            "--",
+        ],
+    )
+    .map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "Git could not read checkpoint history.",
+        )
+    })?;
+    if !output.status.success() {
+        return Ok(CheckpointSupport::Supported(None));
+    }
+    let commits = parse_git_commits(&output, &selected);
+    let ended_at = ended_at.unwrap_or(0);
+    let checkpoint = if let Some(recorded_sha) = recorded_sha
+        .filter(|sha| valid_full_sha(sha))
+        .map(str::to_ascii_lowercase)
+    {
+        commits
+            .iter()
+            .position(|commit| commit.sha == recorded_sha)
+            .and_then(|recorded_index| {
+                (0..recorded_index)
+                    .rev()
+                    .find(|index| commits[*index].committed_at >= ended_at)
+            })
+            .map(|index| commits[index].clone())
+    } else {
+        commits
+            .iter()
+            .filter(|commit| commit.committed_at >= ended_at)
+            .min_by_key(|commit| commit.committed_at)
+            .cloned()
+    };
+    Ok(CheckpointSupport::Supported(checkpoint))
+}
+
+fn parse_git_commits(output: &Output, branch: &str) -> Vec<SessionCheckpoint> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\u{1f}');
+            let sha = fields.next()?;
+            let committed_at = fields.next()?.parse::<u64>().ok()?;
+            let subject = fields.next().unwrap_or_default();
+            valid_full_sha(sha).then(|| SessionCheckpoint {
+                sha: sha.to_ascii_lowercase(),
+                short_sha: sha.chars().take(12).collect(),
+                subject: subject.chars().take(500).collect(),
+                committed_at,
+                branch: branch.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn valid_full_sha(value: &str) -> bool {
+    (value.len() == 40 || value.len() == 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Result<Output, String> {
+    Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())
+}
+
+fn with_checkpoint_count(
+    mut counts: SessionEventCounts,
+    checkpoint: &CheckpointSupport,
+) -> SessionEventCounts {
+    counts.checkpoints = match checkpoint {
+        CheckpointSupport::Unsupported => SessionCount::unsupported(
+            "Git checkpoints are unavailable because this project is not a Git worktree.",
+        ),
+        CheckpointSupport::Supported(value) => SessionCount {
+            value: Some(u64::from(value.is_some())),
+            quality: SessionCountQuality::Inferred,
+            explanation: Some(
+                "Checkpoints are inferred from the first successor commit on the session branch."
+                    .to_string(),
+            ),
+        },
+    };
+    counts
+}
+
+fn count_is_supported(count: &SessionCount) -> bool {
+    count.quality != SessionCountQuality::Unsupported
+}
+
+fn append_unique_warnings(
+    target: &mut Vec<SessionDetailWarning>,
+    warnings: impl IntoIterator<Item = SessionDetailWarning>,
+) {
+    for warning in warnings {
+        if !target
+            .iter()
+            .any(|existing| existing.code == warning.code && existing.message == warning.message)
+        {
+            target.push(warning);
+        }
+    }
+}
+
+fn ensure_response_bound<T: Serialize>(value: T, max_bytes: usize) -> SessionDetailResult<T> {
+    let encoded = serde_json::to_vec(&value).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "Mallard could not encode the normalized session response.",
+        )
+    })?;
+    if encoded.len() > max_bytes {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ResponseTooLarge,
+            "The normalized session response exceeded Mallard's safety limit.",
+        ));
+    }
+    Ok(value)
+}
+
+fn summarize_session(
+    registry: &ProviderRegistry,
+    session: &ResolvedLocalSession,
+) -> SessionDetailResult<crate::providers::SessionFileSummary> {
+    let adapter = registry.require_sessions(&session.provider).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::NotFound,
+            "No registered provider can read this session.",
+        )
+    })?;
+    let summary = adapter
+        .summarize_file(&session.transcript_path)
+        .map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider could not summarize this local session.",
+            )
+        })?;
+    if summary.session_id != session.provider_session_id || summary.is_internal_subagent {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::OwnershipChanged,
+            "The local session identity changed while loading its details.",
+        ));
+    }
+    Ok(summary)
+}
+
+fn sanitize_boundary_text(value: &str, session: &ResolvedLocalSession) -> String {
+    let transcript = session.transcript_path.to_string_lossy();
+    let provider_home = session.provider_home.to_string_lossy();
+    let project_root = session.project_root.to_string_lossy();
+    value
+        .replace(transcript.as_ref(), "<session-transcript>")
+        .replace(provider_home.as_ref(), "<provider-home>")
+        .replace(project_root.as_ref(), ".")
+}
+
+fn sanitize_timeline_events(events: &mut [SessionTimelineEvent], session: &ResolvedLocalSession) {
+    for event in events {
+        if let Some(text) = event.text.as_mut() {
+            *text = sanitize_boundary_text(text, session);
+        }
+        if let Some(tool) = event.tool.as_mut() {
+            tool.native_name = sanitize_boundary_text(&tool.native_name, session);
+            tool.summary = sanitize_boundary_text(&tool.summary, session);
+            if let Some(arguments) = tool.argument_preview.as_mut() {
+                *arguments = sanitize_boundary_text(arguments, session);
+            }
+            if let Some(result) = tool.result_preview.as_mut() {
+                *result = sanitize_boundary_text(result, session);
+            }
+        }
+        if let Some(checkpoint) = event.checkpoint.as_mut() {
+            checkpoint.subject = sanitize_boundary_text(&checkpoint.subject, session);
+        }
+    }
+}
+
+fn sanitize_warnings(warnings: &mut [SessionDetailWarning], session: &ResolvedLocalSession) {
+    for warning in warnings {
+        warning.message = sanitize_boundary_text(&warning.message, session);
+    }
+}
+
+fn sanitize_actions(
+    actions: &mut [SessionActionDescriptor],
+    session: &ResolvedLocalSession,
+) -> SessionDetailResult<()> {
+    for action in actions {
+        ensure_identifier("session action id", &action.action_id)?;
+        action.label = sanitize_boundary_text(&action.label, session);
+        if let Some(reason) = action.disabled_reason.as_mut() {
+            *reason = sanitize_boundary_text(reason, session);
+        }
+    }
+    Ok(())
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    encoded
+}
+
+fn decode_hex(value: &str) -> SessionDetailResult<Vec<u8>> {
+    if value.len() > 16 * 1024 || value.len() % 2 != 0 {
+        return Err(invalid_request("The timeline cursor is invalid."));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = hex_digit(pair[0])?;
+            let low = hex_digit(pair[1])?;
+            Ok((high << 4) | low)
+        })
+        .collect()
+}
+
+fn hex_digit(byte: u8) -> SessionDetailResult<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err(invalid_request("The timeline cursor is invalid.")),
+    }
+}
+
+fn encode_cursor(cursor: &TimelineCursor) -> SessionDetailResult<String> {
+    let bytes = serde_json::to_vec(cursor)
+        .map_err(|_| invalid_request("Mallard could not encode the timeline cursor."))?;
+    Ok(format!("v1-{}", encode_hex(&bytes)))
+}
+
+fn decode_cursor(value: &str) -> SessionDetailResult<TimelineCursor> {
+    let encoded = value
+        .strip_prefix("v1-")
+        .ok_or_else(|| invalid_request("The timeline cursor is invalid."))?;
+    let bytes = decode_hex(encoded)?;
+    let cursor: TimelineCursor = serde_json::from_slice(&bytes)
+        .map_err(|_| invalid_request("The timeline cursor is invalid."))?;
+    if cursor.schema != 1 {
+        return Err(invalid_request(
+            "The timeline cursor version is unsupported.",
+        ));
+    }
+    Ok(cursor)
+}
+
+fn filter_fingerprint(request: &ProjectSessionTimelineRequest) -> SessionDetailResult<String> {
+    let bytes = serde_json::to_vec(&(
+        &request.included_event_kinds,
+        &request.included_tool_categories,
+        &request.turn_id,
+    ))
+    .map_err(|_| invalid_request("The timeline filters are invalid."))?;
+    Ok(hex_sha256(bytes))
+}
+
+fn validate_slice_against_query(
+    slice: &SessionTimelinePageSlice,
+    index: &SessionTimelineIndex,
+    query: &SessionTimelineQuery,
+) -> SessionDetailResult<()> {
+    validate_page_slice(slice, index, query.limit)?;
+    let indexed = index
+        .events
+        .iter()
+        .map(|event| (event.event_id.as_str(), event))
+        .collect::<BTreeMap<_, _>>();
+    for event in &slice.events {
+        let Some(source) = indexed.get(event.event_id.as_str()) else {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned an event outside the validated index.",
+            ));
+        };
+        let tool_matches_index = match (&event.tool, &source.tool) {
+            (Some(tool), Some(source_tool)) => {
+                tool.provider_call_id == source_tool.provider_call_id
+                    && tool.native_name == source_tool.native_name
+                    && tool.category == source_tool.category
+                    && tool.status == source_tool.status
+                    && tool.affected_paths == source_tool.affected_paths
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if event.kind != source.kind
+            || event.ordinal != source.ordinal
+            || event.timestamp != source.timestamp
+            || event.quality != source.quality
+            || event.turn_id != source.turn_id
+            || event.parent_event_id != source.parent_event_id
+            || !tool_matches_index
+            || !query.included_event_kinds.contains(&event.kind)
+            || (event.kind == SessionTimelineEventKind::ToolCall
+                && event
+                    .tool
+                    .as_ref()
+                    .is_none_or(|tool| !query.included_tool_categories.contains(&tool.category)))
+            || query
+                .turn_id
+                .as_ref()
+                .is_some_and(|turn_id| event.turn_id.as_deref() != Some(turn_id.as_str()))
+        {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned an event outside the requested filters.",
+            ));
+        }
+    }
+    if slice
+        .next_index
+        .is_some_and(|next| query.start_index.is_some_and(|start| next <= start))
+    {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "The provider returned a non-advancing timeline cursor.",
+        ));
+    }
+    Ok(())
+}
+
+/// Load the authoritative header and build/reuse the metadata-only timeline
+/// index. Remote-only rows fail with `not_local`; Pull remains the only path
+/// that makes a remote session resumable and richly viewable.
+pub fn get_project_session_detail(
+    repository: &LocalStateRepository,
+    registry: &ProviderRegistry,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+) -> SessionDetailResult<ProjectSessionDetail> {
+    let mut session = resolve_local_session(repository, registry, local_project_id, resource_id)?;
+    let (index, snapshot_id, cache_warnings) =
+        load_or_build_index(repository, registry, &mut session)?;
+    let summary = summarize_session(registry, &session)?;
+    let checkpoint = checkpoint_support(
+        &session.project_root,
+        summary.branch.as_deref(),
+        summary.recorded_sha.as_deref(),
+        summary.ended_at,
+    )?;
+    let event_counts = with_checkpoint_count(index.counts.clone(), &checkpoint);
+    let tokens = match summary.total_tokens {
+        Some(value) => SessionCount {
+            value: Some(value),
+            quality: if summary.metrics_complete {
+                SessionCountQuality::Exact
+            } else {
+                SessionCountQuality::LowerBound
+            },
+            explanation: (!summary.metrics_complete)
+                .then(|| "The provider transcript may contain additional token usage.".to_string()),
+        },
+        None => SessionCount::unsupported(
+            "This provider transcript does not expose a reliable token total.",
+        ),
+    };
+    let mut actions = registry
+        .require_sessions(&session.provider)
+        .map(|adapter| {
+            adapter.available_actions(&SessionActionContext {
+                provider_session_id: &session.provider_session_id,
+                is_local: true,
+                transcript_path: Some(&session.transcript_path),
+                surface: SessionActionSurface::Detail,
+            })
+        })
+        .unwrap_or_default();
+    sanitize_actions(&mut actions, &session)?;
+    let checkpoint_jumps = match &checkpoint {
+        CheckpointSupport::Supported(Some(checkpoint)) => {
+            vec![checkpoint_jump(checkpoint.clone())]
+        }
+        _ => Vec::new(),
+    };
+    let mut warnings = index.warnings.clone();
+    append_unique_warnings(&mut warnings, cache_warnings);
+    if index.truncated {
+        append_unique_warnings(
+            &mut warnings,
+            [SessionDetailWarning {
+                code: "timeline_truncated".to_string(),
+                message: "The timeline reached Mallard's event limit; counts are lower bounds."
+                    .to_string(),
+            }],
+        );
+    }
+    sanitize_warnings(&mut warnings, &session);
+    let title = summary
+        .title
+        .clone()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| session.display_name.clone());
+    let detail = ProjectSessionDetail {
+        resource_id: session.resource_id.clone(),
+        provider: session.provider.clone(),
+        provider_display_name: provider_display_name(registry, &session.provider),
+        provider_session_id: session.provider_session_id.clone(),
+        title: sanitize_boundary_text(&title, &session),
+        summary: summary
+            .summary
+            .as_deref()
+            .map(|summary| sanitize_boundary_text(summary, &session)),
+        started_at: summary.started_at,
+        ended_at: summary.ended_at,
+        is_active: session.is_active,
+        branch: summary
+            .branch
+            .as_deref()
+            .map(|branch| sanitize_boundary_text(branch, &session)),
+        recorded_sha: summary.recorded_sha.filter(|sha| valid_full_sha(sha)),
+        tokens,
+        capabilities: SessionDetailCapabilities {
+            intermediate_steps: count_is_supported(&event_counts.intermediate_steps),
+            checkpoints: matches!(checkpoint, CheckpointSupport::Supported(_)),
+            tool_calls: count_is_supported(&event_counts.tool_calls),
+            event_detail: count_is_supported(&event_counts.tool_calls),
+        },
+        event_counts,
+        actions,
+        checkpoint_jumps,
+        snapshot_id,
+        warnings,
+    };
+    ensure_response_bound(detail, MAX_TIMELINE_RESPONSE_BYTES)
+}
+
+/// Read one filtered, chronological page. The opaque cursor is bound to the
+/// provider, resource, transcript snapshot, filter fingerprint, and raw next
+/// index. Provider filtering occurs before pagination.
+pub fn get_project_session_timeline_page(
+    repository: &LocalStateRepository,
+    registry: &ProviderRegistry,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+    request: ProjectSessionTimelineRequest,
+) -> SessionDetailResult<ProjectSessionTimelinePage> {
+    ensure_identifier("snapshot id", &request.snapshot_id)?;
+    if request.cursor.is_some() && request.anchor_event_id.is_some() {
+        return Err(invalid_request(
+            "Use either a timeline cursor or an anchor event, not both.",
+        ));
+    }
+    if let Some(turn_id) = &request.turn_id {
+        ensure_identifier("turn id", turn_id)?;
+    }
+    if let Some(anchor) = &request.anchor_event_id {
+        ensure_identifier("anchor event id", anchor)?;
+    }
+    let mut session = resolve_local_session(repository, registry, local_project_id, resource_id)?;
+    let (index, current_snapshot_id, cache_warnings) =
+        load_or_build_index(repository, registry, &mut session)?;
+    if request.snapshot_id != current_snapshot_id {
+        return Err(SessionDetailError::snapshot_changed(current_snapshot_id));
+    }
+    let fingerprint = filter_fingerprint(&request)?;
+    let mut start_index = None;
+    if let Some(cursor) = &request.cursor {
+        let cursor = decode_cursor(cursor)?;
+        if cursor.provider != session.provider
+            || cursor.resource_id != session.resource_id
+            || cursor.snapshot_id != current_snapshot_id
+            || cursor.filter_fingerprint != fingerprint
+        {
+            return Err(invalid_request(
+                "The timeline cursor does not match this session, snapshot, or filter set.",
+            ));
+        }
+        start_index = Some(cursor.next_index);
+    }
+    let summary = summarize_session(registry, &session)?;
+    let checkpoint = checkpoint_support(
+        &session.project_root,
+        summary.branch.as_deref(),
+        summary.recorded_sha.as_deref(),
+        summary.ended_at,
+    )?;
+    let checkpoint = match checkpoint {
+        CheckpointSupport::Supported(checkpoint) => checkpoint,
+        CheckpointSupport::Unsupported => None,
+    };
+    let checkpoint_id = checkpoint.as_ref().map(checkpoint_event_id);
+    if let Some(anchor) = &request.anchor_event_id {
+        start_index = if checkpoint_id.as_deref() == Some(anchor.as_str()) {
+            Some(index.events.len())
+        } else {
+            Some(
+                index
+                    .events
+                    .iter()
+                    .position(|event| event.event_id == *anchor)
+                    .ok_or_else(|| invalid_request("The timeline anchor does not exist."))?,
+            )
+        };
+    }
+    let start_index = start_index.unwrap_or(0);
+    if start_index > index.events.len() {
+        return Err(invalid_request("The timeline cursor position is invalid."));
+    }
+    let limit = request
+        .limit
+        .unwrap_or(MAX_TIMELINE_PAGE_EVENTS)
+        .clamp(1, 50);
+    let adapter = registry.require_sessions(&session.provider).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::NotFound,
+            "No registered provider can read this session.",
+        )
+    })?;
+    let query = SessionTimelineQuery {
+        start_index: Some(start_index),
+        anchor_event_id: request
+            .anchor_event_id
+            .clone()
+            .filter(|anchor| checkpoint_id.as_deref() != Some(anchor.as_str())),
+        limit,
+        included_event_kinds: request.included_event_kinds.clone(),
+        included_tool_categories: request.included_tool_categories.clone(),
+        turn_id: request.turn_id.clone(),
+    };
+    let mut slice = if start_index < index.events.len() {
+        adapter
+            .read_timeline_page(&session.transcript_path, &index, &query)
+            .map_err(|_| {
+                SessionDetailError::new(
+                    SessionDetailErrorCode::ProviderError,
+                    "The provider could not read the requested timeline page.",
+                )
+            })?
+    } else {
+        SessionTimelinePageSlice {
+            events: Vec::new(),
+            next_index: None,
+        }
+    };
+    validate_slice_against_query(&slice, &index, &query)?;
+    let checkpoint_requested = request.turn_id.is_none()
+        && request
+            .included_event_kinds
+            .contains(&SessionTimelineEventKind::Checkpoint);
+    if slice.next_index.is_none() && checkpoint_requested {
+        if let Some(checkpoint) = checkpoint {
+            if slice.events.len() < limit {
+                slice.events.push(checkpoint_event(&index, checkpoint));
+            } else {
+                slice.next_index = Some(index.events.len());
+            }
+        }
+    }
+    sanitize_timeline_events(&mut slice.events, &session);
+    let next_cursor = slice
+        .next_index
+        .map(|next_index| {
+            encode_cursor(&TimelineCursor {
+                schema: 1,
+                provider: session.provider.clone(),
+                resource_id: session.resource_id.clone(),
+                snapshot_id: current_snapshot_id.clone(),
+                filter_fingerprint: fingerprint.clone(),
+                next_index,
+            })
+        })
+        .transpose()?;
+    let mut warnings = index.warnings.clone();
+    append_unique_warnings(&mut warnings, cache_warnings);
+    sanitize_warnings(&mut warnings, &session);
+    let page = ProjectSessionTimelinePage {
+        resource_id: session.resource_id,
+        snapshot_id: current_snapshot_id,
+        events: slice.events,
+        next_cursor,
+        warnings,
+    };
+    ensure_response_bound(page, MAX_TIMELINE_RESPONSE_BYTES)
+}
+
+fn truncate_to_bytes(value: &mut Option<String>, limit: usize, truncated: &mut bool) {
+    let Some(text) = value.as_mut() else {
+        return;
+    };
+    if text.len() <= limit {
+        return;
+    }
+    let mut boundary = limit.min(text.len());
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    text.truncate(boundary);
+    *truncated = true;
+}
+
+/// Expand one indexed tool event on demand. Prompt/response text is already
+/// carried by timeline pages; raw reasoning and unindexed records are never
+/// addressable through this command.
+pub fn get_project_session_event_detail(
+    repository: &LocalStateRepository,
+    registry: &ProviderRegistry,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+    snapshot_id_value: &str,
+    event_id: &str,
+) -> SessionDetailResult<SessionEventDetail> {
+    ensure_identifier("snapshot id", snapshot_id_value)?;
+    ensure_identifier("event id", event_id)?;
+    let mut session = resolve_local_session(repository, registry, local_project_id, resource_id)?;
+    let (index, current_snapshot_id, _) = load_or_build_index(repository, registry, &mut session)?;
+    if snapshot_id_value != current_snapshot_id {
+        return Err(SessionDetailError::snapshot_changed(current_snapshot_id));
+    }
+    let indexed = index
+        .events
+        .iter()
+        .find(|event| event.event_id == event_id)
+        .ok_or_else(|| invalid_request("The timeline event does not exist."))?;
+    if indexed.kind != SessionTimelineEventKind::ToolCall || indexed.tool.is_none() {
+        return Err(invalid_request(
+            "Only tool-call events have expanded detail.",
+        ));
+    }
+    let adapter = registry.require_sessions(&session.provider).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::NotFound,
+            "No registered provider can read this session.",
+        )
+    })?;
+    let mut detail = adapter
+        .read_event_detail(&session.transcript_path, &index, event_id)
+        .map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider could not expand the requested tool event.",
+            )
+        })?;
+    if detail.event_id != event_id
+        || detail
+            .affected_paths
+            .iter()
+            .any(|path| path.len() > 1024 || !safe_relative_path(path))
+    {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "The provider returned unsafe event detail.",
+        ));
+    }
+    if let Some(arguments) = detail.arguments.as_mut() {
+        *arguments = sanitize_boundary_text(arguments, &session);
+    }
+    if let Some(result) = detail.result.as_mut() {
+        *result = sanitize_boundary_text(result, &session);
+    }
+    truncate_to_bytes(
+        &mut detail.arguments,
+        30 * 1024,
+        &mut detail.arguments_truncated,
+    );
+    truncate_to_bytes(&mut detail.result, 30 * 1024, &mut detail.result_truncated);
+    ensure_response_bound(detail, MAX_EVENT_DETAIL_BYTES)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::{
+        SessionSourceSpan, SessionTimelineIndexEntry, SessionToolCallStatus, SessionToolIndexEntry,
+    };
+
+    fn counts() -> SessionEventCounts {
+        SessionEventCounts {
+            prompts: SessionCount::exact(1),
+            responses: SessionCount::exact(1),
+            intermediate_steps: SessionCount::exact(0),
+            checkpoints: SessionCount::unsupported("common Git layer"),
+            tool_calls: SessionCount::exact(1),
+            file_edits: SessionCount::exact(1),
+            shell_calls: SessionCount::exact(0),
+            reads: SessionCount::exact(0),
+            other_tools: SessionCount::exact(0),
+        }
+    }
+
+    fn index_with_path(path: &str) -> SessionTimelineIndex {
+        SessionTimelineIndex {
+            parser_version: 1,
+            events: vec![SessionTimelineIndexEntry {
+                event_id: "event-1".to_string(),
+                ordinal: 0,
+                timestamp: Some(1),
+                kind: SessionTimelineEventKind::ToolCall,
+                quality: SessionCountQuality::Exact,
+                turn_id: Some("turn-1".to_string()),
+                turn_tool_summary: Some(crate::providers::SessionTurnToolSummary {
+                    turn_id: "turn-1".to_string(),
+                    tool_calls: SessionCount::exact(1),
+                }),
+                parent_event_id: None,
+                source: SessionSourceSpan {
+                    offset: 0,
+                    length: 4,
+                },
+                tool: Some(SessionToolIndexEntry {
+                    provider_call_id: "call-1".to_string(),
+                    native_name: "Write".to_string(),
+                    category: SessionToolCategory::FileEdit,
+                    status: SessionToolCallStatus::Completed,
+                    affected_paths: vec![path.to_string()],
+                    result_source: None,
+                }),
+            }],
+            counts: counts(),
+            warnings: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn timeline_index_rejects_absolute_affected_paths() {
+        let error = validate_index(&index_with_path("/private/project/secret"), 4)
+            .expect_err("absolute path must fail closed");
+        assert_eq!(error.code, SessionDetailErrorCode::ProviderError);
+        assert!(validate_index(&index_with_path("src/main.rs"), 4).is_ok());
+    }
+
+    #[test]
+    fn opaque_cursor_round_trips_bound_coordinates() {
+        let cursor = TimelineCursor {
+            schema: 1,
+            provider: ProviderKey::parse("codex").unwrap(),
+            resource_id: "codex:conversation:thread-1".to_string(),
+            snapshot_id: "a".repeat(64),
+            filter_fingerprint: "b".repeat(64),
+            next_index: 49,
+        };
+        let encoded = encode_cursor(&cursor).unwrap();
+        assert!(encoded.starts_with("v1-"));
+        assert_eq!(decode_cursor(&encoded).unwrap(), cursor);
+        assert!(decode_cursor("v1-not-hex").is_err());
+    }
+
+    #[test]
+    fn snapshot_changed_error_is_structured() {
+        let error = SessionDetailError::snapshot_changed("current".to_string());
+        let value = serde_json::to_value(error).unwrap();
+        assert_eq!(value["code"], "snapshot_changed");
+        assert_eq!(value["current_snapshot_id"], "current");
+    }
+
+    #[test]
+    fn metadata_index_serialization_contains_no_message_body_fields() {
+        let encoded = serde_json::to_string(&index_with_path("src/main.rs")).unwrap();
+        assert!(!encoded.contains("argument_preview"));
+        assert!(!encoded.contains("result_preview"));
+        assert!(!encoded.contains("\"text\""));
+    }
+
+    #[test]
+    fn identical_thread_ids_remain_provider_scoped_resources() {
+        let thread = mallard_domain::ThreadId::parse("same-native-id").unwrap();
+        let codex = mallard_domain::conversation_resource_id(
+            &ProviderKey::parse("codex").unwrap(),
+            &thread,
+        )
+        .unwrap();
+        let claude = mallard_domain::conversation_resource_id(
+            &ProviderKey::parse("claude").unwrap(),
+            &thread,
+        )
+        .unwrap();
+        assert_ne!(codex, claude);
+        assert_eq!(
+            parse_conversation_resource_id(codex.as_str()).unwrap().0,
+            ProviderKey::parse("codex").unwrap()
+        );
+        assert_eq!(
+            parse_conversation_resource_id(claude.as_str()).unwrap().0,
+            ProviderKey::parse("claude").unwrap()
+        );
+    }
+}

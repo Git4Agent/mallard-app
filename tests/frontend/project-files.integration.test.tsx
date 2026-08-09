@@ -14,7 +14,8 @@ import PushResourceWorkspace, {
   requiredProjectContentDirectoryIds,
 } from "../../src/components/project-sync/PushResourceWorkspace";
 import RestorePlanView from "../../src/components/project-sync/RestorePlanView";
-import SyncReviewTabs, { syncReviewSteps } from "../../src/components/project-sync/SyncReviewTabs";
+import SyncReviewTabs from "../../src/components/sync-review/SyncReviewTabs";
+import { projectReviewTabs, syncReviewSteps } from "../../src/components/project-sync/reviewSteps";
 import { applyPullReview } from "../../src/components/project-sync/pullReviewFlow";
 import {
   buildPullReviewItems,
@@ -106,9 +107,8 @@ test("eligible reviews put Project files directly after Git & sessions with no R
 
   const eligible = renderToStaticMarkup(
     <SyncReviewTabs
-      activeStep="project_files"
-      steps={syncReviewSteps(true)}
-      counts={emptyCounts}
+      tabs={projectReviewTabs(syncReviewSteps(true), emptyCounts)}
+      activeId="project_files"
       onChange={() => undefined}
     />,
   );
@@ -124,9 +124,8 @@ test("eligible reviews put Project files directly after Git & sessions with no R
 
   const git = renderToStaticMarkup(
     <SyncReviewTabs
-      activeStep="history"
-      steps={syncReviewSteps(false)}
-      counts={emptyCounts}
+      tabs={projectReviewTabs(syncReviewSteps(false), emptyCounts)}
+      activeId="history"
       onChange={() => undefined}
     />,
   );
@@ -361,7 +360,7 @@ test("confirming keep-local still submits an empty approved set so Pull can adva
           plan_id: pullPlan.plan_id,
           applied_action_ids: [],
           failed_actions: [],
-          codex_divergences: [],
+          divergences: [],
         };
       },
       getRestoreReadiness: async () => {

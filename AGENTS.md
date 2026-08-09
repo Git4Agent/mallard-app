@@ -27,6 +27,13 @@ The integration tests intentionally enforce this cutover.
 - `src/main.tsx` boots React; `src/App.tsx` mounts the project-sync workspace.
 - `src/components/project-sync/` contains setup, history, inventory,
   Push/Pull review, storage, project-file, and status UI.
+- `src/components/sync-review/` holds the resource-neutral review primitives
+  (tabs, selection bar, outcome renderer) shared by project sync and the
+  storage Library; it imports no feature DTOs and never calls Tauri.
+- `src/components/storage-catalog/` is the storage-scoped Library UI (Codex
+  and Claude skills, plugin intent, and Codex v1/v2 pets) with its own
+  `api.ts`, `model.ts`, and `types.ts`; it never imports project-sync
+  components, models, or DTOs.
 - `src/components/project-sync/api.ts` is the typed Tauri `invoke` boundary.
 - `src/components/project-sync/model.ts`, `pullReviewModel.ts`, and
   `pullReviewFlow.ts` contain reusable frontend behavior.
@@ -43,7 +50,15 @@ The integration tests intentionally enforce this cutover.
   planning, backups, and apply behavior.
 - `commands.rs` orchestrates Tauri commands and cross-document transactions.
 - `persistence.rs` owns bounded, atomic machine-local JSON persistence.
-- `s3_store.rs` owns S3/R2 transport, conditional writes, and pagination.
+- `storage_core/` (in `crates/mallard-infrastructure`) is the neutral
+  transport shared by both storage protocols: the closed `.mallard/` object
+  keys with separate repository and catalog constructors, the object-store
+  trait, the local-folder and S3/R2 stores, and the storage marker.
+- `src-tauri/src/storage_catalog/` owns the storage-scoped catalog:
+  Tauri-free domain and plans, machine-local persistence, profile and skill
+  root resolution, provider adapters, inventory, the remote catalog engine,
+  reconciliation/planning, journaled apply, and its command surface. It never
+  imports `project_sync` modules or project/thread domain types.
 - `chat_history.rs` parses Codex history and maps sessions to Git history.
 - `activity_log.rs` owns sanitized JSONL activity history and retention.
 - `tests/frontend/` contains Node test-runner integration tests bundled with

@@ -1,7 +1,7 @@
 //! S3/R2 transport for the current bundle object-store contract.
 //!
-//! [`BundleObjectStore`] is deliberately synchronous because the bundle
-//! engine also supports a filesystem implementation.  Consequently, command
+//! [`ObjectStore`] is deliberately synchronous because both storage
+//! protocols also support a filesystem implementation.  Consequently, command
 //! handlers must run every engine operation which can reach this store inside
 //! `tokio::task::spawn_blocking`.  The store uses the supplied runtime handle
 //! to drive AWS SDK futures; a nested-runtime panic is caught and converted to
@@ -24,9 +24,9 @@ use tempfile::NamedTempFile;
 use tokio::runtime::Handle;
 use tokio::time::timeout;
 
-use crate::bundle_engine::{
-    BundleObjectStore, CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey,
-    ObjectPrefix, StageOutcome, StoreListPage, StoredMetadata, VerifiedBody,
+use super::{
+    CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
+    ObjectStore, StageOutcome, StoreListPage, StoredMetadata, VerifiedBody,
 };
 use mallard_domain::{self as domain, StorageConfig, StorageKind};
 
@@ -36,16 +36,118 @@ const MAX_LIST_REQUESTS: usize = MAX_LIST_PAGE + 2;
 const R2_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const BULK_STAGE_CONCURRENCY: usize = 6;
 const BULK_PUT_CONCURRENCY: usize = 6;
+const R2_SETUP_PROBE_PREFIX: &str = ".mallard/v1/_setup_probes";
+const MAX_R2_SETUP_PROBE_BYTES: u64 = 512;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum R2CapabilityProbeErrorKind {
+    Remote,
+    CleanupRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum R2CapabilityProbeStage {
+    Validate,
+    List,
+    Create,
+    Read,
+    ConditionalOverwrite,
+    StaleConditionalRejection,
+    Cleanup,
+}
+
+impl std::fmt::Display for R2CapabilityProbeStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Validate => "validation",
+            Self::List => "bounded listing",
+            Self::Create => "absent-key creation",
+            Self::Read => "verified readback",
+            Self::ConditionalOverwrite => "conditional overwrite",
+            Self::StaleConditionalRejection => "stale-condition rejection",
+            Self::Cleanup => "cleanup",
+        })
+    }
+}
+
+/// Sanitized capability-probe failure. It intentionally retains no SDK
+/// error, endpoint, bucket, object key, or credential-bearing configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct R2CapabilityProbeError {
+    kind: R2CapabilityProbeErrorKind,
+    stage: R2CapabilityProbeStage,
+    setup_id: String,
+}
+
+impl R2CapabilityProbeError {
+    fn remote(stage: R2CapabilityProbeStage, setup_id: &str) -> Self {
+        Self {
+            kind: R2CapabilityProbeErrorKind::Remote,
+            stage,
+            setup_id: setup_id.to_string(),
+        }
+    }
+
+    fn cleanup_required(setup_id: &str) -> Self {
+        Self {
+            kind: R2CapabilityProbeErrorKind::CleanupRequired,
+            stage: R2CapabilityProbeStage::Cleanup,
+            setup_id: setup_id.to_string(),
+        }
+    }
+
+    pub fn kind(&self) -> R2CapabilityProbeErrorKind {
+        self.kind
+    }
+
+    pub fn stage(&self) -> R2CapabilityProbeStage {
+        self.stage
+    }
+
+    pub fn setup_id(&self) -> &str {
+        &self.setup_id
+    }
+}
+
+impl std::fmt::Display for R2CapabilityProbeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            R2CapabilityProbeErrorKind::Remote => write!(
+                formatter,
+                "R2 capability verification failed during {}",
+                self.stage
+            ),
+            R2CapabilityProbeErrorKind::CleanupRequired => write!(
+                formatter,
+                "R2 capability verification requires cleanup for setup '{}'",
+                self.setup_id
+            ),
+        }
+    }
+}
+
+impl std::error::Error for R2CapabilityProbeError {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct R2CapabilityProbeReceipt {
+    setup_id: String,
+}
+
+impl R2CapabilityProbeReceipt {
+    pub fn setup_id(&self) -> &str {
+        &self.setup_id
+    }
+}
 
 #[derive(Clone)]
-pub struct S3BundleObjectStore {
+pub struct S3ObjectStore {
     client: S3Client,
     bucket: String,
     runtime: Handle,
     request_timeout: Duration,
 }
 
-impl S3BundleObjectStore {
+impl S3ObjectStore {
     /// Build a store using the application's existing S3/R2 client
     /// configuration path.  An explicitly unsupported conditional-write
     /// capability is rejected: project bundles publish mutable heads only by CAS.
@@ -110,6 +212,266 @@ impl S3BundleObjectStore {
                 "S3 bundle-store {} cannot block an async runtime worker; run the enclosing bundle-engine operation with tokio::task::spawn_blocking",
                 operation
             )),
+        }
+    }
+
+    /// Verify the exact R2 operations Mallard needs without widening the
+    /// general [`ObjectStore`] namespace. Only a generated setup-probe key is
+    /// accepted, and cleanup targets that one exact key.
+    pub fn probe_r2_capabilities(
+        &self,
+        setup_id: &str,
+    ) -> Result<R2CapabilityProbeReceipt, R2CapabilityProbeError> {
+        let key = setup_probe_key(setup_id).map_err(|_| {
+            R2CapabilityProbeError::remote(R2CapabilityProbeStage::Validate, setup_id)
+        })?;
+        match catch_unwind(AssertUnwindSafe(|| {
+            self.runtime
+                .block_on(self.probe_r2_capabilities_async(setup_id, &key))
+        })) {
+            Ok(result) => result,
+            Err(_) => Err(R2CapabilityProbeError::remote(
+                R2CapabilityProbeStage::Validate,
+                setup_id,
+            )),
+        }
+    }
+
+    /// Remove and confirm absence of one previously journaled setup probe.
+    /// This accepts the same narrow generated setup identifier as the probe
+    /// itself and never exposes a general object-deletion primitive.
+    pub fn reconcile_r2_capability_probe(
+        &self,
+        setup_id: &str,
+    ) -> Result<(), R2CapabilityProbeError> {
+        let key = setup_probe_key(setup_id).map_err(|_| {
+            R2CapabilityProbeError::remote(R2CapabilityProbeStage::Validate, setup_id)
+        })?;
+        match catch_unwind(AssertUnwindSafe(|| {
+            self.runtime.block_on(self.cleanup_probe_async(&key))
+        })) {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(_) => Err(R2CapabilityProbeError::cleanup_required(setup_id)),
+        }
+    }
+
+    async fn probe_r2_capabilities_async(
+        &self,
+        setup_id: &str,
+        key: &str,
+    ) -> Result<R2CapabilityProbeReceipt, R2CapabilityProbeError> {
+        match self.probe_key_is_absent_from_list_async(key).await {
+            Ok(true) => {}
+            Ok(false) | Err(()) => {
+                return Err(R2CapabilityProbeError::remote(
+                    R2CapabilityProbeStage::List,
+                    setup_id,
+                ))
+            }
+        }
+
+        let first_body = format!("mallard-r2-setup-probe-v1:{setup_id}:first").into_bytes();
+        match self
+            .probe_conditional_put_async(key, &first_body, ProbeExpectation::Absent)
+            .await
+        {
+            ProbePutAttempt::Written => {}
+            ProbePutAttempt::Ambiguous => {
+                return self
+                    .probe_failure_after_possible_write(
+                        setup_id,
+                        key,
+                        R2CapabilityProbeStage::Create,
+                    )
+                    .await
+            }
+            ProbePutAttempt::PreconditionFailed | ProbePutAttempt::Failed => {
+                return Err(R2CapabilityProbeError::remote(
+                    R2CapabilityProbeStage::Create,
+                    setup_id,
+                ))
+            }
+        }
+
+        let first_etag = match self.probe_get_verified_async(key, &first_body).await {
+            Ok(Some(etag)) => etag,
+            Ok(None) | Err(()) => {
+                return self
+                    .probe_failure_after_possible_write(setup_id, key, R2CapabilityProbeStage::Read)
+                    .await
+            }
+        };
+
+        let second_body = format!("mallard-r2-setup-probe-v1:{setup_id}:second").into_bytes();
+        match self
+            .probe_conditional_put_async(key, &second_body, ProbeExpectation::Match(&first_etag))
+            .await
+        {
+            ProbePutAttempt::Written => {}
+            ProbePutAttempt::PreconditionFailed
+            | ProbePutAttempt::Ambiguous
+            | ProbePutAttempt::Failed => {
+                return self
+                    .probe_failure_after_possible_write(
+                        setup_id,
+                        key,
+                        R2CapabilityProbeStage::ConditionalOverwrite,
+                    )
+                    .await
+            }
+        }
+
+        let stale_body = format!("mallard-r2-setup-probe-v1:{setup_id}:stale").into_bytes();
+        match self
+            .probe_conditional_put_async(key, &stale_body, ProbeExpectation::Match(&first_etag))
+            .await
+        {
+            ProbePutAttempt::PreconditionFailed => {}
+            ProbePutAttempt::Written | ProbePutAttempt::Ambiguous | ProbePutAttempt::Failed => {
+                return self
+                    .probe_failure_after_possible_write(
+                        setup_id,
+                        key,
+                        R2CapabilityProbeStage::StaleConditionalRejection,
+                    )
+                    .await
+            }
+        }
+
+        if !self.cleanup_probe_async(key).await {
+            return Err(R2CapabilityProbeError::cleanup_required(setup_id));
+        }
+        Ok(R2CapabilityProbeReceipt {
+            setup_id: setup_id.to_string(),
+        })
+    }
+
+    async fn probe_failure_after_possible_write(
+        &self,
+        setup_id: &str,
+        key: &str,
+        stage: R2CapabilityProbeStage,
+    ) -> Result<R2CapabilityProbeReceipt, R2CapabilityProbeError> {
+        if self.cleanup_probe_async(key).await {
+            Err(R2CapabilityProbeError::remote(stage, setup_id))
+        } else {
+            Err(R2CapabilityProbeError::cleanup_required(setup_id))
+        }
+    }
+
+    async fn probe_key_is_absent_from_list_async(&self, key: &str) -> Result<bool, ()> {
+        let request = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(key)
+            .max_keys(2)
+            .send();
+        let response = timeout(self.request_timeout, request)
+            .await
+            .map_err(|_| ())?
+            .map_err(|_| ())?;
+        if response.is_truncated() == Some(true) || response.contents().len() > 2 {
+            return Err(());
+        }
+        Ok(response.contents().is_empty())
+    }
+
+    async fn probe_conditional_put_async(
+        &self,
+        key: &str,
+        body: &[u8],
+        expectation: ProbeExpectation<'_>,
+    ) -> ProbePutAttempt {
+        let checksum = aws_smithy_types::base64::encode(Sha256::digest(body));
+        let mut request = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .checksum_sha256(checksum)
+            .body(ByteStream::from(Bytes::copy_from_slice(body)));
+        request = match expectation {
+            ProbeExpectation::Absent => request.if_none_match("*"),
+            ProbeExpectation::Match(etag) => request.if_match(format!("\"{etag}\"")),
+        };
+        match timeout(self.request_timeout, request.send()).await {
+            Err(_) => ProbePutAttempt::Ambiguous,
+            Ok(Ok(_)) => ProbePutAttempt::Written,
+            Ok(Err(error)) if matches!(sdk_status(&error), Some(409) | Some(412)) => {
+                ProbePutAttempt::PreconditionFailed
+            }
+            Ok(Err(error)) if ambiguous_sdk_error(&error) => ProbePutAttempt::Ambiguous,
+            Ok(Err(_)) => ProbePutAttempt::Failed,
+        }
+    }
+
+    async fn probe_get_verified_async(
+        &self,
+        key: &str,
+        expected: &[u8],
+    ) -> Result<Option<String>, ()> {
+        let request = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send();
+        let response = match timeout(self.request_timeout, request).await {
+            Err(_) => return Err(()),
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) if sdk_status(&error) == Some(404) => return Ok(None),
+            Ok(Err(_)) => return Err(()),
+        };
+        if response
+            .content_length()
+            .is_some_and(|length| length < 0 || length as u64 > MAX_R2_SETUP_PROBE_BYTES)
+        {
+            return Err(());
+        }
+        let etag = response
+            .e_tag()
+            .and_then(|etag| validated_service_etag(etag, "setup probe").ok())
+            .ok_or(())?;
+        let mut body = response.body;
+        let mut received = Vec::new();
+        loop {
+            let next = timeout(self.request_timeout, body.try_next())
+                .await
+                .map_err(|_| ())?
+                .map_err(|_| ())?;
+            let Some(chunk) = next else {
+                break;
+            };
+            if received.len().saturating_add(chunk.len()) > MAX_R2_SETUP_PROBE_BYTES as usize {
+                return Err(());
+            }
+            received.extend_from_slice(&chunk);
+        }
+        if received.len() != expected.len() || sha256_bytes(&received) != sha256_bytes(expected) {
+            return Err(());
+        }
+        Ok(Some(etag))
+    }
+
+    async fn cleanup_probe_async(&self, key: &str) -> bool {
+        let delete = self
+            .client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send();
+        let _ = timeout(self.request_timeout, delete).await;
+
+        let head = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send();
+        match timeout(self.request_timeout, head).await {
+            Ok(Err(error)) if sdk_status(&error) == Some(404) => true,
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => false,
         }
     }
 
@@ -525,7 +887,7 @@ impl S3BundleObjectStore {
     }
 }
 
-impl BundleObjectStore for S3BundleObjectStore {
+impl ObjectStore for S3ObjectStore {
     fn get_metadata(
         &self,
         key: &ObjectKey,
@@ -697,6 +1059,32 @@ impl BundleObjectStore for S3BundleObjectStore {
     }
 }
 
+enum ProbeExpectation<'a> {
+    Absent,
+    Match(&'a str),
+}
+
+enum ProbePutAttempt {
+    Written,
+    PreconditionFailed,
+    Ambiguous,
+    Failed,
+}
+
+fn setup_probe_key(setup_id: &str) -> Result<String, ()> {
+    let Some(suffix) = setup_id.strip_prefix("r2setup-") else {
+        return Err(());
+    };
+    if suffix.len() != 24
+        || !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(());
+    }
+    Ok(format!("{R2_SETUP_PROBE_PREFIX}/{setup_id}"))
+}
+
 enum PutAttempt {
     Written(Option<String>),
     PreconditionFailed,
@@ -768,14 +1156,9 @@ fn make_s3_client(config: &StorageConfig) -> Result<S3Client, String> {
     } else {
         return Err("Endpoint is not configured".to_string());
     };
-    let secret = if config.secret_access_key.starts_with("cfat_") {
-        sha256_bytes(config.secret_access_key.as_bytes())
-    } else {
-        config.secret_access_key.clone()
-    };
     let credentials = Credentials::new(
         &config.access_key_id,
-        secret,
+        &config.secret_access_key,
         None,
         None,
         "mallard-project-sync",
@@ -877,6 +1260,7 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
     use std::convert::Infallible;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
 
@@ -886,6 +1270,8 @@ mod tests {
         endpoint: String,
         objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
         get_behaviors: Arc<Mutex<BTreeMap<String, GetBehavior>>>,
+        honor_conditions: Arc<AtomicBool>,
+        fail_delete: Arc<AtomicBool>,
         server: tokio::task::JoinHandle<()>,
     }
 
@@ -952,8 +1338,12 @@ mod tests {
             let endpoint = format!("http://{}", listener.local_addr().expect("test S3 address"));
             let objects = Arc::new(Mutex::new(BTreeMap::new()));
             let get_behaviors = Arc::new(Mutex::new(BTreeMap::new()));
+            let honor_conditions = Arc::new(AtomicBool::new(true));
+            let fail_delete = Arc::new(AtomicBool::new(false));
             let server_objects = objects.clone();
             let server_get_behaviors = get_behaviors.clone();
+            let server_honor_conditions = honor_conditions.clone();
+            let server_fail_delete = fail_delete.clone();
             let server = tokio::spawn(async move {
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
@@ -961,9 +1351,17 @@ mod tests {
                     };
                     let objects = server_objects.clone();
                     let get_behaviors = server_get_behaviors.clone();
+                    let honor_conditions = server_honor_conditions.clone();
+                    let fail_delete = server_fail_delete.clone();
                     tokio::spawn(async move {
                         let service = service_fn(move |request| {
-                            test_s3_request(request, objects.clone(), get_behaviors.clone())
+                            test_s3_request(
+                                request,
+                                objects.clone(),
+                                get_behaviors.clone(),
+                                honor_conditions.clone(),
+                                fail_delete.clone(),
+                            )
                         });
                         let _ = http1::Builder::new()
                             .serve_connection(TokioIo::new(stream), service)
@@ -975,6 +1373,8 @@ mod tests {
                 endpoint,
                 objects,
                 get_behaviors,
+                honor_conditions,
+                fail_delete,
                 server,
             }
         }
@@ -1003,7 +1403,7 @@ mod tests {
             );
         }
 
-        fn store(&self) -> S3BundleObjectStore {
+        fn store(&self) -> S3ObjectStore {
             let credentials = Credentials::new("test", "test", None, None, "bundle-tests");
             let config = S3Config::builder()
                 .credentials_provider(credentials)
@@ -1019,8 +1419,16 @@ mod tests {
                         .build_https(),
                 )
                 .build();
-            S3BundleObjectStore::from_client(S3Client::from_conf(config), BUCKET, Handle::current())
+            S3ObjectStore::from_client(S3Client::from_conf(config), BUCKET, Handle::current())
                 .expect("construct test store")
+        }
+
+        fn ignore_conditions(&self) {
+            self.honor_conditions.store(false, Ordering::SeqCst);
+        }
+
+        fn fail_delete(&self) {
+            self.fail_delete.store(true, Ordering::SeqCst);
         }
     }
 
@@ -1515,6 +1923,97 @@ mod tests {
             .all(|pair| pair[0].as_str() < pair[1].as_str()));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn r2_capability_probe_verifies_conditional_writes_and_cleans_up() {
+        let server = TestS3::start().await;
+        let store = server.store();
+        let receipt =
+            blocking(move || store.probe_r2_capabilities("r2setup-0123456789abcdef01234567"))
+                .await
+                .unwrap();
+
+        assert_eq!(receipt.setup_id(), "r2setup-0123456789abcdef01234567");
+        assert!(server.objects.lock().expect("test S3 lock").is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn r2_capability_probe_rejects_stores_that_accept_stale_etags() {
+        let server = TestS3::start().await;
+        server.ignore_conditions();
+        let store = server.store();
+        let error =
+            blocking(move || store.probe_r2_capabilities("r2setup-1123456789abcdef01234567"))
+                .await
+                .unwrap_err();
+
+        assert_eq!(error.kind(), R2CapabilityProbeErrorKind::Remote);
+        assert_eq!(
+            error.stage(),
+            R2CapabilityProbeStage::StaleConditionalRejection
+        );
+        assert!(server.objects.lock().expect("test S3 lock").is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn r2_capability_probe_reports_only_a_setup_id_when_cleanup_fails() {
+        let server = TestS3::start().await;
+        server.fail_delete();
+        let store = server.store();
+        let error =
+            blocking(move || store.probe_r2_capabilities("r2setup-2123456789abcdef01234567"))
+                .await
+                .unwrap_err();
+
+        assert_eq!(error.kind(), R2CapabilityProbeErrorKind::CleanupRequired);
+        assert_eq!(error.setup_id(), "r2setup-2123456789abcdef01234567");
+        let display = error.to_string();
+        assert!(display.contains("r2setup-2123456789abcdef01234567"));
+        assert!(!display.contains(R2_SETUP_PROBE_PREFIX));
+        assert_eq!(server.objects.lock().expect("test S3 lock").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn r2_probe_reconciliation_deletes_only_the_journaled_setup_key() {
+        let server = TestS3::start().await;
+        let setup_id = "r2setup-3123456789abcdef01234567";
+        let probe_key = setup_probe_key(setup_id).unwrap();
+        let unrelated = ".mallard/v1/_setup_probes/r2setup-4123456789abcdef01234567";
+        server.seed(probe_key, b"stale probe".to_vec());
+        server.seed(unrelated.to_string(), b"keep".to_vec());
+        let store = server.store();
+        blocking(move || store.reconcile_r2_capability_probe(setup_id))
+            .await
+            .unwrap();
+
+        let objects = server.objects.lock().expect("test S3 lock");
+        assert_eq!(objects.len(), 1);
+        assert_eq!(
+            objects.get(unrelated).map(Vec::as_slice),
+            Some(&b"keep"[..])
+        );
+    }
+
+    #[test]
+    fn r2_capability_probe_rejects_unscoped_probe_identifiers() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let credentials = Credentials::new("test", "test", None, None, "bundle-tests");
+        let config = S3Config::builder()
+            .credentials_provider(credentials)
+            .region(Region::new("us-east-1"))
+            .endpoint_url("http://127.0.0.1:9")
+            .force_path_style(true)
+            .behavior_version_latest()
+            .build();
+        let store = S3ObjectStore::from_client(
+            S3Client::from_conf(config),
+            BUCKET,
+            runtime.handle().clone(),
+        )
+        .unwrap();
+        let error = store.probe_r2_capabilities("../../foreign").unwrap_err();
+        assert_eq!(error.stage(), R2CapabilityProbeStage::Validate);
+    }
+
     #[test]
     fn rejects_unsafe_cas_etags_and_foreign_cursors() {
         assert!(validate_expected_etag("").is_err());
@@ -1533,6 +2032,8 @@ mod tests {
         request: Request<Incoming>,
         objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
         get_behaviors: Arc<Mutex<BTreeMap<String, GetBehavior>>>,
+        honor_conditions: Arc<AtomicBool>,
+        fail_delete: Arc<AtomicBool>,
     ) -> Result<Response<TestBody>, Infallible> {
         let method = request.method().clone();
         let path = request.uri().path().trim_start_matches('/').to_string();
@@ -1581,11 +2082,12 @@ mod tests {
             }),
             Method::PUT => {
                 let current = objects.get(key);
-                let precondition_failed = (if_none_match && current.is_some())
-                    || if_match.as_ref().is_some_and(|expected| {
-                        current.map(|bytes| sha256_bytes(bytes)).as_deref()
-                            != Some(expected.as_str())
-                    });
+                let precondition_failed = honor_conditions.load(Ordering::SeqCst)
+                    && ((if_none_match && current.is_some())
+                        || if_match.as_ref().is_some_and(|expected| {
+                            current.map(|bytes| sha256_bytes(bytes)).as_deref()
+                                != Some(expected.as_str())
+                        }));
                 if precondition_failed {
                     return Ok(xml_error(
                         StatusCode::PRECONDITION_FAILED,
@@ -1594,6 +2096,17 @@ mod tests {
                 }
                 objects.insert(key.to_string(), body.clone());
                 Ok(object_response(StatusCode::OK, Vec::new(), Some(&body)))
+            }
+            Method::HEAD => Ok(match objects.get(key) {
+                Some(bytes) => object_response(StatusCode::OK, Vec::new(), Some(bytes)),
+                None => xml_error(StatusCode::NOT_FOUND, "NoSuchKey"),
+            }),
+            Method::DELETE => {
+                if fail_delete.load(Ordering::SeqCst) {
+                    return Ok(xml_error(StatusCode::INTERNAL_SERVER_ERROR, "DeleteFailed"));
+                }
+                objects.remove(key);
+                Ok(object_response(StatusCode::NO_CONTENT, Vec::new(), None))
             }
             _ => Ok(xml_error(
                 StatusCode::METHOD_NOT_ALLOWED,

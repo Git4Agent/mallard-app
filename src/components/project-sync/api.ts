@@ -14,22 +14,27 @@ import type {
   CodexConversationPathAudit,
   CodexConversationPathRepairResult,
   ConnectProjectBundleRequest,
+  ConnectR2StorageRequest,
+  ConnectStorageResult,
   ConversationResolutionSelection,
-  CodexThreadDetailsPage,
   CreateSetupDraftResult,
   HostIdentityStatus,
   LocalProjectRegistration,
   OriginHostAlias,
   OriginHostLabel,
+  ProjectActivity,
   ProjectBinding,
-  ProjectChatHistory,
   ProjectDetail,
   ProjectContentInventory,
   ProjectOperationResult,
   ProjectOriginTokens,
-  ProjectProvider,
+  ProjectSessionDetail,
+  ProjectSessionTimelinePage,
+  ProjectSessionTimelineQuery,
   ProjectSetupDraft,
   ProjectStorageLink,
+  ProviderDescriptor,
+  ProviderKey,
   ProviderProfile,
   ProviderProfileProbe,
   ProviderProfileSummary,
@@ -45,6 +50,7 @@ import type {
   SaveProjectLinkRequest,
   SetupDraftInspection,
   SetupDraftList,
+  SessionEventDetail,
   SyncConfig,
   ThreadSyncComparison,
   UpdateHostDisplayNameRequest,
@@ -89,13 +95,16 @@ export const projectSyncApi = {
   getActivityLogFolder: () =>
     invoke<string>("get_activity_log_folder"),
 
+  listAgentProviders: () =>
+    invoke<ProviderDescriptor[]>("list_agent_providers"),
+
   listProviderProfiles: () =>
     invoke<ProviderProfileSummary[]>("list_provider_profiles"),
 
-  probeProviderProfile: (provider: ProjectProvider, path: string) =>
+  probeProviderProfile: (provider: ProviderKey, path: string) =>
     invoke<ProviderProfileProbe>("probe_provider_profile", { provider, path }),
 
-  createProviderProfile: (provider: ProjectProvider, displayName: string, path: string) =>
+  createProviderProfile: (provider: ProviderKey, displayName: string, path: string) =>
     invoke<ProviderProfile>("create_provider_profile", { provider, displayName, path }),
 
   renameProviderProfile: (profileId: string, displayName: string, expectedRevision: number) =>
@@ -131,6 +140,12 @@ export const projectSyncApi = {
 
   saveConfig: (config: SyncConfig) =>
     invoke<SyncConfig>("save_project_sync_config", { config }),
+
+  connectR2Storage: (request: ConnectR2StorageRequest) =>
+    invoke<ConnectStorageResult>("connect_r2_storage", { request }),
+
+  getMallardCliPath: () =>
+    invoke<string>("get_mallard_cli_path"),
 
   getHostIdentityStatus: () =>
     invoke<HostIdentityStatus>("get_host_identity_status"),
@@ -180,8 +195,8 @@ export const projectSyncApi = {
   getPushDestinationStatus: (localProjectId: string, storageId: string) =>
     invoke<PushDestinationStatus>("get_push_destination_status", { localProjectId, storageId }),
 
-  getThreadSyncComparison: (localProjectId: string, storageId: string) =>
-    invoke<ThreadSyncComparison>("get_project_thread_sync_comparison", { localProjectId, storageId }),
+  getSessionSyncComparison: (localProjectId: string, storageId: string) =>
+    invoke<ThreadSyncComparison>("get_project_session_sync_comparison", { localProjectId, storageId }),
 
   inspectProjectFiles: (localProjectId: string, storageId: string) =>
     invoke<ProjectContentInventory>("inspect_project_files", { localProjectId, storageId }),
@@ -288,8 +303,9 @@ export const projectSyncApi = {
   finalizeProjectSetup: (draftId: string, expectedRevision: number) =>
     invoke<ProjectDetail>("finalize_project_setup", { draftId, expectedRevision }),
 
-  getProjectChatHistory: (
+  getProjectActivity: (
     localProjectId: string,
+    storageId?: string | null,
     branch?: string | null,
     beforeTime?: number | null,
     windowDays = 30,
@@ -297,35 +313,61 @@ export const projectSyncApi = {
   ) => {
     const request = {
       localProjectId,
+      storageId: storageId ?? null,
       branch: branch ?? null,
       beforeTime: beforeTime ?? null,
       windowDays,
       forceRevalidate,
     };
     return projectSyncSingleFlight(
-      JSON.stringify(["get_project_chat_history", request]),
-      () => invoke<ProjectChatHistory>("get_project_chat_history", request),
+      JSON.stringify(["get_project_activity", request]),
+      () => invoke<ProjectActivity>("get_project_activity", request),
     );
   },
 
-  getProjectChatThreadDetails: (
+  getProjectSessionDetail: (localProjectId: string, resourceId: string) => {
+    const request = { localProjectId, resourceId };
+    return projectSyncSingleFlight(
+      JSON.stringify(["get_project_session_detail", request]),
+      () => invoke<ProjectSessionDetail>("get_project_session_detail", request),
+    );
+  },
+
+  getProjectSessionTimelinePage: (
     localProjectId: string,
-    threadId: string,
-    cursor?: number | null,
-    limit = 10,
-  ) => invoke<CodexThreadDetailsPage>("get_project_chat_thread_details", {
-    localProjectId,
-    threadId,
-    cursor: cursor ?? null,
-    limit,
-  }),
+    resourceId: string,
+    query: ProjectSessionTimelineQuery,
+  ) => {
+    const request = {
+      localProjectId,
+      resourceId,
+      snapshotId: query.snapshot_id,
+      cursor: query.cursor ?? null,
+      anchorEventId: query.anchor_event_id ?? null,
+      limit: query.limit,
+      includedEventKinds: query.included_event_kinds,
+      includedToolCategories: query.included_tool_categories,
+      turnId: query.turn_id ?? null,
+    };
+    return projectSyncSingleFlight(
+      JSON.stringify(["get_project_session_timeline_page", request]),
+      () => invoke<ProjectSessionTimelinePage>("get_project_session_timeline_page", request),
+    );
+  },
 
-  openCodexThreadInApp: (localProjectId: string, threadId: string) =>
-    invoke<void>("open_codex_thread_in_app", { localProjectId, threadId }),
+  getProjectSessionEventDetail: (
+    localProjectId: string,
+    resourceId: string,
+    snapshotId: string,
+    eventId: string,
+  ) => {
+    const request = { localProjectId, resourceId, snapshotId, eventId };
+    return projectSyncSingleFlight(
+      JSON.stringify(["get_project_session_event_detail", request]),
+      () => invoke<SessionEventDetail>("get_project_session_event_detail", request),
+    );
+  },
 
-  openCodexThreadInTerminal: (localProjectId: string, threadId: string) =>
-    invoke<void>("open_codex_thread_in_terminal", { localProjectId, threadId }),
-
-  validateCodexThreadOwnership: (localProjectId: string, threadId: string) =>
-    invoke<void>("validate_codex_thread_ownership", { localProjectId, threadId }),
+  executeProjectSessionAction: (localProjectId: string, resourceId: string, actionId: string) =>
+    invoke<void>("execute_project_session_action", { localProjectId, resourceId, actionId }),
 };

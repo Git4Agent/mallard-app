@@ -1,4 +1,4 @@
-use super::harness::{analyzed_chain, chain, TranscriptBuilder};
+use super::harness::{analyzed_chain, chain, codex, TranscriptBuilder};
 use crate::project_sync::conversation_codec::rewrite_codex_transcript;
 use crate::project_sync::conversation_sync::{
     build_conversation_plan_action, default_conversation_decision,
@@ -8,8 +8,9 @@ use crate::project_sync::conversation_sync::{
 use crate::project_sync::domain::{
     classify_conversation_relation, ActionId, CodexForkExecutor, ConversationDivergencePlan,
     ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationReasonCode, ConversationRelation, HostId, LocalProjectId, LocalProviderProfileId,
-    PlanId, Provider, ProviderStateExpectation, ReplicaId, ResourceId, TargetExpectation, ThreadId,
+    ConversationReasonCode, ConversationRelation, DivergenceExecution, HostId, LocalProjectId,
+    LocalProviderProfileId, PlanId, ProviderStateExpectation, ReplicaId, ResourceId,
+    TargetExpectation, ThreadId,
 };
 use std::collections::BTreeMap;
 
@@ -144,6 +145,8 @@ fn complete_push_pull_relation_matrix_plans_and_revalidates() {
                 pinned_revision: template.pinned_revision,
                 pinned_commit_id: template.pinned_commit_id,
                 pinned_manifest_sha256: template.pinned_manifest_sha256,
+                pinned_scope_revision: template.pinned_scope_revision,
+                pinned_scope_sha256: template.pinned_scope_sha256,
                 pinned_lineage_digest: template.pinned_lineage_digest,
                 pinned_semantic_digest: template.pinned_semantic_digest,
                 expected_local_target: template.expected_local_target,
@@ -273,12 +276,14 @@ pub(super) fn reviewed_action(
             desired_fork_name:
                 "Local title — local before Pull · 2026-07-29 18:42Z".to_string(),
             desired_original_name: Some("Cloud title".to_string()),
-            codex_executable: "/tmp/codex".to_string(),
-            codex_executable_sha256: "e".repeat(64),
-            available_executors: vec![
-                CodexForkExecutor::AppServerStdio,
-                CodexForkExecutor::NativePty,
-            ],
+            execution: DivergenceExecution::CodexNativeFork {
+                codex_executable: "/tmp/codex".to_string(),
+                codex_executable_sha256: "e".repeat(64),
+                available_executors: vec![
+                    CodexForkExecutor::AppServerStdio,
+                    CodexForkExecutor::NativePty,
+                ],
+            },
         }
     });
     let host_id = HostId::parse("11111111111111111111111111111111").unwrap();
@@ -291,7 +296,7 @@ pub(super) fn reviewed_action(
         action: action_type,
         reason_code,
         relation,
-        provider: Provider::Codex,
+        provider: codex(),
         host_id: host_id.clone(),
         replica_id: replica_id.clone(),
         local_project_id: local_project_id.clone(),
@@ -304,6 +309,8 @@ pub(super) fn reviewed_action(
         pinned_revision: 7,
         pinned_commit_id: "commit-abcdef".to_string(),
         pinned_manifest_sha256: "a".repeat(64),
+        pinned_scope_revision: 6,
+        pinned_scope_sha256: "f".repeat(64),
         pinned_lineage_digest: Some("b".repeat(64)),
         pinned_semantic_digest: Some("c".repeat(64)),
         expected_local_target: TargetExpectation::Sha256("d".repeat(64)),
@@ -325,6 +332,8 @@ pub(super) fn reviewed_action(
         revision: 7,
         commit_id: "commit-abcdef".to_string(),
         manifest_sha256: "a".repeat(64),
+        scope_revision: 6,
+        scope_sha256: "f".repeat(64),
         lineage_digest: Some("b".repeat(64)),
         semantic_digest: Some("c".repeat(64)),
         local_target: TargetExpectation::Sha256("d".repeat(64)),

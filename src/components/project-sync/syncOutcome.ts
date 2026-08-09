@@ -1,12 +1,16 @@
 import type { IconName } from "../Icons";
 import type {
+  SyncOutcomeRowPresentation,
+  SyncOutcomeView,
+} from "../sync-review/SyncOutcomeNotice";
+import type {
   BundleReadiness,
   ProjectOperationResult,
   RestorePlan,
   RestoreResult,
   ThreadSyncComparison,
 } from "../../types";
-import { compactThreadTitle, syncHoldDetail } from "./ProjectChatHistoryPage";
+import { compactThreadTitle, syncHoldDetail } from "./ProjectActivityPage";
 import { pushReviewPullHolds } from "./PushResourceWorkspace";
 import type { PullReviewItem } from "./pullReviewModel";
 
@@ -177,7 +181,7 @@ export function buildPullOutcome({
   error?: string | null;
 }): SyncOutcome {
   const titleByResource = new Map(items.map((item) => [item.resourceId, item.title]));
-  const divergences = "codex_divergences" in result ? (result.codex_divergences ?? []) : [];
+  const divergences = result.divergences ?? [];
   // A fork only counts when the child thread exists: that is the one outcome
   // Codex cannot show until it reloads, so it alone earns the restart offer.
   const forked = divergences.filter((divergence) => (
@@ -193,7 +197,7 @@ export function buildPullOutcome({
   const forkedResourceIds = new Set(forked
     .map((divergence) => resourceByAction.get(divergence.action_id))
     .filter((resourceId): resourceId is string => Boolean(resourceId)));
-  const checkpoints = (result.codex_fork_checkpoints ?? []).filter(
+  const checkpoints = (result.fork_checkpoints ?? []).filter(
     (checkpoint) => checkpoint.origin !== "manual",
   );
   const failures = result.failed_actions ?? [];
@@ -362,5 +366,48 @@ export function buildPullOutcome({
       })),
       ...(result.plan_id ? [{ label: "Plan", value: result.plan_id }] : []),
     ],
+  };
+}
+
+const ROW_PRESENTATION: Record<SyncOutcomeRowStatus, SyncOutcomeRowPresentation> = {
+  synced: { icon: "check-circle", className: "synced", label: "Synced" },
+  held: { icon: "git-compare-arrows", className: "diverged", label: "Held for Pull" },
+  forked: { icon: "git-fork", className: "diverged-forked", label: "Forked" },
+  failed: { icon: "octagon-x", className: "unavailable", label: "Failed" },
+};
+
+/** Project the domain outcome onto the shared, resource-neutral renderer. */
+export function syncOutcomeView(outcome: SyncOutcome): SyncOutcomeView {
+  return {
+    tone: outcome.tone,
+    title: outcome.title,
+    stats: outcome.stats,
+    rows: outcome.rows.map((row) => {
+      const forkCount = row.forkCount ?? 0;
+      return {
+        key: row.key,
+        title: row.title,
+        presentation: ROW_PRESENTATION[row.status],
+        reason: row.reason,
+        identifier: row.threadId,
+        annotation: forkCount > 0
+          ? {
+            icon: "git-fork" as const,
+            count: forkCount,
+            title: `Forked ${forkCount} ${forkCount === 1 ? "time" : "times"} before this sync`,
+          }
+          : null,
+        updatedAt: row.updatedAt,
+      };
+    }),
+    action: outcome.action
+      ? {
+        label: outcome.action.label,
+        icon: outcome.action.kind === "open_pull" ? "download" : "refresh",
+        title: outcome.action.kind === "restart_codex" ? outcome.action.title : undefined,
+      }
+      : null,
+    defaultOpen: outcome.defaultOpen,
+    technical: outcome.technical,
   };
 }

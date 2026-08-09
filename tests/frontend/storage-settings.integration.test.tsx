@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  isCloudflareR2AccountId,
+  isCloudflareR2BucketName,
   parseR2S3ApiUrl,
+  parseR2Endpoint,
   r2EndpointForAccount,
   r2S3ApiUrl,
   storageConfigReady,
@@ -11,12 +14,135 @@ import {
   StorageEditor,
 } from "../../src/components/project-sync/StorageSettings";
 import {
+  agentSetupEditorAdoption,
+  buildR2AgentSetupInstruction,
+  createAgentSetupMarker,
+  reconcileAgentSetup,
+  reconcileStorageDraft,
   StorageRepositoryDetails,
   StorageRepositoryRow,
   StorageSettingsMeta,
 } from "../../src/components/project-sync/ProjectLinksWorkspace";
+import {
+  applyStorageDraft,
+  shouldReloadConfigRevision,
+} from "../../src/components/project-sync/ProjectSync";
 import { storageAccessErrorMessage } from "../../src/components/project-sync/model";
 import type { RemoteBundleSummary, StorageConfig } from "../../src/types";
+
+const R2_ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
+const OTHER_R2_ACCOUNT_ID = "fedcba9876543210fedcba9876543210";
+
+test("agent setup instructions contain only the name and resolved CLI path", () => {
+  const instruction = buildR2AgentSetupInstruction({
+    storageName: "Team backup",
+    cliPath: "/Applications/Mallard.app/Contents/MacOS/mallard-cli",
+  });
+  assert.match(instruction, /Team backup/);
+  assert.match(instruction, /\/Applications\/Mallard\.app\/Contents\/MacOS\/mallard-cli/);
+  assert.match(instruction, /connect an existing bucket or provision a new one/);
+  assert.match(instruction, /do not edit Mallard’s open setup form or JSON/);
+  assert.match(instruction, /automatically populate the open setup page/);
+  assert.match(instruction, /hidden prompt/);
+  for (const secretValue of ["canary-access-key", "canary-secret-key", R2_ACCOUNT_ID, "private-bucket"]) {
+    assert.equal(instruction.includes(secretValue), false);
+  }
+});
+
+test("external config refresh adopts clean drafts and preserves dirty drafts", () => {
+  const baseline = r2Storage({ name: "Before" });
+  const incoming = r2Storage({ name: "After" });
+  assert.deepEqual(reconcileStorageDraft(baseline, { ...baseline }, incoming), {
+    kind: "adopt",
+    storage: incoming,
+  });
+  assert.deepEqual(
+    reconcileStorageDraft(baseline, { ...baseline, bucket: "local-edit" }, incoming),
+    { kind: "conflict", reason: "changed" },
+  );
+  assert.deepEqual(reconcileStorageDraft(baseline, { ...incoming }, incoming), {
+    kind: "adopt",
+    storage: incoming,
+  });
+  assert.deepEqual(
+    reconcileStorageDraft(baseline, { ...baseline, bucket: "local-edit" }, null),
+    { kind: "conflict", reason: "removed" },
+  );
+  assert.deepEqual(reconcileStorageDraft(baseline, { ...baseline }, null), { kind: "close" });
+});
+
+test("agent setup reconciliation adopts one unchanged matching storage into the editor", () => {
+  const existing = r2Storage({ id: "existing", name: "Existing" });
+  const draft = r2Storage({
+    id: "draft-client",
+    name: " Team backup ",
+    access_key_id: "canary-access-key",
+    secret_access_key: "canary-secret-key",
+  });
+  const marker = createAgentSetupMarker(draft, [existing], draft.id);
+  const markerWithDifferentCredentials = createAgentSetupMarker({
+    ...draft,
+    access_key_id: "different-access-key",
+    secret_access_key: "different-secret-key",
+  }, [existing], draft.id);
+  const created = r2Storage({ id: "created-by-cli", name: "Team backup" });
+
+  assert.equal(JSON.stringify(marker).includes("canary-access-key"), false);
+  assert.equal(JSON.stringify(marker).includes("canary-secret-key"), false);
+  assert.deepEqual(markerWithDifferentCredentials, marker);
+  assert.deepEqual(reconcileAgentSetup(marker, { ...draft }, draft.id, [existing, created]), {
+    kind: "adopt",
+    storage: created,
+  });
+  const adoption = agentSetupEditorAdoption(created);
+  assert.deepEqual(adoption.editingStorage, { projectId: "", storageId: created.id });
+  assert.deepEqual(adoption.storageDraft, created);
+  assert.deepEqual(adoption.storageBaseline, created);
+  assert.notEqual(adoption.storageDraft, adoption.storageBaseline);
+  assert.equal(adoption.storageDetailsExpanded, true);
+  assert.equal(adoption.status, "Connected Team backup. Settings filled in automatically.");
+});
+
+test("agent setup reconciliation preserves a draft changed after copy", () => {
+  const draft = r2Storage({ id: "draft-client", name: "Team backup" });
+  const marker = createAgentSetupMarker(draft, [], draft.id);
+  const created = r2Storage({ id: "created-by-cli", name: "Team backup" });
+
+  assert.deepEqual(
+    reconcileAgentSetup(marker, { ...draft, bucket: "edited-locally" }, draft.id, [created]),
+    { kind: "preserve", reason: "draft_changed" },
+  );
+});
+
+test("agent setup reconciliation preserves a draft when no new storage matches", () => {
+  const draft = r2Storage({ id: "draft-client", name: "Team backup" });
+  const marker = createAgentSetupMarker(draft, [], draft.id);
+
+  assert.deepEqual(reconcileAgentSetup(marker, draft, draft.id, [
+    r2Storage({ id: "other", name: "Other storage" }),
+  ]), { kind: "preserve", reason: "no_match" });
+});
+
+test("agent setup reconciliation preserves an ambiguous pair of new matches", () => {
+  const draft = r2Storage({ id: "draft-client", name: "Team backup" });
+  const marker = createAgentSetupMarker(draft, [], draft.id);
+
+  assert.deepEqual(reconcileAgentSetup(marker, draft, draft.id, [
+    r2Storage({ id: "first", name: "Team backup" }),
+    r2Storage({ id: "second", name: "Team backup" }),
+  ]), { kind: "preserve", reason: "ambiguous" });
+});
+
+test("agent setup reconciliation does not adopt a pre-existing same-name storage", () => {
+  const existing = r2Storage({ id: "existing", name: "Team backup" });
+  const draft = r2Storage({ id: "draft-client", name: "Team backup" });
+  const marker = createAgentSetupMarker(draft, [existing], draft.id);
+
+  assert.deepEqual(reconcileAgentSetup(marker, draft, draft.id, [existing]), {
+    kind: "preserve",
+    reason: "no_match",
+  });
+});
 
 function r2Storage(patch: Partial<StorageConfig> = {}): StorageConfig {
   return {
@@ -35,18 +161,54 @@ function r2Storage(patch: Partial<StorageConfig> = {}): StorageConfig {
   };
 }
 
-test("R2 configuration derives the endpoint and requires the four user-provided values", () => {
-  assert.equal(
-    r2EndpointForAccount(" 0123456789abcdef "),
-    "https://0123456789abcdef.r2.cloudflarestorage.com",
+test("storage draft application rejects stale baselines and creation collisions", () => {
+  const baseline = r2Storage({ id: "storage", name: "Before" });
+  const draft = { ...baseline, name: "After" };
+  assert.deepEqual(applyStorageDraft([baseline], draft, { ...baseline }), [draft]);
+
+  assert.throws(
+    () => applyStorageDraft([{ ...baseline, bucket: "external-change" }], draft, baseline),
+    /changed outside the editor/,
   );
+  assert.throws(
+    () => applyStorageDraft([], draft, baseline),
+    /changed outside the editor/,
+  );
+  assert.throws(
+    () => applyStorageDraft([baseline], draft, null),
+    /identifier was added outside the editor/,
+  );
+  assert.deepEqual(applyStorageDraft([], draft, null), [draft]);
+});
+
+test("config revision events recover invalid startup snapshots without reloading valid peers", () => {
+  assert.equal(shouldReloadConfigRevision(5, 4, true), false);
+  assert.equal(shouldReloadConfigRevision(5, 5, true), false);
+  assert.equal(shouldReloadConfigRevision(5, 6, true), true);
+  assert.equal(shouldReloadConfigRevision(0, 0, false), true);
+});
+
+test("R2 configuration requires a canonical endpoint and the four user-provided values", () => {
+  assert.equal(
+    r2EndpointForAccount(` ${R2_ACCOUNT_ID.toUpperCase()} `),
+    `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  );
+  assert.equal(r2EndpointForAccount("0123456789abcdef"), "");
   assert.equal(storageConfigReady(r2Storage()), false);
   assert.equal(storageConfigReady(r2Storage({
     bucket: "agent-sync",
-    account_id: "0123456789abcdef",
+    account_id: R2_ACCOUNT_ID,
+    s3_endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
     access_key_id: "access-key",
     secret_access_key: "secret-key",
   })), true);
+  assert.equal(storageConfigReady(r2Storage({
+    bucket: "agent-sync",
+    account_id: R2_ACCOUNT_ID,
+    s3_endpoint: `https://${OTHER_R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    access_key_id: "access-key",
+    secret_access_key: "secret-key",
+  })), false);
 });
 
 test("R2 connection failures use actionable storage language", () => {
@@ -69,23 +231,105 @@ test("switching storage type updates only its generated default name", () => {
   assert.equal(storageNameForKind("Team backup", "s3"), "Team backup");
 });
 
-test("R2 S3 API URLs map to and from an Account ID and bucket", () => {
-  const accountId = "0123456789abcdef0123456789abcdef";
-  const fullUrl = `https://${accountId}.r2.cloudflarestorage.com/agent`;
-  assert.deepEqual(parseR2S3ApiUrl(fullUrl), {
-    accountId,
-    bucket: "agent",
-  });
-  assert.deepEqual(parseR2S3ApiUrl(`${fullUrl}/`), {
-    accountId,
-    bucket: "agent",
-  });
+test("R2 S3 API URLs round-trip every Cloudflare jurisdiction", () => {
+  const cases = [
+    { jurisdiction: "default" as const, hostnameLabel: "" },
+    { jurisdiction: "eu" as const, hostnameLabel: ".eu" },
+    { jurisdiction: "fedramp" as const, hostnameLabel: ".fedramp" },
+  ];
+
+  for (const { jurisdiction, hostnameLabel } of cases) {
+    const endpoint = `https://${R2_ACCOUNT_ID}${hostnameLabel}.r2.cloudflarestorage.com`;
+    const fullUrl = `${endpoint}/agent-sync`;
+    assert.deepEqual(parseR2Endpoint(endpoint), {
+      accountId: R2_ACCOUNT_ID,
+      jurisdiction,
+    });
+    assert.deepEqual(parseR2S3ApiUrl(fullUrl), {
+      accountId: R2_ACCOUNT_ID,
+      bucket: "agent-sync",
+      jurisdiction,
+    });
+    assert.equal(parseR2S3ApiUrl(`${fullUrl}/`), null);
+    assert.equal(r2EndpointForAccount(R2_ACCOUNT_ID, jurisdiction), endpoint);
+    assert.equal(r2S3ApiUrl(R2_ACCOUNT_ID, "agent-sync", endpoint), fullUrl);
+  }
   assert.equal(
-    r2S3ApiUrl(accountId, "agent"),
-    fullUrl,
+    r2S3ApiUrl(R2_ACCOUNT_ID, "agent-sync"),
+    `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/agent-sync`,
   );
-  assert.equal(parseR2S3ApiUrl("https://example.com/agent"), null);
-  assert.equal(parseR2S3ApiUrl(`${fullUrl}/nested`), null);
+});
+
+test("R2 endpoint helpers preserve jurisdiction while account and bucket values change", () => {
+  const euEndpoint = `https://${R2_ACCOUNT_ID}.eu.r2.cloudflarestorage.com`;
+  const parsed = parseR2Endpoint(euEndpoint);
+  assert.ok(parsed);
+
+  const changedAccountEndpoint = r2EndpointForAccount(OTHER_R2_ACCOUNT_ID, parsed.jurisdiction);
+  assert.equal(
+    changedAccountEndpoint,
+    `https://${OTHER_R2_ACCOUNT_ID}.eu.r2.cloudflarestorage.com`,
+  );
+  assert.equal(
+    r2S3ApiUrl(OTHER_R2_ACCOUNT_ID, "new-bucket", changedAccountEndpoint),
+    `https://${OTHER_R2_ACCOUNT_ID}.eu.r2.cloudflarestorage.com/new-bucket`,
+  );
+  assert.equal(
+    r2S3ApiUrl(R2_ACCOUNT_ID, "new-bucket", euEndpoint),
+    `https://${R2_ACCOUNT_ID}.eu.r2.cloudflarestorage.com/new-bucket`,
+  );
+  assert.equal(r2S3ApiUrl(OTHER_R2_ACCOUNT_ID, "new-bucket", euEndpoint), "");
+});
+
+test("R2 validation enforces exact accounts, canonical hosts, and Cloudflare bucket names", () => {
+  assert.equal(isCloudflareR2AccountId(R2_ACCOUNT_ID), true);
+  assert.equal(isCloudflareR2AccountId(R2_ACCOUNT_ID.toUpperCase()), true);
+  assert.equal(isCloudflareR2AccountId(R2_ACCOUNT_ID.slice(1)), false);
+  assert.equal(isCloudflareR2AccountId(`${R2_ACCOUNT_ID}0`), false);
+  assert.equal(isCloudflareR2AccountId(`${R2_ACCOUNT_ID.slice(0, -1)}g`), false);
+
+  for (const bucket of ["abc", "a-b", "a".repeat(63)]) {
+    assert.equal(isCloudflareR2BucketName(bucket), true, bucket);
+  }
+  for (const bucket of [
+    "ab",
+    "a".repeat(64),
+    "-agent",
+    "agent-",
+    "Agent",
+    "agent.backup",
+    "agent_backup",
+    "agent backup",
+  ]) {
+    assert.equal(isCloudflareR2BucketName(bucket), false, bucket);
+  }
+
+  const validUrl = `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/agent`;
+  for (const invalidUrl of [
+    `http://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/agent`,
+    `https://user@${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/agent`,
+    `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com:443/agent`,
+    `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com:8443/agent`,
+    `${validUrl}?list=true`,
+    `${validUrl}#fragment`,
+    `https://${R2_ACCOUNT_ID.slice(1)}.r2.cloudflarestorage.com/agent`,
+    `https://${R2_ACCOUNT_ID.slice(0, -1)}g.r2.cloudflarestorage.com/agent`,
+    `https://${R2_ACCOUNT_ID}.other.r2.cloudflarestorage.com/agent`,
+    `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    `${validUrl}/nested`,
+    ` ${validUrl}`,
+    `${validUrl} `,
+    `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/agent%2Dsync`,
+    `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/Agent`,
+    `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/ab`,
+    "https://example.com/agent",
+  ]) {
+    assert.equal(parseR2S3ApiUrl(invalidUrl), null, invalidUrl);
+  }
+  assert.equal(
+    parseR2Endpoint(`https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/`),
+    null,
+  );
 });
 
 test("cloud storage editor keeps a one-line guide and states each example once", () => {
@@ -126,6 +370,27 @@ test("cloud storage editor keeps a one-line guide and states each example once",
   assert.doesNotMatch(html, />Region</);
 });
 
+test("cloud storage editor displays the API URL from its stored jurisdictional endpoint", () => {
+  const endpoint = `https://${R2_ACCOUNT_ID}.fedramp.r2.cloudflarestorage.com`;
+  const html = renderToStaticMarkup(
+    <StorageEditor
+      storage={r2Storage({
+        account_id: R2_ACCOUNT_ID,
+        bucket: "agent-sync",
+        s3_endpoint: endpoint,
+      })}
+      disabled={false}
+      onChange={() => undefined}
+    />,
+  );
+
+  assert.equal(html.includes(`value="${endpoint}/agent-sync"`), true);
+  assert.equal(
+    html.includes(`value="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/agent-sync"`),
+    false,
+  );
+});
+
 test("local storage keeps browse in the path row and save in the footer", () => {
   const html = renderToStaticMarkup(
     <StorageEditor
@@ -155,6 +420,15 @@ test("configured storage can move name editing into its page heading", () => {
 
   assert.doesNotMatch(html, /aria-label="Storage name"/);
   assert.match(html, /Cloudflare R2/);
+});
+
+test("the repositories heading is text-only", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+
+  assert.match(
+    workspace,
+    /className="sync-storage-repositories-heading">\s*<h2 id="storage-repositories-heading">Repositories<\/h2>/,
+  );
 });
 
 test("repository rows spell their chips and fold full details behind the history chevron", () => {
@@ -254,6 +528,20 @@ test("storage settings identify the destination with its storage icon", () => {
   assert.match(cloudHtml, /title="Cloudflare R2: R2 storage"/);
 });
 
+test("the storage group is skipped when it would frame nothing", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+
+  // The group is a bordered box. Once the storage identity and the Push/Pull
+  // buttons moved to the path bar, a settled project leaves it empty, and an
+  // empty frame collapses into a rule above the history. It renders only when
+  // it has a repair notice, a storage banner, an open review, an unlinked
+  // project to prompt, or the link picker open.
+  assert.match(workspace, /const storageGroupEmpty = !storageGroupNotice\s*&& !!selectedStorage\s*&& projectLinks\.length > 0\s*&& !storageBlockShown\s*&& linkingProjectId !== project\.local_project_id;/);
+  assert.match(workspace, /if \(storageGroupEmpty\) return null;/);
+  // …and the block inside it goes the same way when it has no banner to carry.
+  assert.match(workspace, /if \(!activeNotice && !reviewOpen\) return null;/);
+});
+
 test("the storage sidebar opens the overview folded and the gear opens settings", () => {
   const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
   const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
@@ -268,20 +556,23 @@ test("the storage sidebar opens the overview folded and the gear opens settings"
     workspace,
     /const openStorageEditorWithSettings = async[\s\S]*setStorageDetailsExpanded\(true\);/,
   );
-  assert.match(workspace, /void openStorageEditorWithSettings\(storage\);/);
+  assert.match(workspace, /void openStorageEditorWithSettings\(workspaceStorage\);/);
   assert.match(workspace, /aria-expanded=\{storageDetailsExpanded\}/);
   assert.match(workspace, /aria-label=\{storageDetailsExpanded \? "Hide storage settings" : "Edit storage settings"\}/);
   assert.match(workspace, /showStorageDetails \? " settings-expanded" : " settings-collapsed"/);
   assert.match(workspace, /hidden=\{!showStorageDetails\}/);
   assert.match(workspace, /\{showStorageDetails && \(/);
   assert.match(workspace, /setStorageDetailsExpanded\(false\);\s*await loadStorageBundles/);
+  // The storage editor keeps the heading block; the project's own identity
+  // moved to the path bar, where the folder and the agent live behind ···.
   assert.match(workspace, /className="sync-project-heading-name"/);
-  assert.match(workspace, /sync-project-heading-meta-item sync-project-heading-path/);
-  assert.match(workspace, /sync-project-heading-meta-item sync-project-heading-agent/);
   assert.match(workspace, /<Icon name="folder" size=\{12\} \/>/);
-  assert.match(workspace, /<Icon name="terminal" size=\{12\} \/>/);
+  assert.doesNotMatch(workspace, /sync-project-heading-path/);
+  assert.doesNotMatch(workspace, /sync-project-heading-agent/);
+  assert.match(workspace, /label: "Reveal in Finder",\s*detail: compactProjectPath\(workspaceProject\.project_root\)/);
+  assert.match(workspace, /label: "Agent profile",\s*detail: workspaceProfileLabel/);
+  assert.match(workspace, /label: "Rename project"/);
   assert.match(workspace, /aria-label="Rename storage"/);
-  assert.match(workspace, /aria-label="Rename project"/);
   assert.match(workspace, /<Icon name="edit" size=\{13\} \/>/);
   assert.match(workspace, /`rename-storage:\$\{storageDraft\.id\}`/);
   assert.match(workspace, /const renamedStorage = \{ \.\.\.editedStorageConfig, name \}/);

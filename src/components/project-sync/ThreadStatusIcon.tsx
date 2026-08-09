@@ -1,5 +1,10 @@
 import type { SVGProps } from "react";
 
+/* The first eight answer "how does this stand against storage?". The last three
+   answer "there is no answer yet" — the state a project with no storage, a
+   comparison in flight, and a failed comparison are all in. Without them the
+   row had nothing to draw and drew nothing, which is what collapsed the icon
+   slot and shifted every title on the page. */
 export type ThreadStatusIconName =
   | "synced"
   | "cloud-outstanding"
@@ -8,7 +13,10 @@ export type ThreadStatusIconName =
   | "divergent-forked"
   | "pending"
   | "conflict"
-  | "unavailable";
+  | "unavailable"
+  | "untracked"
+  | "checking"
+  | "unknown";
 
 interface ThreadStatusIconProps extends Omit<SVGProps<SVGSVGElement>, "name"> {
   status: ThreadStatusIconName;
@@ -58,6 +66,27 @@ function StatusGlyph({ status }: { status: ThreadStatusIconName }) {
       return <path fill="currentColor" d="M11 6h3v9h-3ZM11 16h3v3h-3Z" />;
     case "unavailable":
       return <path fill="currentColor" d="M7 11h10v3h-10Z" />;
+    // An empty box: no verdict has been recorded, as against `unavailable`'s
+    // minus bar, which is the verdict "this one cannot be synced".
+    case "untracked":
+      return <path fill="currentColor" d="M8 8h8v8H8ZM10 14h4v-4h-4Z" />;
+    // Three dots, faded in turn by CSS. Separate paths so they can blink
+    // independently; a single pulsing glyph read as an error, not as work.
+    case "checking":
+      return (
+        <g className="thread-status-icon-dots">
+          <path fill="currentColor" d="M6 11h3v3H6Z" />
+          <path fill="currentColor" d="M11 11h3v3h-3Z" />
+          <path fill="currentColor" d="M16 11h3v3h-3Z" />
+        </g>
+      );
+    case "unknown":
+      return (
+        <path
+          fill="currentColor"
+          d="M9 6h6v2H9ZM13 8h2v3h-2ZM11 11h4v2h-4ZM11 13h2v2h-2ZM11 16h2v2h-2Z"
+        />
+      );
   }
 }
 

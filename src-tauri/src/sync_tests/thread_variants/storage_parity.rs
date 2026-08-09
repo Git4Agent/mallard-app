@@ -1,15 +1,17 @@
 use super::harness::{
-    assert_snapshot_consistent, chain, publish_request, publish_with_head, ThreadSpec, VariantWorld,
+    assert_snapshot_consistent, chain, codex_scope, codex_scope_key, harness_captured_with,
+    publish_request, publish_with_head, scope_pin, ThreadSpec, VariantWorld,
 };
 use crate::project_sync::bundle_engine::{
-    BundleEngine, BundleObjectStore, CasExpectation, CasOutcome, ExpectedObject,
-    ImmutablePutOutcome, ObjectKey, ObjectPrefix, PublishBundleRequest, PublishExpectation,
-    StageOutcome, StoreListPage, StoredMetadata,
+    BundleEngine, PublishBundleRequest, PublishExpectation, ScopePublishInput,
 };
 use crate::project_sync::domain::{
     BundleRecipe, StorageConfig, StorageKind, ThreadId, Tombstone, TombstoneTarget,
 };
-use crate::project_sync::s3_store::S3BundleObjectStore;
+use crate::project_sync::storage_core::{
+    CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
+    ObjectStore, S3ObjectStore, StageOutcome, StoreListPage, StoredMetadata,
+};
 use crate::sync_tests::stub_s3::StubS3;
 use std::collections::BTreeMap;
 use std::fs;
@@ -32,7 +34,7 @@ fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
     let initial = world.publish(&[t1.clone(), t2], origin.clone(), 10);
     let dropping = publish_request(
         world.bundle_id.clone(),
-        &[t1.clone()],
+        std::slice::from_ref(&t1),
         origin.clone(),
         20,
         Some(&initial.snapshot.manifest),
@@ -73,18 +75,21 @@ fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
         PublishExpectation::Match(initial.head_token),
     );
     world.engine().publish(first_request).unwrap();
+    // The lost update now fails through the per-scope firewall — the stale
+    // writer's reviewed Codex-scope pin no longer matches — instead of the
+    // repository-wide head CAS.
     assert!(world
         .engine()
         .publish(stale_request)
         .unwrap_err()
-        .contains("head changed"));
+        .contains("changed since review"));
 }
 
 #[test]
 fn local_store_immutable_and_head_failures_leave_a_retryable_fixed_point() {
     let temp = tempfile::tempdir().unwrap();
     let inner =
-        crate::project_sync::bundle_engine::LocalBundleObjectStore::open(temp.path().join("store"))
+        crate::project_sync::storage_core::LocalObjectStore::open(temp.path().join("store"))
             .unwrap();
     let store = FailingStore::new(inner);
     let storage_id = crate::project_sync::domain::StorageId::parse("failure-store").unwrap();
@@ -100,7 +105,7 @@ fn local_store_immutable_and_head_failures_leave_a_retryable_fixed_point() {
     );
     let initial_request = publish_request(
         world.bundle_id.clone(),
-        &[thread.clone()],
+        std::slice::from_ref(&thread),
         origin.clone(),
         10,
         None,
@@ -165,11 +170,10 @@ async fn stub_s3_current_schema_noop_and_fast_forward_match_local_protocol() {
         included_default_exclusions: Vec::new(),
         supports_conditional_writes: None,
     };
-    let store =
-        S3BundleObjectStore::from_config(&config, tokio::runtime::Handle::current()).unwrap();
+    let store = S3ObjectStore::from_config(&config, tokio::runtime::Handle::current()).unwrap();
     let initial_request = publish_request(
         world.bundle_id.clone(),
-        &[thread.clone()],
+        std::slice::from_ref(&thread),
         origin.clone(),
         10,
         None,
@@ -187,7 +191,7 @@ async fn stub_s3_current_schema_noop_and_fast_forward_match_local_protocol() {
 
     let noop_request = publish_request(
         world.bundle_id.clone(),
-        &[thread.clone()],
+        std::slice::from_ref(&thread),
         world.origin(&world.repo_b, "replica-b"),
         20,
         Some(&initial.snapshot.manifest),
@@ -287,8 +291,7 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
         included_default_exclusions: Vec::new(),
         supports_conditional_writes: None,
     };
-    let store =
-        S3BundleObjectStore::from_config(&config, tokio::runtime::Handle::current()).unwrap();
+    let store = S3ObjectStore::from_config(&config, tokio::runtime::Handle::current()).unwrap();
     let initial_request = publish_request(
         world.bundle_id.clone(),
         &[t1.clone(), t2.clone()],
@@ -362,12 +365,19 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
     })
     .await
     .unwrap();
-    assert!(stale_error.contains("head changed") || stale_error.contains("conflict"));
+    // Both writers change the same Codex scope, so the stale writer is
+    // rejected by that scope's reviewed pin rather than the head CAS.
+    assert!(
+        stale_error.contains("changed since review") || stale_error.contains("conflict"),
+        "{stale_error}"
+    );
 
-    let t1_path = after_a.snapshot.manifest.conversations[&t1_id].files[0]
+    let t1_path = codex_scope(&after_a.snapshot.manifest).conversations[&t1_id].files[0]
         .logical_path
         .clone();
-    let t1_object = after_a.snapshot.manifest.files[&t1_path].object_key.clone();
+    let t1_object = codex_scope(&after_a.snapshot.manifest).files[&t1_path]
+        .object_key
+        .clone();
     let retry_b = publish_request(
         world.bundle_id.clone(),
         &[advanced_t1, advanced_t2],
@@ -385,10 +395,15 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
     .await
     .unwrap();
     assert_eq!(after_b.snapshot.head.revision, 3);
-    assert_eq!(after_b.snapshot.manifest.conversations.len(), 2);
-    assert!(after_b.snapshot.manifest.conversations.contains_key(&t2_id));
     assert_eq!(
-        after_b.snapshot.manifest.files[&t1_path].object_key,
+        codex_scope(&after_b.snapshot.manifest).conversations.len(),
+        2
+    );
+    assert!(codex_scope(&after_b.snapshot.manifest)
+        .conversations
+        .contains_key(&t2_id));
+    assert_eq!(
+        codex_scope(&after_b.snapshot.manifest).files[&t1_path].object_key,
         t1_object
     );
 
@@ -464,11 +479,10 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         included_default_exclusions: Vec::new(),
         supports_conditional_writes: None,
     };
-    let store =
-        S3BundleObjectStore::from_config(&config, tokio::runtime::Handle::current()).unwrap();
+    let store = S3ObjectStore::from_config(&config, tokio::runtime::Handle::current()).unwrap();
     let initial_request = publish_request(
         world.bundle_id.clone(),
-        &[cloud_thread.clone()],
+        std::slice::from_ref(&cloud_thread),
         origin_b,
         10,
         None,
@@ -482,10 +496,10 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
     })
     .await
     .unwrap();
-    let cloud_path = initial.snapshot.manifest.conversations[&cloud_id].files[0]
+    let cloud_path = codex_scope(&initial.snapshot.manifest).conversations[&cloud_id].files[0]
         .logical_path
         .clone();
-    let cloud_object = initial.snapshot.manifest.files[&cloud_path]
+    let cloud_object = codex_scope(&initial.snapshot.manifest).files[&cloud_path]
         .object_key
         .clone();
 
@@ -506,13 +520,16 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
     .await
     .unwrap();
     assert_eq!(forked.snapshot.head.revision, 2);
-    assert_eq!(forked.snapshot.manifest.conversations.len(), 2);
     assert_eq!(
-        forked.snapshot.manifest.conversations[&forked_id].forked_from,
+        codex_scope(&forked.snapshot.manifest).conversations.len(),
+        2
+    );
+    assert_eq!(
+        codex_scope(&forked.snapshot.manifest).conversations[&forked_id].forked_from,
         Some(cloud_id.clone())
     );
     assert_eq!(
-        forked.snapshot.manifest.files[&cloud_path].object_key,
+        codex_scope(&forked.snapshot.manifest).files[&cloud_path].object_key,
         cloud_object,
     );
 
@@ -551,18 +568,23 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
     };
     let delete_request = PublishBundleRequest {
         identity: no_op.snapshot.manifest.bundle.clone(),
-        recipe: BundleRecipe::default(),
-        captured_with: no_op.snapshot.manifest.captured_with.clone(),
         published_by_origin: origin_a.clone(),
-        conversations: BTreeMap::new(),
-        resources: BTreeMap::new(),
-        retained_files: BTreeMap::new(),
-        captured_files: BTreeMap::new(),
-        directories: BTreeMap::new(),
-        tombstones: BTreeMap::from([
-            (cloud_tombstone.canonical_key(), cloud_tombstone),
-            (forked_tombstone.canonical_key(), forked_tombstone),
-        ]),
+        reviewed_scope_pins: BTreeMap::from([(
+            codex_scope_key(),
+            scope_pin(Some(&no_op.snapshot.manifest), &codex_scope_key()),
+        )]),
+        writable_scopes: BTreeMap::from([(
+            codex_scope_key(),
+            ScopePublishInput {
+                recipe: BundleRecipe::default(),
+                captured_with: harness_captured_with(),
+                tombstones: BTreeMap::from([
+                    (cloud_tombstone.canonical_key(), cloud_tombstone),
+                    (forked_tombstone.canonical_key(), forked_tombstone),
+                ]),
+                ..ScopePublishInput::default()
+            },
+        )]),
         expected_head: PublishExpectation::Match(no_op.head_token),
         updated_at: 30,
     };
@@ -575,7 +597,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
     .await
     .unwrap();
     assert_eq!(deleted.snapshot.head.revision, 3);
-    assert!(deleted.snapshot.manifest.conversations.is_empty());
+    assert_eq!(deleted.snapshot.manifest.all_conversations().count(), 0);
 
     let mut modified = forked_thread;
     modified.transcript = chain(
@@ -605,17 +627,14 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
     .await
     .unwrap();
     assert_eq!(resurrected.snapshot.head.revision, 4);
-    assert!(resurrected
-        .snapshot
-        .manifest
+    assert!(codex_scope(&resurrected.snapshot.manifest)
         .conversations
         .contains_key(&forked_id));
     assert!(!resurrected
         .snapshot
         .manifest
-        .tombstones
-        .values()
-        .any(|tombstone| matches!(
+        .all_tombstones()
+        .any(|(_, _, tombstone)| matches!(
             &tombstone.target,
             TombstoneTarget::ConversationThread { thread_id }
                 if thread_id.as_str() == forked_id.as_str()
@@ -678,12 +697,12 @@ enum StoreFailure {
 
 #[derive(Clone)]
 struct FailingStore {
-    inner: crate::project_sync::bundle_engine::LocalBundleObjectStore,
+    inner: crate::project_sync::storage_core::LocalObjectStore,
     next_failure: Arc<Mutex<Option<StoreFailure>>>,
 }
 
 impl FailingStore {
-    fn new(inner: crate::project_sync::bundle_engine::LocalBundleObjectStore) -> Self {
+    fn new(inner: crate::project_sync::storage_core::LocalObjectStore) -> Self {
         Self {
             inner,
             next_failure: Arc::new(Mutex::new(None)),
@@ -705,7 +724,7 @@ impl FailingStore {
     }
 }
 
-impl BundleObjectStore for FailingStore {
+impl ObjectStore for FailingStore {
     fn get_metadata(
         &self,
         key: &ObjectKey,

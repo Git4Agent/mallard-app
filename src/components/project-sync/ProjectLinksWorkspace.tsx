@@ -1,10 +1,14 @@
 import {
+  lazy,
+  Suspense,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
+import { openPath } from "@tauri-apps/plugin-opener";
 import type {
   BundleFetchProgress,
   BundlePage,
@@ -17,18 +21,22 @@ import type {
   StorageConfig,
 } from "../../types";
 import Icon from "../Icons";
-import ProjectChatHistoryPage from "./ProjectChatHistoryPage";
+import ProjectActivityPage from "./ProjectActivityPage";
+import type {
+  ActiveProjectSubview,
+  OpenSessionDetailRequest,
+} from "./session-detail/sessionDetailModel";
 import ConversationPathRepairNotice from "./ConversationPathRepairNotice";
+import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "./SyncPathBar";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
-import SyncOutcomeNotice from "./SyncOutcomeNotice";
+import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
+import { syncOutcomeView } from "./syncOutcome";
 import type { SyncOutcome } from "./syncOutcome";
 import { newStorage, storageConfigReady, StorageEditor } from "./StorageSettings";
 import { projectSyncApi } from "./api";
 import {
   compactProjectPath,
-  configuredProjectProvider,
   formatRelativeTime,
-  PROJECT_PROVIDERS,
   projectLabel,
   providerLabel,
   storageAccessErrorMessage,
@@ -73,6 +81,7 @@ interface Props {
   projects: LocalProjectSummary[];
   activeProjectId: string | null;
   activeStorageId: string | null;
+  activeProjectSubview: ActiveProjectSubview;
   bindings: ProjectBinding[];
   profiles: ProviderProfileSummary[];
   storages: StorageConfig[];
@@ -85,6 +94,8 @@ interface Props {
   conversationPathAuditLoading: boolean;
   fetchProgress?: BundleFetchProgress | null;
   onSelectStorage: (projectId: string, storageId: string) => Promise<void> | void;
+  onOpenSessionDetail: (projectId: string, request: OpenSessionDetailRequest) => void;
+  onCloseSessionDetail: () => void;
   onLinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onUnlinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onPush: (projectId: string, storageId: string) => Promise<void> | void;
@@ -94,8 +105,14 @@ interface Props {
   onRenameProject: (projectId: string, alias: string | null) => Promise<boolean> | boolean;
   onRefresh: () => void;
   onAddProject: () => void;
+  onSelectProject: (projectId: string) => void;
+  /** Theme toggle and app menu — the path bar doubles as the window titlebar. */
+  windowActions: ReactNode;
   onOpenStorageSettings: (storageId?: string) => void;
-  onSaveStorage: (storage: StorageConfig) => Promise<boolean | void> | boolean | void;
+  onSaveStorage: (
+    storage: StorageConfig,
+    expectedBaseline: StorageConfig | null,
+  ) => Promise<boolean | void> | boolean | void;
   storageEditorRequest?: StorageEditorRequest | null;
   onStorageEditorRequestHandled?: () => void;
   onStorageEditorChange?: (storageId: string | null) => void;
@@ -108,6 +125,8 @@ interface Props {
   onDismissStorageNotice?: () => void;
 }
 
+const SessionDetailPage = lazy(() => import("./session-detail/SessionDetailPage"));
+
 function storageSubtitle(storage: StorageConfig): string {
   if (storage.kind === "local") return compactProjectPath(storage.local_dir || "Folder not configured");
   if (storage.bucket) return `Bucket · ${storage.bucket}`;
@@ -118,6 +137,178 @@ function storageSubtitle(storage: StorageConfig): string {
 // which one it handed over so the stylesheet reads a class instead of guessing.
 function storageSubtitleIsPath(storage: StorageConfig): boolean {
   return storage.kind === "local";
+}
+
+function sameStorage(left: StorageConfig, right: StorageConfig): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export type StorageDraftReconciliation =
+  | { kind: "unchanged" }
+  | { kind: "adopt"; storage: StorageConfig }
+  | { kind: "close" }
+  | { kind: "conflict"; reason: "changed" | "removed" };
+
+/** Pure decision used when the config watcher supplies a newer snapshot. */
+export function reconcileStorageDraft(
+  baseline: StorageConfig,
+  draft: StorageConfig,
+  incoming: StorageConfig | null,
+): StorageDraftReconciliation {
+  const incomingChanged = !incoming || !sameStorage(incoming, baseline);
+  if (!incomingChanged) return { kind: "unchanged" };
+  if (incoming && sameStorage(draft, incoming)) {
+    return { kind: "adopt", storage: incoming };
+  }
+  if (!sameStorage(draft, baseline)) {
+    return { kind: "conflict", reason: incoming ? "changed" : "removed" };
+  }
+  return incoming ? { kind: "adopt", storage: incoming } : { kind: "close" };
+}
+
+const MAX_AGENT_SETUP_STORAGE_IDS = 512;
+
+export type AgentSetupMarker = {
+  draftFingerprint: string;
+  editingDraftId: string;
+  requestedName: string;
+  storageIds: readonly string[];
+  storageIdsComplete: boolean;
+};
+
+export type AgentSetupReconciliation =
+  | { kind: "adopt"; storage: StorageConfig }
+  | { kind: "preserve"; reason: "draft_changed" | "no_match" | "ambiguous" };
+
+function storageDraftFingerprint(storage: StorageConfig): string {
+  const {
+    access_key_id,
+    secret_access_key,
+    ...nonCredentialFields
+  } = storage;
+  const redactedSnapshot = JSON.stringify({
+    ...nonCredentialFields,
+    has_access_key_id: access_key_id.length > 0,
+    has_secret_access_key: secret_access_key.length > 0,
+  });
+  // Keep the marker fixed-size and credential-free. Draft edits invalidate
+  // the live marker immediately; this redacted fingerprint additionally makes
+  // the pure reconciliation decision independent of credential contents.
+  let hash = 0xcbf29ce484222325n;
+  for (const character of redactedSnapshot) {
+    hash ^= BigInt(character.codePointAt(0) ?? 0);
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+function normalizedStorageName(name: string): string {
+  return name.trim();
+}
+
+export function createAgentSetupMarker(
+  draft: StorageConfig,
+  storages: readonly StorageConfig[],
+  editingDraftId: string,
+): AgentSetupMarker {
+  return {
+    draftFingerprint: storageDraftFingerprint(draft),
+    editingDraftId,
+    requestedName: normalizedStorageName(draft.name),
+    storageIds: storages.slice(0, MAX_AGENT_SETUP_STORAGE_IDS).map((storage) => storage.id),
+    storageIdsComplete: storages.length <= MAX_AGENT_SETUP_STORAGE_IDS,
+  };
+}
+
+/** Decide whether a CLI-created storage safely completes the open setup. */
+export function reconcileAgentSetup(
+  marker: AgentSetupMarker,
+  draft: StorageConfig,
+  editingDraftId: string,
+  storages: readonly StorageConfig[],
+): AgentSetupReconciliation {
+  if (
+    marker.editingDraftId !== editingDraftId
+    || marker.draftFingerprint !== storageDraftFingerprint(draft)
+  ) {
+    return { kind: "preserve", reason: "draft_changed" };
+  }
+  if (!marker.storageIdsComplete) return { kind: "preserve", reason: "ambiguous" };
+
+  const priorIds = new Set(marker.storageIds);
+  const candidates = storages.filter((storage) => (
+    !priorIds.has(storage.id)
+    && storage.kind === "s3"
+    && normalizedStorageName(storage.name) === marker.requestedName
+  ));
+  if (candidates.length === 0) return { kind: "preserve", reason: "no_match" };
+  if (candidates.length > 1) return { kind: "preserve", reason: "ambiguous" };
+  return { kind: "adopt", storage: candidates[0] };
+}
+
+export type AgentSetupEditorAdoption = {
+  editingStorage: LinkKey;
+  storageDraft: StorageConfig;
+  storageBaseline: StorageConfig;
+  storageDetailsExpanded: true;
+  status: string;
+};
+
+/** State transition that keeps the setup surface open with committed values. */
+export function agentSetupEditorAdoption(storage: StorageConfig): AgentSetupEditorAdoption {
+  return {
+    editingStorage: { projectId: "", storageId: storage.id },
+    storageDraft: {
+      ...storage,
+      included_default_exclusions: [...storage.included_default_exclusions],
+    },
+    storageBaseline: {
+      ...storage,
+      included_default_exclusions: [...storage.included_default_exclusions],
+    },
+    storageDetailsExpanded: true,
+    status: `Connected ${storage.name || "Cloudflare R2"}. Settings filled in automatically.`,
+  };
+}
+
+export function buildR2AgentSetupInstruction({
+  storageName,
+  cliPath,
+}: {
+  storageName: string;
+  cliPath: string;
+}): string {
+  return [
+    `Set up the Cloudflare R2 storage “${storageName.trim() || "Cloudflare R2"}” in Mallard.`,
+    "",
+    "Use this Mallard CLI:",
+    cliPath,
+    "",
+    "Treat that as a literal executable path and quote it for the current shell. Run its R2 help first, then either connect an existing bucket or provision a new one. Finish through the CLI; do not edit Mallard’s open setup form or JSON, put a secret in an argument or environment variable, or print credentials. Let me enter the Secret Access Key or Cloudflare bootstrap token through the CLI's hidden prompt. Mallard is listening for the committed storage and will automatically populate the open setup page when the CLI finishes. Finish by verifying the storage and confirming it appears in the running app.",
+  ].join("\n");
+}
+
+async function writeClipboardText(value: string): Promise<void> {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // Some desktop WebViews expose Clipboard but reject it. Continue under
+      // the same user gesture with a document-local copy operation.
+    }
+  }
+  if (typeof document === "undefined") throw new Error("Clipboard access is unavailable");
+  const field = document.createElement("textarea");
+  field.value = value;
+  field.readOnly = true;
+  field.style.position = "fixed";
+  field.style.opacity = "0";
+  document.body.append(field);
+  field.select();
+  const copied = document.execCommand("copy");
+  field.remove();
+  if (!copied) throw new Error("Clipboard access is unavailable");
 }
 
 function absoluteTime(epoch: number): string {
@@ -269,6 +460,7 @@ export default function ProjectLinksWorkspace({
   projects,
   activeProjectId,
   activeStorageId,
+  activeProjectSubview,
   bindings,
   profiles,
   storages,
@@ -281,6 +473,8 @@ export default function ProjectLinksWorkspace({
   conversationPathAuditLoading,
   fetchProgress,
   onSelectStorage,
+  onOpenSessionDetail,
+  onCloseSessionDetail,
   onLinkStorage,
   onUnlinkStorage,
   onPush,
@@ -290,6 +484,8 @@ export default function ProjectLinksWorkspace({
   onRenameProject,
   onRefresh,
   onAddProject,
+  onSelectProject,
+  windowActions,
   onOpenStorageSettings,
   onSaveStorage,
   storageEditorRequest,
@@ -307,6 +503,9 @@ export default function ProjectLinksWorkspace({
   const [runningAction, setRunningAction] = useState<string | null>(null);
   const [editingStorage, setEditingStorage] = useState<LinkKey | null>(null);
   const [storageDraft, setStorageDraft] = useState<StorageConfig | null>(null);
+  const [storageBaseline, setStorageBaseline] = useState<StorageConfig | null>(null);
+  const [storageConflict, setStorageConflict] = useState<"changed" | "removed" | null>(null);
+  const [agentCopyStatus, setAgentCopyStatus] = useState<string | null>(null);
   const [storageDetailsExpanded, setStorageDetailsExpanded] = useState(false);
   const [renamingStorageId, setRenamingStorageId] = useState<string | null>(null);
   const [storageNameDraft, setStorageNameDraft] = useState("");
@@ -315,17 +514,32 @@ export default function ProjectLinksWorkspace({
   const [bundleError, setBundleError] = useState<string | null>(null);
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [projectAliasDraft, setProjectAliasDraft] = useState("");
-  const [storagePickerProjectId, setStoragePickerProjectId] = useState<string | null>(null);
-  const [storageActionsProjectId, setStorageActionsProjectId] = useState<string | null>(null);
   const bundleRequestRef = useRef(0);
   const storageSettingsRef = useRef<HTMLDivElement>(null);
-  const storagePickerRef = useRef<HTMLDivElement>(null);
-  const storagePickerMenuRef = useRef<HTMLDivElement>(null);
-  const storagePickerTriggerRef = useRef<HTMLButtonElement>(null);
-  const storageActionsRef = useRef<HTMLDivElement>(null);
-  const storageActionsMenuRef = useRef<HTMLDivElement>(null);
-  const storageActionsTriggerRef = useRef<HTMLButtonElement>(null);
   const workspaceScrollRef = useRef<HTMLElement>(null);
+  const overviewScrollPositionRef = useRef(0);
+  const sessionDetailOriginRef = useRef<HTMLButtonElement | null>(null);
+  const agentSetupMarkerRef = useRef<AgentSetupMarker | null>(null);
+
+  const openSessionDetail = (
+    projectId: string,
+    request: OpenSessionDetailRequest,
+    trigger: HTMLButtonElement,
+  ) => {
+    overviewScrollPositionRef.current = workspaceScrollRef.current?.scrollTop ?? 0;
+    sessionDetailOriginRef.current = trigger;
+    onOpenSessionDetail(projectId, request);
+  };
+
+  const closeSessionDetail = () => {
+    const scrollTop = overviewScrollPositionRef.current;
+    const origin = sessionDetailOriginRef.current;
+    onCloseSessionDetail();
+    window.requestAnimationFrame(() => {
+      workspaceScrollRef.current?.scrollTo({ top: scrollTop, left: 0 });
+      origin?.focus({ preventScroll: true });
+    });
+  };
 
   useEffect(() => {
     if (!editingStorage) return;
@@ -345,11 +559,6 @@ export default function ProjectLinksWorkspace({
   }, [storageDraft?.id]);
 
   useEffect(() => {
-    setStoragePickerProjectId(null);
-    setStorageActionsProjectId(null);
-  }, [activeProjectId, activeStorageId]);
-
-  useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       workspaceScrollRef.current?.scrollTo({ top: 0, left: 0 });
     });
@@ -357,71 +566,20 @@ export default function ProjectLinksWorkspace({
   }, [activeProjectId, activeStorageId]);
 
   useEffect(() => {
+    if (activeProjectSubview.kind !== "session_detail") return;
+    agentSetupMarkerRef.current = null;
+    const frame = window.requestAnimationFrame(() => {
+      workspaceScrollRef.current?.scrollTo({ top: 0, left: 0 });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeProjectSubview.kind, activeProjectSubview.kind === "session_detail"
+    ? activeProjectSubview.resourceId
+    : null]);
+
+  useEffect(() => {
     if (!inlineStorageReview) return;
-    setStoragePickerProjectId(null);
-    setStorageActionsProjectId(null);
     setLinkingProjectId(null);
   }, [inlineStorageReview?.kind, inlineStorageReview?.projectId, inlineStorageReview?.storageId]);
-
-  useEffect(() => {
-    if (!storagePickerProjectId) return;
-    const pickerContains = (target: EventTarget | null) => target instanceof Node && (
-      storagePickerRef.current?.contains(target) || storagePickerMenuRef.current?.contains(target)
-    );
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!pickerContains(event.target)) {
-        setStoragePickerProjectId(null);
-      }
-    };
-    const handleFocusIn = (event: FocusEvent) => {
-      if (!pickerContains(event.target)) setStoragePickerProjectId(null);
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setStoragePickerProjectId(null);
-      window.requestAnimationFrame(() => storagePickerTriggerRef.current?.focus());
-    };
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("focusin", handleFocusIn);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("focusin", handleFocusIn);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [storagePickerProjectId]);
-
-  useEffect(() => {
-    if (!storageActionsProjectId) return;
-    const menuContains = (target: EventTarget | null) => (
-      target instanceof Node && !!storageActionsRef.current?.contains(target)
-    );
-    const closeMenu = (restoreFocus = false) => {
-      setStorageActionsProjectId(null);
-      if (restoreFocus) {
-        window.requestAnimationFrame(() => storageActionsTriggerRef.current?.focus());
-      }
-    };
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!menuContains(event.target)) closeMenu();
-    };
-    const handleFocusIn = (event: FocusEvent) => {
-      if (!menuContains(event.target)) closeMenu();
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      closeMenu(true);
-    };
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("focusin", handleFocusIn);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("focusin", handleFocusIn);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [storageActionsProjectId]);
 
   const linkedByProject = useMemo(() => new Map(projects.map((project) => [
     project.local_project_id,
@@ -438,7 +596,7 @@ export default function ProjectLinksWorkspace({
     : null;
   const editedStorageConfig = savedEditedStorage
     ?? (storageDraft?.id === editingStorage?.storageId ? storageDraft : null);
-  const creatingStorage = !!editingStorage && !savedEditedStorage;
+  const creatingStorage = !!editingStorage && storageBaseline === null;
   const orderedRemoteBundles = [...(bundlePage?.bundles ?? [])].sort((left, right) => {
     return (right.updated_at ?? 0) - (left.updated_at ?? 0);
   });
@@ -476,10 +634,14 @@ export default function ProjectLinksWorkspace({
 
   useEffect(() => {
     if (!storageEditorRequest) return;
+    agentSetupMarkerRef.current = null;
     if (storageEditorRequest.mode === "close") {
       bundleRequestRef.current += 1;
       setEditingStorage(null);
       setStorageDraft(null);
+      setStorageBaseline(null);
+      setStorageConflict(null);
+      setAgentCopyStatus(null);
       setStorageDetailsExpanded(false);
       setBundlePage(null);
       setBundleError(null);
@@ -492,6 +654,9 @@ export default function ProjectLinksWorkspace({
       bundleRequestRef.current += 1;
       setEditingStorage({ projectId: "", storageId: storage.id });
       setStorageDraft(storage);
+      setStorageBaseline(null);
+      setStorageConflict(null);
+      setAgentCopyStatus(null);
       setStorageDetailsExpanded(true);
       setBundlePage(null);
       setBundleError(null);
@@ -508,6 +673,9 @@ export default function ProjectLinksWorkspace({
     if (editingStorage?.storageId !== storage.id) {
       setEditingStorage({ projectId: "", storageId: storage.id });
       setStorageDraft({ ...storage });
+      setStorageBaseline({ ...storage });
+      setStorageConflict(null);
+      setAgentCopyStatus(null);
       void loadStorageBundles(storage);
     }
     setStorageDetailsExpanded(storageEditorRequest.settingsExpanded);
@@ -517,39 +685,141 @@ export default function ProjectLinksWorkspace({
   const openStorageEditorWithSettings = async (storage: StorageConfig) => {
     const switchingStorage = editingStorage?.storageId !== storage.id;
     if (switchingStorage) {
+      agentSetupMarkerRef.current = null;
       setEditingStorage({ projectId: "", storageId: storage.id });
       setStorageDraft({ ...storage });
+      setStorageBaseline({ ...storage });
+      setStorageConflict(null);
+      setAgentCopyStatus(null);
     }
 
     setStorageDetailsExpanded(true);
     if (switchingStorage) await loadStorageBundles(storage);
   };
 
+  useEffect(() => {
+    const marker = agentSetupMarkerRef.current;
+    if (!marker || !editingStorage || !storageDraft || storageBaseline) return;
+    const reconciliation = reconcileAgentSetup(
+      marker,
+      storageDraft,
+      editingStorage.storageId,
+      storages,
+    );
+    if (reconciliation.kind === "preserve") {
+      if (reconciliation.reason === "draft_changed" || reconciliation.reason === "ambiguous") {
+        agentSetupMarkerRef.current = null;
+      }
+      return;
+    }
+
+    agentSetupMarkerRef.current = null;
+    const adoption = agentSetupEditorAdoption(reconciliation.storage);
+    setEditingStorage(adoption.editingStorage);
+    setStorageDraft(adoption.storageDraft);
+    setStorageBaseline(adoption.storageBaseline);
+    setStorageConflict(null);
+    setStorageDetailsExpanded(adoption.storageDetailsExpanded);
+    setBundlePage(null);
+    setBundleError(null);
+    setAgentCopyStatus(adoption.status);
+    void loadStorageBundles(reconciliation.storage);
+  }, [storages]);
+
+  useEffect(() => {
+    if (!editingStorage || !storageDraft) return;
+    const incoming = storages.find((candidate) => candidate.id === editingStorage.storageId) ?? null;
+    if (!storageBaseline) {
+      if (incoming && sameStorage(incoming, storageDraft)) {
+        setStorageBaseline({ ...incoming });
+        setStorageDraft({ ...incoming });
+      }
+      return;
+    }
+    const reconciliation = reconcileStorageDraft(storageBaseline, storageDraft, incoming);
+    if (reconciliation.kind === "adopt") {
+      setStorageBaseline({ ...reconciliation.storage });
+      setStorageDraft({ ...reconciliation.storage });
+      setStorageConflict(null);
+    } else if (reconciliation.kind === "close") {
+      setEditingStorage(null);
+      setStorageDraft(null);
+      setStorageBaseline(null);
+      setStorageConflict(null);
+      setStorageDetailsExpanded(false);
+    } else if (reconciliation.kind === "conflict") {
+      setStorageConflict(reconciliation.reason);
+    }
+  }, [editingStorage?.storageId, storageBaseline, storageDraft, storages]);
+
+  const reloadExternalStorage = () => {
+    if (!editingStorage) return;
+    const incoming = storages.find((candidate) => candidate.id === editingStorage.storageId) ?? null;
+    if (!incoming) {
+      setEditingStorage(null);
+      setStorageDraft(null);
+      setStorageBaseline(null);
+      setStorageConflict(null);
+      setStorageDetailsExpanded(false);
+      return;
+    }
+    setStorageBaseline({ ...incoming });
+    setStorageDraft({ ...incoming });
+    setStorageConflict(null);
+  };
+
+  const copyAgentSetupInstruction = async () => {
+    if (!storageDraft || storageDraft.kind !== "s3") return;
+    setAgentCopyStatus(null);
+    try {
+      const cliPath = await projectSyncApi.getMallardCliPath();
+      const instruction = buildR2AgentSetupInstruction({
+        storageName: storageDraft.name,
+        cliPath,
+      });
+      await writeClipboardText(instruction);
+      agentSetupMarkerRef.current = createAgentSetupMarker(
+        storageDraft,
+        storages,
+        storageDraft.id,
+      );
+      setAgentCopyStatus("Agent setup instruction copied.");
+    } catch (reason) {
+      setAgentCopyStatus(`Could not copy agent setup instructions: ${String(reason)}`);
+    }
+  };
+
   const activeProject = projects.find((project) => project.local_project_id === activeProjectId) ?? null;
   const workspaceProject = newProjectSetup ? null : activeProject;
+  const sessionDetailSubview = activeProjectSubview.kind === "session_detail"
+    && workspaceProject?.local_project_id === activeProjectSubview.localProjectId
+    ? activeProjectSubview
+    : null;
   const workspaceBinding = workspaceProject
     ? bindingByProject.get(workspaceProject.local_project_id)
     : undefined;
-  const workspaceProviders = PROJECT_PROVIDERS.filter((provider) => (
-    workspaceBinding?.profile_ids?.[provider]
-  ));
-  const workspaceHasMultipleProviders = workspaceProviders.length > 1;
-  const workspaceProvider = configuredProjectProvider(workspaceBinding?.profile_ids);
-  const workspaceProfileId = workspaceProvider
-    ? workspaceBinding?.profile_ids?.[workspaceProvider]
-    : null;
-  const workspaceProfile = profiles.find((candidate) => candidate.profile_id === workspaceProfileId);
-  const workspaceProfileReady = !workspaceHasMultipleProviders
-    && !!workspaceProfile?.available
-    && workspaceProfile.readable;
-  const workspaceProfileLabel = workspaceHasMultipleProviders
-    ? "Choose one agent"
-    : workspaceProfile?.display_name ?? "No agent configured";
-  const workspaceProfileTitle = workspaceHasMultipleProviders
-    ? "Codex and Claude are both assigned"
-    : workspaceProfile
-      ? `${providerLabel(workspaceProvider ?? "codex")} agent home: ${workspaceProfile.path}${workspaceProfileReady ? "" : " (unavailable)"}`
-      : "No agent profile is assigned";
+  // The header summarizes every bound provider profile; a project may bind
+  // one provider or several, and none of them is "the" project agent.
+  const workspaceProfiles = Object.entries(workspaceBinding?.profile_ids ?? {}).map(
+    ([provider, profileId]) => ({
+      provider,
+      profile: profiles.find((candidate) => candidate.profile_id === profileId),
+    }),
+  );
+  const workspaceProfileReady = workspaceProfiles.length > 0
+    && workspaceProfiles.every(({ profile }) => !!profile?.available && profile.readable);
+  const workspaceProfileLabel = workspaceProfiles.length === 0
+    ? "No agent configured"
+    : workspaceProfiles
+      .map(({ provider, profile }) => profile?.display_name ?? providerLabel(provider))
+      .join(" · ");
+  const workspaceProfileTitle = workspaceProfiles.length === 0
+    ? "No agent profile is assigned"
+    : workspaceProfiles
+      .map(({ provider, profile }) => (profile
+        ? `${providerLabel(provider)} agent home: ${profile.path}${profile.available && profile.readable ? "" : " (unavailable)"}`
+        : `${providerLabel(provider)} profile is missing on this machine`))
+      .join("\n");
   const proposedProjectAlias = workspaceProject
     ? projectAliasDraft.trim() && projectAliasDraft.trim() !== workspaceProject.display_name
       ? projectAliasDraft.trim()
@@ -557,6 +827,91 @@ export default function ProjectLinksWorkspace({
     : null;
   const projectNameChanged = !!workspaceProject
     && proposedProjectAlias !== (workspaceProject.local_alias ?? null);
+
+  // ---- the workspace path bar -------------------------------------------
+  // Everything the header used to spread across an h1, a meta row and a
+  // storage card is derived once here, because the bar renders above the
+  // scrolling page rather than inside it.
+  const workspaceLinks = workspaceProject
+    ? linkedByProject.get(workspaceProject.local_project_id) ?? []
+    : [];
+  const workspaceLinkedStorages = workspaceLinks
+    .map((link) => storages.find((storage) => storage.id === link.storage_id))
+    .filter((storage): storage is StorageConfig => !!storage);
+  const workspaceStorage = workspaceLinkedStorages.find((storage) => (
+    workspaceProject?.local_project_id === activeProjectId && storage.id === activeStorageId
+  )) ?? workspaceLinkedStorages[0] ?? null;
+  const workspaceAvailableStorages = storages.filter((storage) => (
+    !workspaceLinks.some((link) => link.storage_id === storage.id)
+  ));
+  const workspaceBindingActive = workspaceBinding?.state === "active";
+  const workspaceReadableProfiles = workspaceProfiles.filter(({ profile }) => (
+    !!profile?.available && profile.readable
+  ));
+  const workspaceProfilesReadable = workspaceReadableProfiles.length > 0;
+  const workspaceProfilesWritable = workspaceReadableProfiles.some(({ profile }) => !!profile?.writable);
+  const workspaceCanSync = workspaceBindingActive && workspaceProfilesReadable;
+  const workspaceCanRestore = workspaceBindingActive && workspaceProfilesWritable;
+  const workspaceCodexProfile = workspaceProfiles.find(({ provider }) => provider === "codex")?.profile;
+  const workspaceCodexConfigured = workspaceBindingActive && !!workspaceCodexProfile;
+  const workspacePathAudit = workspaceProject
+    ? conversationPathAudits[workspaceProject.local_project_id]
+    : undefined;
+  const workspacePathAuditError = workspaceProject
+    ? conversationPathAuditErrors[workspaceProject.local_project_id]
+    : undefined;
+  const workspacePathBlocked = conversationPathsBlockSync(
+    workspaceCodexConfigured,
+    workspacePathAudit,
+    workspacePathAuditError,
+    conversationPathAuditLoading,
+  );
+  const workspacePathTitle = workspaceCodexConfigured
+    ? conversationPathAuditLoading
+      ? "Checking Codex conversation paths"
+      : workspacePathAuditError
+        ? `Codex conversation paths could not be verified: ${workspacePathAuditError}`
+        : workspacePathAudit && !workspacePathAudit.ready
+          ? "Repair Codex conversation paths before Push or Pull"
+          : null
+    : null;
+  const workspaceProfileIssue = workspaceBindingActive && !workspaceProfilesReadable
+    ? "No selected agent profile is available on this machine"
+    : null;
+
+  const workspaceActionPrefix = workspaceProject && workspaceStorage
+    ? `${workspaceProject.local_project_id}:${workspaceStorage.id}`
+    : null;
+  const workspaceReviewOpen = !!workspaceActionPrefix
+    && inlineStorageReview?.projectId === workspaceProject?.local_project_id
+    && inlineStorageReview?.storageId === workspaceStorage?.id;
+  const workspaceReviewKind = workspaceReviewOpen ? inlineStorageReview?.kind ?? null : null;
+  const workspacePushReviewOpen = workspaceReviewOpen && inlineStorageReview?.kind === "push";
+  const workspacePullReviewOpen = workspaceReviewOpen && inlineStorageReview?.kind === "pull";
+  const workspacePushPreparing = runningAction === `push:${workspaceActionPrefix}`;
+  const workspacePushPublishing = workspacePushReviewOpen && busy;
+  const workspacePullPreparing = runningAction === `pull:${workspaceActionPrefix}`;
+  const workspacePullApplying = workspacePullReviewOpen && busy;
+  const workspacePullProgress = workspacePullPreparing || workspacePullApplying;
+  const workspacePushProgress = workspacePushPreparing || workspacePushPublishing;
+  const workspacePullReadout = workspacePullPreparing && fetchProgress?.phase === "plan"
+    ? `${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`
+    : null;
+  const workspacePushReadout = workspacePushPublishing && fetchProgress?.phase === "push"
+    ? `${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`
+    : null;
+  const workspaceControlsLocked = busy
+    || !!runningAction
+    || storageActionLockedForReview(workspaceReviewKind, "storage");
+
+  // The section the page is showing. The activity page picks Git history for a
+  // git repo and Sessions otherwise; the crumb reads the same fact off the
+  // project so the trail is right before the page has finished loading.
+  const workspaceSectionLabel = workspaceProject?.is_git_repository ? "Git history" : "Sessions";
+  const [sessionDetailTitle, setSessionDetailTitle] = useState<string | null>(null);
+  const handleSessionTitleChange = useCallback((title: string | null) => {
+    setSessionDetailTitle(title);
+  }, []);
 
   const saveProjectName = async () => {
     if (!workspaceProject || !projectNameChanged) return;
@@ -574,9 +929,10 @@ export default function ProjectLinksWorkspace({
     if (!storageDraft || !editedStorageConfig || renamingStorageId !== storageDraft.id) return;
     const name = storageNameDraft.trim();
     if (!name || name === storageDraft.name) return;
+    agentSetupMarkerRef.current = null;
     await run(`rename-storage:${storageDraft.id}`, async () => {
       const renamedStorage = { ...editedStorageConfig, name };
-      const saved = await onSaveStorage(renamedStorage);
+      const saved = await onSaveStorage(renamedStorage, editedStorageConfig);
       if (saved === false) return;
       setStorageDraft((current) => current?.id === renamedStorage.id ? { ...current, name } : current);
       setStorageNameDraft(name);
@@ -621,7 +977,7 @@ export default function ProjectLinksWorkspace({
                         disabled={busy}
                         autoFocus
                       />
-                      <button type="submit" className="btn btn-primary" disabled={busy || !storageNameChanged}>
+                      <button type="submit" className="btn btn-primary" disabled={busy || !storageNameChanged || !!storageConflict}>
                         {runningAction === `rename-storage:${storageDraft.id}` ? "Saving…" : "Save"}
                       </button>
                       <button
@@ -689,8 +1045,12 @@ export default function ProjectLinksWorkspace({
                 type="button"
                 className="btn btn-ghost sync-storage-settings-icon"
                 onClick={() => {
+                  agentSetupMarkerRef.current = null;
                   setEditingStorage(null);
                   setStorageDraft(null);
+                  setStorageBaseline(null);
+                  setStorageConflict(null);
+                  setAgentCopyStatus(null);
                   setStorageDetailsExpanded(false);
                 }}
                 title="Close storage settings"
@@ -711,34 +1071,81 @@ export default function ProjectLinksWorkspace({
               hidden={!showStorageDetails}
             >
               {showStorageDetails && (
-                <StorageEditor
-                  storage={storageDraft}
-                  disabled={busy}
-                  onChange={setStorageDraft}
-                  showNameField={creatingStorage}
-                  primaryAction={(
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      disabled={busy || !storageReady || (!creatingStorage && JSON.stringify(storageDraft) === JSON.stringify(editedStorageConfig))}
-                      onClick={() => void run(`storage:${editedStorageConfig.id}`, async () => {
-                        const saved = await onSaveStorage(storageDraft);
-                        if (saved === false) return;
-                        setStorageDetailsExpanded(false);
-                        await loadStorageBundles(storageDraft);
-                      })}
-                    >
-                      {runningAction === `storage:${editedStorageConfig.id}` ? "Saving…" : creatingStorage ? "Create storage" : "Save storage"}
-                    </button>
+                <>
+                  {storageConflict && (
+                    <div className="sync-callout warning" role="alert">
+                      <Icon name="alert-triangle" size={14} />
+                      <span>
+                        This storage was {storageConflict === "removed" ? "removed" : "changed"} outside this editor. Your draft was kept, but it cannot be saved until you reload the current configuration.
+                      </span>
+                      <button type="button" className="btn btn-ghost" onClick={reloadExternalStorage}>
+                        Reload
+                      </button>
+                    </div>
                   )}
-                />
+                  {creatingStorage && storageDraft.kind === "s3" && (
+                    <div className="sync-callout" role="status">
+                      <Icon name="terminal" size={14} />
+                      <span>Let a terminal coding agent connect R2 through Mallard’s packaged CLI.</span>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        disabled={busy}
+                        onClick={() => void copyAgentSetupInstruction()}
+                      >
+                        Set up with an agent
+                      </button>
+                      {agentCopyStatus && <span>{agentCopyStatus}</span>}
+                    </div>
+                  )}
+                  {!creatingStorage && agentCopyStatus && (
+                    <div className="sync-callout" role="status">
+                      <Icon name="check-circle" size={14} />
+                      <span>{agentCopyStatus}</span>
+                    </div>
+                  )}
+                  <StorageEditor
+                    storage={storageDraft}
+                    disabled={busy || !!storageConflict}
+                    onChange={(nextDraft) => {
+                      agentSetupMarkerRef.current = null;
+                      setStorageDraft(nextDraft);
+                    }}
+                    showNameField={creatingStorage}
+                    primaryAction={(
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={busy || !!storageConflict || !storageReady || (!creatingStorage && !!storageBaseline && sameStorage(storageDraft, storageBaseline))}
+                        onClick={() => void run(`storage:${editedStorageConfig.id}`, async () => {
+                          const wasCreatingR2 = creatingStorage && storageDraft.kind === "s3";
+                          agentSetupMarkerRef.current = null;
+                          setAgentCopyStatus(null);
+                          const saved = await onSaveStorage(storageDraft, storageBaseline);
+                          if (saved === false) return;
+                          setStorageConflict(null);
+                          if (wasCreatingR2) {
+                            setStorageDetailsExpanded(false);
+                            setEditingStorage(null);
+                            setStorageDraft(null);
+                            setStorageBaseline(null);
+                            return;
+                          }
+                          setStorageDetailsExpanded(false);
+                          await loadStorageBundles(storageDraft);
+                        })}
+                      >
+                        {runningAction === `storage:${editedStorageConfig.id}` ? "Saving…" : creatingStorage ? "Create storage" : "Save storage"}
+                      </button>
+                    )}
+                  />
+                </>
               )}
             </div>
 
             {!creatingStorage && (
               <section className="sync-storage-repositories" aria-labelledby="storage-repositories-heading">
                 <div className="sync-storage-repositories-heading">
-                  <Icon name="git-folder" size={15} />
                   <h2 id="storage-repositories-heading">Repositories</h2>
                   <button
                     type="button"
@@ -790,15 +1197,304 @@ export default function ProjectLinksWorkspace({
               <div className="profile-links-subtitle">Select a completed project to view its Codex history.</div>
             </div>
           </div>
+          {agentCopyStatus && (
+            <div className="sync-callout" role="status">
+              <Icon name="check-circle" size={14} />
+              <span>{agentCopyStatus}</span>
+            </div>
+          )}
         </section>
       </main>
     );
   }
 
+  // Storage leads the trail because it is the outermost scope and the thing
+  // Push and Pull act on; the repo sits inside it; the section is the page.
+  // Drilling into a session appends a fourth crumb and turns the section into
+  // the way back — the trail grows, it never swaps.
+  const pathCrumbs: PathBarCrumb[] = [];
+  if (workspaceProject) {
+    if (workspaceStorage) {
+      const storageMenu: PathBarMenuGroup[] = [{
+        label: `Storage · ${workspaceLinks.length} linked`,
+        items: workspaceLinkedStorages.map((storage) => ({
+          id: storage.id,
+          label: storage.name || "(unnamed)",
+          detail: storageSubtitle(storage),
+          icon: storage.kind === "local" ? ("drive" as const) : ("cloud" as const),
+          checked: storage.id === workspaceStorage.id,
+          disabled: workspaceControlsLocked,
+          onSelect: () => {
+            if (storage.id === workspaceStorage.id) return;
+            if (workspaceReviewOpen) inlineStorageReview?.onClose();
+            void onSelectStorage(workspaceProject.local_project_id, storage.id);
+          },
+        })),
+      }];
+      const storageLinkItems = [
+        ...(workspaceAvailableStorages.length > 0 ? [{
+          id: "link-storage",
+          label: "Link storage",
+          icon: "link" as const,
+          disabled: workspaceControlsLocked,
+          onSelect: () => {
+            setLinkingProjectId(workspaceProject.local_project_id);
+          },
+        }] : []),
+        {
+          id: "add-storage",
+          label: "Add storage",
+          icon: "plus" as const,
+          disabled: workspaceControlsLocked,
+          onSelect: () => {
+            setLinkingProjectId(null);
+            onOpenStorageSettings();
+          },
+        },
+      ];
+      storageMenu.push({ items: storageLinkItems });
+      pathCrumbs.push({
+        id: "storage",
+        label: workspaceStorage.name || "(unnamed)",
+        icon: workspaceStorage.kind === "local" ? "drive" : "cloud",
+        tone: "root",
+        title: `${workspaceStorage.name || "Storage"} · ${storageSubtitle(workspaceStorage)}`,
+        ariaLabel: `Storage ${workspaceStorage.name || "unnamed"}. Choose another storage`,
+        menu: storageMenu,
+        menuLabel: "Switch storage",
+        disabled: workspaceControlsLocked,
+      });
+    }
+
+    pathCrumbs.push({
+      id: "project",
+      label: projectLabel(workspaceProject),
+      icon: workspaceProject.is_git_repository ? "git-folder" : "folder",
+      warning: !workspaceProfileReady,
+      title: [
+        workspaceProject.project_root ?? "Folder not configured",
+        workspaceProfileTitle,
+      ].filter(Boolean).join("\n"),
+      ariaLabel: sessionDetailSubview
+        ? `Back to ${workspaceSectionLabel} for ${projectLabel(workspaceProject)}`
+        : `Project ${projectLabel(workspaceProject)}. Choose another project`,
+      // Inside a session the repo is the ancestor you came from, so its label
+      // walks back out to the project's page; the switcher stays on its chevron.
+      onActivate: sessionDetailSubview ? closeSessionDetail : undefined,
+      menu: [{
+        label: "Switch project",
+        items: projects.map((candidate) => ({
+          id: candidate.local_project_id,
+          label: projectLabel(candidate),
+          detail: compactProjectPath(candidate.project_root),
+          icon: candidate.is_git_repository ? ("git-folder" as const) : ("folder" as const),
+          checked: candidate.local_project_id === workspaceProject.local_project_id,
+          disabled: busy || !!inlineStorageReview,
+          onSelect: () => {
+            if (candidate.local_project_id === workspaceProject.local_project_id) return;
+            onSelectProject(candidate.local_project_id);
+          },
+        })),
+      }, {
+        items: [{
+          id: "add-project",
+          label: "Add project",
+          icon: "plus" as const,
+          disabled: busy,
+          onSelect: () => onAddProject(),
+        }],
+      }],
+      menuLabel: "Switch project",
+      disabled: busy || !!inlineStorageReview,
+    });
+
+    // A session is not inside Git history — it is the thing the history lists.
+    // So the section crumb names the page you are on and steps aside once you
+    // open a session, giving the title the width it needs.
+    if (sessionDetailSubview) {
+      pathCrumbs.push({
+        id: "session",
+        label: sessionDetailTitle ?? "Opening session…",
+        title: sessionDetailTitle ?? undefined,
+      });
+    } else {
+      pathCrumbs.push({
+        id: "section",
+        label: workspaceSectionLabel,
+        tone: "section",
+      });
+    }
+  }
+
+  const pathOverflow: PathBarMenuGroup[] = workspaceProject ? [
+    {
+      label: "Project",
+      items: [
+        ...(workspaceProject.project_root ? [{
+          id: "reveal",
+          label: "Reveal in Finder",
+          detail: compactProjectPath(workspaceProject.project_root),
+          icon: "folder" as const,
+          onSelect: () => { void openPath(workspaceProject.project_root as string); },
+        }] : []),
+        {
+          id: "agent",
+          label: "Agent profile",
+          detail: workspaceProfileLabel,
+          icon: "terminal" as const,
+          title: workspaceProfileTitle,
+          onSelect: () => void onConfigureBinding(workspaceProject.local_project_id),
+        },
+        {
+          id: "rename",
+          label: "Rename project",
+          icon: "edit" as const,
+          disabled: busy,
+          onSelect: () => {
+            setProjectAliasDraft(workspaceProject.local_alias ?? workspaceProject.display_name);
+            setRenamingProjectId(workspaceProject.local_project_id);
+          },
+        },
+      ],
+    },
+    ...(workspaceStorage ? [{
+      label: "Storage",
+      items: [
+        {
+          id: "storage-settings",
+          label: "Storage settings",
+          icon: "settings" as const,
+          disabled: workspaceControlsLocked,
+          onSelect: () => { void openStorageEditorWithSettings(workspaceStorage); },
+        },
+        {
+          id: "unlink",
+          label: "Unlink storage",
+          icon: "x" as const,
+          danger: true,
+          disabled: workspaceControlsLocked,
+          onSelect: () => void run(
+            `unlink:${workspaceActionPrefix}`,
+            () => onUnlinkStorage(workspaceProject.local_project_id, workspaceStorage.id),
+          ),
+        },
+      ],
+    }] : []),
+  ] : [];
+
+  const pathActions = workspaceProject && workspaceStorage ? (
+    <div className="sync-path-action-group" role="group" aria-label="Sync actions">
+      <button
+        type="button"
+        className={`sync-path-sync${workspacePullReviewOpen ? " active" : ""}`}
+        disabled={busy
+          || !!runningAction
+          || workspacePathBlocked
+          || (workspaceBindingActive && !workspaceCanRestore)
+          || storageActionLockedForReview(workspaceReviewKind, "pull")
+          || (workspacePullReviewOpen && inlineStorageReview?.continueDisabled)}
+        onClick={() => {
+          if (workspacePullReviewOpen) {
+            // The bar button IS the review's primary: it applies the current
+            // selection — an empty one included, which is how a
+            // revision-only change is acknowledged.
+            inlineStorageReview?.onContinue?.();
+            return;
+          }
+          setLinkingProjectId(null);
+          void run(
+            `pull:${workspaceActionPrefix}`,
+            () => onPull(workspaceProject.local_project_id, workspaceStorage.id),
+          );
+        }}
+        title={workspacePathTitle
+          ?? workspaceProfileIssue
+          ?? (!workspaceBindingActive
+            ? "Confirm project setup before pulling"
+            : workspacePullReviewOpen
+            ? (inlineStorageReview?.continueTitle ?? "Pull the selected changes from this storage")
+            : !workspaceProfilesWritable
+              ? "No selected agent profile is writable"
+              : "Review the Pull actions before applying them")}
+        aria-label={!workspaceBindingActive
+          ? "Set up project before Pull"
+          : workspacePullReviewOpen
+          ? `Pull selected changes from ${workspaceStorage.name || "storage"}`
+          : `Pull from ${workspaceStorage.name || "storage"}`}
+        aria-expanded={workspacePullReviewOpen}
+      >
+        <Icon
+          key={workspacePullProgress ? "pull-progress" : "pull-idle"}
+          name={workspacePullProgress ? "refresh" : "download"}
+          size={14}
+          className={workspacePullProgress ? "icon-spin" : undefined}
+        />
+        {workspacePullReadout
+          ? <span className="sync-btn-readout">{workspacePullReadout}</span>
+          : projectPullActionLabel({ preparing: workspacePullPreparing, applying: workspacePullApplying })}
+      </button>
+      <button
+        type="button"
+        className={`sync-path-sync${workspacePushReviewOpen ? " active" : ""}`}
+        disabled={busy
+          || !!runningAction
+          || workspacePathBlocked
+          || !workspaceCanSync
+          || storageActionLockedForReview(workspaceReviewKind, "push")
+          || (workspacePushReviewOpen && inlineStorageReview?.continueDisabled)}
+        onClick={() => {
+          if (workspacePushReviewOpen) {
+            inlineStorageReview?.onContinue?.();
+            return;
+          }
+          setLinkingProjectId(null);
+          void run(
+            `push:${workspaceActionPrefix}`,
+            () => onPush(workspaceProject.local_project_id, workspaceStorage.id),
+          );
+        }}
+        title={workspacePathTitle
+          ?? workspaceProfileIssue
+          ?? (workspacePushReviewOpen
+            ? "Push the selected resources to this storage"
+            : "Choose resources, then push them to this storage")}
+        aria-label={workspacePushReviewOpen
+          ? `Push selected resources to ${workspaceStorage.name || "storage"}`
+          : `Push to ${workspaceStorage.name || "storage"}`}
+        aria-expanded={workspacePushReviewOpen}
+      >
+        <Icon
+          key={workspacePushProgress ? "push-progress" : "push-idle"}
+          name={workspacePushProgress ? "refresh" : "upload"}
+          size={14}
+          className={workspacePushProgress ? "icon-spin" : undefined}
+        />
+        {workspacePushReadout
+          ? <span className="sync-btn-readout">{workspacePushReadout}</span>
+          : projectPushActionLabel({ preparing: workspacePushPreparing, publishing: workspacePushPublishing })}
+      </button>
+    </div>
+  ) : null;
+
   return (
+    <>
+    {workspaceProject && (
+      <SyncPathBar
+        crumbs={pathCrumbs}
+        overflow={pathOverflow}
+        overflowLabel="Project and storage actions"
+        overflowDisabled={workspaceControlsLocked}
+        actions={pathActions}
+        windowActions={windowActions}
+        ariaLabel={`${projectLabel(workspaceProject)} path`}
+      />
+    )}
     <main ref={workspaceScrollRef} className={`sync-main sync-project-links-page${workspaceProject ? " sync-project-workspace-page sync-project-combined-page" : ""}${newProjectSetup ? " sync-project-setup-page" : ""}${inlineStorageReview ? " sync-sync-review-page" : ""}`}>
       <section
-        className="profile-links-section"
+        className={`profile-links-section sync-project-overview${sessionDetailSubview ? " session-detail-hidden" : ""}`}
+        hidden={sessionDetailSubview != null}
+        inert={sessionDetailSubview != null}
+        aria-hidden={sessionDetailSubview ? true : undefined}
         aria-label={newProjectSetup
           ? "Project setup"
           : workspaceProject
@@ -806,131 +1502,92 @@ export default function ProjectLinksWorkspace({
             : undefined}
         aria-labelledby={newProjectSetup || workspaceProject ? undefined : "project-links-heading"}
       >
-        {!newProjectSetup && (
+        {!newProjectSetup && !workspaceProject && (
           <div className="profile-links-heading sync-combined-project-heading">
             <div className="profile-links-copy">
-              {workspaceProject ? (
-                <div className="sync-project-heading-identity">
-                  {renamingProjectId === workspaceProject.local_project_id ? (
-                    <form
-                      className="sync-project-heading-rename"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        void saveProjectName();
-                      }}
-                    >
-                      <input
-                        value={projectAliasDraft}
-                        onChange={(event) => setProjectAliasDraft(event.target.value)}
-                        aria-label="Project display name"
-                        disabled={busy}
-                        autoFocus
-                      />
-                      <button type="submit" className="btn btn-primary" disabled={busy || !projectNameChanged}>
-                        {runningAction === `rename:${workspaceProject.local_project_id}` ? "Saving…" : "Save"}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        disabled={busy}
-                        onClick={() => {
-                          setProjectAliasDraft(workspaceProject.local_alias ?? workspaceProject.display_name);
-                          setRenamingProjectId(null);
-                        }}
-                      >
-                        Cancel
-                      </button>
-                      {workspaceProject.local_alias && (
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          disabled={busy}
-                          onClick={() => void run(
-                            `rename:${workspaceProject.local_project_id}`,
-                            async () => {
-                              const saved = await onRenameProject(workspaceProject.local_project_id, null);
-                              if (!saved) return;
-                              setProjectAliasDraft(workspaceProject.display_name);
-                              setRenamingProjectId(null);
-                            },
-                          )}
-                        >
-                          Use repo name
-                        </button>
-                      )}
-                    </form>
-                  ) : (
-                    <div className="sync-project-heading-name">
-                      <h1>{projectLabel(workspaceProject)}</h1>
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        aria-label="Rename project"
-                        title="Rename project"
-                        disabled={busy}
-                        onClick={() => {
-                          setProjectAliasDraft(workspaceProject.local_alias ?? workspaceProject.display_name);
-                          setRenamingProjectId(workspaceProject.local_project_id);
-                        }}
-                      >
-                        <Icon name="edit" size={13} />
-                      </button>
-                    </div>
-                  )}
-                  <div className="sync-project-heading-meta">
-                    {workspaceProject.local_alias && (
-                      <span
-                        className="sync-project-heading-meta-item sync-project-heading-repository"
-                        title={`Repository: ${workspaceProject.display_name}`}
-                        aria-label={`Repository ${workspaceProject.display_name}`}
-                      >
-                        <Icon name={workspaceProject.is_git_repository ? "git-folder" : "folder"} size={12} />
-                        <span>{workspaceProject.display_name}</span>
-                      </span>
-                    )}
-                    <span
-                      className="sync-project-heading-meta-item sync-project-heading-path"
-                      title={workspaceProject.project_root ?? undefined}
-                      aria-label={`Project folder ${workspaceProject.project_root ?? "not configured"}`}
-                    >
-                      <Icon name="folder" size={12} />
-                      <span>{compactProjectPath(workspaceProject.project_root)}</span>
-                    </span>
-                    <span
-                      className={`sync-project-heading-meta-item sync-project-heading-agent${workspaceProfileReady ? "" : " warning"}`}
-                      title={workspaceProfileTitle}
-                    >
-                      <Icon name="terminal" size={12} />
-                      <span>{workspaceProfileLabel}</span>
-                    </span>
-                  </div>
-                  {renamingProjectId === workspaceProject.local_project_id && error && (
-                    <div className="sync-project-heading-error"><Icon name="alert-triangle" size={13} /> {error}</div>
-                  )}
-                </div>
-              ) : (
-                <>
-                  <h1 id="project-links-heading" className="settings-section-title">Project links</h1>
-                  <div className="profile-links-subtitle">Choose where each project repo syncs.</div>
-                </>
-              )}
+              <h1 id="project-links-heading" className="settings-section-title">Project links</h1>
+              <div className="profile-links-subtitle">Choose where each project repo syncs.</div>
             </div>
-            {!workspaceProject && (
-              <div className="profile-links-heading-actions">
-                <div className="profile-links-counts">
-                  {projects.length} projects <span>·</span> {storages.length} storage <span>·</span> {links.length} links
-                </div>
-                <div className="profile-links-primary-actions">
-                  <button type="button" className="btn profile-refresh-linkage" onClick={onRefresh} disabled={loading || busy}>
-                    <Icon name="refresh" size={16} className={loading ? "icon-spin" : undefined} />
-                    {loading ? "Refreshing…" : "Refresh"}
-                  </button>
-                  <button type="button" className="btn profile-add-profile" onClick={onAddProject} disabled={busy}>
-                    <Icon name="plus" size={16} /> Add project
-                  </button>
-                </div>
+            <div className="profile-links-heading-actions">
+              <div className="profile-links-counts">
+                {projects.length} projects <span>·</span> {storages.length} storage <span>·</span> {links.length} links
+              </div>
+              <div className="profile-links-primary-actions">
+                <button type="button" className="btn profile-refresh-linkage" onClick={onRefresh} disabled={loading || busy}>
+                  <Icon name="refresh" size={16} className={loading ? "icon-spin" : undefined} />
+                  {loading ? "Refreshing…" : "Refresh"}
+                </button>
+                <button type="button" className="btn profile-add-profile" onClick={onAddProject} disabled={busy}>
+                  <Icon name="plus" size={16} /> Add project
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Renaming is a once-in-a-project act, so it opens from the path bar's
+            ··· menu as a row under the trail rather than living in the header. */}
+        {workspaceProject && renamingProjectId === workspaceProject.local_project_id && (
+          <form
+            className="sync-path-rename"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveProjectName();
+            }}
+          >
+            <label htmlFor="sync-path-rename-input">Project name</label>
+            <input
+              id="sync-path-rename-input"
+              value={projectAliasDraft}
+              onChange={(event) => setProjectAliasDraft(event.target.value)}
+              aria-label="Project display name"
+              disabled={busy}
+              autoFocus
+            />
+            <button type="submit" className="btn btn-primary" disabled={busy || !projectNameChanged}>
+              {runningAction === `rename:${workspaceProject.local_project_id}` ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              onClick={() => {
+                setProjectAliasDraft(workspaceProject.local_alias ?? workspaceProject.display_name);
+                setRenamingProjectId(null);
+              }}
+            >
+              Cancel
+            </button>
+            {workspaceProject.local_alias && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy}
+                onClick={() => void run(
+                  `rename:${workspaceProject.local_project_id}`,
+                  async () => {
+                    const saved = await onRenameProject(workspaceProject.local_project_id, null);
+                    if (!saved) return;
+                    setProjectAliasDraft(workspaceProject.display_name);
+                    setRenamingProjectId(null);
+                  },
+                )}
+              >
+                Use repo name
+              </button>
+            )}
+            {error && (
+              <div className="sync-path-rename-error" role="alert">
+                <Icon name="alert-triangle" size={13} /> {error}
               </div>
             )}
+          </form>
+        )}
+
+        {agentCopyStatus && (
+          <div className="sync-callout" role="status">
+            <Icon name="check-circle" size={14} />
+            <span>{agentCopyStatus}</span>
           </div>
         )}
 
@@ -954,59 +1611,32 @@ export default function ProjectLinksWorkspace({
               const selectedStorage = linkedStorages.find((storage) => (
                 project.local_project_id === activeProjectId && storage.id === activeStorageId
               )) ?? linkedStorages[0] ?? null;
-              const storagePickerOpen = storagePickerProjectId === project.local_project_id;
               const availableStorages = storages.filter((storage) => (
                 !projectLinks.some((link) => link.storage_id === storage.id)
               ));
               const projectBinding = bindingByProject.get(project.local_project_id);
               const bindingActive = projectBinding?.state === "active";
-              const configuredProviders = PROJECT_PROVIDERS.filter((provider) => (
-                projectBinding?.profile_ids?.[provider]
-              ));
-              const hasMultipleProviders = configuredProviders.length > 1;
-              const projectProvider = configuredProjectProvider(projectBinding?.profile_ids);
-              const projectProfileId = projectProvider
-                ? projectBinding?.profile_ids?.[projectProvider]
-                : null;
-              const projectProfile = profiles.find((candidate) => candidate.profile_id === projectProfileId);
-              const profilesReadable = !hasMultipleProviders
-                && !!projectProfile?.available
-                && projectProfile.readable;
-              const profilesWritable = profilesReadable && !!projectProfile?.writable;
-              const canSync = bindingActive && profilesReadable;
-              const canRestore = bindingActive && profilesWritable;
-              const codexConfigured = bindingActive && projectProvider === "codex" && !hasMultipleProviders;
+              const projectProfiles = Object.entries(projectBinding?.profile_ids ?? {}).map(
+                ([provider, profileId]) => ({
+                  provider,
+                  profile: profiles.find((candidate) => candidate.profile_id === profileId),
+                }),
+              );
+              // Codex conversation-path repair is provider-specific
+              // maintenance; it appears exactly when a Codex profile is bound.
+              const codexProfile = projectProfiles.find(({ provider }) => provider === "codex")?.profile;
+              const codexConfigured = bindingActive && !!codexProfile;
               const conversationPathAudit = conversationPathAudits[project.local_project_id];
               const conversationPathAuditError = conversationPathAuditErrors[project.local_project_id];
               const conversationPathNoticeBlocked = !!conversationPathAuditError
                 || !!conversationPathAudit?.blockers.length;
-              const conversationPathBlocked = conversationPathsBlockSync(
-                codexConfigured,
-                conversationPathAudit,
-                conversationPathAuditError,
-                conversationPathAuditLoading,
-              );
-              const conversationPathTitle = codexConfigured
-                ? conversationPathAuditLoading
-                  ? "Checking Codex conversation paths"
-                  : conversationPathAuditError
-                    ? `Codex conversation paths could not be verified: ${conversationPathAuditError}`
-                    : conversationPathAudit && !conversationPathAudit.ready
-                      ? "Repair Codex conversation paths before Push or Pull"
-                      : null
-                : null;
-              const profileIssue = hasMultipleProviders
-                ? "Choose one project agent before syncing"
-                : bindingActive && !profilesReadable
-                  ? "The selected agent profile is unavailable"
-                  : null;
               const conversationPathNotice = codexConfigured && !conversationPathAuditLoading ? (
                 <ConversationPathRepairNotice
                   audit={conversationPathAudit}
                   auditError={conversationPathAuditError}
                   projectName={projectLabel(project)}
-                  profileName={projectProfile?.display_name ?? "Codex"}
-                  profilePath={projectProfile?.path ?? conversationPathAudit?.profile_path}
+                  profileName={codexProfile?.display_name ?? "Codex"}
+                  profilePath={codexProfile?.path ?? conversationPathAudit?.profile_path}
                   showScope={false}
                   busy={busy || runningAction === `repair-paths:${project.local_project_id}`}
                   onRepair={() => run(
@@ -1027,8 +1657,7 @@ export default function ProjectLinksWorkspace({
                       title="Link storage"
                       aria-label="Link storage"
                       onClick={() => {
-                        setStoragePickerProjectId(null);
-                        setLinkingProjectId((current) => current === project.local_project_id ? null : project.local_project_id);
+                                    setLinkingProjectId((current) => current === project.local_project_id ? null : project.local_project_id);
                       }}
                     >
                       <Icon name="link" size={14} />
@@ -1041,8 +1670,7 @@ export default function ProjectLinksWorkspace({
                     title="Add storage"
                     aria-label="Add storage"
                     onClick={() => {
-                      setStoragePickerProjectId(null);
-                      setLinkingProjectId(null);
+                                setLinkingProjectId(null);
                       onOpenStorageSettings();
                     }}
                   >
@@ -1076,6 +1704,26 @@ export default function ProjectLinksWorkspace({
                 </div>
               );
 
+              // The group is a framed box. Its contents used to be permanent —
+              // the storage card was always there — but the identity and the
+              // buttons moved to the path bar, so on a settled project it can
+              // now hold nothing at all, and an empty frame draws as a rule
+              // above the history.
+              const storageGroupNotice = (conversationPathNoticeBlocked || selectedStorage)
+                && conversationPathNotice;
+              const storageBlockShown = !!selectedStorage
+                && (!!(storageNotice
+                  && storageNotice.projectId === project.local_project_id
+                  && storageNotice.storageId === selectedStorage.id)
+                  || (inlineStorageReview?.projectId === project.local_project_id
+                    && inlineStorageReview.storageId === selectedStorage.id));
+              const storageGroupEmpty = !storageGroupNotice
+                && !!selectedStorage
+                && projectLinks.length > 0
+                && !storageBlockShown
+                && linkingProjectId !== project.local_project_id;
+              if (storageGroupEmpty) return null;
+
               return (
                 <article
                   key={project.local_project_id}
@@ -1086,7 +1734,7 @@ export default function ProjectLinksWorkspace({
                       className="project-profile-group project-storage-group"
                       aria-label={`${projectLabel(project)} storage`}
                     >
-                      {(conversationPathNoticeBlocked || selectedStorage) && conversationPathNotice}
+                      {storageGroupNotice}
 
                       {!selectedStorage && storageHeading}
                     {projectLinks.length === 0 && <div className="profile-link-no-storage">No storage linked yet.</div>}
@@ -1098,409 +1746,30 @@ export default function ProjectLinksWorkspace({
                         && inlineStorageReview.storageId === storage.id;
                       const actionPrefix = `${project.local_project_id}:${storage.id}`;
                       const reviewPanelId = `storage-review-${actionPrefix.replace(/[^a-z0-9_-]/gi, "-")}`;
-                      const activeReviewKind = reviewOpen ? inlineStorageReview?.kind ?? null : null;
-                      const pushReviewOpen = reviewOpen && inlineStorageReview?.kind === "push";
-                      const pullReviewOpen = reviewOpen && inlineStorageReview?.kind === "pull";
-                      const pushPreparing = runningAction === `push:${actionPrefix}`;
-                      const pushPublishing = pushReviewOpen && busy;
-                      const pullPreparing = runningAction === `pull:${actionPrefix}`;
-                      const pullApplying = pullReviewOpen && busy;
-                      const pullLabel = projectPullActionLabel({
-                        preparing: pullPreparing,
-                        applying: pullApplying,
-                      });
-                      const pullProgress = pullPreparing || pullApplying;
-                      const pullPlanReadout = pullPreparing && fetchProgress?.phase === "plan"
-                        ? `${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`
-                        : null;
-                      const linkedStorageLabel = `${projectLinks.length} linked`;
-                      const storageActionsOpen = storageActionsProjectId === project.local_project_id;
-                      const storageActionsMenuId = `storage-actions-${actionPrefix.replace(/[^a-z0-9_-]/gi, "-")}`;
-                      const pushLabel = projectPushActionLabel({
-                        preparing: pushPreparing,
-                        publishing: pushPublishing,
-                      });
-                      const pushProgress = pushPreparing || pushPublishing;
-                      const pushUploadReadout = pushPublishing && fetchProgress?.phase === "push"
-                        ? `${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`
-                        : null;
-                      const storageControlsLocked = busy
-                        || !!runningAction
-                        || storageActionLockedForReview(activeReviewKind, "storage");
-                      const focusStorageOption = (position: "first" | "last") => {
-                        window.requestAnimationFrame(() => {
-                          const options = Array.from(storagePickerMenuRef.current?.querySelectorAll<HTMLButtonElement>(
-                            '[role="menuitem"]',
-                          ) ?? []);
-                          if (options.length === 0) return;
-                          if (position === "first") options[0]?.focus();
-                          else options[options.length - 1]?.focus();
-                        });
-                      };
-                      const focusStorageAction = (position: "first" | "last") => {
-                        window.requestAnimationFrame(() => {
-                          const options = Array.from(storageActionsMenuRef.current?.querySelectorAll<HTMLButtonElement>(
-                            '[role="menuitem"]',
-                          ) ?? []).filter((option) => !option.disabled);
-                          if (position === "first") options[0]?.focus();
-                          else options[options.length - 1]?.focus();
-                        });
-                      };
                       const activeNotice = storageNotice
                         && storageNotice.projectId === project.local_project_id
                         && storageNotice.storageId === storage.id
                         ? storageNotice
                         : null;
                       const noticeActionsDisabled = busy || !!runningAction;
-                      const storageIdentityCopy = (
-                        <span className="storage-link-copy">
-                          <strong>{storage.name || "(unnamed)"}</strong>
-                          <span className="storage-link-meta">
-                            <span className={storageSubtitleIsPath(storage) ? "is-path" : undefined} title={storageSubtitle(storage)}>{storageSubtitle(storage)}</span>
-                            <small>· {linkedStorageLabel}</small>
-                          </span>
-                        </span>
-                      );
+                      // The card used to be the storage's identity and its two
+                      // buttons; both live in the path bar now, so what is left
+                      // is a container for banners and the open review. With
+                      // neither it has nothing to frame, and an empty frame
+                      // reads as a gap above the history.
+                      if (!activeNotice && !reviewOpen) return null;
 
                       return (
                         <div
                           key={storage.id}
-                          className={`storage-link-block selected${reviewOpen ? " sync-review-open" : ""}${storagePickerOpen ? " storage-picker-open" : ""}${storageActionsOpen ? " storage-actions-open" : ""}`}
+                          className={`storage-link-block selected${reviewOpen ? " sync-review-open" : ""}`}
                           aria-busy={reviewOpen && busy}
                         >
-                          <div className="storage-link-row">
-                            <div className="storage-link-storage-section">
-                              <div ref={storagePickerRef} className="storage-link-main">
-                                {linkedStorages.length > 1 ? (
-                                  <button
-                                    ref={storagePickerTriggerRef}
-                                    type="button"
-                                    className={`storage-link-identity storage-link-switcher${storagePickerOpen ? " open" : ""}`}
-                                    disabled={storageControlsLocked}
-                                    aria-haspopup="menu"
-                                    aria-expanded={storagePickerOpen}
-                                    aria-controls={`storage-picker-${project.local_project_id}`}
-                                    title="Choose the storage used to compare, pull, and push"
-                                    onClick={() => {
-                                      setStorageActionsProjectId(null);
-                                      setLinkingProjectId(null);
-                                      setStoragePickerProjectId((current) => (
-                                        current === project.local_project_id ? null : project.local_project_id
-                                      ));
-                                    }}
-                                    onKeyDown={(event) => {
-                                      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-                                      event.preventDefault();
-                                      setStorageActionsProjectId(null);
-                                      setStoragePickerProjectId(project.local_project_id);
-                                      focusStorageOption(event.key === "ArrowDown" ? "first" : "last");
-                                    }}
-                                    aria-label={`Active storage: ${storage.name || "unnamed"}. Choose another storage`}
-                                  >
-                                    <span className="storage-link-icon" aria-hidden="true">
-                                      <Icon name={storage.kind === "local" ? "drive" : "cloud"} size={23} />
-                                    </span>
-                                    {storageIdentityCopy}
-                                    <span className="storage-link-switcher-affordance" aria-hidden="true">
-                                      <Icon name="chevron-down" size={13} />
-                                    </span>
-                                  </button>
-                                ) : (
-                                  <div className="storage-link-identity">
-                                    <span className="storage-link-icon">
-                                      <Icon name={storage.kind === "local" ? "drive" : "cloud"} size={23} />
-                                    </span>
-                                    {storageIdentityCopy}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-
-                            <div className="storage-link-actions">
-                              <div
-                                ref={storageActionsRef}
-                                className={`storage-link-overflow${storageActionsOpen ? " open" : ""}`}
-                              >
-                                <button
-                                  ref={storageActionsTriggerRef}
-                                  type="button"
-                                  className="storage-link-more"
-                                  disabled={storageControlsLocked}
-                                  aria-haspopup="menu"
-                                  aria-expanded={storageActionsOpen}
-                                  aria-controls={storageActionsMenuId}
-                                  title="Storage actions"
-                                  aria-label="Storage actions"
-                                  onClick={() => {
-                                    setStoragePickerProjectId(null);
-                                    setLinkingProjectId(null);
-                                    setStorageActionsProjectId((current) => (
-                                      current === project.local_project_id ? null : project.local_project_id
-                                    ));
-                                  }}
-                                  onKeyDown={(event) => {
-                                    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-                                    event.preventDefault();
-                                    setStoragePickerProjectId(null);
-                                    setLinkingProjectId(null);
-                                    setStorageActionsProjectId(project.local_project_id);
-                                    focusStorageAction(event.key === "ArrowDown" ? "first" : "last");
-                                  }}
-                                >
-                                  <Icon name="more" size={16} />
-                                </button>
-                                <div
-                                  ref={storageActionsMenuRef}
-                                  id={storageActionsMenuId}
-                                  className="storage-link-actions-menu"
-                                  role="menu"
-                                  aria-label={`Actions for ${storage.name || "storage"}`}
-                                  hidden={!storageActionsOpen}
-                                  onKeyDown={(event) => {
-                                    const options = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>(
-                                      '[role="menuitem"]:not(:disabled)',
-                                    ));
-                                    if (options.length === 0) return;
-                                    const currentIndex = options.indexOf(document.activeElement as HTMLButtonElement);
-                                    let nextIndex: number | null = null;
-                                    if (event.key === "ArrowDown") {
-                                      nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % options.length;
-                                    }
-                                    if (event.key === "ArrowUp") {
-                                      nextIndex = currentIndex < 0
-                                        ? options.length - 1
-                                        : (currentIndex - 1 + options.length) % options.length;
-                                    }
-                                    if (event.key === "Home") nextIndex = 0;
-                                    if (event.key === "End") nextIndex = options.length - 1;
-                                    if (nextIndex === null) return;
-                                    event.preventDefault();
-                                    options[nextIndex]?.focus();
-                                  }}
-                                >
-                                  {availableStorages.length > 0 && (
-                                    <button
-                                      type="button"
-                                      role="menuitem"
-                                      className="storage-link-actions-menu-item"
-                                      disabled={storageControlsLocked}
-                                      onClick={() => {
-                                        setStorageActionsProjectId(null);
-                                        setStoragePickerProjectId(null);
-                                        setLinkingProjectId(project.local_project_id);
-                                      }}
-                                    >
-                                      <Icon name="link" size={14} />
-                                      <span>Link storage</span>
-                                    </button>
-                                  )}
-                                  <button
-                                    type="button"
-                                    role="menuitem"
-                                    className="storage-link-actions-menu-item"
-                                    disabled={storageControlsLocked}
-                                    onClick={() => {
-                                      setStorageActionsProjectId(null);
-                                      setStoragePickerProjectId(null);
-                                      setLinkingProjectId(null);
-                                      onOpenStorageSettings();
-                                    }}
-                                  >
-                                    <Icon name="plus" size={14} />
-                                    <span>Add storage</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    role="menuitem"
-                                    className="storage-link-actions-menu-item"
-                                    disabled={storageControlsLocked}
-                                    onClick={() => {
-                                      setStorageActionsProjectId(null);
-                                      void openStorageEditorWithSettings(storage);
-                                    }}
-                                  >
-                                    <Icon name="settings" size={14} />
-                                    <span>Storage settings</span>
-                                  </button>
-                                  <div className="storage-link-actions-menu-separator" role="separator" />
-                                  <button
-                                    type="button"
-                                    role="menuitem"
-                                    className="storage-link-actions-menu-item danger"
-                                    disabled={storageControlsLocked}
-                                    onClick={() => {
-                                      setStorageActionsProjectId(null);
-                                      void run(
-                                        `unlink:${actionPrefix}`,
-                                        () => onUnlinkStorage(project.local_project_id, storage.id),
-                                      );
-                                    }}
-                                  >
-                                    <Icon name="x" size={14} />
-                                    <span>Unlink storage</span>
-                                  </button>
-                                </div>
-                              </div>
-
-                              <span className="storage-link-actions-divider" aria-hidden="true" />
-
-                              <div className="storage-link-action-group" role="group" aria-label="Sync actions">
-                                <button
-                                  type="button"
-                                  className={`storage-link-sync storage-link-sync-secondary${pullReviewOpen ? " active" : ""}`}
-                                  disabled={busy
-                                    || !!runningAction
-                                    || conversationPathBlocked
-                                    || (bindingActive && !canRestore)
-                                    || storageActionLockedForReview(activeReviewKind, "pull")
-                                    || (pullReviewOpen && inlineStorageReview?.continueDisabled)}
-                                  onClick={() => {
-                                    if (pullReviewOpen) {
-                                      // The card button IS the review's primary: it applies
-                                      // the current selection — an empty one included, which
-                                      // is how a revision-only change is acknowledged.
-                                      inlineStorageReview?.onContinue?.();
-                                      return;
-                                    }
-                                    setStoragePickerProjectId(null);
-                                    setStorageActionsProjectId(null);
-                                    setLinkingProjectId(null);
-                                    void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.id));
-                                  }}
-                                  title={conversationPathTitle
-                                    ?? profileIssue
-                                    ?? (!bindingActive
-                                      ? "Confirm project setup before pulling"
-                                      : pullReviewOpen
-                                      ? (inlineStorageReview?.continueTitle
-                                        ?? "Pull the selected changes from this storage")
-                                      : !profilesWritable
-                                        ? "The selected agent profile is read only"
-                                        : "Review the Pull actions before applying them")}
-                                  aria-label={!bindingActive
-                                    ? "Set up project before Pull"
-                                    : pullReviewOpen
-                                    ? `Pull selected changes from ${storage.name || "storage"}`
-                                    : `Pull from ${storage.name || "storage"}`}
-                                  aria-expanded={pullReviewOpen}
-                                  aria-controls={pullReviewOpen ? reviewPanelId : undefined}
-                                >
-                                  <Icon
-                                    key={pullProgress ? "pull-progress" : "pull-idle"}
-                                    name={pullProgress ? "refresh" : "download"}
-                                    size={15}
-                                    className={pullProgress ? "icon-spin" : undefined}
-                                  />
-                                  {/* The card says what the button does, never
-                                      which screen it lands on; setup prompts and
-                                      review focus live in the title and label. */}
-                                  {pullPlanReadout ? <span className="sync-btn-readout">{pullPlanReadout}</span> : pullLabel}
-                                </button>
-                                <button
-                                  type="button"
-                                  className={`storage-link-sync storage-link-sync-commit${pushReviewOpen ? " active" : ""}`}
-                                  disabled={busy
-                                    || !!runningAction
-                                    || conversationPathBlocked
-                                    || !canSync
-                                    || storageActionLockedForReview(activeReviewKind, "push")
-                                    || (pushReviewOpen && inlineStorageReview?.continueDisabled)}
-                                  onClick={() => {
-                                    if (pushReviewOpen) {
-                                      inlineStorageReview?.onContinue?.();
-                                      return;
-                                    }
-                                    setStoragePickerProjectId(null);
-                                    setStorageActionsProjectId(null);
-                                    setLinkingProjectId(null);
-                                    void run(`push:${actionPrefix}`, () => onPush(project.local_project_id, storage.id));
-                                  }}
-                                  title={conversationPathTitle
-                                    ?? profileIssue
-                                    ?? (pushReviewOpen
-                                      ? "Push the selected resources to this storage"
-                                      : "Choose resources, then push them to this storage")}
-                                  aria-label={pushReviewOpen
-                                    ? `Push selected resources to ${storage.name || "storage"}`
-                                    : `Push to ${storage.name || "storage"}`}
-                                  aria-expanded={pushReviewOpen}
-                                  aria-controls={pushReviewOpen ? reviewPanelId : undefined}
-                                >
-                                  <Icon
-                                    key={pushProgress ? "push-progress" : "push-idle"}
-                                    name={pushProgress ? "refresh" : "upload"}
-                                    size={15}
-                                    className={pushProgress ? "icon-spin" : undefined}
-                                  />
-                                  {pushUploadReadout ? <span className="sync-btn-readout">{pushUploadReadout}</span> : pushLabel}
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-
-                          {linkedStorages.length > 1 && (
-                            <div
-                              ref={storagePickerMenuRef}
-                              id={`storage-picker-${project.local_project_id}`}
-                              className="storage-link-menu"
-                              role="menu"
-                              aria-label="Switch storage"
-                              hidden={!storagePickerOpen}
-                              onKeyDown={(event) => {
-                                const options = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>(
-                                  '[role="menuitem"]',
-                                ));
-                                if (options.length === 0) return;
-                                const currentIndex = options.indexOf(document.activeElement as HTMLButtonElement);
-                                let nextIndex: number | null = null;
-                                if (event.key === "ArrowDown") {
-                                  nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % options.length;
-                                }
-                                if (event.key === "ArrowUp") {
-                                  nextIndex = currentIndex < 0
-                                    ? options.length - 1
-                                    : (currentIndex - 1 + options.length) % options.length;
-                                }
-                                if (event.key === "Home") nextIndex = 0;
-                                if (event.key === "End") nextIndex = options.length - 1;
-                                if (nextIndex === null) return;
-                                event.preventDefault();
-                                options[nextIndex]?.focus();
-                              }}
-                            >
-                              {linkedStorages.filter((linkedStorage) => linkedStorage.id !== storage.id).map((linkedStorage) => (
-                                <button
-                                  key={linkedStorage.id}
-                                  type="button"
-                                  role="menuitem"
-                                  className="storage-link-menu-option"
-                                  disabled={storageControlsLocked}
-                                  aria-label={`Switch to ${linkedStorage.name || "unnamed storage"}`}
-                                  onClick={() => {
-                                    setStoragePickerProjectId(null);
-                                    if (reviewOpen) inlineStorageReview?.onClose();
-                                    void onSelectStorage(project.local_project_id, linkedStorage.id);
-                                    window.requestAnimationFrame(() => storagePickerTriggerRef.current?.focus());
-                                  }}
-                                >
-                                  <span className="storage-link-menu-icon" aria-hidden="true">
-                                    <Icon name={linkedStorage.kind === "local" ? "drive" : "cloud"} size={20} />
-                                  </span>
-                                  <span className="storage-link-menu-copy">
-                                    <strong>{linkedStorage.name || "(unnamed)"}</strong>
-                                    <span className={storageSubtitleIsPath(linkedStorage) ? "is-path" : undefined} title={storageSubtitle(linkedStorage)}>{storageSubtitle(linkedStorage)}</span>
-                                  </span>
-                                  <Icon className="storage-link-menu-arrow" name="chevron-right" size={13} aria-hidden="true" />
-                                </button>
-                              ))}
-                            </div>
-                          )}
-
                           {activeNotice && activeNotice.kind === "outcome" && (
                             <SyncOutcomeNotice
-                              outcome={activeNotice.outcome}
+                              view={syncOutcomeView(activeNotice.outcome)}
                               busy={noticeActionsDisabled}
-                              onAction={(outcome) => onStorageNoticeAction?.(outcome)}
+                              onAction={() => onStorageNoticeAction?.(activeNotice.outcome)}
                               onDismiss={() => onDismissStorageNotice?.()}
                             />
                           )}
@@ -1648,7 +1917,7 @@ export default function ProjectLinksWorkspace({
 
         {activeProject && !newProjectSetup && !inlineStorageReview && (
           <div id="project-history-panel" className="sync-project-tab-panel">
-            <ProjectChatHistoryPage
+            <ProjectActivityPage
               embedded
               project={activeProject}
               binding={activeBindingByProject.get(activeProject.local_project_id) ?? null}
@@ -1662,11 +1931,32 @@ export default function ProjectLinksWorkspace({
                 );
               } : undefined}
               continuityActionBusy={busy || !!runningAction}
+              onOpenSessionDetail={(request, trigger) => (
+                openSessionDetail(activeProject.local_project_id, request, trigger)
+              )}
             />
           </div>
         )}
       </section>
 
+      {sessionDetailSubview && workspaceProject && (
+        <Suspense fallback={(
+          <section className="session-detail-page session-detail-entry-state" role="status">
+            <span className="status-loader" />
+            <strong>Opening session detail…</strong>
+          </section>
+        )}>
+          <SessionDetailPage
+            localProjectId={sessionDetailSubview.localProjectId}
+            resourceId={sessionDetailSubview.resourceId}
+            occurrenceKey={sessionDetailSubview.occurrenceKey}
+            initialCheckpointId={sessionDetailSubview.initialCheckpointId}
+            onTitleChange={handleSessionTitleChange}
+          />
+        </Suspense>
+      )}
+
     </main>
+    </>
   );
 }

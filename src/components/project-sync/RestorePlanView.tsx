@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   BundleReadiness,
   ConversationPlanAction,
@@ -9,12 +9,11 @@ import type {
   RestoreResult,
 } from "../../types";
 import Icon from "../Icons";
-import ProjectChatHistoryPage from "./ProjectChatHistoryPage";
+import ProjectActivityPage from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
-import SyncReviewTabs, {
-  type SyncReviewStep,
-  syncReviewSteps,
-} from "./SyncReviewTabs";
+import SyncReviewTabs from "../sync-review/SyncReviewTabs";
+import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
+import { type SyncReviewStep, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { providerLabel } from "./model";
 import type { PullApplyPhase, PullReviewSelection } from "./pullReviewFlow";
 import {
@@ -320,7 +319,7 @@ export default function RestorePlanView({
   ));
   // Activity-page fork checkpoints stay on the Activity page; the Pull
   // review drives only the checkpoints its own plan created.
-  const forkCheckpoints = (restoreResult?.codex_fork_checkpoints ?? []).filter(
+  const forkCheckpoints = (restoreResult?.fork_checkpoints ?? []).filter(
     (checkpoint) => checkpoint.origin !== "manual",
   );
   const forkCheckpoint = forkCheckpoints[0] ?? null;
@@ -357,11 +356,10 @@ export default function RestorePlanView({
     if (!reviewSteps.includes(activeStep)) setActiveStep("history");
   }, [activeStep, reviewSteps]);
 
-  // The embedded history renders the storage rows ("Only in …") from its own
-  // async fetches; until it reports ready, the primary must not apply a
-  // selection the user has not seen. The ItemList fallback is synchronous.
-  const embeddedHistoryInUse =
-    conversationItems.length > 0 && Boolean(project) && Boolean(binding.profile_ids.codex);
+  // The embedded Activity review renders the storage rows ("Only in …") from
+  // its own async fetches; until it reports ready, the primary must not apply
+  // a selection the user has not seen. The ItemList fallback is synchronous.
+  const embeddedHistoryInUse = conversationItems.length > 0 && Boolean(project);
   const [reviewListReady, setReviewListReady] = useState(false);
   const failureCount = restoreResult?.failed_actions?.length ?? 0;
   const finalReady = hasResult && !error && failureCount === 0 && readiness?.state === "ready";
@@ -587,61 +585,29 @@ export default function RestorePlanView({
               )}
           </div>
         </div>
-        <div className="sync-push-resource-actions">
-          {/* The recommend button's own count is a property of the plan, not of
-              the selection, so it never moves when a row is ticked. Shown as a
-              bare number beside a tick it read as "5 selected"; the live count
-              below is the one that answers that question. */}
-          <span
-            className="sync-sync-review-selected"
-            style={{ "--review-count-digits": String(pendingStepItems.length).length } as CSSProperties}
-            aria-live="polite"
-            aria-label={`${selectedIn(pendingStepItems)} of ${pendingStepItems.length} selected`}
-            title={`${selectedIn(pendingStepItems)} of ${pendingStepItems.length} selected`}
-          >
-            <b>{selectedIn(pendingStepItems)}</b>/{pendingStepItems.length}
-          </span>
-          <button
-            type="button"
-            className="btn btn-ghost sync-sync-review-icon-action"
-            onClick={useRecommended}
-            disabled={busy || finalReady || pendingStepItems.length === 0 || stepMatchesRecommended}
-            title={`Restore the recommended safe selection (${pendingRecommendedCount})`}
-            aria-label={`Use recommended selection (${pendingRecommendedCount})`}
-          >
-            <Icon name="check-circle" size={15} />
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost sync-sync-review-icon-action"
-            onClick={clearStep}
-            disabled={busy || finalReady || selectedIn(stepItems) === 0}
-            title="Clear current selection"
-            aria-label="Clear current selection"
-          >
-            <Icon name="trash" size={15} />
-          </button>
-          {embedded && (
-            <button
-              type="button"
-              className="btn btn-ghost sync-inline-action-close"
-              onClick={onBack}
-              disabled={busy}
-              aria-label={`Close pull review for ${projectName}`}
-            >
-              <Icon name="x" size={15} />
-            </button>
-          )}
-        </div>
+        {/* The recommend button's own count is a property of the plan, not of
+            the selection, so it never moves when a row is ticked. */}
+        <SyncReviewSelectionBar
+          count={selectedIn(pendingStepItems)}
+          total={pendingStepItems.length}
+          busy={busy}
+          recommendedTitle={`Restore the recommended safe selection (${pendingRecommendedCount})`}
+          recommendedAriaLabel={`Use recommended selection (${pendingRecommendedCount})`}
+          recommendedDisabled={finalReady || pendingStepItems.length === 0 || stepMatchesRecommended}
+          onRecommended={useRecommended}
+          clearDisabled={finalReady || selectedIn(stepItems) === 0}
+          onClear={clearStep}
+          close={embedded
+            ? { ariaLabel: `Close pull review for ${projectName}`, onClose: onBack }
+            : undefined}
+        />
       </header>
 
       <SyncReviewTabs
-        activeStep={activeStep}
-        counts={counts}
-        steps={reviewSteps}
-        warningSteps={warningSteps}
+        tabs={projectReviewTabs(reviewSteps, counts, warningSteps)}
+        activeId={activeStep}
         disabled={busy}
-        onChange={setActiveStep}
+        onChange={(step) => setActiveStep(step as SyncReviewStep)}
       />
 
       <div
@@ -676,8 +642,8 @@ export default function RestorePlanView({
           )}
           {activeStep === "history" && (
             <>
-              {conversationItems.length > 0 && project && binding.profile_ids.codex ? (
-                <ProjectChatHistoryPage
+              {conversationItems.length > 0 && project ? (
+                <ProjectActivityPage
                   embedded
                   project={project}
                   binding={binding}

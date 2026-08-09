@@ -75,7 +75,34 @@ export interface ActivityLogCleanupResult {
 // Project-scoped sync (local state and portable bundles)
 // ---------------------------------------------------------------------------
 
-export type ProjectProvider = "codex" | "claude";
+/**
+ * Validated provider key. Providers are registered adapters, not a closed
+ * union: the frontend renders whatever `list_agent_providers` returns and
+ * never holds a fixed provider array.
+ */
+export type ProviderKey = string;
+
+export type ProviderCapabilityLevel =
+  | "activity_only"
+  | "backup_only"
+  | "resumable"
+  | "resumable_with_conflict_preservation";
+
+export interface ProviderDescriptor {
+  key: ProviderKey;
+  display_name: string;
+  profile_label: string;
+  default_profile_directory?: string | null;
+  setup_default: boolean;
+  capabilities: ProviderCapabilityLevel;
+  adapter_version: number;
+}
+
+export type ProviderAccessState =
+  | "bound_ready"
+  | "bound_unavailable"
+  | "view_only"
+  | "unsupported";
 
 export type ProjectResourceCategory =
   | "conversations"
@@ -95,21 +122,18 @@ export type ProjectResourceState =
   | "ready";
 
 export type ProjectResourceKind =
-  | "codex_conversation"
-  | "claude_conversation"
+  | "conversation"
+  | "provider_state"
   | "project_content_file"
   | "project_content_directory"
-  | "project_memory"
   | "requirement";
-
-export type ProjectResourceScope = "project" | "provider_state" | "requirement";
 export type ProjectApplyPolicy = "safe_file" | "merge" | "explicit_review" | "manual_only" | "never";
 
 export interface ProjectResourceDescriptor {
   resource_id: string;
   kind: ProjectResourceKind;
-  provider?: ProjectProvider | null;
-  scope: ProjectResourceScope;
+  provider?: ProviderKey | null;
+  provider_resource_type?: string | null;
   display_name: string;
   provenance: Record<string, unknown>;
   apply_policy: ProjectApplyPolicy;
@@ -155,20 +179,36 @@ export interface LocalProjectRegistration {
   local_alias?: string | null;
   repository_fingerprint?: string | null;
   recipe: BundleRecipe;
-  recipe_bases: Record<string, {
-    revision: number;
-    manifest_sha256: string;
-    manifest_size: number;
-    commit_id: string;
-    recipe_revision: number;
-    binding_revision?: number | null;
-    last_pull_at?: number | null;
-    last_push_at?: number | null;
-  }>;
   revision: number;
   created_at: number;
   updated_at: number;
 }
+
+export interface RepositoryBase {
+  revision: number;
+  commit_id: string;
+  manifest_sha256: string;
+  manifest_size: number;
+}
+
+/** Machine-local reviewed base for one sync scope ("project" or "provider:<key>"). */
+export interface ScopeBase {
+  scope: string;
+  scope_revision: number;
+  scope_sha256: string;
+  reviewed_in: RepositoryBase;
+  binding_revision: number;
+  last_pull_at?: number | null;
+  last_push_at?: number | null;
+}
+
+export type ScopeContinuity =
+  | { state: "fresh" }
+  | { state: "remote_missing"; base_revision: number }
+  | { state: "unreviewed"; remote_revision: number }
+  | { state: "in_sync"; revision: number }
+  | { state: "advanced"; base_revision: number; remote_revision: number }
+  | { state: "replaced"; base_revision: number; remote_revision: number };
 
 export interface ProjectStorageLink {
   local_project_id: string;
@@ -176,6 +216,8 @@ export interface ProjectStorageLink {
   bundle_id: string;
   /** Last resource selection explicitly published to this storage. */
   recipe?: BundleRecipe | null;
+  /** Per-scope reviewed bases; a viewed scope has no entry. */
+  scope_bases?: Record<string, ScopeBase>;
   /** Destination-local exclusions recorded only after a successful Push. */
   project_content_preferences: ProjectContentPreferences;
   pinned: boolean;
@@ -195,7 +237,7 @@ export interface ProjectBinding {
   bundle_id: string;
   project_root: string;
   canonical_project_root: string;
-  profile_ids: Partial<Record<ProjectProvider, string>>;
+  profile_ids: Record<ProviderKey, string>;
   state: "active" | "detached";
   revision: number;
   updated_at: number;
@@ -237,9 +279,9 @@ export interface LocalProjectSummary {
   repository_fingerprint?: string | null;
   project_root?: string | null;
   canonical_project_root?: string | null;
-  profile_ids?: Partial<Record<ProjectProvider, string>>;
+  profile_ids?: Record<ProviderKey, string>;
   profile_names?: string[];
-  providers?: ProjectProvider[];
+  providers?: ProviderKey[];
   resource_count?: number;
   selected_resource_count?: number;
   linked_storage_ids?: string[];
@@ -314,7 +356,7 @@ export interface ProjectSetupDraft {
   canonical_project_root: string;
   display_name: string;
   repository_fingerprint?: string | null;
-  profiles: Partial<Record<ProjectProvider, DraftProfileSelection>>;
+  profiles: Record<ProviderKey, DraftProfileSelection>;
   storage?: DraftStorageSelection | null;
   repository: DraftRepositoryChoice;
   revision: number;
@@ -357,7 +399,7 @@ export interface SetupDraftInspection {
 
 export interface ProviderProfile {
   profile_id: string;
-  provider: ProjectProvider;
+  provider: ProviderKey;
   display_name: string;
   path: string;
   canonical_path: string;
@@ -375,7 +417,7 @@ export interface ProviderProfileSummary extends ProviderProfile {
 }
 
 export interface ProviderProfileProbe {
-  provider: ProjectProvider;
+  provider: ProviderKey;
   requested_path: string;
   resolved_path: string;
   canonical_path: string;
@@ -410,7 +452,7 @@ export interface ConnectProjectBundleRequest {
 export interface SaveProjectBindingRequest {
   local_project_id: string;
   project_root: string;
-  profile_ids: Partial<Record<ProjectProvider, string>>;
+  profile_ids: Record<ProviderKey, string>;
   expected_revision?: number | null;
 }
 
@@ -470,6 +512,27 @@ export interface SyncConfig {
   storages: StorageConfig[];
   projects: LocalProjectRegistration[];
   links: ProjectStorageLink[];
+}
+
+/** Secret-bearing request sent only across the local Tauri IPC boundary. */
+export interface ConnectR2StorageRequest {
+  name: string;
+  api_url: string;
+  access_key_id: string;
+  secret_access_key: string;
+  expected_config_revision?: number | null;
+}
+
+/** Sanitized result: destination and credential fields are intentionally absent. */
+export interface ConnectStorageResult {
+  storage_id: string;
+  config_revision: number;
+  verified: boolean;
+}
+
+/** Filesystem watcher events contain no credential-bearing config fields. */
+export interface ProjectSyncConfigChangedEvent {
+  revision: number;
 }
 
 export interface StorageConfig {
@@ -585,7 +648,7 @@ export interface RemoteBundleSummary {
   revision?: number;
   updated_at?: number;
   resource_count?: number;
-  providers?: ProjectProvider[];
+  providers?: ProviderKey[];
   repository_fingerprint?: string | null;
 }
 
@@ -623,6 +686,8 @@ export type PushDestinationStatus =
     reason: "remote_without_base" | "binding_changed" | "remote_advanced";
     remote_revision: number;
     base_revision?: number;
+    /** Canonical scope keys that actually block this Push. */
+    blocking_scopes?: string[];
   }
   | {
     state: "unavailable";
@@ -679,7 +744,7 @@ export type RestoreActionKind =
   | { kind: "delete_project_file"; logical_path: string; last_sha256: string }
   | { kind: "delete_project_directory"; logical_path: string }
   | { kind: "merge_file"; logical_path: string }
-  | { kind: "materialize_conversation"; provider: ProjectProvider; logical_path: string }
+  | { kind: "materialize_conversation"; provider: ProviderKey; logical_path: string }
   | { kind: "manual"; message: string };
 
 export interface RestoreAction {
@@ -748,10 +813,21 @@ export interface ConversationDivergencePlan {
   pinned_cloud_title?: string | null;
   desired_fork_name: string;
   desired_original_name?: string | null;
-  codex_executable: string;
-  codex_executable_sha256: string;
-  available_executors: CodexForkExecutor[];
+  execution: DivergenceExecution;
 }
+
+export type DivergenceExecution =
+  | {
+    kind: "codex_native_fork";
+    codex_executable: string;
+    codex_executable_sha256: string;
+    available_executors: CodexForkExecutor[];
+  }
+  | {
+    kind: "adapter_file_fork";
+    fork_provider_thread_id: string;
+    fork_transcript_path: string;
+  };
 
 export interface ConversationPlanAction {
   action_id: string;
@@ -759,7 +835,7 @@ export interface ConversationPlanAction {
   action: ConversationPlanActionType;
   reason_code: ConversationReasonCode;
   relation: ConversationRelation;
-  provider: ProjectProvider;
+  provider: ProviderKey;
   host_id: string;
   replica_id: string;
   local_project_id: string;
@@ -772,6 +848,8 @@ export interface ConversationPlanAction {
   pinned_revision: number;
   pinned_commit_id: string;
   pinned_manifest_sha256: string;
+  pinned_scope_revision: number;
+  pinned_scope_sha256: string;
   pinned_lineage_digest?: string | null;
   pinned_semantic_digest?: string | null;
   expected_local_target: ConversationTargetExpectation;
@@ -834,7 +912,7 @@ export interface RestoreResult {
   reviewed_base_advanced?: boolean;
   applied_action_ids: string[];
   failed_actions: Array<{ action_id: string; display_name?: string | null; message: string }>;
-  codex_fork_checkpoints: CodexForkCheckpoint[];
+  fork_checkpoints: CodexForkCheckpoint[];
   codex_app_refresh?: {
     operation_id: string;
     app_kind: "codex" | "codex_plus_plus";
@@ -842,7 +920,7 @@ export interface RestoreResult {
     state: "restart_available" | "manual_restart";
     message: string;
   } | null;
-  codex_divergences: Array<{
+  divergences: Array<{
     action_id: string;
     original_thread_id: string;
     original_provider_thread_id: string;
@@ -854,7 +932,7 @@ export interface RestoreResult {
     fork_name_status?: ConversationNameStatus | null;
     desired_original_name?: string | null;
     original_name_status?: ConversationNameStatus | null;
-    inventory_refresh_status: CodexInventoryRefreshStatus;
+    inventory_refresh_status?: CodexInventoryRefreshStatus | null;
   }>;
   /** The fork a manual-fork operation created, carried structurally so the
    *  banner can name it without parsing the message sentence back apart. */
@@ -875,7 +953,7 @@ export interface BundleReadinessIssue {
   title: string;
   detail?: string | null;
   severity?: "info" | "warning" | "error" | string;
-  provider?: ProjectProvider | null;
+  provider?: ProviderKey | null;
   resource_id?: string | null;
   action?: string | null;
 }
@@ -887,40 +965,193 @@ export interface BundleReadiness {
   generated_at?: number;
 }
 
-export interface CodexThreadSummary {
-  thread_id: string;
-  working_directory?: string | null;
+// ---------------------------------------------------------------------------
+// Provider-neutral project Activity
+// ---------------------------------------------------------------------------
+
+export type SessionSourceState = "local_only" | "remote_only" | "local_and_remote";
+
+export type SessionActionKind = "open_in_app" | "open_in_terminal" | "fork_session";
+
+export interface SessionActionDescriptor {
+  action_id: string;
+  kind: SessionActionKind;
+  label: string;
+  enabled: boolean;
+  disabled_reason?: string | null;
+}
+
+export interface ProviderActivityState {
+  provider: ProviderKey;
+  display_name: string;
+  access: ProviderAccessState;
+  detail?: string | null;
+}
+
+export interface ProjectSessionSummary {
+  /** Frontend key and selection identity: `<provider>:conversation:<thread>`. */
+  resource_id: string;
+  provider: ProviderKey;
+  provider_display_name: string;
+  provider_session_id?: string | null;
+  logical_thread_id?: string | null;
+  source: SessionSourceState;
+  access: ProviderAccessState;
   title: string;
-  summary: string;
+  summary?: string | null;
   started_at: number;
   ended_at: number;
+  working_directory?: string | null;
+  relative_cwd?: string | null;
   branch?: string | null;
   recorded_sha?: string | null;
-  is_active?: boolean;
+  is_active: boolean;
   user_round_count: number;
   agent_message_count: number;
   tool_call_count: number;
   total_tokens?: number | null;
   metrics_complete: boolean;
+  actions: SessionActionDescriptor[];
 }
 
-export interface CommitThreadReference {
-  thread_id: string;
+export interface CommitSessionReference {
+  resource_id: string;
 }
 
-export type ChatTurnRole = "user" | "assistant";
+export type SessionCountQuality = "exact" | "lower_bound" | "inferred" | "unsupported";
 
-export interface ChatTurnPreview {
+export interface SessionCount {
+  value?: number | null;
+  quality: SessionCountQuality;
+  explanation?: string | null;
+}
+
+export interface SessionEventCounts {
+  prompts: SessionCount;
+  responses: SessionCount;
+  intermediate_steps: SessionCount;
+  checkpoints: SessionCount;
+  tool_calls: SessionCount;
+  file_edits: SessionCount;
+  shell_calls: SessionCount;
+  reads: SessionCount;
+  other_tools: SessionCount;
+}
+
+export type SessionTimelineEventKind =
+  | "prompt"
+  | "response"
+  | "intermediate_step"
+  | "checkpoint"
+  | "tool_call";
+
+export type SessionToolCategory = "file_edit" | "shell" | "read" | "other";
+
+export type SessionToolCallStatus = "completed" | "failed" | "incomplete";
+
+export interface SessionDetailWarning {
+  code: string;
+  message: string;
+}
+
+export interface SessionDetailCapabilities {
+  intermediate_steps: boolean;
+  checkpoints: boolean;
+  tool_calls: boolean;
+  event_detail: boolean;
+}
+
+export interface SessionCheckpointJump {
+  event_id: string;
+  checkpoint: SessionCheckpoint;
+}
+
+export interface SessionCheckpoint {
+  sha: string;
+  short_sha: string;
+  subject: string;
+  committed_at: number;
+  branch: string;
+}
+
+export interface ProjectSessionDetail {
+  resource_id: string;
+  provider: ProviderKey;
+  provider_display_name: string;
+  provider_session_id: string;
+  title: string;
+  summary?: string | null;
+  started_at?: number | null;
+  ended_at?: number | null;
+  is_active: boolean;
+  branch?: string | null;
+  recorded_sha?: string | null;
+  tokens: SessionCount;
+  event_counts: SessionEventCounts;
+  capabilities: SessionDetailCapabilities;
+  actions: SessionActionDescriptor[];
+  checkpoint_jumps: SessionCheckpointJump[];
+  snapshot_id: string;
+  warnings: SessionDetailWarning[];
+}
+
+export interface SessionToolCallPreview {
+  provider_call_id: string;
+  native_name: string;
+  category: SessionToolCategory;
+  status: SessionToolCallStatus;
+  summary: string;
+  argument_preview?: string | null;
+  argument_truncated: boolean;
+  result_preview?: string | null;
+  result_truncated: boolean;
+  affected_paths: string[];
+}
+
+export interface SessionTurnToolSummary {
+  turn_id: string;
+  tool_calls: SessionCount;
+}
+
+export interface SessionTimelineEvent {
+  event_id: string;
   ordinal: number;
-  role: ChatTurnRole;
   timestamp?: number | null;
-  preview: string;
+  kind: SessionTimelineEventKind;
+  quality: SessionCountQuality;
+  turn_id?: string | null;
+  turn_tool_summary?: SessionTurnToolSummary | null;
+  parent_event_id?: string | null;
+  text?: string | null;
+  tool?: SessionToolCallPreview | null;
+  checkpoint?: SessionCheckpoint | null;
 }
 
-export interface CodexThreadDetailsPage {
-  thread_id: string;
-  turns: ChatTurnPreview[];
-  next_cursor?: number | null;
+export interface ProjectSessionTimelinePage {
+  resource_id: string;
+  snapshot_id: string;
+  events: SessionTimelineEvent[];
+  next_cursor?: string | null;
+  warnings: SessionDetailWarning[];
+}
+
+export interface SessionEventDetail {
+  event_id: string;
+  arguments?: string | null;
+  arguments_truncated: boolean;
+  result?: string | null;
+  result_truncated: boolean;
+  affected_paths: string[];
+}
+
+export interface ProjectSessionTimelineQuery {
+  snapshot_id: string;
+  cursor?: string | null;
+  anchor_event_id?: string | null;
+  limit: number;
+  included_event_kinds: SessionTimelineEventKind[];
+  included_tool_categories: SessionToolCategory[];
+  turn_id?: string | null;
 }
 
 export interface StorageSyncSummary {
@@ -995,6 +1226,9 @@ export interface ThreadSyncDecision {
 }
 
 export interface ThreadSyncEntry {
+  provider: ProviderKey;
+  provider_display_name: string;
+  access: ProviderAccessState;
   thread_id: string;
   resource_id: string;
   display_name: string;
@@ -1031,6 +1265,16 @@ export interface ThreadSyncCounts {
   unknown: number;
 }
 
+/** One sync scope's continuity row in Push/Pull review. */
+export interface ScopeSyncRow {
+  scope: string;
+  provider?: ProviderKey | null;
+  access: ProviderAccessState;
+  remote_revision?: number | null;
+  base_revision?: number | null;
+  continuity: ScopeContinuity;
+}
+
 export interface ThreadSyncComparison {
   project_id: string;
   storage_id: string;
@@ -1040,6 +1284,8 @@ export interface ThreadSyncComparison {
   compared_at: number;
   entries: ThreadSyncEntry[];
   counts: ThreadSyncCounts;
+  scopes: ScopeSyncRow[];
+  provider_errors: Record<ProviderKey, string>;
   warnings: string[];
   remote_continuity: RemoteContinuity;
 }
@@ -1049,7 +1295,7 @@ export interface GitCommitSummary {
   short_sha: string;
   committed_at: number;
   subject: string;
-  thread_refs: CommitThreadReference[];
+  session_refs: CommitSessionReference[];
 }
 
 export interface GitBranchSummary {
@@ -1064,20 +1310,20 @@ export interface GitHistoryPage {
   commits: GitCommitSummary[];
   github_repository_url?: string | null;
   next_cursor?: string | null;
-  unique_thread_count: number;
+  unique_session_count: number;
 }
 
-export interface UnmappedThreadReference {
-  thread_id: string;
+export interface UnmappedSessionReference {
+  resource_id: string;
   reason: string;
 }
 
-export interface ProjectChatHistory {
+export interface ProjectActivity {
   project_id: string;
-  codex_home: string;
-  threads: CodexThreadSummary[];
+  sessions: ProjectSessionSummary[];
   git?: GitHistoryPage | null;
-  unmapped: UnmappedThreadReference[];
+  unmapped: UnmappedSessionReference[];
+  providers: ProviderActivityState[];
   warnings: string[];
   window_start: number;
   window_end: number;

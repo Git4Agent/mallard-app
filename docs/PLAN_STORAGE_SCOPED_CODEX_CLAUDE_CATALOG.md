@@ -1,15 +1,17 @@
 # Implementation plan: Storage-scoped Codex and Claude catalog
 
-**Status:** proposed
+**Status:** historical; superseded by
+[`PLAN_DRAFT_LINKED_CATALOG_RESOURCES.md`](./PLAN_DRAFT_LINKED_CATALOG_RESOURCES.md)
 
 **Date:** 2026-08-07
 
 **Scope:** Codex and Claude skills/plugins, plus Codex v1 and v2 pets
 
-**Design:** [`DESIGN_STORAGE_SCOPED_CODEX_CLAUDE_CATALOG.md`](./DESIGN_STORAGE_SCOPED_CODEX_CLAUDE_CATALOG.md)
+**Historical design:**
+[`DESIGN_STORAGE_SCOPED_CODEX_CLAUDE_CATALOG.md`](./DESIGN_STORAGE_SCOPED_CODEX_CLAUDE_CATALOG.md)
 
-This plan is self-contained. It does not require another capability, catalog,
-repository-sync, or compatibility plan to define implementation behavior.
+This content is retained as design history only. Do not implement it or use it
+to fill gaps in the current draft-linked plan.
 
 ## 1. Delivery gate
 
@@ -141,6 +143,24 @@ files. Every listed production module must own behavior used by a registered
 command or rendered route. Combine adjacent modules when a boundary would
 otherwise be a pass-through, and update this plan to match; do not leave empty
 `mod.rs` exports, future-provider stubs, or one-line forwarding layers.
+
+**Realized layout.** The delivered tree maps this plan onto the current
+Cargo workspace and combines boundaries that would otherwise be
+pass-throughs:
+
+- `storage_core` lives at `crates/mallard-infrastructure/src/storage_core/`
+  (`mod.rs` holds the closed keys and constructors; `object_store.rs`,
+  `local_store.rs`, `marker.rs`, and the moved `s3_store.rs` sit beside it),
+  since the workspace reorganization already placed shared transport in that
+  crate. The moved trait is `ObjectStore` with `LocalObjectStore`,
+  `S3ObjectStore`, and the shared `ConfiguredObjectStore` dispatcher.
+- `storage_catalog` lives at `src-tauri/src/storage_catalog/` with
+  `provider_adapters/` combined into one `adapters.rs` (two compiled
+  adapters, one injectable runner), `resource_adapters/` realized as
+  `skill_tree.rs` and `codex_pet.rs` (plugin intent is pure domain plus
+  adapter planning), `reconciliation.rs` + `planning.rs` combined into
+  `planning.rs`, `directory_transaction.rs` + `apply.rs` combined into
+  `apply.rs`, and the test suite at `commands/tests.rs`.
 
 The `sync-review` layer is an extraction of current resource-neutral
 presentation and interaction behavior. Both `project-sync` and

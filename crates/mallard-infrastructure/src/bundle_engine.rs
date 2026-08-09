@@ -10,662 +10,32 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tempfile::NamedTempFile;
-use walkdir::WalkDir;
 
-#[cfg(test)]
-use crate::provider_capture;
 use crate::provider_capture::CapturedResources;
+use crate::providers::ProviderRegistry;
 use mallard_domain::{
     self as domain, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt, BindingState,
     BundleDirectoryEntry, BundleFileEntry, BundleHead, BundleId, BundleIdentity, BundleKind,
-    BundleManifest, BundleRecipe, BundleSnapshot, CapturedWith, ConversationThread, LogicalPath,
-    PlanId, PortableOrigin, ProjectBinding, Provider, ResourceDescriptor, ResourceId, ResourceKind,
-    RestoreAction, RestoreActionKind, RestorePlan, StorageId, ThreadId, Tombstone, TombstoneTarget,
-    BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
+    BundleManifest, BundleRecipe, BundleScope, BundleSnapshot, CapturedWith, ConversationThread,
+    LogicalPath, PlanId, PortableOrigin, ProjectBinding, ProviderKey, ResourceDescriptor,
+    ResourceId, ResourceKind, RestoreAction, RestoreActionKind, RestorePlan, StorageId,
+    SyncScopeKey, ThreadId, Tombstone, TombstoneTarget, BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
 };
 
-const MALLARD_ROOT: &str = ".mallard";
-const STORAGE_MARKER_KEY: &str = ".mallard/_storage.json";
-const REPOSITORY_PREFIX: &str = ".mallard/v1/repositories";
-const STORAGE_MARKER_FORMAT: &str = "mallard-storage";
-const STORAGE_LAYOUT_VERSION: u32 = 1;
-const LOCAL_STORAGE_LOCK: &str = ".storage.lock";
-const HEAD_FILE: &str = "_head.json";
-const TAG_FILE: &str = "_tag.json";
-const MAX_STORAGE_MARKER_BYTES: u64 = 4 * 1024;
+use crate::storage_core::{
+    hex_lower, open_read_only_no_follow, parse_json_bytes, parse_json_reader,
+    repository_object_key, sha256, sha256_reader, validate_bundle_relative_object_key,
+    CasExpectation, CasOutcome, ExpectedObject, ObjectPrefix, ObjectStore, StageOutcome,
+    VerifiedBody, HEAD_FILE, MAX_LIST_PAGE, REPOSITORY_PREFIX, TAG_FILE,
+};
+
 const MAX_BUNDLE_HEAD_BYTES: u64 = 64 * 1024;
 const MAX_BUNDLE_TAG_BYTES: u64 = 64 * 1024;
-const MAX_LIST_PAGE: usize = 10_000;
 const DEFAULT_PLAN_LIFETIME_SECS: u64 = 24 * 60 * 60;
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ObjectKey(String);
-
-impl ObjectKey {
-    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
-        let value = value.into();
-        validate_store_path(&value, 2)?;
-        if value == STORAGE_MARKER_KEY {
-            return Ok(Self(value));
-        }
-        validate_store_path(&value, 5)?;
-        if !value.starts_with(&format!("{}/", REPOSITORY_PREFIX)) {
-            return Err(format!(
-                "object key is outside the Mallard storage namespace: '{}'",
-                value
-            ));
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for ObjectKey {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ObjectPrefix(String);
-
-impl ObjectPrefix {
-    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
-        let value = value.into().trim_end_matches('/').to_string();
-        validate_store_path(&value, 3)?;
-        if value != REPOSITORY_PREFIX && !value.starts_with(&format!("{}/", REPOSITORY_PREFIX)) {
-            return Err(format!(
-                "object prefix is outside {}: '{}'",
-                REPOSITORY_PREFIX, value
-            ));
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoredMetadata {
-    pub bytes: Vec<u8>,
-    pub etag: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExpectedObject {
-    pub size: u64,
-    pub sha256: String,
-}
-
-struct VerifiedBodyInner {
-    file: Mutex<NamedTempFile>,
-}
-
-pub struct VerifiedBodyReader {
-    inner: Arc<VerifiedBodyInner>,
-    position: u64,
-}
-
-impl Read for VerifiedBodyReader {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let mut staged = self
-            .inner
-            .file
-            .lock()
-            .map_err(|_| std::io::Error::other("verified object lock is poisoned"))?;
-        staged.as_file_mut().seek(SeekFrom::Start(self.position))?;
-        let count = staged.as_file_mut().read(buffer)?;
-        self.position = self
-            .position
-            .checked_add(count as u64)
-            .ok_or_else(|| std::io::Error::other("verified object reader position overflow"))?;
-        Ok(count)
-    }
-}
-
-/// A fully received and integrity-verified object backed by a private
-/// machine-local temporary file. Clones share ownership of the staged bytes;
-/// each [`Self::open`] call returns an independent reader at byte zero.
-#[derive(Clone)]
-pub struct VerifiedBody {
-    inner: Arc<VerifiedBodyInner>,
-    size: u64,
-    sha256: String,
-    etag: String,
-}
-
-impl std::fmt::Debug for VerifiedBody {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("VerifiedBody")
-            .field("size", &self.size)
-            .field("sha256", &self.sha256)
-            .field("etag", &self.etag)
-            .finish_non_exhaustive()
-    }
-}
-
-impl VerifiedBody {
-    pub(crate) fn from_temp_file(
-        mut file: NamedTempFile,
-        size: u64,
-        sha256: String,
-        etag: String,
-    ) -> Result<Self, String> {
-        domain::validate_sha256("verified object", &sha256)?;
-        let actual_size = file
-            .as_file()
-            .metadata()
-            .map_err(|error| format!("inspect verified object: {}", error))?
-            .len();
-        if actual_size != size {
-            return Err("verified object size differs from its staged file".to_string());
-        }
-        file.as_file_mut()
-            .seek(SeekFrom::Start(0))
-            .map_err(|error| format!("rewind verified object: {}", error))?;
-        Ok(Self {
-            inner: Arc::new(VerifiedBodyInner {
-                file: Mutex::new(file),
-            }),
-            size,
-            sha256,
-            etag,
-        })
-    }
-
-    pub fn open(&self) -> Result<VerifiedBodyReader, String> {
-        Ok(VerifiedBodyReader {
-            inner: self.inner.clone(),
-            position: 0,
-        })
-    }
-
-    pub fn read_bounded(&self, max_bytes: u64, label: &str) -> Result<Vec<u8>, String> {
-        if self.size > max_bytes {
-            return Err(format!("{} exceeds its read limit", label));
-        }
-        let capacity = usize::try_from(self.size)
-            .map_err(|_| format!("{} cannot fit in memory on this platform", label))?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(capacity)
-            .map_err(|_| format!("reserve memory for {}", label))?;
-        Read::take(self.open()?, max_bytes.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("read {}: {}", label, error))?;
-        if bytes.len() as u64 != self.size || sha256(&bytes) != self.sha256 {
-            return Err(format!("{} changed after verification", label));
-        }
-        Ok(bytes)
-    }
-
-    pub fn size(&self) -> u64 {
-        self.size
-    }
-
-    pub fn sha256(&self) -> &str {
-        &self.sha256
-    }
-
-    pub fn etag(&self) -> &str {
-        &self.etag
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum StageOutcome {
-    Missing,
-    Mismatch,
-    Verified(VerifiedBody),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CasExpectation {
-    Absent,
-    Match(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CasOutcome {
-    Written { etag: String },
-    Conflict { current_etag: Option<String> },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ImmutablePutOutcome {
-    Written,
-    AlreadyPresent,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoreListPage {
-    pub keys: Vec<ObjectKey>,
-    pub next_cursor: Option<String>,
-}
-
-/// The narrow transport contract required by the bundle protocol.
-pub trait BundleObjectStore: Send + Sync {
-    fn get_metadata(
-        &self,
-        key: &ObjectKey,
-        max_bytes: u64,
-    ) -> Result<Option<StoredMetadata>, String>;
-
-    fn stage_verified(
-        &self,
-        key: &ObjectKey,
-        expected: &ExpectedObject,
-    ) -> Result<StageOutcome, String>;
-
-    /// Fetch several verified objects; results line up with `requests`.
-    /// Remote stores override this with a bounded-concurrency implementation.
-    fn stage_many_verified(
-        &self,
-        requests: &[(ObjectKey, ExpectedObject)],
-    ) -> Result<Vec<StageOutcome>, String> {
-        requests
-            .iter()
-            .map(|(key, expected)| self.stage_verified(key, expected))
-            .collect()
-    }
-
-    fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String>;
-
-    /// Store several immutable objects; outcomes line up with `objects`.
-    /// Remote stores override this with a bounded-concurrency implementation.
-    fn put_many(
-        &self,
-        objects: Vec<(ObjectKey, Bytes)>,
-    ) -> Result<Vec<ImmutablePutOutcome>, String> {
-        objects
-            .iter()
-            .map(|(key, bytes)| self.put_immutable(key, bytes))
-            .collect()
-    }
-
-    fn compare_and_swap(
-        &self,
-        key: &ObjectKey,
-        expectation: &CasExpectation,
-        bytes: &[u8],
-    ) -> Result<CasOutcome, String>;
-    fn list(
-        &self,
-        prefix: &ObjectPrefix,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<StoreListPage, String>;
-
-    /// Used only for local isolation checks; remote stores return `None`.
-    fn local_root(&self) -> Option<&Path> {
-        None
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct LocalBundleObjectStore {
-    root: PathBuf,
-}
-
-impl LocalBundleObjectStore {
-    pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
-        let root = root.as_ref();
-        if !root.is_absolute() {
-            return Err(format!(
-                "local bundle store must be absolute: '{}'",
-                root.display()
-            ));
-        }
-        if let Ok(meta) = fs::symlink_metadata(root) {
-            if meta.file_type().is_symlink() || !meta.is_dir() {
-                return Err(format!(
-                    "local store '{}' must be a real directory",
-                    root.display()
-                ));
-            }
-        } else {
-            fs::create_dir_all(root)
-                .map_err(|e| format!("create local store '{}': {}", root.display(), e))?;
-        }
-        let root = fs::canonicalize(root)
-            .map_err(|e| format!("resolve local store '{}': {}", root.display(), e))?;
-        let mallard_root = root.join(MALLARD_ROOT);
-        match fs::symlink_metadata(&mallard_root) {
-            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
-            Ok(_) => {
-                return Err(format!(
-                    "Mallard storage namespace '{}' must be a real directory",
-                    mallard_root.display()
-                ))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match fs::create_dir(&mallard_root) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(error) => {
-                        return Err(format!(
-                            "create Mallard storage namespace '{}': {}",
-                            mallard_root.display(),
-                            error
-                        ))
-                    }
-                }
-                let meta = fs::symlink_metadata(&mallard_root).map_err(|error| {
-                    format!(
-                        "inspect Mallard storage namespace '{}': {}",
-                        mallard_root.display(),
-                        error
-                    )
-                })?;
-                if meta.file_type().is_symlink() || !meta.is_dir() {
-                    return Err(format!(
-                        "Mallard storage namespace '{}' must be a real directory",
-                        mallard_root.display()
-                    ));
-                }
-            }
-            Err(error) => {
-                return Err(format!(
-                    "inspect Mallard storage namespace '{}': {}",
-                    mallard_root.display(),
-                    error
-                ))
-            }
-        }
-        Ok(Self { root })
-    }
-
-    fn lock(&self) -> Result<fs::File, String> {
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.root.join(MALLARD_ROOT).join(LOCAL_STORAGE_LOCK))
-            .map_err(|e| format!("open Mallard storage lock: {}", e))?;
-        file.lock()
-            .map_err(|e| format!("lock local Mallard storage: {}", e))?;
-        Ok(file)
-    }
-
-    fn open_object_unlocked(
-        &self,
-        key: &ObjectKey,
-    ) -> Result<Option<(fs::File, fs::Metadata)>, String> {
-        let path = checked_existing_object_path(&self.root, key)?;
-        let Some(path) = path else {
-            return Ok(None);
-        };
-        let meta = fs::symlink_metadata(&path).map_err(|e| format!("inspect '{}': {}", key, e))?;
-        if !meta.is_file() || meta.file_type().is_symlink() {
-            return Err(format!("object '{}' is not a regular no-follow file", key));
-        }
-        let file = open_read_only_no_follow(&path, &format!("object '{}'", key))?;
-        let opened_meta = file
-            .metadata()
-            .map_err(|error| format!("inspect opened object '{}': {}", key, error))?;
-        if !opened_meta.is_file() || opened_meta.len() != meta.len() {
-            return Err(format!("object '{}' changed while opening", key));
-        }
-        Ok(Some((file, opened_meta)))
-    }
-
-    fn read_metadata_unlocked(
-        &self,
-        key: &ObjectKey,
-        max_bytes: u64,
-    ) -> Result<Option<StoredMetadata>, String> {
-        let Some((mut file, metadata)) = self.open_object_unlocked(key)? else {
-            return Ok(None);
-        };
-        if metadata.len() > max_bytes {
-            return Err(format!("metadata object '{}' exceeds its read limit", key));
-        }
-        let capacity = usize::try_from(metadata.len())
-            .map_err(|_| format!("metadata object '{}' is too large for this platform", key))?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(capacity)
-            .map_err(|_| format!("reserve memory for metadata object '{}'", key))?;
-        Read::by_ref(&mut file)
-            .take(max_bytes.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("read metadata object '{}': {}", key, error))?;
-        if bytes.len() as u64 > max_bytes {
-            return Err(format!("metadata object '{}' exceeds its read limit", key));
-        }
-        Ok(Some(StoredMetadata {
-            etag: sha256(&bytes),
-            bytes,
-        }))
-    }
-
-    fn stage_verified_unlocked(
-        &self,
-        key: &ObjectKey,
-        expected: &ExpectedObject,
-    ) -> Result<StageOutcome, String> {
-        domain::validate_sha256("expected object", &expected.sha256)?;
-        let Some((mut source, metadata)) = self.open_object_unlocked(key)? else {
-            return Ok(StageOutcome::Missing);
-        };
-        if metadata.len() != expected.size {
-            return Ok(StageOutcome::Mismatch);
-        }
-        let mut staged = NamedTempFile::new()
-            .map_err(|error| format!("create staged object '{}': {}", key, error))?;
-        let mut hasher = Sha256::new();
-        let mut received = 0_u64;
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let count = source
-                .read(&mut buffer)
-                .map_err(|error| format!("read object '{}': {}", key, error))?;
-            if count == 0 {
-                break;
-            }
-            received = received
-                .checked_add(count as u64)
-                .ok_or_else(|| format!("object '{}' byte count overflow", key))?;
-            if received > expected.size {
-                return Ok(StageOutcome::Mismatch);
-            }
-            hasher.update(&buffer[..count]);
-            staged
-                .as_file_mut()
-                .write_all(&buffer[..count])
-                .map_err(|error| format!("stage object '{}': {}", key, error))?;
-        }
-        let digest = hex_lower(&hasher.finalize());
-        if received != expected.size || digest != expected.sha256 {
-            return Ok(StageOutcome::Mismatch);
-        }
-        staged
-            .as_file_mut()
-            .sync_all()
-            .map_err(|error| format!("sync staged object '{}': {}", key, error))?;
-        Ok(StageOutcome::Verified(VerifiedBody::from_temp_file(
-            staged,
-            received,
-            digest.clone(),
-            digest,
-        )?))
-    }
-
-    fn current_etag_unlocked(&self, key: &ObjectKey) -> Result<Option<String>, String> {
-        let Some((mut file, _)) = self.open_object_unlocked(key)? else {
-            return Ok(None);
-        };
-        Ok(Some(sha256_reader(
-            &mut file,
-            &format!("object '{}'", key),
-        )?))
-    }
-
-    fn write_atomic_unlocked(&self, key: &ObjectKey, bytes: &[u8]) -> Result<(), String> {
-        let path = checked_create_object_path(&self.root, key)?;
-        let parent = path
-            .parent()
-            .ok_or_else(|| format!("object '{}' has no parent", key))?;
-        let mut temp = tempfile::NamedTempFile::new_in(parent)
-            .map_err(|e| format!("create object temp in '{}': {}", parent.display(), e))?;
-        temp.as_file_mut()
-            .write_all(bytes)
-            .map_err(|e| format!("write object '{}': {}", key, e))?;
-        temp.as_file_mut()
-            .sync_all()
-            .map_err(|e| format!("sync object '{}': {}", key, e))?;
-        temp.persist(&path)
-            .map_err(|e| format!("publish object '{}': {}", key, e.error))?;
-        Ok(())
-    }
-}
-
-impl BundleObjectStore for LocalBundleObjectStore {
-    fn get_metadata(
-        &self,
-        key: &ObjectKey,
-        max_bytes: u64,
-    ) -> Result<Option<StoredMetadata>, String> {
-        self.read_metadata_unlocked(key, max_bytes)
-    }
-
-    fn stage_verified(
-        &self,
-        key: &ObjectKey,
-        expected: &ExpectedObject,
-    ) -> Result<StageOutcome, String> {
-        self.stage_verified_unlocked(key, expected)
-    }
-
-    fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
-        let _guard = self.lock()?;
-        if let Some((mut existing, metadata)) = self.open_object_unlocked(key)? {
-            if metadata.len() == bytes.len() as u64
-                && sha256_reader(&mut existing, &format!("object '{}'", key))? == sha256(bytes)
-            {
-                return Ok(ImmutablePutOutcome::AlreadyPresent);
-            }
-            return Err(format!(
-                "immutable object '{}' already exists with different bytes",
-                key
-            ));
-        }
-        self.write_atomic_unlocked(key, bytes)?;
-        Ok(ImmutablePutOutcome::Written)
-    }
-
-    fn compare_and_swap(
-        &self,
-        key: &ObjectKey,
-        expectation: &CasExpectation,
-        bytes: &[u8],
-    ) -> Result<CasOutcome, String> {
-        let _guard = self.lock()?;
-        let current_etag = self.current_etag_unlocked(key)?;
-        let matches = match expectation {
-            CasExpectation::Absent => current_etag.is_none(),
-            CasExpectation::Match(expected) => current_etag.as_ref() == Some(expected),
-        };
-        if !matches {
-            return Ok(CasOutcome::Conflict { current_etag });
-        }
-        self.write_atomic_unlocked(key, bytes)?;
-        Ok(CasOutcome::Written {
-            etag: sha256(bytes),
-        })
-    }
-
-    fn list(
-        &self,
-        prefix: &ObjectPrefix,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<StoreListPage, String> {
-        if limit == 0 || limit > MAX_LIST_PAGE {
-            return Err(format!(
-                "list limit must be between 1 and {}",
-                MAX_LIST_PAGE
-            ));
-        }
-        if let Some(cursor) = cursor {
-            ObjectKey::parse(cursor.to_string())?;
-        }
-        let namespace_root = self.root.join(prefix.as_str());
-        let namespace_meta = match fs::symlink_metadata(&namespace_root) {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(StoreListPage {
-                    keys: Vec::new(),
-                    next_cursor: None,
-                })
-            }
-            Err(error) => {
-                return Err(format!(
-                    "inspect local Mallard repository namespace '{}': {}",
-                    namespace_root.display(),
-                    error
-                ))
-            }
-        };
-        if namespace_meta.file_type().is_symlink() || !namespace_meta.is_dir() {
-            return Err(format!(
-                "local Mallard repository namespace '{}' must be a real directory",
-                namespace_root.display()
-            ));
-        }
-
-        let mut keys = Vec::new();
-        for entry in WalkDir::new(&namespace_root)
-            .follow_links(false)
-            .into_iter()
-        {
-            let entry = entry.map_err(|e| format!("walk local bundle store: {}", e))?;
-            if entry.depth() == 0 {
-                continue;
-            }
-            if entry.file_type().is_symlink() {
-                return Err(format!(
-                    "symlink '{}' is forbidden in local bundle storage",
-                    entry.path().display()
-                ));
-            }
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let relative = normalized_relative_path(&self.root, entry.path())?;
-            if relative.contains("/.tmp") {
-                continue;
-            }
-            if relative == prefix.as_str() || relative.starts_with(&format!("{}/", prefix.as_str()))
-            {
-                let key = ObjectKey::parse(relative)?;
-                if cursor.is_none_or(|cursor| key.as_str() > cursor) {
-                    keys.push(key);
-                }
-            }
-        }
-        keys.sort();
-        let has_more = keys.len() > limit;
-        keys.truncate(limit);
-        let next_cursor = has_more.then(|| keys.last().unwrap().as_str().to_string());
-        Ok(StoreListPage { keys, next_cursor })
-    }
-
-    fn local_root(&self) -> Option<&Path> {
-        Some(&self.root)
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeadToken {
@@ -680,19 +50,6 @@ pub struct HeadToken {
 pub enum PublishExpectation {
     Absent,
     Match(HeadToken),
-}
-
-#[derive(Clone, Debug)]
-#[cfg(test)]
-pub struct CapturedResourcesPublishRequest {
-    pub identity: BundleIdentity,
-    pub recipe: BundleRecipe,
-    pub captured_with: CapturedWith,
-    pub captured: CapturedResources,
-    /// Head observed by the caller's single read; the head CAS on its etag is
-    /// the concurrency guard, so publish never re-reads the head itself.
-    pub observed_head: Option<(BundleHead, HeadToken)>,
-    pub updated_at: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -722,23 +79,41 @@ pub struct BundleObjectAudit {
     pub failures: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
-pub struct PublishBundleRequest {
-    pub identity: BundleIdentity,
+/// The reviewed next content for one writable sync scope.
+#[derive(Clone, Debug, Default)]
+pub struct ScopePublishInput {
     pub recipe: BundleRecipe,
     pub captured_with: CapturedWith,
-    pub published_by_origin: PortableOrigin,
     pub conversations: BTreeMap<ThreadId, ConversationThread>,
     pub resources: BTreeMap<ResourceId, ResourceDescriptor>,
-    /// Entries copied byte-for-byte from the reviewed previous manifest. The
-    /// engine verifies every referenced immutable object before publishing.
+    /// Entries copied byte-for-byte from the reviewed previous scope. The
+    /// engine verifies each against the current manifest's same scope.
     pub retained_files: BTreeMap<LogicalPath, BundleFileEntry>,
     /// New or changed payloads. A path cannot also appear in retained_files.
     pub captured_files: BTreeMap<LogicalPath, CapturedBundleFile>,
     pub directories: BTreeMap<LogicalPath, BundleDirectoryEntry>,
     pub tombstones: BTreeMap<String, Tombstone>,
+}
+
+/// A scoped publication. Only the named writable scopes may change; every
+/// other scope is carried from the verified current manifest with exactly
+/// the same revision and content digest (the mutation firewall), and a CAS
+/// loss grafts the prepared writable scopes onto the winner as long as the
+/// winner's writable-scope coordinates still match the reviewed pins.
+#[derive(Clone, Debug)]
+pub struct PublishBundleRequest {
+    pub identity: BundleIdentity,
+    pub published_by_origin: PortableOrigin,
+    pub writable_scopes: BTreeMap<SyncScopeKey, ScopePublishInput>,
+    /// The reviewed `(revision, content_sha256)` coordinates per writable
+    /// scope. `(0, all-zero digest)` pins an absent scope.
+    pub reviewed_scope_pins: BTreeMap<SyncScopeKey, (u64, String)>,
     pub expected_head: PublishExpectation,
     pub updated_at: u64,
+}
+
+pub fn absent_scope_pin() -> (u64, String) {
+    (0, "0".repeat(64))
 }
 
 /// One payload object finished downloading. `fetched_bytes`/`total_bytes`
@@ -854,7 +229,7 @@ pub trait BundleBytes {
 /// Store-backed lazy byte source: downloads objects on demand, verifies them
 /// against the manifest, and shares them through the process-wide
 /// [`ObjectCache`].
-pub struct EngineByteSource<'a, S: BundleObjectStore> {
+pub struct EngineByteSource<'a, S: ObjectStore> {
     engine: &'a BundleEngine<S>,
     snapshot: &'a BundleSnapshot,
     cache: Option<Arc<ObjectCache>>,
@@ -862,7 +237,7 @@ pub struct EngineByteSource<'a, S: BundleObjectStore> {
     on_progress: Option<&'a mut dyn FnMut(FetchProgress)>,
 }
 
-impl<'a, S: BundleObjectStore> EngineByteSource<'a, S> {
+impl<'a, S: ObjectStore> EngineByteSource<'a, S> {
     fn ensure_loaded(&mut self, logical_path: &LogicalPath) -> Result<(), String> {
         if self.loaded.contains_key(logical_path) {
             return Ok(());
@@ -870,8 +245,8 @@ impl<'a, S: BundleObjectStore> EngineByteSource<'a, S> {
         let entry = self
             .snapshot
             .manifest
-            .files
-            .get(logical_path)
+            .find_file(logical_path)
+            .map(|(_, entry)| entry)
             .ok_or_else(|| format!("manifest has no file entry for '{}'", logical_path))?;
         let bundle_id = &self.snapshot.head.bundle_id;
         let cache_key = ObjectCacheKey {
@@ -910,7 +285,7 @@ impl<'a, S: BundleObjectStore> EngineByteSource<'a, S> {
     }
 }
 
-impl<S: BundleObjectStore> BundleBytes for EngineByteSource<'_, S> {
+impl<S: ObjectStore> BundleBytes for EngineByteSource<'_, S> {
     fn body(&mut self, logical_path: &LogicalPath) -> Result<VerifiedBody, String> {
         self.ensure_loaded(logical_path)?;
         Ok(self
@@ -929,8 +304,8 @@ impl<S: BundleObjectStore> BundleBytes for EngineByteSource<'_, S> {
         let entry = self
             .snapshot
             .manifest
-            .files
-            .get(logical_path)
+            .find_file(logical_path)
+            .map(|(_, entry)| entry)
             .ok_or_else(|| format!("manifest has no file entry for '{}'", logical_path))?;
         if entry.size > max_bytes {
             return Err(format!("{} exceeds its read limit", label));
@@ -948,8 +323,8 @@ impl<S: BundleObjectStore> BundleBytes for EngineByteSource<'_, S> {
             let entry = self
                 .snapshot
                 .manifest
-                .files
-                .get(path)
+                .find_file(path)
+                .map(|(_, entry)| entry)
                 .ok_or_else(|| format!("manifest has no file entry for '{}'", path))?;
             let cache_key = ObjectCacheKey {
                 storage_id: self.snapshot.storage_id.clone(),
@@ -1032,8 +407,6 @@ impl<S: BundleObjectStore> BundleBytes for EngineByteSource<'_, S> {
 enum PlannedOutcome {
     /// Blocked or unmaterializable — becomes a manual action.
     Manual(String),
-    /// The local conversation diverged; the reviewed Pull keeps it.
-    KeepLocal,
     /// The local target already holds exactly the manifest bytes, so the
     /// plan emits nothing: a review must not ask about a write that changes
     /// nothing, and an all-deselected apply must not strand the reviewed
@@ -1084,37 +457,6 @@ struct BundleTag {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-struct StorageMarker {
-    format: String,
-    layout_version: u32,
-}
-
-impl StorageMarker {
-    fn current() -> Self {
-        Self {
-            format: STORAGE_MARKER_FORMAT.to_string(),
-            layout_version: STORAGE_LAYOUT_VERSION,
-        }
-    }
-
-    fn validate(&self) -> Result<(), String> {
-        if self.format != STORAGE_MARKER_FORMAT {
-            return Err(format!(
-                "storage marker format '{}' is not supported; expected '{}'",
-                self.format, STORAGE_MARKER_FORMAT
-            ));
-        }
-        if self.layout_version != STORAGE_LAYOUT_VERSION {
-            return Err(format!(
-                "Mallard storage layout version {} is not supported; expected version {}",
-                self.layout_version, STORAGE_LAYOUT_VERSION
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RemoteBundleSummary {
     pub bundle_id: BundleId,
     pub display_name: String,
@@ -1137,30 +479,10 @@ pub struct BundleEngine<S> {
     storage_id: StorageId,
 }
 
-impl<S: BundleObjectStore> BundleEngine<S> {
+impl<S: ObjectStore> BundleEngine<S> {
     pub fn open(store: S, storage_id: StorageId) -> Result<Self, String> {
-        let engine = Self { store, storage_id };
-        engine.ensure_storage_marker()?;
-        Ok(engine)
-    }
-
-    fn ensure_storage_marker(&self) -> Result<(), String> {
-        let key = ObjectKey::parse(STORAGE_MARKER_KEY)?;
-        if let Some(stored) = self.store.get_metadata(&key, MAX_STORAGE_MARKER_BYTES)? {
-            let marker: StorageMarker = parse_json_bytes(&stored.bytes, "Mallard storage marker")?;
-            marker.validate()?;
-            return Ok(());
-        }
-
-        let bytes = serde_json::to_vec(&StorageMarker::current())
-            .map_err(|error| format!("serialize Mallard storage marker: {}", error))?;
-        self.store.put_immutable(&key, &bytes)?;
-        let stored = self
-            .store
-            .get_metadata(&key, MAX_STORAGE_MARKER_BYTES)?
-            .ok_or_else(|| "Mallard storage marker disappeared after creation".to_string())?;
-        let marker: StorageMarker = parse_json_bytes(&stored.bytes, "Mallard storage marker")?;
-        marker.validate()
+        crate::storage_core::ensure_storage_marker(&store)?;
+        Ok(Self { store, storage_id })
     }
 
     pub fn read_head(
@@ -1189,123 +511,6 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         Ok(Some((head, token)))
     }
 
-    /// Publish immutable objects and history first, then compare-and-swap the
-    /// single bundle head. A failed CAS can leave only unreachable immutable
-    /// objects, never a partially visible revision. Payloads are content-
-    /// addressed under `_objects/<sha256>`, so bytes already referenced by the
-    /// previous manifest never travel again and a semantically unchanged
-    /// publish writes nothing at all.
-    #[cfg(test)]
-    pub fn publish_test_resources(
-        &self,
-        request: CapturedResourcesPublishRequest,
-    ) -> Result<PublishedBundle, String> {
-        self.publish_test_resources_with_progress(request, &mut |_| {})
-    }
-
-    #[cfg(test)]
-    pub fn publish_test_resources_with_progress(
-        &self,
-        mut request: CapturedResourcesPublishRequest,
-        on_progress: &mut dyn FnMut(FetchProgress),
-    ) -> Result<PublishedBundle, String> {
-        request.identity.validate()?;
-        request.recipe.validate()?;
-        let observed = request.observed_head.take();
-        let previous = observed
-            .as_ref()
-            .map(|(head, _)| self.read_manifest(head))
-            .transpose()?;
-        let descriptors = provider_capture::domain_resources(&request.captured)?;
-        let (resources, mut retained_files, mut directories, tombstones) =
-            reconcile_manifest_content(
-                &request.recipe,
-                &descriptors,
-                &request.captured,
-                previous.as_ref(),
-                request.updated_at,
-            )?;
-        let mut captured_files = BTreeMap::new();
-        for captured in request.captured.files.values() {
-            let path = LogicalPath::parse(captured.logical_path.clone())?;
-            let resource_id = ResourceId::parse(captured.resource_id.clone())?;
-            let digest = sha256(&captured.bytes);
-            let mode = Some(captured.mode & 0o777);
-            let retained = previous
-                .as_ref()
-                .and_then(|manifest| manifest.files.get(&path))
-                .filter(|entry| {
-                    entry.resource_id == resource_id
-                        && entry.sha256 == digest
-                        && entry.size == captured.bytes.len() as u64
-                        && entry.source_mtime == captured.source_mtime
-                        && entry.mode == mode
-                })
-                .cloned();
-            if let Some(entry) = retained {
-                retained_files.insert(path, entry);
-            } else {
-                retained_files.remove(&path);
-                captured_files.insert(
-                    path,
-                    CapturedBundleFile {
-                        resource_id,
-                        bytes: captured.bytes.clone(),
-                        source_mtime: captured.source_mtime,
-                        mode,
-                    },
-                );
-            }
-        }
-        for captured in request.captured.directories.values() {
-            let path = LogicalPath::parse(captured.logical_path.clone())?;
-            directories.insert(
-                path,
-                BundleDirectoryEntry {
-                    resource_id: ResourceId::parse(captured.resource_id.clone())?,
-                    mode: Some(captured.mode & 0o777),
-                    source_mtime: captured.source_mtime,
-                },
-            );
-        }
-        let mut captured_with = request.captured_with;
-        if let Some(previous) = &previous {
-            for (codec, version) in &previous.captured_with.codec_versions {
-                captured_with
-                    .codec_versions
-                    .entry(codec.clone())
-                    .or_insert(*version);
-            }
-        }
-        let published_by_origin = PortableOrigin {
-            origin_host_token: domain::OriginHostToken::parse("0".repeat(64))?,
-            origin_replica_token: domain::OriginReplicaToken::parse("0".repeat(64))?,
-            shared_label: None,
-        };
-        self.publish_with_progress(
-            PublishBundleRequest {
-                identity: request.identity,
-                recipe: request.recipe,
-                captured_with,
-                published_by_origin,
-                conversations: previous
-                    .as_ref()
-                    .map(|manifest| manifest.conversations.clone())
-                    .unwrap_or_default(),
-                resources,
-                retained_files,
-                captured_files,
-                directories,
-                tombstones,
-                expected_head: observed
-                    .map(|(_, token)| PublishExpectation::Match(token))
-                    .unwrap_or(PublishExpectation::Absent),
-                updated_at: request.updated_at,
-            },
-            on_progress,
-            &mut |_, _| {},
-        )
-    }
     /// Publish one complete reviewed bundle snapshot. The caller supplies the
     /// live resource and conversation sets; the engine enforces retention
     /// against the previous hash-verified manifest, skips true no-ops, and
@@ -1329,7 +534,6 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     ) -> Result<PublishedBundle, String> {
         let phase_started = Instant::now();
         request.identity.validate()?;
-        request.recipe.validate()?;
         request.published_by_origin.validate()?;
         if request.identity.kind != BundleKind::Project {
             return Err("bundle publication supports only project bundles".to_string());
@@ -1337,241 +541,368 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         if request.updated_at == 0 {
             return Err("publish timestamp must be non-zero".to_string());
         }
-        for path in request.captured_files.keys() {
-            if request.retained_files.contains_key(path) {
+        if request.writable_scopes.is_empty() {
+            return Err("bundle publication names no writable scopes".to_string());
+        }
+        for (scope_key, input) in &request.writable_scopes {
+            input.recipe.validate()?;
+            if !request.reviewed_scope_pins.contains_key(scope_key) {
                 return Err(format!(
-                    "bundle file '{}' is both retained and captured",
-                    path
+                    "writable scope '{}' has no reviewed scope pin",
+                    scope_key
                 ));
+            }
+            for path in input.captured_files.keys() {
+                if input.retained_files.contains_key(path) {
+                    return Err(format!(
+                        "bundle file '{}' is both retained and captured",
+                        path
+                    ));
+                }
             }
         }
 
-        let current = self.read_head(&request.identity.bundle_id)?;
-        let cas_expectation = match (&request.expected_head, &current) {
-            (PublishExpectation::Absent, None) => CasExpectation::Absent,
+        let mut current = self.read_head(&request.identity.bundle_id)?;
+        match (&request.expected_head, &current) {
+            (PublishExpectation::Absent, None) => {}
             (PublishExpectation::Absent, Some(_)) => {
                 return Err("bundle head changed: expected an absent head".to_string())
             }
-            (PublishExpectation::Match(expected), Some((head, token)))
-                if expected == token
-                    && expected.revision == head.revision
-                    && expected.commit_id == head.commit_id
-                    && expected.manifest_sha256 == head.manifest_sha256
-                    && expected.manifest_size == head.manifest_size =>
-            {
-                CasExpectation::Match(token.etag.clone())
+            (PublishExpectation::Match(_), None) => {
+                return Err("bundle head is missing; the remote repository was removed".to_string())
             }
-            (PublishExpectation::Match(_), _) => {
-                return Err("bundle head changed before publication".to_string())
-            }
-        };
-        let previous_manifest = current
-            .as_ref()
-            .map(|(head, _)| self.read_manifest(head))
-            .transpose()?;
-        on_phase(
-            "publish: read head and previous manifest",
-            phase_started.elapsed(),
-        );
+            // A moved head is not by itself fatal: disjoint-scope publishers
+            // may land between review and push. The per-scope firewall below
+            // decides whether this publication can graft onto the winner.
+            (PublishExpectation::Match(_), Some(_)) => {}
+        }
+        on_phase("publish: read head", phase_started.elapsed());
 
-        let phase_started = Instant::now();
-        for (path, entry) in &request.retained_files {
-            entry.validate()?;
-            let previous = previous_manifest
+        const MAX_CAS_ATTEMPTS: usize = 4;
+        for attempt in 0..MAX_CAS_ATTEMPTS {
+            let phase_started = Instant::now();
+            let previous_manifest = current
                 .as_ref()
-                .ok_or_else(|| format!("retained file '{}' has no previous manifest", path))?;
-            let was_published = previous.files.values().any(|candidate| {
-                candidate.object_key == entry.object_key
-                    && candidate.sha256 == entry.sha256
-                    && candidate.size == entry.size
-            });
-            if !was_published {
-                return Err(format!(
-                    "retained file '{}' was not in the reviewed manifest",
-                    path
-                ));
-            }
-        }
+                .map(|(head, _)| self.read_manifest(head))
+                .transpose()?;
 
-        let revision = current
-            .as_ref()
-            .map(|(head, _)| head.revision.saturating_add(1))
-            .unwrap_or(1);
-        let commit_id = random_named_id("commit")?;
-        let mut files = request.retained_files.clone();
-        for (path, captured) in &request.captured_files {
-            if captured.mode.is_some_and(|mode| mode & !0o777 != 0) {
-                return Err(format!("bundle file '{}' has unsafe mode bits", path));
+            // Mutation-firewall input check: every writable scope in the
+            // verified current manifest must still match its reviewed pin.
+            // Anything else means that scope advanced and needs a Pull.
+            for (scope_key, pin) in &request.reviewed_scope_pins {
+                let observed = previous_manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.scopes.get(scope_key))
+                    .map(|scope| (scope.revision, scope.content_sha256.clone()))
+                    .unwrap_or_else(absent_scope_pin);
+                if &observed != pin {
+                    return Err(format!(
+                        "sync scope '{}' changed since review; pull and replan before pushing",
+                        scope_key
+                    ));
+                }
             }
-            if !request.resources.contains_key(&captured.resource_id) {
-                return Err(format!(
-                    "bundle file '{}' belongs to missing resource '{}'",
-                    path, captured.resource_id
-                ));
+            for (scope_key, input) in &request.writable_scopes {
+                let previous_scope = previous_manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.scopes.get(scope_key));
+                for (path, entry) in &input.retained_files {
+                    entry.validate()?;
+                    let was_published = previous_scope.is_some_and(|scope| {
+                        scope.files.values().any(|candidate| {
+                            candidate.object_key == entry.object_key
+                                && candidate.sha256 == entry.sha256
+                                && candidate.size == entry.size
+                        })
+                    });
+                    if !was_published {
+                        return Err(format!(
+                            "retained file '{}' was not in the reviewed manifest",
+                            path
+                        ));
+                    }
+                }
             }
-            let digest = sha256(&captured.bytes);
-            files.insert(
-                path.clone(),
-                BundleFileEntry {
-                    resource_id: captured.resource_id.clone(),
-                    sha256: digest.clone(),
-                    size: captured.bytes.len() as u64,
-                    source_mtime: captured.source_mtime,
-                    object_key: format!("_objects/{}", digest),
-                    mode: captured.mode,
-                },
-            );
-        }
 
-        let manifest = BundleManifest {
-            schema_version: BUNDLE_SCHEMA,
-            revision,
-            commit_id: commit_id.clone(),
-            updated_at: request.updated_at,
-            bundle: request.identity.clone(),
-            recipe: request.recipe,
-            captured_with: request.captured_with,
-            published_by_origin: request.published_by_origin.clone(),
-            conversations: request.conversations,
-            resources: request.resources,
-            files,
-            directories: request.directories,
-            tombstones: request.tombstones,
-        };
-        manifest.validate()?;
-        if let Some(previous) = &previous_manifest {
-            validate_conversation_retention(previous, &manifest)?;
-        }
-        on_phase(
-            "publish: validate retention and build manifest",
-            phase_started.elapsed(),
-        );
-
-        if let (Some((head, _)), Some(previous)) = (&current, &previous_manifest) {
-            if manifest_is_semantic_noop(previous, &manifest) {
+            // Carry every scope from the verified current manifest, then
+            // rebuild only the approved writable scopes.
+            let mut scopes = previous_manifest
+                .as_ref()
+                .map(|manifest| manifest.scopes.clone())
+                .unwrap_or_default();
+            let mut any_change = false;
+            let mut pending_uploads = BTreeMap::<String, Bytes>::new();
+            for (scope_key, input) in &request.writable_scopes {
+                let previous_scope = previous_manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.scopes.get(scope_key));
+                let mut files = input.retained_files.clone();
+                for (path, captured) in &input.captured_files {
+                    if captured.mode.is_some_and(|mode| mode & !0o777 != 0) {
+                        return Err(format!("bundle file '{}' has unsafe mode bits", path));
+                    }
+                    if !input.resources.contains_key(&captured.resource_id) {
+                        return Err(format!(
+                            "bundle file '{}' belongs to missing resource '{}'",
+                            path, captured.resource_id
+                        ));
+                    }
+                    let digest = sha256(&captured.bytes);
+                    files.insert(
+                        path.clone(),
+                        BundleFileEntry {
+                            resource_id: captured.resource_id.clone(),
+                            sha256: digest.clone(),
+                            size: captured.bytes.len() as u64,
+                            source_mtime: captured.source_mtime,
+                            object_key: format!("_objects/{}", digest),
+                            mode: captured.mode,
+                        },
+                    );
+                }
+                if let Some(previous_scope) = previous_scope {
+                    validate_scope_conversation_retention(previous_scope, input)?;
+                    if scope_content_is_semantic_noop(previous_scope, input, &files) {
+                        continue;
+                    }
+                } else if input.recipe.entries.is_empty()
+                    && input.resources.is_empty()
+                    && files.is_empty()
+                    && input.directories.is_empty()
+                    && input.tombstones.is_empty()
+                    && input.conversations.is_empty()
+                {
+                    // Creating an absent scope with no content publishes
+                    // nothing for that scope.
+                    continue;
+                }
+                for captured in input.captured_files.values() {
+                    pending_uploads
+                        .entry(sha256(&captured.bytes))
+                        .or_insert_with(|| Bytes::from(captured.bytes.clone()));
+                }
+                let revision = previous_scope
+                    .map(|scope| scope.revision.saturating_add(1))
+                    .unwrap_or(1);
+                let sealed = BundleScope::sealed(
+                    scope_key,
+                    revision,
+                    input.recipe.clone(),
+                    input.captured_with.clone(),
+                    input.conversations.clone(),
+                    input.resources.clone(),
+                    files,
+                    input.directories.clone(),
+                    input.tombstones.clone(),
+                )?;
+                scopes.insert(scope_key.clone(), sealed);
+                any_change = true;
+            }
+            let identity_changed = previous_manifest
+                .as_ref()
+                .map(|manifest| manifest.bundle != request.identity)
+                .unwrap_or(true);
+            if !any_change && !identity_changed {
+                let (head, _) = current
+                    .as_ref()
+                    .expect("a semantic noop requires a current head");
                 return Ok(PublishedBundle {
                     published: false,
                     snapshot: BundleSnapshot {
                         storage_id: self.storage_id.clone(),
                         head: head.clone(),
-                        manifest: previous.clone(),
+                        manifest: previous_manifest
+                            .expect("a semantic noop requires a current manifest"),
                         fetched_at: request.updated_at,
                     },
                 });
             }
-        }
 
-        let phase_started = Instant::now();
-        let mut pending = BTreeMap::<String, Bytes>::new();
-        for captured in request.captured_files.values() {
-            pending
-                .entry(sha256(&captured.bytes))
-                .or_insert_with(|| Bytes::from(captured.bytes.clone()));
-        }
-        let total_objects = pending.len();
-        let total_bytes = pending.values().map(|bytes| bytes.len() as u64).sum();
-        let pending = pending.into_iter().collect::<Vec<_>>();
-        let mut uploaded_objects = 0;
-        let mut uploaded_bytes = 0_u64;
-        for chunk in pending.chunks(UPLOAD_BATCH_OBJECTS) {
-            let mut batch = Vec::with_capacity(chunk.len());
-            for (digest, bytes) in chunk {
-                let key = repository_object_key(
-                    &request.identity.bundle_id,
-                    &format!("_objects/{}", digest),
-                )?;
-                batch.push((key, bytes.clone()));
+            let revision = current
+                .as_ref()
+                .map(|(head, _)| head.revision.saturating_add(1))
+                .unwrap_or(1);
+            let commit_id = random_named_id("commit")?;
+            let manifest = BundleManifest {
+                schema_version: BUNDLE_SCHEMA,
+                revision,
+                commit_id: commit_id.clone(),
+                updated_at: request.updated_at,
+                bundle: request.identity.clone(),
+                published_by_origin: request.published_by_origin.clone(),
+                scopes,
+            };
+            manifest.validate()?;
+
+            // The final mutation firewall at the request boundary: a
+            // publication may change only scopes named by the reviewed
+            // writable-scope set. Every other scope must retain its exact
+            // revision and content digest from the CAS input manifest.
+            if let Some(previous) = &previous_manifest {
+                for (scope_key, previous_scope) in &previous.scopes {
+                    if request.writable_scopes.contains_key(scope_key) {
+                        continue;
+                    }
+                    let carried = manifest.scopes.get(scope_key).ok_or_else(|| {
+                        format!(
+                            "mutation firewall: carried scope '{}' was dropped",
+                            scope_key
+                        )
+                    })?;
+                    if carried.revision != previous_scope.revision
+                        || carried.content_sha256 != previous_scope.content_sha256
+                    {
+                        return Err(format!(
+                            "mutation firewall: non-writable scope '{}' changed",
+                            scope_key
+                        ));
+                    }
+                }
             }
-            self.store.put_many(batch)?;
-            for (_, bytes) in chunk {
-                uploaded_objects += 1;
-                uploaded_bytes = uploaded_bytes.saturating_add(bytes.len() as u64);
-                on_progress(FetchProgress {
-                    index: uploaded_objects,
-                    total_objects,
-                    fetched_bytes: uploaded_bytes,
-                    total_bytes,
-                });
+            for scope_key in manifest.scopes.keys() {
+                let carried_from_previous = previous_manifest
+                    .as_ref()
+                    .is_some_and(|previous| previous.scopes.contains_key(scope_key));
+                if !request.writable_scopes.contains_key(scope_key) && !carried_from_previous {
+                    return Err(format!(
+                        "mutation firewall: unexpected new scope '{}'",
+                        scope_key
+                    ));
+                }
+            }
+            on_phase(
+                "publish: validate retention and build manifest",
+                phase_started.elapsed(),
+            );
+
+            let phase_started = Instant::now();
+            let total_objects = pending_uploads.len();
+            let total_bytes = pending_uploads
+                .values()
+                .map(|bytes| bytes.len() as u64)
+                .sum();
+            let pending = pending_uploads.into_iter().collect::<Vec<_>>();
+            let mut uploaded_objects = 0;
+            let mut uploaded_bytes = 0_u64;
+            for chunk in pending.chunks(UPLOAD_BATCH_OBJECTS) {
+                let mut batch = Vec::with_capacity(chunk.len());
+                for (digest, bytes) in chunk {
+                    let key = repository_object_key(
+                        &request.identity.bundle_id,
+                        &format!("_objects/{}", digest),
+                    )?;
+                    batch.push((key, bytes.clone()));
+                }
+                self.store.put_many(batch)?;
+                for (_, bytes) in chunk {
+                    uploaded_objects += 1;
+                    uploaded_bytes = uploaded_bytes.saturating_add(bytes.len() as u64);
+                    on_progress(FetchProgress {
+                        index: uploaded_objects,
+                        total_objects,
+                        fetched_bytes: uploaded_bytes,
+                        total_bytes,
+                    });
+                }
+            }
+            on_phase("publish: upload objects", phase_started.elapsed());
+
+            let phase_started = Instant::now();
+            let manifest_bytes = serde_json::to_vec(&manifest)
+                .map_err(|error| format!("serialize bundle manifest: {error}"))?;
+            let manifest_size = u64::try_from(manifest_bytes.len())
+                .map_err(|_| "serialized bundle manifest is too large".to_string())?;
+            let manifest_sha256 = sha256(&manifest_bytes);
+            let manifest_relative_key = format!("_manifests/{}-{}.json", revision, commit_id);
+            let manifest_key =
+                repository_object_key(&request.identity.bundle_id, &manifest_relative_key)?;
+            self.store.put_immutable(&manifest_key, &manifest_bytes)?;
+
+            let (added_files, changed_files, removed_files) =
+                file_delta(previous_manifest.as_ref(), &manifest);
+            let commit = CommitRecord {
+                schema_version: BUNDLE_SCHEMA,
+                bundle_id: request.identity.bundle_id.clone(),
+                revision,
+                commit_id: commit_id.clone(),
+                manifest_key: manifest_relative_key.clone(),
+                manifest_sha256: manifest_sha256.clone(),
+                created_at: request.updated_at,
+                previous_commit_id: current.as_ref().map(|(head, _)| head.commit_id.clone()),
+                added_files,
+                changed_files,
+                removed_files,
+                published_by_origin: request.published_by_origin.clone(),
+            };
+            let commit_bytes = serde_json::to_vec(&commit)
+                .map_err(|error| format!("serialize bundle commit: {error}"))?;
+            let commit_key = repository_object_key(
+                &request.identity.bundle_id,
+                &format!("_commits/{}-{}.json", revision, commit_id),
+            )?;
+            self.store.put_immutable(&commit_key, &commit_bytes)?;
+            on_phase(
+                "publish: write manifest and commit",
+                phase_started.elapsed(),
+            );
+
+            let phase_started = Instant::now();
+            let head = BundleHead {
+                schema_version: BUNDLE_SCHEMA,
+                bundle_id: request.identity.bundle_id.clone(),
+                kind: request.identity.kind,
+                revision,
+                commit_id,
+                manifest_key: manifest_relative_key,
+                manifest_sha256,
+                manifest_size,
+                updated_at: request.updated_at,
+            };
+            head.validate()?;
+            let head_bytes = serde_json::to_vec(&head)
+                .map_err(|error| format!("serialize bundle head: {error}"))?;
+            let head_key = repository_object_key(&request.identity.bundle_id, HEAD_FILE)?;
+            let cas_expectation = match &current {
+                Some((_, token)) => CasExpectation::Match(token.etag.clone()),
+                None => CasExpectation::Absent,
+            };
+            match self
+                .store
+                .compare_and_swap(&head_key, &cas_expectation, &head_bytes)?
+            {
+                CasOutcome::Written { .. } => {
+                    let _ = self.publish_tag(&manifest);
+                    on_phase("publish: swing head", phase_started.elapsed());
+                    return Ok(PublishedBundle {
+                        published: true,
+                        snapshot: BundleSnapshot {
+                            storage_id: self.storage_id.clone(),
+                            head: head.clone(),
+                            manifest,
+                            fetched_at: request.updated_at,
+                        },
+                    });
+                }
+                CasOutcome::Conflict { .. } => {
+                    on_phase("publish: head CAS conflict", phase_started.elapsed());
+                    if attempt + 1 == MAX_CAS_ATTEMPTS {
+                        return Err("bundle head CAS conflict; fetch and rebase before retrying"
+                            .to_string());
+                    }
+                    // Graft retry: read the winner and re-verify the reviewed
+                    // writable-scope pins against it on the next iteration.
+                    current = self.read_head(&request.identity.bundle_id)?;
+                    if current.is_none() {
+                        return Err(
+                            "bundle head disappeared during publication; the repository was \
+                             removed"
+                                .to_string(),
+                        );
+                    }
+                }
             }
         }
-
-        on_phase("publish: upload objects", phase_started.elapsed());
-
-        let phase_started = Instant::now();
-        let manifest_bytes = serde_json::to_vec(&manifest)
-            .map_err(|error| format!("serialize bundle manifest: {error}"))?;
-        let manifest_size = u64::try_from(manifest_bytes.len())
-            .map_err(|_| "serialized bundle manifest is too large".to_string())?;
-        let manifest_sha256 = sha256(&manifest_bytes);
-        let manifest_relative_key = format!("_manifests/{}-{}.json", revision, commit_id);
-        let manifest_key =
-            repository_object_key(&request.identity.bundle_id, &manifest_relative_key)?;
-        self.store.put_immutable(&manifest_key, &manifest_bytes)?;
-
-        let (added_files, changed_files, removed_files) =
-            file_delta(previous_manifest.as_ref(), &manifest);
-        let commit = CommitRecord {
-            schema_version: BUNDLE_SCHEMA,
-            bundle_id: request.identity.bundle_id.clone(),
-            revision,
-            commit_id: commit_id.clone(),
-            manifest_key: manifest_relative_key.clone(),
-            manifest_sha256: manifest_sha256.clone(),
-            created_at: request.updated_at,
-            previous_commit_id: current.as_ref().map(|(head, _)| head.commit_id.clone()),
-            added_files,
-            changed_files,
-            removed_files,
-            published_by_origin: request.published_by_origin,
-        };
-        let commit_bytes = serde_json::to_vec(&commit)
-            .map_err(|error| format!("serialize bundle commit: {error}"))?;
-        let commit_key = repository_object_key(
-            &request.identity.bundle_id,
-            &format!("_commits/{}-{}.json", revision, commit_id),
-        )?;
-        self.store.put_immutable(&commit_key, &commit_bytes)?;
-        on_phase(
-            "publish: write manifest and commit",
-            phase_started.elapsed(),
-        );
-
-        let phase_started = Instant::now();
-        let head = BundleHead {
-            schema_version: BUNDLE_SCHEMA,
-            bundle_id: request.identity.bundle_id.clone(),
-            kind: request.identity.kind,
-            revision,
-            commit_id,
-            manifest_key: manifest_relative_key,
-            manifest_sha256,
-            manifest_size,
-            updated_at: request.updated_at,
-        };
-        head.validate()?;
-        let head_bytes =
-            serde_json::to_vec(&head).map_err(|error| format!("serialize bundle head: {error}"))?;
-        let head_key = repository_object_key(&request.identity.bundle_id, HEAD_FILE)?;
-        match self
-            .store
-            .compare_and_swap(&head_key, &cas_expectation, &head_bytes)?
-        {
-            CasOutcome::Written { .. } => {}
-            CasOutcome::Conflict { .. } => {
-                return Err("bundle head CAS conflict; fetch and rebase before retrying".to_string())
-            }
-        }
-        let _ = self.publish_tag(&manifest);
-        on_phase("publish: swing head", phase_started.elapsed());
-        Ok(PublishedBundle {
-            published: true,
-            snapshot: BundleSnapshot {
-                storage_id: self.storage_id.clone(),
-                head: head.clone(),
-                manifest,
-                fetched_at: request.updated_at,
-            },
-        })
+        Err("bundle head CAS conflict; fetch and rebase before retrying".to_string())
     }
 
     /// Lazy payload access for `snapshot`, sharing verified objects through
@@ -1724,7 +1055,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     pub fn verify_objects(&self, bundle_id: &BundleId) -> Result<BundleObjectAudit, String> {
         let snapshot = self.inspect(bundle_id)?;
         let mut entries = BTreeMap::<String, (String, u64)>::new();
-        for entry in snapshot.manifest.files.values() {
+        for (_, entry) in snapshot.manifest.all_files() {
             entries
                 .entry(entry.object_key.clone())
                 .or_insert((entry.sha256.clone(), entry.size));
@@ -1851,15 +1182,23 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     /// local digest from manifest metadata and never downloads payloads.
     /// Typed conversations are omitted here and added as reviewed
     /// conversation actions by the command layer.
+    /// Build the file-level restore plan for one verified snapshot.
+    ///
+    /// Conversation resources never appear here: the typed conversation
+    /// planner owns them for every provider. Provider-state files are
+    /// planned only for bound providers with a resolved home; unbound and
+    /// unknown provider scopes stay view-only and untouched.
     pub fn build_restore_plan_from_snapshot(
         &self,
+        registry: &ProviderRegistry,
         snapshot: &BundleSnapshot,
         binding: &ProjectBinding,
+        provider_homes: &BTreeMap<ProviderKey, String>,
         created_at: u64,
         expected_host_identity_revision: u64,
     ) -> Result<RestorePlan, String> {
         snapshot.validate()?;
-        self.validate_binding(binding, None)?;
+        self.validate_binding(binding, provider_homes, None)?;
         if binding.state != BindingState::Active {
             return Err("restore requires an active project binding".to_string());
         }
@@ -1872,101 +1211,84 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         let plan_id = PlanId::parse(random_named_id("plan")?)?;
         let mut actions = Vec::new();
         let mut target_owners = BTreeMap::<String, LogicalPath>::new();
-        let mut continuation_ids = BTreeSet::new();
-        let typed_conversation_resources = snapshot
-            .manifest
-            .conversations
-            .values()
-            .map(|thread| thread.resource_id.clone())
-            .collect::<BTreeSet<_>>();
 
-        for (logical_path, entry) in &snapshot.manifest.directories {
-            let descriptor = snapshot
-                .manifest
-                .resources
-                .get(&entry.resource_id)
-                .ok_or_else(|| format!("directory '{}' has no resource", logical_path))?;
-            if descriptor.kind != ResourceKind::ProjectContentDirectory {
-                return Err(format!(
-                    "directory '{}' is not project-content metadata",
-                    logical_path
-                ));
-            }
-            let target = project_content_target(logical_path, binding)?;
-            let expected_target_mode = match inspect_project_directory_target(&target) {
-                Ok(mode) => mode,
-                Err(error) => {
-                    actions.push(manual_action(
-                        &entry.resource_id,
-                        &format!(
-                            "Project directory '{}' is blocked at '{}': {}",
-                            logical_path,
-                            target.display(),
-                            error
-                        ),
-                    )?);
-                    continue;
+        for (scope_key, scope) in &snapshot.manifest.scopes {
+            let scope_home = match scope_key {
+                SyncScopeKey::Project => None,
+                SyncScopeKey::Provider(provider) => {
+                    match provider_homes.get(provider) {
+                        Some(home) => Some((provider.clone(), home.clone())),
+                        // Unbound or unknown provider: every row stays
+                        // view-only and the scope is preserved untouched.
+                        None => continue,
+                    }
                 }
             };
-            let mode = entry.mode.unwrap_or(0o700) & 0o777;
-            let kind = RestoreActionKind::EnsureProjectDirectory {
-                logical_path: logical_path.clone(),
-                mode,
-                source_mtime: entry.source_mtime,
-            };
-            actions.push(RestoreAction {
-                action_id: action_id_for(
-                    &entry.resource_id,
-                    logical_path.as_str(),
-                    kind.action_type(),
-                )?,
-                resource_id: entry.resource_id.clone(),
-                kind,
-                target_path: Some(path_text(&target)?),
-                source_sha256: Some(directory_entry_digest(logical_path, mode)),
-                expected_target_sha256: None,
-                expected_target_mode,
-                materialized_sha256: None,
-                requires_explicit_approval: true,
-            });
-        }
 
-        // Files, pass 1: inspect targets and decide the metadata-only outcome.
-        let mut planned_files = Vec::new();
-        for (logical_path, entry) in &snapshot.manifest.files {
-            let descriptor = snapshot
-                .manifest
-                .resources
-                .get(&entry.resource_id)
-                .ok_or_else(|| format!("file '{}' has no resource", logical_path))?;
-            if typed_conversation_resources.contains(&entry.resource_id) {
-                continue;
-            }
-            let Some(target) = map_logical_target(logical_path, descriptor, binding)? else {
-                planned_files.push(PlannedFile {
-                    logical_path,
-                    entry,
-                    descriptor,
-                    target: None,
-                    target_digest: None,
-                    target_mode: None,
-                    outcome: PlannedOutcome::Manual(format!(
-                        "No safe materializer is available for {}",
-                        logical_path
-                    )),
+            for (logical_path, entry) in &scope.directories {
+                let target = project_content_target(logical_path, binding)?;
+                let expected_target_mode = match inspect_project_directory_target(&target) {
+                    Ok(mode) => mode,
+                    Err(error) => {
+                        actions.push(manual_action(
+                            &entry.resource_id,
+                            &format!(
+                                "Project directory '{}' is blocked at '{}': {}",
+                                logical_path,
+                                target.display(),
+                                error
+                            ),
+                        )?);
+                        continue;
+                    }
+                };
+                let mode = entry.mode.unwrap_or(0o700) & 0o777;
+                let kind = RestoreActionKind::EnsureProjectDirectory {
+                    logical_path: logical_path.clone(),
+                    mode,
+                    source_mtime: entry.source_mtime,
+                };
+                actions.push(RestoreAction {
+                    action_id: action_id_for(
+                        &entry.resource_id,
+                        logical_path.as_str(),
+                        kind.action_type(),
+                    )?,
+                    resource_id: entry.resource_id.clone(),
+                    kind,
+                    target_path: Some(path_text(&target)?),
+                    source_sha256: Some(directory_entry_digest(logical_path, mode)),
+                    expected_target_sha256: None,
+                    expected_target_mode,
+                    materialized_sha256: None,
+                    requires_explicit_approval: true,
                 });
-                continue;
-            };
-            let folded = target.to_string_lossy().to_lowercase();
-            if let Some(previous) = target_owners.insert(folded, logical_path.clone()) {
-                return Err(format!(
-                    "logical files '{}' and '{}' map to one target",
-                    previous, logical_path
-                ));
             }
-            let target_state = match inspect_restore_target(&target) {
-                Ok(state) => state,
-                Err(error) if descriptor.kind == ResourceKind::ProjectContentFile => {
+
+            // Files, pass 1: inspect targets and decide the metadata-only
+            // outcome.
+            let mut planned_files = Vec::new();
+            for (logical_path, entry) in &scope.files {
+                let descriptor = scope
+                    .resources
+                    .get(&entry.resource_id)
+                    .ok_or_else(|| format!("file '{}' has no resource", logical_path))?;
+                if descriptor.kind == ResourceKind::Conversation {
+                    continue;
+                }
+                let target = match (&scope_home, descriptor.kind) {
+                    (None, _) => map_project_logical_target(logical_path, binding)?,
+                    (Some((provider, home)), ResourceKind::ProviderState) => provider_state_target(
+                        registry,
+                        provider,
+                        home,
+                        binding,
+                        descriptor,
+                        logical_path,
+                    ),
+                    (Some(_), _) => None,
+                };
+                let Some(target) = target else {
                     planned_files.push(PlannedFile {
                         logical_path,
                         entry,
@@ -1975,201 +1297,195 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                         target_digest: None,
                         target_mode: None,
                         outcome: PlannedOutcome::Manual(format!(
-                            "Project file '{}' is blocked at '{}': {}",
-                            logical_path,
-                            target.display(),
-                            error
+                            "No safe materializer is available for {}",
+                            logical_path
                         )),
                     });
                     continue;
+                };
+                let folded = target.to_string_lossy().to_lowercase();
+                if let Some(previous) = target_owners.insert(folded, logical_path.clone()) {
+                    return Err(format!(
+                        "logical files '{}' and '{}' map to one target",
+                        previous, logical_path
+                    ));
                 }
-                Err(error) => return Err(error),
-            };
-            let target_digest = target_state.digest;
-            let target_mode = target_state.mode;
-            let conversation_kind = matches!(
-                descriptor.kind,
-                ResourceKind::CodexConversation | ResourceKind::ClaudeConversation
-            );
-            let outcome = if conversation_kind
-                && target_digest
-                    .as_ref()
-                    .is_some_and(|digest| digest != &entry.sha256)
-            {
-                PlannedOutcome::KeepLocal
-            } else if !conversation_kind
-                && descriptor.kind != ResourceKind::ProjectContentFile
-                && target_digest.as_deref() == Some(entry.sha256.as_str())
-            {
-                // Generic files have no enforced mode, so byte identity is
-                // the whole restore; conversations and project files keep
-                // their own receipt semantics.
-                PlannedOutcome::UpToDate
-            } else {
-                PlannedOutcome::Action
-            };
-            planned_files.push(PlannedFile {
-                logical_path,
-                entry,
-                descriptor,
-                target: Some(target),
-                target_digest,
-                target_mode,
-                outcome,
-            });
-        }
-
-        // Files, pass 2: emit actions in manifest order.
-        for planned in planned_files {
-            let logical_path = planned.logical_path;
-            let entry = planned.entry;
-            let descriptor = planned.descriptor;
-            match planned.outcome {
-                PlannedOutcome::Manual(message) => {
-                    actions.push(manual_action(&entry.resource_id, &message)?);
-                    continue;
-                }
-                PlannedOutcome::KeepLocal => {
-                    let target = planned.target.as_ref().expect("keep-local has a target");
-                    let digest = planned
-                        .target_digest
-                        .as_deref()
-                        .expect("keep-local requires a target digest");
-                    actions.push(conversation_keep_local_action(
-                        &entry.resource_id,
-                        logical_path,
-                        target,
-                        &entry.sha256,
-                        digest,
-                    )?);
-                    continue;
-                }
-                PlannedOutcome::UpToDate => continue,
-                PlannedOutcome::Action => {}
-            };
-            let target = planned.target.as_ref().expect("file action has a target");
-            let kind = restore_kind_for_file(logical_path, descriptor, entry)?;
-            let requires_explicit_approval = action_needs_explicit_approval(
-                descriptor,
-                planned.target_digest.as_deref(),
-                &entry.sha256,
-            );
-            actions.push(RestoreAction {
-                action_id: action_id_for(
-                    &entry.resource_id,
-                    logical_path.as_str(),
-                    kind.action_type(),
-                )?,
-                resource_id: entry.resource_id.clone(),
-                kind,
-                target_path: Some(path_text(target)?),
-                source_sha256: Some(entry.sha256.clone()),
-                expected_target_sha256: planned.target_digest.clone(),
-                expected_target_mode: (descriptor.kind == ResourceKind::ProjectContentFile)
-                    .then_some(planned.target_mode)
-                    .flatten(),
-                materialized_sha256: Some(entry.sha256.clone()),
-                requires_explicit_approval,
-            });
-            if descriptor.relative_cwd.is_some()
-                && matches!(descriptor.kind, ResourceKind::ClaudeConversation)
-                && continuation_ids.insert(descriptor.resource_id.clone())
-            {
-                actions.push(continuation_action(descriptor, binding)?);
-            }
-        }
-        for tombstone in snapshot.manifest.tombstones.values() {
-            match &tombstone.target {
-                TombstoneTarget::ProjectContentFile {
-                    resource_id,
-                    logical_path,
-                } => {
-                    let last_sha256 = tombstone.last_sha256.clone().ok_or_else(|| {
-                        format!(
-                            "project-content file tombstone '{}' lacks its last digest",
-                            logical_path
-                        )
-                    })?;
-                    let target = project_content_target(logical_path, binding)?;
-                    let target_state = match inspect_restore_target(&target) {
-                        Ok(state) => state,
-                        Err(error) => {
-                            actions.push(manual_action(
-                                resource_id,
-                                &format!(
-                                    "Project-file deletion '{}' is blocked at '{}': {}",
-                                    logical_path,
-                                    target.display(),
-                                    error
-                                ),
-                            )?);
-                            continue;
-                        }
-                    };
-                    if target_state.digest.is_none() {
+                let target_state = match inspect_restore_target(&target) {
+                    Ok(state) => state,
+                    Err(error) if descriptor.kind == ResourceKind::ProjectContentFile => {
+                        planned_files.push(PlannedFile {
+                            logical_path,
+                            entry,
+                            descriptor,
+                            target: None,
+                            target_digest: None,
+                            target_mode: None,
+                            outcome: PlannedOutcome::Manual(format!(
+                                "Project file '{}' is blocked at '{}': {}",
+                                logical_path,
+                                target.display(),
+                                error
+                            )),
+                        });
                         continue;
                     }
-                    let kind = RestoreActionKind::DeleteProjectFile {
-                        logical_path: logical_path.clone(),
-                        last_sha256: last_sha256.clone(),
-                    };
-                    actions.push(RestoreAction {
-                        action_id: action_id_for(
-                            resource_id,
-                            logical_path.as_str(),
-                            kind.action_type(),
-                        )?,
-                        resource_id: resource_id.clone(),
-                        kind,
-                        target_path: Some(path_text(&target)?),
-                        source_sha256: None,
-                        expected_target_sha256: Some(last_sha256),
-                        expected_target_mode: target_state.mode,
-                        materialized_sha256: None,
-                        requires_explicit_approval: true,
-                    });
-                }
-                TombstoneTarget::ProjectContentDirectory {
-                    resource_id,
+                    Err(error) => return Err(error),
+                };
+                let target_digest = target_state.digest;
+                let target_mode = target_state.mode;
+                let outcome = if descriptor.kind != ResourceKind::ProjectContentFile
+                    && target_digest.as_deref() == Some(entry.sha256.as_str())
+                {
+                    // Generic files have no enforced mode, so byte identity
+                    // is the whole restore; project files keep their own
+                    // receipt semantics.
+                    PlannedOutcome::UpToDate
+                } else {
+                    PlannedOutcome::Action
+                };
+                planned_files.push(PlannedFile {
                     logical_path,
-                } => {
-                    let target = project_content_target(logical_path, binding)?;
-                    let expected_target_mode = match inspect_project_directory_target(&target) {
-                        Ok(Some(mode)) => Some(mode),
-                        Ok(None) => continue,
-                        Err(error) => {
-                            actions.push(manual_action(
-                                resource_id,
-                                &format!(
-                                    "Project-directory deletion '{}' is blocked at '{}': {}",
-                                    logical_path,
-                                    target.display(),
-                                    error
-                                ),
-                            )?);
+                    entry,
+                    descriptor,
+                    target: Some(target),
+                    target_digest,
+                    target_mode,
+                    outcome,
+                });
+            }
+
+            // Files, pass 2: emit actions in manifest order.
+            for planned in planned_files {
+                let logical_path = planned.logical_path;
+                let entry = planned.entry;
+                let descriptor = planned.descriptor;
+                match planned.outcome {
+                    PlannedOutcome::Manual(message) => {
+                        actions.push(manual_action(&entry.resource_id, &message)?);
+                        continue;
+                    }
+                    PlannedOutcome::UpToDate => continue,
+                    PlannedOutcome::Action => {}
+                };
+                let target = planned.target.as_ref().expect("file action has a target");
+                let kind = restore_kind_for_file(logical_path, descriptor, entry)?;
+                let requires_explicit_approval = action_needs_explicit_approval(
+                    descriptor,
+                    planned.target_digest.as_deref(),
+                    &entry.sha256,
+                );
+                actions.push(RestoreAction {
+                    action_id: action_id_for(
+                        &entry.resource_id,
+                        logical_path.as_str(),
+                        kind.action_type(),
+                    )?,
+                    resource_id: entry.resource_id.clone(),
+                    kind,
+                    target_path: Some(path_text(target)?),
+                    source_sha256: Some(entry.sha256.clone()),
+                    expected_target_sha256: planned.target_digest.clone(),
+                    expected_target_mode: (descriptor.kind == ResourceKind::ProjectContentFile)
+                        .then_some(planned.target_mode)
+                        .flatten(),
+                    materialized_sha256: Some(entry.sha256.clone()),
+                    requires_explicit_approval,
+                });
+            }
+
+            for tombstone in scope.tombstones.values() {
+                match &tombstone.target {
+                    TombstoneTarget::ProjectContentFile {
+                        resource_id,
+                        logical_path,
+                    } => {
+                        let last_sha256 = tombstone.last_sha256.clone().ok_or_else(|| {
+                            format!(
+                                "project-content file tombstone '{}' lacks its last digest",
+                                logical_path
+                            )
+                        })?;
+                        let target = project_content_target(logical_path, binding)?;
+                        let target_state = match inspect_restore_target(&target) {
+                            Ok(state) => state,
+                            Err(error) => {
+                                actions.push(manual_action(
+                                    resource_id,
+                                    &format!(
+                                        "Project-file deletion '{}' is blocked at '{}': {}",
+                                        logical_path,
+                                        target.display(),
+                                        error
+                                    ),
+                                )?);
+                                continue;
+                            }
+                        };
+                        if target_state.digest.is_none() {
                             continue;
                         }
-                    };
-                    let kind = RestoreActionKind::DeleteProjectDirectory {
-                        logical_path: logical_path.clone(),
-                    };
-                    actions.push(RestoreAction {
-                        action_id: action_id_for(
-                            resource_id,
-                            logical_path.as_str(),
-                            kind.action_type(),
-                        )?,
-                        resource_id: resource_id.clone(),
-                        kind,
-                        target_path: Some(path_text(&target)?),
-                        source_sha256: None,
-                        expected_target_sha256: None,
-                        expected_target_mode,
-                        materialized_sha256: None,
-                        requires_explicit_approval: true,
-                    });
+                        let kind = RestoreActionKind::DeleteProjectFile {
+                            logical_path: logical_path.clone(),
+                            last_sha256: last_sha256.clone(),
+                        };
+                        actions.push(RestoreAction {
+                            action_id: action_id_for(
+                                resource_id,
+                                logical_path.as_str(),
+                                kind.action_type(),
+                            )?,
+                            resource_id: resource_id.clone(),
+                            kind,
+                            target_path: Some(path_text(&target)?),
+                            source_sha256: None,
+                            expected_target_sha256: Some(last_sha256),
+                            expected_target_mode: target_state.mode,
+                            materialized_sha256: None,
+                            requires_explicit_approval: true,
+                        });
+                    }
+                    TombstoneTarget::ProjectContentDirectory {
+                        resource_id,
+                        logical_path,
+                    } => {
+                        let target = project_content_target(logical_path, binding)?;
+                        let expected_target_mode = match inspect_project_directory_target(&target) {
+                            Ok(Some(mode)) => Some(mode),
+                            Ok(None) => continue,
+                            Err(error) => {
+                                actions.push(manual_action(
+                                    resource_id,
+                                    &format!(
+                                        "Project-directory deletion '{}' is blocked at '{}': {}",
+                                        logical_path,
+                                        target.display(),
+                                        error
+                                    ),
+                                )?);
+                                continue;
+                            }
+                        };
+                        let kind = RestoreActionKind::DeleteProjectDirectory {
+                            logical_path: logical_path.clone(),
+                        };
+                        actions.push(RestoreAction {
+                            action_id: action_id_for(
+                                resource_id,
+                                logical_path.as_str(),
+                                kind.action_type(),
+                            )?,
+                            resource_id: resource_id.clone(),
+                            kind,
+                            target_path: Some(path_text(&target)?),
+                            source_sha256: None,
+                            expected_target_sha256: None,
+                            expected_target_mode,
+                            materialized_sha256: None,
+                            requires_explicit_approval: true,
+                        });
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         actions.sort_by(|a, b| a.action_id.cmp(&b.action_id));
@@ -2229,8 +1545,8 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             kind: manifest.bundle.kind,
             revision: manifest.revision,
             updated_at: manifest.updated_at,
-            resources: manifest.resources.len() as u64,
-            files: manifest.files.len() as u64,
+            resources: manifest.all_resources().count() as u64,
+            files: manifest.all_files().count() as u64,
         };
         let bytes = serde_json::to_vec(&tag).map_err(|e| format!("serialize bundle tag: {}", e))?;
         let key = repository_object_key(&manifest.bundle.bundle_id, TAG_FILE)?;
@@ -2252,6 +1568,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     fn validate_binding(
         &self,
         binding: &ProjectBinding,
+        provider_homes: &BTreeMap<ProviderKey, String>,
         backup_root: Option<&Path>,
     ) -> Result<(), String> {
         binding.validate_structure()?;
@@ -2265,13 +1582,11 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             ));
         }
         let mut targets = vec![project];
-        for (label, home) in [
-            ("Codex home", binding.codex_home.as_deref()),
-            ("Claude home", binding.claude_home.as_deref()),
-        ] {
-            if let Some(home) = home {
-                targets.push(canonical_real_dir(Path::new(home), label)?);
-            }
+        for (provider, home) in provider_homes {
+            targets.push(canonical_real_dir(
+                Path::new(home),
+                &format!("{} home", provider),
+            )?);
         }
         if let Some(store_root) = self.store.local_root() {
             for target in &targets {
@@ -2310,7 +1625,13 @@ impl<S: BundleObjectStore> BundleEngine<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider_capture::{capture_recipe, discover_project, CaptureRequest};
+    use crate::provider_capture::{
+        capture_recipe, discover_project, domain_resources, CaptureRequest,
+    };
+    use crate::storage_core::{
+        ImmutablePutOutcome, LocalObjectStore, ObjectKey, StoreListPage, StoredMetadata,
+        STORAGE_MARKER_KEY,
+    };
     use mallard_domain::{LocalProjectId, RecipeEntry, ReplicaId};
 
     fn bundle_id(number: u64) -> BundleId {
@@ -2319,6 +1640,14 @@ mod tests {
 
     fn storage_id() -> StorageId {
         StorageId::parse("storage-local").unwrap()
+    }
+
+    fn registry() -> &'static ProviderRegistry {
+        ProviderRegistry::production()
+    }
+
+    fn claude_key() -> ProviderKey {
+        ProviderKey::parse("claude").unwrap()
     }
 
     fn identity(id: BundleId, name: &str) -> BundleIdentity {
@@ -2349,8 +1678,7 @@ mod tests {
     fn captured_with() -> CapturedWith {
         CapturedWith {
             app_version: "test".to_string(),
-            codex_version: None,
-            claude_version: None,
+            provider_versions: BTreeMap::new(),
             codec_versions: BTreeMap::from([("codex".to_string(), 1), ("claude".to_string(), 1)]),
         }
     }
@@ -2360,12 +1688,7 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
-    fn active_binding(
-        id: BundleId,
-        project_root: &Path,
-        codex_home: Option<&Path>,
-        claude_home: Option<&Path>,
-    ) -> ProjectBinding {
+    fn active_binding(id: BundleId, project_root: &Path) -> ProjectBinding {
         ProjectBinding {
             host_id: mallard_domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
             replica_id: ReplicaId::parse("replica-test").unwrap(),
@@ -2378,129 +1701,206 @@ mod tests {
                 .unwrap()
                 .to_string(),
             profile_ids: BTreeMap::new(),
-            codex_home: codex_home.map(|path| path.to_str().unwrap().to_string()),
-            claude_home: claude_home.map(|path| path.to_str().unwrap().to_string()),
             state: BindingState::Active,
             revision: 3,
             updated_at: 1,
         }
     }
 
-    #[test]
-    fn local_store_enforces_immutable_objects_and_head_cas() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = LocalBundleObjectStore::open(temp.path().join("store")).unwrap();
-        let key = ObjectKey::parse(format!(
-            ".mallard/v1/repositories/{}/_uploads/upload-a/files/project/AGENTS.md",
-            bundle_id(1)
-        ))
-        .unwrap();
-        assert_eq!(
-            store.put_immutable(&key, b"one").unwrap(),
-            ImmutablePutOutcome::Written
-        );
-        assert_eq!(
-            store.put_immutable(&key, b"one").unwrap(),
-            ImmutablePutOutcome::AlreadyPresent
-        );
-        assert!(store.put_immutable(&key, b"two").is_err());
-
-        let head = ObjectKey::parse(format!(
-            ".mallard/v1/repositories/{}/_head.json",
-            bundle_id(1)
-        ))
-        .unwrap();
-        let first = store
-            .compare_and_swap(&head, &CasExpectation::Absent, b"first")
-            .unwrap();
-        let CasOutcome::Written { etag } = first else {
-            panic!("initial CAS did not write")
-        };
-        assert!(matches!(
-            store
-                .compare_and_swap(&head, &CasExpectation::Absent, b"lost")
-                .unwrap(),
-            CasOutcome::Conflict { .. }
-        ));
-        assert!(matches!(
-            store
-                .compare_and_swap(&head, &CasExpectation::Match(etag), b"second")
-                .unwrap(),
-            CasOutcome::Written { .. }
-        ));
-        assert_eq!(
-            store
-                .get_metadata(&head, MAX_BUNDLE_HEAD_BYTES)
-                .unwrap()
-                .unwrap()
-                .bytes,
-            b"second"
-        );
+    fn project_scope(manifest: &BundleManifest) -> &BundleScope {
+        manifest
+            .scope(&SyncScopeKey::Project)
+            .expect("manifest has a project scope")
     }
 
-    #[test]
-    fn verified_body_readers_have_independent_positions() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = LocalBundleObjectStore::open(temp.path().join("store")).unwrap();
-        let key = ObjectKey::parse(format!(
-            ".mallard/v1/repositories/{}/_objects/{}",
-            bundle_id(1),
-            sha256(b"abcdef")
-        ))
-        .unwrap();
-        store.put_immutable(&key, b"abcdef").unwrap();
-        let outcome = store
-            .stage_verified(
-                &key,
-                &ExpectedObject {
-                    size: 6,
-                    sha256: sha256(b"abcdef"),
-                },
-            )
-            .unwrap();
-        let StageOutcome::Verified(body) = outcome else {
-            panic!("object was not staged")
-        };
-
-        let mut first = body.open().unwrap();
-        let mut second = body.open().unwrap();
-        let mut first_prefix = [0_u8; 2];
-        let mut second_prefix = [0_u8; 2];
-        first.read_exact(&mut first_prefix).unwrap();
-        second.read_exact(&mut second_prefix).unwrap();
-
-        assert_eq!(&first_prefix, b"ab");
-        assert_eq!(&second_prefix, b"ab");
-    }
-
-    #[test]
-    fn mallard_storage_marker_is_created_idempotently_and_validated() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("store");
-        let store = LocalBundleObjectStore::open(&root).unwrap();
-        let engine = BundleEngine::open(store, storage_id()).unwrap();
-        drop(engine);
-
-        let marker_path = root.join(STORAGE_MARKER_KEY);
-        let marker: StorageMarker =
-            serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
-        assert_eq!(marker, StorageMarker::current());
-        assert!(root.join(MALLARD_ROOT).join(LOCAL_STORAGE_LOCK).is_file());
-
-        let store = LocalBundleObjectStore::open(&root).unwrap();
-        BundleEngine::open(store, storage_id()).unwrap();
-
-        fs::write(
-            &marker_path,
-            br#"{"format":"mallard-storage","layout_version":2}"#,
+    /// Publish a full captured selection through the scoped publisher: split
+    /// the capture into its sync scopes, treat every selected or previously
+    /// present scope as writable, and pin each one against the observed
+    /// head's manifest.
+    fn publish_captured<S: ObjectStore>(
+        engine: &BundleEngine<S>,
+        identity: BundleIdentity,
+        recipe: &BundleRecipe,
+        captured: &CapturedResources,
+        observed: Option<(BundleHead, HeadToken)>,
+        updated_at: u64,
+    ) -> Result<PublishedBundle, String> {
+        publish_captured_with_progress(
+            engine,
+            identity,
+            recipe,
+            captured,
+            observed,
+            updated_at,
+            &mut |_| {},
         )
-        .unwrap();
-        let store = LocalBundleObjectStore::open(&root).unwrap();
-        let error = match BundleEngine::open(store, storage_id()) {
-            Ok(_) => panic!("unsupported marker should be rejected"),
-            Err(error) => error,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn publish_captured_with_progress<S: ObjectStore>(
+        engine: &BundleEngine<S>,
+        identity: BundleIdentity,
+        recipe: &BundleRecipe,
+        captured: &CapturedResources,
+        observed: Option<(BundleHead, HeadToken)>,
+        updated_at: u64,
+        on_progress: &mut dyn FnMut(FetchProgress),
+    ) -> Result<PublishedBundle, String> {
+        let previous = observed
+            .as_ref()
+            .map(|(head, _)| engine.read_manifest(head))
+            .transpose()?;
+        let descriptors = domain_resources(captured)?;
+        let scope_of = |resource_id: &ResourceId| -> Result<SyncScopeKey, String> {
+            if let Some(descriptor) = descriptors.get(resource_id) {
+                return Ok(match &descriptor.provider {
+                    Some(provider) => SyncScopeKey::Provider(provider.clone()),
+                    None => SyncScopeKey::Project,
+                });
+            }
+            previous
+                .as_ref()
+                .and_then(|manifest| manifest.find_resource(resource_id))
+                .map(|(scope_key, _)| scope_key.clone())
+                .ok_or_else(|| format!("selected resource '{}' has no sync scope", resource_id))
         };
-        assert!(error.contains("layout version 2"));
+        let scope_of_raw = |resource_id: &str| -> Result<SyncScopeKey, String> {
+            scope_of(&ResourceId::parse(resource_id.to_string())?)
+        };
+
+        let mut writable_keys = BTreeSet::new();
+        for resource_id in recipe.entries.keys() {
+            writable_keys.insert(scope_of(resource_id)?);
+        }
+        if let Some(previous) = &previous {
+            writable_keys.extend(previous.scopes.keys().cloned());
+        }
+
+        let mut writable_scopes = BTreeMap::new();
+        let mut reviewed_scope_pins = BTreeMap::new();
+        for scope_key in writable_keys {
+            let previous_scope = previous
+                .as_ref()
+                .and_then(|manifest| manifest.scopes.get(&scope_key));
+            let mut scope_recipe = BundleRecipe::default();
+            for (resource_id, entry) in &recipe.entries {
+                if scope_of(resource_id)? == scope_key {
+                    scope_recipe
+                        .entries
+                        .insert(resource_id.clone(), entry.clone());
+                }
+            }
+            let mut scope_descriptors = BTreeMap::new();
+            for (resource_id, descriptor) in &descriptors {
+                if scope_of(resource_id)? == scope_key {
+                    scope_descriptors.insert(resource_id.clone(), descriptor.clone());
+                }
+            }
+            let (resources, mut retained_files, mut directories, tombstones) =
+                reconcile_scope_content(
+                    &scope_recipe,
+                    &scope_descriptors,
+                    captured,
+                    previous_scope,
+                    updated_at,
+                )?;
+            let mut captured_files = BTreeMap::new();
+            for file in captured.files.values() {
+                if scope_of_raw(&file.resource_id)? != scope_key {
+                    continue;
+                }
+                let path = LogicalPath::parse(file.logical_path.clone())?;
+                let resource_id = ResourceId::parse(file.resource_id.clone())?;
+                let digest = sha256(&file.bytes);
+                let mode = Some(file.mode & 0o777);
+                let retained = previous_scope
+                    .and_then(|scope| scope.files.get(&path))
+                    .filter(|entry| {
+                        entry.resource_id == resource_id
+                            && entry.sha256 == digest
+                            && entry.size == file.bytes.len() as u64
+                            && entry.source_mtime == file.source_mtime
+                            && entry.mode == mode
+                    })
+                    .cloned();
+                if let Some(entry) = retained {
+                    retained_files.insert(path, entry);
+                } else {
+                    retained_files.remove(&path);
+                    captured_files.insert(
+                        path,
+                        CapturedBundleFile {
+                            resource_id,
+                            bytes: file.bytes.clone(),
+                            source_mtime: file.source_mtime,
+                            mode,
+                        },
+                    );
+                }
+            }
+            for directory in captured.directories.values() {
+                if scope_of_raw(&directory.resource_id)? != scope_key {
+                    continue;
+                }
+                directories.insert(
+                    LogicalPath::parse(directory.logical_path.clone())?,
+                    BundleDirectoryEntry {
+                        resource_id: ResourceId::parse(directory.resource_id.clone())?,
+                        mode: Some(directory.mode & 0o777),
+                        source_mtime: directory.source_mtime,
+                    },
+                );
+            }
+            let mut scope_captured_with = captured_with();
+            if let Some(previous_scope) = previous_scope {
+                for (codec, version) in &previous_scope.captured_with.codec_versions {
+                    scope_captured_with
+                        .codec_versions
+                        .entry(codec.clone())
+                        .or_insert(*version);
+                }
+            }
+            reviewed_scope_pins.insert(
+                scope_key.clone(),
+                previous_scope
+                    .map(|scope| (scope.revision, scope.content_sha256.clone()))
+                    .unwrap_or_else(absent_scope_pin),
+            );
+            writable_scopes.insert(
+                scope_key,
+                ScopePublishInput {
+                    recipe: scope_recipe,
+                    captured_with: scope_captured_with,
+                    conversations: previous_scope
+                        .map(|scope| scope.conversations.clone())
+                        .unwrap_or_default(),
+                    resources,
+                    retained_files,
+                    captured_files,
+                    directories,
+                    tombstones,
+                },
+            );
+        }
+
+        engine.publish_with_progress(
+            PublishBundleRequest {
+                identity,
+                published_by_origin: PortableOrigin {
+                    origin_host_token: domain::OriginHostToken::parse("0".repeat(64))?,
+                    origin_replica_token: domain::OriginReplicaToken::parse("0".repeat(64))?,
+                    shared_label: None,
+                },
+                writable_scopes,
+                reviewed_scope_pins,
+                expected_head: observed
+                    .map(|(_, token)| PublishExpectation::Match(token))
+                    .unwrap_or(PublishExpectation::Absent),
+                updated_at,
+            },
+            on_progress,
+            &mut |_, _| {},
+        )
     }
 
     #[test]
@@ -2511,7 +1911,7 @@ mod tests {
         write(&project.join("CLAUDE.md"), b"portable guidance");
         let mut request = CaptureRequest::for_project(&project);
         request.include_project_content = true;
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let recipe = recipe_for(
             inventory
                 .resources
@@ -2520,21 +1920,17 @@ mod tests {
         );
         let id = bundle_id(91);
         let store_root = temp.path().join("store");
-        let engine = BundleEngine::open(
-            LocalBundleObjectStore::open(&store_root).unwrap(),
-            storage_id(),
+        let engine =
+            BundleEngine::open(LocalObjectStore::open(&store_root).unwrap(), storage_id()).unwrap();
+        publish_captured(
+            &engine,
+            identity(id.clone(), "Sized manifest"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
         )
         .unwrap();
-        engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Sized manifest"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
 
         let head_path = store_root
             .join(REPOSITORY_PREFIX)
@@ -2549,23 +1945,6 @@ mod tests {
     }
 
     #[test]
-    fn object_keys_outside_the_repository_namespace_are_rejected() {
-        assert!(
-            ObjectKey::parse("unsupported/bundles/0123456789abcdef0123456789abcdef/_tag.json")
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn content_addressed_object_keys_stay_inside_the_allowlist() {
-        let id = bundle_id(7);
-        let digest = "a".repeat(64);
-        assert!(repository_object_key(&id, &format!("_objects/{}", digest)).is_ok());
-        assert!(repository_object_key(&id, "_objects/../escape").is_err());
-        assert!(repository_object_key(&id, "_payloads/unknown-namespace").is_err());
-    }
-
-    #[test]
     fn publish_fetch_update_and_tombstone_round_trip() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
@@ -2573,7 +1952,7 @@ mod tests {
         write(&project.join("CLAUDE.md"), b"version one");
         let mut request = CaptureRequest::for_project(&project);
         request.include_project_content = true;
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let resource_id = inventory
             .resources
             .iter()
@@ -2582,21 +1961,20 @@ mod tests {
             .resource_id
             .clone();
         let recipe = recipe_for([resource_id]);
-        let captured = capture_recipe(&request, &recipe).unwrap();
+        let captured = capture_recipe(registry(), &request, &recipe).unwrap();
         let id = bundle_id(2);
         let store_root = temp.path().join("store");
-        let store = LocalBundleObjectStore::open(&store_root).unwrap();
+        let store = LocalObjectStore::open(&store_root).unwrap();
         let engine = BundleEngine::open(store, storage_id()).unwrap();
-        let first = engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured,
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        let first = publish_captured(
+            &engine,
+            identity(id.clone(), "Project"),
+            &recipe,
+            &captured,
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(first.snapshot.head.revision, 1);
         let first_token = engine.read_head(&id).unwrap().unwrap().1;
         let repository_root = store_root.join(format!("{}/{}", REPOSITORY_PREFIX, id));
@@ -2613,7 +1991,12 @@ mod tests {
             first.snapshot.head.manifest_size
         );
         let snapshot = engine.inspect(&id).unwrap();
-        let path = snapshot.manifest.files.keys().next().unwrap().clone();
+        let path = project_scope(&snapshot.manifest)
+            .files
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
         let cache = Arc::new(ObjectCache::default());
         let mut bytes = engine.byte_source(&snapshot, Some(cache.clone()), None);
         assert_eq!(
@@ -2623,7 +2006,15 @@ mod tests {
         drop(bytes);
 
         let mut wrong_size = snapshot.clone();
-        wrong_size.manifest.files.get_mut(&path).unwrap().size += 1;
+        wrong_size
+            .manifest
+            .scopes
+            .get_mut(&SyncScopeKey::Project)
+            .unwrap()
+            .files
+            .get_mut(&path)
+            .unwrap()
+            .size += 1;
         let mut bytes = engine.byte_source(&wrong_size, Some(cache), None);
         let error = bytes.body(&path).unwrap_err();
         assert!(
@@ -2632,55 +2023,51 @@ mod tests {
         );
 
         write(&project.join("CLAUDE.md"), b"version two");
-        let captured = capture_recipe(&request, &recipe).unwrap();
-        let second = engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Renamed Project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured,
-                observed_head: Some((first.snapshot.head.clone(), first_token.clone())),
-                updated_at: 20,
-            })
-            .unwrap();
+        let captured = capture_recipe(registry(), &request, &recipe).unwrap();
+        let second = publish_captured(
+            &engine,
+            identity(id.clone(), "Renamed Project"),
+            &recipe,
+            &captured,
+            Some((first.snapshot.head.clone(), first_token.clone())),
+            20,
+        )
+        .unwrap();
         assert_eq!(second.snapshot.head.revision, 2);
         let second_token = engine.read_head(&id).unwrap().unwrap().1;
-        assert!(engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Stale"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: Some((first.snapshot.head.clone(), first_token)),
-                updated_at: 21,
-            })
-            .is_err());
+        assert!(publish_captured(
+            &engine,
+            identity(id.clone(), "Stale"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            Some((first.snapshot.head.clone(), first_token)),
+            21,
+        )
+        .is_err());
 
         let empty_recipe = BundleRecipe::default();
-        let removed = engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Renamed Project"),
-                recipe: empty_recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &empty_recipe).unwrap(),
-                observed_head: Some((second.snapshot.head.clone(), second_token)),
-                updated_at: 30,
-            })
-            .unwrap();
-        assert!(removed.snapshot.manifest.files.is_empty());
-        assert!(removed.snapshot.manifest.resources.is_empty());
+        let removed = publish_captured(
+            &engine,
+            identity(id.clone(), "Renamed Project"),
+            &empty_recipe,
+            &capture_recipe(registry(), &request, &empty_recipe).unwrap(),
+            Some((second.snapshot.head.clone(), second_token)),
+            30,
+        )
+        .unwrap();
+        assert!(removed.snapshot.manifest.all_files().next().is_none());
+        assert!(removed.snapshot.manifest.all_resources().next().is_none());
         assert!(removed
             .snapshot
             .manifest
-            .tombstones
-            .values()
-            .any(|tombstone| matches!(tombstone.target, TombstoneTarget::Resource { .. })));
+            .all_tombstones()
+            .any(|(_, _, tombstone)| matches!(tombstone.target, TombstoneTarget::Resource { .. })));
     }
 
     #[test]
     fn remote_bundle_listing_pages_more_than_one_thousand_bundles() {
         let temp = tempfile::tempdir().unwrap();
-        let store = LocalBundleObjectStore::open(temp.path().join("store")).unwrap();
+        let store = LocalObjectStore::open(temp.path().join("store")).unwrap();
         for number in 1..=1_005_u64 {
             let id = bundle_id(number);
             let tag = BundleTag {
@@ -2728,7 +2115,7 @@ mod tests {
         write(&target.join("CLAUDE.md"), b"target edits");
         let mut request = CaptureRequest::for_project(&source);
         request.include_project_content = true;
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let resource_id = inventory
             .resources
             .iter()
@@ -2739,24 +2126,31 @@ mod tests {
         let recipe = recipe_for([resource_id]);
         let id = bundle_id(3);
         let engine = BundleEngine::open(
-            LocalBundleObjectStore::open(temp.path().join("store")).unwrap(),
+            LocalObjectStore::open(temp.path().join("store")).unwrap(),
             storage_id(),
         )
         .unwrap();
-        engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Portable project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        publish_captured(
+            &engine,
+            identity(id.clone(), "Portable project"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         let snapshot = engine.inspect(&id).unwrap();
-        let binding = active_binding(id, &target, None, None);
+        let binding = active_binding(id, &target);
+        let provider_homes = BTreeMap::new();
         let plan = engine
-            .build_restore_plan_from_snapshot(&snapshot, &binding, 100, 0)
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &provider_homes,
+                100,
+                0,
+            )
             .unwrap();
         let write_action = plan
             .actions
@@ -2776,6 +2170,7 @@ mod tests {
                 &snapshot,
                 &mut bytes,
                 &binding,
+                &provider_homes,
                 &plan,
                 &approved,
                 &temp.path().join("backups"),
@@ -2803,7 +2198,7 @@ mod tests {
     /// `put_immutable`, so bulk uploads are recorded per object.
     #[derive(Clone)]
     struct CountingStore {
-        inner: LocalBundleObjectStore,
+        inner: LocalObjectStore,
         keys: Arc<Mutex<Vec<String>>>,
         puts: Arc<Mutex<Vec<String>>>,
         cas_writes: Arc<Mutex<Vec<String>>>,
@@ -2812,7 +2207,7 @@ mod tests {
     impl CountingStore {
         fn open(root: &Path) -> Self {
             Self {
-                inner: LocalBundleObjectStore::open(root).unwrap(),
+                inner: LocalObjectStore::open(root).unwrap(),
                 keys: Arc::new(Mutex::new(Vec::new())),
                 puts: Arc::new(Mutex::new(Vec::new())),
                 cas_writes: Arc::new(Mutex::new(Vec::new())),
@@ -2861,7 +2256,7 @@ mod tests {
         }
     }
 
-    impl BundleObjectStore for CountingStore {
+    impl ObjectStore for CountingStore {
         fn get_metadata(
             &self,
             key: &ObjectKey,
@@ -2937,7 +2332,7 @@ mod tests {
         write(&source.join("changing.md"), b"first draft");
         let mut request = CaptureRequest::for_project(&source);
         request.include_project_content = true;
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let recipe = recipe_for(
             inventory
                 .resources
@@ -2947,35 +2342,33 @@ mod tests {
         let id = bundle_id(41);
         let store = CountingStore::open(&temp.path().join("store"));
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
-        let first = engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Incremental"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        let first = publish_captured(
+            &engine,
+            identity(id.clone(), "Incremental"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         assert!(first.published);
         let first_token = engine.read_head(&id).unwrap().unwrap().1;
         assert_eq!(store.payload_puts().len(), 2);
-        for entry in first.snapshot.manifest.files.values() {
+        for entry in project_scope(&first.snapshot.manifest).files.values() {
             assert_eq!(entry.object_key, format!("_objects/{}", entry.sha256));
         }
 
         write(&source.join("changing.md"), b"second draft");
         store.reset();
-        let second = engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Incremental"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: Some((first.snapshot.head.clone(), first_token)),
-                updated_at: 20,
-            })
-            .unwrap();
+        let second = publish_captured(
+            &engine,
+            identity(id.clone(), "Incremental"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            Some((first.snapshot.head.clone(), first_token)),
+            20,
+        )
+        .unwrap();
         assert!(second.published);
         assert_eq!(second.snapshot.head.revision, 2);
         let changed_key =
@@ -2991,17 +2384,15 @@ mod tests {
             "publish downloads nothing — retained entries are witnessed by the previous \
              manifest and the checksummed PUT is the upload receipt"
         );
-        let stable_path = second
-            .snapshot
-            .manifest
+        let stable_path = project_scope(&second.snapshot.manifest)
             .files
             .iter()
             .find(|(_, entry)| entry.sha256 == sha256(b"stable contents"))
             .map(|(path, _)| path.clone())
             .unwrap();
         assert_eq!(
-            second.snapshot.manifest.files[&stable_path],
-            first.snapshot.manifest.files[&stable_path],
+            project_scope(&second.snapshot.manifest).files[&stable_path],
+            project_scope(&first.snapshot.manifest).files[&stable_path],
             "the unchanged entry carries over verbatim, object key included"
         );
     }
@@ -3017,7 +2408,7 @@ mod tests {
         write(&source.join("stable.md"), b"stable contents");
         let mut request = CaptureRequest::for_project(&source);
         request.include_project_content = true;
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let recipe = recipe_for(
             inventory
                 .resources
@@ -3027,16 +2418,15 @@ mod tests {
         let id = bundle_id(77);
         let store = CountingStore::open(&temp.path().join("store"));
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
-        let published = engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Probe"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        let published = publish_captured(
+            &engine,
+            identity(id.clone(), "Probe"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         let head = published.snapshot.head.clone();
         let manifest_key_reads = |store: &CountingStore| {
             store
@@ -3129,7 +2519,7 @@ mod tests {
         write(&source.join("right.md"), b"same bytes either way");
         let mut request = CaptureRequest::for_project(&source);
         request.include_project_content = true;
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let recipe = recipe_for(
             inventory
                 .resources
@@ -3139,19 +2529,21 @@ mod tests {
         let id = bundle_id(42);
         let store = CountingStore::open(&temp.path().join("store"));
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
-        let published = engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Dedupe"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        let published = publish_captured(
+            &engine,
+            identity(id.clone(), "Dedupe"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(store.payload_puts().len(), 1);
         let shared_key = format!("_objects/{}", sha256(b"same bytes either way"));
-        let file_entries: Vec<_> = published.snapshot.manifest.files.values().collect();
+        let file_entries: Vec<_> = project_scope(&published.snapshot.manifest)
+            .files
+            .values()
+            .collect();
         assert_eq!(file_entries.len(), 2);
         for entry in file_entries {
             assert_eq!(entry.object_key, shared_key);
@@ -3166,7 +2558,7 @@ mod tests {
         write(&source.join("CLAUDE.md"), b"steady state");
         let mut request = CaptureRequest::for_project(&source);
         request.include_project_content = true;
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let recipe = recipe_for(
             inventory
                 .resources
@@ -3176,30 +2568,28 @@ mod tests {
         let id = bundle_id(43);
         let store = CountingStore::open(&temp.path().join("store"));
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
-        let first = engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Noop"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        let first = publish_captured(
+            &engine,
+            identity(id.clone(), "Noop"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         assert!(first.published);
         let first_token = engine.read_head(&id).unwrap().unwrap().1;
 
         store.reset();
-        let noop = engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Noop"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: Some((first.snapshot.head.clone(), first_token.clone())),
-                updated_at: 20,
-            })
-            .unwrap();
+        let noop = publish_captured(
+            &engine,
+            identity(id.clone(), "Noop"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            Some((first.snapshot.head.clone(), first_token.clone())),
+            20,
+        )
+        .unwrap();
         assert!(!noop.published);
         assert_eq!(noop.snapshot.head.revision, 1);
         assert_eq!(engine.read_head(&id).unwrap().unwrap().1, first_token);
@@ -3221,7 +2611,7 @@ mod tests {
         write(&source.join("large.md"), b"a considerably longer payload");
         let mut request = CaptureRequest::for_project(&source);
         request.include_project_content = true;
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let recipe = recipe_for(
             inventory
                 .resources
@@ -3232,19 +2622,16 @@ mod tests {
         let store = CountingStore::open(&temp.path().join("store"));
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
         let mut events: Vec<FetchProgress> = Vec::new();
-        let first = engine
-            .publish_test_resources_with_progress(
-                CapturedResourcesPublishRequest {
-                    identity: identity(id.clone(), "Progress"),
-                    recipe: recipe.clone(),
-                    captured_with: captured_with(),
-                    captured: capture_recipe(&request, &recipe).unwrap(),
-                    observed_head: None,
-                    updated_at: 10,
-                },
-                &mut |progress| events.push(progress),
-            )
-            .unwrap();
+        let first = publish_captured_with_progress(
+            &engine,
+            identity(id.clone(), "Progress"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+            &mut |progress| events.push(progress),
+        )
+        .unwrap();
         let first_token = engine.read_head(&id).unwrap().unwrap().1;
         let full_bytes = (b"tiny".len() + b"a considerably longer payload".len()) as u64;
         assert_eq!(events.len(), 2);
@@ -3254,19 +2641,16 @@ mod tests {
         assert_eq!(events.last().unwrap().total_bytes, full_bytes);
 
         events.clear();
-        let noop = engine
-            .publish_test_resources_with_progress(
-                CapturedResourcesPublishRequest {
-                    identity: identity(id.clone(), "Progress"),
-                    recipe: recipe.clone(),
-                    captured_with: captured_with(),
-                    captured: capture_recipe(&request, &recipe).unwrap(),
-                    observed_head: Some((first.snapshot.head.clone(), first_token.clone())),
-                    updated_at: 20,
-                },
-                &mut |progress| events.push(progress),
-            )
-            .unwrap();
+        let noop = publish_captured_with_progress(
+            &engine,
+            identity(id.clone(), "Progress"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            Some((first.snapshot.head.clone(), first_token.clone())),
+            20,
+            &mut |progress| events.push(progress),
+        )
+        .unwrap();
         assert!(!noop.published);
         assert!(events.is_empty(), "a no-op publish reports no transfer");
 
@@ -3275,19 +2659,16 @@ mod tests {
             b"a different considerably longer payload",
         );
         events.clear();
-        engine
-            .publish_test_resources_with_progress(
-                CapturedResourcesPublishRequest {
-                    identity: identity(id.clone(), "Progress"),
-                    recipe: recipe.clone(),
-                    captured_with: captured_with(),
-                    captured: capture_recipe(&request, &recipe).unwrap(),
-                    observed_head: Some((first.snapshot.head.clone(), first_token)),
-                    updated_at: 30,
-                },
-                &mut |progress| events.push(progress),
-            )
-            .unwrap();
+        publish_captured_with_progress(
+            &engine,
+            identity(id.clone(), "Progress"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            Some((first.snapshot.head.clone(), first_token)),
+            30,
+            &mut |progress| events.push(progress),
+        )
+        .unwrap();
         let changed_bytes = b"a different considerably longer payload".len() as u64;
         assert_eq!(events.len(), 1, "unchanged payloads never enter the totals");
         assert_eq!(events[0].total_objects, 1);
@@ -3307,7 +2688,7 @@ mod tests {
         write(&target.join("CLAUDE.md"), b"portable guidance");
         let mut request = CaptureRequest::for_project(&source);
         request.include_project_content = true;
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let resource_id = inventory
             .resources
             .iter()
@@ -3320,22 +2701,26 @@ mod tests {
         let store_root = temp.path().join("store");
         let store = CountingStore::open(&store_root);
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
-        engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Lazy project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
-        let binding = active_binding(id.clone(), &target, None, None);
+        publish_captured(
+            &engine,
+            identity(id.clone(), "Lazy project"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        let binding = active_binding(id.clone(), &target);
+        let provider_homes = BTreeMap::new();
 
         store.reset();
         let snapshot = engine.inspect(&id).unwrap();
-        let logical_path = snapshot.manifest.files.keys().next().unwrap();
-        let entry_size = snapshot.manifest.files[logical_path].size;
+        let logical_path = project_scope(&snapshot.manifest)
+            .files
+            .keys()
+            .next()
+            .unwrap();
+        let entry_size = project_scope(&snapshot.manifest).files[logical_path].size;
         let mut limited_bytes = engine.byte_source(&snapshot, None, None);
         let error = limited_bytes
             .read_bounded(
@@ -3351,7 +2736,14 @@ mod tests {
             "resource limits must reject before downloading an object"
         );
         let plan = engine
-            .build_restore_plan_from_snapshot(&snapshot, &binding, 100, 0)
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &provider_homes,
+                100,
+                0,
+            )
             .unwrap();
         assert_eq!(
             store.payload_gets(),
@@ -3383,6 +2775,7 @@ mod tests {
                 &snapshot,
                 &mut apply_bytes,
                 &binding,
+                &provider_homes,
                 &plan,
                 &approved,
                 &temp.path().join("backups"),
@@ -3403,7 +2796,14 @@ mod tests {
         fs::remove_file(target.join("CLAUDE.md")).unwrap();
         let snapshot = engine.inspect(&id).unwrap();
         let plan = engine
-            .build_restore_plan_from_snapshot(&snapshot, &binding, 102, 0)
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &provider_homes,
+                102,
+                0,
+            )
             .unwrap();
         let write_action = plan
             .actions
@@ -3423,6 +2823,7 @@ mod tests {
                 &snapshot,
                 &mut apply_bytes,
                 &binding,
+                &provider_homes,
                 &plan,
                 &approved,
                 &temp.path().join("backups"),
@@ -3453,6 +2854,7 @@ mod tests {
                 &snapshot,
                 &mut apply_bytes,
                 &binding,
+                &provider_homes,
                 &plan,
                 &approved,
                 &temp.path().join("backups"),
@@ -3492,13 +2894,12 @@ mod tests {
         );
         let request = CaptureRequest {
             project_root: source.clone(),
-            codex_home: None,
-            claude_home: Some(source_claude),
+            provider_homes: BTreeMap::from([(claude_key(), source_claude)]),
             excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let resource = inventory
             .resources
             .iter()
@@ -3507,22 +2908,29 @@ mod tests {
         let recipe = recipe_for([resource.resource_id.clone()]);
         let id = bundle_id(98);
         let engine = BundleEngine::open(
-            LocalBundleObjectStore::open(temp.path().join("store")).unwrap(),
+            LocalObjectStore::open(temp.path().join("store")).unwrap(),
             storage_id(),
         )
         .unwrap();
-        engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Memory project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
+        publish_captured(
+            &engine,
+            identity(id.clone(), "Memory project"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
         let snapshot = engine.inspect(&id).unwrap();
-        let binding = active_binding(id, &target, None, Some(&target_claude));
+        let binding = active_binding(id, &target);
+        let provider_homes = BTreeMap::from([(
+            claude_key(),
+            fs::canonicalize(&target_claude)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string(),
+        )]);
 
         let is_generic_write = |action: &RestoreAction| {
             matches!(
@@ -3531,7 +2939,14 @@ mod tests {
             )
         };
         let plan = engine
-            .build_restore_plan_from_snapshot(&snapshot, &binding, 100, 0)
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &provider_homes,
+                100,
+                0,
+            )
             .unwrap();
         let action = plan
             .actions
@@ -3545,7 +2960,14 @@ mod tests {
         // behind a write that would change nothing.
         write(&memory_target, b"remember the ducks");
         let plan = engine
-            .build_restore_plan_from_snapshot(&snapshot, &binding, 101, 0)
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &provider_homes,
+                101,
+                0,
+            )
             .unwrap();
         assert!(
             !plan.actions.iter().any(|action| is_generic_write(action)),
@@ -3556,27 +2978,32 @@ mod tests {
         // A drifted target is real work again.
         write(&memory_target, b"remember the geese");
         let plan = engine
-            .build_restore_plan_from_snapshot(&snapshot, &binding, 102, 0)
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &provider_homes,
+                102,
+                0,
+            )
             .unwrap();
         assert!(plan.actions.iter().any(|action| is_generic_write(action)));
     }
 
+    /// Conversations belong exclusively to the typed pipeline now: a raw
+    /// session capture is a conversation-kind resource without typed thread
+    /// metadata, and the scoped file publisher refuses to put one into a
+    /// provider scope.
     #[test]
-    fn claude_session_materializes_under_remapped_relative_cwd() {
+    fn scoped_publisher_rejects_session_captures_without_typed_threads() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
-        let source_child = source.join("apps/web");
-        let target = temp.path().join("target");
-        let target_child = target.join("apps/web");
         let source_claude = temp.path().join("source-claude");
-        let target_claude = temp.path().join("target-claude");
-        fs::create_dir_all(&source_child).unwrap();
-        fs::create_dir_all(&target_child).unwrap();
+        fs::create_dir_all(&source).unwrap();
         fs::create_dir_all(&source_claude).unwrap();
-        fs::create_dir_all(&target_claude).unwrap();
         let transcript = format!(
             "{{\"type\":\"system\",\"sessionId\":\"session-a\",\"cwd\":{}}}\n",
-            serde_json::to_string(source_child.to_str().unwrap()).unwrap()
+            serde_json::to_string(source.to_str().unwrap()).unwrap()
         );
         write(
             &source_claude.join("projects/source-bucket/session-a.jsonl"),
@@ -3584,74 +3011,35 @@ mod tests {
         );
         let request = CaptureRequest {
             project_root: source,
-            codex_home: None,
-            claude_home: Some(source_claude),
+            provider_homes: BTreeMap::from([(claude_key(), source_claude)]),
             excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
-        let inventory = discover_project(&request).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
         let resource = inventory
             .resources
             .iter()
             .find(|resource| resource.resource_id == "claude:session:session-a")
             .unwrap();
-        assert_eq!(resource.relative_cwd.as_deref(), Some("apps/web"));
         let recipe = recipe_for([resource.resource_id.clone()]);
         let id = bundle_id(4);
         let engine = BundleEngine::open(
-            LocalBundleObjectStore::open(temp.path().join("store")).unwrap(),
+            LocalObjectStore::open(temp.path().join("store")).unwrap(),
             storage_id(),
         )
         .unwrap();
-        engine
-            .publish_test_resources(CapturedResourcesPublishRequest {
-                identity: identity(id.clone(), "Claude project"),
-                recipe: recipe.clone(),
-                captured_with: captured_with(),
-                captured: capture_recipe(&request, &recipe).unwrap(),
-                observed_head: None,
-                updated_at: 10,
-            })
-            .unwrap();
-        let snapshot = engine.inspect(&id).unwrap();
-        let binding = active_binding(id, &target, None, Some(&target_claude));
-        let plan = engine
-            .build_restore_plan_from_snapshot(&snapshot, &binding, 100, 0)
-            .unwrap();
-        let action = plan
-            .actions
-            .iter()
-            .find(|action| {
-                matches!(
-                    action.kind,
-                    RestoreActionKind::MaterializeConversation { .. }
-                )
-            })
-            .unwrap();
-        let encoded_target = encode_claude_project_path(target_child.to_str().unwrap());
-        assert!(action
-            .target_path
-            .as_deref()
-            .unwrap()
-            .contains(&encoded_target));
-        let approved = BTreeSet::from([action.action_id.clone()]);
-        let mut bytes = engine.byte_source(&snapshot, None, None);
-        engine
-            .apply_restore_plan_lazy(
-                &snapshot,
-                &mut bytes,
-                &binding,
-                &plan,
-                &approved,
-                &temp.path().join("backups"),
-                101,
-            )
-            .unwrap();
-        assert_eq!(
-            fs::read(action.target_path.as_ref().unwrap()).unwrap(),
-            transcript.as_bytes()
-        );
+        let error = publish_captured(
+            &engine,
+            identity(id.clone(), "Claude project"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap_err();
+        assert!(error.contains("belongs to no live thread"), "{error}");
+        assert!(engine.inspect_optional(&id).unwrap().is_none());
     }
 }
 
@@ -3674,89 +3062,18 @@ fn manual_action(resource_id: &ResourceId, message: &str) -> Result<RestoreActio
     Ok(action)
 }
 
-fn conversation_keep_local_action(
-    resource_id: &ResourceId,
-    logical_path: &LogicalPath,
-    target: &Path,
-    source_sha256: &str,
-    target_sha256: &str,
-) -> Result<RestoreAction, String> {
-    let message = format!(
-        "Conversation '{}' differs at '{}'; this Pull will keep the local version",
-        logical_path,
-        target.display()
-    );
-    let suffix = &sha256(message.as_bytes())[..24];
-    let action = RestoreAction {
-        action_id: ActionId::parse(format!("manual-{}", suffix))?,
-        resource_id: resource_id.clone(),
-        kind: RestoreActionKind::Manual { message },
-        target_path: Some(path_text(target)?),
-        source_sha256: Some(source_sha256.to_string()),
-        expected_target_sha256: Some(target_sha256.to_string()),
-        expected_target_mode: None,
-        materialized_sha256: None,
-        requires_explicit_approval: true,
-    };
-    action.validate()?;
-    Ok(action)
-}
-
-fn is_conversation_keep_local_action(action: &RestoreAction) -> bool {
-    matches!(action.kind, RestoreActionKind::Manual { .. })
-        && action.resource_id.as_str().starts_with("claude:session:")
-        && action.target_path.is_some()
-        && action.source_sha256.is_some()
-        && action.expected_target_sha256.is_some()
-}
-
-fn continuation_action(
-    descriptor: &ResourceDescriptor,
-    binding: &ProjectBinding,
-) -> Result<RestoreAction, String> {
-    let target_cwd = remapped_resource_cwd(descriptor, binding)?;
-    let command = match descriptor.kind {
-        ResourceKind::CodexConversation => format!(
-            "codex resume {} -C {}",
-            descriptor.display_name,
-            target_cwd.display()
-        ),
-        ResourceKind::ClaudeConversation => format!(
-            "cd {} && claude --resume {}",
-            target_cwd.display(),
-            descriptor.display_name
-        ),
-        _ => return Err("continuation action requires a conversation resource".to_string()),
-    };
-    manual_action(&descriptor.resource_id, &command)
-}
-
-fn remapped_resource_cwd(
-    descriptor: &ResourceDescriptor,
-    binding: &ProjectBinding,
-) -> Result<PathBuf, String> {
-    let relative_cwd = descriptor.relative_cwd.as_deref().unwrap_or(".");
-    if relative_cwd == "." {
-        Ok(PathBuf::from(&binding.project_root))
-    } else {
-        safe_lexical_join(Path::new(&binding.project_root), relative_cwd)
-    }
-}
-
 fn restore_kind_for_file(
     logical_path: &LogicalPath,
     descriptor: &ResourceDescriptor,
     entry: &BundleFileEntry,
 ) -> Result<RestoreActionKind, String> {
     Ok(match descriptor.kind {
-        ResourceKind::CodexConversation => RestoreActionKind::MaterializeConversation {
-            provider: Provider::Codex,
-            logical_path: logical_path.clone(),
-        },
-        ResourceKind::ClaudeConversation => RestoreActionKind::MaterializeConversation {
-            provider: Provider::Claude,
-            logical_path: logical_path.clone(),
-        },
+        ResourceKind::Conversation => {
+            return Err(format!(
+                "conversation file '{}' belongs to the typed conversation planner",
+                logical_path
+            ))
+        }
         ResourceKind::ProjectContentFile => RestoreActionKind::WriteProjectFile {
             logical_path: logical_path.clone(),
             mode: entry.mode.unwrap_or(0o600) & 0o777,
@@ -3791,9 +3108,11 @@ fn action_id_for(
     ActionId::parse(format!("action-{}", &sha256(material.as_bytes())[..24]))
 }
 
-fn map_logical_target(
+/// Map one project-scope logical path to its machine target. `project/`
+/// content lands under the canonical project root; `requirements/` and
+/// `dependencies/` entries have no safe materializer and stay manual.
+fn map_project_logical_target(
     logical_path: &LogicalPath,
-    descriptor: &ResourceDescriptor,
     binding: &ProjectBinding,
 ) -> Result<Option<PathBuf>, String> {
     let logical = logical_path.as_str();
@@ -3803,64 +3122,30 @@ fn map_logical_target(
             relative,
         )?));
     }
-    if let Some(relative) = logical.strip_prefix("state/codex/skills/") {
-        let home = canonical_bound_home(binding.codex_home.as_deref(), "Codex")?;
-        return Ok(Some(safe_lexical_join(
-            &home,
-            &format!("skills/{}", relative),
-        )?));
-    }
-    if let Some(relative) = logical.strip_prefix("state/claude/skills/") {
-        let home = canonical_bound_home(binding.claude_home.as_deref(), "Claude")?;
-        return Ok(Some(safe_lexical_join(
-            &home,
-            &format!("skills/{}", relative),
-        )?));
-    }
-    if let Some(relative) = logical.strip_prefix("state/claude/projects/") {
-        let (_, file_relative) = relative
-            .split_once('/')
-            .ok_or_else(|| format!("invalid Claude project logical path '{}'", logical))?;
-        let relative_cwd = descriptor.relative_cwd.as_deref().unwrap_or(".");
-        let cwd = if relative_cwd == "." {
-            PathBuf::from(&binding.project_root)
-        } else {
-            safe_lexical_join(Path::new(&binding.project_root), relative_cwd)?
-        };
-        let bucket = encode_claude_project_path(&path_text(&cwd)?);
-        let home = canonical_bound_home(binding.claude_home.as_deref(), "Claude")?;
-        return Ok(Some(safe_lexical_join(
-            &home,
-            &format!("projects/{}/{}", bucket, file_relative),
-        )?));
-    }
-    for directory in ["file-history", "todos"] {
-        if let Some(relative) = logical.strip_prefix(&format!("state/claude/{}/", directory)) {
-            let home = canonical_bound_home(binding.claude_home.as_deref(), "Claude")?;
-            return Ok(Some(safe_lexical_join(
-                &home,
-                &format!("{}/{}", directory, relative),
-            )?));
-        }
-    }
-    if let Some(relative) = logical.strip_prefix("state/claude/memory/") {
-        let (_, memory_relative) = relative
-            .split_once('/')
-            .ok_or_else(|| format!("invalid Claude memory path '{}'", logical))?;
-        let relative_cwd = descriptor.relative_cwd.as_deref().unwrap_or(".");
-        let cwd = if relative_cwd == "." {
-            PathBuf::from(&binding.project_root)
-        } else {
-            safe_lexical_join(Path::new(&binding.project_root), relative_cwd)?
-        };
-        let bucket = encode_claude_project_path(&path_text(&cwd)?);
-        let home = canonical_bound_home(binding.claude_home.as_deref(), "Claude")?;
-        return Ok(Some(safe_lexical_join(
-            &home,
-            &format!("projects/{}/memory/{}", bucket, memory_relative),
-        )?));
-    }
     Ok(None)
+}
+
+/// Map one provider-state logical path through the registered adapter. A
+/// mapping failure downgrades to a manual row rather than blocking the plan.
+fn provider_state_target(
+    registry: &ProviderRegistry,
+    provider: &ProviderKey,
+    provider_home: &str,
+    binding: &ProjectBinding,
+    descriptor: &ResourceDescriptor,
+    logical_path: &LogicalPath,
+) -> Option<PathBuf> {
+    let prefix = mallard_domain::provider_state_path_prefix(provider);
+    let suffix = logical_path.as_str().strip_prefix(prefix.as_str())?;
+    let sessions = registry.sessions(provider)?;
+    sessions
+        .state_target(
+            Path::new(provider_home),
+            &binding.project_root,
+            descriptor.relative_cwd.as_deref(),
+            suffix,
+        )
+        .ok()
 }
 
 fn project_content_target(
@@ -3944,27 +3229,6 @@ fn set_path_mtime_best_effort(path: &Path, source_mtime: u64) {
     }
 }
 
-fn required_home<'a>(home: Option<&'a str>, provider: &str) -> Result<&'a Path, String> {
-    home.map(Path::new)
-        .ok_or_else(|| format!("{} home is required by this bundle", provider))
-}
-
-fn canonical_bound_home(home: Option<&str>, provider: &str) -> Result<PathBuf, String> {
-    canonical_real_dir(
-        required_home(home, provider)?,
-        &format!("{} home", provider),
-    )
-}
-
-fn encode_claude_project_path(path: &str) -> String {
-    path.encode_utf16()
-        .map(|unit| match u8::try_from(unit) {
-            Ok(byte) if byte.is_ascii_alphanumeric() => byte as char,
-            _ => '-',
-        })
-        .collect()
-}
-
 fn safe_lexical_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
     if !root.is_absolute() || relative.is_empty() || relative.contains('\\') {
         return Err("unsafe restore path".to_string());
@@ -4045,13 +3309,19 @@ fn validate_target_for_logical(
     target: &Path,
     logical_path: &LogicalPath,
     binding: &ProjectBinding,
+    provider_homes: &BTreeMap<ProviderKey, String>,
 ) -> Result<(), String> {
     let root = if logical_path.as_str().starts_with("project/") {
         PathBuf::from(&binding.canonical_project_root)
-    } else if logical_path.as_str().starts_with("state/codex/") {
-        canonical_bound_home(binding.codex_home.as_deref(), "Codex")?
-    } else if logical_path.as_str().starts_with("state/claude/") {
-        canonical_bound_home(binding.claude_home.as_deref(), "Claude")?
+    } else if let Some(provider) = provider_homes.keys().find(|provider| {
+        logical_path
+            .as_str()
+            .starts_with(&mallard_domain::provider_state_path_prefix(provider))
+    }) {
+        let home = provider_homes
+            .get(provider)
+            .expect("provider key came from this map");
+        canonical_real_dir(Path::new(home), &format!("{} home", provider))?
     } else {
         return Err(format!(
             "logical path '{}' has no writable target root",
@@ -4098,19 +3368,6 @@ fn inspect_existing_ancestors_no_symlink(path: &Path) -> Result<(), String> {
         existing = parent;
     }
     Ok(())
-}
-
-fn open_read_only_no_follow(path: &Path, label: &str) -> Result<fs::File, String> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    options
-        .open(path)
-        .map_err(|error| format!("open {}: {}", label, error))
 }
 
 fn prospective_canonical_path(path: &Path) -> Result<PathBuf, String> {
@@ -4536,199 +3793,26 @@ fn random_named_id(prefix: &str) -> Result<String, String> {
     domain::generated_named_id(prefix)
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(&mut output, "{:02x}", byte);
-    }
-    output
-}
+/// The reconciled next-revision manifest content: descriptors, file entries,
+/// directories, and tombstones.
+pub type ReconciledManifestContent = (
+    BTreeMap<ResourceId, ResourceDescriptor>,
+    BTreeMap<LogicalPath, BundleFileEntry>,
+    BTreeMap<LogicalPath, BundleDirectoryEntry>,
+    BTreeMap<String, Tombstone>,
+);
 
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut output, "{:02x}", byte);
-    }
-    output
-}
-
-fn sha256_reader(reader: &mut impl Read, label: &str) -> Result<String, String> {
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let count = reader
-            .read(&mut buffer)
-            .map_err(|error| format!("read {}: {}", label, error))?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    Ok(hex_lower(&hasher.finalize()))
-}
-
-fn parse_json_bytes<T: for<'de> Deserialize<'de>>(bytes: &[u8], label: &str) -> Result<T, String> {
-    serde_json::from_slice(bytes).map_err(|e| format!("parse {}: {}", label, e))
-}
-
-fn parse_json_reader<T: for<'de> Deserialize<'de>>(
-    reader: impl Read,
-    label: &str,
-) -> Result<T, String> {
-    serde_json::from_reader(BufReader::new(reader))
-        .map_err(|error| format!("parse {}: {}", label, error))
-}
-
-fn validate_store_path(value: &str, minimum_components: usize) -> Result<(), String> {
-    if value.is_empty()
-        || value.len() > 4096
-        || value.starts_with('/')
-        || value.ends_with('/')
-        || value.contains('\\')
-        || value.contains(':')
-        || value.chars().any(char::is_control)
-    {
-        return Err(format!("unsafe store path '{}'", value.escape_debug()));
-    }
-    let components = value.split('/').collect::<Vec<_>>();
-    if components.len() < minimum_components
-        || components.iter().any(|component| {
-            component.is_empty() || *component == "." || *component == ".." || component.len() > 255
-        })
-    {
-        return Err(format!("unsafe store path '{}'", value.escape_debug()));
-    }
-    Ok(())
-}
-
-fn validate_bundle_relative_object_key(value: &str) -> Result<(), String> {
-    if value.is_empty()
-        || value.len() > 2048
-        || value.starts_with('/')
-        || value.ends_with('/')
-        || value.contains('\\')
-        || value.contains(':')
-        || value.chars().any(char::is_control)
-        || value
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return Err(format!("unsafe bundle-relative object key '{}'", value));
-    }
-    if !(value == HEAD_FILE
-        || value == TAG_FILE
-        || value.starts_with("_manifests/")
-        || value.starts_with("_commits/")
-        || value.starts_with("_objects/")
-        || value.starts_with("_uploads/"))
-    {
-        return Err(format!("unknown bundle object namespace '{}'", value));
-    }
-    Ok(())
-}
-
-fn repository_object_key(bundle_id: &BundleId, relative: &str) -> Result<ObjectKey, String> {
-    validate_bundle_relative_object_key(relative)?;
-    ObjectKey::parse(format!("{}/{}/{}", REPOSITORY_PREFIX, bundle_id, relative))
-}
-
-fn checked_existing_object_path(root: &Path, key: &ObjectKey) -> Result<Option<PathBuf>, String> {
-    let mut cursor = root.to_path_buf();
-    for component in key.as_str().split('/') {
-        cursor.push(component);
-        match fs::symlink_metadata(&cursor) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(format!("symlink traversal in object key '{}'", key))
-            }
-            Ok(meta) if cursor != root.join(key.as_str()) && !meta.is_dir() => {
-                return Err(format!("non-directory ancestor in object key '{}'", key))
-            }
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("inspect object '{}': {}", key, e)),
-        }
-    }
-    let canonical_parent = fs::canonicalize(
-        cursor
-            .parent()
-            .ok_or_else(|| format!("object '{}' has no parent", key))?,
-    )
-    .map_err(|e| format!("resolve object parent '{}': {}", key, e))?;
-    if !canonical_parent.starts_with(root) {
-        return Err(format!("object '{}' escapes local store", key));
-    }
-    Ok(Some(cursor))
-}
-
-fn checked_create_object_path(root: &Path, key: &ObjectKey) -> Result<PathBuf, String> {
-    let parts = key.as_str().split('/').collect::<Vec<_>>();
-    let mut cursor = root.to_path_buf();
-    for component in &parts[..parts.len() - 1] {
-        cursor.push(component);
-        match fs::symlink_metadata(&cursor) {
-            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
-            Ok(_) => return Err(format!("unsafe object ancestor '{}'", cursor.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&cursor)
-                .map_err(|e| format!("create object directory '{}': {}", cursor.display(), e))?,
-            Err(e) => {
-                return Err(format!(
-                    "inspect object directory '{}': {}",
-                    cursor.display(),
-                    e
-                ))
-            }
-        }
-    }
-    let canonical_parent = fs::canonicalize(&cursor)
-        .map_err(|e| format!("resolve object directory '{}': {}", cursor.display(), e))?;
-    if !canonical_parent.starts_with(root) {
-        return Err(format!("object '{}' escapes local store", key));
-    }
-    cursor.push(parts.last().unwrap());
-    if let Ok(meta) = fs::symlink_metadata(&cursor) {
-        if meta.file_type().is_symlink() || !meta.is_file() {
-            return Err(format!("object target '{}' is unsafe", cursor.display()));
-        }
-    }
-    Ok(cursor)
-}
-
-fn normalized_relative_path(root: &Path, path: &Path) -> Result<String, String> {
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| format!("'{}' is outside '{}';", path.display(), root.display()))?;
-    let mut parts = Vec::new();
-    for component in relative.components() {
-        match component {
-            Component::Normal(value) => parts.push(
-                value
-                    .to_str()
-                    .ok_or_else(|| format!("non-UTF-8 store path '{}';", path.display()))?,
-            ),
-            _ => return Err(format!("unsafe store path '{}';", path.display())),
-        }
-    }
-    Ok(parts.join("/"))
-}
-
-pub fn reconcile_manifest_content(
+/// Reconcile one sync scope's next content from its reviewed recipe, this
+/// capture, and the verified previous scope. Tombstones are minted only
+/// inside the scope being reconciled, so no tombstone can ever target an
+/// unbound or unknown provider scope.
+pub fn reconcile_scope_content(
     recipe: &BundleRecipe,
     captured_descriptors: &BTreeMap<ResourceId, ResourceDescriptor>,
     captured: &CapturedResources,
-    previous: Option<&BundleManifest>,
+    previous: Option<&BundleScope>,
     updated_at: u64,
-) -> Result<
-    (
-        BTreeMap<ResourceId, ResourceDescriptor>,
-        BTreeMap<LogicalPath, BundleFileEntry>,
-        BTreeMap<LogicalPath, BundleDirectoryEntry>,
-        BTreeMap<String, Tombstone>,
-    ),
-    String,
-> {
+) -> Result<ReconciledManifestContent, String> {
     for id in captured_descriptors.keys() {
         if !recipe.entries.contains_key(id) {
             return Err(format!("capture returned unselected resource '{}'", id));
@@ -4752,13 +3836,13 @@ pub fn reconcile_manifest_content(
     let mut files = BTreeMap::new();
     let mut directories = BTreeMap::new();
     let mut tombstones = previous
-        .map(|manifest| manifest.tombstones.clone())
+        .map(|scope| scope.tombstones.clone())
         .unwrap_or_default();
 
     for id in recipe.entries.keys() {
         if let Some(descriptor) = captured_descriptors.get(id) {
             resources.insert(id.clone(), descriptor.clone());
-        } else if let Some(descriptor) = previous.and_then(|manifest| manifest.resources.get(id)) {
+        } else if let Some(descriptor) = previous.and_then(|scope| scope.resources.get(id)) {
             resources.insert(id.clone(), descriptor.clone());
             for (path, entry) in &previous.unwrap().files {
                 if &entry.resource_id == id {
@@ -4779,7 +3863,20 @@ pub fn reconcile_manifest_content(
     }
 
     if let Some(previous) = previous {
+        // Conversation threads and their files never travel through the
+        // generic recipe: they are carried and mutated only by reviewed
+        // conversation actions, so their absence from the recipe is not a
+        // deletion.
+        let conversation_owned = |resource_id: &ResourceId| {
+            previous
+                .resources
+                .get(resource_id)
+                .is_some_and(|descriptor| descriptor.kind == ResourceKind::Conversation)
+        };
         for (id, descriptor) in &previous.resources {
+            if descriptor.kind == ResourceKind::Conversation {
+                continue;
+            }
             if !recipe.entries.contains_key(id) {
                 let last_sha256 = descriptor.metadata.get("content_sha256").cloned();
                 let tombstone = Tombstone {
@@ -4793,6 +3890,9 @@ pub fn reconcile_manifest_content(
             }
         }
         for (path, old_entry) in &previous.files {
+            if conversation_owned(&old_entry.resource_id) {
+                continue;
+            }
             let owner_removed = !recipe.entries.contains_key(&old_entry.resource_id);
             let recaptured_without_file = captured_ids.contains(&old_entry.resource_id)
                 && !captured_file_paths.contains(path);
@@ -4861,15 +3961,15 @@ pub fn reconcile_manifest_content(
     Ok((resources, files, directories, tombstones))
 }
 
-fn validate_conversation_retention(
-    previous: &BundleManifest,
-    next: &BundleManifest,
+fn validate_scope_conversation_retention(
+    previous: &BundleScope,
+    input: &ScopePublishInput,
 ) -> Result<(), String> {
     for thread_id in previous.conversations.keys() {
-        if next.conversations.contains_key(thread_id) {
+        if input.conversations.contains_key(thread_id) {
             continue;
         }
-        let deleted = next.tombstones.values().any(|tombstone| {
+        let deleted = input.tombstones.values().any(|tombstone| {
             matches!(
                 &tombstone.target,
                 TombstoneTarget::ConversationThread { thread_id: deleted_thread_id }
@@ -4886,18 +3986,21 @@ fn validate_conversation_retention(
     Ok(())
 }
 
-/// Semantic manifest equality excludes `object_key` and revision/commit/time
-/// coordinates. Object keys are derived from content and do not define the
-/// reviewed bundle state.
-fn manifest_is_semantic_noop(previous: &BundleManifest, candidate: &BundleManifest) -> bool {
-    previous.bundle == candidate.bundle
-        && previous.recipe == candidate.recipe
-        && previous.captured_with.codec_versions == candidate.captured_with.codec_versions
-        && previous.conversations == candidate.conversations
-        && previous.resources == candidate.resources
-        && files_are_semantically_equal(&previous.files, &candidate.files)
-        && previous.directories == candidate.directories
-        && previous.tombstones == candidate.tombstones
+/// Semantic scope equality excludes `object_key` and revision coordinates.
+/// Object keys are derived from content and do not define the reviewed scope
+/// state, so a byte-identical recapture publishes nothing for that scope.
+fn scope_content_is_semantic_noop(
+    previous: &BundleScope,
+    input: &ScopePublishInput,
+    files: &BTreeMap<LogicalPath, BundleFileEntry>,
+) -> bool {
+    previous.recipe == input.recipe
+        && previous.captured_with.codec_versions == input.captured_with.codec_versions
+        && previous.conversations == input.conversations
+        && previous.resources == input.resources
+        && files_are_semantically_equal(&previous.files, files)
+        && previous.directories == input.directories
+        && previous.tombstones == input.tombstones
 }
 
 fn files_are_semantically_equal(
@@ -4917,28 +4020,26 @@ fn files_are_semantically_equal(
 }
 
 fn file_delta(previous: Option<&BundleManifest>, current: &BundleManifest) -> (u64, u64, u64) {
+    let current_files: BTreeMap<&LogicalPath, &BundleFileEntry> = current.all_files().collect();
     let Some(previous) = previous else {
-        return (current.files.len() as u64, 0, 0);
+        return (current_files.len() as u64, 0, 0);
     };
-    let added = current
-        .files
+    let previous_files: BTreeMap<&LogicalPath, &BundleFileEntry> = previous.all_files().collect();
+    let added = current_files
         .keys()
-        .filter(|path| !previous.files.contains_key(*path))
+        .filter(|path| !previous_files.contains_key(*path))
         .count() as u64;
-    let changed = current
-        .files
+    let changed = current_files
         .iter()
         .filter(|(path, entry)| {
-            previous
-                .files
+            previous_files
                 .get(*path)
                 .is_some_and(|old| old.sha256 != entry.sha256)
         })
         .count() as u64;
-    let removed = previous
-        .files
+    let removed = previous_files
         .keys()
-        .filter(|path| !current.files.contains_key(*path))
+        .filter(|path| !current_files.contains_key(*path))
         .count() as u64;
     (added, changed, removed)
 }
@@ -4958,7 +4059,7 @@ pub struct ApplyBundleResult {
     pub backups: Vec<BackupRecord>,
 }
 
-impl<S: BundleObjectStore> BundleEngine<S> {
+impl<S: ObjectStore> BundleEngine<S> {
     /// Apply approved byte-materialization actions. This engine never shells
     /// out or silently activates executable configuration.
     /// Apply approved actions, downloading only the payload objects that
@@ -4970,6 +4071,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         snapshot: &BundleSnapshot,
         bytes: &mut dyn BundleBytes,
         binding: &ProjectBinding,
+        provider_homes: &BTreeMap<ProviderKey, String>,
         plan: &RestorePlan,
         approved_action_ids: &BTreeSet<ActionId>,
         backup_root: &Path,
@@ -4977,7 +4079,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     ) -> Result<ApplyBundleResult, String> {
         plan.validate()?;
         snapshot.validate()?;
-        self.validate_binding(binding, Some(backup_root))?;
+        self.validate_binding(binding, provider_homes, Some(backup_root))?;
         validate_plan_pin(plan, snapshot, binding, &self.storage_id, applied_at)?;
         let known_actions = plan
             .actions
@@ -5074,7 +4176,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             };
             let pinned_noop = action.materialized_sha256.is_some()
                 && action.materialized_sha256 == action.expected_target_sha256;
-            if !pinned_noop && snapshot.manifest.files.contains_key(logical_path) {
+            if !pinned_noop && snapshot.manifest.find_file(logical_path).is_some() {
                 prefetch_paths.push(logical_path.clone());
             }
         }
@@ -5097,7 +4199,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             .collect::<Vec<_>>();
         ensure_actions.sort_by_key(|action| project_action_depth(action));
         for action in ensure_actions {
-            match self.prepare_project_directory(binding, action) {
+            match self.prepare_project_directory(binding, provider_homes, action) {
                 Ok(()) => prepared_directories.push(action),
                 Err(error) => receipts.push(receipt_for(
                     action,
@@ -5115,20 +4217,13 @@ impl<S: BundleObjectStore> BundleEngine<S> {
 
         for action in &plan.actions {
             if !effective_approved.contains(&action.action_id) {
-                let keeps_local_conversation = is_conversation_keep_local_action(action);
                 receipts.push(receipt_for(
                     action,
                     ActionStatus::Skipped,
                     applied_at,
                     None,
-                    keeps_local_conversation
-                        .then(|| action.expected_target_sha256.clone())
-                        .flatten(),
-                    Some(if keeps_local_conversation {
-                        "local conversation was kept by the reviewed Pull".to_string()
-                    } else {
-                        "action was not approved".to_string()
-                    }),
+                    None,
+                    Some("action was not approved".to_string()),
                 ));
                 continue;
             }
@@ -5152,14 +4247,28 @@ impl<S: BundleObjectStore> BundleEngine<S> {
                         ),
                     ));
                 }
+                RestoreActionKind::MaterializeConversation { .. } => {
+                    receipts.push(receipt_for(
+                        action,
+                        ActionStatus::Blocked,
+                        applied_at,
+                        None,
+                        None,
+                        Some(
+                            "conversation materialization belongs to the typed conversation \
+                             pipeline"
+                                .to_string(),
+                        ),
+                    ));
+                }
                 RestoreActionKind::WriteFile { logical_path }
                 | RestoreActionKind::WriteProjectFile { logical_path, .. }
-                | RestoreActionKind::MergeFile { logical_path }
-                | RestoreActionKind::MaterializeConversation { logical_path, .. } => {
+                | RestoreActionKind::MergeFile { logical_path } => {
                     let receipt = self.apply_file_action(
                         snapshot,
                         bytes,
                         binding,
+                        provider_homes,
                         action,
                         logical_path,
                         &plan_backup,
@@ -5186,6 +4295,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         for action in approved_file_deletions {
             let receipt = self.apply_project_file_deletion(
                 binding,
+                provider_homes,
                 action,
                 &plan_backup,
                 applied_at,
@@ -5206,7 +4316,8 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         approved_directory_deletions
             .sort_by_key(|action| std::cmp::Reverse(project_action_depth(action)));
         for action in approved_directory_deletions {
-            let receipt = self.apply_project_directory_deletion(binding, action, applied_at);
+            let receipt =
+                self.apply_project_directory_deletion(binding, provider_homes, action, applied_at);
             receipts.push(receipt.unwrap_or_else(|error| {
                 receipt_for(
                     action,
@@ -5221,7 +4332,8 @@ impl<S: BundleObjectStore> BundleEngine<S> {
 
         prepared_directories.sort_by_key(|action| std::cmp::Reverse(project_action_depth(action)));
         for action in prepared_directories {
-            let receipt = self.finalize_project_directory(binding, action, applied_at);
+            let receipt =
+                self.finalize_project_directory(binding, provider_homes, action, applied_at);
             receipts.push(receipt.unwrap_or_else(|error| {
                 receipt_for(
                     action,
@@ -5243,6 +4355,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     fn prepare_project_directory(
         &self,
         binding: &ProjectBinding,
+        provider_homes: &BTreeMap<ProviderKey, String>,
         action: &RestoreAction,
     ) -> Result<(), String> {
         let RestoreActionKind::EnsureProjectDirectory { logical_path, .. } = &action.kind else {
@@ -5252,7 +4365,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         if action.target_path.as_deref() != Some(path_text(&target)?.as_str()) {
             return Err("project directory target differs from the pinned plan".to_string());
         }
-        validate_target_for_logical(&target, logical_path, binding)?;
+        validate_target_for_logical(&target, logical_path, binding, provider_homes)?;
         match (
             inspect_project_directory_target(&target)?,
             action.expected_target_mode,
@@ -5289,6 +4402,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     fn finalize_project_directory(
         &self,
         binding: &ProjectBinding,
+        provider_homes: &BTreeMap<ProviderKey, String>,
         action: &RestoreAction,
         applied_at: u64,
     ) -> Result<ApplyReceipt, String> {
@@ -5301,7 +4415,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
             return Err("directory finalization received another action kind".to_string());
         };
         let target = project_content_target(logical_path, binding)?;
-        validate_target_for_logical(&target, logical_path, binding)?;
+        validate_target_for_logical(&target, logical_path, binding, provider_homes)?;
         if inspect_project_directory_target(&target)?.is_none() {
             return Err("project directory disappeared before finalization".to_string());
         }
@@ -5320,6 +4434,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     fn apply_project_file_deletion(
         &self,
         binding: &ProjectBinding,
+        provider_homes: &BTreeMap<ProviderKey, String>,
         action: &RestoreAction,
         plan_backup: &Path,
         applied_at: u64,
@@ -5336,7 +4451,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         if action.target_path.as_deref() != Some(path_text(&target)?.as_str()) {
             return Err("project-file deletion target differs from the plan".to_string());
         }
-        validate_target_for_logical(&target, logical_path, binding)?;
+        validate_target_for_logical(&target, logical_path, binding, provider_homes)?;
         let before = inspect_restore_target(&target)?;
         let Some(before_digest) = before.digest.as_deref() else {
             return Ok(receipt_for(
@@ -5394,6 +4509,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
     fn apply_project_directory_deletion(
         &self,
         binding: &ProjectBinding,
+        provider_homes: &BTreeMap<ProviderKey, String>,
         action: &RestoreAction,
         applied_at: u64,
     ) -> Result<ApplyReceipt, String> {
@@ -5404,7 +4520,7 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         if action.target_path.as_deref() != Some(path_text(&target)?.as_str()) {
             return Err("project-directory deletion target differs from the plan".to_string());
         }
-        validate_target_for_logical(&target, logical_path, binding)?;
+        validate_target_for_logical(&target, logical_path, binding, provider_homes)?;
         let Some(actual_mode) = inspect_project_directory_target(&target)? else {
             return Ok(receipt_for(
                 action,
@@ -5453,35 +4569,40 @@ impl<S: BundleObjectStore> BundleEngine<S> {
         snapshot: &BundleSnapshot,
         bytes: &mut dyn BundleBytes,
         binding: &ProjectBinding,
+        provider_homes: &BTreeMap<ProviderKey, String>,
         action: &RestoreAction,
         logical_path: &LogicalPath,
         plan_backup: &Path,
         applied_at: u64,
         backups: &mut Vec<BackupRecord>,
     ) -> Result<ApplyReceipt, String> {
-        let entry = snapshot
+        let (scope_key, entry) = snapshot
             .manifest
-            .files
-            .get(logical_path)
+            .find_file(logical_path)
             .ok_or_else(|| format!("plan references missing file '{}'", logical_path))?;
         if entry.resource_id != action.resource_id {
             return Err("restore action resource changed after planning".to_string());
         }
-        let descriptor = snapshot
+        let scope = snapshot
             .manifest
+            .scope(scope_key)
+            .ok_or_else(|| "restore action scope is missing".to_string())?;
+        let descriptor = scope
             .resources
             .get(&entry.resource_id)
             .ok_or_else(|| "restore action resource is missing".to_string())?;
-        let target = map_logical_target(logical_path, descriptor, binding)?
-            .ok_or_else(|| format!("'{}' has no file materializer", logical_path))?;
-        let planned_target = action
+        if descriptor.kind == ResourceKind::Conversation {
+            return Err(format!(
+                "conversation file '{}' belongs to the typed conversation pipeline",
+                logical_path
+            ));
+        }
+        let target = action
             .target_path
             .as_deref()
+            .map(PathBuf::from)
             .ok_or_else(|| "file restore action has no target".to_string())?;
-        if Path::new(planned_target) != target {
-            return Err("restore target differs from the pinned plan".to_string());
-        }
-        validate_target_for_logical(&target, logical_path, binding)?;
+        validate_target_for_logical(&target, logical_path, binding, provider_homes)?;
         let before = inspect_restore_target(&target)?;
         match (&action.expected_target_sha256, &before.digest) {
             (None, None) => {}

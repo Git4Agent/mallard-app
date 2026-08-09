@@ -1,20 +1,19 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { ProjectProvider, ProviderProfile, ProviderProfileSummary } from "../../types";
+import type {
+  ProviderDescriptor,
+  ProviderKey,
+  ProviderProfile,
+  ProviderProfileSummary,
+} from "../../types";
 import Icon from "../Icons";
-import {
-  compactProjectPath,
-  configuredProjectProvider,
-  PROJECT_PROVIDERS,
-  providerLabel,
-  singleProviderSelection,
-} from "./model";
+import { compactProjectPath } from "./model";
 
 export interface ProjectBindingDraft {
   local_project_id?: string;
   bundle_id: string;
   project_root: string;
-  profile_ids: Partial<Record<ProjectProvider, string>>;
+  profile_ids: Record<ProviderKey, string>;
   expected_revision?: number | null;
 }
 
@@ -25,13 +24,18 @@ interface Props {
   busy: boolean;
   error?: string | null;
   actionLabel: string;
+  providers: ProviderDescriptor[];
   profiles: ProviderProfileSummary[];
-  requiredProviders?: ProjectProvider[];
-  onAddProfile: (provider: ProjectProvider) => Promise<ProviderProfile | null>;
+  onAddProfile: (provider: ProviderKey) => Promise<ProviderProfile | null>;
   onCancel: () => void;
   onSubmit: (binding: ProjectBindingDraft) => void;
 }
 
+/**
+ * Machine-local binding editor. Providers come from the backend registry;
+ * each registered provider is independently enabled with its own profile,
+ * and at least one provider must stay enabled.
+ */
 export default function ProjectBindingEditor({
   title,
   description,
@@ -39,18 +43,16 @@ export default function ProjectBindingEditor({
   busy,
   error,
   actionLabel,
+  providers,
   profiles,
-  requiredProviders = [],
   onAddProfile,
   onCancel,
   onSubmit,
 }: Props) {
-  const initialProvider = configuredProjectProvider(binding.profile_ids) ?? requiredProviders[0] ?? "codex";
   const [projectRoot, setProjectRoot] = useState(binding.project_root);
-  const [selectedProvider, setSelectedProvider] = useState<ProjectProvider>(initialProvider);
-  const [profileIds, setProfileIds] = useState<Partial<Record<ProjectProvider, string>>>(() => (
-    singleProviderSelection(binding.profile_ids ?? {}, initialProvider)
-  ));
+  const [profileIds, setProfileIds] = useState<Record<ProviderKey, string>>(() => ({
+    ...(binding.profile_ids ?? {}),
+  }));
 
   const chooseFolder = async () => {
     const picked = await open({ directory: true, multiple: false });
@@ -62,52 +64,78 @@ export default function ProjectBindingEditor({
     project_root: projectRoot,
     profile_ids: profileIds,
   };
-  const profilesComplete = !!profileIds[selectedProvider]
-    && (requiredProviders.length === 0 || requiredProviders.includes(selectedProvider));
+  const enabledProviders = providers.filter((provider) => profileIds[provider.key] !== undefined);
+  const profilesComplete = enabledProviders.length > 0
+    && enabledProviders.every((provider) => !!profileIds[provider.key]);
 
-  const addProfile = async (provider: ProjectProvider) => {
+  const addProfile = async (provider: ProviderKey) => {
     const profile = await onAddProfile(provider);
-    if (profile) setProfileIds({ [provider]: profile.profile_id });
+    if (profile) {
+      setProfileIds((current) => ({ ...current, [provider]: profile.profile_id }));
+    }
   };
 
-  const selectProvider = (provider: ProjectProvider) => {
-    setSelectedProvider(provider);
-    setProfileIds((current) => singleProviderSelection(current, provider));
+  const toggleProvider = (provider: ProviderKey) => {
+    setProfileIds((current) => {
+      if (current[provider] !== undefined) {
+        const { [provider]: _removed, ...rest } = current;
+        return rest;
+      }
+      return { ...current, [provider]: "" };
+    });
   };
 
-  const profileField = (provider: ProjectProvider, label: string) => {
-    const options = profiles.filter((profile) => profile.provider === provider);
-    const selected = profileIds[provider] ?? "";
+  const providerCard = (descriptor: ProviderDescriptor) => {
+    const enabled = profileIds[descriptor.key] !== undefined;
+    const options = profiles.filter((profile) => profile.provider === descriptor.key);
+    const selected = enabled ? profileIds[descriptor.key] : "";
     const selectedProfile = options.find((profile) => profile.profile_id === selected);
     return (
-      <label>
-        <span>{label} profile <small>{requiredProviders.includes(provider) ? "required" : "this machine"}</small></span>
-        <div className="sync-profile-select-row">
-          <select
-            value={selected}
-            disabled={busy}
-            aria-label={`${label} profile`}
-            onChange={(event) => setProfileIds(
-              event.target.value ? { [provider]: event.target.value } : {},
-            )}
-          >
-            <option value="">Choose a profile</option>
-            {options.map((profile) => (
-              <option key={profile.profile_id} value={profile.profile_id} disabled={!profile.available || !profile.readable}>
-                {profile.display_name}{!profile.available || !profile.readable ? " (unavailable)" : ""}
-              </option>
-            ))}
-          </select>
-          <button type="button" className="btn" onClick={() => void addProfile(provider)} disabled={busy}>
-            <Icon name="plus" size={13} /> Add
-          </button>
-        </div>
-        <small title={selectedProfile?.error ?? selectedProfile?.path}>
-          {selectedProfile
-            ? `${compactProjectPath(selectedProfile.path)}${!selectedProfile.available || !selectedProfile.readable ? " · Unavailable" : !selectedProfile.writable ? " · Read only" : ""}`
-            : `Choose the ${label} home used by this project.`}
-        </small>
-      </label>
+      <div key={descriptor.key} className={`sync-provider-card${enabled ? " enabled" : ""}`}>
+        <label className="sync-provider-toggle">
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={busy || (enabled && enabledProviders.length === 1)}
+            aria-label={`Use ${descriptor.display_name} in this project`}
+            onChange={() => toggleProvider(descriptor.key)}
+          />
+          <strong>{descriptor.display_name}</strong>
+          <span>{descriptor.profile_label}</span>
+        </label>
+        {enabled ? (
+          <div className="sync-profile-select-row">
+            <select
+              value={selected}
+              disabled={busy}
+              aria-label={`${descriptor.display_name} profile`}
+              onChange={(event) => setProfileIds((current) => ({
+                ...current,
+                [descriptor.key]: event.target.value,
+              }))}
+            >
+              <option value="">Choose a profile</option>
+              {options.map((profile) => (
+                <option key={profile.profile_id} value={profile.profile_id} disabled={!profile.available || !profile.readable}>
+                  {profile.display_name}{!profile.available || !profile.readable ? " (unavailable)" : ""}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="btn" onClick={() => void addProfile(descriptor.key)} disabled={busy}>
+              <Icon name="plus" size={13} /> Add
+            </button>
+          </div>
+        ) : (
+          <small>Not used by this project on this machine.</small>
+        )}
+        {enabled && (
+          <small title={selectedProfile?.error ?? selectedProfile?.path}>
+            {selectedProfile
+              ? `${compactProjectPath(selectedProfile.path)}${!selectedProfile.available || !selectedProfile.readable ? " · Unavailable" : !selectedProfile.writable ? " · Read only" : ""}`
+              : `Choose the ${descriptor.display_name} home used by this project.`}
+          </small>
+        )}
+      </div>
     );
   };
 
@@ -137,26 +165,8 @@ export default function ProjectBindingEditor({
             </div>
             <small>{compactProjectPath(projectRoot)} becomes the root for every project-relative task and setting.</small>
           </label>
-          <div className="sync-single-provider-binding">
-            <div className="sync-agent-choice" role="radiogroup" aria-label="Agent used by this project">
-              {PROJECT_PROVIDERS.map((provider) => (
-                <button
-                  key={provider}
-                  type="button"
-                  role="radio"
-                  aria-checked={selectedProvider === provider}
-                  className={selectedProvider === provider ? "active" : undefined}
-                  disabled={busy}
-                  onClick={() => selectProvider(provider)}
-                >
-                  <strong>{providerLabel(provider)}</strong>
-                  <span>{provider === "codex" ? ".codex profile" : ".claude profile"}</span>
-                </button>
-              ))}
-            </div>
-            <div className="sync-provider-home-grid single">
-              {profileField(selectedProvider, providerLabel(selectedProvider))}
-            </div>
+          <div className="sync-provider-cards" role="group" aria-label="Agents used by this project">
+            {providers.map((descriptor) => providerCard(descriptor))}
           </div>
           <dl className="sync-fact-grid compact">
             <div><dt>Local project</dt><dd><code>{binding.local_project_id ?? "created after confirmation"}</code></dd></div>

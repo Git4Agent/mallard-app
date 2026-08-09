@@ -1,0 +1,533 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type {
+  ProjectSessionDetail,
+  SessionActionDescriptor,
+  SessionCheckpointJump,
+  SessionDetailWarning,
+  SessionTimelineEvent,
+} from "../../../types";
+import Icon from "../../Icons";
+import { projectSyncApi } from "../api";
+import SessionDetailHeader from "./SessionDetailHeader";
+import SessionDetailInspector from "./SessionDetailInspector";
+import SessionDetailTimeline from "./SessionDetailTimeline";
+import type { SessionTurnToolState } from "./SessionDetailEvent";
+import type { SessionToolDetailState } from "./SessionDetailToolCall";
+import {
+  checkpointAnchorEventId,
+  createDefaultSessionDetailFilters,
+  eventAnchorId,
+  findCheckpointJump,
+  includedSessionEventKinds,
+  includedSessionToolCategories,
+  mergeSessionTimelinePages,
+  normalizeSessionDetailFailure,
+  sessionDetailFilterFingerprint,
+  type SessionDetailFilters,
+} from "./sessionDetailModel";
+
+const TIMELINE_PAGE_SIZE = 50;
+
+interface Props {
+  localProjectId: string;
+  resourceId: string;
+  occurrenceKey: string;
+  initialCheckpointId?: string;
+  /**
+   * Reports the loaded session title so the workspace path bar can append it as
+   * the trail's leaf. Called with null while the detail is still loading or has
+   * failed, and once more on unmount so the crumb never outlives the page.
+   */
+  onTitleChange: (title: string | null) => void;
+}
+
+function mergeWarnings(...groups: SessionDetailWarning[][]): SessionDetailWarning[] {
+  const warnings = new Map<string, SessionDetailWarning>();
+  for (const warning of groups.flat()) warnings.set(`${warning.code}:${warning.message}`, warning);
+  return [...warnings.values()];
+}
+
+function SessionDetailEntryState({
+  loading,
+  error,
+  onRetry,
+}: {
+  loading: boolean;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  return (
+    <section className="session-detail-page session-detail-entry-state" aria-labelledby="session-detail-entry-heading">
+      <div className={`session-detail-state${error ? " error" : ""}`} role={error ? "alert" : "status"}>
+        {loading ? <span className="status-loader" /> : <Icon name="alert-triangle" size={18} />}
+        <h1 id="session-detail-entry-heading">{loading ? "Loading session detail…" : "Session detail unavailable"}</h1>
+        <span>{error ?? "Preparing the local, bounded timeline."}</span>
+        {error && <button type="button" className="btn btn-ghost" onClick={onRetry}>Try again</button>}
+      </div>
+    </section>
+  );
+}
+
+export default function SessionDetailPage({
+  localProjectId,
+  resourceId,
+  occurrenceKey,
+  initialCheckpointId,
+  onTitleChange,
+}: Props) {
+  const [detail, setDetail] = useState<ProjectSessionDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(true);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [filters, setFilters] = useState<SessionDetailFilters | null>(null);
+  const [events, setEvents] = useState<SessionTimelineEvent[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+  const [timelineLoadingMore, setTimelineLoadingMore] = useState(false);
+  const [timelineError, setTimelineError] = useState<string | null>(null);
+  const [snapshotChanged, setSnapshotChanged] = useState(false);
+  const [timelineWarnings, setTimelineWarnings] = useState<SessionDetailWarning[]>([]);
+  const [selectedCheckpointId, setSelectedCheckpointId] = useState("");
+  const [timelineReloadEpoch, setTimelineReloadEpoch] = useState(0);
+  const [turnToolStates, setTurnToolStates] = useState<Record<string, SessionTurnToolState>>({});
+  const [toolDetails, setToolDetails] = useState<Record<string, SessionToolDetailState>>({});
+  const [expandedToolIds, setExpandedToolIds] = useState<Set<string>>(new Set());
+  const [expandFollowsLoadedTools, setExpandFollowsLoadedTools] = useState(false);
+  const [actionBusyId, setActionBusyId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const detailRequestRef = useRef(0);
+  const timelineRequestRef = useRef(0);
+  const turnRequestRef = useRef<Record<string, number>>({});
+  const eventDetailRequestRef = useRef<Record<string, number>>({});
+  const sequenceRef = useRef(0);
+  const pendingAnchorRef = useRef<string | null>(null);
+  const focusAnchorRef = useRef<string | null>(null);
+  const initialCheckpointRef = useRef(initialCheckpointId ?? null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const focusedHeadingRef = useRef(false);
+
+  const loadDetail = useCallback(async (preserveFilters = false) => {
+    const requestId = ++detailRequestRef.current;
+    setDetailLoading(true);
+    setDetailError(null);
+    setActionError(null);
+    try {
+      const next = await projectSyncApi.getProjectSessionDetail(localProjectId, resourceId);
+      if (requestId !== detailRequestRef.current) return;
+      const initialCheckpoint = initialCheckpointRef.current
+        ? findCheckpointJump(next.checkpoint_jumps, initialCheckpointRef.current)
+        : null;
+      initialCheckpointRef.current = null;
+      pendingAnchorRef.current = initialCheckpoint?.event_id ?? null;
+      focusAnchorRef.current = initialCheckpoint?.event_id ?? null;
+      setSelectedCheckpointId(initialCheckpoint?.event_id ?? "");
+      setSnapshotChanged(false);
+      setTimelineError(null);
+      setTimelineWarnings([]);
+      setTurnToolStates({});
+      setToolDetails({});
+      setExpandedToolIds(new Set());
+      setExpandFollowsLoadedTools(false);
+      setDetail(next);
+      setFilters((current) => preserveFilters && current
+        ? current
+        : createDefaultSessionDetailFilters(next.event_counts));
+    } catch (reason) {
+      if (requestId !== detailRequestRef.current) return;
+      setDetailError(normalizeSessionDetailFailure(reason).message);
+      setDetail(null);
+      setFilters(null);
+    } finally {
+      if (requestId === detailRequestRef.current) setDetailLoading(false);
+    }
+  }, [localProjectId, resourceId]);
+
+  useEffect(() => {
+    initialCheckpointRef.current = initialCheckpointId ?? null;
+    focusedHeadingRef.current = false;
+    setDetail(null);
+    setFilters(null);
+    setEvents([]);
+    setNextCursor(null);
+    void loadDetail(false);
+    return () => {
+      detailRequestRef.current += 1;
+      timelineRequestRef.current += 1;
+      turnRequestRef.current = {};
+      eventDetailRequestRef.current = {};
+    };
+  }, [localProjectId, resourceId, occurrenceKey, initialCheckpointId, loadDetail]);
+
+  useEffect(() => {
+    onTitleChange(detail ? detail.title || "Untitled session" : null);
+  }, [detail, onTitleChange]);
+
+  useEffect(() => () => onTitleChange(null), [onTitleChange]);
+
+  useEffect(() => {
+    if (!detail || focusedHeadingRef.current) return;
+    focusedHeadingRef.current = true;
+    const frame = window.requestAnimationFrame(() => headingRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [detail]);
+
+  const focusTimelineAnchor = useCallback((eventId: string) => {
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.getElementById(eventAnchorId(eventId));
+      target?.scrollIntoView({ block: "center" });
+      target?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  const requestTimelinePage = useCallback(async ({
+    sessionDetail,
+    activeFilters,
+    cursor = null,
+    anchorEventId = null,
+    append = false,
+  }: {
+    sessionDetail: ProjectSessionDetail;
+    activeFilters: SessionDetailFilters;
+    cursor?: string | null;
+    anchorEventId?: string | null;
+    append?: boolean;
+  }) => {
+    const requestId = ++timelineRequestRef.current;
+    if (append) setTimelineLoadingMore(true);
+    else setTimelineLoading(true);
+    setTimelineError(null);
+    try {
+      const page = await projectSyncApi.getProjectSessionTimelinePage(
+        localProjectId,
+        resourceId,
+        {
+          snapshot_id: sessionDetail.snapshot_id,
+          cursor,
+          anchor_event_id: anchorEventId,
+          limit: TIMELINE_PAGE_SIZE,
+          included_event_kinds: includedSessionEventKinds(activeFilters),
+          included_tool_categories: includedSessionToolCategories(activeFilters),
+          turn_id: null,
+        },
+      );
+      if (requestId !== timelineRequestRef.current) return;
+      setSnapshotChanged(false);
+      setEvents((current) => mergeSessionTimelinePages(current, page, !append));
+      setNextCursor(page.next_cursor ?? null);
+      setTimelineWarnings((current) => append
+        ? mergeWarnings(current, page.warnings)
+        : page.warnings);
+      const anchorToFocus = focusAnchorRef.current;
+      if (anchorToFocus) {
+        focusAnchorRef.current = null;
+        focusTimelineAnchor(anchorToFocus);
+      }
+    } catch (reason) {
+      if (requestId !== timelineRequestRef.current) return;
+      const failure = normalizeSessionDetailFailure(reason);
+      setSnapshotChanged(failure.code === "snapshot_changed");
+      setTimelineError(failure.message);
+      if (!append) {
+        setEvents([]);
+        setNextCursor(null);
+      }
+    } finally {
+      if (requestId === timelineRequestRef.current) {
+        setTimelineLoading(false);
+        setTimelineLoadingMore(false);
+      }
+    }
+  }, [focusTimelineAnchor, localProjectId, resourceId]);
+
+  const filterFingerprint = filters ? sessionDetailFilterFingerprint(filters) : "";
+  useEffect(() => {
+    if (!detail || !filters) return;
+    const anchorEventId = pendingAnchorRef.current;
+    pendingAnchorRef.current = null;
+    setTurnToolStates({});
+    setExpandedToolIds(new Set());
+    setExpandFollowsLoadedTools(false);
+    void requestTimelinePage({
+      sessionDetail: detail,
+      activeFilters: filters,
+      anchorEventId,
+    });
+  }, [detail, filterFingerprint, timelineReloadEpoch, requestTimelinePage]);
+
+  const loadTurnTools = useCallback(async (turnId: string, cursor?: string | null) => {
+    if (!detail || !filters) return;
+    const requestId = ++sequenceRef.current;
+    turnRequestRef.current[turnId] = requestId;
+    setTurnToolStates((current) => ({
+      ...current,
+      [turnId]: {
+        open: true,
+        loading: true,
+        error: null,
+        page: current[turnId]?.page ?? null,
+      },
+    }));
+    try {
+      const page = await projectSyncApi.getProjectSessionTimelinePage(
+        localProjectId,
+        resourceId,
+        {
+          snapshot_id: detail.snapshot_id,
+          cursor: cursor ?? null,
+          anchor_event_id: null,
+          limit: TIMELINE_PAGE_SIZE,
+          included_event_kinds: ["tool_call"],
+          included_tool_categories: includedSessionToolCategories(filters),
+          turn_id: turnId,
+        },
+      );
+      if (turnRequestRef.current[turnId] !== requestId) return;
+      setTurnToolStates((current) => {
+        const previous = current[turnId]?.page;
+        const merged = previous && cursor
+          ? { ...page, events: mergeSessionTimelinePages(previous.events, page) }
+          : page;
+        return {
+          ...current,
+          [turnId]: { open: true, loading: false, error: null, page: merged },
+        };
+      });
+    } catch (reason) {
+      if (turnRequestRef.current[turnId] !== requestId) return;
+      const failure = normalizeSessionDetailFailure(reason);
+      if (failure.code === "snapshot_changed") setSnapshotChanged(true);
+      setTurnToolStates((current) => ({
+        ...current,
+        [turnId]: {
+          open: true,
+          loading: false,
+          error: failure.message,
+          page: current[turnId]?.page ?? null,
+        },
+      }));
+    }
+  }, [detail, filters, localProjectId, resourceId]);
+
+  const requestToolDetail = useCallback(async (eventId: string) => {
+    if (!detail) return;
+    const existing = toolDetails[eventId];
+    if (existing?.loading || existing?.detail) return;
+    const requestId = ++sequenceRef.current;
+    eventDetailRequestRef.current[eventId] = requestId;
+    setToolDetails((current) => ({
+      ...current,
+      [eventId]: { loading: true, error: null, detail: current[eventId]?.detail ?? null },
+    }));
+    try {
+      const next = await projectSyncApi.getProjectSessionEventDetail(
+        localProjectId,
+        resourceId,
+        detail.snapshot_id,
+        eventId,
+      );
+      if (eventDetailRequestRef.current[eventId] !== requestId) return;
+      setToolDetails((current) => ({
+        ...current,
+        [eventId]: { loading: false, error: null, detail: next },
+      }));
+    } catch (reason) {
+      if (eventDetailRequestRef.current[eventId] !== requestId) return;
+      const failure = normalizeSessionDetailFailure(reason);
+      if (failure.code === "snapshot_changed") setSnapshotChanged(true);
+      setToolDetails((current) => ({
+        ...current,
+        [eventId]: {
+          loading: false,
+          error: failure.message,
+          detail: current[eventId]?.detail ?? null,
+        },
+      }));
+    }
+  }, [detail, localProjectId, resourceId, toolDetails]);
+
+  const loadedToolEvents = useMemo(() => {
+    const byId = new Map<string, SessionTimelineEvent>();
+    events.filter((event) => event.kind === "tool_call")
+      .forEach((event) => byId.set(event.event_id, event));
+    Object.values(turnToolStates).forEach((state) => {
+      state.page?.events.filter((event) => event.kind === "tool_call")
+        .forEach((event) => byId.set(event.event_id, event));
+    });
+    return [...byId.values()];
+  }, [events, turnToolStates]);
+
+  useEffect(() => {
+    if (!expandFollowsLoadedTools || loadedToolEvents.length === 0) return;
+    setExpandedToolIds((current) => {
+      const next = new Set(current);
+      loadedToolEvents.forEach((event) => next.add(event.event_id));
+      return next;
+    });
+    loadedToolEvents.forEach((event) => void requestToolDetail(event.event_id));
+  }, [expandFollowsLoadedTools, loadedToolEvents, requestToolDetail]);
+
+  const allLoadedToolsExpanded = loadedToolEvents.length > 0
+    && loadedToolEvents.every((event) => expandedToolIds.has(event.event_id));
+
+  const handleToolExpandedChange = (eventId: string, expanded: boolean) => {
+    setExpandedToolIds((current) => {
+      const next = new Set(current);
+      if (expanded) next.add(eventId);
+      else next.delete(eventId);
+      return next;
+    });
+    if (expanded) void requestToolDetail(eventId);
+    else setExpandFollowsLoadedTools(false);
+  };
+
+  const toggleAllLoadedTools = () => {
+    if (allLoadedToolsExpanded) {
+      setExpandFollowsLoadedTools(false);
+      setExpandedToolIds((current) => {
+        const next = new Set(current);
+        loadedToolEvents.forEach((event) => next.delete(event.event_id));
+        return next;
+      });
+      return;
+    }
+    setExpandFollowsLoadedTools(true);
+    setExpandedToolIds((current) => {
+      const next = new Set(current);
+      loadedToolEvents.forEach((event) => next.add(event.event_id));
+      return next;
+    });
+    loadedToolEvents.forEach((event) => void requestToolDetail(event.event_id));
+  };
+
+  const handleTurnToolExpandedChange = (turnId: string, open: boolean) => {
+    setTurnToolStates((current) => ({
+      ...current,
+      [turnId]: {
+        open,
+        loading: current[turnId]?.loading ?? false,
+        error: current[turnId]?.error ?? null,
+        page: current[turnId]?.page ?? null,
+      },
+    }));
+    const current = turnToolStates[turnId];
+    if (open && !current?.page && !current?.loading) void loadTurnTools(turnId);
+  };
+
+  const jumpToCheckpoint = (checkpoint: SessionCheckpointJump) => {
+    if (!filters) return;
+    const eventId = checkpointAnchorEventId(checkpoint);
+    const nextFilters = filters.checkpoints ? filters : { ...filters, checkpoints: true };
+    pendingAnchorRef.current = eventId;
+    focusAnchorRef.current = eventId;
+    setSelectedCheckpointId(checkpoint.event_id);
+    if (nextFilters === filters) setTimelineReloadEpoch((epoch) => epoch + 1);
+    else setFilters(nextFilters);
+  };
+
+  const runAction = async (action: SessionActionDescriptor) => {
+    if (!action.enabled || actionBusyId) return;
+    setActionBusyId(action.action_id);
+    setActionError(null);
+    try {
+      await projectSyncApi.executeProjectSessionAction(localProjectId, resourceId, action.action_id);
+    } catch (reason) {
+      setActionError(normalizeSessionDetailFailure(reason).message);
+    } finally {
+      setActionBusyId(null);
+    }
+  };
+
+  if (!detail) {
+    return (
+      <SessionDetailEntryState
+        loading={detailLoading}
+        error={detailError}
+        onRetry={() => void loadDetail(false)}
+      />
+    );
+  }
+
+  const warnings = mergeWarnings(detail.warnings, timelineWarnings);
+
+  return (
+    <section
+      className="session-detail-page"
+      data-resource-id={resourceId}
+      data-occurrence-key={occurrenceKey}
+      aria-labelledby="session-detail-heading"
+    >
+      <SessionDetailHeader
+        detail={detail}
+        headingRef={headingRef}
+        actionBusyId={actionBusyId}
+        actionError={actionError}
+        onRefresh={() => void loadDetail(true)}
+        onAction={(action) => void runAction(action)}
+      />
+
+      {snapshotChanged && (
+        <div className="sync-callout warning session-detail-stale" role="alert">
+          <Icon name="refresh" size={14} />
+          <span><strong>This session changed.</strong> Refresh before continuing so pages are not mixed across snapshots.</span>
+          <button type="button" className="btn btn-ghost" onClick={() => void loadDetail(true)}>Refresh</button>
+        </div>
+      )}
+
+      {warnings.length > 0 && (
+        <section className="session-detail-warnings" aria-label="Session detail warnings">
+          {warnings.map((warning) => (
+            <div key={`${warning.code}:${warning.message}`} className="sync-callout warning" role="status">
+              <Icon name="alert-triangle" size={13} />
+              <span>{warning.message}</span>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {filters && (
+        <div className="session-detail-layout">
+          <SessionDetailTimeline
+            events={events}
+            providerDisplayName={detail.provider_display_name}
+            loading={timelineLoading}
+            loadingMore={timelineLoadingMore}
+            nextCursor={nextCursor}
+            error={timelineError}
+            expandedToolIds={expandedToolIds}
+            toolDetails={toolDetails}
+            turnToolStates={turnToolStates}
+            onRetry={() => setTimelineReloadEpoch((epoch) => epoch + 1)}
+            onLoadMore={() => void requestTimelinePage({
+              sessionDetail: detail,
+              activeFilters: filters,
+              cursor: nextCursor,
+              append: true,
+            })}
+            onToolExpandedChange={handleToolExpandedChange}
+            onTurnToolExpandedChange={handleTurnToolExpandedChange}
+            onLoadMoreTurnTools={(turnId) => void loadTurnTools(
+              turnId,
+              turnToolStates[turnId]?.page?.next_cursor,
+            )}
+          />
+          <SessionDetailInspector
+            detail={detail}
+            filters={filters}
+            loadedToolCount={loadedToolEvents.length}
+            allLoadedToolsExpanded={allLoadedToolsExpanded}
+            selectedCheckpointId={selectedCheckpointId}
+            onFiltersChange={setFilters}
+            onCheckpointJump={jumpToCheckpoint}
+            onToggleAllLoadedTools={toggleAllLoadedTools}
+          />
+        </div>
+      )}
+    </section>
+  );
+}

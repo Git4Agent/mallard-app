@@ -10,8 +10,8 @@ use mallard_domain::{
     classify_thread_refresh, ActionId, CanonicalConversationMessage, ConversationDivergencePlan,
     ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
     ConversationReasonCode, ConversationRelation, HostId, LocalProjectId, LocalProviderProfileId,
-    Provider, ProviderStateExpectation, RefreshCloudMeta, RefreshLocalState, ReplicaId, ResourceId,
-    TargetExpectation, ThreadId,
+    ProviderKey, ProviderStateExpectation, RefreshCloudMeta, RefreshLocalState, ReplicaId,
+    ResourceId, TargetExpectation, ThreadId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,7 +253,7 @@ pub struct ConversationPlanActionRequest {
     /// action pins re-prove it against actual content at apply time.
     pub relation: ConversationRelation,
     pub capabilities: ConversationCapabilities,
-    pub provider: Provider,
+    pub provider: ProviderKey,
     pub host_id: HostId,
     pub replica_id: ReplicaId,
     pub local_project_id: LocalProjectId,
@@ -266,6 +266,10 @@ pub struct ConversationPlanActionRequest {
     pub pinned_revision: u64,
     pub pinned_commit_id: String,
     pub pinned_manifest_sha256: String,
+    /// Reviewed provider-scope coordinates: `(0, all-zero digest)` pins an
+    /// absent scope.
+    pub pinned_scope_revision: u64,
+    pub pinned_scope_sha256: String,
     pub pinned_lineage_digest: Option<String>,
     pub pinned_semantic_digest: Option<String>,
     pub expected_local_target: TargetExpectation,
@@ -305,6 +309,8 @@ pub fn build_conversation_plan_action(
         pinned_revision: request.pinned_revision,
         pinned_commit_id: request.pinned_commit_id,
         pinned_manifest_sha256: request.pinned_manifest_sha256,
+        pinned_scope_revision: request.pinned_scope_revision,
+        pinned_scope_sha256: request.pinned_scope_sha256,
         pinned_lineage_digest: request.pinned_lineage_digest,
         pinned_semantic_digest: request.pinned_semantic_digest,
         expected_local_target: request.expected_local_target,
@@ -395,6 +401,8 @@ pub enum ConversationStalePin {
     Revision,
     Commit,
     Manifest,
+    ScopeRevision,
+    ScopeDigest,
     LineageDigest,
     SemanticDigest,
     LocalTarget,
@@ -418,6 +426,8 @@ pub struct ConversationApplyContext {
     pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
+    pub scope_revision: u64,
+    pub scope_sha256: String,
     pub lineage_digest: Option<String>,
     pub semantic_digest: Option<String>,
     pub local_target: TargetExpectation,
@@ -463,6 +473,12 @@ pub fn validate_conversation_action_pins(
     }
     if current.manifest_sha256 != action.pinned_manifest_sha256 {
         return Err(ConversationStalePin::Manifest);
+    }
+    if current.scope_revision != action.pinned_scope_revision {
+        return Err(ConversationStalePin::ScopeRevision);
+    }
+    if current.scope_sha256 != action.pinned_scope_sha256 {
+        return Err(ConversationStalePin::ScopeDigest);
     }
     if current.lineage_digest != action.pinned_lineage_digest {
         return Err(ConversationStalePin::LineageDigest);

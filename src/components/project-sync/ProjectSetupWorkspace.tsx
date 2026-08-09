@@ -5,8 +5,9 @@ import type {
   DraftProfileSelection,
   LocalProjectSummary,
   ProjectDetail,
-  ProjectProvider,
   ProjectSetupDraft,
+  ProviderDescriptor,
+  ProviderKey,
   ProviderProfileSummary,
   SetupDraftInspection,
   SetupSectionStatus,
@@ -16,14 +17,10 @@ import Icon from "../Icons";
 import { projectSyncApi } from "./api";
 import {
   compactProjectPath,
-  configuredProjectProvider,
   errorMessage,
   formatRelativeTime,
-  PROJECT_PROVIDERS,
   projectLabel,
-  providerLabel,
   repositoryFingerprintMatches,
-  singleProviderSelection,
 } from "./model";
 
 export type SetupCompletion = "open" | "pull";
@@ -32,6 +29,7 @@ interface Props {
   draftId: string;
   workflowEpoch: number;
   isWorkflowCurrent: (workflowEpoch: number) => boolean;
+  providers: ProviderDescriptor[];
   profiles: ProviderProfileSummary[];
   projects: LocalProjectSummary[];
   storages: StorageConfig[];
@@ -76,6 +74,7 @@ export default function ProjectSetupWorkspace({
   draftId,
   workflowEpoch,
   isWorkflowCurrent,
+  providers,
   profiles,
   projects,
   storages,
@@ -93,7 +92,10 @@ export default function ProjectSetupWorkspace({
   const [remoteBundles, setRemoteBundles] = useState<BundleSnapshotSummary[]>([]);
   const [bundlesLoading, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
-  const [setupProvider, setSetupProvider] = useState<ProjectProvider>("codex");
+  // Providers the user has switched on for this draft. Only entries with a
+  // chosen profile are persisted on the draft itself; an enabled provider
+  // without a selection blocks finalization locally.
+  const [enabledProviders, setEnabledProviders] = useState<ReadonlySet<ProviderKey> | null>(null);
 
   // Autosave bookkeeping: edits mark the draft dirty; one debounced save
   // persists the latest state and refreshes inspection afterwards.
@@ -131,14 +133,13 @@ export default function ProjectSetupWorkspace({
           setError("This setup draft no longer exists.");
           return;
         }
-        const provider = configuredProjectProvider(loaded.profiles) ?? "codex";
-        const normalizedProfiles = singleProviderSelection(loaded.profiles, provider);
-        if (Object.keys(loaded.profiles).length > 1) {
-          dirtyRef.current = true;
-          setSaveState("saving");
-        }
-        setSetupProvider(provider);
-        setDraft({ ...loaded, profiles: normalizedProfiles });
+        const selectedKeys = Object.keys(loaded.profiles);
+        setEnabledProviders(new Set(
+          selectedKeys.length > 0
+            ? selectedKeys
+            : providers.filter((provider) => provider.setup_default).map((provider) => provider.key),
+        ));
+        setDraft(loaded);
         void refreshInspection(draftId);
       } catch (reason) {
         if (!cancelled && workflowIsActive()) setError(errorMessage(reason));
@@ -287,24 +288,38 @@ export default function ProjectSetupWorkspace({
     ))
   ), [remoteBundles, repositoryFingerprint]);
 
-  const chooseProfileFolder = async (provider: ProjectProvider) => {
+  const chooseProfileFolder = async (provider: ProviderKey) => {
     const picked = await open({ directory: true, multiple: false });
     if (!workflowIsActive() || typeof picked !== "string" || !picked) return;
     edit((current) => ({
       ...current,
       profiles: {
+        ...current.profiles,
         [provider]: { kind: "pending", path: picked, display_name: "" } satisfies DraftProfileSelection,
       },
     }));
   };
 
-  const selectSetupProvider = (provider: ProjectProvider) => {
-    if (!workflowIsActive()) return;
-    setSetupProvider(provider);
-    edit((current) => ({
-      ...current,
-      profiles: singleProviderSelection(current.profiles, provider),
-    }));
+  /**
+   * Switch one provider on or off for this draft. Disabling drops that
+   * provider's draft selection and never touches another provider's entry.
+   */
+  const toggleSetupProvider = (provider: ProviderKey) => {
+    if (!workflowIsActive() || !enabledProviders) return;
+    const enabled = enabledProviders.has(provider);
+    const next = new Set(enabledProviders);
+    if (enabled) {
+      next.delete(provider);
+    } else {
+      next.add(provider);
+    }
+    setEnabledProviders(next);
+    if (enabled && draft?.profiles[provider] !== undefined) {
+      edit((current) => {
+        const { [provider]: _removed, ...rest } = current.profiles;
+        return { ...current, profiles: rest };
+      });
+    }
   };
 
   const changeProjectFolder = async () => {
@@ -369,7 +384,23 @@ export default function ProjectSetupWorkspace({
   const storageSection = sectionState(sections, "storage");
   const repositorySection = sectionState(sections, "repository");
   const working = busy || finalizing;
+  const setupEnabled = enabledProviders ?? new Set<ProviderKey>();
+  const incompleteProviders = providers.filter((descriptor) => {
+    if (!setupEnabled.has(descriptor.key)) return false;
+    const selection = draft.profiles[descriptor.key];
+    return !selection || (selection.kind === "pending" && !selection.path.trim());
+  });
+  const profileNeedsSelection = setupEnabled.size === 0 || incompleteProviders.length > 0;
+  const profileBlocked = profilesSection?.state === "blocked";
+  const profileErrorMessage = setupEnabled.size === 0
+    ? "Turn on at least one agent to continue."
+    : incompleteProviders.length > 0
+      ? `Choose a profile for ${incompleteProviders.map((descriptor) => descriptor.display_name).join(", ")}.`
+      : profileBlocked
+        ? profilesSection?.message
+        : null;
   const canFinalize = !!inspection?.can_finalize
+    && !profileNeedsSelection
     && !working
     && !bundlesLoading
     && saveState !== "saving"
@@ -378,13 +409,6 @@ export default function ProjectSetupWorkspace({
     || Boolean(bundlesError)
     || remoteBundles.length > 0
     || repositorySection?.state === "blocked";
-  const setupProfileSelection = draft.profiles[setupProvider] ?? null;
-  const profileNeedsSelection = !setupProfileSelection
-    || (setupProfileSelection.kind === "pending" && !setupProfileSelection.path.trim());
-  const profileBlocked = profilesSection?.state === "blocked";
-  const profileErrorMessage = profileBlocked
-    ? (profileNeedsSelection ? "Choose a profile to continue." : profilesSection?.message)
-    : null;
 
   // Configs already claimed by a project on this same folder: the composite
   // project key (folder, config) makes them invalid choices for this draft.
@@ -396,16 +420,19 @@ export default function ProjectSetupWorkspace({
     }
   }
 
-  const profileRow = (provider: ProjectProvider, label: string) => {
+  const profileRow = (descriptor: ProviderDescriptor) => {
+    const provider = descriptor.key;
+    const label = descriptor.display_name;
     const selection = draft.profiles[provider] ?? null;
     const options = profiles.filter((profile) => profile.provider === provider);
     const value = selection?.kind === "existing"
       ? selection.profile_id
       : selection?.kind === "pending" ? "__pending" : "";
     const path = selection?.kind === "pending" ? selection.path : "";
+    const rowIncomplete = incompleteProviders.some((candidate) => candidate.key === provider);
     return (
       <div
-        className={`sync-agent-profile-row${selection?.kind === "pending" ? " has-custom-path" : ""}${profileBlocked ? " has-error" : ""}`}
+        className={`sync-agent-profile-row${selection?.kind === "pending" ? " has-custom-path" : ""}${profileBlocked || rowIncomplete ? " has-error" : ""}`}
         key={provider}
       >
         {/* A native select cannot hold an <svg>, so the app's chevron rides a
@@ -416,7 +443,7 @@ export default function ProjectSetupWorkspace({
             value={value}
             disabled={working}
             aria-label={`${label} profile`}
-            aria-invalid={profileBlocked || undefined}
+            aria-invalid={profileBlocked || rowIncomplete || undefined}
             onChange={(event) => {
               const next = event.target.value;
               if (next === "__pending") {
@@ -424,11 +451,17 @@ export default function ProjectSetupWorkspace({
                 return;
               }
               edit((current) => {
-                const nextProfiles: Partial<Record<ProjectProvider, DraftProfileSelection>> = {};
-                if (next) {
-                  nextProfiles[provider] = { kind: "existing", profile_id: next };
+                if (!next) {
+                  const { [provider]: _removed, ...rest } = current.profiles;
+                  return { ...current, profiles: rest };
                 }
-                return { ...current, profiles: nextProfiles };
+                return {
+                  ...current,
+                  profiles: {
+                    ...current.profiles,
+                    [provider]: { kind: "existing", profile_id: next } satisfies DraftProfileSelection,
+                  },
+                };
               });
             }}
           >
@@ -450,7 +483,7 @@ export default function ProjectSetupWorkspace({
             value={path}
             disabled={working}
             aria-label={`${label} custom profile path`}
-            aria-invalid={profileBlocked || undefined}
+            aria-invalid={profileBlocked || rowIncomplete || undefined}
             placeholder={`${label} profile path`}
             spellCheck={false}
             autoFocus
@@ -459,6 +492,7 @@ export default function ProjectSetupWorkspace({
               edit((current) => ({
                 ...current,
                 profiles: {
+                  ...current.profiles,
                   [provider]: { kind: "pending", path: nextPath, display_name: "" },
                 },
               }));
@@ -528,25 +562,32 @@ export default function ProjectSetupWorkspace({
             <div><strong>Agent</strong></div>
             {sectionBadge(profilesSection)}
           </div>
-          <div className="sync-single-agent-setup">
-            <div className="sync-agent-choice" role="radiogroup" aria-label="Agent used by this project">
-              {PROJECT_PROVIDERS.map((provider) => (
-                <button
-                  key={provider}
-                  type="button"
-                  role="radio"
-                  aria-checked={setupProvider === provider}
-                  className={setupProvider === provider ? "active" : undefined}
-                  disabled={working}
-                  onClick={() => selectSetupProvider(provider)}
-                >
-                  <strong>{providerLabel(provider)}</strong>
-                </button>
-              ))}
-            </div>
-            <div className="sync-agent-profile-list">
-              {profileRow(setupProvider, providerLabel(setupProvider))}
-            </div>
+          <div className="sync-provider-cards" role="group" aria-label="Agents used by this project">
+            {providers.map((descriptor) => {
+              const enabled = setupEnabled.has(descriptor.key);
+              return (
+                <div key={descriptor.key} className={`sync-provider-card${enabled ? " enabled" : ""}`}>
+                  <label className="sync-provider-toggle">
+                    <input
+                      type="checkbox"
+                      checked={enabled}
+                      disabled={working || (enabled && setupEnabled.size === 1)}
+                      aria-label={`Use ${descriptor.display_name} in this project`}
+                      onChange={() => toggleSetupProvider(descriptor.key)}
+                    />
+                    <strong>{descriptor.display_name}</strong>
+                    <span>{descriptor.profile_label}</span>
+                  </label>
+                  {enabled ? (
+                    <div className="sync-agent-profile-list">
+                      {profileRow(descriptor)}
+                    </div>
+                  ) : (
+                    <small>Not used by this project on this machine.</small>
+                  )}
+                </div>
+              );
+            })}
           </div>
           {profileErrorMessage && (
             <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {profileErrorMessage}</div>

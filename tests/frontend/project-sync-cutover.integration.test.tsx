@@ -5,6 +5,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import StartupLoadingScreen from "../../src/components/project-sync/StartupLoadingScreen";
 import { repositoryFingerprintMatches } from "../../src/components/project-sync/model";
 import { PROJECT_SYNC_SCHEMA } from "../../src/types";
+import {
+  MIN_PANE_HEIGHT,
+  catalogHeightRange,
+  shareHolding,
+  shareHoldingStorages,
+} from "../../src/components/project-sync/ProjectSidebar";
 
 test("ProjectSync is the only application interface", () => {
   const app = readFileSync("src/App.tsx", "utf8");
@@ -225,8 +231,8 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
     ".sync-sidebar-brand strong",
     ".sync-primary-nav button",
     ".sidebar-settings-sections .sidebar-section-title",
-    ".sync-project-combined-page .storage-link-sync",
-    ".sync-history-embedded-title",
+    ".sync-path-sync",
+    ".sync-path-crumb.section",
     ".sync-history-section-heading h2",
     ".sync-history-branch-state",
     ".log-panel-title",
@@ -237,6 +243,11 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   // A count and a branch name are data, so neither speaks in the app's voice.
   assert.ok(!pixelSelectors.includes(".sidebar-nav-badge"));
   assert.ok(!pixelSelectors.includes(".sync-history-branch-trigger"));
+  // A storage name, a repo name and a session title are data; only the section
+  // crumb is a closed word, so the bare crumb must not take the pixel face.
+  assert.ok(!/\.sync-path-crumb(?![.\w-])/.test(pixelSelectors));
+  assert.match(retroCss, /\.sync-path-crumb\s*\{[^}]*font-family: var\(--font-sans\)/s);
+  assert.match(retroCss, /\.sync-path-menu-copy > small\s*\{[^}]*font-family: var\(--font-mono\)/s);
   assert.match(retroCss, /\.sync-project-heading-name h1\s*\{[^}]*font-family: var\(--font-sans\)/s);
   // Longhands, not the font: shorthand — it resets the grid-fitting properties
   // these rules go on to re-state, and one bad var() would unset all three.
@@ -278,7 +289,7 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /\.sync-app\s*\{[^}]*padding: var\(--retro-gutter\);[^}]*border: 0;[^}]*border-radius: 0;[^}]*background: var\(--retro-frame-gutter\);[^}]*box-shadow: none;/s);
   assert.match(retroCss, /\.sync-sidebar\s*\{[^}]*overflow: visible;[^}]*gap: var\(--retro-gutter\);[^}]*border: 0;[^}]*border-radius: 0;[^}]*background: var\(--retro-frame-gutter\);[^}]*box-shadow: none;/s);
   assert.match(retroCss, /\.sync-workspace\s*\{[^}]*overflow: visible;[^}]*border: 0;[^}]*border-radius: 0;[^}]*background: var\(--retro-frame-gutter\);[^}]*box-shadow: none;/s);
-  assert.match(retroCss, /\.sync-sidebar-head,\s*\.sidebar-project-pane,\s*\.sidebar-storage-pane,\s*\.sync-sidebar-product-mark,\s*\.sync-titlebar,\s*\.sync-workspace > \.sync-main,\s*\.sync-log-drawer\.open\s*\{[^}]*border: 1px solid var\(--retro-frame-edge\);[^}]*border-radius: var\(--retro-panel-radius\);/s);
+  assert.match(retroCss, /\.sync-sidebar-head,\s*\.sidebar-project-pane,\s*\.sidebar-storage-pane,\s*\.sidebar-catalog-pane,\s*\.sync-sidebar-product-mark,\s*\.sync-titlebar,\s*\.sync-workspace > \.sync-main,\s*\.sync-log-drawer\.open\s*\{[^}]*border: 1px solid var\(--retro-frame-edge\);[^}]*border-radius: var\(--retro-panel-radius\);/s);
   assert.match(sidebar, /className="sync-sidebar-head"/);
   assert.doesNotMatch(retroCss, /\.sync-(?:sidebar|workspace)::after/);
   assert.match(retroCss, /\.sync-sidebar-resizer\s*\{[^}]*width: 7px;[^}]*margin-right: -2px;[^}]*margin-left: -2px;[^}]*flex: 0 0 7px;[^}]*background: transparent;/s);
@@ -289,9 +300,21 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /\.sync-titlebar\s*\{[^}]*margin-bottom: var\(--retro-gutter\);/s);
   assert.doesNotMatch(retroCss, /\.sync-titlebar\s*\{[^}]*border-bottom: 1px solid var\(--retro-rule\);/s);
   assert.match(retroCss, /\.sync-sidebar-sections\s*\{[^}]*overflow: visible;[^}]*background: transparent;/s);
-  assert.match(readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8"), /gridTemplateRows: `minmax\(96px, \$\{projectShare\}fr\) 3px minmax\(96px, \$\{1 - projectShare\}fr\)`/);
-  assert.match(retroCss, /\.sidebar-project-pane\s*\{[^}]*background: var\(--bg-1\);/s);
-  assert.match(retroCss, /\.sidebar-storage-pane\s*\{[^}]*background: var\(--bg-1\);/s);
+  // Two elastic rows and a Catalog row that fits its contents up to a 40% cap
+  // until the lower handle pins it, parted by two 3px handle tracks. The cap
+  // matters because the row list is unbounded — one row per (provider home ×
+  // kind) — and an uncapped content-sized track would squeeze Projects and
+  // Storages onto their 96px floors.
+  const sidebarSource = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
+  assert.match(sidebarSource, /gridTemplateRows: `\$\{elasticRows\(sectionLayout\.projectShare\)\} 3px \$\{sectionLayout\.catalogHeight === null \? "fit-content\(40%\)" : `\$\{sectionLayout\.catalogHeight\}px`\}`/);
+  // Shares go out as fr factors scaled to 100, never as the fractions
+  // themselves: a track whose flex factor is under 1 is only given that
+  // fraction of the leftover space, so once a pane bottoms out on its floor the
+  // rows stop filling the box and leave dead space under the last pane.
+  assert.match(sidebarSource, /const projects = projectShare \* 100;/);
+  assert.match(sidebarSource, /minmax\(\$\{MIN_PANE_HEIGHT\}px, \$\{projects\}fr\) 3px minmax\(\$\{MIN_PANE_HEIGHT\}px, \$\{100 - projects\}fr\)/);
+  assert.match(retroCss, /\.sidebar-project-pane,\s*\.sidebar-storage-pane,\s*\.sidebar-catalog-pane\s*\{[^}]*background: var\(--bg-1\);/s);
+  assert.doesNotMatch(retroCss, /\.sidebar-catalog-pane\s*\{[^}]*margin-top/s);
   assert.match(retroCss, /\.sidebar-section-divider\s*\{[^}]*height: 9px;[^}]*margin: -3px 0;[^}]*align-self: center;[^}]*background: transparent;/s);
   assert.match(retroCss, /\.sidebar-section-divider::before\s*\{[^}]*display: none;/s);
   // The handles only tint the gutter they straddle, and stop short of the tile
@@ -332,21 +355,31 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   // the theme's display:none existed only to kill the App.css original.
   assert.doesNotMatch(retroCss, /\.sync-history-commit-rail::before/);
   assert.doesNotMatch(readFileSync("src/App.css", "utf8"), /\.sync-history-commit-rail::before/);
-  assert.match(retroCss, /\.sync-history-commit::before\s*\{[^}]*top: var\(--sync-history-row-anchor-y\);[^}]*bottom: calc\(-10px - var\(--sync-history-row-anchor-y\)\);[^}]*left: calc\(var\(--sync-history-rail-x\) - var\(--sync-history-card-offset\)\);[^}]*width: 1px;[^}]*background: var\(--border-mid\);/s);
-  assert.match(retroCss, /\.sync-history-uncommitted::after\s*\{[^}]*bottom: -10px;[^}]*left: calc\(var\(--sync-history-rail-x\) - var\(--sync-history-card-offset\)\);[^}]*background: repeating-linear-gradient\(/s);
+  // Both rail segments yield the fold's 24px box by geometry — 12px short of
+  // the anchor, resuming 12px past it. They must never go back to running
+  // under the fold and relying on its background to hide them: `opacity` on a
+  // disabled fold and the translucent hover wash each let the line straight
+  // back through, so the spine broke at some folds, ran through others, and
+  // grew a line on hover. `bottom: -anchor` closes the joint exactly — the
+  // pseudo is laid out against the padding box, so the two card borders and
+  // the 10px gap already span the 12px the fold needs.
+  assert.match(retroCss, /\.sync-history-commit::before\s*\{[^}]*top: calc\(var\(--sync-history-row-anchor-y\) \+ 12px\);[^}]*bottom: calc\(-1 \* var\(--sync-history-row-anchor-y\)\);[^}]*left: calc\(var\(--sync-history-rail-x\) - var\(--sync-history-card-offset\)\);[^}]*width: 1px;[^}]*background: var\(--border-mid\);/s);
+  assert.match(retroCss, /\.sync-history-uncommitted::after\s*\{[^}]*top: calc\(var\(--sync-history-row-anchor-y\) \+ 12px\);[^}]*bottom: calc\(-1 \* var\(--sync-history-row-anchor-y\)\);[^}]*left: calc\(var\(--sync-history-rail-x\) - var\(--sync-history-card-offset\)\);[^}]*background: repeating-linear-gradient\(/s);
   assert.match(retroCss, /\.sync-history-commit:last-child::before\s*\{[^}]*display: none;/s);
-  assert.match(retroCss, /\.sync-history-timeline\.has-uncommitted \.sync-history-commit:only-child::before\s*\{[^}]*top: 0;[^}]*bottom: auto;[^}]*height: var\(--sync-history-row-anchor-y\);[^}]*display: block;/s);
+  // The Uncommitted group's own segment now reaches the first commit's fold,
+  // so neither the first-child reach nor the only-child stub has any work.
+  assert.doesNotMatch(retroCss, /\.sync-history-commit:(first|only)-child::before/);
   // The rail node became the fold button: one 24px control (WCAG 2.5.8) in
   // the rail column for every fold on the page, outside the card so neither
   // a review's checkbox nor an outcome banner can move it. The decorative
   // node, its connector, and the pixel-ring var it used are gone with it.
-  assert.match(retroCss, /\.sync-history-spine-fold\s*\{[^}]*position: absolute;[^}]*top: calc\(var\(--sync-history-row-anchor-y\) - 12px\);[^}]*left: calc\(var\(--sync-history-rail-x\) - var\(--sync-history-card-offset\) - 12px\);[^}]*width: 24px;[^}]*height: 24px;[^}]*background: var\(--bg-0\);/s);
+  assert.match(retroCss, /\.sync-history-spine-fold\s*\{[^}]*position: absolute;[^}]*top: calc\(var\(--sync-history-row-anchor-y\) - 12px\);[^}]*left: calc\(var\(--sync-history-rail-x\) - var\(--sync-history-card-offset\) - 12px\);[^}]*width: 24px;[^}]*height: 24px;[^}]*background: transparent;/s);
   assert.match(retroCss, /\.sync-history-spine-fold:disabled\s*\{[^}]*opacity: 0\.35;/s);
   assert.doesNotMatch(retroCss, /sync-history-commit-node|--sync-history-node-size|--sync-history-node-half|--retro-pixel-ring|sync-history-group-toggle/);
   // Storage-only rows and the fork banner live outside the timeline and need
   // the same row tokens — they are not inherited, so a scope left off the
   // list silently computes margin-left to 0 and leaves the rail column.
-  assert.match(retroCss, /\.sync-history-timeline,\s*\.sync-history-storage-only,\s*\.sync-history-fork-event\s*\{[^}]*--sync-history-row-actions-column: 80px;[^}]*--sync-history-commit-actions-column: 26px;[^}]*--sync-history-commit-date-column: 26ch;[^}]*--sync-history-row-icon-size: 18px;[^}]*--sync-history-row-anchor-y: 15px;[^}]*--sync-history-rail-x: 8px;[^}]*--sync-history-card-offset: 26px;/s);
+  assert.match(retroCss, /\.sync-history-timeline,\s*\.sync-history-storage-only,\s*\.sync-history-fork-event\s*\{[^}]*--sync-history-row-actions-column: 148px;[^}]*--sync-history-commit-actions-column: 26px;[^}]*--sync-history-commit-date-column: 26ch;[^}]*--sync-history-row-icon-size: 18px;[^}]*--sync-history-row-anchor-y: 15px;[^}]*--sync-history-rail-x: 8px;[^}]*--sync-history-card-offset: 26px;/s);
   // The storage-only card and the fork banner take the timeline's inset, so
   // their rail marks land in the same column, and all three scopes take the
   // wide anchor together.
@@ -375,7 +408,7 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   // It used to be a weight step too, but 650 over 600 was never drawn apart.
   assert.match(retroCss, /\.sync-history-commit-title > strong\s*\{[^}]*font-size: var\(--type-md\);/s);
   // Pixel geometry only stays crisp at an exact 2:1 downscale of the 24px art.
-  assert.match(retroCss, /\.sync-history-commit-icon > svg,[\s\S]*?\.sync-history-chat-toggle > svg\s*\{[^}]*width: 12px;[^}]*height: 12px;/s);
+  assert.match(retroCss, /\.sync-history-commit-icon > svg,[\s\S]*?\.sync-history-debug-trigger > svg\s*\{[^}]*width: 12px;[^}]*height: 12px;/s);
   // A translucent block is a smudge, not a pixel — metrics are held back with
   // colour so every block stays solid.
   assert.match(retroCss, /\.sync-history-thread-metric svg\s*\{[^}]*opacity: 1;[^}]*color: var\(--text-3\);/s);
@@ -463,13 +496,16 @@ test("notice copy stays one line: no two-sentence reassurance", () => {
   }
 });
 
-test("the titlebar marks active Git projects with the Git folder icon", () => {
+test("the titlebar stays silent for a project and names the screens without a trail", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
 
+  // The project workspace names itself in the path bar, so the titlebar would
+  // only repeat it. Every other screen still has to say what it is.
   assert.match(
     workspace,
-    /const workspaceIcon = !activeDraftSummary && activeSummary\?\.is_git_repository === true\s*\? "git-folder"\s*: "folder";/,
+    /const workspaceTitle = activeDraftSummary\?\.display_name\s*\?\? \(addingCatalogScope \? "Add Catalog row" : null\)\s*\?\? \(activeCatalogScope \? catalogScopeLabel\([^)]*\) : null\)\s*\?\? \(activeSummary \? null : "Projects"\);/,
   );
+  assert.match(workspace, /\{workspaceTitle && \(/);
   assert.match(workspace, /<Icon name=\{workspaceIcon\} size=\{16\} \/>/);
 });
 
@@ -527,8 +563,8 @@ test("the shell verifies host identity and relies on backend auto-registration",
     "the ordinary shell must remain behind the completed identity refresh gate",
   );
   assert.match(linksWorkspace, /const bindingActive = projectBinding\?\.state === "active"/);
-  assert.match(linksWorkspace, /const canSync = bindingActive && profilesReadable/);
-  assert.match(linksWorkspace, /onConfigureBinding\(project\.local_project_id\)/);
+  assert.match(linksWorkspace, /const workspaceCanSync = workspaceBindingActive && workspaceProfilesReadable/);
+  assert.match(linksWorkspace, /onConfigureBinding\(workspaceProject\.local_project_id\)/);
   assert.match(setupWorkspace, /mountedRef\.current && isWorkflowCurrent\(workflowEpoch\)/);
   assert.match(setupWorkspace, /if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, completion, workflowEpoch\)/);
   assert.doesNotMatch(workspace, /Host settings/);
@@ -650,4 +686,48 @@ test("refocus reconciles external changes narrowly and the full reload lives in 
   assert.match(reconcile, /hostWorkflowEpoch\.current !== workflowEpoch/);
   assert.match(reconcile, /await refresh\(workflowEpoch\)/);
   assert.match(workspace, /Date\.now\(\) - blurredAt >= FOCUS_RECONCILE_MIN_AWAY_MS/);
+});
+
+// Each handle must move the one gutter it borders. The panes below the head and
+// above Catalog are sized by share, so any change to the box they divide slides
+// their gutters unless the share is re-solved against the new box.
+test("every sidebar handle moves its own gutter and no other", () => {
+  const BOX = 700;
+  const CATALOG = 175;
+  const elastic = BOX - 6 - CATALOG;
+  const projects = 210;
+  const storages = elastic - projects;
+
+  // Head handle: the box shrinks by what the head takes, and Storages must come
+  // out of it unchanged — Projects, the pane it borders, absorbs the whole move.
+  const shrunkBox = BOX - 60;
+  const heldShare = shareHoldingStorages(storages, shrunkBox, CATALOG);
+  const shrunkElastic = shrunkBox - 6 - CATALOG;
+  assert.ok(Math.abs((1 - heldShare) * shrunkElastic - storages) < 0.5, "Storages holds its pixels");
+  assert.ok(Math.abs(heldShare * shrunkElastic - (projects - 60)) < 0.5, "Projects absorbs the change");
+
+  // Catalog handle: the elastic space shrinks as Catalog grows, and Projects is
+  // the pane that must not move.
+  const grown = CATALOG + 40;
+  const share = shareHolding(projects, BOX, grown);
+  const grownElastic = BOX - 6 - grown;
+  assert.ok(Math.abs(share * grownElastic - projects) < 0.5, "Projects holds its pixels");
+  assert.ok(Math.abs((1 - share) * grownElastic - (storages - 40)) < 0.5, "Storages absorbs the change");
+});
+
+test("the Catalog pane floors at the same height as the panes above it", () => {
+  // It used to floor at its own content height, so the bottom handle refused to
+  // move while the two above travelled down to MIN_PANE_HEIGHT.
+  const [min, max] = catalogHeightRange(700, 210);
+  assert.equal(min, MIN_PANE_HEIGHT);
+  assert.equal(max, 700 - 6 - 210 - MIN_PANE_HEIGHT);
+  // The list scrolls unconditionally — the unbounded row list needs it past
+  // the 40% cap as much as under a pinned height — so the old is-pinned
+  // overflow switch stays deleted.
+  const css = readFileSync("src/App.css", "utf8");
+  assert.doesNotMatch(css, /\.sidebar-catalog-pane\.is-pinned/);
+  assert.match(
+    css,
+    /\.sidebar-split-pane > \.sidebar-profile-list,\s*\.sidebar-split-pane > \.sidebar-links-list\s*\{[^}]*overflow-y: scroll;/s,
+  );
 });

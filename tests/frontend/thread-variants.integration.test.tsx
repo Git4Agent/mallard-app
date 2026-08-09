@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ProjectChatHistoryContent, syncHoldDetail } from "../../src/components/project-sync/ProjectChatHistoryPage";
+import { ProjectChatHistoryContent, syncHoldDetail } from "../../src/components/project-sync/ProjectActivityPage";
 import type {
   ConversationPlanActionType,
   ConversationReasonCode,
@@ -48,37 +48,69 @@ const OLDER_ACTIONABLE_ID = "019f7798-5437-7632-9dbc-5b589cf68bf4";
 const OLDER_BLOCKED_ID = "019f7798-5437-7632-9dbc-5b589cf68bf5";
 const OLDER_SYNCED_ID = "019f7798-5437-7632-9dbc-5b589cf68bf6";
 
-function localThread(threadId: string, title: string) {
+function localSession(threadId: string, title: string) {
   return {
-    thread_id: threadId,
+    resource_id: `codex:conversation:${threadId}`,
+    provider: "codex",
+    provider_display_name: "Codex",
+    provider_session_id: threadId,
+    logical_thread_id: threadId,
+    source: "local_only" as const,
+    access: "bound_ready" as const,
     title,
     summary: "",
     started_at: WINDOW_START + 1_000,
     ended_at: WINDOW_START + 2_000,
+    working_directory: null,
+    relative_cwd: null,
     branch: "main",
     recorded_sha: "a".repeat(40),
+    is_active: false,
     user_round_count: 2,
     agent_message_count: 3,
     tool_call_count: 4,
     total_tokens: 1_200,
     metrics_complete: true,
+    actions: [
+      {
+        action_id: "codex.open_in_app",
+        kind: "open_in_app" as const,
+        label: "Open in Codex",
+        enabled: true,
+        disabled_reason: null,
+      },
+      {
+        action_id: "codex.open_in_terminal",
+        kind: "open_in_terminal" as const,
+        label: "Open in Terminal",
+        enabled: true,
+        disabled_reason: null,
+      },
+      {
+        action_id: "codex.fork_session",
+        kind: "fork_session" as const,
+        label: "Fork in Codex",
+        enabled: true,
+        disabled_reason: null,
+      },
+    ],
   };
 }
 
-const history = {
+const activity = {
   project_id: project.local_project_id,
-  threads: [
-    localThread(HEALTHY_ID, "Test task"),
-    localThread(LEGACY_ID, "Legacy pre-0.146 session"),
-    localThread(REPLACE_ID, "Force-replace candidate"),
+  sessions: [
+    localSession(HEALTHY_ID, "Test task"),
+    localSession(LEGACY_ID, "Legacy pre-0.146 session"),
+    localSession(REPLACE_ID, "Force-replace candidate"),
   ],
   git: null,
   unmapped: [],
+  providers: [{ provider: "codex", display_name: "Codex", access: "bound_ready" as const }],
   warnings: [],
   window_start: WINDOW_START,
   window_end: WINDOW_START + 3_000_000,
   next_before: null,
-  codex_home: "/Users/test/config/mallard/.codex",
   storage_sync: [],
 };
 
@@ -110,7 +142,10 @@ function decision(
 
 function entry(overrides: Partial<ThreadSyncEntry> & Pick<ThreadSyncEntry, "thread_id">): ThreadSyncEntry {
   return {
-    resource_id: `codex:session:${overrides.thread_id}`,
+    provider: "codex",
+    provider_display_name: "Codex",
+    access: "bound_ready",
+    resource_id: `codex:conversation:${overrides.thread_id}`,
     display_name: overrides.thread_id,
     state: "local_only",
     local_present: true,
@@ -182,7 +217,10 @@ function comparisonOf(entries: ThreadSyncEntry[]) {
     storage_name: "Local storage 1",
     compared_at: WINDOW_START + 4_000,
     counts: { synced: 0, local: 0, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
+    scopes: [],
+    provider_errors: {},
     warnings: [],
+    remote_continuity: { state: "in_sync" as const, revision: 1 },
     entries,
   };
 }
@@ -198,7 +236,7 @@ function render(props: {
       embedded
       project={project}
       binding={binding}
-      history={history}
+      activity={activity}
       comparison={comparisonOf(props.entries)}
       activeStorageName="Local storage 1"
       selectionMode={props.selectionMode}
@@ -207,12 +245,11 @@ function render(props: {
       loading={false}
       loadingMore={false}
       actionError={null}
-      actionBusyThreadId={null}
+      actionBusyResourceId={null}
       onBranchChange={() => undefined}
       onRefresh={() => undefined}
       onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
+      onSessionAction={() => undefined}
     />,
   );
 }
@@ -285,23 +322,28 @@ test("out-of-window threads live in a collapsed Older activity group with a non-
   });
 
   assert.match(html, /Older activity/);
-  assert.match(html, /title="3 threads outside this 30-day window"/);
+  assert.match(html, /title="3 sessions outside this 30-day window"/);
   assert.match(html, /aria-label="Include Older unpublished session, Codex thread 019f7798-5437-7632-9dbc-5b589cf68bf4"/);
-  assert.match(html, />2 threads need no changes or can&#x27;t sync</);
+  assert.match(html, />2 sessions need no changes or can&#x27;t sync</);
   assert.match(html, /Older legacy session/, "blocked threads stay discoverable");
   assert.match(html, /Older synced session/);
-  assert.match(html, /On this Mac/);
+  // No location line anywhere: the status badge carries where a thread lives,
+  // and it carries it on every row rather than only on the ones with an entry.
+  assert.doesNotMatch(html, /On this Mac/);
   assert.equal((html.match(/type="checkbox"/g) ?? []).length, 2, "healthy in-window plus older actionable");
 });
 
-test("storage-only rows speak location and offer Pull to open", () => {
+test("storage-only rows state their status and offer Pull to open", () => {
   const html = render({
     selectionMode: "pull",
     entries: [storedEntry],
     selectableResourceIds: new Set([storedEntry.resource_id]),
   });
 
-  assert.match(html, /In Local storage 1 · Pull to open/);
+  assert.doesNotMatch(html, /sync-history-stored-thread-location/);
+  // The row still names its provider — inert, because a comparison entry has
+  // nothing to open.
+  assert.match(html, /class="sync-history-launch-action sync-history-provider-inert"[^>]*title="Codex thread"/);
   // Line 2 carries the whole thread id — never a stub, no chip, no title
   // reveal — with the <time> beside it.
   assert.match(html, /class="sync-history-stored-thread-id"><code>019f7798-5437-7632-9dbc-5b589cf68bf3<\/code><\/span>/);
@@ -343,7 +385,7 @@ test("hold details use user vocabulary for every non-actionable direction", () =
 });
 
 test("the retired review-list vocabulary stays out of the sources", () => {
-  const page = readFileSync("src/components/project-sync/ProjectChatHistoryPage.tsx", "utf8");
+  const page = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
   const css = readFileSync("src/App.css", "utf8");
   const types = readFileSync("src/types.ts", "utf8");
 
@@ -375,7 +417,7 @@ function renderWithFork(selectionMode?: "push" | "pull") {
       embedded
       project={project}
       binding={binding}
-      history={history}
+      activity={activity}
       comparison={comparisonOf([divergedForkedEntry])}
       activeStorageName="Local storage 1"
       selectionMode={selectionMode}
@@ -384,14 +426,12 @@ function renderWithFork(selectionMode?: "push" | "pull") {
       loading={false}
       loadingMore={false}
       actionError={null}
-      actionBusyThreadId={null}
+      actionBusyResourceId={null}
       onBranchChange={() => undefined}
       onRefresh={() => undefined}
       onLoadMore={() => undefined}
-      onOpenCodex={() => undefined}
-      onOpenTerminal={() => undefined}
-      onFork={() => undefined}
-      forkBusyThreadId={null}
+      onSessionAction={() => undefined}
+      forkBusyResourceId={null}
       onReviewPull={() => undefined}
     />,
   );

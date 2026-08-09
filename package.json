@@ -12,7 +12,8 @@
     "test:frontend-integration": "node scripts/run-frontend-integration-tests.mjs",
     "test:release-config": "node --test tests/release-config.test.mjs",
     "test:backend-integration": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
-    "test:integration": "npm run test:frontend-integration && npm run test:release-config && npm run test:backend-integration",
+    "test:cli": "cargo test -p mallard-cli",
+    "test:integration": "npm run test:frontend-integration && npm run test:release-config && npm run test:backend-integration && npm run test:cli",
     "tauri": "node scripts/tauri-build.mjs"
   },
   "dependencies": {

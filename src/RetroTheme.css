@@ -290,8 +290,10 @@ body {
 .sync-draft-badge,
 .sync-eyebrow,
 .settings-section-title,
-.sync-project-combined-page .storage-link-sync,
-.sync-history-embedded-title,
+.sync-path-crumb.section,
+.sync-path-sync,
+.sync-path-menu-label,
+.sync-path-rename label,
 .sync-history-fork-label,
 .sync-sync-review-header h1,
 .sync-sync-review-header h2,
@@ -319,7 +321,16 @@ body {
 .sync-storage-repo-chip > span,
 .sync-r2-guide-warning,
 .sync-r2-guide > .btn-link,
-.sync-secret-reveal {
+.sync-secret-reveal,
+.session-detail-provider-badge,
+.session-detail-active-badge,
+.session-detail-event-heading h3,
+.session-detail-section-heading span,
+.session-detail-checkpoint-jump h2,
+.session-detail-filters legend,
+.session-detail-tool-view h2,
+.session-detail-tool-payload h4,
+.session-detail-tool-paths h4 {
   font-family: var(--font-pixel);
   /* One weight exists, and synthesis is off, so asking for anything heavier
      here would be a declaration that quietly does nothing. Pixel hierarchy is
@@ -662,6 +673,7 @@ summary {
 .sync-sidebar-head,
 .sidebar-project-pane,
 .sidebar-storage-pane,
+.sidebar-catalog-pane,
 .sync-sidebar-product-mark,
 .sync-titlebar,
 .sync-workspace > .sync-main,
@@ -678,16 +690,20 @@ summary {
   background: var(--bg-1);
 }
 
+/* The strip exists only to clear the macOS traffic lights. Those end at 41px
+   (trafficLightPosition y: 29 plus the 12px buttons), and the strip starts 4px
+   in — the frame gutter plus the head tile's own border — so 42px leaves the
+   wordmark a 5px margin and nothing above it is wasted. */
 .sync-sidebar-drag {
-  height: 46px;
-  flex-basis: 46px;
+  height: 42px;
+  flex-basis: 42px;
 }
 
 .sync-sidebar-brand {
-  height: 72px;
-  flex-basis: 72px;
-  gap: 11px;
-  padding: 0 22px;
+  height: 56px;
+  flex-basis: 56px;
+  gap: 10px;
+  padding: 0 18px;
 }
 
 /* 40, not 42: the mark is a 20-unit grid, so an even multiple puts every cell on
@@ -727,10 +743,14 @@ summary {
   font-size: var(--type-3xl);
 }
 
+/* Shortening the head clips the nav, so it scrolls — no destination the handle
+   pushes out of view becomes unreachable. */
 .sync-primary-nav {
   position: relative;
-  gap: 3px;
-  padding: 8px 10px 11px;
+  min-height: 0;
+  overflow-y: auto;
+  gap: 2px;
+  padding: 6px 8px 8px;
   border-bottom: 0;
 }
 
@@ -740,10 +760,14 @@ summary {
   display: none;
 }
 
+/* Fixed, not shrinkable: in a column flex the rows would otherwise squash as
+   the head is shortened, so the nav would never scroll and the handle's floor —
+   measured off one row — would drift as it moved. */
 .sync-primary-nav button {
-  height: 45px;
-  gap: 12px;
-  padding: 0 13px;
+  height: 38px;
+  flex: 0 0 auto;
+  gap: 10px;
+  padding: 0 11px;
   border: 1px solid transparent;
   border-radius: 5px;
   color: var(--text-0);
@@ -751,8 +775,8 @@ summary {
 }
 
 .sync-primary-nav button > svg {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
 }
 
 .sync-primary-nav button:hover:not(:disabled) {
@@ -789,11 +813,13 @@ summary {
   background: transparent;
 }
 
-.sidebar-project-pane {
-  background: var(--bg-1);
-}
-
-.sidebar-storage-pane {
+/* All three panes are drag-sized rows of one split, each parted from the next
+   by a handle straddling the gutter — so the tiles differ only in what they
+   hold. The Catalog pane used to stand off a plain gutter margin instead,
+   which put an identical 3px seam under a handle that answered to nothing. */
+.sidebar-project-pane,
+.sidebar-storage-pane,
+.sidebar-catalog-pane {
   background: var(--bg-1);
 }
 
@@ -895,6 +921,17 @@ summary {
 
 .sidebar-section-divider::before {
   display: none;
+}
+
+/* The head is a flex child of the rail rather than a row of the split, so this
+   one has to cancel the two gutters flexbox puts either side of it: a 9px box
+   with -6px margins collapses to a -3px margin box, which the surrounding 3px
+   gaps restore to a single 3px seam with the handle centred on it. It must sit
+   after the shared rule above to win the margin. */
+.sidebar-head-divider {
+  margin: -6px 0;
+  flex: 0 0 auto;
+  align-self: stretch;
 }
 
 .sidebar-section-divider::after {
@@ -1181,45 +1218,64 @@ summary {
   border-bottom: 0;
 }
 
-.sync-project-combined-page .project-profile-storage-list .storage-link-row,
-.sync-project-combined-page .project-profile-storage-list .storage-link-identity {
-  min-height: 72px;
-}
-
-.storage-link-icon {
-  width: 33px;
-  height: 33px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--text-0);
-}
-
-.sync-project-combined-page .storage-link-copy strong {
+/* ---- workspace path bar -------------------------------------------------
+   The trail mixes all three faces on one line, so each crumb declares which
+   one it is: a storage name, a repo name and a session title came out of the
+   user's data and stay sans; a section name is a closed word and speaks pixel;
+   the paths inside the menus are machine identifiers and stay mono. */
+.sync-path-crumb {
   font-family: var(--font-sans);
-  color: var(--text-0);
   font-size: var(--type-md);
-  font-weight: var(--weight-semibold);
+  font-weight: var(--weight-medium);
+  letter-spacing: -0.01em;
 }
 
-.sync-project-combined-page .storage-link-copy span {
-  color: var(--text-2);
-  font-family: var(--font-sans);
-  font-size: var(--type-xs);
+.sync-path-crumb.section {
+  /* One weight exists for the pixel face; hierarchy is size and colour. */
+  font-size: var(--type-md);
+  letter-spacing: 0;
 }
 
-/* The subtitle is a path for a local storage and a phrase for the rest, so the
-   component tags which one it handed us rather than the CSS guessing. */
-.sync-project-combined-page .storage-link-copy .storage-link-meta > span.is-path {
+.sync-path-separator {
   font-family: var(--font-mono);
+  font-size: var(--type-md);
 }
 
-/* "· 1 linked" is a numeral inside an English phrase, not a column — it keeps
-   the surrounding face and only asks for figures that hold their width. */
-.sync-project-combined-page .storage-link-copy .storage-link-meta > small {
-  font-family: var(--font-sans);
+.sync-path-sync {
+  font-size: var(--type-md);
+  line-height: var(--leading-flat);
+}
+
+.sync-path-menu-label {
   font-size: var(--type-3xs);
+  letter-spacing: 1px;
+  text-transform: uppercase;
   font-variant-numeric: tabular-nums;
+}
+
+.sync-path-menu-item {
+  font-family: var(--font-sans);
+  font-size: var(--type-sm);
+}
+
+.sync-path-menu-copy > small {
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+}
+
+.sync-path-rename label {
+  font-size: var(--type-3xs);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.sync-path-rename input {
+  font-family: var(--font-sans);
+  font-size: var(--type-lg);
+}
+
+.sync-path-rename-error {
+  font-size: var(--type-xs);
 }
 
 .sync-project-combined-page .storage-link-more {
@@ -1229,34 +1285,9 @@ summary {
   box-shadow: none;
 }
 
-.sync-project-combined-page .storage-link-action-group {
-  gap: 8px;
-  overflow: visible;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.sync-project-combined-page .storage-link-actions {
-  padding-right: 12px;
-  border-left: 0;
-}
-
-.sync-project-combined-page .storage-link-sync {
-  min-height: 34px;
-  padding: 0 13px;
-  border: 1px solid var(--button-border);
-  border-radius: 4px;
-  background: var(--button-bg);
-  box-shadow: none;
-  color: var(--text-0);
-  font-size: var(--type-lg);
-  line-height: var(--leading-flat);
-}
-
 /* A byte readout is a measurement, not a label — it holds its width while the
    pixel word beside it keeps speaking in the app's voice. */
-.sync-project-combined-page .storage-link-sync .sync-btn-readout,
+.sync-path-sync .sync-btn-readout,
 .btn .sync-btn-readout {
   font-family: var(--font-mono);
   font-weight: var(--weight-medium);
@@ -1266,16 +1297,6 @@ summary {
 .btn .sync-btn-name {
   font-family: var(--font-sans);
   font-weight: var(--weight-medium);
-}
-
-.sync-project-combined-page .storage-link-sync + .storage-link-sync {
-  border-left: 1px solid var(--button-border);
-}
-
-.sync-project-combined-page .storage-link-sync:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  background: var(--button-bg-hover);
-  color: var(--accent);
 }
 
 .storage-link-actions-menu,
@@ -1288,7 +1309,6 @@ summary {
 }
 
 .storage-link-actions-menu-item,
-.storage-link-menu-option,
 .sync-history-branch-option {
   border-radius: 3px;
 }
@@ -1316,13 +1336,12 @@ summary {
   border-bottom: 0;
 }
 
-.sync-history-embedded-title {
-  color: var(--text-0);
-  font-size: var(--type-xl);
-}
-
-.sync-history-embedded-title > svg {
-  color: var(--text-1);
+/* The 50px reserved a line for the section title. The path bar carries that
+   name now, so the row is only as tall as the controls left in it. */
+.sync-history-embedded .sync-history-header.embedded {
+  min-height: 0;
+  margin-bottom: 6px;
+  align-items: center;
 }
 
 .sync-history-toolbar {
@@ -1448,13 +1467,20 @@ summary {
 .sync-history-timeline,
 .sync-history-storage-only,
 .sync-history-fork-event {
-  --sync-history-row-actions-column: 80px;
+  /* Five slots now: the provider-marked open button, terminal, fork, the debug
+     panel and the transcript chevron. The last two moved up from line 2, where
+     they sat stranded between readouts that can only be hovered. */
+  --sync-history-row-actions-column: 148px;
   --sync-history-commit-actions-column: 26px;
   --sync-history-commit-date-column: 26ch;
   --sync-history-row-column-gap: 12px;
   --sync-history-row-icon-size: 18px;
   --sync-history-row-title-gap: 8px;
-  --sync-history-row-text-offset: 26px;
+  /* Derived, not chosen: line 2 indents to exactly where the status badge ends,
+     so the badge box and the indent can never drift apart. */
+  --sync-history-row-text-offset: calc(
+    var(--sync-history-row-icon-size) + var(--sync-history-row-title-gap)
+  );
   --sync-history-row-anchor-y: 15px;
   --sync-history-rail-x: 8px;
   --sync-history-card-offset: 26px;
@@ -1478,12 +1504,23 @@ summary {
   background: var(--surface-row);
 }
 
+/* The rail stops 12px short of every fold and resumes 12px past it, so the 24px
+   control sits in a gap the line never enters. That gap used to be an opaque
+   plate on the button itself, and a plate cannot hold it: `opacity` on a
+   disabled fold faded the plate away, hover swapped it for a translucent wash,
+   and the line drew straight through both. The spine broke at the folds that
+   could expand, ran through the ones that could not, and hovering any of them
+   added a line that was not there a moment earlier. Geometry has no states.
+
+   `bottom` is exactly -anchor because the pseudo is laid out against the
+   padding box: this card's border, the 10px card gap and the next card's border
+   already span the 12px the gap needs, so the anchor is all that is left. */
 .sync-history-uncommitted::after {
   content: "";
   position: absolute;
   z-index: 1;
-  top: var(--sync-history-row-anchor-y);
-  bottom: -10px;
+  top: calc(var(--sync-history-row-anchor-y) + 12px);
+  bottom: calc(-1 * var(--sync-history-row-anchor-y));
   left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset));
   width: 1px;
   background: repeating-linear-gradient(
@@ -1573,31 +1610,25 @@ summary {
    already paints it above the following commit without any of that, verified
    by hit-testing three points through an overlapping commit. */
 
+/* Fold to fold, on the same offsets as the dashed segment above. The commit
+   below an Uncommitted group needs no special first-child reach: that group's
+   own segment already runs down to this fold. */
 .sync-history-commit::before {
   content: "";
   position: absolute;
   z-index: 0;
-  top: var(--sync-history-row-anchor-y);
-  bottom: calc(-10px - var(--sync-history-row-anchor-y));
+  top: calc(var(--sync-history-row-anchor-y) + 12px);
+  bottom: calc(-1 * var(--sync-history-row-anchor-y));
   left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset));
   width: 1px;
   background: var(--border-mid);
   pointer-events: none;
 }
 
-.sync-history-timeline.has-uncommitted .sync-history-commit:first-child::before {
-  top: 0;
-}
-
+/* Every segment is a connector to the next commit, so the last one has nothing
+   to draw and the rail ends at its fold. */
 .sync-history-commit:last-child::before {
   display: none;
-}
-
-.sync-history-timeline.has-uncommitted .sync-history-commit:only-child::before {
-  top: 0;
-  bottom: auto;
-  height: var(--sync-history-row-anchor-y);
-  display: block;
 }
 
 .sync-history-commit::after {
@@ -1607,8 +1638,10 @@ summary {
 /* The fold control lives in the rail, where the node used to sit: one column
    for every fold on the page — group headings and commits alike — and outside
    the card, so neither a review's checkbox nor an outcome banner can move it.
-   24px hit area (WCAG 2.5.8) centred on the rail x; the opaque background
-   masks the rail line passing behind it. */
+   24px hit area (WCAG 2.5.8) centred on the rail x, and the rail yields exactly
+   that box — the 12px above matches the 12px each segment stops short by. The
+   background stays transparent: nothing is behind it to hide, and an opaque
+   plate here would only mask a rail that had drifted back into the gap. */
 .sync-history-spine-fold {
   position: absolute;
   z-index: 6;
@@ -1621,7 +1654,7 @@ summary {
   padding: 0;
   border: 1px solid transparent;
   border-radius: 3px;
-  background: var(--bg-0);
+  background: transparent;
   box-shadow: none;
   color: var(--text-2);
 }
@@ -1771,7 +1804,6 @@ summary {
    the slot and shifts every following item in the row. Pin the box so the
    swap stays paint-only. */
 .sync-history-commit-icon,
-.sync-history-thread-kind,
 .sync-history-thread-title > .sync-thread-sync-indicator,
 .sync-history-thread-title > .sync-thread-sync-error {
   position: relative;
@@ -1804,11 +1836,9 @@ summary {
 
 .sync-history-commit-icon > svg,
 .sync-history-commit-link > svg,
-.sync-history-thread-kind > svg,
 .sync-history-thread-title > .sync-thread-sync-error > svg,
 .sync-history-thread-meta > span > svg,
-.sync-history-debug-trigger > svg,
-.sync-history-chat-toggle > svg {
+.sync-history-debug-trigger > svg {
   width: 12px;
   height: 12px;
 }
@@ -1822,13 +1852,8 @@ summary {
   height: var(--sync-history-row-icon-size, 18px);
 }
 
-.sync-history-thread-kind {
-  color: var(--text-2);
-}
-
 .sync-history-commit-title > strong,
-.sync-history-thread-title > strong,
-.sync-history-stored-thread-copy > strong {
+.sync-history-thread-title > strong {
   min-width: 0;
   overflow: hidden;
   flex: 1;
@@ -2151,20 +2176,6 @@ summary {
   border-top: 1px solid var(--border-mid);
 }
 
-/* "On this Mac · In {storage}" is one phrase assembled in TS, so it cannot be
-   split by face — it reads as prose. */
-.sync-history-stored-thread-location {
-  overflow: hidden;
-  color: var(--text-3);
-  font-family: var(--font-sans);
-  font-size: var(--type-xs);
-  font-weight: var(--weight-regular);
-  line-height: var(--leading-snug);
-  letter-spacing: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* A stored thread reads like the completed sync's rows: title on line 1, the
    whole thread id on line 2 with the stamp at the far edge. The id is bare
    monospace — a box here would mean "target", and the sha chip has already
@@ -2305,7 +2316,11 @@ summary {
   gap: 7px;
 }
 
-.sync-history-thread-actions .sync-history-launch-action {
+/* The inert provider mark takes the same box as a real launch button so the
+   cluster keeps one width whether or not the row can be opened — the right edge
+   of every row is a column, not a ragged margin. */
+.sync-history-thread-actions .sync-history-launch-action,
+.sync-history-thread-actions .sync-history-provider-inert {
   width: 22px;
   min-width: 22px;
   min-height: 24px;
@@ -2325,23 +2340,6 @@ summary {
   box-shadow: inset 0 0 0 1px var(--border-mid);
 }
 
-/* The transcript chevron pairs with the debug button — the two clickables on
-   the line, one group behind the hairline — and the stamp closes the row at
-   the card edge. Same 26px square as the outcome's fold. */
-.sync-history-chat-toggle {
-  width: var(--sync-history-commit-actions-column);
-  min-width: var(--sync-history-commit-actions-column);
-  min-height: var(--sync-history-commit-actions-column);
-}
-
-/* Pulled to 2px of the debug trigger against the summary's 5px gap, so the
-   pair reads as one group rather than two strays. The adjacent sibling is the
-   trigger's static menu wrapper, not the button itself. */
-.sync-history-debug-menu + .sync-history-chat-toggle {
-  margin-left: -3px;
-}
-
-.sync-history-chat-toggle,
 .sync-history-debug-trigger {
   border: 0;
   border-radius: 2px;
@@ -2378,9 +2376,7 @@ summary {
 .sync-capability-chevron,
 .log-type-filter > summary svg,
 .sync-resource-details > summary > svg,
-.storage-link-switcher-affordance svg,
-.exclusion-summary::before,
-.storage-link-menu-arrow {
+.exclusion-summary::before {
   transition: color 120ms ease;
 }
 
@@ -2390,7 +2386,6 @@ summary {
    it. Every icon-only clicker keeps the colour feedback and drops the
    displacement; labelled buttons keep the press. */
 .sync-history-thread-actions .sync-history-launch-action:active:not(:disabled),
-.sync-history-chat-toggle:active:not(:disabled),
 .sync-history-debug-trigger:active:not(:disabled),
 .sync-history-commit-toggle:active:not(:disabled),
 .sync-history-spine-fold:active:not(:disabled),
@@ -2407,7 +2402,6 @@ summary {
 }
 
 .sync-history-thread-card:hover .sync-history-launch-action,
-.sync-history-thread-card:hover .sync-history-chat-toggle,
 .sync-history-thread-card:hover .sync-history-debug-trigger {
   color: var(--text-1);
 }
@@ -2489,12 +2483,6 @@ summary {
 .sync-history-older-inert {
   border-color: var(--border-mid);
   border-radius: 4px;
-}
-
-.sync-history-turn {
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  background: var(--surface-muted);
 }
 
 .sync-history-debug-popover,
@@ -3253,14 +3241,6 @@ summary {
   .sync-project-heading-identity {
     width: min(600px, calc(100vw - 330px));
   }
-
-  .sync-project-combined-page .storage-link-actions {
-    gap: 5px;
-  }
-
-  .sync-project-combined-page .storage-link-sync {
-    padding: 0 9px;
-  }
 }
 
 @media (max-width: 720px) {
@@ -3276,20 +3256,6 @@ summary {
 
   .sync-project-heading-identity {
     width: 100%;
-  }
-
-  .sync-project-combined-page .project-profile-storage-list .storage-link-row {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .sync-project-combined-page .storage-link-actions {
-    width: 100%;
-    padding: 0 10px 9px;
-  }
-
-  .sync-project-combined-page .storage-link-action-group {
-    margin-left: auto;
   }
 
   .sync-history-commit-meta {
@@ -3350,4 +3316,107 @@ summary {
 .sync-sync-review-workspace .sync-resource-select input::before,
 .sync-sync-review-workspace .sync-pull-item-select input::before {
   transition: none;
+}
+
+/* Session detail follows the live RetroTheme contract: pixel chrome, sans
+   conversation prose, mono evidence, and warm neutral surfaces. */
+.session-detail-page {
+  animation: retro-workspace-enter 150ms steps(4, end) both;
+  font-family: var(--font-sans);
+}
+
+.session-detail-heading-copy h1,
+.session-detail-heading-copy > p,
+.session-detail-event-copy,
+.session-detail-checkpoint-body strong,
+.sync-history-session-title-button {
+  font-family: var(--font-sans);
+}
+
+.session-detail-meta-item code,
+.session-detail-meta-item time,
+.session-detail-event-heading time,
+.session-detail-filter-count,
+.session-detail-tool-call > summary strong,
+.session-detail-tool-call > summary time,
+.session-detail-tool-payload pre,
+.session-detail-checkpoint-body code,
+.session-detail-checkpoint-body time {
+  font-family: var(--font-mono);
+}
+
+.sync-history-thread-title > .sync-history-session-title-button {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-0);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
+}
+
+.sync-history-session-detail-action {
+  width: var(--sync-history-commit-actions-column);
+  min-width: var(--sync-history-commit-actions-column);
+  min-height: var(--sync-history-commit-actions-column);
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-3);
+}
+
+.sync-history-debug-menu + .sync-history-session-detail-action {
+  margin-left: -3px;
+}
+
+.sync-history-thread-card:hover .sync-history-session-detail-action {
+  color: var(--text-1);
+}
+
+.session-detail-prompt-card,
+.session-detail-inspector {
+  border-radius: var(--r-sm);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+}
+
+.session-detail-response-prose {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.session-detail-tool-call,
+.session-detail-turn-tools,
+.session-detail-checkpoint-body {
+  box-shadow: none;
+}
+
+.session-detail-checkpoint-jump select {
+  appearance: none;
+  background-color: var(--button-bg);
+  background-image: var(--retro-chevron-down);
+  background-position: right 6px center;
+  background-repeat: no-repeat;
+  background-size: 14px 14px;
+}
+
+.session-detail-filter-row input {
+  border-radius: 2px;
+}
+
+.session-detail-tool-call > summary:active,
+.session-detail-turn-tools > summary:active,
+.sync-history-session-detail-action:active:not(:disabled) {
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-detail-page {
+    animation: none;
+  }
 }

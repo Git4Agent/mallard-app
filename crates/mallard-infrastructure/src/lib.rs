@@ -7,7 +7,6 @@
 
 pub mod activity_log;
 pub mod bundle_engine;
-pub mod chat_history;
 pub mod codex_app_refresh;
 pub mod codex_binary;
 pub mod codex_native_fork;
@@ -16,5 +15,9 @@ pub mod conversation_codec;
 pub mod conversation_materialization;
 pub mod conversation_sync;
 pub mod persistence;
+pub mod project_activity;
 pub mod provider_capture;
-pub mod s3_store;
+pub mod providers;
+pub mod r2_setup_journal;
+pub mod session_detail;
+pub mod storage_core;

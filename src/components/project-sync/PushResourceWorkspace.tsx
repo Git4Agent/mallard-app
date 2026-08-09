@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   BundleFetchProgress,
   BundleRecipe,
@@ -11,13 +11,12 @@ import type {
   ThreadSyncEntry,
 } from "../../types";
 import Icon from "../Icons";
-import ProjectChatHistoryPage from "./ProjectChatHistoryPage";
+import ProjectActivityPage from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
 import ResourceInventory from "./ResourceInventory";
-import SyncReviewTabs, {
-  type SyncReviewStep,
-  syncReviewSteps,
-} from "./SyncReviewTabs";
+import SyncReviewTabs from "../sync-review/SyncReviewTabs";
+import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
+import { type SyncReviewStep, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { categoryFor } from "./model";
 
 const EMPTY_STATUSES = new Map<string, string>();
@@ -548,59 +547,25 @@ export default function PushResourceWorkspace({
         <div className="sync-sync-review-title">
           <h2 id="sync-push-resource-title">Push review</h2>
         </div>
-        <div className="sync-push-resource-actions">
-          {/* The recommend button's own count is a property of the resource set,
-              not of the selection, so it never moves when a row is ticked. Shown
-              as a bare number beside a tick it read as "N selected"; the live
-              count below is the one that answers that question. */}
-          <span
-            className="sync-sync-review-selected"
-            style={{ "--review-count-digits": String(currentGroup.length).length } as CSSProperties}
-            aria-live="polite"
-            aria-label={`${countSelected(currentGroup, effectiveSelected)} of ${currentGroup.length} selected`}
-            title={`${countSelected(currentGroup, effectiveSelected)} of ${currentGroup.length} selected`}
-          >
-            <b>{countSelected(currentGroup, effectiveSelected)}</b>/{currentGroup.length}
-          </span>
-          <button
-            type="button"
-            className="btn btn-ghost sync-sync-review-icon-action"
-            onClick={useRecommendedForStep}
-            disabled={busy || safeProjectDefaults.size === 0 || currentMatchesDefaults}
-            title={`Use the recommended ${activeStep === "history" ? "session" : "project file"} selection (${recommendedCount})`}
-            aria-label={`Use recommended selection (${recommendedCount})`}
-          >
-            <Icon name="check-circle" size={15} />
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost sync-sync-review-icon-action"
-            onClick={clearStep}
-            disabled={busy || countSelected(currentGroup, effectiveSelected) === 0}
-            title="Clear current selection"
-            aria-label="Clear current selection"
-          >
-            <Icon name="trash" size={15} />
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost sync-inline-action-close"
-            onClick={onClose}
-            disabled={busy}
-            aria-label="Close push review"
-          >
-            <Icon name="x" size={15} />
-          </button>
-        </div>
+        <SyncReviewSelectionBar
+          count={countSelected(currentGroup, effectiveSelected)}
+          total={currentGroup.length}
+          busy={busy}
+          recommendedTitle={`Use the recommended ${activeStep === "history" ? "session" : "project file"} selection (${recommendedCount})`}
+          recommendedAriaLabel={`Use recommended selection (${recommendedCount})`}
+          recommendedDisabled={safeProjectDefaults.size === 0 || currentMatchesDefaults}
+          onRecommended={useRecommendedForStep}
+          clearDisabled={countSelected(currentGroup, effectiveSelected) === 0}
+          onClear={clearStep}
+          close={{ ariaLabel: "Close push review", onClose }}
+        />
       </header>
 
       <SyncReviewTabs
-        activeStep={activeStep}
-        counts={counts}
-        steps={steps}
-        warningSteps={warningSteps}
+        tabs={projectReviewTabs(steps, counts, warningSteps)}
+        activeId={activeStep}
         disabled={busy}
-        onChange={selectStep}
+        onChange={(step) => selectStep(step as SyncReviewStep)}
       />
 
       <div
@@ -636,8 +601,8 @@ export default function PushResourceWorkspace({
           )}
           {activeStep === "history" && (
             <>
-              {project && binding?.profile_ids?.codex ? (
-                <ProjectChatHistoryPage
+              {project && binding ? (
+                <ProjectActivityPage
                   embedded
                   project={project}
                   binding={binding}
