@@ -1,0 +1,930 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mallard · header redesign mockup</title>
+<style>
+@font-face {
+  font-family: "Departure Mono";
+  src: url("/fonts/DepartureMono-Regular.woff2") format("woff2"),
+       url("public/fonts/DepartureMono-Regular.woff2") format("woff2");
+  font-style: normal; font-weight: 400; font-display: block;
+}
+
+/* ---- tokens, copied verbatim from RetroTheme.css --------------------- */
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+    "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Roboto Mono",
+    "Liberation Mono", Menlo, Consolas, monospace;
+  --font-pixel: "Departure Mono", var(--font-mono);
+  --type-3xs: 9px;  --type-2xs: 10px; --type-xs: 11px;  --type-sm: 12px;
+  --type-md: 13px;  --type-lg: 14px;  --type-xl: 17px;
+  --weight-regular: 400; --weight-medium: 500; --weight-semibold: 600;
+  --leading-snug: 1.35; --leading-flat: 1;
+  --r-sm: 8px; --r-pill: 999px;
+  --thread-status-synced: #31ae6b;   --thread-status-cloud: #397dcc;
+  --thread-status-local: #16a7c9;    --thread-status-divergent: #7655d6;
+  --thread-status-forked: #9a45c5;   --thread-status-pending: #e59b1b;
+  --thread-status-conflict: #e44649; --thread-status-unavailable: #85878e;
+}
+:root, :root[data-theme="dark"] {
+  --color-scheme: dark;
+  --bg-0:#12100d; --bg-1:#0d0b09; --bg-3:#282420;
+  --bg-hover:rgba(255,238,217,.065);
+  --border:#2e2925; --border-mid:#443d36; --border-strong:#7a7065;
+  --button-bg:#181512; --button-bg-hover:#221e19; --button-border:#6f6459;
+  --button-primary-bg:#362f28; --button-primary-border:#7a7065; --button-primary-text:#f6f1e6;
+  --button-radius:4px;
+  --app-shell:#0b0908; --surface-card:#171412; --surface-row:#14120f;
+  --surface-row-hover:#201c18; --surface-popover:#1b1815;
+  --surface-subtle:rgba(255,238,217,.035);
+  --chip-bg:rgba(255,238,217,.08); --chip-strong-bg:rgba(255,238,217,.13);
+  --accent-contrast:#100e0b;
+  --text-0:#f6f1e6; --text-1:#d8d2c5; --text-2:#a59d8f; --text-3:#756e62;
+  --accent:#efe7d4; --green:#63cd82; --red:#fb7361; --yellow:#f4b94f;
+  --danger-text:var(--red);
+  --danger-soft:rgba(251,115,97,.11); --warning-soft:rgba(244,185,79,.11);
+  --focus-ring:#b9ab95;
+  --shadow-popover:0 14px 34px rgba(0,0,0,.5);
+  --retro-gutter:3px; --retro-panel-radius:10px; --retro-panel-radius-inner:9px;
+  --retro-frame-edge:#968a7c; --retro-frame-gutter:#040303;
+}
+:root[data-theme="light"] {
+  --color-scheme: light;
+  --bg-0:#fefbf6; --bg-1:#fdf9f4; --bg-3:#f2e8dd;
+  --bg-hover:rgba(82,58,43,.045);
+  --border:#d8cec4; --border-mid:#aa998d; --border-strong:#66574f;
+  --button-bg:#fdf8f1; --button-bg-hover:#f7ede1; --button-border:#9d8b7f;
+  --button-primary-bg:#eee0d3; --button-primary-border:#66574f; --button-primary-text:#1e1817;
+  --app-shell:#f6eee5; --surface-card:#fcf7f0; --surface-row:#fdf9f3;
+  --surface-row-hover:#faf2e9; --surface-popover:#fffaf4;
+  --surface-subtle:rgba(82,58,43,.025);
+  --chip-bg:rgba(82,58,43,.065); --chip-strong-bg:rgba(82,58,43,.12);
+  --accent-contrast:#fffaf4;
+  --text-0:#1e1817; --text-1:#3d332e; --text-2:#6f6159; --text-3:#96877d;
+  --accent:#2a211d; --green:#4b9661; --red:#d8523e; --yellow:#d99609;
+  --danger-text:#c73d28;
+  --danger-soft:rgba(205,69,49,.09); --warning-soft:rgba(192,124,12,.1);
+  --focus-ring:#6f5f54;
+  --shadow-popover:0 14px 30px rgba(72,50,36,.16);
+  --retro-frame-edge:#8f7f74; --retro-frame-gutter:#dfd1c4;
+}
+
+/* ---- specimen chrome (not part of the app) --------------------------- */
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 0 0 120px;
+  background: var(--app-shell); color: var(--text-0);
+  font-family: var(--font-sans); font-size: 13px; line-height: 1.35;
+  font-variant-ligatures: none; font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+}
+svg.ic { display: block; flex: none; shape-rendering: crispEdges; }
+
+.spec-bar {
+  position: sticky; top: 0; z-index: 40;
+  padding: 12px clamp(20px, 4vw, 56px);
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--border-mid); background: var(--bg-1);
+}
+.spec-bar strong { font-family: var(--font-pixel); font-weight: 400; font-size: var(--type-lg); }
+.spec-bar .spec-sub { color: var(--text-2); font-size: var(--type-xs); }
+.spec-seg { margin-left: auto; display: flex; gap: 6px; }
+.spec-seg button {
+  padding: 6px 12px;
+  border: 1px solid var(--button-border); border-radius: var(--button-radius);
+  background: var(--button-bg); color: var(--text-1);
+  font-family: var(--font-pixel); font-size: var(--type-sm); cursor: pointer;
+}
+.spec-seg button[aria-pressed="true"] {
+  border-color: var(--button-primary-border);
+  background: var(--button-primary-bg); color: var(--button-primary-text);
+}
+.spec-body { padding: 0 clamp(20px, 4vw, 56px); max-width: 1120px; }
+
+.spec-case { margin: 44px 0 0; }
+.spec-head { max-width: 960px; margin-bottom: 14px; }
+.spec-head h2 {
+  margin: 0 0 6px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  font-family: var(--font-pixel); font-weight: 400; font-size: var(--type-xl);
+}
+.spec-head h2 em { color: var(--text-3); font-style: normal; font-family: var(--font-mono); font-size: var(--type-sm); }
+.spec-head p { margin: 0; color: var(--text-2); font-size: var(--type-sm); line-height: 1.55; }
+.spec-head p + p { margin-top: 6px; }
+.spec-head b { color: var(--text-1); font-weight: 600; }
+code {
+  padding: 1px 4px; border-radius: 3px; background: var(--chip-bg);
+  color: var(--text-1); font-family: var(--font-mono); font-size: var(--type-xs);
+}
+.spec-note {
+  max-width: 960px; margin: 12px 0 0; padding: 9px 12px;
+  border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+  border-radius: 4px; background: var(--surface-subtle);
+  color: var(--text-2); font-size: var(--type-xs); line-height: 1.6;
+}
+.spec-note b { color: var(--text-1); }
+.spec-note.warn { border-left-color: var(--yellow); background: var(--warning-soft); }
+.spec-note.try { border-left-color: var(--green); background: color-mix(in srgb, var(--green) 8%, transparent); }
+.spec-note + .spec-note { margin-top: 7px; }
+figure { margin: 18px 0 0; }
+figcaption {
+  margin-bottom: 7px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  color: var(--text-2); font-family: var(--font-pixel); font-size: var(--type-xs);
+}
+figcaption b { color: var(--text-1); }
+.tag {
+  display: inline-block; padding: 1px 6px; border-radius: 3px;
+  background: var(--chip-bg); color: var(--text-3);
+  font-family: var(--font-sans); font-size: var(--type-3xs);
+  letter-spacing: .04em; text-transform: uppercase;
+}
+.tag.bad { background: var(--danger-soft); color: var(--danger-text); }
+.tag.good { background: color-mix(in srgb, var(--green) 18%, transparent); color: var(--green); }
+
+.frame {
+  border: 1px solid var(--border-mid);
+  border-radius: 9px; background: var(--bg-0);
+  box-shadow: 0 10px 26px rgba(0,0,0,.10);
+}
+.frame.narrow { max-width: 640px; }
+/* the frame does not clip: an open popover has to hang past its edge the way a
+   real one hangs past the titlebar. Corners are rounded on the children instead. */
+.frame > .sync-pathbar:first-child,
+.frame > div > .sync-titlebar:first-child,
+.frame > div > .sync-pathbar:first-child { border-radius: 8px 8px 0 0; }
+.frame-body {
+  min-height: 96px; padding: 14px 18px 20px;
+  border-radius: 0 0 8px 8px;
+  background: var(--app-shell);
+}
+
+/* =====================================================================
+   BEFORE — the header as it ships today
+   ===================================================================== */
+.sync-titlebar {
+  position: relative; width: 100%; height: 52px; min-height: 52px;
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  padding: 0 14px 0 20px;
+  border-bottom: 1px solid var(--border); background: var(--bg-0);
+}
+.sync-titlebar-context { min-width: 0; display: flex; align-items: center; gap: 9px; color: var(--text-0); }
+.sync-titlebar-context > svg { flex-shrink: 0; color: var(--text-1); }
+.sync-titlebar-context strong {
+  overflow: hidden; font-size: 13.5px; font-weight: 600;
+  letter-spacing: -0.01em; text-overflow: ellipsis; white-space: nowrap;
+}
+.sync-titlebar-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.sync-theme-button {
+  min-height: 24px; flex-shrink: 0; padding: 0 9px; border: 0; border-radius: 6px;
+  color: var(--text-2); background: transparent; font: inherit; font-size: 11px; cursor: pointer;
+}
+.sync-theme-button:hover { color: var(--text-0); background: var(--bg-hover); }
+.storage-link-more {
+  width: 28px; height: 28px; display: inline-grid; place-items: center;
+  padding: 0; border: 0; border-radius: 4px;
+  color: var(--text-2); background: transparent; cursor: pointer;
+}
+.storage-link-more:hover { color: var(--text-0); background: var(--bg-hover); }
+
+.before-heading { padding: 16px 20px 0; }
+.sync-project-heading-name { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.sync-project-heading-name h1 {
+  margin: 0; color: var(--text-0); font-size: 22px; font-weight: 650;
+  letter-spacing: -0.02em; line-height: 1.2; white-space: nowrap;
+}
+.heading-edit {
+  min-height: 29px; padding: 0 8px; display: inline-grid; place-items: center;
+  border: 1px solid var(--button-border); border-radius: var(--button-radius);
+  color: var(--text-2); background: var(--button-bg); cursor: pointer;
+}
+.sync-project-heading-meta {
+  margin-top: 6px; display: flex; align-items: center; gap: 0;
+  color: var(--text-2); font-size: 11px;
+}
+.sync-project-heading-meta-item { display: inline-flex; align-items: center; gap: 5px; }
+.sync-project-heading-meta-item svg { flex: 0 0 auto; color: var(--text-3); }
+.sync-project-heading-meta-item + .sync-project-heading-meta-item { margin-left: 10px; }
+.sync-project-heading-meta-item + .sync-project-heading-meta-item::before {
+  content: ""; width: 1px; height: 11px; flex: 0 0 auto; margin-right: 5px; background: var(--border-mid);
+}
+.before-card {
+  margin: 16px 20px 0; border: 1px solid var(--border-mid);
+  border-radius: 7px; background: var(--surface-card); overflow: hidden;
+}
+.before-card-id { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+.before-card-id > svg { color: var(--text-1); }
+.before-card-id strong { display: block; font-size: 14px; font-weight: 600; }
+.before-card-id .meta { margin-top: 3px; color: var(--text-2); font-size: var(--type-xs); }
+.before-card-id .meta code { background: none; padding: 0; color: var(--text-2); }
+.before-card-actions {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-top: 1px solid var(--border);
+}
+.before-divider { width: 1px; height: 22px; background: var(--border-mid); }
+.storage-link-sync {
+  min-height: 34px; padding: 0 13px; display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid var(--button-border); border-radius: 4px;
+  background: var(--button-bg); color: var(--text-0);
+  font-family: var(--font-pixel); font-weight: 400; font-size: var(--type-lg);
+  line-height: var(--leading-flat); cursor: pointer;
+}
+.storage-link-sync:hover { border-color: var(--border-strong); background: var(--button-bg-hover); color: var(--accent); }
+.before-section-title {
+  margin: 18px 20px 0; display: flex; align-items: center; gap: 8px;
+  color: var(--text-0); font-family: var(--font-pixel); font-size: var(--type-xl);
+}
+
+/* =====================================================================
+   AFTER — the path bar.  Trail is  storage / repo / section / item.
+   ===================================================================== */
+.sync-pathbar {
+  position: relative; z-index: 6; width: 100%;
+  min-height: 44px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 0 10px 0 14px;
+  border-bottom: 1px solid var(--border); background: var(--bg-0);
+}
+.sync-pathbar.in-titlebar { height: 52px; min-height: 52px; padding-left: 20px; }
+
+.sync-path {
+  min-width: 0; flex: 1 1 auto;
+  display: flex; align-items: center; gap: 1px;
+  margin: 0; padding: 0; list-style: none;
+}
+.sync-path > li { min-width: 0; flex: 0 0 auto; display: flex; align-items: center; }
+/* only the leaf gives up width; the ancestors keep theirs so you always know
+   which storage and which repo you are about to Push */
+.sync-path > li.leaf-li { flex: 0 1 auto; min-width: 44px; }
+
+.sync-path-crumb {
+  min-width: 0; max-width: 30vw;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 7px;
+  border: 1px solid transparent; border-radius: 5px;
+  color: var(--text-1); background: transparent;
+  font-family: var(--font-sans); font-size: var(--type-md); font-weight: var(--weight-medium);
+  letter-spacing: -0.01em; line-height: 1; cursor: pointer;
+}
+.sync-path-crumb > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-path-crumb > svg { color: var(--text-3); }
+.sync-path-crumb:hover { color: var(--text-0); background: var(--bg-hover); }
+.sync-path-crumb:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.sync-path-crumb[aria-expanded="true"] {
+  color: var(--text-0); border-color: var(--border-mid); background: var(--chip-bg);
+}
+/* the storage root is the outermost scope — quiet, so the repo still leads */
+.sync-path-crumb.root { color: var(--text-2); }
+.sync-path-crumb.root:hover { color: var(--text-0); }
+/* a section name is a closed word — Sessions, Git history, Files */
+.sync-path-crumb.section { font-family: var(--font-pixel); font-weight: var(--weight-regular); }
+/* the leaf is where you are: stated, not offered */
+.sync-path-crumb.leaf { color: var(--text-0); background: none; cursor: default; }
+.sync-path-crumb.leaf:hover { background: none; }
+.sync-path-crumb.dim { color: var(--text-2); }
+.sync-path-crumb.warning, .sync-path-crumb.warning > svg { color: var(--yellow); }
+.sync-path-sep {
+  flex: 0 0 auto; padding: 0 1px; color: var(--text-3);
+  font-family: var(--font-mono); font-size: var(--type-md); user-select: none;
+}
+.sync-path-chevron { flex: 0 0 auto; color: var(--text-3); }
+/* a crumb appended by drilling in fades up rather than snapping */
+@keyframes crumb-in { from { opacity: 0; transform: translateX(-3px); } to { opacity: 1; transform: none; } }
+.sync-path > li.appended { animation: crumb-in 130ms ease-out both; }
+
+.sync-path-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.sync-path-actions .storage-link-more {
+  width: 30px; height: 30px;
+  border: 1px solid var(--button-border); border-radius: 4px; background: var(--button-bg);
+}
+.sync-path-actions .storage-link-more:hover { border-color: var(--border-strong); background: var(--button-bg-hover); color: var(--text-0); }
+.sync-path-actions .storage-link-sync { min-height: 30px; padding: 0 11px; font-size: var(--type-md); }
+.sync-path-divider { width: 1px; height: 20px; margin: 0 3px; background: var(--border-mid); }
+.sync-btn-readout { font-family: var(--font-mono); font-weight: var(--weight-medium); font-variant-numeric: tabular-nums; font-size: var(--type-sm); }
+
+/* popovers ----------------------------------------------------------- */
+.pop-anchor { position: relative; }
+.sync-path-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
+  min-width: 250px; padding: 5px;
+  border: 1px solid var(--border-strong); border-radius: 5px;
+  background: var(--surface-popover); box-shadow: var(--shadow-popover);
+}
+.sync-path-menu.right { left: auto; right: 0; }
+.sync-path-menu[hidden] { display: none; }
+.sync-path-menu-label {
+  padding: 6px 8px 4px; color: var(--text-3);
+  font-family: var(--font-pixel); font-size: var(--type-3xs); letter-spacing: 1px; text-transform: uppercase;
+}
+.sync-path-menu-item {
+  width: 100%; display: flex; align-items: center; gap: 9px;
+  padding: 7px 8px; border: 0; border-radius: 3px;
+  color: var(--text-1); background: transparent;
+  font-family: var(--font-sans); font-size: var(--type-sm); text-align: left; cursor: pointer;
+}
+.sync-path-menu-item:hover { color: var(--text-0); background: var(--surface-row-hover); }
+.sync-path-menu-item > svg { flex: 0 0 auto; color: var(--text-3); }
+.sync-path-menu-item .stack { min-width: 0; display: block; }
+.sync-path-menu-item .stack small {
+  display: block; margin-top: 2px; color: var(--text-3);
+  font-family: var(--font-mono); font-size: var(--type-2xs);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sync-path-menu-item.danger, .sync-path-menu-item.danger > svg { color: var(--danger-text); }
+.sync-path-menu-item.danger:hover { background: var(--danger-soft); }
+.sync-path-menu-item[aria-checked="true"] { color: var(--text-0); background: var(--chip-bg); }
+.sync-path-menu-sep { height: 1px; margin: 5px 3px; background: var(--border); }
+
+/* content stand-ins so a frame reads as a page ------------------------ */
+.after-history-meta {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+  color: var(--text-2); font-size: var(--type-xs);
+}
+.after-history-meta .pill { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-pixel); color: var(--text-1); }
+.after-history-meta .count { display: inline-flex; align-items: center; gap: 4px; color: var(--thread-status-cloud); font-variant-numeric: tabular-nums; }
+.row-stub {
+  width: 100%; display: flex; align-items: center; gap: 10px; text-align: left;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--surface-row); color: var(--text-1);
+  font-family: var(--font-sans); font-size: var(--type-sm); cursor: pointer;
+}
+.row-stub:hover { background: var(--surface-row-hover); border-color: var(--border-mid); }
+.row-stub + .row-stub { margin-top: 6px; }
+.row-stub .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--thread-status-synced); flex: none; }
+.row-stub .label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-stub time { margin-left: auto; padding-left: 10px; color: var(--text-3); font-family: var(--font-mono); font-size: var(--type-2xs); }
+.detail-stub { color: var(--text-2); font-size: var(--type-sm); }
+.detail-stub .head { display: flex; align-items: center; gap: 8px; color: var(--text-1); }
+.detail-stub p { margin: 10px 0 0; line-height: 1.6; }
+
+.height-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 1px 7px; border-radius: 3px;
+  background: var(--chip-bg); color: var(--text-2);
+  font-family: var(--font-mono); font-size: var(--type-2xs); font-variant-numeric: tabular-nums;
+}
+.height-badge b { color: var(--text-0); font-weight: 600; }
+.height-badge.win { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
+.height-badge.win b { color: var(--green); }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <g id="i-folder"><path fill="currentColor" d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/></g>
+    <g id="i-git-folder">
+      <path fill="currentColor" d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/>
+      <path fill="currentColor" d="M15 9h2v2h-2ZM15 15h2v2h-2ZM7 9h2v2H7ZM7 11h2v4H7ZM7 15h2v2H7ZM9 15h6v2H9Z"/>
+    </g>
+    <g id="i-drive"><path fill="currentColor" d="M3 2h18v2H3ZM3 7h18v2H3ZM1 4h2v3H1ZM21 4h2v3h-2ZM19 9h2v11h-2ZM3 9h2v11H3ZM5 20h14v2H5ZM9 11h6v2H9Z"/></g>
+    <g id="i-cloud"><path fill="currentColor" d="M22 12v-1h-2V9h-1V8h-1V7h-3v1h-1V6h-1V5H8v1H7v1H6v1H5v3H2v1H1v5h1v1h1v1h2v1h14v-1h2v-1h1v-1h1v-5h-1Zm0 4h-1v1h-1v1h-2v1H6v-1H4v-1H3v-1H2v-3h1v-1h3V9h1V8h1V7h1V6h3v1h1v2h3V8h1v1h1v1h1v2h2v1h1v3Z"/></g>
+    <g id="i-chevron-down"><path fill="currentColor" d="M20 8v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-4v-1H9v-1H8v-1H7v-1H6v-1H5v-1H4V8h2v1h1v1h1v1h1v1h1v1h4v-1h1v-1h1v-1h1V9h1V8h2Z"/></g>
+    <g id="i-more"><path fill="currentColor" d="M3 9h2v2H3ZM11 9h2v2h-2ZM19 9h2v2h-2ZM1 11h2v2H1ZM9 11h2v2H9ZM17 11h2v2h-2ZM3 13h2v2H3ZM11 13h2v2h-2ZM19 13h2v2h-2ZM5 11h2v2H5ZM13 11h2v2h-2ZM21 11h2v2h-2Z"/></g>
+    <g id="i-download"><path fill="currentColor" d="M4 20h16v2H4ZM11 2h2v16h-2ZM13 14h2v2h-2ZM15 12h2v2h-2ZM17 10h2v2h-2ZM9 14h2v2H9ZM7 12h2v2H7ZM5 10h2v2H5Z"/></g>
+    <g id="i-upload"><path fill="currentColor" d="M4 4h16V2H4ZM11 22h2V6h-2ZM13 10h2V8h-2ZM15 12h2v-2h-2ZM17 14h2v-2h-2ZM9 10h2V8H9ZM7 12h2v-2H7ZM5 14h2v-2H5Z"/></g>
+    <g id="i-terminal"><path fill="currentColor" d="M4 6h2v2H4ZM6 8h2v2H6ZM8 10h2v2H8ZM10 12h2v2h-2ZM8 14h2v2H8ZM6 16h2v2H6ZM4 18h2v2H4ZM14 18h6v2h-6Z"/></g>
+    <g id="i-link">
+      <path fill="currentColor" d="M16 10h1v7h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H5v-1H4v-1H3v-1H2v-1H1v-5h1v-1h1v-1h1v-1h1v3H4v1H3v3h1v1h1v1h1v1h4v-1h1v-1h1v-1h1v-1h1v-1h1v-5h-1v-1h-1V9h1V8h1v1h1v1Z"/>
+      <path fill="currentColor" d="M23 5v5h-1v1h-1v1h-1v1h-1v-3h1V9h1V6h-1V5h-1V4h-1V3h-4v1h-1v1h-1v1h-1v1h-1v1H9v5h1v1h1v1h-1v1H9v-1H8v-1H7V7h1V6h1V5h1V4h1V3h1V2h1V1h6v1h1v1h1v1h1v1h1Z"/>
+    </g>
+    <g id="i-plus"><path fill="currentColor" d="M13 11h7v2h-7v7h-2v-7H4v-2h7V4h2v7Z"/></g>
+    <g id="i-settings"><path fill="currentColor" d="M15 2h4v2h3v2h-3v2h-4v-2h-13v-2h13ZM5 9h4v2h13v2h-13v2h-4v-2h-3v-2h3ZM11 16h4v2h7v2h-7v2h-4v-2h-9v-2h9Z"/></g>
+    <g id="i-x"><path fill="currentColor" d="M14 13h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h-1v1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-2v1h-1v1H9v1H8v1H7v1H6v1H5v1H4v1H3v-1H2v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-2H9v-1H8V9H7V8H6V7H5V6H4V5H3V4H2V3h1V2h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h2V9h1V8h1V7h1V6h1V5h1V4h1V3h1V2h1v1h1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v2Z"/></g>
+    <g id="i-edit">
+      <path fill="currentColor" d="M22 4v3h-1v1h-1V7h-1V6h2V5h-1V4h-1v2h-1V5h-1V4h1V3h3v1h1Z"/>
+      <path fill="currentColor" d="M18 14v7h-1v1H2v-1H1V6h1V5h12v1h-1v1H3v13h13v-5h1v-1h1Z"/>
+      <path fill="currentColor" d="M18 8V7h-1V6h-2v1h-1v1h-1v1h-1v1h-1v1h-1v1H9v1H8v1H7v4h4v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1V9h-1Zm-1 2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H8v-2h1v-1h1v-1h1v-1h1v-1h1v-1h1V9h1V8h2v2Z"/>
+    </g>
+    <g id="i-git-branch"><path fill="currentColor" d="M20 2V1h-4v1h-1v4h1v1h1v4H7V7h1V6h1V2H8V1H4v1H3v4h1v1h1v10H4v1H3v4h1v1h4v-1h1v-4H8v-1H7v-4h12V7h1V6h1V2h-1ZM5 3h2v2H5Zm2 18H5v-2h2ZM19 5h-2V3h2Z"/></g>
+    <g id="i-message"><path fill="currentColor" d="M2 3h20v2H2ZM2 5h2v10H2ZM20 5h2v10h-2ZM4 15h16v2H4ZM6 17h2v4H6ZM8 17h2v2H8Z"/></g>
+    <g id="i-refresh">
+      <path fill="currentColor" d="M23 14v1h-1v2h-1v2h-1v1h-1v1h-2v1h-2v1H9v-1H7v-1H5v-1H3v1H2v1H1v-7h7v1H7v1H6v2h1v1h2v1h6v-1h2v-1h2v-2h1v-3h3Z"/>
+      <path fill="currentColor" d="M23 2v7h-7V8h1V7h1V5h-1V4h-2V3H9v1H7v1H5v2H4v3H1V9h1V7h1V5h1V4h1V3h2V2h2V1h6v1h2v1h2v1h2V3h1V2h1Z"/>
+    </g>
+    <g id="i-sun"><path fill="currentColor" d="M13 3h-2v2h2V3zm4 2h2v2h-2V5zm-6 6h2v2h-2v-2zm-8 0h2v2H3v-2zm18 0h-2v2h2v-2zM5 5h2v2H5V5zm14 14h-2v-2h2v2zm-8 2h2v-2h-2v2zm-4-2H5v-2h2v2zM9 7h6v2H9V7zm0 8H7V9h2v6zm0 0v2h6v-2h2V9h-2v6H9Z"/></g>
+    <g id="i-alert"><path fill="currentColor" d="M11 2h2v2h-2ZM10 4h4v3h-4ZM9 7h6v3H9ZM8 10h8v3H8ZM7 13h10v3H7ZM6 16h12v3H6ZM4 19h16v2H4ZM11 8h2v6h-2ZM11 16h2v2h-2Z"/></g>
+  </defs>
+</svg>
+
+<div class="spec-bar">
+  <strong>Header redesign</strong>
+  <span class="spec-sub">trail = storage / repo / section / session</span>
+  <div class="spec-seg">
+    <button type="button" id="t-light" aria-pressed="true">Light</button>
+    <button type="button" id="t-dark" aria-pressed="false">Dark</button>
+  </div>
+</div>
+
+<div class="spec-body">
+
+<!-- ============================ BEFORE ============================ -->
+<section class="spec-case">
+  <div class="spec-head">
+    <h2>0 · Before <em>as it ships today</em></h2>
+    <p>Four stacked blocks say the project's name three times before a single row of
+      content appears: the titlebar, the <b>h1</b>, the meta row, and the storage card.
+      Push and Pull sit at the bottom of the card, two blocks away from the title.</p>
+  </div>
+
+  <figure>
+    <figcaption><b>Current</b> <span class="height-badge" id="badge-before">measuring…</span> above the content</figcaption>
+    <div class="frame">
+      <div id="chrome-before">
+        <header class="sync-titlebar">
+          <div class="sync-titlebar-context">
+            <svg class="ic" width="16" height="16" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg>
+            <strong>HorrorGame (Codex)</strong>
+          </div>
+          <div class="sync-titlebar-actions">
+            <button class="sync-theme-button" type="button"><svg class="ic" width="18" height="18" viewBox="0 0 24 24"><use href="#i-sun"/></svg></button>
+            <button class="storage-link-more" type="button"><svg class="ic" width="16" height="16" viewBox="0 0 24 24"><use href="#i-more"/></svg></button>
+          </div>
+        </header>
+
+        <div class="before-heading">
+          <div class="sync-project-heading-name">
+            <h1>HorrorGame (Codex)</h1>
+            <button class="heading-edit" type="button"><svg class="ic" width="13" height="13" viewBox="0 0 24 24"><use href="#i-edit"/></svg></button>
+          </div>
+          <div class="sync-project-heading-meta">
+            <span class="sync-project-heading-meta-item"><svg class="ic" width="12" height="12" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg><span>HorrorGame</span></span>
+            <span class="sync-project-heading-meta-item"><svg class="ic" width="12" height="12" viewBox="0 0 24 24"><use href="#i-folder"/></svg><span>~/Desktop/project/HorrorGame</span></span>
+            <span class="sync-project-heading-meta-item"><svg class="ic" width="12" height="12" viewBox="0 0 24 24"><use href="#i-terminal"/></svg><span>Default Codex</span></span>
+          </div>
+        </div>
+
+        <div class="before-card">
+          <div class="before-card-id">
+            <svg class="ic" width="23" height="23" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+            <span>
+              <strong>Local storage 1</strong>
+              <span class="meta"><code>~/Desktop/project/myconfstorage</code> · 1 linked</span>
+            </span>
+          </div>
+          <div class="before-card-actions">
+            <button class="storage-link-more" type="button" style="border:1px solid var(--button-border);background:var(--button-bg);width:32px;height:32px"><svg class="ic" width="16" height="16" viewBox="0 0 24 24"><use href="#i-more"/></svg></button>
+            <span class="before-divider"></span>
+            <button class="storage-link-sync" type="button"><svg class="ic" width="15" height="15" viewBox="0 0 24 24"><use href="#i-download"/></svg>Pull</button>
+            <button class="storage-link-sync" type="button"><svg class="ic" width="15" height="15" viewBox="0 0 24 24"><use href="#i-upload"/></svg>Push</button>
+          </div>
+        </div>
+
+        <div class="before-section-title">
+          <svg class="ic" width="17" height="17" viewBox="0 0 24 24"><use href="#i-git-branch"/></svg>Git history
+        </div>
+      </div>
+      <div class="frame-body"></div>
+    </div>
+  </figure>
+</section>
+
+<!-- ============================ LIVE TRAIL ============================ -->
+<section class="spec-case">
+  <div class="spec-head">
+    <h2>1 · The trail <em>storage / repo / section — and the session appends</em></h2>
+    <p>Storage leads: it is the outermost scope, the thing everything below it lives inside,
+      and it is what Push and Pull act on. Then the repo, then the section. Open a session
+      and the trail <b>grows a fourth crumb</b>; the section crumb behind it becomes the way back.</p>
+    <p>One row replaces the h1, the meta row, the storage card and the section heading.
+      Everything you set once is behind <code>···</code>.</p>
+  </div>
+
+  <div class="spec-note try">
+    <b>This one is live.</b> Click a session row to drill in, then click <code>Sessions</code>
+    to come back. Click any crumb with a <code>⌄</code> to open its menu.
+  </div>
+
+  <figure>
+    <figcaption><b>Live</b> <span class="height-badge win" id="badge-a">measuring…</span> <span class="tag good" id="save-a">—</span></figcaption>
+    <div class="frame">
+      <div id="chrome-a">
+        <header class="sync-titlebar">
+          <div class="sync-titlebar-context"></div>
+          <div class="sync-titlebar-actions">
+            <button class="sync-theme-button" type="button"><svg class="ic" width="18" height="18" viewBox="0 0 24 24"><use href="#i-sun"/></svg></button>
+            <button class="storage-link-more" type="button"><svg class="ic" width="16" height="16" viewBox="0 0 24 24"><use href="#i-more"/></svg></button>
+          </div>
+        </header>
+
+        <div class="sync-pathbar">
+          <ol class="sync-path" id="live-path">
+            <li class="pop-anchor">
+              <button class="sync-path-crumb root" type="button" aria-expanded="false" aria-haspopup="menu" data-pop="pop-storage">
+                <svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+                <span>Local storage 1</span>
+                <svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg>
+              </button>
+              <div class="sync-path-menu" id="pop-storage" role="menu" hidden>
+                <div class="sync-path-menu-label">Storage · 2 linked</div>
+                <button class="sync-path-menu-item" role="menuitemradio" aria-checked="true" type="button">
+                  <svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+                  <span class="stack">Local storage 1<small>~/Desktop/project/myconfstorage</small></span>
+                </button>
+                <button class="sync-path-menu-item" role="menuitemradio" aria-checked="false" type="button">
+                  <svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-cloud"/></svg>
+                  <span class="stack">R2 backup<small>mallard-r2 · auto</small></span>
+                </button>
+                <div class="sync-path-menu-sep"></div>
+                <button class="sync-path-menu-item" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-link"/></svg>Link storage</button>
+                <button class="sync-path-menu-item" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg>Add storage</button>
+              </div>
+            </li>
+
+            <li class="sync-path-sep" aria-hidden="true">/</li>
+
+            <li class="pop-anchor">
+              <button class="sync-path-crumb" type="button" aria-expanded="false" aria-haspopup="menu" data-pop="pop-repo">
+                <svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg>
+                <span>HorrorGame</span>
+                <svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg>
+              </button>
+              <div class="sync-path-menu" id="pop-repo" role="menu" hidden>
+                <div class="sync-path-menu-label">Repos in this storage</div>
+                <button class="sync-path-menu-item" role="menuitemradio" aria-checked="true" type="button">
+                  <svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg>
+                  <span class="stack">HorrorGame<small>~/Desktop/project/HorrorGame</small></span>
+                </button>
+                <button class="sync-path-menu-item" role="menuitemradio" aria-checked="false" type="button">
+                  <svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg>
+                  <span class="stack">mallard-app<small>~/Desktop/project/mallard-app</small></span>
+                </button>
+                <div class="sync-path-menu-sep"></div>
+                <button class="sync-path-menu-item" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg>Add repo</button>
+              </div>
+            </li>
+
+            <li class="sync-path-sep" aria-hidden="true">/</li>
+
+            <li class="pop-anchor leaf-li" id="live-section-li">
+              <button class="sync-path-crumb leaf section" id="live-section" type="button" aria-expanded="false" aria-haspopup="menu" data-pop="pop-section">
+                <span>Sessions</span>
+                <svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg>
+              </button>
+              <div class="sync-path-menu" id="pop-section" role="menu" hidden style="min-width:190px">
+                <button class="sync-path-menu-item" role="menuitemradio" aria-checked="true" type="button" data-section="Sessions"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-message"/></svg>Sessions</button>
+                <button class="sync-path-menu-item" role="menuitemradio" aria-checked="false" type="button" data-section="Git history"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-branch"/></svg>Git history</button>
+                <button class="sync-path-menu-item" role="menuitemradio" aria-checked="false" type="button" data-section="Files"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-folder"/></svg>Files</button>
+              </div>
+            </li>
+          </ol>
+
+          <div class="sync-path-actions pop-anchor">
+            <button class="storage-link-more" type="button" aria-expanded="false" aria-haspopup="menu" data-pop="pop-more">
+              <svg class="ic" width="16" height="16" viewBox="0 0 24 24"><use href="#i-more"/></svg>
+            </button>
+            <span class="sync-path-divider"></span>
+            <button class="storage-link-sync" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-download"/></svg>Pull</button>
+            <button class="storage-link-sync" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-upload"/></svg>Push</button>
+
+            <div class="sync-path-menu right" id="pop-more" role="menu" hidden style="min-width:270px">
+              <div class="sync-path-menu-label">Repo</div>
+              <button class="sync-path-menu-item" type="button">
+                <svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-folder"/></svg>
+                <span class="stack">Reveal in Finder<small>~/Desktop/project/HorrorGame</small></span>
+              </button>
+              <button class="sync-path-menu-item" type="button">
+                <svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-terminal"/></svg>
+                <span class="stack">Agent profile<small>Default Codex</small></span>
+              </button>
+              <button class="sync-path-menu-item" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-edit"/></svg>Rename repo</button>
+              <div class="sync-path-menu-sep"></div>
+              <div class="sync-path-menu-label">Storage</div>
+              <button class="sync-path-menu-item" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg>Storage settings</button>
+              <button class="sync-path-menu-item danger" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-x"/></svg>Unlink storage</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="frame-body" id="live-body"></div>
+    </div>
+  </figure>
+
+  <div class="spec-note">
+    <b>Drilling in appends; it never replaces.</b> <code>Sessions</code> stops being the leaf
+    and becomes a link back, losing its <code>⌄</code> — the section switcher belongs to the
+    section you are <em>on</em>, not one you are inside. Same rule for
+    <code>Git history → a commit</code> and <code>Files → a file</code>.
+  </div>
+  <div class="spec-note">
+    <b>Only the leaf truncates.</b> Storage, repo and section keep their full width, so the
+    two crumbs that decide what Push writes are never the ones that get shortened.
+  </div>
+  <div class="spec-note">
+    <b>Typography law held.</b> Crumbs carrying your data — storage name, repo name, session
+    title — stay in <code>--font-sans</code>; only the closed vocabulary
+    (<code>Sessions</code>, <code>Git history</code>, <code>Pull</code>, <code>Push</code>,
+    menu group labels) speaks pixel, which is the rule <code>RetroTheme.css</code> enforces
+    with a test.
+  </div>
+</section>
+
+<!-- ============================ SINGLE ROW ============================ -->
+<section class="spec-case">
+  <div class="spec-head">
+    <h2>2 · Merged into the titlebar <em>most concise</em></h2>
+    <p>The same trail, living inside the 52px drag region — the header costs <b>one row for
+      the whole app</b>. Traffic lights keep their inset on macOS; the crumbs and buttons opt
+      out of the drag region. The theme toggle moves into <code>···</code>.</p>
+  </div>
+
+  <figure>
+    <figcaption><b>Single row</b>, at full depth <span class="height-badge win" id="badge-c">measuring…</span> <span class="tag good" id="save-c">—</span></figcaption>
+    <div class="frame">
+      <div id="chrome-c">
+        <div class="sync-pathbar in-titlebar">
+          <ol class="sync-path">
+            <li><button class="sync-path-crumb root" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg><span>Local storage 1</span><svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg></button></li>
+            <li class="sync-path-sep" aria-hidden="true">/</li>
+            <li><button class="sync-path-crumb" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg><span>HorrorGame</span><svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg></button></li>
+            <li class="sync-path-sep" aria-hidden="true">/</li>
+            <li><button class="sync-path-crumb section dim" type="button"><span>Sessions</span></button></li>
+            <li class="sync-path-sep" aria-hidden="true">/</li>
+            <li class="leaf-li"><span class="sync-path-crumb leaf"><span>Create a simple path to enable reference storage for existing repos</span></span></li>
+          </ol>
+          <div class="sync-path-actions">
+            <button class="storage-link-more" type="button"><svg class="ic" width="16" height="16" viewBox="0 0 24 24"><use href="#i-more"/></svg></button>
+            <span class="sync-path-divider"></span>
+            <button class="storage-link-sync" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-download"/></svg>Pull</button>
+            <button class="storage-link-sync" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-upload"/></svg>Push</button>
+          </div>
+        </div>
+      </div>
+      <div class="frame-body">
+        <div class="detail-stub">
+          <span class="head"><svg class="ic" width="13" height="13" viewBox="0 0 24 24"><use href="#i-terminal"/></svg>Codex · 41 events · forked once</span>
+        </div>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ============================ STATES ============================ -->
+<section class="spec-case">
+  <div class="spec-head">
+    <h2>States</h2>
+    <p>The bar has to absorb everything the storage card used to hold: work in flight, a
+      warning, and a narrow window.</p>
+  </div>
+
+  <figure>
+    <figcaption><b>Pushing</b> — the readout replaces the word, in mono, as it does today</figcaption>
+    <div class="frame">
+      <div class="sync-pathbar" style="border-radius:8px 8px 0 0">
+        <ol class="sync-path">
+          <li><button class="sync-path-crumb root" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg><span>Local storage 1</span><svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg></button></li>
+          <li class="sync-path-sep" aria-hidden="true">/</li>
+          <li><button class="sync-path-crumb" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg><span>HorrorGame</span><svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg></button></li>
+          <li class="sync-path-sep" aria-hidden="true">/</li>
+          <li class="leaf-li"><button class="sync-path-crumb leaf section" type="button"><span>Git history</span><svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg></button></li>
+        </ol>
+        <div class="sync-path-actions">
+          <button class="storage-link-more" type="button" disabled style="opacity:.45"><svg class="ic" width="16" height="16" viewBox="0 0 24 24"><use href="#i-more"/></svg></button>
+          <span class="sync-path-divider"></span>
+          <button class="storage-link-sync" type="button" disabled style="opacity:.45"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-download"/></svg>Pull</button>
+          <button class="storage-link-sync" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-refresh"/></svg><span class="sync-btn-readout">3/12 · 4.1 MB…</span></button>
+        </div>
+      </div>
+      <div class="frame-body"></div>
+    </div>
+  </figure>
+
+  <figure>
+    <figcaption><b>Agent unavailable</b> — the warning rides the crumb it belongs to; Push disables</figcaption>
+    <div class="frame">
+      <div class="sync-pathbar" style="border-radius:8px 8px 0 0">
+        <ol class="sync-path">
+          <li><button class="sync-path-crumb root" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg><span>Local storage 1</span><svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg></button></li>
+          <li class="sync-path-sep" aria-hidden="true">/</li>
+          <li><button class="sync-path-crumb warning" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-alert"/></svg><span>HorrorGame</span><svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg></button></li>
+          <li class="sync-path-sep" aria-hidden="true">/</li>
+          <li class="leaf-li"><button class="sync-path-crumb leaf section" type="button"><span>Git history</span><svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg></button></li>
+        </ol>
+        <div class="sync-path-actions">
+          <button class="storage-link-more" type="button"><svg class="ic" width="16" height="16" viewBox="0 0 24 24"><use href="#i-more"/></svg></button>
+          <span class="sync-path-divider"></span>
+          <button class="storage-link-sync" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-download"/></svg>Pull</button>
+          <button class="storage-link-sync" type="button" disabled style="opacity:.45"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-upload"/></svg>Push</button>
+        </div>
+      </div>
+      <div class="frame-body"></div>
+    </div>
+  </figure>
+
+  <figure>
+    <figcaption><b>Narrow window</b> — the storage root drops to its icon, the leaf truncates, the buttons never move</figcaption>
+    <div class="frame narrow">
+      <div class="sync-pathbar" style="border-radius:8px 8px 0 0">
+        <ol class="sync-path">
+          <li><button class="sync-path-crumb root" type="button" title="Local storage 1" style="padding:0 6px"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg><svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg></button></li>
+          <li class="sync-path-sep" aria-hidden="true">/</li>
+          <li><button class="sync-path-crumb" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg><span>HorrorGame</span><svg class="ic sync-path-chevron" width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg></button></li>
+          <li class="sync-path-sep" aria-hidden="true">/</li>
+          <li><button class="sync-path-crumb section dim" type="button"><span>Sessions</span></button></li>
+          <li class="sync-path-sep" aria-hidden="true">/</li>
+          <li class="leaf-li"><span class="sync-path-crumb leaf"><span>Create a simple path to enable reference storage for existing repos</span></span></li>
+        </ol>
+        <div class="sync-path-actions">
+          <button class="storage-link-more" type="button"><svg class="ic" width="16" height="16" viewBox="0 0 24 24"><use href="#i-more"/></svg></button>
+          <span class="sync-path-divider"></span>
+          <button class="storage-link-sync" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-download"/></svg>Pull</button>
+          <button class="storage-link-sync" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-upload"/></svg>Push</button>
+        </div>
+      </div>
+      <div class="frame-body"></div>
+    </div>
+  </figure>
+</section>
+
+<section class="spec-case">
+  <div class="spec-head">
+    <h2>Menus <em>the same popovers, pinned open</em></h2>
+  </div>
+  <figure>
+    <figcaption>Storage root · repo · section · the <b>···</b> overflow</figcaption>
+    <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:flex-start">
+      <div class="sync-path-menu" style="position:static; min-width:250px">
+        <div class="sync-path-menu-label">Storage · 2 linked</div>
+        <button class="sync-path-menu-item" aria-checked="true" role="menuitemradio" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg><span class="stack">Local storage 1<small>~/Desktop/project/myconfstorage</small></span></button>
+        <button class="sync-path-menu-item" aria-checked="false" role="menuitemradio" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-cloud"/></svg><span class="stack">R2 backup<small>mallard-r2 · auto</small></span></button>
+        <div class="sync-path-menu-sep"></div>
+        <button class="sync-path-menu-item" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-link"/></svg>Link storage</button>
+        <button class="sync-path-menu-item" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg>Add storage</button>
+      </div>
+      <div class="sync-path-menu" style="position:static; min-width:250px">
+        <div class="sync-path-menu-label">Repos in this storage</div>
+        <button class="sync-path-menu-item" aria-checked="true" role="menuitemradio" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg><span class="stack">HorrorGame<small>~/Desktop/project/HorrorGame</small></span></button>
+        <button class="sync-path-menu-item" aria-checked="false" role="menuitemradio" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg><span class="stack">mallard-app<small>~/Desktop/project/mallard-app</small></span></button>
+        <div class="sync-path-menu-sep"></div>
+        <button class="sync-path-menu-item" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg>Add repo</button>
+      </div>
+      <div class="sync-path-menu" style="position:static; min-width:190px">
+        <button class="sync-path-menu-item" aria-checked="true" role="menuitemradio" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-message"/></svg>Sessions</button>
+        <button class="sync-path-menu-item" aria-checked="false" role="menuitemradio" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-branch"/></svg>Git history</button>
+        <button class="sync-path-menu-item" aria-checked="false" role="menuitemradio" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-folder"/></svg>Files</button>
+      </div>
+      <div class="sync-path-menu" style="position:static; min-width:270px">
+        <div class="sync-path-menu-label">Repo</div>
+        <button class="sync-path-menu-item" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-folder"/></svg><span class="stack">Reveal in Finder<small>~/Desktop/project/HorrorGame</small></span></button>
+        <button class="sync-path-menu-item" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-terminal"/></svg><span class="stack">Agent profile<small>Default Codex</small></span></button>
+        <button class="sync-path-menu-item" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-edit"/></svg>Rename repo</button>
+        <div class="sync-path-menu-sep"></div>
+        <div class="sync-path-menu-label">Storage</div>
+        <button class="sync-path-menu-item" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg>Storage settings</button>
+        <button class="sync-path-menu-item danger" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><use href="#i-x"/></svg>Unlink storage</button>
+      </div>
+    </div>
+  </figure>
+</section>
+
+</div>
+
+<script>
+const root = document.documentElement;
+const setTheme = (t) => {
+  root.dataset.theme = t;
+  document.getElementById("t-light").setAttribute("aria-pressed", String(t === "light"));
+  document.getElementById("t-dark").setAttribute("aria-pressed", String(t === "dark"));
+};
+document.getElementById("t-light").onclick = () => setTheme("light");
+document.getElementById("t-dark").onclick = () => setTheme("dark");
+
+/* ---- popovers ---- */
+const closeAll = () => {
+  document.querySelectorAll(".sync-path-menu[id]").forEach((m) => { m.hidden = true; });
+  document.querySelectorAll("[data-pop]").forEach((b) => b.setAttribute("aria-expanded", "false"));
+};
+const bindPop = (btn) => {
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const menu = document.getElementById(btn.dataset.pop);
+    const open = !menu.hidden;
+    closeAll();
+    if (!open) { menu.hidden = false; btn.setAttribute("aria-expanded", "true"); }
+  });
+};
+document.querySelectorAll("[data-pop]").forEach(bindPop);
+document.addEventListener("click", closeAll);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeAll(); });
+
+/* ---- the live trail: drilling into a session appends a crumb ---- */
+const SECTIONS = {
+  "Sessions": [
+    { title: "Create a simple path to enable reference storage for existing repos", when: "2h ago", tone: "synced" },
+    { title: "Fix the fork lineage check on pull", when: "yesterday", tone: "local" },
+    { title: "Dark palette contrast pass", when: "3d ago", tone: "forked" },
+  ],
+  "Git history": [
+    { title: "Reorganize Rust code into workspace crates", when: "80690f0", tone: "synced" },
+    { title: "Add storage-scoped agent catalog plans", when: "2aa6c7a", tone: "synced" },
+  ],
+  "Files": [
+    { title: "AGENTS.md", when: "9.6 kB", tone: "synced" },
+    { title: "docs/CURRENT_METADATA_LAYOUT.md", when: "4.1 kB", tone: "synced" },
+  ],
+};
+const path = document.getElementById("live-path");
+const sectionLi = document.getElementById("live-section-li");
+const sectionBtn = document.getElementById("live-section");
+const body = document.getElementById("live-body");
+let section = "Sessions";
+let openItem = null;
+
+const renderTrail = () => {
+  sectionBtn.querySelector("span").textContent = section;
+  // the section keeps its switcher only while it is the leaf
+  const chev = sectionBtn.querySelector(".sync-path-chevron");
+  path.querySelectorAll("li.appended, li.sep-appended").forEach((n) => n.remove());
+  if (openItem) {
+    sectionLi.classList.remove("leaf-li");
+    sectionBtn.classList.remove("leaf");
+    sectionBtn.classList.add("dim");
+    chev.hidden = true;
+    const sep = document.createElement("li");
+    sep.className = "sync-path-sep sep-appended";
+    sep.setAttribute("aria-hidden", "true");
+    sep.textContent = "/";
+    const li = document.createElement("li");
+    li.className = "leaf-li appended";
+    li.innerHTML = '<span class="sync-path-crumb leaf"><span></span></span>';
+    li.querySelector("span > span").textContent = openItem.title;
+    path.append(sep, li);
+  } else {
+    sectionLi.classList.add("leaf-li");
+    sectionBtn.classList.add("leaf");
+    sectionBtn.classList.remove("dim");
+    chev.hidden = false;
+  }
+};
+
+const renderBody = () => {
+  body.innerHTML = "";
+  if (openItem) {
+    const d = document.createElement("div");
+    d.className = "detail-stub";
+    d.innerHTML =
+      '<span class="head"><svg class="ic" width="13" height="13" viewBox="0 0 24 24"><use href="#i-terminal"/></svg>Codex · 41 events · forked once</span>' +
+      "<p>The trail above grew a crumb instead of swapping the header. " +
+      "<b>Sessions</b> is now the way back — click it.</p>";
+    body.append(d);
+    return;
+  }
+  SECTIONS[section].forEach((item) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "row-stub";
+    b.innerHTML = '<span class="dot"></span><span class="label"></span><time></time>';
+    b.querySelector(".dot").style.background = "var(--thread-status-" + item.tone + ")";
+    b.querySelector(".label").textContent = item.title;
+    b.querySelector("time").textContent = item.when;
+    b.addEventListener("click", () => { openItem = item; renderTrail(); renderBody(); });
+    body.append(b);
+  });
+};
+
+// clicking the section crumb while drilled in pops back out
+sectionBtn.addEventListener("click", (e) => {
+  if (!openItem) return;          // otherwise it is the section switcher
+  e.stopPropagation();
+  closeAll();
+  openItem = null;
+  renderTrail();
+  renderBody();
+}, true);
+
+document.querySelectorAll("[data-section]").forEach((item) => {
+  item.addEventListener("click", (e) => {
+    e.stopPropagation();
+    section = item.dataset.section;
+    openItem = null;
+    document.querySelectorAll("[data-section]").forEach((o) => {
+      o.setAttribute("aria-checked", String(o.dataset.section === section));
+    });
+    closeAll();
+    renderTrail();
+    renderBody();
+  });
+});
+
+renderTrail();
+renderBody();
+
+/* ---- chrome height readout ---- */
+const measure = () => {
+  const h = (id) => Math.round(document.getElementById(id).getBoundingClientRect().height);
+  const before = h("chrome-before");
+  document.getElementById("badge-before").innerHTML = "<b>" + before + "px</b> chrome";
+  [["a", "chrome-a"], ["c", "chrome-c"]].forEach(([k, id]) => {
+    const v = h(id);
+    document.getElementById("badge-" + k).innerHTML = "<b>" + v + "px</b> chrome";
+    document.getElementById("save-" + k).textContent =
+      Math.round(((before - v) / before) * 100) + "% shorter · " + (before - v) + "px back";
+  });
+};
+document.fonts.ready.then(measure);
+window.addEventListener("resize", measure);
+</script>
+</body>
+</html>
