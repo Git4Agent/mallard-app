@@ -16,7 +16,6 @@ import type {
   ConnectProjectBundleRequest,
   ConnectR2StorageRequest,
   ConnectStorageResult,
-  ConversationResolutionSelection,
   CreateSetupDraftResult,
   HostIdentityStatus,
   LocalProjectRegistration,
@@ -33,6 +32,7 @@ import type {
   ProjectSessionTimelineQuery,
   ProjectSetupDraft,
   ProjectStorageLink,
+  ProjectSyncMetadataResetResult,
   ProviderDescriptor,
   ProviderKey,
   ProviderProfile,
@@ -51,6 +51,7 @@ import type {
   SetupDraftInspection,
   SetupDraftList,
   SessionEventDetail,
+  StorageDataClearResult,
   SyncConfig,
   ThreadSyncComparison,
   UpdateHostDisplayNameRequest,
@@ -131,6 +132,18 @@ export const projectSyncApi = {
 
   removeProject: (localProjectId: string) =>
     invoke<boolean>("remove_local_project", { localProjectId }),
+
+  resetProjectSyncMetadata: (localProjectId: string, expectedProjectRevision: number) =>
+    invoke<ProjectSyncMetadataResetResult>("reset_project_sync_metadata", {
+      localProjectId,
+      expectedProjectRevision,
+    }),
+
+  clearStorageData: (storageId: string, expectedConfigRevision: number) =>
+    invoke<StorageDataClearResult>("clear_storage_data", {
+      storageId,
+      expectedConfigRevision,
+    }),
 
   renameProject: (localProjectId: string, localAlias: string | null, expectedRevision: number) =>
     invoke<LocalProjectRegistration>("rename_local_project", { localProjectId, localAlias, expectedRevision }),
@@ -239,30 +252,13 @@ export const projectSyncApi = {
   planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) =>
     invoke<RestorePlan>("plan_bundle_restore", { storageId, bundleId, binding }),
 
-  getRestorePlan: (planId: string) =>
-    invoke<RestorePlan>("get_restore_plan", { planId }),
-
-  getPendingCodexDivergence: (localProjectId: string) =>
-    invoke<RestoreResult | null>("get_pending_codex_divergence", { localProjectId }),
-
   applyRestore: (
     planId: string,
     approvedActionIds: string[],
-    conversationResolutions: ConversationResolutionSelection[],
   ) => invoke<RestoreResult>("apply_bundle_restore", {
     planId,
     approvedActionIds,
-    conversationResolutions,
   }),
-
-  retryCodexDivergence: (operationId: string) =>
-    invoke<RestoreResult>("retry_codex_divergence", { operationId }),
-
-  forkCodexThread: (localProjectId: string, providerThreadId: string) =>
-    invoke<RestoreResult>("fork_codex_thread", {
-      localProjectId,
-      providerThreadId,
-    }),
 
   restartCodexAppAfterPull: (
     operationId: string,

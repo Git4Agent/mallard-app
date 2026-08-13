@@ -9,8 +9,8 @@ use mallard_domain::{
     generated_named_id, BundleId, ConversationBindings, ConversationPushPlan,
     ConversationSyncJournal, HostId, HostIdentity, LocalProjectId, MachineProjectState,
     Materializations, OriginHostToken, OriginReplicaToken, PlanId, ProjectSetupDraft, ReplicaId,
-    RestorePlan, SetupDraftId, SetupTransaction, SyncConfig, CONVERSATION_BINDINGS_SCHEMA,
-    HOST_IDENTITY_SCHEMA, MACHINE_PROJECT_SCHEMA, MAX_SETUP_DRAFTS,
+    RestorePlan, SetupDraftId, SetupTransaction, StorageConfig, StorageId, SyncConfig,
+    CONVERSATION_BINDINGS_SCHEMA, HOST_IDENTITY_SCHEMA, MACHINE_PROJECT_SCHEMA, MAX_SETUP_DRAFTS,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,42 @@ pub enum ConfigMutation<T> {
 pub enum ConfigTransactionError<E> {
     Mutation(E),
     Persistence(String),
+}
+
+/// Exact machine-local state removed by an explicit project sync reset.
+/// Project registration, provider/storage configuration, user recipes, local
+/// files, and remote objects are deliberately outside this result and outside
+/// the mutation.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProjectSyncMetadataResetResult {
+    pub local_project_id: LocalProjectId,
+    pub config_revision: u64,
+    pub links_reset: u64,
+    pub scope_bases_removed: u64,
+    pub conversation_checkpoints_removed: u64,
+    pub conversation_bindings_removed: u64,
+    pub materializations_removed: u64,
+    pub journal_operations_removed: u64,
+    pub restore_plans_removed: u64,
+    pub push_plans_removed: u64,
+    pub unreadable_plan_files_retained: u64,
+}
+
+/// Destination-scoped derived state forgotten after an explicit destructive
+/// storage clear. Project registrations, links, recipes, bindings, provider
+/// files, and the storage configuration remain in place.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct StorageSyncMetadataResetResult {
+    pub storage_id: StorageId,
+    pub config_revision: u64,
+    pub links_reset: u64,
+    pub scope_bases_removed: u64,
+    pub conversation_checkpoints_removed: u64,
+    pub materializations_removed: u64,
+    pub journal_operations_removed: u64,
+    pub restore_plans_removed: u64,
+    pub push_plans_removed: u64,
+    pub unreadable_plan_files_retained: u64,
 }
 
 impl<E> ConfigTransactionError<E> {
@@ -117,10 +153,9 @@ pub struct HostOperationGuard {
 
 impl Drop for HostOperationGuard {
     fn drop(&mut self) {
-        // Explicitly unlock before close. Native fork executors may spawn while
-        // this guard is held; on Unix, a fork briefly inherits open file
-        // descriptions before exec closes them. Unlocking here prevents that
-        // transient child descriptor from extending the operation lock.
+        // Explicitly unlock before close. A child process spawned while this
+        // guard is held may briefly inherit the descriptor before exec closes
+        // it; unlocking prevents that descriptor extending the operation lock.
         let _ = self._file.unlock();
     }
 }
@@ -536,6 +571,35 @@ impl LocalStateRepository {
         Ok(result)
     }
 
+    /// Install one journaled whole-document bindings after-state exactly as
+    /// recorded: validated, atomically written, and never re-revisioned. The
+    /// caller proves the current document equals the journaled before-state.
+    pub fn install_conversation_bindings_snapshot(
+        &self,
+        document: ConversationBindings,
+    ) -> Result<(), String> {
+        let _guard = persistence_guard(&self.root)?;
+        let identity = self.load_or_create_host_identity_unlocked()?;
+        let config = self.load_config_unlocked()?;
+        let machine = self.load_bindings_unlocked(&config, &identity)?;
+        document.validate(&identity, &machine, &config)?;
+        write_json_atomic(
+            &self.root,
+            &self.conversation_bindings_path(),
+            &document,
+            MAX_CONVERSATION_BINDINGS_BYTES,
+        )
+    }
+
+    /// Install one journaled whole-document `SyncConfig` after-state exactly
+    /// as recorded. Metadata-only Pull actions and journaled operations both
+    /// commit through this single atomic replacement.
+    pub fn install_config_snapshot(&self, document: SyncConfig) -> Result<(), String> {
+        let _guard = persistence_guard(&self.root)?;
+        document.validate()?;
+        write_json_atomic(&self.root, &self.config_path(), &document, MAX_CONFIG_BYTES)
+    }
+
     pub fn load_conversation_sync_journal(&self) -> Result<ConversationSyncJournal, String> {
         let _guard = persistence_guard(&self.root)?;
         let journal = read_json_bounded(
@@ -740,6 +804,384 @@ impl LocalStateRepository {
             MAX_MATERIALIZATIONS_BYTES,
         )?;
         Ok(result)
+    }
+
+    /// Forget every derived sync decision for one configured project while
+    /// retaining its setup and every user-owned byte. The reset deliberately
+    /// abandons matching recovery operations: their provider/cloud effects
+    /// are left in place and will be rediscovered, never rolled back or
+    /// deleted under this new approval.
+    ///
+    /// All prospective documents are validated before the first write. Each
+    /// write is an atomic replacement and each intermediate state is valid,
+    /// so a process crash is repaired by rerunning this idempotent reset; it
+    /// does not need a second recovery journal.
+    pub fn reset_project_sync_metadata(
+        &self,
+        local_project_id: &LocalProjectId,
+        expected_project_revision: u64,
+    ) -> Result<ProjectSyncMetadataResetResult, String> {
+        let _operation = self.acquire_host_operation()?;
+        let _guard = persistence_guard(&self.root)?;
+        let identity = self.load_or_create_host_identity_unlocked()?;
+        let mut config = self.load_config_unlocked()?;
+        let project = config
+            .project(local_project_id)
+            .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
+        if project.revision != expected_project_revision {
+            return Err(format!(
+                "project changed (expected revision {}, current {})",
+                expected_project_revision, project.revision
+            ));
+        }
+
+        let machine = self.load_bindings_unlocked(&config, &identity)?;
+        let project_replica = machine
+            .for_project(local_project_id)
+            .map(|binding| (binding.host_id.clone(), binding.replica_id.clone()));
+        let mut conversation_bindings =
+            self.load_conversation_bindings_document_unlocked(&config, &machine, &identity)?;
+        let mut materializations = self.load_materializations_unlocked(&config)?;
+        let mut journal: ConversationSyncJournal = read_json_bounded(
+            &self.root,
+            &self.conversation_sync_journal_path(),
+            MAX_CONVERSATION_JOURNAL_BYTES,
+        )?
+        .unwrap_or_else(ConversationSyncJournal::empty);
+        journal.validate()?;
+
+        let (restore_plans, restore_warnings) = self.list_documents::<RestorePlan>(
+            &self.root.join("restore_plans"),
+            MAX_RESTORE_PLAN_BYTES,
+        )?;
+        let (push_plans, push_warnings) = self.list_documents::<ConversationPushPlan>(
+            &self.root.join("conversation_push_plans"),
+            MAX_CONVERSATION_PUSH_PLAN_BYTES,
+        )?;
+        let restore_plan_ids = restore_plans
+            .into_iter()
+            .filter(|plan| {
+                plan.conversation_actions
+                    .iter()
+                    .any(|action| &action.local_project_id == local_project_id)
+                    || project_replica
+                        .as_ref()
+                        .is_some_and(|(host_id, replica_id)| {
+                            &plan.host_id == host_id && &plan.replica_id == replica_id
+                        })
+            })
+            .map(|plan| plan.plan_id)
+            .collect::<Vec<_>>();
+        let push_plan_ids = push_plans
+            .into_iter()
+            .filter(|plan| &plan.local_project_id == local_project_id)
+            .map(|plan| plan.plan_id)
+            .collect::<Vec<_>>();
+
+        let mut links_reset = 0_u64;
+        let mut scope_bases_removed = 0_u64;
+        let mut conversation_checkpoints_removed = 0_u64;
+        let mut config_changed = false;
+        for link in config
+            .links
+            .iter_mut()
+            .filter(|link| &link.local_project_id == local_project_id)
+        {
+            links_reset = links_reset.saturating_add(1);
+            scope_bases_removed = scope_bases_removed.saturating_add(link.scope_bases.len() as u64);
+            conversation_checkpoints_removed = conversation_checkpoints_removed.saturating_add(
+                link.conversation_checkpoints
+                    .values()
+                    .map(|threads| threads.len() as u64)
+                    .sum::<u64>(),
+            );
+            config_changed |=
+                !link.scope_bases.is_empty() || !link.conversation_checkpoints.is_empty();
+            link.scope_bases.clear();
+            link.conversation_checkpoints.clear();
+        }
+
+        let conversation_binding_count = conversation_bindings.bindings.len();
+        conversation_bindings
+            .bindings
+            .retain(|binding| &binding.local_project_id != local_project_id);
+        let conversation_bindings_removed =
+            (conversation_binding_count - conversation_bindings.bindings.len()) as u64;
+
+        let materialization_count = materializations.records.len();
+        materializations
+            .records
+            .retain(|record| &record.local_project_id != local_project_id);
+        let materializations_removed =
+            (materialization_count - materializations.records.len()) as u64;
+
+        let journal_count = journal.operations.len();
+        journal
+            .operations
+            .retain(|operation| &operation.local_project_id != local_project_id);
+        let journal_operations_removed = (journal_count - journal.operations.len()) as u64;
+
+        if config_changed {
+            config.revision = config.revision.saturating_add(1);
+        }
+        if conversation_bindings_removed > 0 {
+            conversation_bindings.revision = conversation_bindings.revision.saturating_add(1);
+        }
+        if materializations_removed > 0 {
+            materializations.revision = materializations.revision.saturating_add(1);
+        }
+        if journal_operations_removed > 0 {
+            journal.revision = journal.revision.saturating_add(1);
+        }
+
+        config.validate()?;
+        machine.validate(&config)?;
+        conversation_bindings.validate(&identity, &machine, &config)?;
+        materializations.validate(&config)?;
+        journal.validate()?;
+
+        // Checkpoints are detached before aliases so a crash never leaves an
+        // accepted destination cursor pointing at a forgotten provider row.
+        if config_changed {
+            write_json_atomic(&self.root, &self.config_path(), &config, MAX_CONFIG_BYTES)?;
+        }
+        if conversation_bindings_removed > 0 {
+            write_json_atomic(
+                &self.root,
+                &self.conversation_bindings_path(),
+                &conversation_bindings,
+                MAX_CONVERSATION_BINDINGS_BYTES,
+            )?;
+        }
+        if materializations_removed > 0 {
+            write_json_atomic(
+                &self.root,
+                &self.materializations_path(),
+                &materializations,
+                MAX_MATERIALIZATIONS_BYTES,
+            )?;
+        }
+        if journal_operations_removed > 0 {
+            write_json_atomic(
+                &self.root,
+                &self.conversation_sync_journal_path(),
+                &journal,
+                MAX_CONVERSATION_JOURNAL_BYTES,
+            )?;
+        }
+
+        for plan_id in &restore_plan_ids {
+            let path = self.restore_plan_path(plan_id);
+            ensure_no_symlinks(&self.root, &path)?;
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("remove restore plan '{}': {}", plan_id, error)),
+            }
+        }
+        for plan_id in &push_plan_ids {
+            let path = self.conversation_push_plan_path(plan_id);
+            ensure_no_symlinks(&self.root, &path)?;
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "remove conversation push plan '{}': {}",
+                        plan_id, error
+                    ))
+                }
+            }
+        }
+
+        Ok(ProjectSyncMetadataResetResult {
+            local_project_id: local_project_id.clone(),
+            config_revision: config.revision,
+            links_reset,
+            scope_bases_removed,
+            conversation_checkpoints_removed,
+            conversation_bindings_removed,
+            materializations_removed,
+            journal_operations_removed,
+            restore_plans_removed: restore_plan_ids.len() as u64,
+            push_plans_removed: push_plan_ids.len() as u64,
+            unreadable_plan_files_retained: restore_warnings
+                .len()
+                .saturating_add(push_warnings.len())
+                as u64,
+        })
+    }
+
+    /// Pin one exact configured destination, clear its remote Mallard data,
+    /// then forget only destination-scoped local sync decisions. The host and
+    /// persistence locks intentionally span the remote callback: a destructive
+    /// clear must not race a credential/path edit or another Push/Pull.
+    ///
+    /// The remote callback runs only after all local after-states validate.
+    /// Local writes finish with `sync_config.json`, so a crash before that
+    /// point can be repaired by rerunning with the same reviewed revision.
+    pub fn clear_storage_data<T>(
+        &self,
+        storage_id: &StorageId,
+        expected_config_revision: u64,
+        clear_remote: impl FnOnce(&StorageConfig) -> Result<T, String>,
+    ) -> Result<(T, StorageSyncMetadataResetResult), String> {
+        let _operation = self.acquire_host_operation()?;
+        let _guard = persistence_guard(&self.root)?;
+        self.load_or_create_host_identity_unlocked()?;
+        let mut config = self.load_config_unlocked()?;
+        if config.revision != expected_config_revision {
+            return Err(format!(
+                "storage configuration changed (expected revision {}, current {})",
+                expected_config_revision, config.revision
+            ));
+        }
+        let storage = config
+            .storages
+            .iter()
+            .find(|storage| &storage.id == storage_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown storage '{}'", storage_id))?;
+
+        let mut materializations = self.load_materializations_unlocked(&config)?;
+        let mut journal: ConversationSyncJournal = read_json_bounded(
+            &self.root,
+            &self.conversation_sync_journal_path(),
+            MAX_CONVERSATION_JOURNAL_BYTES,
+        )?
+        .unwrap_or_else(ConversationSyncJournal::empty);
+        journal.validate()?;
+        let (restore_plans, restore_warnings) = self.list_documents::<RestorePlan>(
+            &self.root.join("restore_plans"),
+            MAX_RESTORE_PLAN_BYTES,
+        )?;
+        let (push_plans, push_warnings) = self.list_documents::<ConversationPushPlan>(
+            &self.root.join("conversation_push_plans"),
+            MAX_CONVERSATION_PUSH_PLAN_BYTES,
+        )?;
+        let restore_plan_ids = restore_plans
+            .into_iter()
+            .filter(|plan| &plan.storage_id == storage_id)
+            .map(|plan| plan.plan_id)
+            .collect::<Vec<_>>();
+        let push_plan_ids = push_plans
+            .into_iter()
+            .filter(|plan| &plan.storage_id == storage_id)
+            .map(|plan| plan.plan_id)
+            .collect::<Vec<_>>();
+
+        let mut links_reset = 0_u64;
+        let mut scope_bases_removed = 0_u64;
+        let mut conversation_checkpoints_removed = 0_u64;
+        let mut config_changed = false;
+        for link in config
+            .links
+            .iter_mut()
+            .filter(|link| &link.storage_id == storage_id)
+        {
+            links_reset = links_reset.saturating_add(1);
+            scope_bases_removed = scope_bases_removed.saturating_add(link.scope_bases.len() as u64);
+            conversation_checkpoints_removed = conversation_checkpoints_removed.saturating_add(
+                link.conversation_checkpoints
+                    .values()
+                    .map(|threads| threads.len() as u64)
+                    .sum::<u64>(),
+            );
+            config_changed |=
+                !link.scope_bases.is_empty() || !link.conversation_checkpoints.is_empty();
+            link.scope_bases.clear();
+            link.conversation_checkpoints.clear();
+        }
+
+        let materialization_count = materializations.records.len();
+        materializations
+            .records
+            .retain(|record| &record.storage_id != storage_id);
+        let materializations_removed =
+            (materialization_count - materializations.records.len()) as u64;
+
+        let journal_count = journal.operations.len();
+        journal
+            .operations
+            .retain(|operation| &operation.cloud.storage_id != storage_id);
+        let journal_operations_removed = (journal_count - journal.operations.len()) as u64;
+
+        if config_changed {
+            config.revision = config.revision.saturating_add(1);
+        }
+        if materializations_removed > 0 {
+            materializations.revision = materializations.revision.saturating_add(1);
+        }
+        if journal_operations_removed > 0 {
+            journal.revision = journal.revision.saturating_add(1);
+        }
+        config.validate()?;
+        materializations.validate(&config)?;
+        journal.validate()?;
+
+        let remote_result = clear_remote(&storage)?;
+
+        if materializations_removed > 0 {
+            write_json_atomic(
+                &self.root,
+                &self.materializations_path(),
+                &materializations,
+                MAX_MATERIALIZATIONS_BYTES,
+            )?;
+        }
+        if journal_operations_removed > 0 {
+            write_json_atomic(
+                &self.root,
+                &self.conversation_sync_journal_path(),
+                &journal,
+                MAX_CONVERSATION_JOURNAL_BYTES,
+            )?;
+        }
+        for plan_id in &restore_plan_ids {
+            let path = self.restore_plan_path(plan_id);
+            ensure_no_symlinks(&self.root, &path)?;
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("remove restore plan '{}': {}", plan_id, error)),
+            }
+        }
+        for plan_id in &push_plan_ids {
+            let path = self.conversation_push_plan_path(plan_id);
+            ensure_no_symlinks(&self.root, &path)?;
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "remove conversation push plan '{}': {}",
+                        plan_id, error
+                    ))
+                }
+            }
+        }
+        if config_changed {
+            write_json_atomic(&self.root, &self.config_path(), &config, MAX_CONFIG_BYTES)?;
+        }
+
+        Ok((
+            remote_result,
+            StorageSyncMetadataResetResult {
+                storage_id: storage_id.clone(),
+                config_revision: config.revision,
+                links_reset,
+                scope_bases_removed,
+                conversation_checkpoints_removed,
+                materializations_removed,
+                journal_operations_removed,
+                restore_plans_removed: restore_plan_ids.len() as u64,
+                push_plans_removed: push_plan_ids.len() as u64,
+                unreadable_plan_files_retained: restore_warnings
+                    .len()
+                    .saturating_add(push_warnings.len())
+                    as u64,
+            },
+        ))
     }
 
     pub fn setup_draft_path(&self, draft_id: &SetupDraftId) -> PathBuf {
@@ -2196,7 +2638,10 @@ mod tests {
     use mallard_domain::{
         generated_named_id, BindingState, BundleId, BundleRecipe, ConversationMaterializationState,
         LocalConversationBinding, LocalProjectRegistration, LocalProviderProfileId,
-        OriginHostAlias, ProjectBinding, ProviderKey, ProviderProfile, ThreadId, LOCAL_SCHEMA,
+        MaterializationId, MaterializationRecord, MaterializationStatus, OriginHostAlias, PlanId,
+        ProjectBinding, ProjectStorageLink, ProviderKey, ProviderProfile, RepositoryBase,
+        RootTailLayout, ScopeBase, StorageConfig, StorageId, StorageKind, SyncScopeKey,
+        TailPartitionKind, ThreadId, LOCAL_SCHEMA, PORTABLE_TAIL_CODEC_V1,
     };
     use std::collections::BTreeMap;
 
@@ -2332,6 +2777,170 @@ mod tests {
     }
 
     #[test]
+    fn project_sync_metadata_reset_forgets_derived_state_and_keeps_user_bytes_and_setup() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let identity = repo.load_or_create_host_identity().unwrap();
+        let replica_id = install_bound_project(&repo, &temp, &identity);
+        let local_project_id = LocalProjectId::parse("project-a").unwrap();
+        let storage_id = StorageId::parse("storage-a").unwrap();
+        let storage_root = temp.path().join("storage");
+        fs::create_dir_all(&storage_root).unwrap();
+        let remote_sentinel = storage_root.join("remote-object");
+        fs::write(&remote_sentinel, b"keep remote").unwrap();
+        let provider_sentinel = temp.path().join("codex").join("provider-session.jsonl");
+        fs::write(&provider_sentinel, b"keep provider").unwrap();
+
+        repo.mutate_config(|config| {
+            config.storages.push(StorageConfig {
+                id: storage_id.clone(),
+                name: "Storage A".to_string(),
+                kind: StorageKind::Local,
+                bucket: String::new(),
+                access_key_id: String::new(),
+                secret_access_key: String::new(),
+                account_id: String::new(),
+                s3_endpoint: String::new(),
+                region: String::new(),
+                local_dir: storage_root.to_string_lossy().into_owned(),
+                included_default_exclusions: Vec::new(),
+                supports_conditional_writes: None,
+            });
+            config.links.push(ProjectStorageLink {
+                local_project_id: local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                bundle_id: project().bundle_id,
+                recipe: Some(BundleRecipe::default()),
+                scope_bases: BTreeMap::from([(
+                    SyncScopeKey::provider(codex_key()),
+                    ScopeBase {
+                        scope: SyncScopeKey::provider(codex_key()),
+                        scope_revision: 1,
+                        scope_sha256: "a".repeat(64),
+                        reviewed_in: RepositoryBase {
+                            revision: 1,
+                            commit_id: "commit-a".to_string(),
+                            manifest_sha256: "b".repeat(64),
+                            manifest_size: 1,
+                        },
+                        binding_revision: 0,
+                        last_pull_at: Some(1),
+                        last_push_at: None,
+                    },
+                )]),
+                project_content_preferences: Default::default(),
+                conversation_checkpoints: BTreeMap::new(),
+                pinned: true,
+                created_at: 1,
+            });
+            Ok(())
+        })
+        .unwrap();
+        repo.mutate_conversation_bindings(|bindings| {
+            bindings.bindings.push(LocalConversationBinding {
+                host_id: identity.host_id.clone(),
+                replica_id: replica_id.clone(),
+                local_project_id: local_project_id.clone(),
+                provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
+                thread_id: ThreadId::parse("thread-a").unwrap(),
+                forked_from: None,
+                root_tail_layout: Some(RootTailLayout {
+                    codec: PORTABLE_TAIL_CODEC_V1.to_string(),
+                    partition_kind: TailPartitionKind::WholeThread,
+                    start_record_count: 0,
+                }),
+                provider_thread_id: Some("provider-thread-a".to_string()),
+                materialization_state: ConversationMaterializationState::Resumable,
+                revision: 0,
+                created_at: 1,
+                updated_at: 1,
+            });
+            Ok(())
+        })
+        .unwrap();
+        repo.mutate_materializations(|_, materializations| {
+            materializations.records.push(MaterializationRecord {
+                materialization_id: MaterializationId::parse("materialization-a").unwrap(),
+                plan_id: PlanId::parse("plan-a").unwrap(),
+                host_id: identity.host_id.clone(),
+                replica_id: replica_id.clone(),
+                local_project_id: local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                bundle_id: project().bundle_id,
+                revision: 1,
+                commit_id: "commit-a".to_string(),
+                manifest_sha256: "c".repeat(64),
+                binding_revision: 0,
+                status: MaterializationStatus::Partial,
+                applied_at: 1,
+                receipts: Vec::new(),
+            });
+            Ok(())
+        })
+        .unwrap();
+
+        let result = repo
+            .reset_project_sync_metadata(&local_project_id, 0)
+            .unwrap();
+        assert_eq!(result.links_reset, 1);
+        assert_eq!(result.scope_bases_removed, 1);
+        assert_eq!(result.conversation_bindings_removed, 1);
+        assert_eq!(result.materializations_removed, 1);
+
+        let config = repo.load_config().unwrap();
+        assert!(config.project(&local_project_id).is_some());
+        assert_eq!(config.storages.len(), 1);
+        let link = config
+            .links
+            .iter()
+            .find(|link| link.local_project_id == local_project_id)
+            .unwrap();
+        assert!(link.scope_bases.is_empty());
+        assert!(link.conversation_checkpoints.is_empty());
+        assert!(link.recipe.is_some());
+        assert!(link.pinned);
+        assert!(repo
+            .load_bindings()
+            .unwrap()
+            .active_for(&local_project_id)
+            .is_some());
+        assert!(repo
+            .load_conversation_bindings()
+            .unwrap()
+            .bindings
+            .is_empty());
+        assert!(repo.load_materializations().unwrap().records.is_empty());
+        assert_eq!(fs::read(remote_sentinel).unwrap(), b"keep remote");
+        assert_eq!(fs::read(provider_sentinel).unwrap(), b"keep provider");
+
+        let second = repo
+            .reset_project_sync_metadata(&local_project_id, 0)
+            .unwrap();
+        assert_eq!(second.scope_bases_removed, 0);
+        assert_eq!(second.conversation_bindings_removed, 0);
+        assert_eq!(second.materializations_removed, 0);
+    }
+
+    #[test]
+    fn project_sync_metadata_reset_rejects_a_stale_project_revision_before_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let identity = repo.load_or_create_host_identity().unwrap();
+        install_bound_project(&repo, &temp, &identity);
+        let before = repo.load_config().unwrap();
+
+        let error = repo
+            .reset_project_sync_metadata(
+                &LocalProjectId::parse("project-a").unwrap(),
+                before.projects[0].revision.saturating_add(1),
+            )
+            .unwrap_err();
+
+        assert!(error.contains("project changed"));
+        assert_eq!(repo.load_config().unwrap(), before);
+    }
+
+    #[test]
     fn config_transaction_returns_the_exact_committed_document() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
@@ -2403,15 +3012,9 @@ mod tests {
                 provider_profile_id: first_profile_id.clone(),
                 thread_id: ThreadId::parse("group-a.variant-a").unwrap(),
                 forked_from: None,
-                fork_stamp: None,
+                root_tail_layout: None,
                 provider_thread_id: None,
                 materialization_state: ConversationMaterializationState::StoredOnly,
-                last_observed_file_sha256: None,
-                last_observed_head_message_id: None,
-                last_observed_lineage_digest: None,
-                last_observed_semantic_digest: None,
-                source_revision: None,
-                source_manifest_sha256: None,
                 revision: 0,
                 created_at: 1,
                 updated_at: 1,

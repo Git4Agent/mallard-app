@@ -152,7 +152,7 @@ fn unregistered_provider_scope_is_carried_unchanged_through_a_publish() {
     );
     let mut first = publish_request(
         world.bundle_id.clone(),
-        &[thread.clone()],
+        std::slice::from_ref(&thread),
         origin.clone(),
         10,
         None,

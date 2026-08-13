@@ -31,6 +31,7 @@ import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "./SyncPat
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
 import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
 import { syncOutcomeView } from "./syncOutcome";
+import { isIrrecoverableSyncError } from "./syncError";
 import type { SyncOutcome } from "./syncOutcome";
 import { newStorage, storageConfigReady, StorageEditor } from "./StorageSettings";
 import { projectSyncApi } from "./api";
@@ -103,6 +104,7 @@ interface Props {
   onConfigureBinding: (projectId: string) => Promise<void> | void;
   onRepairConversationPaths: (projectId: string) => Promise<void> | void;
   onRenameProject: (projectId: string, alias: string | null) => Promise<boolean> | boolean;
+  onResetProjectMetadata: (projectId: string) => Promise<void> | void;
   onRefresh: () => void;
   onAddProject: () => void;
   onSelectProject: (projectId: string) => void;
@@ -482,6 +484,7 @@ export default function ProjectLinksWorkspace({
   onConfigureBinding,
   onRepairConversationPaths,
   onRenameProject,
+  onResetProjectMetadata,
   onRefresh,
   onAddProject,
   onSelectProject,
@@ -1355,6 +1358,15 @@ export default function ProjectLinksWorkspace({
             setRenamingProjectId(workspaceProject.local_project_id);
           },
         },
+        {
+          id: "reset-sync-metadata",
+          label: "Reset local sync state",
+          icon: "trash" as const,
+          danger: true,
+          disabled: busy,
+          title: "Forget local sync bases, conversation mappings, recovery records, and saved plans; files and cloud data are kept",
+          onSelect: () => void onResetProjectMetadata(workspaceProject.local_project_id),
+        },
       ],
     },
     ...(workspaceStorage ? [{
@@ -1857,17 +1869,32 @@ export default function ProjectLinksWorkspace({
                                 {activeNotice.message}
                               </span>
                               <div className="sync-sync-review-recovery-actions">
-                                <button
-                                  type="button"
-                                  className="btn btn-ghost"
-                                  disabled={noticeActionsDisabled}
-                                  onClick={() => void run(
-                                    `${activeNotice.action}:${actionPrefix}`,
-                                    () => (activeNotice.action === "push" ? onPush : onPull)(project.local_project_id, storage.id),
-                                  )}
-                                >
-                                  Retry
-                                </button>
+                                {isIrrecoverableSyncError(activeNotice.message) ? (
+                                  <button
+                                    type="button"
+                                    className="btn btn-ghost danger"
+                                    disabled={noticeActionsDisabled}
+                                    onClick={() => void run(
+                                      `reset-sync-metadata:${project.local_project_id}`,
+                                      () => onResetProjectMetadata(project.local_project_id),
+                                    )}
+                                  >
+                                    <Icon name="trash" size={13} />
+                                    Reset local sync state
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="btn btn-ghost"
+                                    disabled={noticeActionsDisabled}
+                                    onClick={() => void run(
+                                      `${activeNotice.action}:${actionPrefix}`,
+                                      () => (activeNotice.action === "push" ? onPush : onPull)(project.local_project_id, storage.id),
+                                    )}
+                                  >
+                                    Retry
+                                  </button>
+                                )}
                               </div>
                             </div>
                           )}

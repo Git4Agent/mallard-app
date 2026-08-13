@@ -14,6 +14,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::domain::{
     CatalogMaterializationsDocument, CatalogOperationsDocument, CatalogPlanId,
@@ -45,6 +46,15 @@ pub struct CatalogTargetLock {
 
 pub struct CatalogStateRepository {
     root: PathBuf,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CatalogStorageDataClearResult {
+    pub links_reset: u64,
+    pub plans_removed: u64,
+    pub claims_removed: u64,
+    pub preservation_witnesses_removed: u64,
+    pub terminal_operations_removed: u64,
 }
 
 impl CatalogStateRepository {
@@ -364,6 +374,10 @@ impl CatalogStateRepository {
 
     pub fn list_resource_plans(&self) -> Result<Vec<CatalogResourcePlanDocument>, String> {
         let _guard = self.guard()?;
+        self.list_resource_plans_unlocked()
+    }
+
+    fn list_resource_plans_unlocked(&self) -> Result<Vec<CatalogResourcePlanDocument>, String> {
         let mut plans = Vec::new();
         let directory = self.root.join("catalog_resource_plans");
         let entries = match fs::read_dir(&directory) {
@@ -578,6 +592,167 @@ impl CatalogStateRepository {
         Ok(None)
     }
 
+    /// Hold the catalog-wide lock while the caller clears the shared remote
+    /// namespaces and project-sync metadata, then detach every Library record
+    /// for this destination. Registrations and links remain configured so a
+    /// later Push can repopulate the now-empty storage.
+    pub fn clear_storage_data<T>(
+        &self,
+        storage_id: &mallard_domain::StorageId,
+        clear_remote_and_project_state: impl FnOnce() -> Result<T, String>,
+    ) -> Result<(T, CatalogStorageDataClearResult), String> {
+        let _guard = self.guard()?;
+        let mut resources: CatalogResourcesDocument = self.load_document(
+            &self.resources_path(),
+            MAX_CATALOG_RESOURCES_BYTES,
+            "catalog resources",
+        )?;
+        let mut materializations: CatalogMaterializationsDocument = self.load_document(
+            &self.materializations_path(),
+            MAX_CATALOG_MATERIALIZATIONS_BYTES,
+            "catalog materializations",
+        )?;
+        let mut preservations: CatalogPreservationsDocument = self.load_document(
+            &self.preservations_path(),
+            MAX_CATALOG_PRESERVATIONS_BYTES,
+            "catalog preservations",
+        )?;
+        let mut operations: CatalogOperationsDocument = self.load_document(
+            &self.operations_path(),
+            MAX_CATALOG_OPERATIONS_BYTES,
+            "catalog operations",
+        )?;
+        resources.validate()?;
+        materializations.validate()?;
+        preservations.validate()?;
+        operations.validate()?;
+        if operations.operations.iter().any(|operation| {
+            operation.storage_id.as_ref() == Some(storage_id) && !operation.phase.is_terminal()
+        }) {
+            return Err(format!(
+                "storage '{}' has an unfinished Library operation; finish or recover it before clearing the storage",
+                storage_id
+            ));
+        }
+
+        let plans = self.list_resource_plans_unlocked()?;
+        let plan_ids = plans
+            .into_iter()
+            .filter(|plan| match plan {
+                CatalogResourcePlanDocument::Push(plan) => &plan.storage_id == storage_id,
+                CatalogResourcePlanDocument::Pull(plan) => &plan.storage_id == storage_id,
+                CatalogResourcePlanDocument::Fork(_) => false,
+            })
+            .map(|plan| plan.plan_id().clone())
+            .collect::<Vec<_>>();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "system clock is before Unix epoch".to_string())?
+            .as_secs();
+        let mut links_reset = 0_u64;
+        for link in resources
+            .links
+            .iter_mut()
+            .filter(|link| &link.storage_id == storage_id)
+        {
+            if link.accepted_head.is_some() || link.accepted_content_sha256.is_some() {
+                link.accepted_head = None;
+                link.accepted_content_sha256 = None;
+                link.revision = link.revision.saturating_add(1);
+                link.updated_at = link.updated_at.max(now);
+                links_reset = links_reset.saturating_add(1);
+            }
+        }
+        let claim_count = materializations.claims.len();
+        materializations
+            .claims
+            .retain(|claim| &claim.storage_id != storage_id);
+        let claims_removed = (claim_count - materializations.claims.len()) as u64;
+        let witness_count = preservations.witnesses.len();
+        preservations
+            .witnesses
+            .retain(|witness| &witness.storage_id != storage_id);
+        let preservation_witnesses_removed = (witness_count - preservations.witnesses.len()) as u64;
+        let operation_count = operations.operations.len();
+        operations
+            .operations
+            .retain(|operation| operation.storage_id.as_ref() != Some(storage_id));
+        let terminal_operations_removed = (operation_count - operations.operations.len()) as u64;
+
+        if links_reset > 0 {
+            resources.revision = resources.revision.saturating_add(1);
+        }
+        if claims_removed > 0 {
+            materializations.revision = materializations.revision.saturating_add(1);
+        }
+        if preservation_witnesses_removed > 0 {
+            preservations.revision = preservations.revision.saturating_add(1);
+        }
+        if terminal_operations_removed > 0 {
+            operations.revision = operations.revision.saturating_add(1);
+        }
+        resources.validate()?;
+        materializations.validate()?;
+        preservations.validate()?;
+        operations.validate()?;
+
+        let value = clear_remote_and_project_state()?;
+
+        if links_reset > 0 {
+            write_json_atomic(
+                &self.root,
+                &self.resources_path(),
+                &resources,
+                MAX_CATALOG_RESOURCES_BYTES,
+            )?;
+        }
+        if claims_removed > 0 {
+            write_json_atomic(
+                &self.root,
+                &self.materializations_path(),
+                &materializations,
+                MAX_CATALOG_MATERIALIZATIONS_BYTES,
+            )?;
+        }
+        if preservation_witnesses_removed > 0 {
+            write_json_atomic(
+                &self.root,
+                &self.preservations_path(),
+                &preservations,
+                MAX_CATALOG_PRESERVATIONS_BYTES,
+            )?;
+        }
+        if terminal_operations_removed > 0 {
+            write_json_atomic(
+                &self.root,
+                &self.operations_path(),
+                &operations,
+                MAX_CATALOG_OPERATIONS_BYTES,
+            )?;
+        }
+        for plan_id in &plan_ids {
+            let path = self.plan_path(plan_id);
+            ensure_no_symlinks(&self.root, &path)?;
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("discard catalog plan '{}': {}", plan_id, error)),
+            }
+        }
+
+        Ok((
+            value,
+            CatalogStorageDataClearResult {
+                links_reset,
+                plans_removed: plan_ids.len() as u64,
+                claims_removed,
+                preservation_witnesses_removed,
+                terminal_operations_removed,
+            },
+        ))
+    }
+
     fn ensure_directory(&self, directory: &Path) -> Result<(), String> {
         if !directory.starts_with(&self.root) {
             return Err(format!(
@@ -768,11 +943,11 @@ fn sync_directory(_directory: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::super::domain::{
-        skill_resource_id, AgentSkillScope, CatalogLinkId, CatalogPlanId, CatalogProfilesDocument,
-        CatalogRegistrationId, CatalogResourceKindTag, CatalogResourceLink,
-        CatalogResourceRegistration, CatalogResourceRepositoryId, CatalogScope, CatalogScopeId,
-        CatalogScopesDocument, LocalCatalogProfile, LocalCatalogProfileId, LocalCatalogTargetId,
-        ProviderKey,
+        skill_resource_id, AgentSkillScope, CatalogCommitId, CatalogLinkId, CatalogPlanId,
+        CatalogProfilesDocument, CatalogRegistrationId, CatalogResourceKindTag,
+        CatalogResourceLink, CatalogResourceRegistration, CatalogResourceRepositoryId,
+        CatalogScope, CatalogScopeId, CatalogScopesDocument, LibraryHeadCoordinate,
+        LocalCatalogProfile, LocalCatalogProfileId, LocalCatalogTargetId, ProviderKey,
     };
     use super::*;
     use mallard_domain::StorageId;
@@ -932,5 +1107,72 @@ mod tests {
             .unwrap()
             .unwrap()
             .contains("link"));
+    }
+
+    #[test]
+    fn storage_clear_keeps_catalog_links_and_forgets_their_accepted_heads() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("storage-a").unwrap();
+        let registration_id = CatalogRegistrationId::generate().unwrap();
+        let repository_id = CatalogResourceRepositoryId::generate().unwrap();
+        repo.mutate_resources(|document| {
+            document.registrations.push(CatalogResourceRegistration {
+                registration_id: registration_id.clone(),
+                provider: ProviderKey::Codex,
+                profile_id: LocalCatalogProfileId::generate().unwrap(),
+                resource_kind: CatalogResourceKindTag::AgentSkill,
+                resource_id: skill_resource_id(AgentSkillScope::CodexHome, "review", "review"),
+                local_target: LocalCatalogTargetId::SkillDirectory {
+                    scope: AgentSkillScope::CodexHome,
+                    canonical_root: temp
+                        .path()
+                        .join("codex/skills")
+                        .to_string_lossy()
+                        .to_string(),
+                    install_directory: "review".to_string(),
+                },
+                display_name: "Review".to_string(),
+                revision: 1,
+                created_at: 1,
+                updated_at: 1,
+            });
+            document.links.push(CatalogResourceLink {
+                link_id: CatalogLinkId::generate().unwrap(),
+                registration_id,
+                storage_id: storage_id.clone(),
+                repository_id: repository_id.clone(),
+                accepted_head: Some(LibraryHeadCoordinate {
+                    repository_id,
+                    revision: 1,
+                    commit_id: CatalogCommitId::generate().unwrap(),
+                    manifest_sha256: "a".repeat(64),
+                    manifest_size: 1,
+                    storage_identity_sha256: "b".repeat(64),
+                }),
+                accepted_content_sha256: Some("c".repeat(64)),
+                revision: 1,
+                created_at: 1,
+                updated_at: 1,
+            });
+            Ok(())
+        })
+        .unwrap();
+        let mut callback_called = false;
+
+        let (value, result) = repo
+            .clear_storage_data(&storage_id, || {
+                callback_called = true;
+                Ok("cleared")
+            })
+            .unwrap();
+
+        assert!(callback_called);
+        assert_eq!(value, "cleared");
+        assert_eq!(result.links_reset, 1);
+        let resources = repo.load_resources().unwrap();
+        assert_eq!(resources.links.len(), 1);
+        assert!(resources.links[0].accepted_head.is_none());
+        assert!(resources.links[0].accepted_content_sha256.is_none());
     }
 }

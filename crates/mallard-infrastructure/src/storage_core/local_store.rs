@@ -1,5 +1,5 @@
 //! Local-folder object store: no-follow traversal, atomic writes, and a
-//! storage-wide advisory lock for the two mutating operations.
+//! storage-wide advisory lock for mutating operations.
 
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -291,6 +291,23 @@ impl ObjectStore for LocalObjectStore {
         })
     }
 
+    fn delete(&self, key: &ObjectKey) -> Result<(), String> {
+        let _guard = self.lock()?;
+        let Some(path) = checked_existing_object_path(&self.root, key)? else {
+            return Ok(());
+        };
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect object '{}': {}", key, error))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!("object '{}' is not a regular no-follow file", key));
+        }
+        fs::remove_file(&path).map_err(|error| format!("delete object '{}': {}", key, error))?;
+        sync_directory(
+            path.parent()
+                .ok_or_else(|| format!("object '{}' has no parent", key))?,
+        )
+    }
+
     fn list(
         &self,
         prefix: &ObjectPrefix,
@@ -370,6 +387,18 @@ impl ObjectStore for LocalObjectStore {
     fn local_root(&self) -> Option<&Path> {
         Some(&self.root)
     }
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), String> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync object directory '{}': {}", path.display(), error))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 pub(crate) fn open_read_only_no_follow(path: &Path, label: &str) -> Result<fs::File, String> {

@@ -1,6 +1,5 @@
 import type {
   ConversationPlanAction,
-  ConversationResolutionSelection,
   ProviderKey,
   RestoreAction,
   RestorePlan,
@@ -29,6 +28,52 @@ function humanize(value: string): string {
     .split("_")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+function blockedConversationDetail(action: ConversationPlanAction): string {
+  switch (action.reason_code) {
+    case "provider_not_quiescent":
+      return "The provider may still be writing this task. Finish the active turn, then refresh.";
+    case "codec_unsupported":
+      return "This task cannot be transformed safely by the active provider codec.";
+    case "ambiguous_binding":
+      return "More than one local task could match this stored task.";
+    case "missing_binding":
+      return "Mallard cannot prove which local task this stored task belongs to.";
+    case "detached_requires_pull":
+      return "This task's local mapping changed. Refresh Pull to establish the current mapping.";
+    case "corruption_blocked":
+      return "This task failed local verification and needs repair before it can sync.";
+    case "stale_plan":
+      return "The reviewed task changed. Refresh and review it again.";
+    case "busy":
+      return "Another sync operation still owns this task. Finish recovery, then refresh.";
+    default:
+      return "Mallard cannot prove that this task can be changed safely.";
+  }
+}
+
+function conversationActionDetail(action: ConversationPlanAction): string {
+  switch (action.action) {
+    case "adopt_cloud_metadata":
+      return "Records the reviewed storage version as accepted. No provider files change.";
+    case "materialize_cloud":
+      return "Brings the reviewed storage history into this task. Existing provider files are retained.";
+    case "keep_both":
+      return "Keeps the current local history as an independent task and brings the storage history into this task. No messages are deleted.";
+    case "create_local":
+      return "Creates a local task from the reviewed storage history.";
+    case "report_push_eligible":
+      return "This computer has newer messages. The task stays local and can be pushed.";
+    case "report_local_only":
+      return "This task exists only on this computer. Pull leaves it unchanged.";
+    case "not_found":
+      return "This task no longer exists locally or in storage.";
+    case "blocked":
+      return blockedConversationDetail(action);
+    default:
+      return humanize(action.action);
+  }
 }
 
 function finalPathPart(value: string): string {
@@ -170,21 +215,7 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
   for (const action of plan.conversation_actions ?? []) {
     const resourceId = action.source_resource_id
       ?? `${action.provider}:conversation:${action.thread_id}`;
-    const detail = action.action === "resolve_divergence"
-      ? "Preserves the local branch as a Codex-native fork, then restores the cloud branch into the original conversation."
-      : action.action === "create_local"
-        ? "Restores this cloud thread as a new local conversation."
-        : action.action === "fast_forward_local"
-          ? "Updates the local conversation to the reviewed cloud continuation."
-          : action.action === "store_only"
-            ? "Stores the cloud transcript without offering unsafe resume behavior."
-            : action.action === "keep_local"
-              ? "The local branch is ahead and will remain unchanged."
-              : action.action === "no_op"
-                ? "This conversation is already up to date."
-                : action.action === "blocked"
-                  ? "This conversation cannot be changed safely."
-                  : humanize(action.action);
+    const detail = conversationActionDetail(action);
     const item = ensure(
       resourceId,
       "project_data",
@@ -253,13 +284,12 @@ export function pendingIds(item: PullReviewItem, completedActionIds: ReadonlySet
 export function requiresApproval(item: PullReviewItem): boolean {
   return item.restoreActions
     .filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind))
-    .some((action) => action.requires_explicit_approval)
-    || item.conversationActions.some((action) => conversationActionRequiresApproval(action));
+    .some((action) => action.requires_explicit_approval);
 }
 
 export function keepsLocalConversation(item: PullReviewItem): boolean {
   return item.conversationActions.some((action) => (
-    action.action === "keep_local" || action.action === "require_pull"
+    action.action === "report_push_eligible" || action.action === "report_local_only"
   )) || (/^(codex|claude):session:/.test(item.resourceId)
     && item.restoreActions.some((action) => (
       action.kind.kind === "manual"
@@ -280,8 +310,7 @@ export function defaultSelected(item: PullReviewItem): boolean {
   const actions = item.restoreActions.filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind));
   const selectedConversationActions = item.conversationActions.filter(conversationActionSelectable);
   return (actions.length > 0 || selectedConversationActions.length > 0)
-    && actions.every((action) => !action.requires_explicit_approval)
-    && selectedConversationActions.every((action) => !conversationActionRequiresApproval(action));
+    && actions.every((action) => !action.requires_explicit_approval);
 }
 
 export function itemKindLabel(item: PullReviewItem): string {
@@ -298,15 +327,11 @@ export function itemKindLabel(item: PullReviewItem): string {
 
 function conversationActionSelectable(action: ConversationPlanAction): boolean {
   return [
-    "fast_forward_local",
-    "resolve_divergence",
+    "adopt_cloud_metadata",
+    "materialize_cloud",
+    "keep_both",
     "create_local",
-    "replace_local",
   ].includes(action.action);
-}
-
-function conversationActionRequiresApproval(action: ConversationPlanAction): boolean {
-  return action.action === "replace_local";
 }
 
 export function buildPullReviewSelection(
@@ -314,26 +339,12 @@ export function buildPullReviewSelection(
   selected: ReadonlySet<string>,
   completedActionIds: ReadonlySet<string>,
   completedResourceIds: ReadonlySet<string>,
-  conversationResolutions: ReadonlyMap<string, ConversationResolutionSelection> = new Map(),
 ): PullReviewSelection {
   const chosen = items.filter((item) => selected.has(item.resourceId) && !completedResourceIds.has(item.resourceId));
-  const chosenConversationActions = chosen.flatMap((item) => (
-    item.conversationActions.filter((action) => (
-      conversationActionSelectable(action) && !completedActionIds.has(action.action_id)
-    ))
-  ));
   return {
     resourceIds: chosen
       .filter((item) => pendingIds(item, completedActionIds).length > 0)
       .map((item) => item.resourceId),
     restoreActionIds: chosen.flatMap((item) => restoreActionIds(item).filter((id) => !completedActionIds.has(id))),
-    conversationResolutions: chosenConversationActions
-      .filter((action) => action.action === "resolve_divergence")
-      .map((action) => conversationResolutions.get(action.action_id) ?? {
-        action_id: action.action_id,
-        resolution: action.divergence?.recommended_resolution
-          ?? "preserve_local_with_native_fork",
-        destructive_approved: false,
-      }),
   };
 }

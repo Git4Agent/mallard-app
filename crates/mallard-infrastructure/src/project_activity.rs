@@ -11,12 +11,13 @@
 use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
 use crate::providers::{
     ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionActionRequest,
-    SessionActionSurface, SessionDiscoveryContext, SessionFileSummary,
+    SessionDiscoveryContext, SessionFileSummary,
 };
 use crate::storage_core::ConfiguredObjectStore;
 use mallard_domain::{
-    conversation_resource_id, initial_conversation_thread_id, BindingState, BundleSnapshot,
-    LocalProjectId, MaterializationStatus, ProviderKey, StorageId, SyncScopeKey,
+    conversation_resource_id, initial_conversation_thread_id, ActionStatus, BindingState,
+    BundleSnapshot, LocalProjectId, MaterializationStatus, Materializations, ProviderKey,
+    StorageId, SyncScopeKey, ThreadId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -82,6 +83,9 @@ pub struct ProjectSessionSummary {
     pub source: SessionSourceState,
     pub access: ProviderAccessState,
     pub title: String,
+    /// True only when a successful divergent Pull receipt identifies this
+    /// local logical thread as the preserved side of keep-both.
+    pub is_preserved_local: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     pub started_at: u64,
@@ -594,11 +598,29 @@ pub fn merge_activity_sessions(
     registry: &ProviderRegistry,
     repository: &LocalStateRepository,
     resolved: &ResolvedActivityProject,
+    materializations: &Materializations,
     local: Vec<LocalSessionRecord>,
     remote: Vec<RemoteSessionRecord>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<ProjectSessionSummary>, String> {
     let bindings = repository.load_conversation_bindings()?;
+    let preserved_local_threads = materializations
+        .records
+        .iter()
+        .filter(|record| {
+            record.host_id == resolved.binding.host_id
+                && record.replica_id == resolved.binding.replica_id
+                && record.local_project_id == resolved.project_id
+        })
+        .flat_map(|record| &record.receipts)
+        .filter(|receipt| receipt.status == ActionStatus::Applied)
+        .filter_map(|receipt| receipt.conversation.as_ref())
+        .filter(|receipt| {
+            receipt.host_id == resolved.binding.host_id
+                && receipt.replica_id == resolved.binding.replica_id
+        })
+        .filter_map(|receipt| receipt.preserved_thread_id.clone())
+        .collect::<BTreeSet<ThreadId>>();
     let mut thread_by_session: BTreeMap<(ProviderKey, String), mallard_domain::ThreadId> =
         BTreeMap::new();
     for binding in &bindings.bindings {
@@ -648,13 +670,15 @@ pub fn merge_activity_sessions(
         };
         let resource_id = conversation_resource_id(&record.provider, &thread_id)?;
         let access = provider_access(registry, resolved, &record.provider);
-        let title = record
-            .summary
-            .title
-            .clone()
+        let title = (record.display_name != record.session_id)
+            .then(|| record.display_name.clone())
             .filter(|title| !title.trim().is_empty())
             .or_else(|| {
-                (record.display_name != record.session_id).then(|| record.display_name.clone())
+                record
+                    .summary
+                    .title
+                    .clone()
+                    .filter(|title| !title.trim().is_empty())
             })
             .unwrap_or_else(|| {
                 format!(
@@ -670,7 +694,6 @@ pub fn merge_activity_sessions(
                     provider_session_id: &record.session_id,
                     is_local: access == ProviderAccessState::BoundReady,
                     transcript_path: Some(&record.physical_path),
-                    surface: SessionActionSurface::Activity,
                 })
             })
             .unwrap_or_default();
@@ -691,6 +714,7 @@ pub fn merge_activity_sessions(
                 source: SessionSourceState::LocalOnly,
                 access,
                 title,
+                is_preserved_local: preserved_local_threads.contains(&thread_id),
                 summary: record.summary.summary.clone(),
                 started_at,
                 ended_at,
@@ -755,6 +779,7 @@ pub fn merge_activity_sessions(
                 source: SessionSourceState::RemoteOnly,
                 access,
                 title,
+                is_preserved_local: false,
                 summary: None,
                 started_at,
                 ended_at,
@@ -831,10 +856,12 @@ pub fn get_project_activity(
         .iter()
         .map(|record| record.provider.clone())
         .collect::<BTreeSet<_>>();
+    let materializations = repository.load_materializations()?;
     let all_sessions = merge_activity_sessions(
         registry,
         repository,
         &resolved,
+        &materializations,
         local,
         remote,
         &mut warnings,
@@ -941,16 +968,16 @@ pub fn get_project_activity(
         window_start,
         window_end,
         next_before: has_older_sessions.then_some(window_start),
-        storage_sync: project_storage_sync(repository, local_project_id)?,
+        storage_sync: project_storage_sync(repository, local_project_id, &materializations)?,
     })
 }
 
 fn project_storage_sync(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
+    materializations: &Materializations,
 ) -> Result<Vec<StorageSyncSummary>, String> {
     let config = repository.load_config()?;
-    let materializations = repository.load_materializations()?;
     let mut result = Vec::new();
     for link in config
         .links
@@ -1548,7 +1575,7 @@ fn git_error(action: &str, output: &Output) -> String {
 mod activity_only_tests {
     use super::*;
     use crate::providers::{
-        AgentProviderAdapter, DivergenceStyle, MaterializationTargetRequest, PlannedProviderTarget,
+        AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget,
         ProviderCapabilityLevel, ProviderDescriptor, SessionActionOutcome, SessionAnalysis,
         SessionEventDetail, SessionFileMetadata, SessionRewriteRequest, SessionTimelineContext,
         SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
@@ -1596,10 +1623,6 @@ mod activity_only_tests {
             ProviderCapabilityLevel::ActivityOnly
         }
 
-        fn divergence_style(&self) -> DivergenceStyle {
-            DivergenceStyle::AdapterFileFork
-        }
-
         fn discover(
             &self,
             _context: &SessionDiscoveryContext<'_>,
@@ -1609,7 +1632,7 @@ mod activity_only_tests {
                     session_id: "session-1".to_string(),
                     relative_cwd: ".".to_string(),
                     physical_path: self.transcript.clone(),
-                    display_name: "Session one".to_string(),
+                    display_name: "Session one (3)".to_string(),
                     blocked_reason: None,
                 }],
                 ..Default::default()
@@ -1704,7 +1727,7 @@ mod activity_only_tests {
     }
 
     #[test]
-    fn activity_cache_miss_calls_summary_but_no_rich_timeline_method() {
+    fn activity_cache_miss_uses_native_title_without_rich_timeline_method() {
         let temporary = tempfile::tempdir().unwrap();
         let home = temporary.path().join("provider");
         let project_root = temporary.path().join("project");
@@ -1758,6 +1781,79 @@ mod activity_only_tests {
         let rows =
             scan_local_sessions(&repository, &registry, &resolved, false, &mut warnings).unwrap();
         assert_eq!(rows.len(), 1);
+        let empty_materializations = repository.load_materializations().unwrap();
+        let sessions = merge_activity_sessions(
+            &registry,
+            &repository,
+            &resolved,
+            &empty_materializations,
+            rows.clone(),
+            Vec::new(),
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, "Session one (3)");
+        assert!(!sessions[0].is_preserved_local);
+
+        let preserved_thread_id = initial_conversation_thread_id(
+            &resolved.bundle_id,
+            &ProviderKey::parse("instrumented").unwrap(),
+            "session-1",
+        )
+        .unwrap();
+        let materializations: Materializations = serde_json::from_value(serde_json::json!({
+            "schema": 1,
+            "revision": 1,
+            "records": [{
+                "materialization_id": "materialization-test",
+                "plan_id": "plan-test",
+                "host_id": resolved.binding.host_id.to_string(),
+                "replica_id": resolved.binding.replica_id.to_string(),
+                "local_project_id": resolved.project_id.to_string(),
+                "storage_id": "storage-test",
+                "bundle_id": resolved.bundle_id.to_string(),
+                "revision": 1,
+                "commit_id": "commit-test",
+                "manifest_sha256": "a".repeat(64),
+                "binding_revision": resolved.binding.revision,
+                "status": "complete",
+                "applied_at": 2,
+                "receipts": [{
+                    "action_id": "action-test",
+                    "resource_id": "instrumented:conversation:thread-original",
+                    "action_type": "materialize_conversation",
+                    "status": "applied",
+                    "applied_at": 2,
+                    "conversation": {
+                        "host_id": resolved.binding.host_id.to_string(),
+                        "replica_id": resolved.binding.replica_id.to_string(),
+                        "thread_id": "thread-original",
+                        "provider_profile_id": "profile-test",
+                        "provider_thread_id": "provider-remote",
+                        "materialization_state": "resumable",
+                        "cloud_revision": 1,
+                        "cloud_commit_id": "commit-test",
+                        "cloud_manifest_sha256": "a".repeat(64),
+                        "journal_operation_id": "conversation-operation-test",
+                        "preserved_thread_id": preserved_thread_id.to_string(),
+                        "source_disposition": "retained"
+                    }
+                }]
+            }]
+        }))
+        .unwrap();
+        let preserved_sessions = merge_activity_sessions(
+            &registry,
+            &repository,
+            &resolved,
+            &materializations,
+            rows,
+            Vec::new(),
+            &mut warnings,
+        )
+        .unwrap();
+        assert!(preserved_sessions[0].is_preserved_local);
         assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(timeline_calls.load(Ordering::SeqCst), 0);
     }

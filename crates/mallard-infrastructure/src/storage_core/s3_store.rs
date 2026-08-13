@@ -774,6 +774,57 @@ impl S3ObjectStore {
         }
     }
 
+    async fn delete_async(&self, key: &ObjectKey) -> Result<(), String> {
+        let request = self
+            .client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key.as_str())
+            .send();
+        match timeout(self.request_timeout, request).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) if sdk_status(&error) == Some(404) => Ok(()),
+            Ok(Err(error)) if ambiguous_sdk_error(&error) => {
+                self.resolve_ambiguous_delete(key, &error.to_string()).await
+            }
+            Ok(Err(error)) => Err(format!("S3 delete '{}': {}", key, error)),
+            Err(_) => {
+                self.resolve_ambiguous_delete(
+                    key,
+                    &format!(
+                        "request timed out after {} ms",
+                        self.request_timeout.as_millis()
+                    ),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn resolve_ambiguous_delete(&self, key: &ObjectKey, cause: &str) -> Result<(), String> {
+        let request = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key.as_str())
+            .send();
+        match timeout(self.request_timeout, request).await {
+            Ok(Err(error)) if sdk_status(&error) == Some(404) => Ok(()),
+            Ok(Ok(_)) => Err(format!(
+                "S3 delete '{}' was ambiguous ({}) and the object is still present",
+                key, cause
+            )),
+            Ok(Err(error)) => Err(format!(
+                "S3 delete '{}' was ambiguous ({}); resolution read failed: {}",
+                key, cause, error
+            )),
+            Err(_) => Err(format!(
+                "S3 delete '{}' was ambiguous ({}); resolution read timed out",
+                key, cause
+            )),
+        }
+    }
+
     async fn list_async(
         &self,
         prefix: &ObjectPrefix,
@@ -1031,6 +1082,10 @@ impl ObjectStore for S3ObjectStore {
             "compare-and-swap",
             self.compare_and_swap_async(key, expectation, Bytes::copy_from_slice(bytes)),
         )
+    }
+
+    fn delete(&self, key: &ObjectKey) -> Result<(), String> {
+        self.run("delete", self.delete_async(key))
     }
 
     fn list(
@@ -1605,6 +1660,26 @@ mod tests {
                 etag: sha256_bytes(b"head-two")
             }
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exact_object_delete_is_idempotent() {
+        let server = TestS3::start().await;
+        let key = test_upload_key("delete-me");
+        server.seed(key.as_str().to_string(), b"value".to_vec());
+        let store = server.store();
+        let first_store = store.clone();
+        let first_key = key.clone();
+
+        blocking(move || first_store.delete(&first_key))
+            .await
+            .unwrap();
+        assert!(!server
+            .objects
+            .lock()
+            .expect("test S3 lock")
+            .contains_key(key.as_str()));
+        blocking(move || store.delete(&key)).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

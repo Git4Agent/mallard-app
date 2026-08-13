@@ -3,12 +3,39 @@ use crate::project_sync::conversation_sync::{
     default_conversation_decision, ConversationCapabilities,
 };
 use crate::project_sync::domain::{
-    classify_conversation_relation, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationRelation,
+    compare_conversation_tail, compute_portable_conversation_tail, ConversationPlanActionType,
+    ConversationPlanDirection, SyncCurrency, TailClassification, TailComparisonEvidence,
+    TailPartitionKind, TailSideEvidence,
 };
+
+fn whole_tail(chain: &[mallard_domain::CanonicalConversationMessage]) -> TailSideEvidence {
+    TailSideEvidence::Present(
+        compute_portable_conversation_tail(TailPartitionKind::WholeThread, 0, chain).unwrap(),
+    )
+}
+
+fn evidence(
+    accepted: TailSideEvidence,
+    local: TailSideEvidence,
+    cloud: TailSideEvidence,
+) -> TailComparisonEvidence {
+    TailComparisonEvidence {
+        accepted,
+        local,
+        cloud,
+        local_provenance_verified: true,
+        accepted_witness_verified: true,
+        cloud_ancestry_verified: true,
+        coordinates_verified: true,
+    }
+}
 
 #[test]
 fn divergence_is_pull_first_and_pull_defaults_to_keep_both() {
+    let base = analyzed_chain(&chain(
+        "thread-a",
+        &[("m-1", "shared"), ("m-2", "shared answer")],
+    ));
     let local = analyzed_chain(&chain(
         "thread-a",
         &[
@@ -25,8 +52,12 @@ fn divergence_is_pull_first_and_pull_defaults_to_keep_both() {
             ("m-cloud", "cloud branch"),
         ],
     ));
-    let relation = classify_conversation_relation(Some(&local), Some(&cloud));
-    assert_eq!(relation, ConversationRelation::Diverged);
+    let relation = compare_conversation_tail(evidence(
+        whole_tail(&base),
+        whole_tail(&local),
+        whole_tail(&cloud),
+    ));
+    assert_eq!(relation, TailClassification::Divergent);
 
     let push = default_conversation_decision(
         ConversationPlanDirection::Push,
@@ -35,24 +66,21 @@ fn divergence_is_pull_first_and_pull_defaults_to_keep_both() {
     );
     assert_eq!(push.action, ConversationPlanActionType::RequirePull);
     assert!(!push.selectable);
-    assert!(!push.selected_by_default);
 
     let pull = default_conversation_decision(
         ConversationPlanDirection::Pull,
         relation,
         ConversationCapabilities::default(),
     );
-    assert_eq!(pull.action, ConversationPlanActionType::ResolveDivergence);
+    assert_eq!(pull.action, ConversationPlanActionType::KeepBoth);
     assert!(pull.selectable);
-    assert!(pull.selected_by_default);
-    assert!(!pull.requires_explicit_approval);
 }
 
 #[test]
-fn unknown_lineage_never_becomes_a_push_fork() {
+fn unknown_evidence_never_becomes_a_push() {
     let push = default_conversation_decision(
         ConversationPlanDirection::Push,
-        ConversationRelation::Unknown,
+        TailClassification::Unknown,
         ConversationCapabilities::default(),
     );
     assert_eq!(push.action, ConversationPlanActionType::Blocked);
@@ -60,10 +88,10 @@ fn unknown_lineage_never_becomes_a_push_fork() {
 
     let pull = default_conversation_decision(
         ConversationPlanDirection::Pull,
-        ConversationRelation::Unknown,
+        TailClassification::Unknown,
         ConversationCapabilities::default(),
     );
-    assert_eq!(pull.action, ConversationPlanActionType::StoreOnly);
+    assert_eq!(pull.action, ConversationPlanActionType::Blocked);
     assert!(!pull.selectable);
 }
 
@@ -73,20 +101,24 @@ fn a_resolved_original_branch_reaches_a_noop_fixed_point() {
         "thread-a",
         &[("m-1", "shared"), ("m-cloud", "cloud branch")],
     ));
-    assert_eq!(
-        classify_conversation_relation(Some(&cloud), Some(&cloud)),
-        ConversationRelation::Identical
-    );
-    for direction in [
+    let relation = compare_conversation_tail(evidence(
+        whole_tail(&cloud),
+        whole_tail(&cloud),
+        whole_tail(&cloud),
+    ));
+    assert_eq!(relation, TailClassification::Sync(SyncCurrency::Current));
+    let push = default_conversation_decision(
         ConversationPlanDirection::Push,
+        relation,
+        ConversationCapabilities::default(),
+    );
+    assert_eq!(push.action, ConversationPlanActionType::NoChanges);
+    assert!(!push.selectable);
+    let pull = default_conversation_decision(
         ConversationPlanDirection::Pull,
-    ] {
-        let decision = default_conversation_decision(
-            direction,
-            ConversationRelation::Identical,
-            ConversationCapabilities::default(),
-        );
-        assert_eq!(decision.action, ConversationPlanActionType::NoOp);
-        assert!(!decision.selectable);
-    }
+        relation,
+        ConversationCapabilities::default(),
+    );
+    assert_eq!(pull.action, ConversationPlanActionType::AdoptCloudMetadata);
+    assert!(pull.selectable);
 }

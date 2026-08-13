@@ -369,7 +369,7 @@ test("confirming keep-local still submits an empty approved set so Pull can adva
       },
     },
     pullPlan,
-    { resourceIds: [], restoreActionIds: [], conversationResolutions: [] },
+    { resourceIds: [], restoreActionIds: [] },
     () => undefined,
   );
   assert.deepEqual(calls, ["restore:0", "verify"]);

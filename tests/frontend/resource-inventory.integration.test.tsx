@@ -30,8 +30,6 @@ function decision(
     action,
     reason_code: reasonCode,
     selectable,
-    selected_by_default: selectable,
-    requires_explicit_approval: false,
   };
 }
 
@@ -72,9 +70,9 @@ function conversation(resourceId: string): ProjectResourceDescriptor {
 }
 
 test("recommended Push selection includes only locally changed sessions", () => {
-  const localAhead = conversation("codex:session:local-ahead");
-  const synced = conversation("codex:session:synced");
-  const storageAhead = conversation("codex:session:storage-ahead");
+  const localAhead = conversation("codex:conversation:local-ahead");
+  const synced = conversation("codex:conversation:synced");
+  const storageAhead = conversation("codex:conversation:storage-ahead");
   const sessionIndex = conversation("codex:session-index");
   const memory = memoryResource("frontend-memory");
   const comparison: ThreadSyncComparison = {
@@ -92,8 +90,8 @@ test("recommended Push selection includes only locally changed sessions", () => 
         state: "local_ahead",
         local_present: true,
         storage_present: true,
-        push_decision: decision("fast_forward_cloud", "cloud_prefix_of_local", true),
-        pull_decision: decision("keep_local", "cloud_prefix_of_local"),
+        push_decision: decision("publish", "local_outstanding", true),
+        pull_decision: decision("report_push_eligible", "local_outstanding"),
       },
       {
         thread_id: "synced",
@@ -102,8 +100,8 @@ test("recommended Push selection includes only locally changed sessions", () => 
         state: "synced",
         local_present: true,
         storage_present: true,
-        push_decision: decision("no_op", "identical"),
-        pull_decision: decision("no_op", "identical"),
+        push_decision: decision("no_changes", "sync_current"),
+        pull_decision: decision("no_changes", "sync_current"),
       },
       {
         thread_id: "storage-ahead",
@@ -112,8 +110,8 @@ test("recommended Push selection includes only locally changed sessions", () => 
         state: "storage_ahead",
         local_present: true,
         storage_present: true,
-        push_decision: decision("require_pull", "local_prefix_of_cloud"),
-        pull_decision: decision("fast_forward_local", "local_prefix_of_cloud", true),
+        push_decision: decision("require_pull", "cloud_outstanding"),
+        pull_decision: decision("materialize_cloud", "cloud_outstanding", true),
       },
     ],
   };
@@ -151,9 +149,9 @@ test("recommended Push selection includes only locally changed sessions", () => 
 });
 
 test("non-uploadable sessions cannot remain in the active Push selection", () => {
-  const localAhead = conversation("codex:session:local-ahead");
-  const synced = conversation("codex:session:synced");
-  const storageAhead = conversation("codex:session:storage-ahead");
+  const localAhead = conversation("codex:conversation:local-ahead");
+  const synced = conversation("codex:conversation:synced");
+  const storageAhead = conversation("codex:conversation:storage-ahead");
   const comparison: ThreadSyncComparison = {
     project_id: "project-a",
     storage_id: "storage-a",
@@ -169,8 +167,8 @@ test("non-uploadable sessions cannot remain in the active Push selection", () =>
         state: "local_ahead",
         local_present: true,
         storage_present: true,
-        push_decision: decision("fast_forward_cloud", "cloud_prefix_of_local", true),
-        pull_decision: decision("keep_local", "cloud_prefix_of_local"),
+        push_decision: decision("publish", "local_outstanding", true),
+        pull_decision: decision("report_push_eligible", "local_outstanding"),
       },
       {
         thread_id: "synced",
@@ -179,8 +177,8 @@ test("non-uploadable sessions cannot remain in the active Push selection", () =>
         state: "synced",
         local_present: true,
         storage_present: true,
-        push_decision: decision("no_op", "identical"),
-        pull_decision: decision("no_op", "identical"),
+        push_decision: decision("no_changes", "sync_current"),
+        pull_decision: decision("no_changes", "sync_current"),
       },
       {
         thread_id: "storage-ahead",
@@ -189,8 +187,8 @@ test("non-uploadable sessions cannot remain in the active Push selection", () =>
         state: "storage_ahead",
         local_present: true,
         storage_present: true,
-        push_decision: decision("require_pull", "local_prefix_of_cloud"),
-        pull_decision: decision("fast_forward_local", "local_prefix_of_cloud", true),
+        push_decision: decision("require_pull", "cloud_outstanding"),
+        pull_decision: decision("materialize_cloud", "cloud_outstanding", true),
       },
     ],
   };
@@ -206,7 +204,7 @@ test("non-uploadable sessions cannot remain in the active Push selection", () =>
 });
 
 test("conversation divergence holds only its thread instead of blocking Push", () => {
-  const resource = conversation("codex:session:diverged");
+  const resource = conversation("codex:conversation:diverged");
   const entry = {
     thread_id: "provider-diverged",
     resource_id: resource.resource_id,
@@ -214,8 +212,8 @@ test("conversation divergence holds only its thread instead of blocking Push", (
     state: "diverged" as const,
     local_present: true,
     storage_present: true,
-    push_decision: decision("require_pull", "diverged"),
-    pull_decision: decision("resolve_divergence", "diverged", true),
+    push_decision: decision("require_pull", "divergent"),
+    pull_decision: decision("keep_both", "diverged", true),
   };
   const comparison: ThreadSyncComparison = {
     project_id: "project-a",
@@ -318,6 +316,26 @@ test("the push review is one screen: header actions, list, Push in the footer", 
   assert.doesNotMatch(html, /Remote history is missing/);
 });
 
+test("an irrecoverable Push error replaces retry with the local-state reset", () => {
+  const resource = memoryResource("review");
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={[resource]}
+      selected={new Set([resource.resource_id])}
+      projectDefaults={new Set([resource.resource_id])}
+      busy={false}
+      error="conversation Push action 'action-a' is stale at LineageDigest"
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+      onResetMetadata={() => undefined}
+    />,
+  );
+
+  assert.match(html, /Reset local sync state/);
+  assert.match(html, /data-icon="trash"/);
+});
+
 test("two steps render two plain tabs — never a Review tab", () => {
   const resource = memoryResource("review");
   const html = renderToStaticMarkup(
@@ -341,6 +359,9 @@ test("two steps render two plain tabs — never a Review tab", () => {
   assert.doesNotMatch(html, />Review</);
   assert.doesNotMatch(html, /Next: |Back: /, "tabs are navigation, not a wizard");
   assert.match(html, />Push<\/button>/);
+  const primary = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[\s\S]*?<\/button>/)?.[0] ?? "";
+  assert.match(primary, /data-thread-status="local-outstanding"/);
+  assert.doesNotMatch(primary, /data-icon="upload"/);
 });
 
 test("destination gates never render inside the push review", () => {
@@ -413,8 +434,8 @@ test("an unreviewed storage and a changed binding each get their own plain sente
 });
 
 test("held threads and storage blockers share one banner with one way forward", () => {
-  const held = conversation("codex:session:held");
-  const pushable = conversation("codex:session:pushable");
+  const held = conversation("codex:conversation:held");
+  const pushable = conversation("codex:conversation:pushable");
   const comparison: ThreadSyncComparison = {
     project_id: "project-a",
     storage_id: "storage-a",
@@ -431,8 +452,8 @@ test("held threads and storage blockers share one banner with one way forward", 
         local_present: true,
         storage_present: true,
         cloud_thread_id: "thread-held",
-        push_decision: decision("require_pull", "diverged"),
-        pull_decision: decision("resolve_divergence", "diverged", true),
+        push_decision: decision("require_pull", "divergent"),
+        pull_decision: decision("keep_both", "diverged", true),
       },
       {
         thread_id: "pushable",
@@ -441,8 +462,8 @@ test("held threads and storage blockers share one banner with one way forward", 
         state: "local_ahead",
         local_present: true,
         storage_present: true,
-        push_decision: decision("fast_forward_cloud", "cloud_prefix_of_local", true),
-        pull_decision: decision("keep_local", "cloud_prefix_of_local"),
+        push_decision: decision("publish", "local_outstanding", true),
+        pull_decision: decision("report_push_eligible", "local_outstanding"),
       },
     ],
   };
@@ -461,12 +482,15 @@ test("held threads and storage blockers share one banner with one way forward", 
       onPull={() => undefined}
     />,
   );
+  const bannerZone = (markup: string) => markup.match(/<div class="sync-review-banners">[\s\S]*?<\/div><\/div>/)?.[0];
 
   assert.equal(html.match(/sync-sync-review-pull-holds/g)?.length, 1, "one banner, not two");
   assert.match(html, />1 conversation held for Pull</);
   assert.match(html, /Storage has newer versions\. Selected threads still push\./);
   assert.equal(html.match(/Open Pull review/g)?.length, 1);
   assert.match(html, /class="sync-callout sync-sync-review-pull-holds" role="status"/);
+  assert.match(bannerZone(html) ?? "", /data-thread-status="divergent"/);
+  assert.doesNotMatch(bannerZone(html) ?? "", /data-icon="git-compare-arrows"/);
   // The held thread keeps its cloud version and Push stays available for the rest.
   const pushButton = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[^>]*>/)?.[0];
   assert.doesNotMatch(pushButton ?? "", /disabled=""/);
@@ -488,7 +512,6 @@ test("held threads and storage blockers share one banner with one way forward", 
       onPull={() => undefined}
     />,
   );
-  const bannerZone = (markup: string) => markup.match(/<div class="sync-review-banners">[\s\S]*?<\/div><\/div>/)?.[0];
   assert.ok(bannerZone(html), "the held banner renders");
   assert.equal(bannerZone(deselected), bannerZone(html), "the banner zone does not change with selection");
 });
@@ -514,23 +537,19 @@ test("the pixel skin transitions nothing, so a tick cannot flicker its neighbour
 });
 
 test("a row's status icon is keyed off its state, not off the selection", () => {
-  // The icon sits beside the checkbox: keying it off the selection-dependent
-  // decision phrase swapped the glyph under the very cursor that ticked it.
+  // Review and Activity share the same status presentation and pixel badge.
+  // The selection-dependent phrase may change, but the status glyph does not.
   const source = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
-  const map = source.match(/const REVIEW_STATE_ICONS[\s\S]*?\};/)?.[0] ?? "";
-  assert.match(map, /local_ahead: "upload"/, "the map is keyed by entry state");
-  assert.match(map, /storage_ahead: "download"/);
-  assert.doesNotMatch(map, /"Not selected"|"Update cloud"/, "no selection-dependent phrases key the icon");
-  // The phrase still reaches the user, in the tooltip and the label, where it
-  // costs no layout.
-  assert.match(source, /REVIEW_STATE_ICONS\[state \?\? "unknown"\]/);
-  assert.doesNotMatch(source, /REVIEW_STATE_ICONS\[label\]/, "the label must not pick the icon");
+  assert.doesNotMatch(source, /REVIEW_STATE_ICONS|SyncDecisionBadge/);
+  assert.match(source, /function ReviewSyncIndicator/);
+  assert.match(source, /const presentation = sessionSyncPresentation\(entry, storageName\)/);
+  assert.match(source, /<ThreadStatusIcon status=\{presentation\.status\} size=\{18\} \/>/);
 });
 
 test("the header count reserves its widest slot so ticking a row moves no icon", () => {
   // tabular-nums equalises digit widths but not digit counts: 9 → 10 grew the
   // string by a character and pushed the header's icon buttons 6px sideways.
-  const rows = Array.from({ length: 13 }, (_, i) => conversation(`codex:session:n${i}`));
+  const rows = Array.from({ length: 13 }, (_, i) => conversation(`codex:conversation:n${i}`));
   const comparison: ThreadSyncComparison = {
     project_id: "project-a",
     storage_id: "storage-a",
@@ -545,8 +564,8 @@ test("the header count reserves its widest slot so ticking a row moves no icon",
       state: "local_ahead" as const,
       local_present: true,
       storage_present: true,
-      push_decision: decision("fast_forward_cloud", "cloud_prefix_of_local", true),
-      pull_decision: decision("keep_local", "cloud_prefix_of_local"),
+      push_decision: decision("publish", "local_outstanding", true),
+      pull_decision: decision("report_push_eligible", "local_outstanding"),
     })),
   };
   const html = renderToStaticMarkup(
@@ -579,7 +598,7 @@ test("a selected item that cannot be captured reports in the footer, not above t
   // The banner zone sits above the list inside the scroll: a banner that
   // appeared on a checkbox click would shove the clicked row out from under
   // the cursor (measured at 255px before this fix).
-  const broken = conversation("codex:session:broken");
+  const broken = conversation("codex:conversation:broken");
   const comparison: ThreadSyncComparison = {
     project_id: "project-a",
     storage_id: "storage-a",
@@ -595,8 +614,8 @@ test("a selected item that cannot be captured reports in the footer, not above t
         state: "unavailable",
         local_present: true,
         storage_present: false,
-        push_decision: decision("create_cloud", "local_only", true),
-        pull_decision: decision("no_op", "local_only"),
+        push_decision: decision("create_cloud", "missing_cloud", true),
+        pull_decision: decision("report_local_only", "missing_cloud"),
       },
     ],
   };

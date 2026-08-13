@@ -1,6 +1,6 @@
 # Mallard Current Metadata Layout
 
-**Code snapshot:** August 7, 2026<br>
+**Code snapshot:** August 11, 2026 (portable-tail conversation resolver)<br>
 **Application version:** 0.1.2<br>
 **Scope:** the active project-sync and scope-rowed Library implementations in
 this repository.
@@ -134,10 +134,10 @@ on demand.
 | Path | Purpose | Important contents | Portable? |
 | --- | --- | --- | --- |
 | `host_identity.json` | Installation identity | Schema/revision, private 128-bit `host_id`, optional local display name, timestamps | No |
-| `sync_config.json` | User configuration and project/storage catalog | Storage definitions, S3 credentials, local projects, storage links, recipes, project-content preferences, per-storage reviewed bases | No |
+| `sync_config.json` | User configuration and project/storage catalog | Storage definitions, S3 credentials, local projects, storage links, recipes, project-content preferences, per-storage reviewed bases, per-link conversation checkpoints (accepted portable tail + witness, observed tail, physical mapping cursor, prefix witness) | No |
 | `machine_projects.json` | Machine path and provider-profile catalog | Exact and canonical checkout paths, exact and canonical provider-home paths, host/replica IDs, project/profile bindings, binding revisions and state | No |
-| `conversation_bindings.json` | Local-to-portable conversation identity map | Mallard thread ID, provider thread ID, project/replica/profile scope, materialization state, observed file/lineage/semantic hashes, source manifest pin, `forked_from`, local origin aliases | No |
-| `conversation_sync_journal.json` | Crash-recoverable conversation transactions | In-flight Push publication, Pull materialization, and Codex divergence operations with phases, target paths, expectations, backups, executor outcomes, and revision/hash pins | No |
+| `conversation_bindings.json` | Local-to-portable conversation identity map | Mallard thread ID, provider thread ID, project/replica/profile scope, materialization state, immutable root tail layout (codec, partition kind, fixed start), `forked_from` provenance hint | No |
+| `conversation_sync_journal.json` | Crash-recoverable conversation transactions | In-flight Push publications (CandidateUploaded, HeadAdvanced, LocalCommitted, terminal phases) and Pull materializations (TargetStaged, ProviderCommitted, LocalCommitted, terminal phases), each embedding the exact whole-document `SyncConfig` and `ConversationBindings` before/after states that recovery installs verbatim | No |
 | `materializations.json` | Durable Pull history | Plan and bundle coordinates, status, action receipts, absolute targets, backup paths, conversation receipts, errors | No |
 | `activity_cache.json` | Local session-history acceleration for every bound provider | File size/mtime keys, provider key, parsed ownership, cwd, Git/session metrics, and identities; cached title, summary, and chat text are deliberately omitted | No |
 | `catalog_resource_profiles.json` | Machine-local Codex/Claude Library profiles | Provider key, display name, configured `CODEX_HOME`/`CLAUDE_CONFIG_DIR` path, revisions | No |
@@ -209,9 +209,22 @@ One provider thread ID may have only one owner for a given host/profile.
 `conversation_bindings.json` also records:
 
 - whether the provider copy is `pending`, `resumable`, or `stored_only`;
-- the last observed provider-file, head-message, lineage, and semantic hashes;
-- the source cloud revision and manifest hash; and
-- `forked_from` for a locally preserved divergence branch.
+- the immutable root tail layout — codec, partition kind
+  (`whole_thread` or `fixed_paginated_tail`), and the fixed start record
+  count — seeded at first full parse or imported from the verified cloud
+  value at Pull install; and
+- `forked_from` as a provenance hint that is surfaced but never used for
+  matching or classification.
+
+Acceptance state does not live on the binding. Each `ProjectStorageLink` in
+`sync_config.json` holds per-provider-scope conversation checkpoints: the
+accepted five-field portable tail with its commit/manifest witness, the
+replaceable observed tail, the physical mapping cursor with a raw-range pin
+and trailing probe window, the machine-local prefix witness over the fixed
+prefix, and generation/binding-revision fences. Removing a project removes
+its links and checkpoints; bindings and layouts survive, and a re-registered
+project re-proves acceptance by refolding the reviewed cloud tail against
+the local chain before it may push again.
 
 The portable manifest has its own conversation entry keyed by Mallard
 `thread_id`. It includes `source_thread_id`, so the provider-native source ID
@@ -271,9 +284,13 @@ skill/pet replacement backups use
 `catalog_resource_operations.json`. Codex path-repair operations use a
 generated `pathrepair-*` directory.
 
-### 3.6 Pull-first Codex divergence metadata
+### 3.6 Divergence and keep-both metadata
 
-For:
+Relations come from one shared classifier over three portable tails — the
+accepted pin `P`, the derived local value `L`, and the verified cloud value
+`C` — plus verification gates. A pinned pair with `L != P` and `C != P` is
+`Divergent`; an unpinned pair that cannot be proven is `Unknown` and blocks
+both directions. For:
 
 ```text
 local t = (m1, m2, m3)
@@ -281,37 +298,34 @@ cloud t = (m1, m2, m4)
 ```
 
 Push records a reviewed `require_pull` action and does not mutate cloud
-storage. Pull records one `resolve_divergence` action with:
+storage. Pull's default divergence resolution is keep-both, planned as one
+materialization action with:
 
-- a pre-minted preserved Mallard thread ID `t'`;
-- the source provider thread ID and local lineage/semantic hashes;
-- pinned local/cloud titles and the planned fork/original names;
-- the exact Codex executable path and SHA-256;
-- the ordered executor list `app_server_stdio`, `native_pty`, `manual`; and
-- provider children that existed before the attempt, pinned by ID and
-  transcript hash.
+- a pre-minted preserved Mallard thread ID `t'` and a fresh provider thread
+  ID for the re-materialized tracked thread, both persisted in the plan;
+- pinned accepted/local/cloud tails, raw-range hashes, and the immutable
+  commit/manifest coordinates; and
+- exact target paths with expected before-states.
 
-Choosing **preserve local with native fork** advances an operation through
-phases such as `prepared`, `replacement_staged`, `fork_attempt_pending`,
-`awaiting_manual_fork`, `fork_verified`, `local_fork_bound`,
-`provider_committed`, `bindings_committed`, and `local_committed`. The journal
-records each executor attempt and, after verification, the fork provider ID,
-absolute transcript path, and transcript hash.
+Apply never invokes Codex and never edits the preserved rollout: `t'` keeps
+the local bytes and the unchanged local layout under a re-keyed checkpoint
+with the accepted pin cleared, while `t` re-materializes the verified cloud
+graph under the fresh alias with the remote layout imported from the cloud
+value. The journal operation embeds the exact whole-document
+`ConversationBindings` and `SyncConfig` before/after states; recovery rolls
+the remaining document forward or terminalizes (`aborted_precommit`,
+`aborted_provider_collision`) without ever clobbering a foreign target.
 
 The completed local identity is:
 
 ```text
-t  -> cloud conversation, materialized into the original provider thread
-t' -> preserved local fork, with forked_from = t
+t  -> cloud conversation, re-materialized under a fresh provider alias
+t' -> preserved local branch, forked_from = t as a provenance hint
 ```
 
-Pull does not publish `t'`. Until a later reviewed Push, cloud still contains
-only its existing `t`. The transient operation is then removed from the
-journal; the durable outcome remains in conversation bindings,
-materialization receipts, and any retained backups.
-
-Choosing **use cloud only** follows the replacement path without creating
-`t'`.
+Pull does not publish `t'`. Its first reviewed Push publishes the preserved
+layout as a new cloud thread with no family metadata; until then cloud still
+contains only `t`.
 
 ### 3.7 Locks, atomicity, permissions, and recovery
 
@@ -631,6 +645,9 @@ files[]                       # path plus transcript/index/sidecar role
 lineage_status and codec
 optional head_message_id, message_count
 optional lineage_digest, semantic_digest
+portable_tail                 # codec, partition_kind, start_record_count,
+                              # accepted_end_record_count, accepted_tail_state;
+                              # required for Codex entries, end == message_count
 optional forked_from
 optional source_thread_id
 optional created_by_origin, last_updated_by_origin
@@ -781,9 +798,9 @@ so there is no active remote garbage collector for those orphans.
 - S3/R2 credentials, endpoints as local configuration, or storage exclusions.
 - Project-content exclusion preferences and other local trust decisions.
 - Provider-thread ownership bindings for a particular local profile.
-- Restore, dependency, Push, setup, or divergence review plans.
-- Operation journals, executor attempts, receipts, backups, quarantine files,
-  chat-history cache, or activity logs.
+- Restore, dependency, Push, or setup review plans.
+- Operation journals, receipts, backups, quarantine files, chat-history
+  cache, or activity logs.
 
 Publishing-origin tokens are HMAC-SHA-256 values derived from the private
 `host_id` and the bundle ID; replica tokens also include the local replica ID.
@@ -855,8 +872,8 @@ are authoritative.
 - [`commands.rs`](../src-tauri/src/project_sync/commands.rs): cross-document
   orchestration, typed Codex publication, and local/remote commit order.
 - [`conversation_materialization.rs`](../crates/mallard-infrastructure/src/conversation_materialization.rs):
-  intent payloads, provider-side stages, backups, recovery phases, native fork
-  execution, and journal cleanup.
+  intent payloads, provider-side stages, backups, recovery phases, journaled
+  whole-document installs, and journal cleanup.
 - [`bundle_engine.rs`](../crates/mallard-infrastructure/src/bundle_engine.rs):
   portable keys, marker/head/tag/manifest/commit formats, immutable objects,
   CAS, lazy verified-body access, restore plans, streamed apply, and backups.

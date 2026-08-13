@@ -7,9 +7,12 @@
   validation, and Pull materialization
 - Compatibility: clean cutover; no migration or legacy execution path
 - Related:
+  - [PLAN_MINIMAL_CONVERSATION_CONFLICT_RESOLVER_BACKEND.md](PLAN_MINIMAL_CONVERSATION_CONFLICT_RESOLVER_BACKEND.md)
   - [DESIGN_CODEX_FORK_LINEAGE_AND_DIVERGENCE_RESOLUTION.md](DESIGN_CODEX_FORK_LINEAGE_AND_DIVERGENCE_RESOLUTION.md)
   - [DESIGN_PUSH_PULL_FLOW.md](DESIGN_PUSH_PULL_FLOW.md)
   - [PLAN_CODEX_SUBAGENT_TREE_SYNC.md](PLAN_CODEX_SUBAGENT_TREE_SYNC.md)
+    (historical; superseded by the minimal backend plan for canonical
+    root-only conflict semantics and incidental subagent snapshot transport)
   - [PLAN_CODEX_SYNTHESIZED_FORK.md](PLAN_CODEX_SYNTHESIZED_FORK.md)
 
 ## Decision
@@ -46,7 +49,10 @@ referenced thread:
 
 Legacy Codex transcripts are already inline and remain on their existing
 path. This design does not convert legacy history into paginated history. The
-new reconstruction contract applies whenever the source is paginated.
+new reconstruction contract applies whenever the source is paginated. Here
+“legacy” names a supported provider-native Codex history mode, not an older
+Mallard schema or compatibility path: every captured conversation still uses
+the single current schema-1 portable-tail contract.
 
 ## Problem
 
@@ -120,9 +126,10 @@ agent --parent_thread_id--> spawning agent
 
 ### Mallard logical thread graph
 
-`ConversationThread.forked_from` records portable conflict provenance. It is
-never used to locate Codex history bytes. Reconstructing a provider transcript
-does not mint or change a Mallard `ThreadId`.
+`ConversationThread.forked_from`, where retained for unrelated provenance, is
+never used to locate Codex history bytes or make a conflict decision. The new
+resolver writes no family relation. Reconstructing a provider transcript does
+not mint or change a Mallard `ThreadId`.
 
 ## Standalone artifact contract
 
@@ -149,6 +156,36 @@ hold:
     authoritative metadata record.
 12. The artifact passes the same bounded structural and transcript analysis
     used for an ordinary captured rollout.
+
+The enclosing schema-1 Codex `ConversationThread` must additionally carry the
+standalone artifact layer's verified `artifact_sha256` and one valid portable
+tail value for the root conversation only:
+
+```text
+portable_tail = {
+  codec,
+  partition_kind,
+  start_record_count,
+  accepted_end_record_count,
+  accepted_tail_state
+}
+```
+
+That is the complete five-field wire value. Its start count maps into the
+reconstructed root conversation projection, its accepted end equals the
+complete end of that projection, and its cumulative state matches exactly the
+root messages from start through end. Tail count is derived as `end - start`;
+there is no prefix witness or second comparison fingerprint. This metadata is
+outside `session_meta`; it is not a new provider-native dependency. Included
+subagent files have ordinary object hashes but no portable tail entry and no
+conflict state.
+
+The canonical root conflict stream is not every physical root JSONL record. It
+excludes subagent lifecycle, spawn/reference/control, child-result, child ID,
+and child topology bookkeeping unless a record changes a canonical root
+conversation message. This exclusion never masks root message content: if the
+root conversation message projection changes, the root tail changes even when
+the provider emitted it beside subagent control records.
 
 An example first record is:
 
@@ -261,13 +298,24 @@ after removing only the allowed envelope changes:
 
 - top-level `ordinal` from every record;
 - authoritative `history_base`;
-- authoritative `history_mode` normalization; and
+- authoritative `history_mode` normalization;
 - authoritative `subagent_history_start_ordinal` when its recomputed value is
-  proven from record provenance.
+  proven from record provenance; and
+- the `thread_id` inside a current `event_msg`/`item_completed` envelope,
+  which is normalized to — or inserted as — the output root identity.
 
-Everything else, including timestamps inside payloads, durable response-item
-IDs, event payloads, tool results, copied ancestor metadata, and unknown
-forward-compatible records, must compare equal.
+Every original non-metadata record must otherwise compare equal, including
+timestamps inside payloads, durable response-item IDs, event payloads, tool
+results, copied ancestor metadata, and unknown forward-compatible records.
+
+Exactly two classes of inserted records are permitted, both produced by the
+frozen Codex paginated projection adapter
+(`codex_paginated_projection.rs`): `event_msg`/`item_completed` projections
+for recognized display completions, and `task_started`/`task_complete`
+lifecycle records for synthesized implicit `rollout-N` turns. Both classes
+are `event_msg` records, which the conversation codec ignores for chain
+identity. The projection pass is a fixpoint on its own output; the builder
+re-runs it over the serialized bytes and requires zero changes.
 
 The current `non_metadata_record_digest` used by native-fork verification is
 not directly sufficient because it includes top-level ordinals. The new
@@ -286,27 +334,25 @@ for content-addressed object reuse and no-op Push behavior.
 The Push plan records a machine-private closure witness:
 
 ```text
-target full-file SHA-256
-ordered dependency edges:
-  provider thread id
-  end byte offset
-  end ordinal exclusive
-  prefix SHA-256
-standalone artifact SHA-256
-lineage digest
-semantic digest
+exact source file identities and reviewed safe ends
+ordered fixed dependency edges and cutoffs
+raw SHA-256 pins for every planning-reviewed physical range
+portable root-tail kind/start and planned cumulative state
+exact local document preconditions and reviewed cloud manifest/HEAD
 ```
 
-Apply-time capture rebuilds the artifact and requires the reviewed witness to
-match. A safe append beyond a frozen dependency prefix does not invalidate
-the witness. A changed referenced prefix, truncated base, moved boundary,
-target drift, or changed output hash fails that item before upload.
+Planning does not reconstruct an artifact or compute output, artifact, lineage,
+or semantic hashes. Apply consumes the pinned source closure once, verifies the
+source witness while reading, reconstructs once, and computes those output
+values for the first time. A safe append beyond a frozen dependency prefix does
+not invalidate the child history. A truncated/replaced base, moved boundary,
+target drift, changed planned range, or changed cumulative tail state fails
+that item before upload.
 
-`LocalConversationBinding.last_observed_file_sha256` continues to describe
-the machine-local provider transcript. It must not be silently repurposed as
-the standalone artifact hash. The artifact hash already belongs to the
-portable file entry and operation pins; if a durable local artifact pin is
-needed, add a separately named field.
+Accepted cloud/tail state and physical tail mappings belong to the selected
+destination's local checkpoint, not to the provider alias binding. The
+portable file entry and reviewed operation pins retain complete artifact
+hashes; no field is reused for two meanings.
 
 ## Push flow
 
@@ -315,48 +361,138 @@ payloads. Reconstruction adds only bounded local reads.
 
 For each selected Codex thread:
 
-1. Re-capture the target and its exact dependency prefixes.
-2. Reconstruct and verify a deterministic standalone transcript.
-3. Re-prove the reviewed local and cloud relation from the canonical message
-   chain.
-4. Replace the raw provider transcript bytes in the captured portable
-   `ConversationFileRole::Transcript` with the standalone artifact bytes.
-5. Hash and upload that artifact through the existing immutable,
+1. During planning, observe the local cumulative tail and pin source
+   identities, cutoffs/EOFs, raw ranges, and the exact cloud HEAD needed to
+   reproduce it.
+2. Re-prove the reviewed local/cloud state by calling the one conservative
+   accepted-pin/local-tail/cloud-manifest-tail classifier shared by Refresh,
+   Push, and Pull. Do not run a command-specific comparison or full graph
+   containment refinement for two changed unequal tails.
+3. Continue only for `LocalOutstanding` or `MissingCloud`; every other result
+   exits before standalone reconstruction or upload.
+4. Finish planning without constructing standalone bytes or output hashes.
+5. During apply, verify the source pins while reading the complete root, exact
+   dependency prefixes, and bounded subagent closure once, then reconstruct
+   and verify each selected rollout as a deterministic standalone transcript.
+6. Replace the raw provider transcript bytes for the root and included
+   subagents with their standalone artifact bytes.
+7. Hash and upload that complete object set through the existing immutable,
    checksum-verified object path.
-6. Publish the existing conversation metadata and swing `head` with the
-   existing compare-and-swap.
-7. Commit receipts and binding pins only after publication is proven.
+8. Publish the complete conversation metadata, including its portable fixed
+   root-tail partition and accepted cumulative tail state, and swing `head` with
+   the existing compare-and-swap.
+9. Commit receipts and binding pins only after publication is proven.
 
 There is no fallback that uploads the unresolved physical child file. A
-reconstruction failure blocks only that conversation; other selected
-resources continue through the existing per-item isolation rules.
+blocked selected conversation produces a non-publishing review outcome for
+the batch; the user may deselect it and request a fresh plan. Mallard never
+silently filters a blocker and publishes a partial unreviewed subset.
 
-The portable manifest does not need local dependency paths or prefix pins.
-It continues to contain one transcript file for the logical conversation.
-The payload contract changes, but the schema-1 file role and content-addressed
-object model are sufficient. Clean-cutover acceptance should start with empty
-test storage so no pre-contract raw-dependent object can be mistaken for a
-standalone transcript.
+The portable manifest does not contain local dependency paths, native base
+IDs, byte offsets, source ordinals, or prefix pins. It does contain the
+provider-independent canonical partition required to continue tail hashing on
+another machine. The numeric portable bundle/head schema remains `1`, but its
+Codex contract is replaced in place and adds a required `portable_tail` value
+to every Codex `ConversationThread`. Old schema-1 shapes are rejected by exact
+shape/codec validation rather than migrated or interpreted by a legacy path.
+Old binaries/writers are unsupported after cutover because the unchanged
+number cannot provide mixed-version writer safety.
+
+A native root with no `history_base` uses a `WholeThread` partition at
+canonical boundary zero and retains complete whole-thread comparison. An exact
+native `history_base(base, cutoff)` seeds a `FixedPaginatedTail` partition at
+the corresponding canonical boundary and permits partial-range comparison. The
+partition kind and start remain fixed for that logical root across Pushes. A
+successful Push records accepted cumulative state = observed cumulative state;
+it does not reset the tail to empty or move its boundary.
+
+Resolving a chain of `history_base` dependencies does not create portable
+entries for its ancestors. Those ancestors are bounded local source segments
+used to flatten the selected leaf. There is exactly one portable tail value,
+for the owning root only. For
+`P0: m1,m2`, `P1: history(P0@m2)+m3`, and
+`P2: history(P1@m3)+m4,m5`, P2 contributes one root tail with start after
+`m3` and cumulative tail `Htail(m4,m5)`; the full standalone artifact still
+contains and byte-hashes `m1..m5`.
+
+Subagent rollout contents and topology do not participate in that root-tail
+hash. Equal root tails compare `Sync` even when the captured subagent files
+differ. Subagent lifecycle, spawn/reference/control, and child-result records
+in the root file are also excluded when they do not change a canonical root
+conversation message. A changed root conversation message always changes the
+projection and tail. A Sync operation does not upload or download subagent-only
+differences; the then-current subagent snapshot is carried only when a
+root-driven operation already needs the full artifact bytes.
+
+Each publishing Push builds and hashes the complete standalone root/subagent
+snapshot once during apply before upload. Pull materializes `history_base: null`,
+imports the cloud portable partition, and maps its canonical start and accepted
+end into the receiving machine's new physical rollout. The receiver therefore
+continues the same cumulative partial hash instead of falling back to
+whole-thread hashing.
 
 ## Pull flow
 
-Pull becomes simpler because every uploaded Codex transcript is
-self-contained:
+When the shared conflict classifier selects a materializing or keep-both
+action, Pull is simpler because every uploaded Codex transcript is
+self-contained. Manifest-only `Sync`/`LocalOutstanding` actions do not run
+this byte-consuming flow. Every current materializing action has exactly one
+new target: for Divergent, C reuses the existing P-local rollout unchanged and
+only cloud T is rebuilt as P-remote.
 
-1. Download and SHA-256 verify the selected transcript object.
-2. Require the authoritative paginated metadata to have
+Planning:
+
+1. Verify and pin the exact cloud HEAD and manifest.
+2. Validate and pin each selected root/subagent object's key, declared size,
+   SHA-256, file role, artifact SHA, and portable root-tail metadata.
+3. Allocate the fixed provider IDs and target paths required by the manifest's
+   declared file set.
+4. Pin local binding/checkpoint/source and document preconditions, including the
+   existing P-local rebind proof for Divergent.
+5. Do not download transcript objects, reconstruct/reidentify output, compute
+   output hashes, or create staging files.
+
+Apply:
+
+1. Revalidate the shared P/L/C relation, plan expiry, exact HEAD/manifest,
+   target absence, local pins, and document revisions.
+2. Download the selected root transcript and included subagent objects once,
+   verifying each declared size and SHA-256 while reading.
+3. Require the authoritative paginated metadata to have
    `history_base: null`; reject a non-null dependency instead of searching
    for another cloud or local thread.
-3. Run the existing bounded codec analysis and require the manifest's
+4. Run the existing bounded codec analysis and require the manifest's
    lineage and semantic claims to match.
-4. Rewrite only declared structural identity and CWD fields for the reviewed
-   destination provider thread.
-5. Preserve inline ancestor metadata, provenance fields, events, and the
+5. Validate the portable root-tail start/end and cumulative state against the
+   complete verified root projection. Do not derive any subagent comparison
+   state.
+6. Reidentify the selected root/subagent closure with plan-persisted provider
+   IDs, rewriting only declared structural identity and CWD fields for the
+   reviewed destination.
+7. Preserve inline ancestor metadata, provenance fields, events, and the
    subagent history boundary.
-6. Rebase ordinals only if the existing materialization rewrite changes the
+8. Rebase ordinals only if the existing materialization rewrite changes the
    record sequence; ordinary ID/CWD rewrites do not.
-7. Atomically stage, verify, commit, refresh Codex inventory best-effort, and
-   write the normal receipt and binding.
+9. Map the cloud canonical root-tail positions into the rewritten root file
+   and derive accepted = observed cumulative tail state.
+10. Validate the typed output invariants, then serialize once while emitted
+    bytes feed SHA-256 and private staging; fsync and pin identities/sizes/hashes.
+11. Build and journal the exact target and local mutations, no-clobber install,
+   commit bindings and SyncConfig, refresh Codex inventory best-effort, and
+   emit the receipt.
+
+Pull planning is metadata-only. Uninterrupted apply downloads the pinned input
+objects once, validates the typed reconstruction, and serializes/hashes the one
+remote output once. Input-object hashing and emitted-output hashing are distinct
+integrity checks over different bytes; the output itself is neither reparsed nor
+hashed twice. Recovery may rehash the journaled stage after a process boundary,
+but never downloads or reconstructs it again.
+In Divergent Pull, moving P-local from logical T to logical C is only a Mallard
+binding/checkpoint mutation. It does not rewrite the local root, its
+`session_meta`, provider ID, native history base, ordinals, compaction records,
+subagent references, index/title metadata, or any dependency source. If that
+existing alias cannot be proven safe and unique to rebind, Pull blocks instead
+of making a preserved copy.
 
 Pull never follows `forked_from_id` or `parent_thread_id` to locate history.
 A dangling provider parent remains valid provenance.
@@ -391,11 +527,17 @@ Consequences:
 - A native subagent with no `history_base` is already standalone; normalizing
   explicit null must not duplicate its copied context.
 
-The current product excludes internal subagent rollouts as independent cloud
-conversations. That product rule remains unchanged. If
-[PLAN_CODEX_SUBAGENT_TREE_SYNC.md](PLAN_CODEX_SUBAGENT_TREE_SYNC.md) later
-stores them as attached files, the same standalone validation applies to each
-attachment.
+Internal subagent rollouts are not independent cloud conversations. Under the
+current minimal backend plan, they belong to the owning root's bounded
+artifact snapshot, but they are excluded from the root `P`/`L`/`C` tail value
+and every conflict decision. Their differences create no separate
+state or Push/Pull action. An already root-driven byte-consuming operation
+still reidentifies, hashes, uploads, or downloads the complete selected
+subagent closure. The older
+[PLAN_CODEX_SUBAGENT_TREE_SYNC.md](PLAN_CODEX_SUBAGENT_TREE_SYNC.md) remains
+historical design context only; its provider-ID identity and parent-only
+digest/conflict rules are superseded. The same standalone byte validation
+applies to every included subagent artifact.
 
 ## Cloud overwrite behavior after this change
 
@@ -448,30 +590,34 @@ It owns:
 - deterministic serialization; and
 - before/after preservation verification.
 
-Suggested internal result:
+Suggested root-snapshot result:
 
 ```rust
-struct StandaloneCodexArtifact {
-    bytes: Vec<u8>,
-    source_thread_id: String,
-    source_file_sha256: String,
+struct StandaloneConversationArtifact {
+    root_provider_thread_id: String,
+    root_bytes: Vec<u8>,
+    subagents: Vec<StandaloneSubagentArtifact>,
     dependency_prefixes: Vec<CodexHistoryPrefixPin>,
+    id_map: Vec<StandaloneThreadAllocation>,
+    portable_tail: PortableConversationTail,
     artifact_sha256: String,
     lineage_digest: String,
     semantic_digest: String,
-    record_count: usize,
+    message_count: u64,
 }
 ```
 
 `dependency_prefixes` contains machine-private paths or path-derived state
 only in capture and reviewed-plan memory. It is never serialized into the
-portable manifest.
+portable manifest. `portable_tail` describes `root_bytes` only; no element of
+`subagents` owns or contributes a portable-tail entry. The aggregate artifact
+hash and per-file hashes still cover the complete root/subagent snapshot.
 
-`provider_capture.rs` should become a two-pass Codex capture:
+`provider_capture.rs` should support two distinct phases:
 
-1. discover and index rollout metadata; then
-2. reconstruct selected conversation artifacts from that immutable capture
-   snapshot.
+1. planning discovers the source closure and records exact source pins without
+   constructing output; then
+2. apply reconstructs each selected conversation once from those exact pins.
 
 Do not place filesystem traversal or provider-format parsing in
 `mallard-domain`. The domain continues to validate portable conversation
@@ -493,7 +639,8 @@ The selected conversation is not uploadable when any of these occurs:
 - `subagent_history_start_ordinal` cannot be mapped safely;
 - deterministic round-trip changes an unapproved payload field;
 - reconstructed lineage or semantic digest differs from the resolved source;
-  or
+- the root portable tail kind/start/end cannot be derived or uniquely mapped, or its
+  cumulative state does not match the reconstructed canonical range; or
 - apply-time prefix or target pins differ from the reviewed snapshot.
 
 The failure is a held Push row with a precise explanation. Mallard must not
@@ -504,7 +651,7 @@ silently downgrade to uploading raw dependent bytes or mark the conversation
 
 - Never read outside the canonical bound Codex session and archived-session
   trees.
-- Reject symlinks and special files at every dependency node.
+- Reject symlinks and special files at every dependency source file/segment.
 - Bound every file, prefix, line, record set, graph depth, and total closure.
 - Resolve provider IDs through the captured index, never by constructing an
   unchecked filesystem path from metadata.
@@ -526,6 +673,15 @@ silently downgrade to uploading raw dependent bytes or mark the conversation
   normalization.
 - One-level dependency reconstructs a contiguous standalone transcript.
 - Three-level chain reconstructs in the correct logical order.
+- A three-level root history chain produces one root portable tail; none of
+  its dependency source segments becomes another entry.
+- Adding, removing, or changing a subagent file does not change the root
+  portable tail value.
+- Equal root tails with different subagent snapshots classify `Sync` and do
+  not create another state or action.
+- Subagent lifecycle/reference/control-only and child-result changes in the
+  physical root file leave the root tail unchanged; changing a
+  canonical root conversation message changes it.
 - Sibling forks sharing one base produce independent artifacts.
 - A base append beyond `end_byte_offset` does not change the child artifact.
 - A changed byte inside the referenced prefix invalidates the plan pin.
@@ -564,6 +720,11 @@ the supported version changes.
 - Pull only a depth-three fork into an empty provider home.
 - Push the same unchanged dependency graph twice; the second Push uploads no
   new transcript object.
+- Equal roots with different subagent snapshots remain manifest-only `Sync`
+  and transfer no subagent object.
+- A root append that authorizes publication carries the selected local
+  subagent snapshot, and a later root-driven materializing Pull installs that
+  cloud snapshot with full per-object verification.
 - Two children sharing one base dedupe immutable objects while remaining
   independently restorable.
 - Review/apply drift inside a referenced prefix fails only that item.
@@ -574,6 +735,9 @@ the supported version changes.
   `history_base` is non-null.
 - Pull, re-capture, and Push converge to a no-op even though the destination
   provider thread ID and CWD differ from the original source.
+- A paginated child pushed by A, pulled as a null-base standalone rollout by
+  B, extended by B, and pushed again retains the same nonzero canonical tail
+  start and advances one cumulative tail state.
 
 ## Cutover
 
@@ -582,11 +746,13 @@ the supported version changes.
 3. Change Codex captured transcript bytes to the verified standalone artifact.
 4. Make Push reject any selected paginated Codex transcript that is not
    standalone after reconstruction.
-5. Make Pull apply reject any new paginated cloud transcript with non-null
-   `history_base`.
-6. Run the isolated Codex compatibility matrix and the complete backend
+5. Keep numeric schema 1, require the new Codex portable-tail shape, and reject
+   every old schema-1 shape without migration or fallback.
+6. Make Pull apply reject any new paginated cloud transcript with non-null
+   `history_base` or an unmappable portable tail checkpoint.
+7. Run the isolated Codex compatibility matrix and the complete backend
    integration suite.
-7. Clear test `~/.mallard` state and test storage before acceptance, consistent
+8. Clear test `~/.mallard` state and test storage before acceptance, consistent
    with the repository's clean-cutover policy.
 
 There is no feature flag, raw-dependent fallback, or dual writer. Once the
@@ -610,3 +776,8 @@ cutover lands, reconstruct-then-upload is the only Codex Push path.
    portable manifest, receipt, or log.
 8. Push publication remains immutable and CAS-committed; Pull remains
    reviewed, verified, backed up where needed, and atomically applied.
+9. A standalone null-base Pull preserves the sender's portable
+   `WholeThread`/`FixedPaginatedTail` partition and cumulative state.
+10. The portable tail is one root descriptor/state. Equal root projections are
+    `Sync` regardless of subagent snapshot or control bookkeeping, and
+    subagents travel only with an already root-driven byte-consuming Push/Pull.

@@ -571,6 +571,9 @@ fn cleanup_r2_setup_with(
     })
 }
 
+// The provisioned variant dwarfs the markers by design; boxing it would
+// change every construction site for no behavioral gain.
+#[allow(clippy::large_enum_variant)]
 enum DestinationPreflight {
     Available,
     Connected {
@@ -623,6 +626,7 @@ fn inspect_destination_preflight(
     Ok(DestinationPreflight::Available)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_idempotent_provision(
     _repository: &LocalStateRepository,
     journal: &R2SetupJournalStore,
@@ -693,6 +697,7 @@ fn verify_idempotent_provision(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reconcile_previous_tokens(
     repository: &LocalStateRepository,
     journal: &R2SetupJournalStore,

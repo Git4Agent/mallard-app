@@ -2309,6 +2309,10 @@ mod tests {
             self.inner.compare_and_swap(key, expectation, bytes)
         }
 
+        fn delete(&self, key: &ObjectKey) -> Result<(), String> {
+            self.inner.delete(key)
+        }
+
         fn list(
             &self,
             prefix: &ObjectPrefix,
@@ -2970,7 +2974,7 @@ mod tests {
             )
             .unwrap();
         assert!(
-            !plan.actions.iter().any(|action| is_generic_write(action)),
+            !plan.actions.iter().any(is_generic_write),
             "identical generic files must not re-enter review: {:?}",
             plan.actions
         );
@@ -2987,7 +2991,7 @@ mod tests {
                 0,
             )
             .unwrap();
-        assert!(plan.actions.iter().any(|action| is_generic_write(action)));
+        assert!(plan.actions.iter().any(is_generic_write));
     }
 
     /// Conversations belong exclusively to the typed pipeline now: a raw

@@ -1,41 +1,32 @@
 use super::harness::{codex, sha256, TranscriptBuilder, VariantWorld};
 use super::relation_matrix::reviewed_action;
-use crate::project_sync::codex_native_fork::CodexForkExecutionRequest;
-use crate::project_sync::commands::{
-    diverged_fork_preservation, pending_codex_divergence_with_repository, LocalThreadReview,
-};
 use crate::project_sync::conversation_codec::{
     analyze_codex_transcript, rewrite_codex_transcript, CodecLineage,
 };
 use crate::project_sync::conversation_materialization::{
-    apply_codex_divergence_locked, apply_conversation_cloud_publication,
-    apply_conversation_materialization, recover_conversation_cloud_publications,
-    recover_conversation_materializations, retry_codex_divergence_locked,
-    CodexDivergenceApplyOutcome, CodexDivergenceMaterializationRequest,
+    apply_conversation_cloud_publication, apply_conversation_materialization,
+    recover_conversation_cloud_publications, recover_conversation_materializations,
     ConversationCloudPublication, ConversationFailpoint, ConversationFailpoints,
     ConversationMaterializationRequest, ConversationTargetPayload, NoConversationFailpoints,
 };
 use crate::project_sync::conversation_sync::{
-    validate_conversation_action_pins, BindingResolution, ConversationStalePin,
+    validate_conversation_action_pins, ConversationStalePin,
 };
 use crate::project_sync::domain::{
-    conversation_resource_id, ActionId, BindingState, BundleId, BundleRecipe,
-    CodexDivergenceOperation, CodexForkAttempt, CodexForkAttemptStatus, CodexForkExecutor,
-    CodexInventoryRefreshStatus, ConversationCloudAnchor, ConversationDivergenceResolution,
-    ConversationFileRole, ConversationJournalTarget, ConversationMaterializationState,
-    ConversationNameStatus, ConversationOperationId, ConversationPlanActionType,
-    ConversationPlanDirection, ConversationPushPlan, ConversationReasonCode, ConversationRelation,
-    ConversationSyncOperation, ConversationSyncOperationKind, ConversationSyncPhase,
-    DivergenceReceiptKind, ForkOrigin, ForkStamp, LocalConversationBinding, LocalProjectId,
-    LocalProjectRegistration, LocalProviderProfileId, PlanId, ProjectBinding, ProviderKey,
-    ProviderProfile, ReplicaId, SessionPresentation, StorageId, TargetExpectation, ThreadId,
+    compute_portable_conversation_tail, BindingState, BundleId, BundleRecipe,
+    ConversationCloudAnchor, ConversationFileRole, ConversationJournalTarget,
+    ConversationMaterializationOperation, ConversationMaterializationState,
+    ConversationOperationId, ConversationPlanActionType, ConversationPlanDirection,
+    ConversationPublicationOperation, ConversationPushPlan, ConversationReasonCode,
+    ConversationSyncOperation, ConversationSyncOperationKind, LocalConversationBinding,
+    LocalProjectId, LocalProjectRegistration, LocalProviderProfileId, PlanId,
+    PortableConversationTail, ProjectBinding, ProviderKey, ProviderProfile, PullJournalPhase,
+    PushJournalPhase, ReplicaId, RootTailLayout, StorageId, SyncConfig, SyncCurrency,
+    TailClassification, TailPartitionKind, TargetExpectation, ThreadId, PORTABLE_TAIL_CODEC_V1,
     PUSH_PLAN_SCHEMA,
 };
 use crate::project_sync::persistence::LocalStateRepository;
-use crate::project_sync::provider_capture::{
-    self, capture_selected, discover_project, CaptureRequest,
-};
-use serde_json::{json, Value};
+use crate::project_sync::provider_capture::{capture_selected, discover_project, CaptureRequest};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
@@ -45,9 +36,9 @@ use std::path::PathBuf;
 fn every_reviewed_pin_rejects_independently_before_mutation() {
     let (action, baseline) = reviewed_action(
         ConversationPlanDirection::Pull,
-        ConversationPlanActionType::FastForwardLocal,
-        ConversationReasonCode::LocalPrefixOfCloud,
-        ConversationRelation::LocalPrefixOfCloud,
+        ConversationPlanActionType::MaterializeCloud,
+        ConversationReasonCode::CloudOutstanding,
+        TailClassification::CloudOutstanding,
     );
     type StaleCase = (
         ConversationStalePin,
@@ -171,65 +162,83 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
 fn every_typed_action_rejects_a_stale_plan_before_apply() {
     let actions = [
         (
-            ConversationPlanDirection::Pull,
-            ConversationPlanActionType::NoOp,
-        ),
-        (
-            ConversationPlanDirection::Pull,
-            ConversationPlanActionType::FastForwardLocal,
+            ConversationPlanDirection::Push,
+            ConversationPlanActionType::NoChanges,
+            TailClassification::Sync(SyncCurrency::Current),
         ),
         (
             ConversationPlanDirection::Push,
-            ConversationPlanActionType::FastForwardCloud,
+            ConversationPlanActionType::RequirePullMetadata,
+            TailClassification::Sync(SyncCurrency::Advanced),
         ),
         (
-            ConversationPlanDirection::Pull,
-            ConversationPlanActionType::KeepLocal,
+            ConversationPlanDirection::Push,
+            ConversationPlanActionType::Publish,
+            TailClassification::LocalOutstanding,
         ),
         (
             ConversationPlanDirection::Push,
             ConversationPlanActionType::RequirePull,
-        ),
-        (
-            ConversationPlanDirection::Pull,
-            ConversationPlanActionType::ResolveDivergence,
-        ),
-        (
-            ConversationPlanDirection::Pull,
-            ConversationPlanActionType::StoreOnly,
-        ),
-        (
-            ConversationPlanDirection::Pull,
-            ConversationPlanActionType::CreateLocal,
+            TailClassification::CloudOutstanding,
         ),
         (
             ConversationPlanDirection::Push,
             ConversationPlanActionType::CreateCloud,
+            TailClassification::MissingCloud,
+        ),
+        (
+            ConversationPlanDirection::Push,
+            ConversationPlanActionType::NotPushable,
+            TailClassification::MissingLocal,
+        ),
+        (
+            ConversationPlanDirection::Push,
+            ConversationPlanActionType::Blocked,
+            TailClassification::Unknown,
         ),
         (
             ConversationPlanDirection::Pull,
-            ConversationPlanActionType::ReplaceLocal,
+            ConversationPlanActionType::AdoptCloudMetadata,
+            TailClassification::Sync(SyncCurrency::Current),
         ),
         (
-            ConversationPlanDirection::Push,
-            ConversationPlanActionType::ReplaceCloud,
+            ConversationPlanDirection::Pull,
+            ConversationPlanActionType::ReportPushEligible,
+            TailClassification::LocalOutstanding,
         ),
         (
-            ConversationPlanDirection::Push,
-            ConversationPlanActionType::TombstoneThread,
+            ConversationPlanDirection::Pull,
+            ConversationPlanActionType::MaterializeCloud,
+            TailClassification::CloudOutstanding,
+        ),
+        (
+            ConversationPlanDirection::Pull,
+            ConversationPlanActionType::KeepBoth,
+            TailClassification::Divergent,
+        ),
+        (
+            ConversationPlanDirection::Pull,
+            ConversationPlanActionType::CreateLocal,
+            TailClassification::MissingLocal,
+        ),
+        (
+            ConversationPlanDirection::Pull,
+            ConversationPlanActionType::ReportLocalOnly,
+            TailClassification::MissingCloud,
+        ),
+        (
+            ConversationPlanDirection::Pull,
+            ConversationPlanActionType::NotFound,
+            TailClassification::MissingBoth,
         ),
         (
             ConversationPlanDirection::Pull,
             ConversationPlanActionType::Blocked,
+            TailClassification::Unknown,
         ),
     ];
 
-    for (direction, action_type) in actions {
-        let relation = if action_type == ConversationPlanActionType::ResolveDivergence {
-            ConversationRelation::Diverged
-        } else {
-            ConversationRelation::Unknown
-        };
+    for (direction, action_type, relation) in actions {
         let (action, mut current) = reviewed_action(
             direction,
             action_type,
@@ -252,9 +261,9 @@ fn reviewed_push_plan_is_immutable_restart_readable_and_scope_pinned() {
     let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
     let (action, _) = reviewed_action(
         ConversationPlanDirection::Push,
-        ConversationPlanActionType::FastForwardCloud,
-        ConversationReasonCode::CloudPrefixOfLocal,
-        ConversationRelation::CloudPrefixOfLocal,
+        ConversationPlanActionType::Publish,
+        ConversationReasonCode::LocalOutstanding,
+        TailClassification::LocalOutstanding,
     );
     let plan = ConversationPushPlan {
         schema_version: PUSH_PLAN_SCHEMA,
@@ -304,15 +313,13 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
         operation_id: ConversationOperationId::parse("operation-a").unwrap(),
         plan_id: Some(PlanId::parse("plan-a").unwrap()),
         plan_action_id: None,
-        direction: ConversationPlanDirection::Pull,
-        phase: ConversationSyncPhase::Prepared,
-        cloud: Some(ConversationCloudAnchor {
+        cloud: ConversationCloudAnchor {
             storage_id: world.storage_id.clone(),
             bundle_id: world.bundle_id.clone(),
             revision: 1,
             commit_id: "commit-a".to_string(),
             manifest_sha256: "a".repeat(64),
-        }),
+        },
         host_id: identity.host_id,
         replica_id: crate::project_sync::domain::ReplicaId::parse("replica-a").unwrap(),
         local_project_id: crate::project_sync::domain::LocalProjectId::parse("project-a").unwrap(),
@@ -322,18 +329,14 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
         .unwrap(),
         provider: codex(),
         thread_id: ThreadId::parse("thread-journal").unwrap(),
-        operation: ConversationSyncOperationKind::ProviderMaterialization,
-        binding_forked_from: None,
+        operation: canned_materialization(TailClassification::MissingLocal),
         provider_thread_id: Some("thread-a".to_string()),
         materialization_state: ConversationMaterializationState::Pending,
-        lineage_digest: Some("b".repeat(64)),
-        semantic_digest: Some("c".repeat(64)),
         expected_host_identity_revision: 0,
         expected_bindings_document_revision: 0,
         expected_binding_revision: None,
         expected_profile_revision: 0,
         expected_project_binding_revision: 0,
-        expected_local_digest: None,
         targets: vec![ConversationJournalTarget {
             target_path: "/tmp/provider/thread-a.jsonl".to_string(),
             role: crate::project_sync::domain::ConversationFileRole::Transcript,
@@ -375,15 +378,13 @@ fn journal_rejects_duplicate_operation_ids() {
         operation_id: ConversationOperationId::parse("operation-a").unwrap(),
         plan_id: None,
         plan_action_id: None,
-        direction: ConversationPlanDirection::Push,
-        phase: ConversationSyncPhase::CloudPublished,
-        cloud: Some(ConversationCloudAnchor {
+        cloud: ConversationCloudAnchor {
             storage_id: world.storage_id.clone(),
             bundle_id: world.bundle_id.clone(),
             revision: 2,
             commit_id: "commit-a".to_string(),
             manifest_sha256: "a".repeat(64),
-        }),
+        },
         host_id: identity.host_id,
         replica_id: crate::project_sync::domain::ReplicaId::parse("replica-a").unwrap(),
         local_project_id: crate::project_sync::domain::LocalProjectId::parse("project-a").unwrap(),
@@ -393,18 +394,14 @@ fn journal_rejects_duplicate_operation_ids() {
         .unwrap(),
         provider: codex(),
         thread_id: ThreadId::parse("thread-journal").unwrap(),
-        operation: ConversationSyncOperationKind::CloudPublication,
-        binding_forked_from: None,
+        operation: canned_publication(),
         provider_thread_id: None,
         materialization_state: ConversationMaterializationState::StoredOnly,
-        lineage_digest: None,
-        semantic_digest: None,
         expected_host_identity_revision: 0,
         expected_bindings_document_revision: 0,
         expected_binding_revision: None,
         expected_profile_revision: 0,
         expected_project_binding_revision: 0,
-        expected_local_digest: None,
         targets: vec![],
         created_at: 1,
         updated_at: 1,
@@ -426,35 +423,35 @@ fn journal_rejects_duplicate_operation_ids() {
 #[test]
 fn every_local_commit_checkpoint_recovers_to_one_valid_fixed_point() {
     let checkpoints = vec![
-        (ConversationFailpoint::BeforePrepared, false),
-        (ConversationFailpoint::AfterPrepared, false),
+        (ConversationFailpoint::BeforeJournal, false),
+        (ConversationFailpoint::AfterJournal, false),
         (
             ConversationFailpoint::BeforeStage {
                 index: 0,
                 role: ConversationFileRole::Transcript,
             },
-            false,
+            true,
         ),
         (
             ConversationFailpoint::AfterStage {
                 index: 0,
                 role: ConversationFileRole::Transcript,
             },
-            false,
+            true,
         ),
         (
             ConversationFailpoint::BeforeStage {
                 index: 1,
                 role: ConversationFileRole::ProviderIndexFragment,
             },
-            false,
+            true,
         ),
         (
             ConversationFailpoint::AfterStage {
                 index: 1,
                 role: ConversationFileRole::ProviderIndexFragment,
             },
-            false,
+            true,
         ),
         (
             ConversationFailpoint::BeforeStage {
@@ -463,7 +460,7 @@ fn every_local_commit_checkpoint_recovers_to_one_valid_fixed_point() {
                     sidecar_kind: "thread-state".to_string(),
                 },
             },
-            false,
+            true,
         ),
         (
             ConversationFailpoint::AfterStage {
@@ -584,7 +581,7 @@ fn every_local_commit_checkpoint_recovers_to_one_valid_fixed_point() {
                 first.completed.len(),
                 usize::from(checkpoint != ConversationFailpoint::AfterCleanup)
             );
-        } else if checkpoint != ConversationFailpoint::BeforePrepared {
+        } else if checkpoint == ConversationFailpoint::AfterJournal {
             assert_eq!(first.rolled_back.len(), 1);
         }
     }
@@ -593,14 +590,14 @@ fn every_local_commit_checkpoint_recovers_to_one_valid_fixed_point() {
 #[test]
 fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
     let checkpoints = [
-        (ConversationFailpoint::BeforePrepared, false),
-        (ConversationFailpoint::AfterPrepared, false),
+        (ConversationFailpoint::BeforeJournal, false),
+        (ConversationFailpoint::AfterJournal, false),
         (ConversationFailpoint::BeforeCloudPublication, false),
         (ConversationFailpoint::AfterCloudHeadCas, true),
-        (ConversationFailpoint::BeforeCloudPublished, true),
-        (ConversationFailpoint::AfterCloudPublished, true),
-        (ConversationFailpoint::BeforeBindingCommit, true),
-        (ConversationFailpoint::AfterBindingCommit, true),
+        (ConversationFailpoint::BeforeHeadAdvanced, true),
+        (ConversationFailpoint::AfterHeadAdvanced, true),
+        (ConversationFailpoint::BeforeConfigCommit, true),
+        (ConversationFailpoint::AfterConfigCommit, true),
         (ConversationFailpoint::BeforeReceipt, true),
         (ConversationFailpoint::AfterReceipt, true),
         (ConversationFailpoint::BeforeLocalCommitted, true),
@@ -649,7 +646,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
         // publication must advance the pin to the pushed digests, because
         // manifest-only refresh reads the pin as "nothing local is unsaved".
         let initial_analysis = analyze_codex_transcript(&initial_thread.transcript);
-        let (initial_lineage, initial_semantic) = match initial_analysis.lineage {
+        let (_initial_lineage, _initial_semantic) = match initial_analysis.lineage {
             CodecLineage::Complete {
                 lineage_digest,
                 semantic_digest,
@@ -667,15 +664,13 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                     provider_profile_id: scope.profile_id.clone(),
                     thread_id: thread_id.clone(),
                     forked_from: None,
-                    fork_stamp: None,
+                    root_tail_layout: Some(RootTailLayout {
+                        codec: PORTABLE_TAIL_CODEC_V1.to_string(),
+                        partition_kind: TailPartitionKind::WholeThread,
+                        start_record_count: 0,
+                    }),
                     provider_thread_id: Some("source-thread".to_string()),
                     materialization_state: ConversationMaterializationState::Resumable,
-                    last_observed_file_sha256: Some(sha256(&initial_thread.transcript)),
-                    last_observed_head_message_id: Some("m-a".to_string()),
-                    last_observed_lineage_digest: Some(initial_lineage.clone()),
-                    last_observed_semantic_digest: Some(initial_semantic.clone()),
-                    source_revision: Some(initial.snapshot.head.revision),
-                    source_manifest_sha256: Some(initial.snapshot.head.manifest_sha256.clone()),
                     revision: 0,
                     created_at: 10,
                     updated_at: 10,
@@ -696,7 +691,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
             Some(&initial.snapshot.manifest),
             crate::project_sync::bundle_engine::PublishExpectation::Match(initial.head_token),
         );
-        let operation = push_operation(
+        let mut operation = push_operation(
             &world,
             &scope,
             "operation-cloud-checkpoint",
@@ -711,6 +706,18 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
             &lineage,
             &semantic,
         );
+        if let ConversationSyncOperationKind::CloudPublication(payload) = &mut operation.operation {
+            let config = world.repo_a.load_config().unwrap();
+            payload.sync_config_before = config.clone();
+            let mut config_after = config;
+            config_after.revision = config_after.revision.saturating_add(1);
+            payload.sync_config_after = config_after;
+            let bindings = world.repo_a.load_conversation_bindings().unwrap();
+            payload.bindings_before = bindings.clone();
+            let mut bindings_after = bindings;
+            bindings_after.revision = bindings_after.revision.saturating_add(1);
+            payload.bindings_after = bindings_after;
+        }
         let engine = world.engine();
         let mut fail_once = FailOnce::new(checkpoint.clone());
         let result = apply_conversation_cloud_publication(
@@ -737,6 +744,8 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                 revision: snapshot.head.revision,
                 commit_id: snapshot.head.commit_id,
                 manifest_sha256: snapshot.head.manifest_sha256,
+                manifest_size: snapshot.head.manifest_size,
+                scope_pins: BTreeMap::new(),
             })
         } else {
             None
@@ -759,47 +768,24 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
         if publication_committed {
             assert_eq!(final_snapshot.head.revision, 2, "{checkpoint:?}");
             assert_eq!(final_bindings.bindings.len(), 1);
-            assert_eq!(
-                final_bindings.bindings[0].source_revision,
-                Some(2),
-                "{checkpoint:?}",
-            );
-            // The push receipt advanced the last-synced pin to the pushed
-            // digests; manifest-only refresh depends on this to classify
-            // later cloud growth as a fast-forward instead of divergence.
-            assert_eq!(
-                final_bindings.bindings[0]
-                    .last_observed_lineage_digest
-                    .as_deref(),
-                Some(lineage.as_str()),
-                "{checkpoint:?}",
-            );
-            assert_eq!(
-                final_bindings.bindings[0]
-                    .last_observed_semantic_digest
-                    .as_deref(),
-                Some(semantic.as_str()),
-                "{checkpoint:?}",
-            );
+            // The receipt records the accepted tail the publication
+            // committed; observation state now lives in destination
+            // checkpoints, never on the binding.
             assert_eq!(final_receipts.records.len(), 1, "{checkpoint:?}");
             assert_eq!(final_receipts.records[0].receipts.len(), 1);
+            let receipt = final_receipts.records[0].receipts[0]
+                .conversation
+                .as_ref()
+                .unwrap();
+            assert!(receipt.accepted_tail.is_some(), "{checkpoint:?}");
             assert_eq!(
                 first.completed.len(),
                 usize::from(checkpoint != ConversationFailpoint::AfterCleanup),
             );
         } else {
             assert_eq!(final_snapshot.head.revision, 1, "{checkpoint:?}");
-            assert_eq!(final_bindings.bindings[0].source_revision, Some(1));
-            // An uncommitted publication leaves the pin untouched.
-            assert_eq!(
-                final_bindings.bindings[0]
-                    .last_observed_lineage_digest
-                    .as_deref(),
-                Some(initial_lineage.as_str()),
-                "{checkpoint:?}",
-            );
             assert!(final_receipts.records.is_empty());
-            if checkpoint != ConversationFailpoint::BeforePrepared {
+            if checkpoint != ConversationFailpoint::BeforeJournal {
                 assert_eq!(first.rolled_back.len(), 1, "{checkpoint:?}");
             }
         }
@@ -851,8 +837,19 @@ fn committed_codex_provider_files_materialize_resume_and_rebind_one_variant() {
         source.lineage.chain().unwrap(),
         rewritten_analysis.lineage.chain().unwrap()
     );
-    fixture.operation.lineage_digest = Some(lineage_digest);
-    fixture.operation.semantic_digest = Some(semantic_digest);
+    if let ConversationSyncOperationKind::ProviderMaterialization(payload) =
+        &mut fixture.operation.operation
+    {
+        payload.pinned_lineage_digest = lineage_digest;
+        payload.pinned_semantic_digest = semantic_digest;
+        payload.accepted_tail_after = match rewritten_analysis.lineage {
+            CodecLineage::Complete { ref chain, .. } => {
+                compute_portable_conversation_tail(TailPartitionKind::WholeThread, 0, chain)
+                    .unwrap()
+            }
+            _ => unreachable!(),
+        };
+    }
     fixture.targets[0].bytes = rewritten.clone();
 
     let mut index: serde_json::Value = serde_json::from_slice(INDEX).unwrap();
@@ -953,13 +950,12 @@ fn committed_codex_provider_files_materialize_resume_and_rebind_one_variant() {
         .conversations
         .get("codex:session:destination-thread")
         .unwrap();
-    assert_eq!(
-        crate::project_sync::domain::classify_conversation_relation(
-            recaptured_conversation.lineage.chain(),
-            captured_conversation.lineage.chain(),
-        ),
-        ConversationRelation::CloudPrefixOfLocal
-    );
+    {
+        let recaptured_chain = recaptured_conversation.lineage.chain().unwrap();
+        let captured_chain = captured_conversation.lineage.chain().unwrap();
+        assert_eq!(&recaptured_chain[..captured_chain.len()], captured_chain);
+        assert!(recaptured_chain.len() > captured_chain.len());
+    }
     let bindings = fixture.repository.load_conversation_bindings().unwrap();
     assert_eq!(bindings.bindings.len(), 1);
     assert_eq!(
@@ -1002,1260 +998,6 @@ fn replacement_is_digest_pinned_backed_up_and_restart_idempotent() {
     assert_materialization_fixed_point(&fixture, &reopened, true);
 }
 
-#[test]
-fn stale_pending_fork_becomes_unacknowledged_without_adopting_an_exact_child() {
-    let fixture = CodexDivergenceFixture::new();
-    fixture.begin_pending_checkpoint(CodexForkExecutor::AppServerStdio);
-    fixture.write_exact_child();
-
-    let recovered = recover_conversation_materializations(&fixture.repository).unwrap();
-    assert_eq!(
-        recovered.recovery_required,
-        vec![fixture.operation.operation_id.clone()]
-    );
-    assert!(recovered.completed.is_empty());
-    let operation = fixture.current_operation();
-    assert_eq!(operation.phase, ConversationSyncPhase::ForkUnacknowledged);
-    let divergence = operation.divergence().unwrap();
-    assert_eq!(
-        divergence.attempts,
-        vec![CodexForkAttempt {
-            executor: CodexForkExecutor::AppServerStdio,
-            status: CodexForkAttemptStatus::Unacknowledged,
-        }]
-    );
-    assert_eq!(
-        divergence.current_executor,
-        Some(CodexForkExecutor::AppServerStdio)
-    );
-    assert!(divergence.successful_executor.is_none());
-    assert!(divergence.fork_provider_thread_id.is_none());
-    assert!(divergence.fork_transcript_path.is_none());
-    assert!(divergence.fork_transcript_sha256.is_none());
-    assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.local_bytes);
-    assert_eq!(fixture.native_child_count(), 1);
-    assert_eq!(
-        fixture
-            .repository
-            .load_conversation_bindings()
-            .unwrap()
-            .bindings
-            .len(),
-        1,
-        "recovery must not adopt even an exact child from the abandoned attempt"
-    );
-}
-
-#[test]
-fn unacknowledged_codex_checkpoint_is_rehydrated_after_reopening() {
-    let fixture = CodexDivergenceFixture::new();
-    fixture.begin_unacknowledged_checkpoint(CodexForkExecutor::AppServerStdio);
-    let reopened = LocalStateRepository::from_home_dir(&fixture.home).unwrap();
-
-    let pending =
-        pending_codex_divergence_with_repository(&reopened, &fixture.operation.local_project_id)
-            .unwrap()
-            .unwrap();
-    assert!(!pending.success);
-    assert!(matches!(
-        pending.status,
-        crate::project_sync::commands::RestoreApplyStatus::ForkUnacknowledged
-    ));
-    assert_eq!(pending.plan_id, fixture.operation.plan_id.clone());
-    assert_eq!(pending.fork_checkpoints.len(), 1);
-    let checkpoint = &pending.fork_checkpoints[0];
-    assert_eq!(checkpoint.operation_id, fixture.operation.operation_id);
-    assert_eq!(checkpoint.plan_id, fixture.operation.plan_id.clone());
-    assert_eq!(checkpoint.thread_id, fixture.operation.thread_id);
-    assert!(matches!(
-        checkpoint.status,
-        crate::project_sync::commands::RestoreApplyStatus::ForkUnacknowledged
-    ));
-    assert_eq!(
-        checkpoint.source_provider_thread_id,
-        fixture.source_provider_id
-    );
-    assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.local_bytes);
-}
-
-#[test]
-fn multiple_pending_codex_checkpoints_surface_as_an_ordered_queue() {
-    let fixture = CodexDivergenceFixture::new();
-    fixture.begin_unacknowledged_checkpoint(CodexForkExecutor::AppServerStdio);
-    // A second thread's paused divergence coexists in the same project
-    // journal; the pending listing returns both, oldest first, instead of
-    // the retired multiple-operations error. The journaled first operation
-    // is the template so the clone carries a valid unacknowledged state.
-    let journal = fixture.repository.load_conversation_sync_journal().unwrap();
-    let mut second = journal
-        .operations
-        .iter()
-        .find(|operation| operation.operation_id == fixture.operation.operation_id)
-        .cloned()
-        .unwrap();
-    second.operation_id =
-        ConversationOperationId::parse("operation-codex-divergence-second").unwrap();
-    second.thread_id = ThreadId::parse("thread-divergent-second").unwrap();
-    second.created_at = fixture.operation.created_at + 5;
-    second.updated_at = second.updated_at.max(second.created_at);
-    fixture
-        .repository
-        .mutate_conversation_sync_journal(journal.revision, |journal| {
-            journal.operations.push(second.clone());
-            Ok(())
-        })
-        .unwrap();
-
-    let pending = pending_codex_divergence_with_repository(
-        &fixture.repository,
-        &fixture.operation.local_project_id,
-    )
-    .unwrap()
-    .unwrap();
-    assert!(!pending.success);
-    assert_eq!(pending.fork_checkpoints.len(), 2);
-    assert_eq!(
-        pending.fork_checkpoints[0].operation_id,
-        fixture.operation.operation_id
-    );
-    assert_eq!(
-        pending.fork_checkpoints[1].operation_id,
-        second.operation_id
-    );
-    assert_eq!(pending.fork_checkpoints[1].thread_id, second.thread_id);
-    for checkpoint in &pending.fork_checkpoints {
-        assert!(matches!(
-            checkpoint.status,
-            crate::project_sync::commands::RestoreApplyStatus::ForkUnacknowledged
-        ));
-    }
-}
-
-#[test]
-fn a_thread_with_a_pending_checkpoint_rejects_a_second_operation() {
-    let fixture = CodexDivergenceFixture::new();
-    fixture.begin_unacknowledged_checkpoint(CodexForkExecutor::AppServerStdio);
-    let mut duplicate = fixture.operation.clone();
-    duplicate.operation_id =
-        ConversationOperationId::parse("operation-codex-divergence-retry").unwrap();
-    let mut failpoints = NoConversationFailpoints;
-    let error = apply_codex_divergence_locked(
-        &fixture.repository,
-        CodexDivergenceMaterializationRequest {
-            operation: duplicate,
-            targets: vec![fixture.target.clone()],
-            fork: fixture.fork.clone(),
-        },
-        &mut failpoints,
-        &mut |_, _| {},
-    )
-    .unwrap_err();
-    assert!(
-        error.contains("already has a pending sync operation"),
-        "{error}"
-    );
-    // The original checkpoint is untouched and still explicitly retryable.
-    let pending = pending_codex_divergence_with_repository(
-        &fixture.repository,
-        &fixture.operation.local_project_id,
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(pending.fork_checkpoints.len(), 1);
-    assert_eq!(
-        pending.fork_checkpoints[0].operation_id,
-        fixture.operation.operation_id
-    );
-    assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.local_bytes);
-}
-
-#[cfg(unix)]
-#[test]
-fn cloud_only_codex_divergence_replaces_original_without_creating_a_fork() {
-    let mut fixture = CodexDivergenceFixture::new();
-    fixture.enable_fake_idle_app_server();
-    let divergence = match &mut fixture.operation.operation {
-        ConversationSyncOperationKind::CodexDivergence(divergence) => divergence,
-        _ => unreachable!(),
-    };
-    divergence.resolution = ConversationDivergenceResolution::UseCloudOnly;
-    fixture.operation.validate().unwrap();
-
-    let mut failpoints = NoConversationFailpoints;
-    let outcome = apply_codex_divergence_locked(
-        &fixture.repository,
-        CodexDivergenceMaterializationRequest {
-            operation: fixture.operation.clone(),
-            targets: vec![fixture.target.clone()],
-            fork: fixture.fork.clone(),
-        },
-        &mut failpoints,
-        &mut |_, _| {},
-    )
-    .unwrap();
-    let CodexDivergenceApplyOutcome::Committed(receipt) = outcome else {
-        panic!("cloud-only divergence did not commit");
-    };
-
-    assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.cloud_bytes);
-    assert_eq!(fixture.native_child_count(), 0);
-    let bindings = fixture.repository.load_conversation_bindings().unwrap();
-    assert_eq!(bindings.bindings.len(), 1);
-    assert_eq!(bindings.bindings[0].thread_id, fixture.source_thread_id);
-    assert_eq!(
-        bindings.bindings[0].provider_thread_id.as_deref(),
-        Some(fixture.source_provider_id.as_str())
-    );
-    let divergence = receipt.divergence.unwrap();
-    assert_eq!(
-        divergence.resolution(),
-        ConversationDivergenceResolution::UseCloudOnly
-    );
-    assert!(divergence.preserved_thread_id().is_none());
-    let DivergenceReceiptKind::CodexNativeFork(divergence) = &divergence else {
-        panic!("Codex divergence machinery produced a non-Codex receipt: {divergence:?}");
-    };
-    assert!(divergence.preserved_provider_thread_id.is_none());
-    assert!(divergence.executor.is_none());
-    assert_eq!(
-        divergence.original_name_status,
-        Some(ConversationNameStatus::Unchanged)
-    );
-    assert_eq!(
-        divergence.inventory_refresh_status,
-        CodexInventoryRefreshStatus::Deferred
-    );
-    let backup = fixture
-        .repository
-        .root()
-        .join("backups/conversations/operation-codex-divergence/0.bak");
-    assert_eq!(fs::read(backup).unwrap(), fixture.local_bytes);
-}
-
-#[test]
-fn cloud_only_status_failure_rolls_back_staging_without_replacing_original() {
-    let mut fixture = CodexDivergenceFixture::new();
-    let divergence = match &mut fixture.operation.operation {
-        ConversationSyncOperationKind::CodexDivergence(divergence) => divergence,
-        _ => unreachable!(),
-    };
-    divergence.resolution = ConversationDivergenceResolution::UseCloudOnly;
-    fixture.operation.validate().unwrap();
-
-    let mut failpoints = NoConversationFailpoints;
-    let error = apply_codex_divergence_locked(
-        &fixture.repository,
-        CodexDivergenceMaterializationRequest {
-            operation: fixture.operation.clone(),
-            targets: vec![fixture.target.clone()],
-            fork: fixture.fork.clone(),
-        },
-        &mut failpoints,
-        &mut |_, _| {},
-    )
-    .unwrap_err();
-    assert!(error.contains("status is unavailable"), "{error}");
-    assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.local_bytes);
-    assert!(fixture
-        .repository
-        .load_conversation_sync_journal()
-        .unwrap()
-        .operations
-        .is_empty());
-    assert_eq!(
-        fixture
-            .repository
-            .load_conversation_bindings()
-            .unwrap()
-            .bindings
-            .len(),
-        1
-    );
-    assert!(fixture
-        .repository
-        .load_materializations()
-        .unwrap()
-        .records
-        .is_empty());
-}
-
-#[test]
-fn cloud_only_staging_crash_rolls_back_when_provider_status_cannot_be_rechecked() {
-    let mut fixture = CodexDivergenceFixture::new();
-    let divergence = match &mut fixture.operation.operation {
-        ConversationSyncOperationKind::CodexDivergence(divergence) => divergence,
-        _ => unreachable!(),
-    };
-    divergence.resolution = ConversationDivergenceResolution::UseCloudOnly;
-    fixture.operation.validate().unwrap();
-    let mut fail_once = FailOnce::new(ConversationFailpoint::AfterStaged);
-    assert!(apply_codex_divergence_locked(
-        &fixture.repository,
-        CodexDivergenceMaterializationRequest {
-            operation: fixture.operation.clone(),
-            targets: vec![fixture.target.clone()],
-            fork: fixture.fork.clone(),
-        },
-        &mut fail_once,
-        &mut |_, _| {},
-    )
-    .is_err());
-
-    let recovered = recover_conversation_materializations(&fixture.repository).unwrap();
-    assert_eq!(
-        recovered.rolled_back,
-        vec![fixture.operation.operation_id.clone()]
-    );
-    assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.local_bytes);
-    assert!(fixture
-        .repository
-        .load_conversation_sync_journal()
-        .unwrap()
-        .operations
-        .is_empty());
-}
-
-#[cfg(unix)]
-#[test]
-fn preserved_fork_staging_crash_rolls_back_without_starting_a_provider() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut fixture = CodexDivergenceFixture::new();
-    let sentinel = fixture.home.join("provider-must-not-start");
-    let script = format!(
-        "#!/bin/sh\n: > '{}'\nexit 1\n",
-        sentinel.to_string_lossy().replace('\'', "'\\''")
-    );
-    fs::write(&fixture.fork.codex_executable, script.as_bytes()).unwrap();
-    fs::set_permissions(
-        &fixture.fork.codex_executable,
-        fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
-    let executable_sha256 = sha256(script.as_bytes());
-    fixture.fork.codex_executable_sha256 = executable_sha256.clone();
-    match &mut fixture.operation.operation {
-        ConversationSyncOperationKind::CodexDivergence(divergence) => {
-            divergence.codex_executable_sha256 = executable_sha256
-        }
-        _ => unreachable!(),
-    }
-
-    let mut fail_once = FailOnce::new(ConversationFailpoint::AfterStaged);
-    let error = apply_codex_divergence_locked(
-        &fixture.repository,
-        CodexDivergenceMaterializationRequest {
-            operation: fixture.operation.clone(),
-            targets: vec![fixture.target.clone()],
-            fork: fixture.fork.clone(),
-        },
-        &mut fail_once,
-        &mut |_, _| {},
-    )
-    .unwrap_err();
-    assert!(error.contains("injected failure"), "{error}");
-    assert!(!sentinel.exists());
-
-    let recovered = recover_conversation_materializations(&fixture.repository).unwrap();
-    assert_eq!(
-        recovered.rolled_back,
-        vec![fixture.operation.operation_id.clone()]
-    );
-    assert!(recovered.completed.is_empty());
-    assert!(recovered.recovery_required.is_empty());
-    assert!(!sentinel.exists());
-    assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.local_bytes);
-    assert!(fixture
-        .repository
-        .load_conversation_sync_journal()
-        .unwrap()
-        .operations
-        .is_empty());
-}
-
-#[cfg(unix)]
-#[test]
-fn every_post_verification_codex_checkpoint_recovers_without_a_second_fork() {
-    let checkpoints = [
-        ConversationFailpoint::AfterForkVerified,
-        ConversationFailpoint::AfterForkNamingRecorded,
-        ConversationFailpoint::AfterLocalForkBound,
-        ConversationFailpoint::AfterProviderCommitted,
-        ConversationFailpoint::AfterBindingCommit,
-        ConversationFailpoint::AfterBindingsCommitted,
-        ConversationFailpoint::AfterOriginalNamingRecorded,
-        ConversationFailpoint::AfterReceipt,
-        ConversationFailpoint::AfterLocalCommitted,
-    ];
-    for checkpoint in checkpoints {
-        let mut fixture = CodexDivergenceFixture::new();
-        fixture.write_exact_child();
-        fixture.enable_fake_fork_app_server();
-        let mut fail_once = FailOnce::new(checkpoint.clone());
-        let error = apply_codex_divergence_locked(
-            &fixture.repository,
-            CodexDivergenceMaterializationRequest {
-                operation: fixture.operation.clone(),
-                targets: vec![fixture.target.clone()],
-                fork: fixture.fork.clone(),
-            },
-            &mut fail_once,
-            &mut |_, _| {},
-        )
-        .unwrap_err();
-        assert!(
-            error.contains("injected failure"),
-            "{checkpoint:?}: {error}"
-        );
-        assert_eq!(
-            fixture.native_child_count(),
-            1,
-            "{checkpoint:?} created an unexpected fork before recovery"
-        );
-
-        let reopened = LocalStateRepository::from_home_dir(&fixture.home).unwrap();
-        let recovered = recover_conversation_materializations(&reopened).unwrap();
-        assert_eq!(
-            recovered.completed,
-            vec![fixture.operation.operation_id.clone()],
-            "{checkpoint:?}"
-        );
-        assert!(recovered.recovery_required.is_empty(), "{checkpoint:?}");
-        let repeated = recover_conversation_materializations(&reopened).unwrap();
-        assert!(repeated.completed.is_empty(), "{checkpoint:?}");
-        let receipt = fixture.persisted_receipt(&reopened);
-        fixture.assert_complete_in(&reopened, &receipt, CodexForkExecutor::AppServerStdio);
-        assert_eq!(
-            fixture.native_child_count(),
-            1,
-            "{checkpoint:?} created a second native fork"
-        );
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn changed_verified_fork_blocks_original_replacement_during_recovery() {
-    let mut fixture = CodexDivergenceFixture::new();
-    fixture.write_exact_child();
-    fixture.enable_fake_fork_app_server();
-    let mut fail_once = FailOnce::new(ConversationFailpoint::AfterForkVerified);
-    assert!(apply_codex_divergence_locked(
-        &fixture.repository,
-        CodexDivergenceMaterializationRequest {
-            operation: fixture.operation.clone(),
-            targets: vec![fixture.target.clone()],
-            fork: fixture.fork.clone(),
-        },
-        &mut fail_once,
-        &mut |_, _| {},
-    )
-    .is_err());
-    let mut changed_child = fixture.child_bytes.clone();
-    changed_child.push(b'\n');
-    fs::write(&fixture.child_path, changed_child).unwrap();
-
-    let recovered = recover_conversation_materializations(&fixture.repository).unwrap();
-    assert_eq!(
-        recovered.recovery_required,
-        vec![fixture.operation.operation_id.clone()]
-    );
-    assert!(recovered.completed.is_empty());
-    assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.local_bytes);
-    assert_eq!(
-        fixture
-            .repository
-            .load_conversation_bindings()
-            .unwrap()
-            .bindings
-            .len(),
-        1
-    );
-    assert!(fixture
-        .repository
-        .load_materializations()
-        .unwrap()
-        .records
-        .is_empty());
-    assert_eq!(
-        fixture.current_operation().phase,
-        ConversationSyncPhase::RecoveryRequired
-    );
-    let pending = pending_codex_divergence_with_repository(
-        &fixture.repository,
-        &fixture.operation.local_project_id,
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        pending.fork_checkpoints[0].status,
-        crate::project_sync::commands::RestoreApplyStatus::RecoveryRequired
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn unacknowledged_recovery_is_inert_until_an_explicit_retry() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut fixture = CodexDivergenceFixture::new();
-    fixture.begin_unacknowledged_checkpoint(CodexForkExecutor::AppServerStdio);
-    let sentinel = fixture.home.join("provider-must-not-start");
-    let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 1\n",
-        sentinel.to_string_lossy().replace('\'', "'\\''")
-    );
-    fs::write(&fixture.fork.codex_executable, script.as_bytes()).unwrap();
-    fs::set_permissions(
-        &fixture.fork.codex_executable,
-        fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
-    let executable_sha256 = sha256(script.as_bytes());
-    fixture.fork.codex_executable_sha256 = executable_sha256.clone();
-
-    let journal = fixture.repository.load_conversation_sync_journal().unwrap();
-    fixture
-        .repository
-        .mutate_conversation_sync_journal(journal.revision, |journal| {
-            let operation = journal
-                .operations
-                .iter_mut()
-                .find(|operation| operation.operation_id == fixture.operation.operation_id)
-                .unwrap();
-            let divergence = match &mut operation.operation {
-                ConversationSyncOperationKind::CodexDivergence(divergence) => divergence,
-                _ => unreachable!(),
-            };
-            divergence.codex_executable_sha256 = executable_sha256;
-            Ok(())
-        })
-        .unwrap();
-
-    let before = fixture.current_operation();
-    let recovered = recover_conversation_materializations(&fixture.repository).unwrap();
-    assert_eq!(
-        recovered.recovery_required,
-        vec![fixture.operation.operation_id.clone()]
-    );
-    assert!(recovered.completed.is_empty());
-    assert_eq!(fixture.current_operation(), before);
-    assert!(!sentinel.exists());
-    assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.local_bytes);
-
-    let outcome = retry_codex_divergence_locked(
-        &fixture.repository,
-        &fixture.operation.operation_id,
-        fixture.fork.clone(),
-        &mut NoConversationFailpoints,
-        &mut |_, _| {},
-    )
-    .unwrap();
-    assert!(matches!(
-        outcome,
-        CodexDivergenceApplyOutcome::ForkUnacknowledged { .. }
-    ));
-    assert!(
-        sentinel.exists(),
-        "only the explicit retry may invoke the provider again"
-    );
-    let invocations = fs::read_to_string(&sentinel).unwrap();
-    assert!(invocations.lines().any(|line| line.contains("app-server")));
-    assert!(
-        invocations
-            .lines()
-            .any(|line| line.contains("login status")),
-        "a definitive app-server failure during explicit retry may fall through to native PTY"
-    );
-    assert_eq!(
-        fixture.current_operation().phase,
-        ConversationSyncPhase::ForkUnacknowledged
-    );
-    assert_eq!(fs::read(&fixture.source_path).unwrap(), fixture.local_bytes);
-    assert_eq!(fixture.native_child_count(), 0);
-}
-
-fn codex_divergence_rollout(
-    provider_thread_id: &str,
-    forked_from_id: Option<&str>,
-    cwd: &PathBuf,
-    branch_message_id: &str,
-    branch_text: &str,
-) -> Vec<u8> {
-    let records = [
-        json!({
-            "timestamp": "2026-07-29T00:00:00Z",
-            "type": "session_meta",
-            "payload": {
-                "id": provider_thread_id,
-                "forked_from_id": forked_from_id,
-                "cwd": cwd,
-            },
-        }),
-        json!({
-            "timestamp": "2026-07-29T00:00:01Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "id": "m1",
-                "parent_id": null,
-                "role": "user",
-                "content": [{"type": "input_text", "text": "question"}],
-            },
-        }),
-        json!({
-            "timestamp": "2026-07-29T00:00:02Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "id": "m2",
-                "parent_id": "m1",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "answer"}],
-            },
-        }),
-        json!({
-            "timestamp": "2026-07-29T00:00:03Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "id": branch_message_id,
-                "parent_id": "m2",
-                "role": "user",
-                "content": [{"type": "input_text", "text": branch_text}],
-            },
-        }),
-        // Real rollouts carry the turn's environment, and Codex re-emits it
-        // under its current schema when forking.  Without one here the fixture
-        // cannot show that verification tolerates that rewrite.
-        json!({
-            "timestamp": "2026-07-29T00:00:04Z",
-            "type": "turn_context",
-            "payload": {
-                "cwd": cwd,
-                "approval_policy": "on-request",
-                "file_system_sandbox_policy": {
-                    "entries": [{
-                        "path": {"type": "path", "path": cwd},
-                        "access": "write",
-                        "missing_path_behavior": "skip",
-                    }],
-                },
-            },
-        }),
-        json!({
-            "timestamp": "2026-07-29T00:00:05Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "thread_settings_applied",
-                "thread_settings": {
-                    "cwd": cwd,
-                    "approval_policy": "on-request",
-                    "permission_profile": {
-                        "type": "managed",
-                        "file_system": {
-                            "type": "restricted",
-                            "entries": [{
-                                "path": cwd,
-                                "access": "write",
-                                "missing_path_behavior": "skip",
-                            }],
-                        },
-                    },
-                },
-            },
-        }),
-    ];
-    let mut bytes = records
-        .into_iter()
-        .map(|record| record.to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .into_bytes();
-    bytes.push(b'\n');
-    bytes
-}
-
-/// Derive a fork from a source rollout the way Codex actually does: new
-/// identity and parent pointer, every record restamped at fork time, and the
-/// sandbox policy re-emitted without its default fields.  Building the fork
-/// from the source — rather than fabricating it from the same literals —
-/// is what keeps this fixture honest about the shape verification must accept.
-fn codex_fork_of(source: &[u8], fork_provider_id: &str, source_provider_id: &str) -> Vec<u8> {
-    let mut lines = Vec::new();
-    for raw in source.split(|byte| *byte == b'\n') {
-        if raw.is_empty() {
-            continue;
-        }
-        let mut value: Value = serde_json::from_slice(raw).unwrap();
-        value["timestamp"] = json!("2026-07-29T12:00:00Z");
-        match value.get("type").and_then(Value::as_str) {
-            Some("session_meta") => {
-                value["payload"]["id"] = json!(fork_provider_id);
-                value["payload"]["forked_from_id"] = json!(source_provider_id);
-            }
-            Some("turn_context") => {
-                let entries = value
-                    .pointer_mut("/payload/file_system_sandbox_policy/entries")
-                    .and_then(Value::as_array_mut)
-                    .expect("fixture turn_context carries sandbox entries");
-                for entry in entries {
-                    entry
-                        .as_object_mut()
-                        .expect("sandbox entries are objects")
-                        .remove("missing_path_behavior");
-                }
-            }
-            Some("event_msg")
-                if value.pointer("/payload/type").and_then(Value::as_str)
-                    == Some("thread_settings_applied") =>
-            {
-                let entries = value
-                    .pointer_mut("/payload/thread_settings/permission_profile/file_system/entries")
-                    .and_then(Value::as_array_mut)
-                    .expect("fixture thread settings carry sandbox entries");
-                for entry in entries {
-                    entry
-                        .as_object_mut()
-                        .expect("sandbox entries are objects")
-                        .remove("missing_path_behavior");
-                }
-            }
-            _ => {}
-        }
-        lines.push(value.to_string());
-    }
-    let mut bytes = lines.join("\n").into_bytes();
-    bytes.push(b'\n');
-    bytes
-}
-
-fn complete_digests(bytes: &[u8]) -> (String, String) {
-    match analyze_codex_transcript(bytes).lineage {
-        CodecLineage::Complete {
-            lineage_digest,
-            semantic_digest,
-            ..
-        } => (lineage_digest, semantic_digest),
-        other => panic!("Codex divergence fixture is not resumable: {other:?}"),
-    }
-}
-
-struct CodexDivergenceFixture {
-    _temp: tempfile::TempDir,
-    home: PathBuf,
-    repository: LocalStateRepository,
-    operation: ConversationSyncOperation,
-    target: ConversationTargetPayload,
-    fork: CodexForkExecutionRequest,
-    source_path: PathBuf,
-    child_path: PathBuf,
-    source_thread_id: ThreadId,
-    preserved_thread_id: ThreadId,
-    source_provider_id: String,
-    child_provider_id: String,
-    local_bytes: Vec<u8>,
-    child_bytes: Vec<u8>,
-    cloud_bytes: Vec<u8>,
-    local_lineage_digest: String,
-    local_semantic_digest: String,
-    cloud_lineage_digest: String,
-    cloud_semantic_digest: String,
-}
-
-impl CodexDivergenceFixture {
-    fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
-        let home_unresolved = temp.path().join("home");
-        fs::create_dir(&home_unresolved).unwrap();
-        let home = fs::canonicalize(home_unresolved).unwrap();
-        let repository = LocalStateRepository::from_home_dir(&home).unwrap();
-        let bundle_id = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
-        let scope = install_scope(
-            &repository,
-            &bundle_id,
-            "codex-divergence",
-            "replica-codex-divergence",
-        );
-        let source_thread_id = ThreadId::parse("thread-divergent").unwrap();
-        let preserved_thread_id = ThreadId::parse("thread-preserved").unwrap();
-        let source_provider_id = "019fac21-4aba-7fc2-bb7d-df711c950987".to_string();
-        let child_provider_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c".to_string();
-        let session_directory = scope.provider_root.join("sessions/2026/07/29");
-        fs::create_dir_all(&session_directory).unwrap();
-        let source_path = session_directory.join(format!(
-            "rollout-2026-07-29T00-00-00-{source_provider_id}.jsonl"
-        ));
-        let child_path = session_directory.join(format!(
-            "rollout-2026-07-29T00-00-01-{child_provider_id}.jsonl"
-        ));
-        let local_bytes = codex_divergence_rollout(
-            &source_provider_id,
-            None,
-            &scope.project_root,
-            "m3",
-            "local branch",
-        );
-        let child_bytes = codex_fork_of(&local_bytes, &child_provider_id, &source_provider_id);
-        let cloud_bytes = codex_divergence_rollout(
-            &source_provider_id,
-            None,
-            &scope.project_root,
-            "m4",
-            "cloud branch",
-        );
-        fs::write(&source_path, &local_bytes).unwrap();
-        let (local_lineage_digest, local_semantic_digest) = complete_digests(&local_bytes);
-        let (cloud_lineage_digest, cloud_semantic_digest) = complete_digests(&cloud_bytes);
-        let source_sha256 = sha256(&local_bytes);
-        repository
-            .mutate_conversation_bindings(|document| {
-                document.bindings.push(LocalConversationBinding {
-                    host_id: scope.host_id.clone(),
-                    replica_id: scope.replica_id.clone(),
-                    local_project_id: scope.project_id.clone(),
-                    provider_profile_id: scope.profile_id.clone(),
-                    thread_id: source_thread_id.clone(),
-                    forked_from: None,
-                    fork_stamp: None,
-                    provider_thread_id: Some(source_provider_id.clone()),
-                    materialization_state: ConversationMaterializationState::Resumable,
-                    last_observed_file_sha256: Some(source_sha256.clone()),
-                    last_observed_head_message_id: Some("m3".to_string()),
-                    last_observed_lineage_digest: Some(local_lineage_digest.clone()),
-                    last_observed_semantic_digest: Some(local_semantic_digest.clone()),
-                    source_revision: Some(6),
-                    source_manifest_sha256: Some("e".repeat(64)),
-                    revision: 0,
-                    created_at: 10,
-                    updated_at: 10,
-                });
-                Ok(())
-            })
-            .unwrap();
-        let bindings_revision = repository.load_conversation_bindings().unwrap().revision;
-        let executable = home.join("codex-fixture-bin");
-        let executable_bytes = b"fixture is intentionally not executable";
-        fs::write(&executable, executable_bytes).unwrap();
-        let executable = fs::canonicalize(executable).unwrap();
-        let executable_sha256 = sha256(executable_bytes);
-        let executors = vec![
-            CodexForkExecutor::AppServerStdio,
-            CodexForkExecutor::NativePty,
-        ];
-        let operation = ConversationSyncOperation {
-            operation_id: ConversationOperationId::parse("operation-codex-divergence").unwrap(),
-            plan_id: Some(PlanId::parse("plan-codex-divergence").unwrap()),
-            plan_action_id: Some(ActionId::parse("action-codex-divergence").unwrap()),
-            direction: ConversationPlanDirection::Pull,
-            phase: ConversationSyncPhase::Prepared,
-            cloud: Some(ConversationCloudAnchor {
-                storage_id: StorageId::parse("storage-codex-divergence").unwrap(),
-                bundle_id,
-                revision: 7,
-                commit_id: "commit-codex-divergence".to_string(),
-                manifest_sha256: "a".repeat(64),
-            }),
-            host_id: scope.host_id.clone(),
-            replica_id: scope.replica_id.clone(),
-            local_project_id: scope.project_id.clone(),
-            provider_profile_id: scope.profile_id.clone(),
-            provider: codex(),
-            thread_id: source_thread_id.clone(),
-            operation: ConversationSyncOperationKind::CodexDivergence(CodexDivergenceOperation {
-                origin: ForkOrigin::PullPreserve,
-                resolution: ConversationDivergenceResolution::PreserveLocalWithNativeFork,
-                available_resolutions: vec![
-                    ConversationDivergenceResolution::PreserveLocalWithNativeFork,
-                    ConversationDivergenceResolution::UseCloudOnly,
-                ],
-                recommended_resolution:
-                    ConversationDivergenceResolution::PreserveLocalWithNativeFork,
-                local_branch_preserved: false,
-                preserved_thread_id: preserved_thread_id.clone(),
-                source_provider_thread_id: source_provider_id.clone(),
-                source_transcript_path: source_path.to_string_lossy().into_owned(),
-                fork_provider_thread_id: None,
-                fork_transcript_path: None,
-                fork_transcript_sha256: None,
-                local_lineage_digest: local_lineage_digest.clone(),
-                local_semantic_digest: local_semantic_digest.clone(),
-                local_message_count: 3,
-                pinned_local_title: None,
-                pinned_cloud_title: None,
-                desired_fork_name: "Local chat — local before Pull · 2026-07-29 18:42Z".to_string(),
-                desired_original_name: None,
-                codex_executable: executable.to_string_lossy().into_owned(),
-                codex_executable_sha256: executable_sha256.clone(),
-                available_executors: executors.clone(),
-                attempts: Vec::new(),
-                current_executor: None,
-                successful_executor: None,
-                fork_name_status: None,
-                original_name_status: None,
-                inventory_refresh_status: CodexInventoryRefreshStatus::NotAttempted,
-            }),
-            binding_forked_from: None,
-            provider_thread_id: Some(source_provider_id.clone()),
-            materialization_state: ConversationMaterializationState::Resumable,
-            lineage_digest: Some(cloud_lineage_digest.clone()),
-            semantic_digest: Some(cloud_semantic_digest.clone()),
-            expected_host_identity_revision: scope.host_identity_revision,
-            expected_bindings_document_revision: bindings_revision,
-            expected_binding_revision: Some(0),
-            expected_profile_revision: 0,
-            expected_project_binding_revision: 0,
-            expected_local_digest: Some(source_sha256.clone()),
-            targets: Vec::new(),
-            created_at: 20,
-            updated_at: 20,
-        };
-        operation.validate().unwrap();
-        let target = ConversationTargetPayload {
-            target_path: source_path.clone(),
-            role: ConversationFileRole::Transcript,
-            expected: TargetExpectation::Sha256(source_sha256.clone()),
-            bytes: cloud_bytes.clone(),
-        };
-        let fork = CodexForkExecutionRequest {
-            codex_home: scope.provider_root,
-            project_directory: scope.project_root,
-            codex_executable: executable,
-            codex_executable_sha256: executable_sha256,
-            source_provider_thread_id: source_provider_id.clone(),
-            source_transcript_path: source_path.clone(),
-            source_transcript_sha256: source_sha256,
-            local_lineage_digest: local_lineage_digest.clone(),
-            local_semantic_digest: local_semantic_digest.clone(),
-            pinned_local_title: None,
-            desired_fork_name: "Local chat — local before Pull · 2026-07-29 18:42Z".to_string(),
-            available_executors: executors,
-        };
-        Self {
-            _temp: temp,
-            home,
-            repository,
-            operation,
-            target,
-            fork,
-            source_path,
-            child_path,
-            source_thread_id,
-            preserved_thread_id,
-            source_provider_id,
-            child_provider_id,
-            local_bytes,
-            child_bytes,
-            cloud_bytes,
-            local_lineage_digest,
-            local_semantic_digest,
-            cloud_lineage_digest,
-            cloud_semantic_digest,
-        }
-    }
-
-    fn begin_pending_checkpoint(&self, executor: CodexForkExecutor) {
-        let mut failpoints = FailOnce::new(ConversationFailpoint::AfterStaged);
-        let error = apply_codex_divergence_locked(
-            &self.repository,
-            CodexDivergenceMaterializationRequest {
-                operation: self.operation.clone(),
-                targets: vec![self.target.clone()],
-                fork: self.fork.clone(),
-            },
-            &mut failpoints,
-            &mut |_, _| {},
-        )
-        .unwrap_err();
-        assert!(error.contains("injected failure"), "{error}");
-        self.set_pending_executor(executor);
-    }
-
-    fn begin_unacknowledged_checkpoint(&self, executor: CodexForkExecutor) {
-        self.begin_pending_checkpoint(executor);
-        let recovered = recover_conversation_materializations(&self.repository).unwrap();
-        assert_eq!(
-            recovered.recovery_required,
-            vec![self.operation.operation_id.clone()]
-        );
-        assert!(recovered.completed.is_empty());
-    }
-
-    fn write_exact_child(&self) {
-        fs::write(&self.child_path, &self.child_bytes).unwrap();
-    }
-
-    #[cfg(unix)]
-    fn enable_fake_fork_app_server(&mut self) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let shell_quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
-        let initialize = json!({"id": 1, "result": {}}).to_string();
-        let read = json!({
-            "id": 2,
-            "result": {
-                "thread": {
-                    "name": null,
-                    "status": {"type": "idle"}
-                }
-            }
-        })
-        .to_string();
-        let fork = json!({
-            "id": 3,
-            "result": {
-                "thread": {
-                    "id": self.child_provider_id,
-                    "forkedFromId": self.source_provider_id,
-                    "path": self.child_path
-                }
-            }
-        })
-        .to_string();
-        let named = json!({"id": 3, "result": {}}).to_string();
-        let listed = json!({"id": 4, "result": {"data": [], "nextCursor": null}}).to_string();
-        let script = format!(
-            "#!/bin/sh\n\
-             while IFS= read -r line\n\
-             do\n\
-               case \"$line\" in\n\
-                 *'\"method\":\"initialize\"'*) printf '%s\\n' {} ;;\n\
-                 *'\"method\":\"thread/read\"'*) printf '%s\\n' {} ;;\n\
-                 *'\"method\":\"thread/fork\"'*) printf '%s\\n' {} ;;\n\
-                 *'\"method\":\"thread/name/set\"'*) printf '%s\\n' {} ;;\n\
-                 *'\"method\":\"thread/list\"'*) printf '%s\\n' {} ;;\n\
-               esac\n\
-             done\n",
-            shell_quote(&initialize),
-            shell_quote(&read),
-            shell_quote(&fork),
-            shell_quote(&named),
-            shell_quote(&listed),
-        );
-        fs::write(&self.fork.codex_executable, script.as_bytes()).unwrap();
-        fs::set_permissions(
-            &self.fork.codex_executable,
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        let digest = sha256(script.as_bytes());
-        self.fork.codex_executable_sha256 = digest.clone();
-        let divergence = match &mut self.operation.operation {
-            ConversationSyncOperationKind::CodexDivergence(divergence) => divergence,
-            _ => unreachable!(),
-        };
-        divergence.codex_executable_sha256 = digest;
-    }
-
-    #[cfg(unix)]
-    fn enable_fake_idle_app_server(&mut self) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let script = br#"#!/bin/sh
-while IFS= read -r line
-do
-  case "$line" in
-    *'"method":"initialize"'*)
-      printf '%s\n' '{"id":1,"result":{}}'
-      ;;
-    *'"method":"thread/read"'*)
-      printf '%s\n' '{"id":2,"result":{"thread":{"name":null,"status":{"type":"idle"}}}}'
-      ;;
-    *'"method":"thread/list"'*)
-      printf '%s\n' '{"id":2,"result":{"data":[],"nextCursor":null}}'
-      ;;
-  esac
-done
-"#;
-        fs::write(&self.fork.codex_executable, script).unwrap();
-        fs::set_permissions(
-            &self.fork.codex_executable,
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        let digest = sha256(script);
-        self.fork.codex_executable_sha256 = digest.clone();
-        let divergence = match &mut self.operation.operation {
-            ConversationSyncOperationKind::CodexDivergence(divergence) => divergence,
-            _ => unreachable!(),
-        };
-        divergence.codex_executable_sha256 = digest;
-    }
-
-    fn current_operation(&self) -> ConversationSyncOperation {
-        self.repository
-            .load_conversation_sync_journal()
-            .unwrap()
-            .operations
-            .into_iter()
-            .find(|operation| operation.operation_id == self.operation.operation_id)
-            .unwrap()
-    }
-
-    fn set_pending_executor(&self, executor: CodexForkExecutor) {
-        let journal = self.repository.load_conversation_sync_journal().unwrap();
-        self.repository
-            .mutate_conversation_sync_journal(journal.revision, |journal| {
-                let operation = journal
-                    .operations
-                    .iter_mut()
-                    .find(|operation| operation.operation_id == self.operation.operation_id)
-                    .unwrap();
-                let divergence = match &mut operation.operation {
-                    ConversationSyncOperationKind::CodexDivergence(divergence) => divergence,
-                    _ => unreachable!(),
-                };
-                divergence.attempts = vec![CodexForkAttempt {
-                    executor,
-                    status: CodexForkAttemptStatus::Pending,
-                }];
-                divergence.current_executor = Some(executor);
-                divergence.successful_executor = None;
-                operation.phase = ConversationSyncPhase::ForkAttemptPending;
-                Ok(())
-            })
-            .unwrap();
-    }
-
-    fn native_child_count(&self) -> usize {
-        fs::read_dir(self.child_path.parent().unwrap())
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry.path() != self.source_path
-                    && entry.path().extension().and_then(|value| value.to_str()) == Some("jsonl")
-            })
-            .count()
-    }
-
-    fn persisted_receipt(
-        &self,
-        repository: &LocalStateRepository,
-    ) -> crate::project_sync::domain::ConversationApplyReceipt {
-        repository
-            .load_materializations()
-            .unwrap()
-            .records
-            .into_iter()
-            .flat_map(|record| record.receipts)
-            .find_map(|receipt| receipt.conversation)
-            .unwrap()
-    }
-
-    fn assert_complete(
-        &self,
-        receipt: &crate::project_sync::domain::ConversationApplyReceipt,
-        executor: CodexForkExecutor,
-    ) {
-        self.assert_complete_in(&self.repository, receipt, executor);
-    }
-
-    fn assert_complete_in(
-        &self,
-        repository: &LocalStateRepository,
-        receipt: &crate::project_sync::domain::ConversationApplyReceipt,
-        executor: CodexForkExecutor,
-    ) {
-        assert_eq!(fs::read(&self.source_path).unwrap(), self.cloud_bytes);
-        assert_eq!(fs::read(&self.child_path).unwrap(), self.child_bytes);
-        assert_eq!(receipt.thread_id, self.source_thread_id);
-        assert_eq!(
-            receipt.provider_thread_id.as_deref(),
-            Some(self.source_provider_id.as_str())
-        );
-        assert_eq!(
-            receipt.lineage_digest.as_deref(),
-            Some(self.cloud_lineage_digest.as_str())
-        );
-        assert_eq!(
-            receipt.semantic_digest.as_deref(),
-            Some(self.cloud_semantic_digest.as_str())
-        );
-        let DivergenceReceiptKind::CodexNativeFork(divergence) =
-            receipt.divergence.as_ref().unwrap()
-        else {
-            panic!(
-                "Codex divergence machinery produced a non-Codex receipt: {:?}",
-                receipt.divergence
-            );
-        };
-        assert_eq!(
-            divergence.resolution,
-            ConversationDivergenceResolution::PreserveLocalWithNativeFork
-        );
-        assert_eq!(
-            divergence.preserved_thread_id.as_ref(),
-            Some(&self.preserved_thread_id)
-        );
-        assert_eq!(
-            divergence.preserved_provider_thread_id.as_deref(),
-            Some(self.child_provider_id.as_str())
-        );
-        assert_eq!(divergence.executor, Some(executor));
-        assert_eq!(
-            divergence.fork_name_status,
-            Some(ConversationNameStatus::Deferred)
-        );
-        assert_eq!(
-            divergence.original_name_status,
-            Some(ConversationNameStatus::Unchanged)
-        );
-        assert_eq!(
-            divergence.inventory_refresh_status,
-            CodexInventoryRefreshStatus::Deferred
-        );
-
-        let document = repository.load_conversation_bindings().unwrap();
-        assert_eq!(document.bindings.len(), 2);
-        let original = document
-            .bindings
-            .iter()
-            .find(|binding| binding.thread_id == self.source_thread_id)
-            .unwrap();
-        assert_eq!(
-            original.provider_thread_id.as_deref(),
-            Some(self.source_provider_id.as_str())
-        );
-        assert!(original.forked_from.is_none());
-        assert_eq!(
-            original.last_observed_lineage_digest.as_deref(),
-            Some(self.cloud_lineage_digest.as_str())
-        );
-        assert_eq!(
-            original.last_observed_semantic_digest.as_deref(),
-            Some(self.cloud_semantic_digest.as_str())
-        );
-        let preserved = document
-            .bindings
-            .iter()
-            .find(|binding| binding.thread_id == self.preserved_thread_id)
-            .unwrap();
-        assert_eq!(
-            preserved.provider_thread_id.as_deref(),
-            Some(self.child_provider_id.as_str())
-        );
-        assert_eq!(preserved.forked_from.as_ref(), Some(&self.source_thread_id));
-        assert_eq!(
-            preserved.last_observed_lineage_digest.as_deref(),
-            Some(self.local_lineage_digest.as_str())
-        );
-        assert_eq!(
-            preserved.last_observed_semantic_digest.as_deref(),
-            Some(self.local_semantic_digest.as_str())
-        );
-        let backup = repository
-            .root()
-            .join("backups/conversations/operation-codex-divergence/0.bak");
-        assert_eq!(fs::read(backup).unwrap(), self.local_bytes);
-        assert!(repository
-            .load_conversation_sync_journal()
-            .unwrap()
-            .operations
-            .is_empty());
-    }
-}
-
-#[derive(Clone)]
 struct FailOnce {
     target: ConversationFailpoint,
     fired: bool,
@@ -2393,40 +1135,58 @@ fn push_operation(
     bindings_revision: u64,
     binding_revision: Option<u64>,
     transcript: &[u8],
-    lineage_digest: &str,
-    semantic_digest: &str,
+    _lineage_digest: &str,
+    _semantic_digest: &str,
 ) -> ConversationSyncOperation {
+    let tail_after = match analyze_codex_transcript(transcript).lineage {
+        CodecLineage::Complete { chain, .. } => {
+            compute_portable_conversation_tail(TailPartitionKind::WholeThread, 0, &chain).unwrap()
+        }
+        other => panic!("push fixture transcript is not resumable: {other:?}"),
+    };
     ConversationSyncOperation {
         operation_id: ConversationOperationId::parse(operation_id).unwrap(),
         plan_id: Some(PlanId::parse(plan_id).unwrap()),
         plan_action_id: None,
-        direction: ConversationPlanDirection::Push,
-        phase: ConversationSyncPhase::Prepared,
-        cloud: Some(ConversationCloudAnchor {
+        cloud: ConversationCloudAnchor {
             storage_id: world.storage_id.clone(),
             bundle_id: world.bundle_id.clone(),
             revision,
-            commit_id,
-            manifest_sha256,
-        }),
+            commit_id: commit_id.clone(),
+            manifest_sha256: manifest_sha256.clone(),
+        },
         host_id: scope.host_id.clone(),
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
         provider: codex(),
         thread_id: thread_id.clone(),
-        operation: ConversationSyncOperationKind::CloudPublication,
-        binding_forked_from: None,
+        operation: ConversationSyncOperationKind::CloudPublication(
+            ConversationPublicationOperation {
+                phase: PushJournalPhase::CandidateUploaded,
+                candidate_commit_id: commit_id,
+                candidate_manifest_sha256: manifest_sha256,
+                artifact_sha256: sha256(transcript),
+                tail_before: None,
+                tail_after,
+                planned_relation: TailClassification::MissingCloud,
+                sync_config_before: SyncConfig::default(),
+                sync_config_after: SyncConfig::default(),
+                bindings_before: crate::project_sync::domain::ConversationBindings::empty(
+                    scope.host_id.clone(),
+                ),
+                bindings_after: crate::project_sync::domain::ConversationBindings::empty(
+                    scope.host_id.clone(),
+                ),
+            },
+        ),
         provider_thread_id: Some("source-thread".to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
-        lineage_digest: Some(lineage_digest.to_string()),
-        semantic_digest: Some(semantic_digest.to_string()),
         expected_host_identity_revision: scope.host_identity_revision,
         expected_bindings_document_revision: bindings_revision,
         expected_binding_revision: binding_revision,
         expected_profile_revision: 0,
         expected_project_binding_revision: 0,
-        expected_local_digest: Some(sha256(transcript)),
         targets: vec![],
         created_at: 30,
         updated_at: 30,
@@ -2440,6 +1200,8 @@ fn cloud_publication(
         revision: outcome.snapshot.head.revision,
         commit_id: outcome.snapshot.head.commit_id,
         manifest_sha256: outcome.snapshot.head.manifest_sha256,
+        manifest_size: outcome.snapshot.head.manifest_size,
+        scope_pins: BTreeMap::new(),
     }
 }
 
@@ -2531,7 +1293,7 @@ impl MaterializationFixture {
                 target_path: provider_root.join("sessions/destination-thread.jsonl"),
                 role: ConversationFileRole::Transcript,
                 expected: TargetExpectation::Absent,
-                bytes: transcript,
+                bytes: transcript.clone(),
             },
             ConversationTargetPayload {
                 target_path: provider_root.join("session_index.jsonl"),
@@ -2548,38 +1310,56 @@ impl MaterializationFixture {
                 bytes: sidecar,
             },
         ];
+        let accepted_tail_after = match analyze_codex_transcript(&transcript).lineage {
+            CodecLineage::Complete { ref chain, .. } => {
+                compute_portable_conversation_tail(TailPartitionKind::WholeThread, 0, chain)
+                    .unwrap()
+            }
+            ref other => panic!("materialize fixture is not resumable: {other:?}"),
+        };
         let operation = ConversationSyncOperation {
             operation_id: ConversationOperationId::parse("operation-materialize").unwrap(),
             plan_id: Some(PlanId::parse("plan-materialize").unwrap()),
             plan_action_id: None,
-            direction: ConversationPlanDirection::Pull,
-            phase: ConversationSyncPhase::Prepared,
-            cloud: Some(ConversationCloudAnchor {
+            cloud: ConversationCloudAnchor {
                 storage_id: crate::project_sync::domain::StorageId::parse("storage-materialize")
                     .unwrap(),
                 bundle_id,
                 revision: 7,
                 commit_id: "commit-materialize".to_string(),
                 manifest_sha256: "a".repeat(64),
-            }),
-            host_id: identity.host_id,
+            },
+            host_id: identity.host_id.clone(),
             replica_id,
             local_project_id,
             provider_profile_id: profile_id,
             provider: codex(),
             thread_id: ThreadId::parse("thread-materialize").unwrap(),
-            operation: ConversationSyncOperationKind::ProviderMaterialization,
-            binding_forked_from: None,
+            operation: ConversationSyncOperationKind::ProviderMaterialization(
+                ConversationMaterializationOperation {
+                    phase: PullJournalPhase::TargetStaged,
+                    planned_relation: TailClassification::MissingLocal,
+                    accepted_tail_after,
+                    pinned_lineage_digest: lineage_digest,
+                    pinned_semantic_digest: semantic_digest,
+                    keep_both: None,
+                    sync_config_before: SyncConfig::default(),
+                    sync_config_after: SyncConfig::default(),
+                    bindings_before: crate::project_sync::domain::ConversationBindings::empty(
+                        identity.host_id.clone(),
+                    ),
+                    bindings_after: crate::project_sync::domain::ConversationBindings::empty(
+                        identity.host_id,
+                    ),
+                },
+            ),
             provider_thread_id: Some(thread_id.to_string()),
             materialization_state: ConversationMaterializationState::Resumable,
-            lineage_digest: Some(lineage_digest),
-            semantic_digest: Some(semantic_digest),
             expected_host_identity_revision: identity.revision,
             expected_bindings_document_revision: 0,
             expected_binding_revision: None,
             expected_profile_revision: 0,
             expected_project_binding_revision: 0,
-            expected_local_digest: None,
             targets: vec![],
             created_at: 10,
             updated_at: 10,
@@ -2594,8 +1374,43 @@ impl MaterializationFixture {
     }
 
     fn request(&self) -> ConversationMaterializationRequest {
+        let mut operation = self.operation.clone();
+        if let ConversationSyncOperationKind::ProviderMaterialization(payload) =
+            &mut operation.operation
+        {
+            let config = self.repository.load_config().unwrap();
+            payload.sync_config_before = config.clone();
+            let mut config_after = config;
+            config_after.revision = config_after.revision.saturating_add(1);
+            payload.sync_config_after = config_after;
+            let bindings = self.repository.load_conversation_bindings().unwrap();
+            payload.bindings_before = bindings.clone();
+            let mut bindings_after = bindings;
+            // The after-state the materialization commits: the destination
+            // binding row under the imported whole-thread layout.
+            bindings_after.bindings.push(LocalConversationBinding {
+                host_id: operation.host_id.clone(),
+                replica_id: operation.replica_id.clone(),
+                local_project_id: operation.local_project_id.clone(),
+                provider_profile_id: operation.provider_profile_id.clone(),
+                thread_id: operation.thread_id.clone(),
+                forked_from: None,
+                root_tail_layout: Some(RootTailLayout {
+                    codec: PORTABLE_TAIL_CODEC_V1.to_string(),
+                    partition_kind: TailPartitionKind::WholeThread,
+                    start_record_count: 0,
+                }),
+                provider_thread_id: operation.provider_thread_id.clone(),
+                materialization_state: ConversationMaterializationState::Resumable,
+                revision: 0,
+                created_at: operation.created_at,
+                updated_at: operation.updated_at,
+            });
+            bindings_after.revision = bindings_after.revision.saturating_add(1);
+            payload.bindings_after = bindings_after;
+        }
         ConversationMaterializationRequest {
-            operation: self.operation.clone(),
+            operation,
             targets: self.targets.clone(),
         }
     }
@@ -2654,219 +1469,51 @@ fn assert_materialization_fixed_point(
         .exists());
 }
 
-#[cfg(unix)]
-#[test]
-fn exact_app_server_fork_is_stamped_before_the_original_is_replaced() {
-    let mut fixture = CodexDivergenceFixture::new();
-    fixture.write_exact_child();
-    fixture.enable_fake_fork_app_server();
-    let outcome = apply_codex_divergence_locked(
-        &fixture.repository,
-        CodexDivergenceMaterializationRequest {
-            operation: fixture.operation.clone(),
-            targets: vec![fixture.target.clone()],
-            fork: fixture.fork.clone(),
-        },
-        &mut NoConversationFailpoints,
-        &mut |_, _| {},
-    )
-    .unwrap();
-    let CodexDivergenceApplyOutcome::Committed(receipt) = outcome else {
-        panic!("exact app-server fork path did not commit the divergence");
-    };
-    fixture.assert_complete(&receipt, CodexForkExecutor::AppServerStdio);
-
-    let document = fixture.repository.load_conversation_bindings().unwrap();
-    let source = document
-        .bindings
-        .iter()
-        .find(|binding| binding.thread_id == fixture.source_thread_id)
-        .unwrap();
-    let stamp = source
-        .fork_stamp
-        .as_ref()
-        .expect("verified fork stamps the source binding");
-    assert_eq!(stamp.fork_thread_id, fixture.preserved_thread_id);
-    assert_eq!(stamp.fork_provider_thread_id, fixture.child_provider_id);
-    assert_eq!(
-        stamp.fork_transcript_path,
-        fixture.child_path.to_string_lossy()
-    );
-    assert_eq!(stamp.lineage_digest, fixture.local_lineage_digest);
-    assert_eq!(stamp.semantic_digest, fixture.local_semantic_digest);
-    assert_eq!(stamp.message_count, 3);
-    assert_eq!(
-        source.last_observed_lineage_digest.as_deref(),
-        Some(fixture.cloud_lineage_digest.as_str())
-    );
-    assert_eq!(
-        source.last_observed_semantic_digest.as_deref(),
-        Some(fixture.cloud_semantic_digest.as_str())
-    );
-}
-
-#[cfg(test)]
-fn preservation_review(bytes: &[u8], provider_thread_id: &str) -> LocalThreadReview {
-    let analysis = analyze_codex_transcript(bytes);
-    let logical_path = format!("state/codex/{provider_thread_id}.jsonl");
-    LocalThreadReview {
-        binding: None,
-        binding_resolution: BindingResolution::Bound,
-        resource_id: conversation_resource_id(
-            &codex(),
-            &ThreadId::parse("thread-preservation-review").unwrap(),
-        )
-        .unwrap(),
-        descriptor: None,
-        conversation: provider_capture::CapturedConversation {
-            provider: codex(),
-            lineage_codec: "codex-jsonl".to_string(),
-            source_thread_id: Some(provider_thread_id.to_string()),
-            source_cwd: analysis.source_cwd.clone(),
-            transcript_logical_path: logical_path.clone(),
-            source_physical_path: None,
-            sidecar_files: Vec::new(),
-            record_count: analysis.record_count,
-            lineage: analysis.lineage,
-            presentation: SessionPresentation::default(),
-        },
-        transcript: provider_capture::CapturedFile {
-            logical_path,
-            resource_id: format!("codex:session:{provider_thread_id}"),
-            bytes: bytes.to_vec(),
-            source_mtime: 0,
-            mode: 0o600,
-        },
+fn canned_tail(end: u64) -> PortableConversationTail {
+    PortableConversationTail {
+        codec: PORTABLE_TAIL_CODEC_V1.to_string(),
+        partition_kind: TailPartitionKind::WholeThread,
+        start_record_count: 0,
+        accepted_end_record_count: end,
+        accepted_tail_state: "e".repeat(64),
     }
 }
 
-#[test]
-fn diverged_forked_witness_requires_stamp_pair_fork_and_prefix() {
-    let cwd = PathBuf::from("/tmp/preservation-project");
-    let source_provider_id = "019fac21-4aba-7fc2-bb7d-df711c950987";
-    let fork_provider_id = "019fac73-c1ff-79b3-bb8e-1673ed0d644c";
-    let preserved_thread_id = ThreadId::parse("thread-preserved").unwrap();
-    let source_bytes =
-        codex_divergence_rollout(source_provider_id, None, &cwd, "m3", "local branch");
-    let fork_bytes = codex_fork_of(&source_bytes, fork_provider_id, source_provider_id);
-    let (lineage, semantic) = complete_digests(&source_bytes);
-    let stamp = ForkStamp {
-        fork_thread_id: preserved_thread_id.clone(),
-        fork_provider_thread_id: fork_provider_id.to_string(),
-        fork_transcript_path: "/tmp/preservation-fork.jsonl".to_string(),
-        lineage_digest: lineage.clone(),
-        semantic_digest: semantic.clone(),
-        message_count: 3,
-        forked_at: 40,
-    };
-    let binding = LocalConversationBinding {
-        host_id: crate::project_sync::domain::HostId::parse("1".repeat(32)).unwrap(),
-        replica_id: ReplicaId::parse("replica-preservation").unwrap(),
-        local_project_id: LocalProjectId::parse("project-preservation").unwrap(),
-        provider_profile_id: LocalProviderProfileId::parse("profile-preservation").unwrap(),
-        thread_id: ThreadId::parse("thread-divergent").unwrap(),
-        forked_from: None,
-        fork_stamp: Some(stamp),
-        provider_thread_id: Some(source_provider_id.to_string()),
-        materialization_state: ConversationMaterializationState::Resumable,
-        last_observed_file_sha256: None,
-        last_observed_head_message_id: None,
-        last_observed_lineage_digest: None,
-        last_observed_semantic_digest: None,
-        source_revision: None,
-        source_manifest_sha256: None,
-        revision: 1,
-        created_at: 10,
-        updated_at: 40,
-    };
-    let source_review = preservation_review(&source_bytes, source_provider_id);
-    let mut local_threads = BTreeMap::new();
+fn canned_publication() -> ConversationSyncOperationKind {
+    ConversationSyncOperationKind::CloudPublication(ConversationPublicationOperation {
+        phase: PushJournalPhase::CandidateUploaded,
+        candidate_commit_id: "commit-candidate".to_string(),
+        candidate_manifest_sha256: "f".repeat(64),
+        artifact_sha256: "a".repeat(64),
+        tail_before: None,
+        tail_after: canned_tail(1),
+        planned_relation: TailClassification::MissingCloud,
+        sync_config_before: SyncConfig::default(),
+        sync_config_after: SyncConfig::default(),
+        bindings_before: crate::project_sync::domain::ConversationBindings::empty(
+            crate::project_sync::domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+        ),
+        bindings_after: crate::project_sync::domain::ConversationBindings::empty(
+            crate::project_sync::domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+        ),
+    })
+}
 
-    // Fork untouched since adoption: the full witness holds.
-    local_threads.insert(
-        preserved_thread_id.clone(),
-        preservation_review(&fork_bytes, fork_provider_id),
-    );
-    let preservation =
-        diverged_fork_preservation(Some(&binding), Some(&source_review), &local_threads)
-            .expect("an exact fork satisfies the witness");
-    assert_eq!(preservation.fork_thread_id, preserved_thread_id);
-    assert_eq!(preservation.forked_at, 40);
-
-    // A continued fork still carries the stamped chain as a prefix.
-    let mut continued = fork_bytes.clone();
-    continued.extend_from_slice(
-        json!({
-            "timestamp": "2026-07-29T13:00:00Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "id": "m4",
-                "parent_id": "m3",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "continued in the fork"}],
-            },
-        })
-        .to_string()
-        .as_bytes(),
-    );
-    continued.push(b'\n');
-    local_threads.insert(
-        preserved_thread_id.clone(),
-        preservation_review(&continued, fork_provider_id),
-    );
-    assert!(
-        diverged_fork_preservation(Some(&binding), Some(&source_review), &local_threads).is_some(),
-        "a continued fork preserves the stamped prefix"
-    );
-
-    // A fork whose early history was rewritten no longer preserves the branch.
-    let rewritten_origin =
-        codex_divergence_rollout(source_provider_id, None, &cwd, "m9", "different branch");
-    let rewritten = codex_fork_of(&rewritten_origin, fork_provider_id, source_provider_id);
-    local_threads.insert(
-        preserved_thread_id.clone(),
-        preservation_review(&rewritten, fork_provider_id),
-    );
-    assert!(
-        diverged_fork_preservation(Some(&binding), Some(&source_review), &local_threads).is_none(),
-        "a rewritten fork fails the prefix condition"
-    );
-
-    // A deleted fork fails the presence condition.
-    local_threads.remove(&preserved_thread_id);
-    assert!(
-        diverged_fork_preservation(Some(&binding), Some(&source_review), &local_threads).is_none(),
-        "a missing fork fails the witness"
-    );
-
-    // A source that moved past the stamp fails the pair condition.
-    local_threads.insert(
-        preserved_thread_id.clone(),
-        preservation_review(&fork_bytes, fork_provider_id),
-    );
-    let moved_bytes =
-        codex_divergence_rollout(source_provider_id, None, &cwd, "m5", "new local work");
-    let moved_review = preservation_review(&moved_bytes, source_provider_id);
-    assert!(
-        diverged_fork_preservation(Some(&binding), Some(&moved_review), &local_threads).is_none(),
-        "a moved source fails the pair condition"
-    );
-
-    // A stamp longer than the fork chain fails the length condition.
-    let mut short_binding = binding.clone();
-    short_binding.fork_stamp.as_mut().unwrap().message_count = 4;
-    assert!(
-        diverged_fork_preservation(Some(&short_binding), Some(&source_review), &local_threads)
-            .is_none(),
-        "a fork shorter than the stamped chain fails the witness"
-    );
-
-    // No stamp, no witness.
-    let mut unstamped = binding.clone();
-    unstamped.fork_stamp = None;
-    assert!(
-        diverged_fork_preservation(Some(&unstamped), Some(&source_review), &local_threads)
-            .is_none()
-    );
+fn canned_materialization(relation: TailClassification) -> ConversationSyncOperationKind {
+    ConversationSyncOperationKind::ProviderMaterialization(ConversationMaterializationOperation {
+        phase: PullJournalPhase::TargetStaged,
+        planned_relation: relation,
+        accepted_tail_after: canned_tail(1),
+        pinned_lineage_digest: "b".repeat(64),
+        pinned_semantic_digest: "c".repeat(64),
+        keep_both: None,
+        sync_config_before: SyncConfig::default(),
+        sync_config_after: SyncConfig::default(),
+        bindings_before: crate::project_sync::domain::ConversationBindings::empty(
+            crate::project_sync::domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+        ),
+        bindings_after: crate::project_sync::domain::ConversationBindings::empty(
+            crate::project_sync::domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+        ),
+    })
 }

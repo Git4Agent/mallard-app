@@ -68,7 +68,6 @@
   --thread-status-cloud: #397dcc;
   --thread-status-local: #16a7c9;
   --thread-status-divergent: #7655d6;
-  --thread-status-forked: #9a45c5;
   --thread-status-pending: #e59b1b;
   --thread-status-conflict: #e44649;
   --thread-status-unavailable: #85878e;
@@ -6815,6 +6814,35 @@ span.sync-path-crumb {
   cursor: not-allowed;
 }
 
+.sidebar-storage-item .sidebar-profile-actions {
+  width: 31px;
+  flex-basis: 31px;
+  overflow: visible;
+}
+
+.sidebar-storage-actions-menu {
+  z-index: 80;
+  right: -5px;
+  width: 210px;
+}
+
+.sidebar-profile-actions .storage-link-actions-menu-item {
+  width: 100%;
+  min-height: 32px;
+  height: auto;
+  display: grid;
+  justify-content: initial;
+}
+
+.sidebar-storage-pane:has(.sidebar-storage-actions.open) {
+  z-index: 30;
+  overflow: visible;
+}
+
+.sidebar-storage-pane:has(.sidebar-storage-actions.open) > .sidebar-links-list {
+  overflow: visible;
+}
+
 .sidebar-settings-sections .sidebar-link-item {
   min-height: 40px;
   gap: 13px;
@@ -8800,7 +8828,6 @@ span.sync-path-crumb {
 .sync-thread-sync-summary .local { color: var(--thread-status-local); }
 .sync-thread-sync-summary .storage { color: var(--thread-status-cloud); }
 .sync-thread-sync-summary .diverged { color: var(--thread-status-divergent); }
-.sync-thread-sync-summary .diverged-forked { color: var(--thread-status-forked); }
 .sync-thread-sync-summary .pending { color: var(--thread-status-pending); }
 .sync-thread-sync-summary .conflict { color: var(--thread-status-conflict); }
 .sync-thread-sync-summary .unavailable { color: var(--thread-status-unavailable); }
@@ -8857,7 +8884,8 @@ span.sync-path-crumb {
   white-space: nowrap;
 }
 
-.sync-history-branch-state {
+.sync-history-branch-state,
+.sync-history-preserved-badge {
   flex: 0 0 auto;
   padding: 1px 5px;
   border-radius: 999px;
@@ -8866,6 +8894,11 @@ span.sync-path-crumb {
   letter-spacing: .02em;
   line-height: 1.5;
   text-transform: uppercase;
+}
+
+.sync-history-preserved-badge {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .sync-history-branch-state.current {
@@ -9301,7 +9334,6 @@ span.sync-path-crumb {
 .thread-status-icon[data-thread-status="cloud-outstanding"] { color: var(--thread-status-cloud); }
 .thread-status-icon[data-thread-status="local-outstanding"] { color: var(--thread-status-local); }
 .thread-status-icon[data-thread-status="divergent"] { color: var(--thread-status-divergent); }
-.thread-status-icon[data-thread-status="divergent-forked"] { color: var(--thread-status-forked); }
 .thread-status-icon[data-thread-status="pending"] { color: var(--thread-status-pending); }
 .thread-status-icon[data-thread-status="conflict"] { color: var(--thread-status-conflict); }
 .thread-status-icon[data-thread-status="unavailable"] { color: var(--thread-status-unavailable); }
@@ -9310,7 +9342,7 @@ span.sync-path-crumb {
 .sync-thread-sync-indicator.local { color: var(--thread-status-local); }
 .sync-thread-sync-indicator.storage { color: var(--thread-status-cloud); }
 .sync-thread-sync-indicator.diverged { color: var(--thread-status-divergent); }
-.sync-thread-sync-indicator.diverged-forked { color: var(--thread-status-forked); }
+.sync-thread-sync-indicator.preserved { color: var(--purple); }
 .sync-thread-sync-indicator.pending { color: var(--thread-status-pending); }
 .sync-thread-sync-indicator.conflict { color: var(--thread-status-conflict); }
 .sync-thread-sync-indicator.unavailable { color: var(--thread-status-unavailable); }
@@ -9994,8 +10026,7 @@ span.sync-path-crumb {
   margin: 8px 0 10px;
 }
 .sync-sync-review-scroll .sync-review-banners > * { margin: 0; }
-/* Every banner callout reads as one column of title, sentence, lineage —
-   the fork-banner anatomy — regardless of variant. */
+/* Every banner callout reads as one column of title, sentence, and lineage. */
 .sync-review-banners > .sync-callout > span {
   min-width: 0;
   display: flex;
@@ -10094,7 +10125,7 @@ span.sync-path-crumb {
 .sync-outcome-body {
   border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
-.sync-outcome-body > .sync-fork-technical { padding: 4px 10px 8px; }
+.sync-outcome-body > .sync-outcome-technical { padding: 4px 10px 8px; }
 /* A session in the fold is a line in the banner, not a card on it: no border
    of its own, no opaque background over the banner tint, and dividers that
    reach both edges so the divisions belong to the box rather than to the
@@ -10151,18 +10182,6 @@ span.sync-path-crumb {
   -webkit-user-select: all;
   user-select: all;
 }
-/* A session forked N times says so once, instead of carrying N timestamps in
-   its display name. Neutral rather than coloured: a past fork is provenance,
-   and the row's status is already the icon at its front. */
-.sync-outcome-threads .sync-outcome-forkmark {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  color: var(--text-3);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-}
 /* The status icon says what happened; the ⓘ at the line's end carries the
    why on hover. Its tooltip pins right and opens downward: the banner sits
    at the top of the scroll pane, so an upward tooltip on the first row would
@@ -10185,10 +10204,19 @@ span.sync-path-crumb {
   white-space: pre-line;
 }
 
-/* A gate the flow cannot get past lands here: inside the storage card, in
-   the slot the review opens into, with the way forward riding on it. */
-.sync-storage-notice {
-  margin: 0 10px 10px;
+/* A gate the flow cannot get past lands here: in the slot the review opens
+   into, with the way forward riding on it. It used to be inset inside the
+   storage card, which is why it carried its own frame; the card moved to the
+   path bar, so the banner is now the storage group's only row and the frame
+   it inherited drew a second box just inside the group's. It fills the group
+   instead — the block above it clips to the group's inner radius. Compounded
+   with .sync-callout because the theme restyles callout corners at one class
+   of specificity; this must win that, same as .sync-outcome-notice. */
+.sync-callout.sync-storage-notice {
+  max-width: none;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
   align-items: center;
 }
 .sync-storage-notice > span {
@@ -10202,68 +10230,17 @@ span.sync-path-crumb {
 .sync-storage-notice .sync-sync-review-recovery-actions { margin-left: auto; }
 .sync-storage-notice .sync-sync-review-recovery-actions .btn { white-space: nowrap; }
 
-/* The conflict choice lives on the conflicted row itself. */
-.sync-divergence-inline {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin: 2px 0;
-  padding-left: 27px;
-}
-.sync-divergence-inline > svg { color: var(--text-3); flex: 0 0 auto; }
-.sync-divergence-choice { display: inline-flex; gap: 2px; }
-.sync-divergence-choice button {
-  line-height: 1;
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-2);
-  cursor: pointer;
-}
-.sync-divergence-choice button.active { background: var(--bg-hover); color: var(--text-0); }
-.sync-divergence-choice button:disabled { opacity: 0.55; cursor: default; }
-.sync-divergence-inline-confirm {
-  grid-column: 1 / -1;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  width: fit-content;
-  margin: 3px 0 4px 27px;
-  padding: 4px 9px;
-  font-size: 11px;
-  color: var(--yellow);
-  background: var(--warning-soft);
-  border: 1px solid color-mix(in srgb, var(--yellow) 40%, var(--border));
-  border-radius: 6px;
-}
-.sync-divergence-inline-confirm svg { flex: 0 0 auto; }
-
-/* Lines inside the consolidated needs-attention card. */
-.sync-attention-line {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  margin-top: 2px;
-}
-.sync-attention-line svg { flex: 0 0 auto; }
-.sync-attention-line.ok svg { color: var(--green); }
-.sync-attention-line.bad svg { color: var(--red); }
-
 /* Technical details tucked under a plain-language banner. */
-.sync-fork-technical {
+.sync-outcome-technical {
   margin-top: 4px;
   font-size: 10.5px;
   color: var(--text-3);
 }
-.sync-fork-technical summary { cursor: pointer; }
-.sync-fork-technical dl { margin: 4px 0 0; display: grid; gap: 2px; }
-.sync-fork-technical dl div { display: flex; gap: 6px; }
-.sync-fork-technical dt { color: var(--text-3); }
-.sync-fork-technical dd { margin: 0; }
+.sync-outcome-technical summary { cursor: pointer; }
+.sync-outcome-technical dl { margin: 4px 0 0; display: grid; gap: 2px; }
+.sync-outcome-technical dl div { display: flex; gap: 6px; }
+.sync-outcome-technical dt { color: var(--text-3); }
+.sync-outcome-technical dd { margin: 0; }
 
 /* Footers are buttons only; the actions pin to the right edge. */
 .sync-inline-action-footer.sync-sync-review-footer { justify-content: flex-end; }
@@ -10289,8 +10266,8 @@ span.sync-path-crumb {
 }
 
 /* A destination waiting on a Pull is a step, not a failure: the push is intact
-   and one action clears it. It reads as the same banner the fork panel and the
-   blockers use — icon, then one column of text — rather than as a red error.
+   and one action clears it. It reads like the other blockers — icon, then one
+   column of text — rather than as a red error.
    It was a bare three-column row before, which put the sentence and the lineage
    numbers on the same baseline as the title and left it competing with the
    Sessions row for the same rhythm. */
@@ -10746,11 +10723,6 @@ button.sync-project-file-expand { cursor: pointer; }
     gap: 9px;
   }
 }
-.sync-sync-row-blocked {
-  color: var(--red);
-  cursor: default;
-}
-
 .sync-history-older-group {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -10788,95 +10760,6 @@ button.sync-project-file-expand { cursor: pointer; }
 
 .sync-history-older-inert[open] > summary {
   margin-bottom: 8px;
-}
-
-/* The Activity page manual-fork checkpoint card (the Pull review now uses a
-   plain banner instead, but this surface keeps the card). */
-.sync-divergence-card,
-.sync-fork-checkpoint {
-  border: 1px solid color-mix(in srgb, var(--yellow) 38%, var(--border));
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--yellow) 5%, var(--bg-1));
-}
-
-.sync-divergence-preview,
-.sync-fork-checkpoint dl {
-  display: grid;
-  gap: 4px;
-  margin: 4px 8px 0;
-}
-
-.sync-divergence-preview div,
-.sync-fork-checkpoint dl div {
-  display: grid;
-  grid-template-columns: 92px minmax(0, 1fr);
-  gap: 8px;
-}
-
-.sync-divergence-preview dt,
-.sync-fork-checkpoint dt {
-  color: var(--text-3);
-  font-size: 10px;
-}
-
-.sync-divergence-preview dd,
-.sync-fork-checkpoint dd {
-  min-width: 0;
-  margin: 0;
-  overflow-wrap: anywhere;
-  color: var(--text-1);
-  font-size: 10.5px;
-}
-
-.sync-fork-checkpoint {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-}
-
-.sync-fork-checkpoint > div {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-}
-
-.sync-fork-checkpoint > div > span {
-  display: grid;
-  gap: 3px;
-}
-
-.sync-fork-checkpoint small {
-  color: var(--text-2);
-  font-size: 10.5px;
-}
-
-.sync-fork-checkpoint h4 {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin: 0;
-  color: var(--text-0);
-  font-size: 12.5px;
-  font-weight: 650;
-}
-
-.sync-fork-checkpoint p {
-  margin: 0;
-  color: var(--text-1);
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-
-.sync-history-content > .sync-fork-checkpoint {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-  margin-bottom: 10px;
-}
-
-.sync-fork-checkpoint-actions {
-  display: flex;
-  gap: 8px;
 }
 
 /* ── Draft-linked Catalog resources ──────────────────────────────────────── */

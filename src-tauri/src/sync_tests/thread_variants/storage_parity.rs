@@ -760,6 +760,10 @@ impl ObjectStore for FailingStore {
         self.inner.compare_and_swap(key, expectation, bytes)
     }
 
+    fn delete(&self, key: &ObjectKey) -> Result<(), String> {
+        self.inner.delete(key)
+    }
+
     fn list(
         &self,
         prefix: &ObjectPrefix,

@@ -1,4 +1,4 @@
-//! The Codex provider adapter. Codec, rollout structure, native fork, and
+//! The Codex provider adapter. Codec, rollout structure, materialization, and
 //! app-refresh machinery live in their long-standing crate modules; this
 //! adapter is the sole registered gateway common code uses to reach them.
 
@@ -8,7 +8,7 @@ pub mod history;
 pub mod materialization;
 
 use super::traits::{
-    AgentProviderAdapter, DivergenceStyle, MaterializationTargetRequest, PlannedProviderTarget,
+    AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget,
     ProviderCapabilityLevel, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
     SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
     SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
@@ -87,10 +87,6 @@ impl SessionAdapter for CodexAdapter {
 
     fn capability(&self) -> ProviderCapabilityLevel {
         ProviderCapabilityLevel::ResumableWithConflictPreservation
-    }
-
-    fn divergence_style(&self) -> DivergenceStyle {
-        DivergenceStyle::CodexNativeFork
     }
 
     fn index_fragment_limit(&self) -> usize {

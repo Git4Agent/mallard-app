@@ -219,6 +219,9 @@ pub trait ObjectStore: Send + Sync {
         expectation: &CasExpectation,
         bytes: &[u8],
     ) -> Result<CasOutcome, String>;
+    /// Delete one exact validated Mallard object. Implementations must make a
+    /// missing key an idempotent success; callers never supply raw paths.
+    fn delete(&self, key: &ObjectKey) -> Result<(), String>;
     fn list(
         &self,
         prefix: &ObjectPrefix,

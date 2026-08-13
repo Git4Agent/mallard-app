@@ -8,10 +8,16 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+/.pnpm-store/
 /src-tauri/binaries/
 dist
 dist-ssr
 *.local
+
+# Local analysis and interpreter caches
+/.understand-anything/
+**/__pycache__/
+*.py[cod]
 
 # Rust workspace build output
 /target

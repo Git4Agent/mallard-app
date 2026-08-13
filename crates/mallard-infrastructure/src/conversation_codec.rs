@@ -97,9 +97,7 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
         return unknown(None, None, 0, structure_error_reason(error.kind), false);
     }
     let mut structure = CodexStructureAccumulator::new(None);
-    let mut chain = Vec::new();
-    let mut seen = BTreeMap::<MessageId, (String, Option<MessageId>)>::new();
-    let mut idless_turn_ordinals = BTreeMap::<String, usize>::new();
+    let mut builder = CanonicalChainBuilder::new();
     for raw in bytes.split(|byte| *byte == b'\n') {
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         if raw.is_empty() {
@@ -112,56 +110,11 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
         if let Err(error) = structure.feed(&value) {
             return unknown_from(&structure, structure_error_reason(error.kind));
         }
-
-        let identity = match durable_message_identity(&value, &mut idless_turn_ordinals) {
-            DurableMessageIdentity::Ignore => continue,
-            DurableMessageIdentity::MissingId => {
-                return unknown_from(&structure, CodecUnknownReason::MissingMessageId)
-            }
-            DurableMessageIdentity::Present(identity) => identity,
-        };
-        let message_id = match MessageId::parse(identity.message_id) {
-            Ok(id) => id,
-            Err(_) => return unknown_from(&structure, CodecUnknownReason::InvalidMessageId),
-        };
-        let explicit_parent = match identity.parent_message_id {
-            Some(parent) => match MessageId::parse(parent) {
-                Ok(parent) => Some(parent),
-                Err(_) => return unknown_from(&structure, CodecUnknownReason::InvalidMessageId),
-            },
-            None => None,
-        };
-        let fingerprint = semantic_record_fingerprint(value);
-        if let Some((existing_fingerprint, existing_parent)) = seen.get(&message_id) {
-            if existing_fingerprint == &fingerprint
-                && explicit_parent
-                    .as_ref()
-                    .is_none_or(|parent| Some(parent) == existing_parent.as_ref())
-            {
-                continue;
-            }
-            if existing_fingerprint == &fingerprint {
-                return unknown_from(&structure, CodecUnknownReason::NonLinearParentage);
-            }
-            return unknown_from(&structure, CodecUnknownReason::DuplicateMessageId);
+        if let Err(reason) = builder.feed(value) {
+            return unknown_from(&structure, reason);
         }
-        let previous = chain
-            .last()
-            .map(|message: &CanonicalConversationMessage| message.message_id.clone());
-        if explicit_parent.is_some() && explicit_parent != previous {
-            return unknown_from(&structure, CodecUnknownReason::NonLinearParentage);
-        }
-        let parent_message_id = explicit_parent.or(previous);
-        seen.insert(
-            message_id.clone(),
-            (fingerprint.clone(), parent_message_id.clone()),
-        );
-        chain.push(CanonicalConversationMessage {
-            message_id,
-            parent_message_id,
-            semantic_fingerprint: fingerprint,
-        });
     }
+    let chain = builder.finish();
 
     // Whole-file structural verdict first, preserving the pre-fusion
     // end-of-file precedence: ancestry problems outrank an empty chain.
@@ -279,9 +232,142 @@ fn unknown_from(
     )
 }
 
+/// The outcome of feeding one record to the canonical chain builder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChainFeedOutcome {
+    /// Not a durable conversation message.
+    Ignored,
+    /// A benign duplicate re-emission of an already-folded message.
+    SkippedDuplicate,
+    Appended,
+}
+
+/// Incremental canonical-message projection: the single implementation of
+/// the `codex.lineage.v1` message identity, parent linkage, and semantic
+/// fingerprint rules. `analyze_codex_transcript` drives it over one file;
+/// the history-graph resolver drives one builder across every resolved
+/// segment in base-to-leaf order; tail refresh resumes one mid-stream from
+/// the checkpoint's saved cursors. A resumed builder starts with an empty
+/// duplicate-detection set, so cross-boundary duplicate re-emission is
+/// outside its view; full-parse verification points re-prove the projection
+/// and block on any divergence.
+pub struct CanonicalChainBuilder {
+    chain: Vec<CanonicalConversationMessage>,
+    seen: BTreeMap<MessageId, (String, Option<MessageId>)>,
+    idless_turn_ordinals: BTreeMap<String, usize>,
+    previous_message_id: Option<MessageId>,
+    last_synthetic_turn: Option<(String, usize)>,
+}
+
+impl CanonicalChainBuilder {
+    pub fn new() -> Self {
+        Self {
+            chain: Vec::new(),
+            seen: BTreeMap::new(),
+            idless_turn_ordinals: BTreeMap::new(),
+            previous_message_id: None,
+            last_synthetic_turn: None,
+        }
+    }
+
+    /// Resume the projection at a saved split point: the last folded message
+    /// (implicit parent of the next appended record) and the id-less
+    /// synthetic-turn resume pair.
+    pub fn resume(
+        last_message_id: Option<MessageId>,
+        synthetic_turn: Option<(String, usize)>,
+    ) -> Self {
+        Self {
+            chain: Vec::new(),
+            seen: BTreeMap::new(),
+            idless_turn_ordinals: synthetic_turn.clone().into_iter().collect(),
+            previous_message_id: last_message_id,
+            last_synthetic_turn: synthetic_turn,
+        }
+    }
+
+    pub fn feed(&mut self, value: Value) -> Result<ChainFeedOutcome, CodecUnknownReason> {
+        let identity = match durable_message_identity(&value, &mut self.idless_turn_ordinals) {
+            DurableMessageIdentity::Ignore => return Ok(ChainFeedOutcome::Ignored),
+            DurableMessageIdentity::MissingId => return Err(CodecUnknownReason::MissingMessageId),
+            DurableMessageIdentity::Present(identity) => identity,
+        };
+        let message_id = MessageId::parse(identity.message_id)
+            .map_err(|_| CodecUnknownReason::InvalidMessageId)?;
+        let explicit_parent = identity
+            .parent_message_id
+            .map(MessageId::parse)
+            .transpose()
+            .map_err(|_| CodecUnknownReason::InvalidMessageId)?;
+        if let Some(turn) = &identity.synthetic_turn_id {
+            self.last_synthetic_turn = self
+                .idless_turn_ordinals
+                .get(turn)
+                .map(|next| (turn.clone(), *next));
+        }
+        let fingerprint = semantic_record_fingerprint(value);
+        if let Some((existing_fingerprint, existing_parent)) = self.seen.get(&message_id) {
+            if existing_fingerprint == &fingerprint
+                && explicit_parent
+                    .as_ref()
+                    .is_none_or(|parent| Some(parent) == existing_parent.as_ref())
+            {
+                return Ok(ChainFeedOutcome::SkippedDuplicate);
+            }
+            if existing_fingerprint == &fingerprint {
+                return Err(CodecUnknownReason::NonLinearParentage);
+            }
+            return Err(CodecUnknownReason::DuplicateMessageId);
+        }
+        if explicit_parent.is_some() && explicit_parent != self.previous_message_id {
+            return Err(CodecUnknownReason::NonLinearParentage);
+        }
+        let parent_message_id = explicit_parent.or_else(|| self.previous_message_id.clone());
+        self.seen.insert(
+            message_id.clone(),
+            (fingerprint.clone(), parent_message_id.clone()),
+        );
+        self.previous_message_id = Some(message_id.clone());
+        self.chain.push(CanonicalConversationMessage {
+            message_id,
+            parent_message_id,
+            semantic_fingerprint: fingerprint,
+        });
+        Ok(ChainFeedOutcome::Appended)
+    }
+
+    pub fn appended_len(&self) -> usize {
+        self.chain.len()
+    }
+
+    pub fn last_appended(&self) -> Option<&CanonicalConversationMessage> {
+        self.chain.last()
+    }
+
+    pub fn last_message_id(&self) -> Option<&MessageId> {
+        self.previous_message_id.as_ref()
+    }
+
+    /// The id-less synthetic-turn resume pair after the last fed record.
+    pub fn synthetic_turn_resume(&self) -> Option<(String, usize)> {
+        self.last_synthetic_turn.clone()
+    }
+
+    pub fn finish(self) -> Vec<CanonicalConversationMessage> {
+        self.chain
+    }
+}
+
+impl Default for CanonicalChainBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 struct MessageIdentity {
     message_id: String,
     parent_message_id: Option<String>,
+    synthetic_turn_id: Option<String>,
 }
 
 enum DurableMessageIdentity {
@@ -313,18 +399,26 @@ fn durable_message_identity(
     {
         return DurableMessageIdentity::Ignore;
     }
-    let message_id = string_field(payload, &["message_id", "id"])
+    let explicit_id = string_field(payload, &["message_id", "id"])
         .or_else(|| string_field(outer, &["message_id", "id"]))
-        .map(str::to_string)
-        .or_else(|| {
-            synthetic_turn_message_id(payload, idless_turn_ordinals).or_else(|| {
-                if std::ptr::eq(payload, outer) {
-                    None
-                } else {
-                    synthetic_turn_message_id(outer, idless_turn_ordinals)
-                }
-            })
-        });
+        .map(str::to_string);
+    let (message_id, synthetic_turn_id) = match explicit_id {
+        Some(id) => (Some(id), None),
+        None => {
+            let synthetic =
+                synthetic_turn_message_id(payload, idless_turn_ordinals).or_else(|| {
+                    if std::ptr::eq(payload, outer) {
+                        None
+                    } else {
+                        synthetic_turn_message_id(outer, idless_turn_ordinals)
+                    }
+                });
+            match synthetic {
+                Some((id, turn)) => (Some(id), Some(turn)),
+                None => (None, None),
+            }
+        }
+    };
     let Some(message_id) = message_id else {
         return DurableMessageIdentity::MissingId;
     };
@@ -334,6 +428,7 @@ fn durable_message_identity(
     DurableMessageIdentity::Present(MessageIdentity {
         message_id,
         parent_message_id,
+        synthetic_turn_id,
     })
 }
 
@@ -345,7 +440,7 @@ fn durable_message_identity(
 fn synthetic_turn_message_id(
     object: &Map<String, Value>,
     idless_turn_ordinals: &mut BTreeMap<String, usize>,
-) -> Option<String> {
+) -> Option<(String, String)> {
     let metadata = object
         .get("internal_chat_message_metadata_passthrough")
         .and_then(Value::as_object)?;
@@ -357,7 +452,7 @@ fn synthetic_turn_message_id(
         hex_sha256(format!("codex-turn-message-v1\0{turn_id}\0{ordinal}").as_bytes())
     );
     *ordinal += 1;
-    Some(identity)
+    Some((identity, turn_id.to_string()))
 }
 
 fn is_durable_message_kind(kind: &str) -> bool {
@@ -377,6 +472,10 @@ fn is_durable_message_kind(kind: &str) -> bool {
 
 fn semantic_record_fingerprint(mut value: Value) -> String {
     if let Some(outer) = value.as_object_mut() {
+        // Paginated rollout ordinals are physical storage coordinates. A
+        // standalone reconstruction assigns new contiguous ordinals without
+        // changing the canonical conversation.
+        outer.remove("ordinal");
         outer.remove("timestamp");
         outer.remove("created_at");
         outer.remove("updated_at");
@@ -603,7 +702,6 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mallard_domain::{classify_conversation_relation, ConversationRelation};
     use serde_json::json;
 
     fn transcript(thread: &str, cwd: &str, messages: &[(&str, Option<&str>, &str)]) -> Vec<u8> {
@@ -647,6 +745,31 @@ mod tests {
         assert!(!analysis.is_internal_subagent);
         assert_eq!(analysis.source_thread_id.as_deref(), Some("thread-a"));
         assert_eq!(analysis.lineage.chain().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn codex_codec_ignores_physical_rollout_ordinals() {
+        let original = transcript(
+            "thread-a",
+            "/tmp/project-a",
+            &[("m-a", None, "one"), ("m-b", Some("m-a"), "two")],
+        );
+        let mut renumbered = Vec::new();
+        for (ordinal, raw) in original
+            .split(|byte| *byte == b'\n')
+            .filter(|raw| !raw.is_empty())
+            .enumerate()
+        {
+            let mut value: Value = serde_json::from_slice(raw).unwrap();
+            value["ordinal"] = Value::from((ordinal as u64) + 41);
+            renumbered.extend_from_slice(&serde_json::to_vec(&value).unwrap());
+            renumbered.push(b'\n');
+        }
+
+        let before = analyze_codex_transcript(&original);
+        let after = analyze_codex_transcript(&renumbered);
+        assert_eq!(before.lineage.chain(), after.lineage.chain());
+        assert_eq!(lineage_digests(&before), lineage_digests(&after));
     }
 
     #[test]
@@ -746,10 +869,8 @@ mod tests {
             continued_chain[base_chain.len()].message_id,
             continued_chain[base_chain.len() + 1].message_id
         );
-        assert_eq!(
-            classify_conversation_relation(Some(continued_chain), Some(&base_chain)),
-            ConversationRelation::CloudPrefixOfLocal
-        );
+        assert_eq!(&continued_chain[..base_chain.len()], base_chain.as_slice());
+        assert!(continued_chain.len() > base_chain.len());
 
         let rewritten = rewrite_codex_transcript(
             &continued,

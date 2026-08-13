@@ -5,12 +5,12 @@
 
 use super::claude::codec::{analyze_claude_transcript, rewrite_claude_transcript};
 use super::traits::{
-    AgentProviderAdapter, DiscoveredSession, DivergenceStyle, MaterializationTargetRequest,
-    PlannedProviderTarget, ProviderCapabilityLevel, ProviderDescriptor, SessionActionContext,
-    SessionActionDescriptor, SessionActionOutcome, SessionActionRequest, SessionAdapter,
-    SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
-    SessionFileMetadata, SessionFileSummary, SessionRewriteRequest, SessionTimelineContext,
-    SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
+    AgentProviderAdapter, DiscoveredSession, MaterializationTargetRequest, PlannedProviderTarget,
+    ProviderCapabilityLevel, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
+    SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
+    SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
+    SessionRewriteRequest, SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice,
+    SessionTimelineQuery,
 };
 use crate::provider_capture::{
     canonical_existing_dir, owned_relative_cwd, provider_walk_entry, scan_session_metadata_with,
@@ -81,10 +81,6 @@ impl SessionAdapter for TestProviderAdapter {
 
     fn capability(&self) -> ProviderCapabilityLevel {
         ProviderCapabilityLevel::Resumable
-    }
-
-    fn divergence_style(&self) -> DivergenceStyle {
-        DivergenceStyle::AdapterFileFork
     }
 
     fn discover(&self, context: &SessionDiscoveryContext<'_>) -> Result<SessionDiscovery, String> {

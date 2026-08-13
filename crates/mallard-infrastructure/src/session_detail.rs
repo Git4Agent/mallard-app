@@ -8,11 +8,11 @@
 use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
 use crate::project_activity::{parse_conversation_resource_id, resolve_activity_project};
 use crate::providers::{
-    ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionActionSurface,
-    SessionCheckpoint, SessionCount, SessionCountQuality, SessionDetailWarning,
-    SessionDiscoveryContext, SessionEventCounts, SessionEventDetail, SessionTimelineContext,
-    SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex, SessionTimelinePageSlice,
-    SessionTimelineQuery, SessionToolCategory,
+    ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionCheckpoint,
+    SessionCount, SessionCountQuality, SessionDetailWarning, SessionDiscoveryContext,
+    SessionEventCounts, SessionEventDetail, SessionTimelineContext, SessionTimelineEvent,
+    SessionTimelineEventKind, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
+    SessionToolCategory,
 };
 use mallard_domain::{initial_conversation_thread_id, LocalProjectId, ProviderKey};
 use serde::{Deserialize, Serialize};
@@ -1164,7 +1164,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(value: &str) -> SessionDetailResult<Vec<u8>> {
-    if value.len() > 16 * 1024 || value.len() % 2 != 0 {
+    if value.len() > 16 * 1024 || !value.len().is_multiple_of(2) {
         return Err(invalid_request("The timeline cursor is invalid."));
     }
     value
@@ -1324,7 +1324,6 @@ pub fn get_project_session_detail(
                 provider_session_id: &session.provider_session_id,
                 is_local: true,
                 transcript_path: Some(&session.transcript_path),
-                surface: SessionActionSurface::Detail,
             })
         })
         .unwrap_or_default();

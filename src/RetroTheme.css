@@ -294,11 +294,11 @@ body {
 .sync-path-sync,
 .sync-path-menu-label,
 .sync-path-rename label,
-.sync-history-fork-label,
 .sync-sync-review-header h1,
 .sync-sync-review-header h2,
 .sync-history-section-heading h2,
 .sync-history-branch-state,
+.sync-history-preserved-badge,
 .sync-history-continuity-copy > strong,
 .sync-sync-review-tabs > button,
 .sync-modal-header h1,
@@ -1459,16 +1459,12 @@ summary {
    a review renders for a non-git project, and the fold on a finished sync, both
    showed the icon glued to the title and a ragged icon column without them.
    Scoping to the list itself makes a session row self-sufficient wherever it
-   renders; the sections below keep the same values for their own rows. The
-   fork-event banner is in the list because the tokens are NOT inherited — a
-   sibling left off it silently computes margin-left to 0 and jumps flush
-   left, with an invalid absolute position on its rail mark. */
+   renders; the sections below keep the same values for their own rows. */
 .sync-history-thread-list,
 .sync-history-timeline,
-.sync-history-storage-only,
-.sync-history-fork-event {
-  /* Five slots now: the provider-marked open button, terminal, fork, the debug
-     panel and the transcript chevron. The last two moved up from line 2, where
+.sync-history-storage-only {
+  /* Four slots: the provider-marked open button, terminal, the debug panel,
+     and the transcript chevron. The last two moved up from line 2, where
      they sat stranded between readouts that can only be hovered. */
   --sync-history-row-actions-column: 148px;
   --sync-history-commit-actions-column: 26px;
@@ -1668,90 +1664,6 @@ summary {
 
 .sync-history-spine-fold:disabled {
   opacity: 0.35;
-}
-
-/* The fork notice is a timeline event — the thread it created sits in the
-   Uncommitted group below — so it takes the cards' shape: inset onto the
-   rail, row-height, with its mark in the fold column. */
-.sync-history-fork-event {
-  min-height: 52px;
-  display: grid;
-  align-content: center;
-  gap: 2px;
-  margin: 12px 0 12px var(--sync-history-card-offset);
-  padding: 5px 12px 6px;
-  border: 1px solid var(--border-mid);
-  border-radius: 4px;
-  background: var(--surface-row);
-}
-
-.sync-history-fork-line {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--sync-history-row-title-gap);
-}
-
-/* The identity glyph sits in the heading like the cloud and pencil on the
-   group bars: an 18px box, so the 8px gap lands the label at the same text
-   offset line 2 indents to. */
-.sync-history-fork-line > svg {
-  width: var(--sync-history-row-icon-size);
-  height: var(--sync-history-row-icon-size);
-  flex: 0 0 var(--sync-history-row-icon-size);
-  color: var(--text-2);
-}
-
-/* The group headings' grammar exactly: the app's phrase in the pixel face
-   (declared in the one grouped rule up top) at the heading size, the user's
-   name beside it in the clean face — "Only in {storage}", one card down. */
-.sync-history-fork-label {
-  flex: 0 0 auto;
-  color: var(--text-0);
-  font-size: var(--type-md);
-}
-
-.sync-history-fork-line > strong {
-  min-width: 0;
-  overflow: hidden;
-  flex: 1;
-  color: var(--text-0);
-  font-family: var(--font-sans);
-  font-size: var(--type-md);
-  font-weight: var(--weight-semibold);
-  line-height: var(--leading-snug);
-  letter-spacing: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sync-history-fork-line > .sync-notice-dismiss {
-  flex: 0 0 auto;
-  margin-left: 2px;
-  border-radius: 3px;
-}
-
-/* Line 2 is the row grammar: the new fork's whole id on the left — bare mono,
-   never truncated — and its stamp closing the line at the rail. */
-.sync-history-fork-meta {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 2px 14px;
-  padding-left: var(--sync-history-row-text-offset);
-}
-
-.sync-history-fork-meta > time {
-  margin-left: auto;
-  color: var(--text-2);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  font-weight: var(--weight-medium);
-  line-height: var(--leading-snug);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0;
-  white-space: nowrap;
 }
 
 .sync-history-commit-heading,

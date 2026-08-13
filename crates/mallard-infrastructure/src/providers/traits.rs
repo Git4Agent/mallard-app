@@ -28,19 +28,6 @@ pub enum ProviderCapabilityLevel {
     ResumableWithConflictPreservation,
 }
 
-/// How the adapter preserves a diverged local branch before an approved
-/// overwrite.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DivergenceStyle {
-    /// The provider's own fork machinery is driven through an executor
-    /// ladder (Codex).
-    CodexNativeFork,
-    /// The adapter rewrites the local transcript to a fresh provider session
-    /// identity and writes it beside the source.
-    AdapterFileFork,
-}
-
 /// Serializable provider facts for setup and Activity. The frontend iterates
 /// these; it never holds a fixed provider array.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -439,7 +426,6 @@ pub struct MaterializationTargetRequest<'a> {
 pub enum SessionActionKind {
     OpenInApp,
     OpenInTerminal,
-    ForkSession,
 }
 
 /// A safe provider action offered to the frontend. The frontend sends the
@@ -456,17 +442,10 @@ pub struct SessionActionDescriptor {
     pub disabled_reason: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionActionSurface {
-    Activity,
-    Detail,
-}
-
 pub struct SessionActionContext<'a> {
     pub provider_session_id: &'a str,
     pub is_local: bool,
     pub transcript_path: Option<&'a Path>,
-    pub surface: SessionActionSurface,
 }
 
 pub struct SessionActionRequest<'a> {
@@ -502,7 +481,6 @@ pub trait SessionAdapter: Send + Sync {
         self.codec_version()
     }
     fn capability(&self) -> ProviderCapabilityLevel;
-    fn divergence_style(&self) -> DivergenceStyle;
     /// How many provider index fragments one conversation operation may
     /// carry (Codex maintains `session_index.jsonl`; most providers none).
     fn index_fragment_limit(&self) -> usize {

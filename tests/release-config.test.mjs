@@ -85,26 +85,26 @@ test("application contains no automatic updater", async () => {
   }
 });
 
-test("Codex native fork is compiled in without an Expect helper", async () => {
-  const [tauriConfigSource, cargoSource, nativeForkSource] = await Promise.all([
+test("release packaging contains no legacy Codex fork executor", async () => {
+  const [tauriConfigSource, infrastructureCargo, tauriCargo, infrastructureLib] = await Promise.all([
     read("src-tauri/tauri.conf.json"),
     read("crates/mallard-infrastructure/Cargo.toml"),
-    read("crates/mallard-infrastructure/src/codex_native_fork.rs"),
+    read("src-tauri/Cargo.toml"),
+    read("crates/mallard-infrastructure/src/lib.rs"),
   ]);
   const tauriConfig = JSON.parse(tauriConfigSource);
 
   await assert.rejects(
+    access(new URL("crates/mallard-infrastructure/src/codex_native_fork.rs", projectUrl)),
+    (error) => error?.code === "ENOENT",
+  );
+  await assert.rejects(
     access(new URL("scripts/codex-fork-and-exit", projectUrl)),
     (error) => error?.code === "ENOENT",
   );
-  assert.match(cargoSource, /^portable-pty = "0\.9"$/m);
-  assert.match(nativeForkSource, /portable_pty::\{native_pty_system,/);
-  assert.match(nativeForkSource, /let pty_system = native_pty_system\(\);/);
-  assert.match(nativeForkSource, /pty_system\.openpty/);
-  assert.doesNotMatch(
-    nativeForkSource,
-    /include_bytes!|PTY_HELPER|pty_helper|\/usr\/bin\/expect|codex-fork-and-exit/,
-  );
+  assert.doesNotMatch(infrastructureCargo, /portable-pty/);
+  assert.doesNotMatch(tauriCargo, /portable-pty/);
+  assert.doesNotMatch(infrastructureLib, /codex_native_fork/);
   assert.equal(tauriConfig.bundle.resources, undefined);
   assert.equal(tauriConfig.bundle.externalBin, undefined);
 });

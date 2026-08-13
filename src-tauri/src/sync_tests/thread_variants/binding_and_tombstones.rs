@@ -1,94 +1,12 @@
 use super::harness::{
-    analyzed_chain, chain, codex_scope, codex_scope_key, harness_captured_with, publish_request,
-    publish_with_head, scope_pin, sha256, ThreadSpec, VariantWorld,
+    chain, codex_scope, codex_scope_key, harness_captured_with, publish_request, publish_with_head,
+    scope_pin, sha256, ThreadSpec, VariantWorld,
 };
 use crate::project_sync::bundle_engine::{
     PublishBundleRequest, PublishExpectation, ScopePublishInput,
 };
-use crate::project_sync::conversation_sync::{
-    recover_unique_compatible_binding_from_meta, BindingRecoveryResult,
-    MetaBindingRecoveryCandidate,
-};
-use crate::project_sync::domain::{
-    conversation_chain_digests, BundleRecipe, CanonicalConversationMessage, RefreshCloudMeta,
-    ThreadId, Tombstone, TombstoneTarget,
-};
+use crate::project_sync::domain::{BundleRecipe, ThreadId, Tombstone, TombstoneTarget};
 use std::collections::BTreeMap;
-
-#[test]
-fn missing_binding_recovers_only_one_unique_longest_compatible_ancestor() {
-    let local = analyzed_chain(&chain(
-        "local-thread",
-        &[("m-a", "one"), ("m-b", "two"), ("m-c", "three")],
-    ));
-    let short = analyzed_chain(&chain("cloud-short", &[("m-a", "one")]));
-    let longest = analyzed_chain(&chain("cloud-long", &[("m-a", "one"), ("m-b", "two")]));
-    let unrelated = analyzed_chain(&chain("cloud-other", &[("m-x", "same title")]));
-    // Recovery sees candidates exactly as a manifest describes them: the
-    // digest pair and message count, never the chain itself.
-    let digests = |chain: &[CanonicalConversationMessage]| -> (u64, String, String) {
-        let (lineage, semantic) = conversation_chain_digests(chain).unwrap();
-        (chain.len() as u64, lineage, semantic)
-    };
-    let short_meta = digests(&short);
-    let longest_meta = digests(&longest);
-    let unrelated_meta = digests(&unrelated);
-    fn candidate<'a>(
-        thread_id: &ThreadId,
-        meta: &'a (u64, String, String),
-    ) -> MetaBindingRecoveryCandidate<'a> {
-        MetaBindingRecoveryCandidate {
-            thread_id: thread_id.clone(),
-            meta: RefreshCloudMeta {
-                message_count: meta.0,
-                lineage_digest: &meta.1,
-                semantic_digest: &meta.2,
-            },
-        }
-    }
-    let short_id = ThreadId::parse("thread-short").unwrap();
-    let longest_id = ThreadId::parse("thread-long").unwrap();
-    let unrelated_id = ThreadId::parse("thread-unrelated").unwrap();
-    let equal_id = ThreadId::parse("thread-equal").unwrap();
-
-    assert_eq!(
-        recover_unique_compatible_binding_from_meta(
-            Some(&local),
-            &[
-                candidate(&short_id, &short_meta),
-                candidate(&longest_id, &longest_meta),
-                candidate(&unrelated_id, &unrelated_meta),
-            ],
-        ),
-        BindingRecoveryResult::Unique(longest_id.clone())
-    );
-
-    assert_eq!(
-        recover_unique_compatible_binding_from_meta(
-            Some(&local),
-            &[
-                candidate(&longest_id, &longest_meta),
-                candidate(&equal_id, &longest_meta),
-            ],
-        ),
-        BindingRecoveryResult::Ambiguous
-    );
-    assert_eq!(
-        recover_unique_compatible_binding_from_meta(
-            Some(&local),
-            &[candidate(
-                &ThreadId::parse("thread-title-only").unwrap(),
-                &unrelated_meta,
-            )],
-        ),
-        BindingRecoveryResult::Missing,
-        "display titles and provider IDs are intentionally absent from recovery evidence",
-    );
-    assert_eq!(
-        recover_unique_compatible_binding_from_meta(None, &[]),
-        BindingRecoveryResult::Unknown
-    );
-}
 
 #[test]
 fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {

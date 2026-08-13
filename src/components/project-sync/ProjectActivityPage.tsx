@@ -1,14 +1,12 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
-  CodexForkCheckpoint,
   GitBranchSummary,
   LocalProjectSummary,
   ProjectActivity,
   ProjectBinding,
   ProjectSessionSummary,
   ProviderActivityState,
-  RestoreResult,
   SessionActionDescriptor,
   ThreadSyncComparison,
   ThreadSyncEntry,
@@ -17,7 +15,6 @@ import Icon, { type IconName } from "../Icons";
 import { projectSyncApi } from "./api";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
 import type { OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
-import { sessionName } from "./syncOutcome";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "./ThreadStatusIcon";
 
 interface PageProps {
@@ -36,8 +33,6 @@ interface PageProps {
   onUnlinkStorage?: () => void;
   continuityActionBusy?: boolean;
   comparisonOverride?: ThreadSyncComparison | null;
-  /** Per-row conflict resolution control, rendered under the row title. */
-  rowResolution?: (resourceId: string) => ReactNode;
   onOpenSessionDetail?: (
     request: OpenSessionDetailRequest,
     trigger: HTMLButtonElement,
@@ -63,10 +58,8 @@ interface ContentProps {
   onBranchChange: (branch: string) => void;
   onRefresh: () => void;
   onLoadMore: () => void;
-  /** Dispatches one backend-declared row action (open, terminal, fork, …). */
+  /** Dispatches one backend-declared row action. */
   onSessionAction: (session: ProjectSessionSummary, action: SessionActionDescriptor) => void;
-  forkBusyResourceId?: string | null;
-  forkPanel?: ReactNode;
   onOpenSessionDetail?: (
     request: OpenSessionDetailRequest,
     trigger: HTMLButtonElement,
@@ -84,123 +77,6 @@ interface ContentProps {
   onReviewPull?: () => void;
   onUnlinkStorage?: () => void;
   continuityActionBusy?: boolean;
-  /** Per-row conflict resolution control, rendered under the row title. */
-  rowResolution?: (resourceId: string) => ReactNode;
-}
-
-export interface ForkCompletionFeedback {
-  message: string;
-  success: boolean;
-  /** Present when the result named the fork it created — the banner then
-   *  draws the thread structurally instead of printing the sentence. */
-  fork?: {
-    name: string;
-    providerThreadId: string;
-    /** Seconds; stamped at receipt, which is when the fork finished. */
-    createdAt: number;
-  } | null;
-}
-
-export function ForkCompletionBanner({ feedback, onDismiss }: {
-  feedback: ForkCompletionFeedback;
-  onDismiss: () => void;
-}) {
-  const fork = feedback.success ? feedback.fork : null;
-  if (!fork) {
-    return (
-      <div className={`sync-callout${feedback.success ? "" : " error"}`}
-        role={feedback.success ? "status" : "alert"}>
-        <Icon name={feedback.success ? "git-fork" : "alert-triangle"} size={15} />
-        <span>{feedback.message}</span>
-      </div>
-    );
-  }
-  // A fork is a timeline event — the thread it created is sitting in the
-  // Uncommitted group below — so the notice takes the cards' shape and the
-  // group headings' grammar: identity glyph, pixel-face phrase, the name in
-  // the clean face ("Only in {storage}" exactly), with line 2 in the row
-  // grammar (whole id left, stamp at the rail). The glyph lives in the
-  // heading like the cloud and pencil do, not out on the rail — no line
-  // passes the banner, so a rail mark would float in empty space.
-  return (
-    <section className="sync-history-fork-event" role="status">
-      <div className="sync-history-fork-line">
-        <Icon name="git-fork" size={13} />
-        <span className="sync-history-fork-label">Created the Codex fork</span>
-        <strong>{sessionName(fork.name).name}</strong>
-        <button type="button" className="sync-notice-dismiss" title="Dismiss"
-          aria-label="Dismiss fork notice" onClick={onDismiss}>
-          <Icon name="x" size={12} />
-        </button>
-      </div>
-      <span className="sync-history-fork-meta">
-        <span className="sync-history-stored-thread-id"><code>{fork.providerThreadId}</code></span>
-        <time dateTime={new Date(fork.createdAt * 1_000).toISOString()}>
-          {formatDate(fork.createdAt)}
-        </time>
-      </span>
-    </section>
-  );
-}
-
-interface ForkActivityPanelProps {
-  feedback: ForkCompletionFeedback | null;
-  checkpoint: CodexForkCheckpoint | null;
-  selectionMode?: "push" | "pull";
-  resolving: boolean;
-  onRetry: () => void;
-  onDismissFeedback: () => void;
-}
-
-export function ForkActivityPanel({
-  feedback,
-  checkpoint,
-  selectionMode,
-  resolving,
-  onRetry,
-  onDismissFeedback,
-}: ForkActivityPanelProps) {
-  const retryable = checkpoint?.status === "fork_unacknowledged";
-  if (!feedback && !checkpoint) return null;
-  return (
-    <>
-      {feedback && <ForkCompletionBanner feedback={feedback} onDismiss={onDismissFeedback} />}
-      {checkpoint && !selectionMode && (
-        <section className="sync-fork-checkpoint" aria-live="polite">
-          <h4>
-            <Icon name="git-branch" size={15} />
-            {retryable ? "Fork not acknowledged" : "Fork recovery needs attention"}
-          </h4>
-          <p>{checkpoint.message}</p>
-          {retryable && (
-            <p>A fork may already exist in Codex. Retrying may create another fork.</p>
-          )}
-          <dl>
-            <div><dt>Source thread</dt><dd>{checkpoint.source_provider_thread_id}</dd></div>
-            <div><dt>Suggested name</dt><dd>{checkpoint.suggested_fork_name}</dd></div>
-          </dl>
-          {retryable && (
-            <div className="sync-fork-checkpoint-actions">
-              <button type="button" className="btn btn-primary" disabled={resolving}
-                onClick={onRetry}>
-                {resolving ? "Retrying…" : "Retry fork"}
-              </button>
-            </div>
-          )}
-        </section>
-      )}
-    </>
-  );
-}
-
-export async function refreshActivityAndHandleForkFeedback(
-  refreshHistory: () => Promise<void>,
-  refreshComparison: () => Promise<void>,
-  dismiss: () => void,
-  dismissForkFeedback: boolean,
-) {
-  await Promise.all([refreshHistory(), refreshComparison()]);
-  if (dismissForkFeedback) dismiss();
 }
 
 interface BranchPickerProps {
@@ -513,7 +389,7 @@ export function sessionSyncPresentation(
     }
     return null;
   };
-  const pending = decisionWithReason(["resolution_pending", "provider_not_quiescent", "stale_plan"]);
+  const pending = decisionWithReason(["busy", "provider_not_quiescent", "stale_plan"]);
   if (pending) {
     return {
       status: "pending",
@@ -523,7 +399,13 @@ export function sessionSyncPresentation(
         ?? "Sync is waiting for this conversation to become ready.",
     };
   }
-  const conflict = decisionWithReason(["unknown_lineage", "ambiguous_binding", "missing_binding"]);
+  const conflict = decisionWithReason([
+    "unknown_evidence",
+    "ambiguous_binding",
+    "missing_binding",
+    "detached_requires_pull",
+    "corruption_blocked",
+  ]);
   if (conflict) {
     return {
       status: "conflict",
@@ -555,14 +437,6 @@ export function sessionSyncPresentation(
       return { status: "cloud-outstanding", className: "storage", label: `Newer in ${storageName}. Pull to update this computer.` };
     case "diverged":
       return { status: "divergent", className: "diverged", label: `Changed here and in ${storageName}. Review before syncing.` };
-    case "diverged_forked": {
-      const forkName = entry.fork_preservation?.fork_display_name;
-      return {
-        status: "divergent-forked",
-        className: "diverged-forked",
-        label: `Changed here and in ${storageName}; your local branch is already preserved in ${forkName ? `the fork “${forkName}”` : "a fork"}. Pull to adopt the ${storageName} version.`,
-      };
-    }
     case "unavailable":
       return {
         status: "unavailable",
@@ -749,11 +623,9 @@ function sessionAccessNote(session: ProjectSessionSummary): { label: string; det
    whatever name it held, so with more than one provider in the list the titles
    stopped lining up with each other row to row. */
 
-/** Open carries the provider's own mark, as it did before the row went
- *  provider-neutral; the other two are the action, not the agent. */
+/** Open carries the provider's own mark; Terminal shows the action itself. */
 const SESSION_ACTION_ICONS: Record<Exclude<SessionActionDescriptor["kind"], "open_in_app">, IconName> = {
   open_in_terminal: "terminal",
-  fork_session: "git-fork",
 };
 
 interface SessionCardProps {
@@ -763,7 +635,6 @@ interface SessionCardProps {
   busy?: boolean;
   busyActionId?: string | null;
   onSessionAction: (session: ProjectSessionSummary, action: SessionActionDescriptor) => void;
-  forkBusy?: boolean;
   initialCheckpointId?: string;
   onOpenSessionDetail?: (
     request: OpenSessionDetailRequest,
@@ -784,7 +655,6 @@ interface SessionCardProps {
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
-  rowResolution?: (resourceId: string) => ReactNode;
 }
 
 interface SessionDebugMenuProps {
@@ -1019,7 +889,7 @@ function ReviewPullRowAction({
   onReviewPull?: () => void;
 }) {
   if (mode !== "push" || !entry || !onReviewPull) return null;
-  if (entry.push_decision?.action !== "require_pull") return null;
+  if (!["require_pull", "require_pull_metadata"].includes(entry.push_decision?.action)) return null;
   const detail = syncHoldDetail("push", entry)
     ?? "Pull this conversation before pushing it.";
   return (
@@ -1046,33 +916,29 @@ function syncReviewStateLabel(
   if (entry.cloud_thread_id) {
     const decision = mode === "push" ? entry.push_decision : entry.pull_decision;
     switch (decision.action) {
-      case "no_op": return null;
-      case "fast_forward_cloud": return selected ? "Update cloud" : "Not selected";
-      case "fast_forward_local": return selected ? "Update this thread" : "Keep local";
-      case "keep_local": return "Keep local";
+      case "no_changes": return null;
+      case "publish": return selected ? "Update storage" : "Not selected";
+      case "create_cloud": return selected ? "Publish new task" : "Not selected";
+      case "require_pull_metadata": return "Pull sync metadata";
       case "require_pull": return "Pull required";
-      case "resolve_divergence":
-        if (!selected) return "Not selected";
-        // The same words the row's own resolution control uses: a branch
-        // already preserved in a fork is simply overwritten, a fresh one is
-        // forked first. One vocabulary for the phrase and the buttons.
-        return entry.state === "diverged_forked" ? "Overwrite" : "Fork and overwrite";
-      case "create_cloud": return selected ? "Publish new thread" : "Not selected";
-      case "create_local": return selected ? "Restore new conversation" : "Not selected";
-      case "store_only": return "Backup only";
-      case "replace_local": return selected ? "Replace local branch" : "Needs approval";
-      case "replace_cloud": return selected ? "Replace cloud branch" : "Needs approval";
-      case "tombstone_thread": return selected ? "Delete thread" : "Needs approval";
+      case "not_pushable": return "Not on this computer";
+      case "adopt_cloud_metadata": return selected ? "Mark synced" : "Not selected";
+      case "report_push_eligible": return "Ready to push";
+      case "materialize_cloud": return selected ? "Update this task" : "Keep local";
+      case "keep_both": return selected ? "Keep both" : "Not selected";
+      case "create_local": return selected ? "Create local task" : "Not selected";
+      case "report_local_only": return "Keep local";
+      case "not_found": return "Not found";
       case "blocked": return "Can't sync";
     }
   }
   if (mode === "push") {
-    if (entry.state === "storage_only" || entry.state === "storage_ahead" || entry.state === "diverged" || entry.state === "diverged_forked") {
+    if (entry.state === "storage_only" || entry.state === "storage_ahead" || entry.state === "diverged") {
       return "Pull required";
     }
     return entry.state === "unknown" ? "Review status" : null;
   }
-  if (entry.state === "diverged" || entry.state === "diverged_forked") return selected ? "Use storage version" : "Keep local";
+  if (entry.state === "diverged") return selected ? "Keep both" : "Not selected";
   if (entry.state === "storage_only" || entry.state === "storage_ahead") {
     return selected ? "Restore from storage" : "Keep local";
   }
@@ -1096,7 +962,7 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
     switch (decision.reason_code) {
       case "codec_unsupported":
         return mode === "push"
-          ? `Can't sync — this session was saved by an older ${providerName} version. It still opens on this computer.`
+          ? `Can't sync — Mallard can't safely capture this ${providerName} session. It still opens on this computer.`
           : "Can't sync — this stored copy can't be restored safely on this computer.";
       case "ambiguous_binding":
         return "Can't sync — more than one stored thread could match this session.";
@@ -1106,90 +972,43 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
         return `Can't sync right now — ${providerName} may still be writing this session.`;
       case "stale_plan":
         return "The comparison is out of date. Refresh and review again.";
-      case "resolution_pending":
-        return `A ${providerName} fork checkpoint from an earlier Pull is pending. Retry it in the Pull review.`;
+      case "busy":
+        return `Another ${providerName} sync operation is still finishing. Wait for recovery, then refresh.`;
+      case "detached_requires_pull":
+        return "This task's local mapping changed. Pull to establish the current mapping.";
+      case "corruption_blocked":
+        return "Can't sync — this task failed local verification and needs repair.";
+      case "unknown_evidence":
+        return "Can't sync — Mallard could not prove the local and stored task state safely.";
       default:
         return "Can't sync — this session can't be changed safely right now.";
     }
   }
-  if (decision.action === "store_only") {
-    return decision.reason_code === "provider_not_quiescent"
-      ? entry.status_detail
-        ?? `Conflict resolution is unavailable right now. Finish any active ${providerName} turn, then refresh.`
-      : "Pulling saves a backup copy that can't be opened on this computer.";
+  if (mode === "push" && decision.action === "require_pull_metadata") {
+    return "The task content matches, but storage has newer sync metadata. Pull once before pushing.";
   }
   if (mode === "push" && decision.action === "require_pull") {
-    if (entry.state === "diverged_forked") {
-      return "Local and stored history have diverged, but the local branch is already preserved in a fork. Pull to adopt the stored version.";
-    }
     return entry.state === "diverged"
-      ? "Local and stored history have diverged. Pull and choose how to preserve the local branch before pushing."
+      ? "Local and stored history have diverged. Pull will keep both histories as independent tasks."
       : "The stored thread has newer messages. Pull them before pushing.";
   }
   return null;
 }
 
-// The row leads with an icon for how this session stands against storage. It
-// is keyed off the entry state, never off the selection: an icon that swapped
-// glyphs when its own checkbox was ticked changed under the cursor doing the
-// ticking. What the selection would *do* is the phrase, and the phrase lives
-// in the tooltip and the accessibility label, where it costs no layout.
-const REVIEW_STATE_ICONS: Record<string, IconName> = {
-  synced: "check-circle",
-  local_only: "upload",
-  local_ahead: "upload",
-  storage_only: "download",
-  storage_ahead: "download",
-  diverged: "git-compare-arrows",
-  diverged_forked: "git-compare-arrows",
-  unavailable: "alert-triangle",
-  unknown: "help-circle",
-};
-
-const INDICATOR_STATE_CLASS: Record<string, string> = {
-  synced: "synced",
-  local_only: "local",
-  local_ahead: "local",
-  storage_only: "storage",
-  storage_ahead: "storage",
-  diverged: "diverged",
-  diverged_forked: "diverged-forked",
-  unavailable: "unavailable",
-  unknown: "pending",
-};
-
-function SyncDecisionBadge({ label, state, detail, blocked = false }: {
+/** Review rows use the same status presentation and pixel badge as Activity.
+ *  Selection changes only the explanatory phrase; it never swaps the status
+ *  glyph under the checkbox the user just clicked. */
+function ReviewSyncIndicator({ entry, storageName, label, detail }: {
+  entry: ThreadSyncEntry;
+  storageName: string;
   label: string;
-  state: string | undefined;
   detail: string | null;
-  blocked?: boolean;
 }) {
-  return (
-    <span
-      className={`sync-thread-sync-indicator ${INDICATOR_STATE_CLASS[state ?? "unknown"] ?? "pending"}`}
-      data-tooltip={detail ? `${label}\n${detail}` : label}
-      aria-label={detail ? `${label}. ${detail}` : label}
-      tabIndex={0}
-    >
-      <Icon
-        name={blocked ? "octagon-x" : REVIEW_STATE_ICONS[state ?? "unknown"] ?? "help-circle"}
-        size={13}
-      />
-    </span>
-  );
-}
-
-function ReviewRequiredBadge() {
-  return (
-    <span
-      className="sync-thread-sync-error"
-      data-tooltip={"Review required\nThis change needs your explicit approval before it applies."}
-      aria-label="Review required. This change needs your explicit approval before it applies."
-      tabIndex={0}
-    >
-      <Icon name="alert-triangle" size={12} />
-    </span>
-  );
+  const presentation = sessionSyncPresentation(entry, storageName);
+  return <SessionSyncIndicator presentation={{
+    ...presentation,
+    label: detail ? `${label}. ${detail}` : label,
+  }} />;
 }
 
 /** Disabled reason wins over the busy phrase, which wins over the plain label. */
@@ -1200,16 +1019,13 @@ function actionTitle(action: SessionActionDescriptor, busy = false): string {
 
 function SessionCard({
   session, occurrenceKey, workingDirectory, busy = false, busyActionId = null,
-  onSessionAction, forkBusy = false, initialCheckpointId, onOpenSessionDetail,
+  onSessionAction, initialCheckpointId, onOpenSessionDetail,
   syncEntry, reviewResourceId, storageName, syncFallback, selectionMode, selected = false, selectable = false,
-  selectionDisabled = false, onToggleResource, onReviewPull, rowResolution,
+  selectionDisabled = false, onToggleResource, onReviewPull,
 }: SessionCardProps) {
   const fullTitle = session.title || "Untitled session";
   const visibleTitle = compactThreadTitle(fullTitle);
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, syncEntry, selected) : null;
-  const activeDecision = selectionMode && syncEntry
-    ? (selectionMode === "push" ? syncEntry.push_decision : syncEntry.pull_decision)
-    : null;
   const holdDetail = selectionMode && syncEntry ? syncHoldDetail(selectionMode, syncEntry) : null;
   // No row-level "uncommitted" mark any more. It existed to hold the slot open
   // when the status badge was absent; the badge is never absent now, and a
@@ -1220,9 +1036,8 @@ function SessionCard({
     && session.source !== "remote_only"
     && session.access === "bound_ready"
     && onOpenSessionDetail != null;
-  const visibleActions = session.actions.filter((action) => !(selectionMode && action.kind === "fork_session"));
-  const openAction = visibleActions.find((action) => action.kind === "open_in_app") ?? null;
-  const otherActions = visibleActions.filter(
+  const openAction = session.actions.find((action) => action.kind === "open_in_app") ?? null;
+  const otherActions = session.actions.filter(
     (action): action is SessionActionDescriptor & { kind: keyof typeof SESSION_ACTION_ICONS } =>
       action.kind !== "open_in_app",
   );
@@ -1252,36 +1067,20 @@ function SessionCard({
               />
             </label>
           )}
-          {selectionMode && !selectable && activeDecision?.action === "blocked" && (
-            <span
-              className="sync-sync-row-choice sync-sync-row-blocked"
-              title={holdDetail ?? "Can't sync"}
-              aria-label={holdDetail ?? "Can't sync"}
-            >
-              <Icon name="octagon-x" size={14} />
-            </span>
+          {selectionMode && reviewStateLabel && syncEntry ? (
+            <ReviewSyncIndicator
+              entry={syncEntry}
+              storageName={storageName ?? "storage"}
+              label={reviewStateLabel}
+              detail={holdDetail}
+            />
+          ) : (
+            <SessionSyncIndicator
+              presentation={syncEntry && storageName
+                ? sessionSyncPresentation(syncEntry, storageName)
+                : syncFallback}
+            />
           )}
-          {/* The blocked octagon in the choice slot already carries the whole
-              story; rows it marks render no second status icon. Otherwise the
-              slot is always filled — a review decision, a real comparison, or
-              the resolved "no verdict" badge. Nothing reaches null: an empty
-              grid column moves every title beside it. */}
-          {selectionMode && !selectable && activeDecision?.action === "blocked" ? null
-            : selectionMode && reviewStateLabel ? (
-              <SyncDecisionBadge
-                label={reviewStateLabel}
-                state={syncEntry?.state}
-                detail={holdDetail}
-                blocked={activeDecision?.action === "blocked"}
-              />
-            ) : (
-              <SessionSyncIndicator
-                presentation={syncEntry && storageName
-                  ? sessionSyncPresentation(syncEntry, storageName)
-                  : syncFallback}
-              />
-            )}
-          {activeDecision?.requires_explicit_approval && <ReviewRequiredBadge />}
           {accessNote && (
             <span
               className="sync-history-branch-state history-only"
@@ -1303,6 +1102,14 @@ function SessionCard({
           ) : (
             <strong title={visibleTitle === fullTitle ? undefined : fullTitle}>{visibleTitle}</strong>
           )}
+          {session.is_preserved_local && (
+            <span
+              className="sync-history-preserved-badge"
+              title="Local branch preserved during a divergent Pull."
+            >
+              Preserved
+            </span>
+          )}
           <ReviewPullRowAction
             mode={selectionMode}
             entry={syncEntry}
@@ -1318,7 +1125,7 @@ function SessionCard({
             <button
               type="button"
               className="btn btn-ghost sync-history-launch-action"
-              disabled={!openAction.enabled || busy || forkBusy}
+              disabled={!openAction.enabled || busy}
               onClick={() => onSessionAction(session, openAction)}
               title={actionTitle(openAction)}
               aria-label={openAction.label}
@@ -1340,13 +1147,13 @@ function SessionCard({
             </span>
           )}
           {otherActions.map((action) => {
-            const actionBusy = action.kind === "fork_session" ? forkBusy : busy && busyActionId === action.action_id;
+            const actionBusy = busy && busyActionId === action.action_id;
             return (
               <button
                 key={action.action_id}
                 type="button"
                 className="btn btn-ghost sync-history-launch-action"
-                disabled={!action.enabled || busy || forkBusy}
+                disabled={!action.enabled || busy}
                 onClick={() => onSessionAction(session, action)}
                 title={actionTitle(action, actionBusy)}
                 aria-label={action.label}
@@ -1362,7 +1169,6 @@ function SessionCard({
         </div>
       </div>
 
-      {rowResolution?.(reviewResourceId)}
 
       {/* Line 2 reads: readouts │ debug detail ……… stamp. The rule is what keeps
           the two clickables from reading as a sixth and seventh readout — every
@@ -1425,9 +1231,6 @@ function SyncEntryCard({
   const identityLabel = `${title}, ${entry.provider_display_name} thread ${entry.thread_id}`;
   const updatedAt = entry.storage_updated_at ?? entry.local_updated_at;
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, entry, selected) : null;
-  const activeDecision = selectionMode
-    ? (selectionMode === "push" ? entry.push_decision : entry.pull_decision)
-    : null;
   const holdDetail = selectionMode ? syncHoldDetail(selectionMode, entry) : null;
   return (
     <article className={`sync-history-thread-card sync-history-stored-thread${selectionMode && selectable ? " sync-sync-selectable-row" : ""}${selected ? " selected" : ""}`}>
@@ -1447,27 +1250,16 @@ function SyncEntryCard({
               />
             </label>
           )}
-          {selectionMode && !selectable && activeDecision?.action === "blocked" && (
-            <span
-              className="sync-sync-row-choice sync-sync-row-blocked"
-              title={holdDetail ?? "Can't sync"}
-              aria-label={holdDetail ?? "Can't sync"}
-            >
-              <Icon name="octagon-x" size={14} />
-            </span>
+          {selectionMode && reviewStateLabel ? (
+            <ReviewSyncIndicator
+              entry={entry}
+              storageName={storageName}
+              label={reviewStateLabel}
+              detail={holdDetail}
+            />
+          ) : (
+            <SessionSyncIndicator presentation={sessionSyncPresentation(entry, storageName)} />
           )}
-          {selectionMode && !selectable && activeDecision?.action === "blocked" ? null
-            : selectionMode && reviewStateLabel ? (
-              <SyncDecisionBadge
-                label={reviewStateLabel}
-                state={entry.state}
-                detail={holdDetail}
-                blocked={activeDecision?.action === "blocked"}
-              />
-            ) : (
-              <SessionSyncIndicator presentation={sessionSyncPresentation(entry, storageName)} />
-            )}
-          {activeDecision?.requires_explicit_approval && <ReviewRequiredBadge />}
           {/* Nothing to open — the thread is a comparison entry, not a session
               — so the mark is inert here by construction. It still identifies
               the provider, which is why it renders at all. */}
@@ -1558,11 +1350,11 @@ function providerNoticeCopy(state: ProviderActivityState): string {
 export function ProjectChatHistoryContent({
   project, binding, activity, loading, loadingMore, actionError, actionBusyResourceId, actionBusyActionId = null,
   onBranchChange, onRefresh, onLoadMore,
-  onSessionAction, forkBusyResourceId = null, forkPanel = null, onOpenSessionDetail, embedded = false, comparison = null,
+  onSessionAction, onOpenSessionDetail, embedded = false, comparison = null,
   comparisonLoading = false, comparisonError = null, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
   selectionDisabled = false, onToggleResource, onReviewPull, onUnlinkStorage,
-  continuityActionBusy = false, rowResolution,
+  continuityActionBusy = false,
 }: ContentProps) {
   const [collapsedCommitShas, setCollapsedCommitShas] = useState<Set<string>>(new Set());
   const [uncommittedCollapsed, setUncommittedCollapsed] = useState(false);
@@ -1634,7 +1426,6 @@ export function ProjectChatHistoryContent({
       "cloud-outstanding": 0,
       "local-outstanding": 0,
       divergent: 0,
-      "divergent-forked": 0,
       pending: 0,
       conflict: 0,
       unavailable: 0,
@@ -1649,7 +1440,6 @@ export function ProjectChatHistoryContent({
   const visibleComparisonChangeCount = visibleComparisonCounts["local-outstanding"]
     + visibleComparisonCounts["cloud-outstanding"]
     + visibleComparisonCounts.divergent
-    + visibleComparisonCounts["divergent-forked"]
     + visibleComparisonCounts.pending
     + visibleComparisonCounts.conflict
     + visibleComparisonCounts.unavailable;
@@ -1679,14 +1469,14 @@ export function ProjectChatHistoryContent({
     return (
     <SessionCard key={key} session={session} occurrenceKey={key} workingDirectory={workingDirectory}
       busy={actionBusyResourceId === session.resource_id} busyActionId={actionBusyActionId}
-      onSessionAction={onSessionAction} forkBusy={forkBusyResourceId === session.resource_id}
+      onSessionAction={onSessionAction}
       initialCheckpointId={initialCheckpointId} onOpenSessionDetail={onOpenSessionDetail}
       syncEntry={entry} reviewResourceId={reviewResourceId}
       storageName={comparison ? comparisonStorageName : activeStorageName} syncFallback={syncFallback}
       selectionMode={selectionMode} selected={selectedResourceIds.has(reviewResourceId)}
       selectable={selectable}
       selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
-      onReviewPull={onReviewPull} rowResolution={rowResolution} />
+      onReviewPull={onReviewPull} />
     );
   };
   const orderedReferences = (references: { resource_id: string }[]) => [...references].sort((left, right) => {
@@ -1756,7 +1546,6 @@ export function ProjectChatHistoryContent({
                     {visibleComparisonCounts["local-outstanding"] > 0 && <span className="local" title={`${visibleComparisonCounts["local-outstanding"]} local thread change${visibleComparisonCounts["local-outstanding"] === 1 ? "" : "s"}`}><ThreadStatusIcon status="local-outstanding" size={12} />{visibleComparisonCounts["local-outstanding"]}</span>}
                     {visibleComparisonCounts["cloud-outstanding"] > 0 && <span className="storage" title={`${visibleComparisonCounts["cloud-outstanding"]} thread change${visibleComparisonCounts["cloud-outstanding"] === 1 ? "" : "s"} in ${comparisonStorageName}`}><ThreadStatusIcon status="cloud-outstanding" size={12} />{visibleComparisonCounts["cloud-outstanding"]}</span>}
                     {visibleComparisonCounts.divergent > 0 && <span className="diverged" title={`${visibleComparisonCounts.divergent} divergent thread${visibleComparisonCounts.divergent === 1 ? "" : "s"}`}><ThreadStatusIcon status="divergent" size={12} />{visibleComparisonCounts.divergent}</span>}
-                    {visibleComparisonCounts["divergent-forked"] > 0 && <span className="diverged-forked" title={`${visibleComparisonCounts["divergent-forked"]} divergent thread${visibleComparisonCounts["divergent-forked"] === 1 ? "" : "s"} already preserved as a fork`}><ThreadStatusIcon status="divergent-forked" size={12} />{visibleComparisonCounts["divergent-forked"]}</span>}
                     {visibleComparisonCounts.pending > 0 && <span className="pending" title={`${visibleComparisonCounts.pending} thread${visibleComparisonCounts.pending === 1 ? " is" : "s are"} waiting to sync`}><ThreadStatusIcon status="pending" size={12} />{visibleComparisonCounts.pending}</span>}
                     {visibleComparisonCounts.conflict > 0 && <span className="conflict" title={`${visibleComparisonCounts.conflict} thread conflict${visibleComparisonCounts.conflict === 1 ? "" : "s"} need attention`}><ThreadStatusIcon status="conflict" size={12} />{visibleComparisonCounts.conflict}</span>}
                     {visibleComparisonCounts.unavailable > 0 && <span className="unavailable" title={`${visibleComparisonCounts.unavailable} thread${visibleComparisonCounts.unavailable === 1 ? " is" : "s are"} unavailable for sync`}><ThreadStatusIcon status="unavailable" size={12} />{visibleComparisonCounts.unavailable}</span>}
@@ -1786,7 +1575,6 @@ export function ProjectChatHistoryContent({
         </header>}
 
         {actionError && <div className="sync-callout error sync-history-error" role="alert"><Icon name="alert-triangle" size={15} /><span>{actionError}</span></div>}
-        {forkPanel}
         {comparison?.remote_continuity?.state === "replaced" && (
           <div className="sync-callout warning sync-history-continuity" role="status">
             <Icon name="alert-triangle" size={15} />
@@ -2025,7 +1813,6 @@ export default function ProjectActivityPage({
   onUnlinkStorage,
   continuityActionBusy = false,
   comparisonOverride,
-  rowResolution,
   onReviewListReadyChange,
   onOpenSessionDetail,
 }: PageProps) {
@@ -2039,10 +1826,6 @@ export default function ProjectActivityPage({
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusyResourceId, setActionBusyResourceId] = useState<string | null>(null);
   const [actionBusyActionId, setActionBusyActionId] = useState<string | null>(null);
-  const [forkBusyResourceId, setForkBusyResourceId] = useState<string | null>(null);
-  const [forkCheckpoint, setForkCheckpoint] = useState<CodexForkCheckpoint | null>(null);
-  const [forkNotice, setForkNotice] = useState<ForkCompletionFeedback | null>(null);
-  const [forkResolving, setForkResolving] = useState(false);
   const requestRef = useRef(0);
   const comparisonRequestRef = useRef(0);
   const hasBoundProvider = Object.keys(binding?.profile_ids ?? {}).length > 0;
@@ -2120,80 +1903,12 @@ export default function ProjectActivityPage({
     onReviewListReadyChange?.(reviewListReady);
   }, [reviewListReady, onReviewListReadyChange]);
 
-  // Rehydrate a pending Activity-page fork checkpoint (for example after an app
-  // restart mid-fork). Pull-origin checkpoints stay with the Pull review.
-  useEffect(() => {
-    let cancelled = false;
-    setForkCheckpoint(null);
-    setForkNotice(null);
-    if (!hasBoundProvider) return;
-    void (async () => {
-      try {
-        const pending = await projectSyncApi.getPendingCodexDivergence(project.local_project_id);
-        if (cancelled) return;
-        const activityCheckpoint = pending?.fork_checkpoints.find(
-          (checkpoint) => checkpoint.origin === "manual",
-        ) ?? null;
-        setForkCheckpoint(activityCheckpoint);
-      } catch {
-        // Rehydration is best-effort; the checkpoint re-surfaces on the next
-        // fork action or refresh.
-      }
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project.local_project_id, binding?.revision, refreshEpoch]);
-
   const changeBranch = (nextBranch: string) => { setBranch(nextBranch); setActivity(null); void load(null, nextBranch); };
-  const refreshActivity = async (dismissForkFeedback: boolean) => {
-    await refreshActivityAndHandleForkFeedback(
-      () => load(null, branch, true),
-      loadComparison,
-      () => setForkNotice(null),
-      dismissForkFeedback,
-    );
-  };
-  const consumeForkResult = (result: RestoreResult) => {
-    const activityCheckpoint = result.fork_checkpoints.find(
-      (checkpoint) => checkpoint.origin === "manual",
-    ) ?? null;
-    setForkCheckpoint(result.status === "complete" ? null : activityCheckpoint);
-    setForkNotice({
-      message: result.message,
-      success: result.success,
-      fork: result.codex_manual_fork
-        ? {
-          name: result.codex_manual_fork.fork_name,
-          providerThreadId: result.codex_manual_fork.provider_thread_id,
-          createdAt: Math.floor(Date.now() / 1_000),
-        }
-        : null,
-    });
-    return result.status === "complete" || activityCheckpoint == null;
-  };
-  // Retained Codex-specific maintenance, reached only through a backend
-  // `fork_session` action descriptor — never through a provider check here.
-  const forkSession = async (session: ProjectSessionSummary) => {
-    const providerSessionId = session.provider_session_id;
-    if (!providerSessionId) {
-      setActionError("This session has no provider-native identity to fork.");
-      return;
-    }
-    setActionError(null);
-    setForkNotice(null);
-    setForkBusyResourceId(session.resource_id);
-    try {
-      const result = await projectSyncApi.forkCodexThread(project.local_project_id, providerSessionId);
-      if (consumeForkResult(result)) await refreshActivity(false);
-    } catch (reason) { setActionError(errorMessage(reason)); }
-    finally { setForkBusyResourceId(null); }
+  const refreshActivity = async () => {
+    await Promise.all([load(null, branch, true), loadComparison()]);
   };
   const runSessionAction = async (session: ProjectSessionSummary, action: SessionActionDescriptor) => {
     if (!action.enabled) return;
-    if (action.kind === "fork_session") {
-      await forkSession(session);
-      return;
-    }
     setActionError(null);
     setActionBusyResourceId(session.resource_id);
     setActionBusyActionId(action.action_id);
@@ -2205,26 +1920,5 @@ export default function ProjectActivityPage({
       setActionBusyActionId(null);
     }
   };
-  const retryForkCheckpoint = async () => {
-    if (!forkCheckpoint) return;
-    setActionError(null);
-    setForkNotice(null);
-    setForkResolving(true);
-    try {
-      const result = await projectSyncApi.retryCodexDivergence(forkCheckpoint.operation_id);
-      if (consumeForkResult(result)) await refreshActivity(false);
-    } catch (reason) { setActionError(errorMessage(reason)); }
-    finally { setForkResolving(false); }
-  };
-  const forkPanel = (
-    <ForkActivityPanel
-      feedback={forkNotice}
-      checkpoint={forkCheckpoint}
-      selectionMode={selectionMode}
-      resolving={forkResolving}
-      onRetry={() => void retryForkCheckpoint()}
-      onDismissFeedback={() => setForkNotice(null)}
-    />
-  );
-  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onBranchChange={changeBranch} onRefresh={() => { void refreshActivity(true); }} onLoadMore={() => void load(activity?.next_before ?? null, branch)} onSessionAction={(session, action) => void runSessionAction(session, action)} forkBusyResourceId={forkBusyResourceId} forkPanel={forkPanel} onOpenSessionDetail={onOpenSessionDetail} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} rowResolution={rowResolution} />;
+  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onBranchChange={changeBranch} onRefresh={() => { void refreshActivity(); }} onLoadMore={() => void load(activity?.next_before ?? null, branch)} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
 }

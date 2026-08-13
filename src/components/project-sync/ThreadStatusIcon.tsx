@@ -1,6 +1,6 @@
 import type { SVGProps } from "react";
 
-/* The first eight answer "how does this stand against storage?". The last three
+/* The first seven answer "how does this stand against storage?". The last three
    answer "there is no answer yet" — the state a project with no storage, a
    comparison in flight, and a failed comparison are all in. Without them the
    row had nothing to draw and drew nothing, which is what collapsed the icon
@@ -10,7 +10,6 @@ export type ThreadStatusIconName =
   | "cloud-outstanding"
   | "local-outstanding"
   | "divergent"
-  | "divergent-forked"
   | "pending"
   | "conflict"
   | "unavailable"
@@ -28,7 +27,6 @@ interface ThreadStatusIconProps extends Omit<SVGProps<SVGSVGElement>, "name"> {
 // Outer radius 11 on the 24px grid: it steps down in 6px runs, which is what
 // reads as a circle. A wider radius flattens the cardinals and looks octagonal.
 const badgePath = "M9 1h6v1h3v1h1v1h1v1h1v1h1v3h1v6h-1v3h-1v1h-1v1h-1v1h-1v1h-3v1h-6v-1h-3v-1h-1v-1h-1v-1h-1v-1h-1v-3h-1v-6h1v-3h1v-1h1v-1h1v-1h1v-1h3ZM11 2v1h-3v1h-2v1h-1v1h-1v2h-1v3h-1v2h1v3h1v2h1v1h1v1h2v1h3v1h2v-1h3v-1h2v-1h1v-1h1v-2h1v-3h1v-2h-1v-3h-1v-2h-1v-1h-1v-1h-2v-1h-3v-1Z";
-// Synced and forked share the check; the status colour is what tells them apart.
 const checkPath = "M16 9h2v2h-1v1h-1v2h-1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h-1v-2h2v1h1v1h2v-1h1v-2h1v-1h1Z";
 
 function StatusGlyph({ status }: { status: ThreadStatusIconName }) {
@@ -58,8 +56,6 @@ function StatusGlyph({ status }: { status: ThreadStatusIconName }) {
           d="M6 6h4v5h1v1h1v2h1v-1h1v-2h1v-1h-1v-4h4v4h-1v2h-1v2h-1v1h-1v1h-1v2h-2v-3h-1v-2h-1v-1h-1v-2h-2ZM7 7v2h2v-2ZM15 7v2h2v-2Z"
         />
       );
-    case "divergent-forked":
-      return <path fill="currentColor" d={checkPath} />;
     case "pending":
       return <path fill="currentColor" d="M11 7h2v5h4v2h-6Z" />;
     case "conflict":

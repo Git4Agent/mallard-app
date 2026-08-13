@@ -256,6 +256,14 @@ pub fn publish_request(
             message_count,
             lineage_digest,
             semantic_digest,
+            portable_tail: Some(
+                mallard_domain::compute_portable_conversation_tail(
+                    mallard_domain::TailPartitionKind::WholeThread,
+                    0,
+                    &chain,
+                )
+                .expect("harness chains fold to a portable tail"),
+            ),
             forked_from: spec.forked_from.clone(),
             source_thread_id: Some(spec.source_thread_id.clone()),
             created_by_origin: spec.created_by.clone(),

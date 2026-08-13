@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ProjectChatHistoryContent, syncHoldDetail } from "../../src/components/project-sync/ProjectActivityPage";
+import {
+  ProjectChatHistoryContent,
+  syncHoldDetail,
+} from "../../src/components/project-sync/ProjectActivityPage";
 import type {
   ConversationPlanActionType,
   ConversationReasonCode,
@@ -39,14 +42,11 @@ const binding = {
 };
 
 const WINDOW_START = 1_750_000_000;
-
 const HEALTHY_ID = "019f7798-5437-7632-9dbc-5b589cf68bf0";
-const LEGACY_ID = "019f7798-5437-7632-9dbc-5b589cf68bf1";
-const REPLACE_ID = "019f7798-5437-7632-9dbc-5b589cf68bf2";
+const BLOCKED_ID = "019f7798-5437-7632-9dbc-5b589cf68bf1";
+const DIVERGED_ID = "019f7798-5437-7632-9dbc-5b589cf68bf2";
 const STORED_ID = "019f7798-5437-7632-9dbc-5b589cf68bf3";
-const OLDER_ACTIONABLE_ID = "019f7798-5437-7632-9dbc-5b589cf68bf4";
-const OLDER_BLOCKED_ID = "019f7798-5437-7632-9dbc-5b589cf68bf5";
-const OLDER_SYNCED_ID = "019f7798-5437-7632-9dbc-5b589cf68bf6";
+const OLDER_ID = "019f7798-5437-7632-9dbc-5b589cf68bf4";
 
 function localSession(threadId: string, title: string) {
   return {
@@ -58,6 +58,7 @@ function localSession(threadId: string, title: string) {
     source: "local_only" as const,
     access: "bound_ready" as const,
     title,
+    is_preserved_local: false,
     summary: "",
     started_at: WINDOW_START + 1_000,
     ended_at: WINDOW_START + 2_000,
@@ -73,23 +74,16 @@ function localSession(threadId: string, title: string) {
     metrics_complete: true,
     actions: [
       {
-        action_id: "codex.open_in_app",
+        action_id: "codex.open-in-app",
         kind: "open_in_app" as const,
         label: "Open in Codex",
         enabled: true,
         disabled_reason: null,
       },
       {
-        action_id: "codex.open_in_terminal",
+        action_id: "codex.open-in-terminal",
         kind: "open_in_terminal" as const,
         label: "Open in Terminal",
-        enabled: true,
-        disabled_reason: null,
-      },
-      {
-        action_id: "codex.fork_session",
-        kind: "fork_session" as const,
-        label: "Fork in Codex",
         enabled: true,
         disabled_reason: null,
       },
@@ -101,8 +95,8 @@ const activity = {
   project_id: project.local_project_id,
   sessions: [
     localSession(HEALTHY_ID, "Test task"),
-    localSession(LEGACY_ID, "Legacy pre-0.146 session"),
-    localSession(REPLACE_ID, "Force-replace candidate"),
+    localSession(BLOCKED_ID, "Older codec task"),
+    localSession(DIVERGED_ID, "Changed on both machines"),
   ],
   git: null,
   unmapped: [],
@@ -116,28 +110,10 @@ const activity = {
 
 function decision(
   action: ConversationPlanActionType,
-  reason_code: ConversationReasonCode,
-  overrides: Partial<ThreadSyncDecision> = {},
+  reasonCode: ConversationReasonCode,
+  selectable = false,
 ): ThreadSyncDecision {
-  const explicit = ["replace_local", "replace_cloud", "tombstone_thread"].includes(action);
-  const selectable = [
-    "fast_forward_local",
-    "fast_forward_cloud",
-    "resolve_divergence",
-    "create_cloud",
-    "create_local",
-    "replace_local",
-    "replace_cloud",
-    "tombstone_thread",
-  ].includes(action);
-  return {
-    action,
-    reason_code,
-    selectable,
-    selected_by_default: selectable && !explicit,
-    requires_explicit_approval: explicit,
-    ...overrides,
-  };
+  return { action, reason_code: reasonCode, selectable };
 }
 
 function entry(overrides: Partial<ThreadSyncEntry> & Pick<ThreadSyncEntry, "thread_id">): ThreadSyncEntry {
@@ -151,8 +127,9 @@ function entry(overrides: Partial<ThreadSyncEntry> & Pick<ThreadSyncEntry, "thre
     local_present: true,
     storage_present: false,
     cloud_thread_id: overrides.thread_id,
-    push_decision: decision("create_cloud", "cloud_missing"),
-    pull_decision: decision("keep_local", "cloud_missing"),
+    relation: "missing_cloud",
+    push_decision: decision("create_cloud", "missing_cloud", true),
+    pull_decision: decision("report_local_only", "missing_cloud"),
     ...overrides,
   };
 }
@@ -162,52 +139,38 @@ const healthyEntry = entry({
   display_name: "Test task",
   local_updated_at: WINDOW_START + 2_000,
 });
-const legacyEntry = entry({
-  thread_id: LEGACY_ID,
-  display_name: "Legacy pre-0.146 session",
+const blockedEntry = entry({
+  thread_id: BLOCKED_ID,
+  display_name: "Older codec task",
   local_updated_at: WINDOW_START + 2_000,
-  push_decision: decision("blocked", "codec_unsupported", {
-    blocked_reason: "This conversation cannot be transformed safely by the active codec.",
-  }),
+  push_decision: decision("blocked", "codec_unsupported"),
 });
-const replaceEntry = entry({
-  thread_id: REPLACE_ID,
-  display_name: "Force-replace candidate",
+const divergedEntry = entry({
+  thread_id: DIVERGED_ID,
+  display_name: "Changed on both machines",
   state: "diverged",
   storage_present: true,
+  relation: "diverged",
   local_updated_at: WINDOW_START + 2_000,
   storage_updated_at: WINDOW_START + 1_500,
-  push_decision: decision("replace_cloud", "diverged"),
+  push_decision: decision("require_pull", "divergent"),
+  pull_decision: decision("keep_both", "divergent", true),
 });
 const storedEntry = entry({
   thread_id: STORED_ID,
-  display_name: "Improve cloud thread titles",
+  display_name: "Improve cloud task titles",
   state: "storage_only",
   local_present: false,
   storage_present: true,
+  relation: "missing_local",
   storage_updated_at: WINDOW_START + 1_000,
-  push_decision: decision("no_op", "local_missing"),
-  pull_decision: decision("create_local", "local_missing"),
+  push_decision: decision("not_pushable", "missing_local"),
+  pull_decision: decision("create_local", "missing_local", true),
 });
-const olderActionableEntry = entry({
-  thread_id: OLDER_ACTIONABLE_ID,
-  display_name: "Older unpublished session",
+const olderEntry = entry({
+  thread_id: OLDER_ID,
+  display_name: "Older unpublished task",
   local_updated_at: WINDOW_START - 5_000,
-});
-const olderBlockedEntry = entry({
-  thread_id: OLDER_BLOCKED_ID,
-  display_name: "Older legacy session",
-  local_updated_at: WINDOW_START - 6_000,
-  push_decision: decision("blocked", "codec_unsupported"),
-});
-const olderSyncedEntry = entry({
-  thread_id: OLDER_SYNCED_ID,
-  display_name: "Older synced session",
-  state: "synced",
-  storage_present: true,
-  local_updated_at: WINDOW_START - 7_000,
-  storage_updated_at: WINDOW_START - 7_000,
-  push_decision: decision("no_op", "identical"),
 });
 
 function comparisonOf(entries: ThreadSyncEntry[]) {
@@ -254,125 +217,92 @@ function render(props: {
   );
 }
 
-const selectable = new Set([healthyEntry.resource_id, replaceEntry.resource_id, olderActionableEntry.resource_id]);
-
-test("selection mode folds decisions into the existing thread cards", () => {
+test("Push selection folds the new decisions into existing task cards", () => {
   const html = render({
     selectionMode: "push",
-    entries: [healthyEntry, legacyEntry, replaceEntry],
-    selectableResourceIds: selectable,
+    entries: [healthyEntry, blockedEntry, divergedEntry],
+    selectableResourceIds: new Set([healthyEntry.resource_id]),
     selectedResourceIds: new Set([healthyEntry.resource_id]),
   });
 
-  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 2, "only selectable rows get a checkbox");
-  assert.equal((html.match(/>Test task<\/strong>/g) ?? []).length, 1, "each thread renders exactly once");
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 1);
   assert.match(html, /aria-label="Exclude Test task"/);
-  assert.doesNotMatch(html, /aria-label="(Include|Exclude) Legacy pre-0\.146 session"/);
-
-  // Decision phrases are icons now: the words live in aria-labels and the
-  // native tooltip bubbles, never as visible chip text.
-  assert.doesNotMatch(html, />Can&#x27;t sync</);
-  assert.doesNotMatch(html, /sync-sync-review-state/);
-  assert.match(html, /sync-sync-row-blocked/, "blocked rows reuse the shared gutter marker");
-  assert.equal(
-    (html.match(/sync-sync-row-blocked/g) ?? []).length,
-    (html.match(/data-icon="octagon-x"/g) ?? []).length,
-    "a blocked row shows exactly one octagon — the gutter marker, no doubled badge",
-  );
-  assert.match(html, /saved by an older Codex version\. It still opens on this computer\./);
-  assert.doesNotMatch(html, /sync-history-sync-hold/, "the reason lives in the marker tooltip, not visible text");
-  assert.doesNotMatch(html, /cannot be transformed safely by the active codec/);
-  assert.doesNotMatch(html, />Review required</);
-  assert.match(html, /aria-label="Review required\./, "the approval flag is an icon with the phrase in its label");
-  assert.match(html, /sync-thread-sync-indicator local[^"]*" data-tooltip="Publish new thread/, "decision icons lead the row with the phrase in the bubble");
-
-  assert.equal((html.match(/aria-label="Open in Codex"/g) ?? []).length, 3, "blocked threads stay openable");
-  assert.doesNotMatch(html, /Stored only|Not materialized|Resumable|materialization/);
-  assert.doesNotMatch(html, /sync-thread-variant/);
-});
-
-test("browse mode shows history only, with no decision content", () => {
-  const html = render({ entries: [healthyEntry, legacyEntry, replaceEntry, olderBlockedEntry] });
-
-  assert.doesNotMatch(html, /type="checkbox"/);
-  assert.doesNotMatch(html, /Review required|Older activity/);
-  assert.doesNotMatch(html, />Can&#x27;t sync</, "no review-state labels outside selection mode");
-  assert.doesNotMatch(html, /sync-sync-row-blocked/);
+  assert.doesNotMatch(html, /aria-label="(Include|Exclude) Older codec task"/);
+  assert.match(html, /data-thread-status="unavailable"/);
+  assert.match(html, /Mallard can&#x27;t safely capture this Codex session\. It still opens on this computer\./);
+  assert.match(html, /Pull required/);
+  assert.match(html, /Pull will keep both histories as independent tasks/);
   assert.equal((html.match(/aria-label="Open in Codex"/g) ?? []).length, 3);
 });
 
-test("blocked threads use the block indicator instead of the upload arrow", () => {
-  const html = render({ entries: [healthyEntry, legacyEntry] });
+test("Pull selection presents divergence as the single keep-both action", () => {
+  const html = render({
+    selectionMode: "pull",
+    entries: [divergedEntry],
+    selectableResourceIds: new Set([divergedEntry.resource_id]),
+    selectedResourceIds: new Set([divergedEntry.resource_id]),
+  });
+
+  assert.match(html, /aria-label="Exclude Changed on both machines"/);
+  assert.match(html, /Keep both/);
+  assert.doesNotMatch(html, /Fork in Codex|Fork and overwrite|radiogroup/);
+});
+
+test("browse mode shows sync state but no selection decisions", () => {
+  const html = render({ entries: [healthyEntry, blockedEntry, divergedEntry] });
+
+  assert.doesNotMatch(html, /type="checkbox"/);
+  assert.equal((html.match(/aria-label="Open in Codex"/g) ?? []).length, 3);
+  assert.doesNotMatch(html, /Fork in Codex/);
+});
+
+test("blocked tasks use the unavailable indicator instead of the upload arrow", () => {
+  const html = render({ entries: [healthyEntry, blockedEntry] });
 
   assert.match(
     html,
-    /sync-thread-sync-indicator unavailable[^>]+aria-label="Can&#x27;t sync — this session was saved by an older Codex version\. It still opens on this computer\."/,
+    /sync-thread-sync-indicator unavailable[^>]+aria-label="Can&#x27;t sync — Mallard can&#x27;t safely capture this Codex session\. It still opens on this computer\."/,
   );
-  assert.match(html, /sync-thread-sync-indicator local/, "pushable threads keep the upload indicator");
+  assert.match(html, /sync-thread-sync-indicator local/);
   assert.equal((html.match(/sync-thread-sync-indicator unavailable/g) ?? []).length, 1);
-  assert.match(html, /title="1 thread is unavailable for sync"/);
-  assert.match(html, /title="1 local thread change"/);
 });
 
-test("out-of-window threads live in a collapsed Older activity group with a non-actionable count", () => {
-  const html = render({
-    selectionMode: "push",
-    entries: [healthyEntry, olderActionableEntry, olderBlockedEntry, olderSyncedEntry],
-    selectableResourceIds: new Set([healthyEntry.resource_id, olderActionableEntry.resource_id]),
-  });
-
-  assert.match(html, /Older activity/);
-  assert.match(html, /title="3 sessions outside this 30-day window"/);
-  assert.match(html, /aria-label="Include Older unpublished session, Codex thread 019f7798-5437-7632-9dbc-5b589cf68bf4"/);
-  assert.match(html, />2 sessions need no changes or can&#x27;t sync</);
-  assert.match(html, /Older legacy session/, "blocked threads stay discoverable");
-  assert.match(html, /Older synced session/);
-  // No location line anywhere: the status badge carries where a thread lives,
-  // and it carries it on every row rather than only on the ones with an entry.
-  assert.doesNotMatch(html, /On this Mac/);
-  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 2, "healthy in-window plus older actionable");
-});
-
-test("storage-only rows state their status and offer Pull to open", () => {
+test("storage-only tasks offer the reviewed create-local action", () => {
   const html = render({
     selectionMode: "pull",
     entries: [storedEntry],
     selectableResourceIds: new Set([storedEntry.resource_id]),
   });
 
-  assert.doesNotMatch(html, /sync-history-stored-thread-location/);
-  // The row still names its provider — inert, because a comparison entry has
-  // nothing to open.
-  assert.match(html, /class="sync-history-launch-action sync-history-provider-inert"[^>]*title="Codex thread"/);
-  // Line 2 carries the whole thread id — never a stub, no chip, no title
-  // reveal — with the <time> beside it.
   assert.match(html, /class="sync-history-stored-thread-id"><code>019f7798-5437-7632-9dbc-5b589cf68bf3<\/code><\/span>/);
-  assert.doesNotMatch(html, /<code title="019f7798-/);
-  assert.match(html, /sync-history-stored-thread-meta[^>]*>[\s\S]*?<time[^>]*>[^<]+<\/time>/);
-  assert.match(html, /aria-label="Include Improve cloud thread titles, Codex thread 019f7798-5437-7632-9dbc-5b589cf68bf3"/);
+  assert.match(html, /aria-label="Include Improve cloud task titles, Codex thread 019f7798-5437-7632-9dbc-5b589cf68bf3"/);
+  assert.doesNotMatch(html, /sync-history-stored-thread-location/);
 });
 
-test("hold details use user vocabulary for every non-actionable direction", () => {
-  assert.match(
-    syncHoldDetail("push", legacyEntry) ?? "",
-    /older Codex version.*still opens on this computer/,
-  );
+test("out-of-window tasks remain discoverable in Older activity", () => {
+  const html = render({
+    selectionMode: "push",
+    entries: [healthyEntry, olderEntry],
+    selectableResourceIds: new Set([healthyEntry.resource_id, olderEntry.resource_id]),
+  });
+
+  assert.match(html, /Older activity/);
+  assert.match(html, /Older unpublished task/);
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 2);
+});
+
+test("hold details explain metadata pulls, divergence, and unsupported codecs", () => {
+  assert.match(syncHoldDetail("push", blockedEntry) ?? "", /can't safely capture this Codex session/i);
   assert.equal(syncHoldDetail("push", healthyEntry), null);
-  assert.match(
-    syncHoldDetail("pull", entry({
-      thread_id: STORED_ID,
-      pull_decision: decision("store_only", "codec_unsupported"),
-    })) ?? "",
-    /backup copy that can't be opened/,
-  );
+  assert.match(syncHoldDetail("push", divergedEntry) ?? "", /keep both histories as independent tasks/);
   assert.match(
     syncHoldDetail("push", entry({
       thread_id: HEALTHY_ID,
-      state: "storage_ahead",
+      state: "synced",
       storage_present: true,
-      push_decision: decision("require_pull", "local_prefix_of_cloud"),
+      push_decision: decision("require_pull_metadata", "sync_advanced"),
     })) ?? "",
-    /Pull them before pushing/,
+    /storage has newer sync metadata/,
   );
   assert.match(
     syncHoldDetail("push", entry({
@@ -384,77 +314,12 @@ test("hold details use user vocabulary for every non-actionable direction", () =
   );
 });
 
-test("the retired review-list vocabulary stays out of the sources", () => {
+test("retired fork and variant vocabulary stays out of production sources", () => {
   const page = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
   const css = readFileSync("src/App.css", "utf8");
   const types = readFileSync("src/types.ts", "utf8");
 
-  assert.doesNotMatch(page, /ThreadVariantReview|materialization/);
-  assert.doesNotMatch(css, /sync-thread-variant/);
-  assert.doesNotMatch(types, /ConversationMaterializationState|materialization_state/);
-  assert.doesNotMatch(types, /resumable\??:/);
-});
-
-const divergedForkedEntry = entry({
-  thread_id: REPLACE_ID,
-  display_name: "Force-replace candidate",
-  state: "diverged_forked",
-  storage_present: true,
-  local_updated_at: WINDOW_START + 2_000,
-  storage_updated_at: WINDOW_START + 1_500,
-  fork_preservation: {
-    fork_thread_id: "thread-preserved",
-    fork_display_name: "Force-replace candidate — fork · 2026-08-01 09:00Z",
-    forked_at: WINDOW_START + 1_800,
-  },
-  push_decision: decision("require_pull", "diverged"),
-  pull_decision: decision("resolve_divergence", "diverged"),
-});
-
-function renderWithFork(selectionMode?: "push" | "pull") {
-  return renderToStaticMarkup(
-    <ProjectChatHistoryContent
-      embedded
-      project={project}
-      binding={binding}
-      activity={activity}
-      comparison={comparisonOf([divergedForkedEntry])}
-      activeStorageName="Local storage 1"
-      selectionMode={selectionMode}
-      selectableResourceIds={selectionMode ? new Set([divergedForkedEntry.resource_id]) : undefined}
-      selectedResourceIds={new Set()}
-      loading={false}
-      loadingMore={false}
-      actionError={null}
-      actionBusyResourceId={null}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
-      onLoadMore={() => undefined}
-      onSessionAction={() => undefined}
-      forkBusyResourceId={null}
-      onReviewPull={() => undefined}
-    />,
-  );
-}
-
-test("browse mode offers the fork action and names the preserving fork", () => {
-  const html = renderWithFork();
-  assert.match(html, /Fork in Codex/, "every local thread row offers the fork action");
-  assert.match(
-    html,
-    /already preserved in the fork/,
-    "the diverged-forked indicator explains the preservation",
-  );
-  assert.match(html, /diverged-forked/, "the indicator uses the preserved-divergence class");
-});
-
-test("selection mode hides the fork action and holds diverged-forked rows on Pull", () => {
-  const html = renderWithFork("push");
-  assert.doesNotMatch(html, /Fork in Codex/, "review mode offers no fork action");
-  assert.match(html, /Pull required/);
-  assert.match(
-    html,
-    /already preserved in a fork/,
-    "the push hold explains the branch is already preserved",
-  );
+  assert.doesNotMatch(page, /ThreadVariantReview|fork_session|ForkActivityPanel/);
+  assert.doesNotMatch(css, /sync-thread-variant|sync-divergence-inline|sync-fork-checkpoint/);
+  assert.doesNotMatch(types, /ConversationMaterializationState|diverged_forked|ConversationDivergenceResolution/);
 });

@@ -224,6 +224,33 @@ export interface ProjectStorageLink {
   created_at: number;
 }
 
+/** Derived machine-local sync state removed by an explicit project reset. */
+export interface ProjectSyncMetadataResetResult {
+  local_project_id: string;
+  config_revision: number;
+  links_reset: number;
+  scope_bases_removed: number;
+  conversation_checkpoints_removed: number;
+  conversation_bindings_removed: number;
+  materializations_removed: number;
+  journal_operations_removed: number;
+  restore_plans_removed: number;
+  push_plans_removed: number;
+  unreadable_plan_files_retained: number;
+}
+
+/** Result of permanently clearing Mallard-managed objects from one storage. */
+export interface StorageDataClearResult {
+  storage_id: string;
+  config_revision: number;
+  repository_objects_deleted: number;
+  library_objects_deleted: number;
+  project_links_reset: number;
+  catalog_links_reset: number;
+  local_records_removed: number;
+  unreadable_plan_files_retained: number;
+}
+
 export interface ProjectContentPreferences {
   schema_version: 1;
   revision: number;
@@ -300,6 +327,39 @@ export interface ApplyReceipt {
   status: "applied" | "skipped" | "failed" | "blocked";
   applied_at: number;
   error?: string | null;
+  conversation?: ConversationApplyReceipt | null;
+}
+
+export type TailPartitionKind = "whole_thread" | "fixed_paginated_tail";
+
+/** The complete portable conversation identity compared by Refresh, Push, and Pull. */
+export interface PortableConversationTail {
+  codec: string;
+  partition_kind: TailPartitionKind;
+  start_record_count: number;
+  accepted_end_record_count: number;
+  accepted_tail_state: string;
+}
+
+export interface ConversationApplyReceipt {
+  host_id: string;
+  replica_id: string;
+  thread_id: string;
+  provider_profile_id: string;
+  provider_thread_id?: string | null;
+  materialization_state: "pending" | "resumable" | "stored_only";
+  lineage_digest?: string | null;
+  semantic_digest?: string | null;
+  local_file_sha256_after?: string | null;
+  cloud_revision: number;
+  cloud_commit_id: string;
+  cloud_manifest_sha256: string;
+  published_origin_host_token?: string | null;
+  published_origin_replica_token?: string | null;
+  journal_operation_id: string;
+  accepted_tail?: PortableConversationTail | null;
+  preserved_thread_id?: string | null;
+  source_disposition?: "retained" | null;
 }
 
 export interface MaterializationRecord {
@@ -770,88 +830,44 @@ export interface ConversationProviderStateExpectation {
   expectation: ConversationTargetExpectation;
 }
 
-export type ConversationDivergenceResolution =
-  | "preserve_local_with_native_fork"
-  | "use_cloud_only";
-
-export interface ConversationResolutionSelection {
-  action_id: string;
-  resolution: ConversationDivergenceResolution;
-  destructive_approved: boolean;
-}
-
-export type CodexForkExecutor =
-  | "app_server_stdio"
-  | "native_pty";
-
-export type ConversationNameStatus =
-  | "applied"
-  | "user_override"
-  | "unchanged"
-  | "deferred"
-  | "failed";
-
-export type CodexInventoryRefreshStatus =
-  | "not_attempted"
-  | "deferred"
-  | "refreshed"
-  | "failed";
-
-export interface ConversationDivergencePlan {
-  available_resolutions: ConversationDivergenceResolution[];
-  /** Review default. `use_cloud_only` exactly when `local_branch_preserved`. */
-  recommended_resolution: ConversationDivergenceResolution;
-  /** The local branch is already held by a verified Mallard fork; the
-   * cloud-overwrite choice needs no destructive acknowledgement. */
-  local_branch_preserved: boolean;
+export interface KeepBothPlan {
   preserved_thread_id: string;
-  source_provider_thread_id: string;
-  local_lineage_digest: string;
-  local_semantic_digest: string;
-  local_message_count: number;
-  pinned_local_title?: string | null;
-  pinned_cloud_title?: string | null;
-  desired_fork_name: string;
-  desired_original_name?: string | null;
-  execution: DivergenceExecution;
+  remote_provider_thread_id: string;
 }
 
-export type DivergenceExecution =
-  | {
-    kind: "codex_native_fork";
-    codex_executable: string;
-    codex_executable_sha256: string;
-    available_executors: CodexForkExecutor[];
-  }
-  | {
-    kind: "adapter_file_fork";
-    fork_provider_thread_id: string;
-    fork_transcript_path: string;
-  };
+export interface ConversationRawRangePin {
+  start_byte_offset: number;
+  end_byte_offset: number;
+  range_sha256: string;
+}
 
 export interface ConversationPlanAction {
   action_id: string;
   direction: ConversationPlanDirection;
   action: ConversationPlanActionType;
   reason_code: ConversationReasonCode;
-  relation: ConversationRelation;
+  relation: TailClassification;
   provider: ProviderKey;
   host_id: string;
   replica_id: string;
   local_project_id: string;
   provider_profile_id: string;
   thread_id: string;
-  divergence?: ConversationDivergencePlan | null;
   source_resource_id?: string | null;
   proposed_provider_thread_id?: string | null;
+  keep_both?: KeepBothPlan | null;
   required_codec: string;
   pinned_revision: number;
   pinned_commit_id: string;
   pinned_manifest_sha256: string;
   pinned_scope_revision: number;
   pinned_scope_sha256: string;
+  pinned_accepted_tail?: PortableConversationTail | null;
+  pinned_local_tail?: PortableConversationTail | null;
+  pinned_cloud_tail?: PortableConversationTail | null;
   pinned_lineage_digest?: string | null;
   pinned_semantic_digest?: string | null;
+  pinned_raw_range?: ConversationRawRangePin | null;
   expected_local_target: ConversationTargetExpectation;
   expected_provider_state: ConversationProviderStateExpectation[];
   expected_profile_revision: number;
@@ -882,27 +898,18 @@ export interface RestorePlan {
   remote_continuity?: RemoteContinuity | null;
 }
 
-export type RestoreApplyStatus = "complete" | "fork_unacknowledged" | "recovery_required";
+export type RestoreApplyStatus = "complete" | "recovery_required";
 
-export type ForkOrigin = "pull_preserve" | "manual";
-
-export interface CodexForkCheckpoint {
-  operation_id: string;
-  origin: ForkOrigin;
-  plan_id?: string | null;
-  action_id?: string | null;
-  thread_id: string;
-  source_provider_thread_id: string;
-  suggested_fork_name: string;
-  status: RestoreApplyStatus;
-  message: string;
+export interface PreservedThreadResult {
+  action_id: string;
+  original_thread_id: string;
+  preserved_thread_id: string;
 }
 
 export interface RestoreResult {
   success: boolean;
   status: RestoreApplyStatus;
   message: string;
-  /** Absent for manual-fork results, which belong to no restore plan. */
   plan_id?: string | null;
   /**
    * Present only on restore applies. `false` means the reviewed baseline
@@ -912,33 +919,13 @@ export interface RestoreResult {
   reviewed_base_advanced?: boolean;
   applied_action_ids: string[];
   failed_actions: Array<{ action_id: string; display_name?: string | null; message: string }>;
-  fork_checkpoints: CodexForkCheckpoint[];
+  preserved_threads: PreservedThreadResult[];
   codex_app_refresh?: {
     operation_id: string;
     app_kind: "codex" | "codex_plus_plus";
     app_name: string;
     state: "restart_available" | "manual_restart";
     message: string;
-  } | null;
-  divergences: Array<{
-    action_id: string;
-    original_thread_id: string;
-    original_provider_thread_id: string;
-    resolution: ConversationDivergenceResolution;
-    preserved_thread_id?: string | null;
-    preserved_provider_thread_id?: string | null;
-    executor?: CodexForkExecutor | null;
-    desired_fork_name?: string | null;
-    fork_name_status?: ConversationNameStatus | null;
-    desired_original_name?: string | null;
-    original_name_status?: ConversationNameStatus | null;
-    inventory_refresh_status?: CodexInventoryRefreshStatus | null;
-  }>;
-  /** The fork a manual-fork operation created, carried structurally so the
-   *  banner can name it without parsing the message sentence back apart. */
-  codex_manual_fork?: {
-    fork_name: string;
-    provider_thread_id: string;
   } | null;
 }
 
@@ -971,7 +958,7 @@ export interface BundleReadiness {
 
 export type SessionSourceState = "local_only" | "remote_only" | "local_and_remote";
 
-export type SessionActionKind = "open_in_app" | "open_in_terminal" | "fork_session";
+export type SessionActionKind = "open_in_app" | "open_in_terminal";
 
 export interface SessionActionDescriptor {
   action_id: string;
@@ -998,6 +985,7 @@ export interface ProjectSessionSummary {
   source: SessionSourceState;
   access: ProviderAccessState;
   title: string;
+  is_preserved_local: boolean;
   summary?: string | null;
   started_at: number;
   ended_at: number;
@@ -1168,60 +1156,60 @@ export type ThreadSyncState =
   | "storage_only"
   | "storage_ahead"
   | "diverged"
-  | "diverged_forked"
   | "unavailable"
   | "unknown";
 
-export type ConversationRelation =
-  | "identical"
-  | "cloud_prefix_of_local"
-  | "local_prefix_of_cloud"
+export type SyncCurrency = "current" | "advanced";
+
+export type TailClassification =
+  | { sync: SyncCurrency }
+  | "local_outstanding"
+  | "cloud_outstanding"
   | "diverged"
-  | "unknown"
-  | "local_missing"
-  | "cloud_missing"
-  | "both_missing";
+  | "missing_cloud"
+  | "missing_local"
+  | "missing_both"
+  | "unknown";
 
 export type ConversationPlanActionType =
-  | "no_op"
-  | "fast_forward_local"
-  | "fast_forward_cloud"
-  | "keep_local"
-  | "require_pull"
-  | "resolve_divergence"
+  | "publish"
   | "create_cloud"
+  | "no_changes"
+  | "require_pull_metadata"
+  | "require_pull"
+  | "not_pushable"
+  | "adopt_cloud_metadata"
+  | "report_push_eligible"
+  | "materialize_cloud"
+  | "keep_both"
   | "create_local"
-  | "store_only"
-  | "replace_local"
-  | "replace_cloud"
-  | "tombstone_thread"
+  | "report_local_only"
+  | "not_found"
   | "blocked";
 
 export type ConversationReasonCode =
-  | "identical"
-  | "structural_rewrite_only"
-  | "cloud_prefix_of_local"
-  | "local_prefix_of_cloud"
-  | "diverged"
-  | "unknown_lineage"
-  | "local_missing"
-  | "cloud_missing"
-  | "both_missing"
+  | "sync_current"
+  | "sync_advanced"
+  | "local_outstanding"
+  | "cloud_outstanding"
+  | "divergent"
+  | "missing_local"
+  | "missing_cloud"
+  | "missing_both"
+  | "unknown_evidence"
+  | "detached_requires_pull"
+  | "corruption_blocked"
   | "provider_not_quiescent"
   | "codec_unsupported"
   | "ambiguous_binding"
   | "missing_binding"
-  | "tombstone_unchanged"
-  | "tombstone_modified"
   | "stale_plan"
-  | "resolution_pending";
+  | "busy";
 
 export interface ThreadSyncDecision {
   action: ConversationPlanActionType;
   reason_code: ConversationReasonCode;
   selectable: boolean;
-  selected_by_default: boolean;
-  requires_explicit_approval: boolean;
   blocked_reason?: string | null;
 }
 
@@ -1240,20 +1228,11 @@ export interface ThreadSyncEntry {
   storage_updated_at?: number | null;
   cloud_thread_id?: string | null;
   forked_from?: string | null;
-  fork_preservation?: ThreadForkPreservation | null;
   provider_thread_id?: string | null;
-  relation?: ConversationRelation | null;
+  relation?: TailClassification | null;
   push_decision: ThreadSyncDecision;
   pull_decision: ThreadSyncDecision;
   origin_label?: string | null;
-}
-
-/** Names the fork that preserves a diverged thread's local branch. Present
- * exactly when the entry's state is `diverged_forked`. */
-export interface ThreadForkPreservation {
-  fork_thread_id: string;
-  fork_display_name?: string | null;
-  forked_at: number;
 }
 
 export interface ThreadSyncCounts {

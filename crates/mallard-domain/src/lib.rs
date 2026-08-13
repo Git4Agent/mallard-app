@@ -500,19 +500,6 @@ fn validate_provider_thread_id(label: &str, value: &str) -> Result<(), String> {
     }
 }
 
-fn validate_codex_thread_name(label: &str, value: &str) -> Result<(), String> {
-    if value.trim() != value
-        || value.is_empty()
-        || value.chars().count() > 180
-        || value.chars().any(char::is_control)
-        || value.split_whitespace().collect::<Vec<_>>().join(" ") != value
-    {
-        Err(format!("invalid {}", label))
-    } else {
-        Ok(())
-    }
-}
-
 pub fn validate_absolute_clean_path(label: &str, value: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 4_096 || value.chars().any(char::is_control) {
         return Err(format!("invalid {}", label));
@@ -1185,6 +1172,7 @@ impl LocalProjectRegistration {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectStorageLink {
     pub local_project_id: LocalProjectId,
     pub storage_id: StorageId,
@@ -1204,6 +1192,13 @@ pub struct ProjectStorageLink {
     /// content. These preferences are never serialized into a remote bundle.
     #[serde(default)]
     pub project_content_preferences: ProjectContentPreferences,
+    /// Destination-scoped conversation state, keyed by provider scope and
+    /// thread. Two links may have accepted different versions of one alias;
+    /// nothing here is ever serialized into a remote bundle. Deliberately not
+    /// defaulted: a pre-cutover link document fails closed instead of being
+    /// silently upgraded.
+    pub conversation_checkpoints:
+        BTreeMap<SyncScopeKey, BTreeMap<ThreadId, ConversationCheckpoint>>,
     #[serde(default)]
     pub pinned: bool,
     pub created_at: u64,
@@ -1335,6 +1330,7 @@ fn validate_project_content_descriptor_identity(
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SyncConfig {
     pub schema: u32,
     pub revision: u64,
@@ -1430,6 +1426,25 @@ impl SyncConfig {
                 base.validate()?;
             }
             link.project_content_preferences.validate()?;
+            let mut checkpoint_count = 0_usize;
+            for (scope, checkpoints) in &link.conversation_checkpoints {
+                if scope.provider_key().is_none() {
+                    return Err(format!(
+                        "link '{}'/'{}' keeps conversation checkpoints outside a provider scope",
+                        link.local_project_id, link.storage_id
+                    ));
+                }
+                checkpoint_count += checkpoints.len();
+                for checkpoint in checkpoints.values() {
+                    checkpoint.validate()?;
+                }
+            }
+            if checkpoint_count > MAX_CONVERSATION_BINDINGS {
+                return Err(format!(
+                    "link '{}'/'{}' has too many conversation checkpoints",
+                    link.local_project_id, link.storage_id
+                ));
+            }
             if !cells.insert((link.local_project_id.clone(), link.storage_id.clone())) {
                 return Err(format!(
                     "duplicate project/storage link '{}'/ '{}'",
@@ -1721,45 +1736,8 @@ pub enum ConversationMaterializationState {
     StoredOnly,
 }
 
-/// Witness that this thread's branch was preserved by a Mallard-driven fork:
-/// the source chain's digest pair at fork time plus the adopted fork's
-/// identity. Written only after fork verification, overwritten by the next
-/// adoption, never cleared — it is consulted solely under a `Diverged`
-/// classification, where digest inequality self-invalidates a stale stamp.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ForkStamp {
-    pub fork_thread_id: ThreadId,
-    pub fork_provider_thread_id: String,
-    pub fork_transcript_path: String,
-    pub lineage_digest: String,
-    pub semantic_digest: String,
-    pub message_count: u64,
-    pub forked_at: u64,
-}
-
-impl ForkStamp {
-    fn validate(&self, source_thread_id: &ThreadId) -> Result<(), String> {
-        if &self.fork_thread_id == source_thread_id {
-            return Err("conversation fork stamp cannot name its own thread".to_string());
-        }
-        validate_provider_thread_id(
-            "conversation fork stamp provider thread",
-            &self.fork_provider_thread_id,
-        )?;
-        validate_absolute_clean_path(
-            "conversation fork stamp transcript",
-            &self.fork_transcript_path,
-        )?;
-        validate_sha256("conversation fork stamp lineage", &self.lineage_digest)?;
-        validate_sha256("conversation fork stamp semantics", &self.semantic_digest)?;
-        if self.message_count == 0 {
-            return Err("conversation fork stamp requires a nonzero message count".to_string());
-        }
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LocalConversationBinding {
     pub host_id: HostId,
     pub replica_id: ReplicaId,
@@ -1767,26 +1745,19 @@ pub struct LocalConversationBinding {
     pub provider_profile_id: LocalProviderProfileId,
     pub thread_id: ThreadId,
     /// Immediate portable parent for a locally preserved conflict branch.
-    /// This survives a Pull fork until a later Push publishes the branch.
+    /// Provenance only: the conflict resolver writes `None` and never reads
+    /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ThreadId>,
+    /// The immutable portable partition of the bound root task, seeded once
+    /// at first full parse.  A bound Codex task without a layout is
+    /// corruption: recover it from an exact journal/checkpoint/cloud witness
+    /// or fail closed — never re-seed at `WholeThread@0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_stamp: Option<ForkStamp>,
+    pub root_tail_layout: Option<RootTailLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
     pub materialization_state: ConversationMaterializationState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_observed_file_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_observed_head_message_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_observed_lineage_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_observed_semantic_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_revision: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_manifest_sha256: Option<String>,
     pub revision: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -1800,8 +1771,8 @@ impl LocalConversationBinding {
                 self.thread_id
             ));
         }
-        if let Some(stamp) = &self.fork_stamp {
-            stamp.validate(&self.thread_id)?;
+        if let Some(layout) = &self.root_tail_layout {
+            layout.validate()?;
         }
         let requires_provider_id = matches!(
             self.materialization_state,
@@ -1817,45 +1788,6 @@ impl LocalConversationBinding {
             thread_id.is_empty() || thread_id.len() > 128 || thread_id.chars().any(char::is_control)
         }) {
             return Err("conversation binding has an invalid provider thread ID".to_string());
-        }
-        if self
-            .last_observed_head_message_id
-            .as_ref()
-            .is_some_and(|message_id| {
-                message_id.is_empty()
-                    || message_id.len() > 256
-                    || message_id.chars().any(char::is_control)
-            })
-        {
-            return Err("conversation binding has an invalid head message ID".to_string());
-        }
-        for (label, digest) in [
-            (
-                "conversation local file",
-                self.last_observed_file_sha256.as_deref(),
-            ),
-            (
-                "conversation lineage",
-                self.last_observed_lineage_digest.as_deref(),
-            ),
-            (
-                "conversation semantic",
-                self.last_observed_semantic_digest.as_deref(),
-            ),
-            (
-                "conversation source manifest",
-                self.source_manifest_sha256.as_deref(),
-            ),
-        ] {
-            if let Some(digest) = digest {
-                validate_sha256(label, digest)?;
-            }
-        }
-        if self.source_revision.is_some() != self.source_manifest_sha256.is_some() {
-            return Err(
-                "conversation binding source revision and manifest must be pinned together"
-                    .to_string(),
-            );
         }
         if self.created_at > self.updated_at {
             return Err("conversation binding has invalid timestamps".to_string());
@@ -1880,6 +1812,7 @@ impl OriginHostAlias {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationBindings {
     pub schema: u32,
     pub revision: u64,
@@ -1901,53 +1834,22 @@ impl ConversationBindings {
         }
     }
 
-    pub fn validate(
-        &self,
-        identity: &HostIdentity,
-        machine: &MachineProjectState,
-        config: &SyncConfig,
-    ) -> Result<(), String> {
+    /// Context-free document invariants: bounds, per-binding validity, and
+    /// key uniqueness.  Journaled document snapshots validate through this;
+    /// the full `validate` adds host/machine/config cross-checks.
+    pub fn validate_structure(&self) -> Result<(), String> {
         if self.schema != CONVERSATION_BINDINGS_SCHEMA
             || self.bindings.len() > MAX_CONVERSATION_BINDINGS
             || self.origin_aliases.len() > MAX_ORIGIN_ALIASES
         {
             return Err("invalid conversation bindings document".to_string());
         }
-        if self.host_id != identity.host_id {
-            return Err("conversation bindings belong to a different host".to_string());
-        }
-
-        let profiles = machine
-            .profiles
-            .iter()
-            .map(|profile| (profile.profile_id.clone(), profile))
-            .collect::<BTreeMap<_, _>>();
-        let replicas = machine
-            .bindings
-            .iter()
-            .map(|binding| (binding.replica_id.clone(), binding))
-            .collect::<BTreeMap<_, _>>();
         let mut binding_keys = HashSet::new();
         let mut provider_owners = HashSet::new();
         for binding in &self.bindings {
             binding.validate()?;
             if binding.host_id != self.host_id {
                 return Err("conversation binding belongs to a different host".to_string());
-            }
-            let project_binding = replicas
-                .get(&binding.replica_id)
-                .ok_or_else(|| "conversation binding references an unknown replica".to_string())?;
-            if project_binding.host_id != self.host_id
-                || project_binding.local_project_id != binding.local_project_id
-                || !project_binding
-                    .profile_ids
-                    .values()
-                    .any(|profile_id| profile_id == &binding.provider_profile_id)
-                || (project_binding.state == BindingState::Active
-                    && config.project(&binding.local_project_id).is_none())
-                || !profiles.contains_key(&binding.provider_profile_id)
-            {
-                return Err("conversation binding project/profile scope is stale".to_string());
             }
             let key = (
                 binding.host_id.clone(),
@@ -1970,12 +1872,69 @@ impl ConversationBindings {
                 }
             }
         }
-
         let mut aliases = HashSet::new();
         for alias in &self.origin_aliases {
             alias.validate()?;
             if !aliases.insert((alias.bundle_id.clone(), alias.origin_host_token.clone())) {
                 return Err("duplicate origin host alias".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate(
+        &self,
+        identity: &HostIdentity,
+        machine: &MachineProjectState,
+        config: &SyncConfig,
+    ) -> Result<(), String> {
+        self.validate_structure()?;
+        if self.host_id != identity.host_id {
+            return Err("conversation bindings belong to a different host".to_string());
+        }
+
+        let profiles = machine
+            .profiles
+            .iter()
+            .map(|profile| (profile.profile_id.clone(), profile))
+            .collect::<BTreeMap<_, _>>();
+        let replicas = machine
+            .bindings
+            .iter()
+            .map(|binding| (binding.replica_id.clone(), binding))
+            .collect::<BTreeMap<_, _>>();
+        for binding in &self.bindings {
+            let project_binding = replicas
+                .get(&binding.replica_id)
+                .ok_or_else(|| "conversation binding references an unknown replica".to_string())?;
+            if project_binding.host_id != self.host_id
+                || project_binding.local_project_id != binding.local_project_id
+                || !project_binding
+                    .profile_ids
+                    .values()
+                    .any(|profile_id| profile_id == &binding.provider_profile_id)
+                || (project_binding.state == BindingState::Active
+                    && config.project(&binding.local_project_id).is_none())
+                || !profiles.contains_key(&binding.provider_profile_id)
+            {
+                return Err("conversation binding project/profile scope is stale".to_string());
+            }
+            // A materialized Codex task must carry its immutable portable
+            // partition under the v1 codec; a missing or foreign layout is
+            // corruption, never a default.
+            if binding.provider_thread_id.is_some()
+                && profiles
+                    .get(&binding.provider_profile_id)
+                    .is_some_and(|profile| profile.provider.as_str() == "codex")
+                && binding
+                    .root_tail_layout
+                    .as_ref()
+                    .is_none_or(|layout| layout.codec != PORTABLE_TAIL_CODEC_V1)
+            {
+                return Err(format!(
+                    "conversation thread '{}' is bound to codex without a v1 root tail layout",
+                    binding.thread_id
+                ));
             }
         }
         Ok(())
@@ -1986,423 +1945,206 @@ pub fn fallback_origin_host_label(token: &OriginHostToken) -> String {
     format!("Host {}", token.as_str()[..4].to_ascii_uppercase())
 }
 
+/// Durable phase of a publishing Push operation.  `RecoveryBlockedCorruption`
+/// gates the touched resources for explicit repair; it neither retries nor
+/// releases.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ConversationSyncPhase {
-    Prepared,
-    ReplacementStaged,
-    ForkAttemptPending,
-    ForkUnacknowledged,
-    ForkVerified,
-    ForkNamingRecorded,
-    LocalForkBound,
-    ProviderCommitted,
-    BindingsCommitted,
-    OriginalNamingRecorded,
-    CloudPublished,
+pub enum PushJournalPhase {
+    CandidateUploaded,
+    HeadAdvanced,
     LocalCommitted,
-    RecoveryRequired,
+    Complete,
+    CompleteWithWarnings,
+    AbortedCasLost,
+    RecoveryBlockedCorruption,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CodexForkAttemptStatus {
-    Pending,
-    DefinitiveNoFork,
-    Verified,
-    Unacknowledged,
-}
+impl PushJournalPhase {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Complete | Self::CompleteWithWarnings | Self::AbortedCasLost
+        )
+    }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct CodexForkAttempt {
-    pub executor: CodexForkExecutor,
-    pub status: CodexForkAttemptStatus,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ConversationNameStatus {
-    Applied,
-    UserOverride,
-    Unchanged,
-    Deferred,
-    Failed,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CodexInventoryRefreshStatus {
-    NotAttempted,
-    Deferred,
-    Refreshed,
-    Failed,
-}
-
-/// Which entry point created a fork-carrying divergence operation. The
-/// executor ladder, verification, and checkpoints are identical for both;
-/// origin decides what follows fork acknowledgment — a Pull restores the cloud
-/// branch into the source, a manual fork stops with the source untouched.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ForkOrigin {
-    PullPreserve,
-    Manual,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct CodexDivergenceOperation {
-    pub origin: ForkOrigin,
-    pub resolution: ConversationDivergenceResolution,
-    pub available_resolutions: Vec<ConversationDivergenceResolution>,
-    pub recommended_resolution: ConversationDivergenceResolution,
-    pub local_branch_preserved: bool,
-    pub preserved_thread_id: ThreadId,
-    pub source_provider_thread_id: String,
-    pub source_transcript_path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_provider_thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_transcript_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_transcript_sha256: Option<String>,
-    pub local_lineage_digest: String,
-    pub local_semantic_digest: String,
-    pub local_message_count: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_local_title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_cloud_title: Option<String>,
-    pub desired_fork_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub desired_original_name: Option<String>,
-    pub codex_executable: String,
-    pub codex_executable_sha256: String,
-    pub available_executors: Vec<CodexForkExecutor>,
-    pub attempts: Vec<CodexForkAttempt>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_executor: Option<CodexForkExecutor>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub successful_executor: Option<CodexForkExecutor>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_name_status: Option<ConversationNameStatus>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub original_name_status: Option<ConversationNameStatus>,
-    pub inventory_refresh_status: CodexInventoryRefreshStatus,
-}
-
-impl CodexDivergenceOperation {
-    fn validate(
-        &self,
-        source_thread_id: &ThreadId,
-        phase: ConversationSyncPhase,
-    ) -> Result<(), String> {
-        let plan = ConversationDivergencePlan {
-            available_resolutions: self.available_resolutions.clone(),
-            recommended_resolution: self.recommended_resolution,
-            local_branch_preserved: self.local_branch_preserved,
-            preserved_thread_id: self.preserved_thread_id.clone(),
-            source_provider_thread_id: self.source_provider_thread_id.clone(),
-            local_lineage_digest: self.local_lineage_digest.clone(),
-            local_semantic_digest: self.local_semantic_digest.clone(),
-            local_message_count: self.local_message_count,
-            pinned_local_title: self.pinned_local_title.clone(),
-            pinned_cloud_title: self.pinned_cloud_title.clone(),
-            desired_fork_name: self.desired_fork_name.clone(),
-            desired_original_name: self.desired_original_name.clone(),
-            execution: DivergenceExecution::CodexNativeFork {
-                codex_executable: self.codex_executable.clone(),
-                codex_executable_sha256: self.codex_executable_sha256.clone(),
-                available_executors: self.available_executors.clone(),
-            },
-        };
-        plan.validate(source_thread_id)?;
-        validate_absolute_clean_path(
-            "Codex divergence source transcript",
-            &self.source_transcript_path,
-        )?;
-        if self.origin == ForkOrigin::Manual {
-            if self.resolution != ConversationDivergenceResolution::PreserveLocalWithNativeFork {
-                return Err("manual fork operation must preserve the local branch".to_string());
-            }
-            if matches!(
-                phase,
-                ConversationSyncPhase::ProviderCommitted | ConversationSyncPhase::BindingsCommitted
-            ) {
-                return Err("manual fork operation has no provider or binding commit".to_string());
-            }
-            if self.desired_original_name.is_some() {
-                return Err("manual fork operation cannot rename the source thread".to_string());
-            }
-        }
-        if self.resolution == ConversationDivergenceResolution::UseCloudOnly
-            && (self.fork_provider_thread_id.is_some()
-                || self.fork_transcript_path.is_some()
-                || self.fork_transcript_sha256.is_some()
-                || !self.attempts.is_empty()
-                || self.current_executor.is_some()
-                || self.successful_executor.is_some()
-                || self.fork_name_status.is_some())
-        {
-            return Err("cloud-only divergence operation carries native-fork state".to_string());
-        }
-        if self.fork_provider_thread_id.is_some() != self.fork_transcript_path.is_some()
-            || self.fork_provider_thread_id.is_some() != self.fork_transcript_sha256.is_some()
-        {
-            return Err(
-                "Codex divergence fork identity and transcript pins must be paired".to_string(),
-            );
-        }
-        if let Some(thread_id) = &self.fork_provider_thread_id {
-            validate_provider_thread_id("Codex divergence fork provider thread", thread_id)?;
-            if thread_id == &self.source_provider_thread_id {
-                return Err("Codex divergence fork reuses the source provider thread".to_string());
-            }
-        }
-        if let Some(path) = &self.fork_transcript_path {
-            validate_absolute_clean_path("Codex divergence fork transcript", path)?;
-        }
-        if let Some(digest) = &self.fork_transcript_sha256 {
-            validate_sha256("Codex divergence fork transcript", digest)?;
-        }
-        if self.attempts.len() > self.available_executors.len() {
-            return Err("Codex divergence has too many executor attempts".to_string());
-        }
-        for (index, attempt) in self.attempts.iter().enumerate() {
-            if self.available_executors.get(index) != Some(&attempt.executor)
-                || (index + 1 < self.attempts.len()
-                    && attempt.status != CodexForkAttemptStatus::DefinitiveNoFork)
-            {
-                return Err(
-                    "Codex divergence executor attempts are not an ordered prefix".to_string(),
-                );
-            }
-        }
-        let expected_current = self.attempts.last().and_then(|attempt| {
-            matches!(
-                attempt.status,
-                CodexForkAttemptStatus::Pending | CodexForkAttemptStatus::Unacknowledged
-            )
-            .then_some(attempt.executor)
-        });
-        let expected_success = self.attempts.last().and_then(|attempt| {
-            (attempt.status == CodexForkAttemptStatus::Verified).then_some(attempt.executor)
-        });
-        if self.current_executor != expected_current || self.successful_executor != expected_success
-        {
-            return Err("Codex divergence executor outcome is inconsistent".to_string());
-        }
-        let has_verified_fork = self.fork_provider_thread_id.is_some();
-        if has_verified_fork != self.successful_executor.is_some()
-            || has_verified_fork != self.fork_name_status.is_some()
-        {
-            return Err("Codex divergence verified fork state is incomplete".to_string());
-        }
-        match self.resolution {
-            ConversationDivergenceResolution::UseCloudOnly => {
-                if !matches!(
-                    phase,
-                    ConversationSyncPhase::Prepared
-                        | ConversationSyncPhase::ReplacementStaged
-                        | ConversationSyncPhase::ProviderCommitted
-                        | ConversationSyncPhase::BindingsCommitted
-                        | ConversationSyncPhase::OriginalNamingRecorded
-                        | ConversationSyncPhase::LocalCommitted
-                        | ConversationSyncPhase::RecoveryRequired
-                ) {
-                    return Err("cloud-only divergence has an invalid phase".to_string());
-                }
-            }
-            ConversationDivergenceResolution::PreserveLocalWithNativeFork => {
-                if matches!(phase, ConversationSyncPhase::CloudPublished) {
-                    return Err("preserved divergence has an invalid phase".to_string());
-                }
-                let phase_requires_verified_fork = matches!(
-                    phase,
-                    ConversationSyncPhase::ForkVerified
-                        | ConversationSyncPhase::ForkNamingRecorded
-                        | ConversationSyncPhase::LocalForkBound
-                        | ConversationSyncPhase::ProviderCommitted
-                        | ConversationSyncPhase::BindingsCommitted
-                        | ConversationSyncPhase::OriginalNamingRecorded
-                        | ConversationSyncPhase::LocalCommitted
-                        | ConversationSyncPhase::RecoveryRequired
-                );
-                if phase_requires_verified_fork != has_verified_fork {
-                    return Err(
-                        "Codex divergence phase disagrees with verified fork state".to_string()
-                    );
-                }
-                if phase == ConversationSyncPhase::ForkUnacknowledged
-                    && self.attempts.last().is_none_or(|attempt| {
-                        attempt.status != CodexForkAttemptStatus::Unacknowledged
-                    })
-                {
-                    return Err(
-                        "unacknowledged Codex fork checkpoint has invalid executor state"
-                            .to_string(),
-                    );
-                }
-                if phase == ConversationSyncPhase::ForkAttemptPending
-                    && self.attempts.last().is_none_or(|attempt| {
-                        !matches!(
-                            attempt.status,
-                            CodexForkAttemptStatus::Pending
-                                | CodexForkAttemptStatus::DefinitiveNoFork
-                        )
-                    })
-                {
-                    return Err(
-                        "pending Codex fork phase lacks an active or definitive executor attempt"
-                            .to_string(),
-                    );
-                }
-                if matches!(
-                    phase,
-                    ConversationSyncPhase::Prepared | ConversationSyncPhase::ReplacementStaged
-                ) && (!self.attempts.is_empty()
-                    || self.current_executor.is_some()
-                    || self.successful_executor.is_some())
-                {
-                    return Err(
-                        "Codex divergence has executor state before fork execution".to_string()
-                    );
-                }
-            }
-        }
-        let original_name_may_be_recorded = matches!(
-            phase,
-            ConversationSyncPhase::BindingsCommitted
-                | ConversationSyncPhase::OriginalNamingRecorded
-                | ConversationSyncPhase::LocalCommitted
-                | ConversationSyncPhase::RecoveryRequired
-        );
-        if self.original_name_status.is_some() && !original_name_may_be_recorded {
-            return Err("Codex original name was recorded before provider commit".to_string());
-        }
-        if matches!(
-            phase,
-            ConversationSyncPhase::OriginalNamingRecorded | ConversationSyncPhase::LocalCommitted
-        ) && self.original_name_status.is_none()
-        {
-            return Err("Codex original naming phase lacks a recorded result".to_string());
-        }
-        let refresh_must_be_recorded = matches!(
-            phase,
-            ConversationSyncPhase::OriginalNamingRecorded | ConversationSyncPhase::LocalCommitted
-        );
-        if refresh_must_be_recorded
-            != (self.inventory_refresh_status != CodexInventoryRefreshStatus::NotAttempted)
-        {
-            return Err("Codex inventory refresh status disagrees with its phase".to_string());
-        }
-        Ok(())
+    pub fn is_blocked(self) -> bool {
+        self == Self::RecoveryBlockedCorruption
     }
 }
 
-/// A divergence preserved by the provider adapter as a plain file fork: the
-/// local branch is rewritten to a fresh provider session identity and written
-/// beside the source before the approved replacement. No external executor is
-/// involved, so there is no attempt ladder and no acknowledgment checkpoint.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct AdapterDivergenceOperation {
-    pub origin: ForkOrigin,
-    pub resolution: ConversationDivergenceResolution,
-    pub local_branch_preserved: bool,
-    pub preserved_thread_id: ThreadId,
-    pub source_provider_thread_id: String,
-    pub source_transcript_path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_provider_thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_transcript_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_transcript_sha256: Option<String>,
-    pub local_lineage_digest: String,
-    pub local_semantic_digest: String,
-    pub local_message_count: u64,
+/// Durable phase of a materializing Pull operation (including keep-both).
+/// Metadata-only Pull actions are journal-free atomic `SyncConfig`
+/// replacements and never appear here.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PullJournalPhase {
+    TargetStaged,
+    ProviderCommitted,
+    LocalCommitted,
+    Complete,
+    CompleteWithWarnings,
+    AbortedPrecommit,
+    AbortedProviderCollision,
+    RecoveryBlockedCorruption,
 }
 
-impl AdapterDivergenceOperation {
-    fn validate(&self, source_thread_id: &ThreadId) -> Result<(), String> {
-        if &self.preserved_thread_id == source_thread_id {
-            return Err("adapter divergence must mint a distinct preserved thread".to_string());
-        }
-        validate_provider_thread_id(
-            "adapter divergence source provider thread",
-            &self.source_provider_thread_id,
-        )?;
-        validate_absolute_clean_path(
-            "adapter divergence source transcript",
-            &self.source_transcript_path,
-        )?;
+impl PullJournalPhase {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Complete
+                | Self::CompleteWithWarnings
+                | Self::AbortedPrecommit
+                | Self::AbortedProviderCollision
+        )
+    }
+
+    pub fn is_blocked(self) -> bool {
+        self == Self::RecoveryBlockedCorruption
+    }
+}
+
+/// A publishing Push: one immutable candidate, one head CAS, and the exact
+/// local after-state to install.  The whole-document before/after states make
+/// recovery a deterministic installation, never a recomputation.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationPublicationOperation {
+    pub phase: PushJournalPhase,
+    pub candidate_commit_id: String,
+    pub candidate_manifest_sha256: String,
+    pub artifact_sha256: String,
+    /// The accepted tail before this operation; absent exactly for
+    /// `CreateCloud`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_before: Option<PortableConversationTail>,
+    pub tail_after: PortableConversationTail,
+    pub planned_relation: TailClassification,
+    pub sync_config_before: SyncConfig,
+    pub sync_config_after: SyncConfig,
+    /// Publishing also commits the binding after-state: a first `CreateCloud`
+    /// creates the binding row with its immutable layout.
+    pub bindings_before: ConversationBindings,
+    pub bindings_after: ConversationBindings,
+}
+
+impl ConversationPublicationOperation {
+    fn validate(&self) -> Result<(), String> {
+        validate_named_id("conversation candidate commit", &self.candidate_commit_id)?;
         validate_sha256(
-            "adapter divergence local lineage",
-            &self.local_lineage_digest,
+            "conversation candidate manifest",
+            &self.candidate_manifest_sha256,
         )?;
-        validate_sha256(
-            "adapter divergence local semantics",
-            &self.local_semantic_digest,
-        )?;
-        if self.local_message_count == 0 {
-            return Err("adapter divergence requires a nonzero local chain".to_string());
-        }
-        let fork_pins = [
-            self.fork_provider_thread_id.is_some(),
-            self.fork_transcript_path.is_some(),
-            self.fork_transcript_sha256.is_some(),
-        ];
-        if fork_pins.iter().any(|present| *present != fork_pins[0]) {
-            return Err("adapter divergence fork pins must be paired".to_string());
-        }
-        match self.resolution {
-            ConversationDivergenceResolution::PreserveLocalWithNativeFork => {
-                if !fork_pins[0] {
-                    return Err("preserved adapter divergence lacks its fork pins".to_string());
+        validate_sha256("conversation candidate artifact", &self.artifact_sha256)?;
+        self.tail_after.validate()?;
+        match (self.planned_relation, &self.tail_before) {
+            (TailClassification::LocalOutstanding, Some(before)) => {
+                before.validate()?;
+                if !before.layout().matches(&self.tail_after) {
+                    return Err(
+                        "conversation publication moves the portable tail layout".to_string()
+                    );
                 }
             }
-            ConversationDivergenceResolution::UseCloudOnly => {
-                if fork_pins[0] {
-                    return Err("cloud-only adapter divergence carries fork state".to_string());
-                }
+            (TailClassification::MissingCloud, None) => {}
+            _ => {
+                return Err(
+                    "conversation publication relation and accepted-before state disagree"
+                        .to_string(),
+                );
             }
         }
-        if let Some(thread_id) = &self.fork_provider_thread_id {
-            validate_provider_thread_id("adapter divergence fork provider thread", thread_id)?;
-            if thread_id == &self.source_provider_thread_id {
-                return Err("adapter divergence fork reuses the source provider thread".to_string());
-            }
+        self.sync_config_before.validate()?;
+        self.sync_config_after.validate()?;
+        self.bindings_before.validate_structure()?;
+        self.bindings_after.validate_structure()
+    }
+}
+
+/// The planned identities of a divergent keep-both binding move.  The full
+/// document mutations live in the operation's before/after states; these
+/// fields let recovery assert it is resuming the same planned move.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KeepBothJournal {
+    pub preserved_thread_id: ThreadId,
+    pub remote_provider_thread_id: String,
+}
+
+/// A materializing Pull: verified cloud objects reconstructed into staged
+/// targets, installed no-clobber, and committed as exact journaled
+/// after-states for bindings and `SyncConfig`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationMaterializationOperation {
+    pub phase: PullJournalPhase,
+    pub planned_relation: TailClassification,
+    /// The verified cloud tail this operation accepts.
+    pub accepted_tail_after: PortableConversationTail,
+    /// The cloud manifest's whole-chain digests: staged transcript bytes must
+    /// re-analyze to exactly these before any visible mutation.
+    pub pinned_lineage_digest: String,
+    pub pinned_semantic_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_both: Option<KeepBothJournal>,
+    pub sync_config_before: SyncConfig,
+    pub sync_config_after: SyncConfig,
+    pub bindings_before: ConversationBindings,
+    pub bindings_after: ConversationBindings,
+}
+
+impl ConversationMaterializationOperation {
+    fn validate(&self) -> Result<(), String> {
+        if !matches!(
+            self.planned_relation,
+            TailClassification::CloudOutstanding
+                | TailClassification::Divergent
+                | TailClassification::MissingLocal
+        ) {
+            return Err(
+                "conversation materialization has a non-materializing relation".to_string(),
+            );
         }
-        if let Some(path) = &self.fork_transcript_path {
-            validate_absolute_clean_path("adapter divergence fork transcript", path)?;
-            if path == &self.source_transcript_path {
-                return Err("adapter divergence fork overwrites its source transcript".to_string());
-            }
+        self.accepted_tail_after.validate()?;
+        validate_sha256(
+            "conversation materialization lineage pin",
+            &self.pinned_lineage_digest,
+        )?;
+        validate_sha256(
+            "conversation materialization semantic pin",
+            &self.pinned_semantic_digest,
+        )?;
+        if (self.planned_relation == TailClassification::Divergent) != self.keep_both.is_some() {
+            return Err(
+                "conversation keep-both state disagrees with its planned relation".to_string(),
+            );
         }
-        if let Some(digest) = &self.fork_transcript_sha256 {
-            validate_sha256("adapter divergence fork transcript", digest)?;
+        if let Some(keep_both) = &self.keep_both {
+            validate_provider_thread_id(
+                "conversation keep-both remote provider thread",
+                &keep_both.remote_provider_thread_id,
+            )?;
         }
-        if self.origin == ForkOrigin::Manual
-            && self.resolution != ConversationDivergenceResolution::PreserveLocalWithNativeFork
-        {
-            return Err("manual adapter fork must preserve the local branch".to_string());
-        }
-        Ok(())
+        self.sync_config_before.validate()?;
+        self.sync_config_after.validate()?;
+        self.bindings_before.validate_structure()?;
+        self.bindings_after.validate_structure()
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", content = "details", rename_all = "snake_case")]
-// The divergence payloads dwarf the marker variants by design; boxing them
-// would change every construction site for no serialized-contract gain.
+// The operation payloads dwarf a marker enum by design; boxing them would
+// change every construction site for no serialized-contract gain.
 #[allow(clippy::large_enum_variant)]
 pub enum ConversationSyncOperationKind {
-    CloudPublication,
-    ProviderMaterialization,
-    CodexDivergence(CodexDivergenceOperation),
-    AdapterDivergence(AdapterDivergenceOperation),
+    CloudPublication(ConversationPublicationOperation),
+    ProviderMaterialization(ConversationMaterializationOperation),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationJournalTarget {
     pub target_path: String,
     pub role: ConversationFileRole,
@@ -2445,10 +2187,11 @@ impl ConversationJournalTarget {
     }
 }
 
-/// The cloud commit a sync operation belongs to. Present on every push and
-/// pull operation; absent only on a manual-fork operation, which touches no
-/// storage and must not fabricate one.
+/// The reviewed cloud coordinates a sync operation was planned against.
+/// Present on every operation: metadata-only actions are journal-free, so
+/// every journaled operation touches storage.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationCloudAnchor {
     pub storage_id: StorageId,
     pub bundle_id: BundleId,
@@ -2465,16 +2208,14 @@ impl ConversationCloudAnchor {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationSyncOperation {
     pub operation_id: ConversationOperationId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<PlanId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_action_id: Option<ActionId>,
-    pub direction: ConversationPlanDirection,
-    pub phase: ConversationSyncPhase,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cloud: Option<ConversationCloudAnchor>,
+    pub cloud: ConversationCloudAnchor,
     pub host_id: HostId,
     pub replica_id: ReplicaId,
     pub local_project_id: LocalProjectId,
@@ -2483,22 +2224,14 @@ pub struct ConversationSyncOperation {
     pub thread_id: ThreadId,
     pub operation: ConversationSyncOperationKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binding_forked_from: Option<ThreadId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
     pub materialization_state: ConversationMaterializationState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_digest: Option<String>,
     pub expected_host_identity_revision: u64,
     pub expected_bindings_document_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_binding_revision: Option<u64>,
     pub expected_profile_revision: u64,
     pub expected_project_binding_revision: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_local_digest: Option<String>,
     #[serde(default)]
     pub targets: Vec<ConversationJournalTarget>,
     pub created_at: u64,
@@ -2506,72 +2239,41 @@ pub struct ConversationSyncOperation {
 }
 
 impl ConversationSyncOperation {
-    pub fn binding_target_thread_id(&self) -> &ThreadId {
-        &self.thread_id
-    }
-
-    pub fn divergence(&self) -> Option<&CodexDivergenceOperation> {
+    pub fn direction(&self) -> ConversationPlanDirection {
         match &self.operation {
-            ConversationSyncOperationKind::CodexDivergence(divergence) => Some(divergence),
-            _ => None,
-        }
-    }
-
-    pub fn adapter_divergence(&self) -> Option<&AdapterDivergenceOperation> {
-        match &self.operation {
-            ConversationSyncOperationKind::AdapterDivergence(divergence) => Some(divergence),
-            _ => None,
-        }
-    }
-
-    pub fn fork_origin(&self) -> Option<ForkOrigin> {
-        match &self.operation {
-            ConversationSyncOperationKind::CodexDivergence(divergence) => Some(divergence.origin),
-            ConversationSyncOperationKind::AdapterDivergence(divergence) => Some(divergence.origin),
-            _ => None,
-        }
-    }
-
-    pub fn cloud_anchor(&self) -> Result<&ConversationCloudAnchor, String> {
-        self.cloud
-            .as_ref()
-            .ok_or_else(|| "conversation operation lacks a cloud anchor".to_string())
-    }
-}
-
-impl ConversationSyncOperation {
-    pub fn validate(&self) -> Result<(), String> {
-        if let Some(anchor) = &self.cloud {
-            anchor.validate()?;
-        }
-        if self.cloud.is_none() && self.fork_origin() != Some(ForkOrigin::Manual) {
-            return Err("only a manual fork operation may omit its cloud anchor".to_string());
-        }
-        if self.plan_action_id.is_some() && self.plan_id.is_none() {
-            return Err("conversation journal action provenance requires a plan id".to_string());
-        }
-        if let Some(digest) = &self.expected_local_digest {
-            validate_sha256("conversation journal local target", digest)?;
-        }
-        for (label, digest) in [
-            (
-                "conversation journal lineage",
-                self.lineage_digest.as_deref(),
-            ),
-            (
-                "conversation journal semantic",
-                self.semantic_digest.as_deref(),
-            ),
-        ] {
-            if let Some(digest) = digest {
-                validate_sha256(label, digest)?;
+            ConversationSyncOperationKind::CloudPublication(_) => ConversationPlanDirection::Push,
+            ConversationSyncOperationKind::ProviderMaterialization(_) => {
+                ConversationPlanDirection::Pull
             }
         }
-        if self.lineage_digest.is_some() != self.semantic_digest.is_some() {
-            return Err("conversation journal lineage and semantics must be paired".to_string());
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        match &self.operation {
+            ConversationSyncOperationKind::CloudPublication(operation) => {
+                operation.phase.is_terminal()
+            }
+            ConversationSyncOperationKind::ProviderMaterialization(operation) => {
+                operation.phase.is_terminal()
+            }
         }
-        if self.binding_forked_from.as_ref() == Some(self.binding_target_thread_id()) {
-            return Err("conversation journal binding cannot parent itself".to_string());
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        match &self.operation {
+            ConversationSyncOperationKind::CloudPublication(operation) => {
+                operation.phase.is_blocked()
+            }
+            ConversationSyncOperationKind::ProviderMaterialization(operation) => {
+                operation.phase.is_blocked()
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.cloud.validate()?;
+        if self.plan_action_id.is_some() && self.plan_id.is_none() {
+            return Err("conversation journal action provenance requires a plan id".to_string());
         }
         if self.created_at > self.updated_at || self.targets.len() > 64 {
             return Err("invalid conversation journal timestamps or target count".to_string());
@@ -2589,91 +2291,25 @@ impl ConversationSyncOperation {
             return Err("conversation journal has invalid provider materialization".to_string());
         }
         match &self.operation {
-            ConversationSyncOperationKind::CloudPublication => {
-                if self.direction != ConversationPlanDirection::Push
-                    || !self.targets.is_empty()
-                    || !matches!(
-                        self.phase,
-                        ConversationSyncPhase::Prepared
-                            | ConversationSyncPhase::CloudPublished
-                            | ConversationSyncPhase::BindingsCommitted
-                            | ConversationSyncPhase::LocalCommitted
-                            | ConversationSyncPhase::RecoveryRequired
-                    )
-                {
-                    return Err("invalid conversation cloud-publication journal".to_string());
+            ConversationSyncOperationKind::CloudPublication(operation) => {
+                if !self.targets.is_empty() {
+                    return Err(
+                        "conversation publication journal reserves no provider targets".to_string(),
+                    );
                 }
+                operation.validate()?;
             }
-            ConversationSyncOperationKind::ProviderMaterialization => {
-                if self.direction != ConversationPlanDirection::Pull
-                    || !matches!(
-                        self.phase,
-                        ConversationSyncPhase::Prepared
-                            | ConversationSyncPhase::ReplacementStaged
-                            | ConversationSyncPhase::ProviderCommitted
-                            | ConversationSyncPhase::BindingsCommitted
-                            | ConversationSyncPhase::LocalCommitted
-                            | ConversationSyncPhase::RecoveryRequired
-                    )
+            ConversationSyncOperationKind::ProviderMaterialization(operation) => {
+                operation.validate()?;
+                if operation
+                    .keep_both
+                    .as_ref()
+                    .is_some_and(|keep_both| keep_both.preserved_thread_id == self.thread_id)
                 {
-                    return Err("invalid conversation materialization journal".to_string());
+                    return Err(
+                        "conversation keep-both cannot preserve into its own thread".to_string()
+                    );
                 }
-            }
-            ConversationSyncOperationKind::CodexDivergence(divergence) => {
-                if self.direction != ConversationPlanDirection::Pull
-                    || self.provider.as_str() != "codex"
-                {
-                    return Err("invalid Codex divergence journal scope".to_string());
-                }
-                match divergence.origin {
-                    ForkOrigin::PullPreserve => {
-                        if self.cloud.is_none() {
-                            return Err(
-                                "pull divergence operation requires a cloud anchor".to_string()
-                            );
-                        }
-                    }
-                    ForkOrigin::Manual => {
-                        if self.cloud.is_some() || !self.targets.is_empty() {
-                            return Err("manual fork operation carries no cloud anchor or targets"
-                                .to_string());
-                        }
-                    }
-                }
-                divergence.validate(&self.thread_id, self.phase)?;
-            }
-            ConversationSyncOperationKind::AdapterDivergence(divergence) => {
-                if self.direction != ConversationPlanDirection::Pull {
-                    return Err("invalid adapter divergence journal scope".to_string());
-                }
-                if !matches!(
-                    self.phase,
-                    ConversationSyncPhase::Prepared
-                        | ConversationSyncPhase::ReplacementStaged
-                        | ConversationSyncPhase::ProviderCommitted
-                        | ConversationSyncPhase::BindingsCommitted
-                        | ConversationSyncPhase::LocalCommitted
-                        | ConversationSyncPhase::RecoveryRequired
-                ) {
-                    return Err("adapter divergence has an invalid phase".to_string());
-                }
-                match divergence.origin {
-                    ForkOrigin::PullPreserve => {
-                        if self.cloud.is_none() {
-                            return Err(
-                                "pull divergence operation requires a cloud anchor".to_string()
-                            );
-                        }
-                    }
-                    ForkOrigin::Manual => {
-                        if self.cloud.is_some() {
-                            return Err(
-                                "manual adapter fork operation carries no cloud anchor".to_string()
-                            );
-                        }
-                    }
-                }
-                divergence.validate(&self.thread_id)?;
             }
         }
         let mut targets = BTreeSet::new();
@@ -2688,6 +2324,7 @@ impl ConversationSyncOperation {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationSyncJournal {
     pub schema: u32,
     pub revision: u64,
@@ -3054,9 +2691,12 @@ impl SessionPresentation {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationThread {
     pub thread_id: ThreadId,
     pub provider: ProviderKey,
+    /// Presentation-only provider title, or a bounded first-user fallback
+    /// when the provider has no explicit title. Never used as identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_title: Option<String>,
     pub presentation: SessionPresentation,
@@ -3073,6 +2713,11 @@ pub struct ConversationThread {
     pub message_count: u64,
     pub lineage_digest: String,
     pub semantic_digest: String,
+    /// The portable wire value: the sole conversation-content comparison
+    /// input. Mandatory when `provider == codex`; optional for providers that
+    /// have not adopted the codec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_tail: Option<PortableConversationTail>,
     /// Provenance of a fork only. Never consulted by the resolver, and the
     /// referenced thread may have been tombstoned or pruned since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3177,6 +2822,31 @@ impl ConversationThread {
         }
         validate_sha256("conversation lineage", &self.lineage_digest)?;
         validate_sha256("conversation semantic", &self.semantic_digest)?;
+        match &self.portable_tail {
+            Some(tail) => {
+                if self.provider.as_str() == "codex" {
+                    tail.validate_codex_wire()?;
+                } else {
+                    tail.validate()?;
+                }
+                // The accepted tail always ends at the complete canonical
+                // root end.
+                if tail.accepted_end_record_count != self.message_count {
+                    return Err(format!(
+                        "conversation thread '{}' has a portable tail that does not end at its message count",
+                        self.thread_id
+                    ));
+                }
+            }
+            None => {
+                if self.provider.as_str() == "codex" {
+                    return Err(format!(
+                        "conversation thread '{}' requires a portable tail for codex",
+                        self.thread_id
+                    ));
+                }
+            }
+        }
         if self.forked_from.as_ref() == Some(&self.thread_id) {
             return Err(format!(
                 "conversation thread '{}' cannot fork from itself",
@@ -3229,19 +2899,6 @@ impl CanonicalConversationMessage {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ConversationRelation {
-    Identical,
-    CloudPrefixOfLocal,
-    LocalPrefixOfCloud,
-    Diverged,
-    Unknown,
-    LocalMissing,
-    CloudMissing,
-    BothMissing,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum ConversationPlanDirection {
     Push,
     Pull,
@@ -3249,247 +2906,51 @@ pub enum ConversationPlanDirection {
 
 /// Typed reconciliation outcomes. Push and Pull intentionally share one enum
 /// so every relation can be represented in review DTOs without interpreting a
-/// localized message. Divergence is directional: Push requires Pull, while
-/// Pull offers one typed resolution action with two reviewed outcomes.
+/// localized message. The mapping from relation to action is fixed by the
+/// resolver contract: Push never runs Pull's path, divergence is Pull-only,
+/// and Pull's only divergence resolution is keep-both.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationPlanActionType {
-    NoOp,
-    FastForwardLocal,
-    FastForwardCloud,
-    KeepLocal,
-    RequirePull,
-    ResolveDivergence,
+    // Push
+    Publish,
     CreateCloud,
+    NoChanges,
+    RequirePullMetadata,
+    RequirePull,
+    NotPushable,
+    // Pull
+    AdoptCloudMetadata,
+    ReportPushEligible,
+    MaterializeCloud,
+    KeepBoth,
     CreateLocal,
-    StoreOnly,
-    ReplaceLocal,
-    ReplaceCloud,
-    TombstoneThread,
+    ReportLocalOnly,
+    NotFound,
+    // Shared
     Blocked,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ConversationDivergenceResolution {
-    PreserveLocalWithNativeFork,
-    UseCloudOnly,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ConversationResolutionSelection {
-    pub action_id: ActionId,
-    pub resolution: ConversationDivergenceResolution,
-    pub destructive_approved: bool,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum CodexForkExecutor {
-    AppServerStdio,
-    NativePty,
-}
-
-/// How a reviewed divergence preservation would be executed. The Codex
-/// native fork drives the provider's own fork machinery through an executor
-/// ladder; an adapter file fork is a deterministic rewrite-and-write
-/// performed by the registered provider adapter.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DivergenceExecution {
-    CodexNativeFork {
-        codex_executable: String,
-        codex_executable_sha256: String,
-        available_executors: Vec<CodexForkExecutor>,
-    },
-    AdapterFileFork {
-        fork_provider_thread_id: String,
-        fork_transcript_path: String,
-    },
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ConversationDivergencePlan {
-    pub available_resolutions: Vec<ConversationDivergenceResolution>,
-    /// Advisory review default. `UseCloudOnly` exactly when
-    /// `local_branch_preserved` witnessed at plan time; apply re-proves the
-    /// witness before any waived-confirmation overwrite.
-    pub recommended_resolution: ConversationDivergenceResolution,
-    pub local_branch_preserved: bool,
-    pub preserved_thread_id: ThreadId,
-    pub source_provider_thread_id: String,
-    pub local_lineage_digest: String,
-    pub local_semantic_digest: String,
-    pub local_message_count: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_local_title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_cloud_title: Option<String>,
-    pub desired_fork_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub desired_original_name: Option<String>,
-    pub execution: DivergenceExecution,
-}
-
-impl ConversationDivergencePlan {
-    fn validate(&self, source_thread_id: &ThreadId) -> Result<(), String> {
-        if self.available_resolutions
-            != [
-                ConversationDivergenceResolution::PreserveLocalWithNativeFork,
-                ConversationDivergenceResolution::UseCloudOnly,
-            ]
-        {
-            return Err(
-                "conversation divergence must advertise exactly keep-both and cloud-only"
-                    .to_string(),
-            );
-        }
-        let expected_recommended = if self.local_branch_preserved {
-            ConversationDivergenceResolution::UseCloudOnly
-        } else {
-            ConversationDivergenceResolution::PreserveLocalWithNativeFork
-        };
-        if self.recommended_resolution != expected_recommended {
-            return Err(
-                "conversation divergence recommendation disagrees with its preservation witness"
-                    .to_string(),
-            );
-        }
-        if &self.preserved_thread_id == source_thread_id {
-            return Err(
-                "conversation divergence must mint a distinct preserved thread".to_string(),
-            );
-        }
-        validate_provider_thread_id(
-            "conversation divergence source provider thread",
-            &self.source_provider_thread_id,
-        )?;
-        validate_sha256(
-            "conversation divergence local lineage",
-            &self.local_lineage_digest,
-        )?;
-        if self.local_message_count == 0 {
-            return Err("conversation divergence requires a nonzero local chain".to_string());
-        }
-        validate_sha256(
-            "conversation divergence local semantics",
-            &self.local_semantic_digest,
-        )?;
-        match &self.execution {
-            DivergenceExecution::CodexNativeFork {
-                codex_executable,
-                codex_executable_sha256,
-                available_executors,
-            } => {
-                for (label, title) in [
-                    (
-                        "conversation divergence local title",
-                        self.pinned_local_title.as_deref(),
-                    ),
-                    (
-                        "conversation divergence cloud title",
-                        self.pinned_cloud_title.as_deref(),
-                    ),
-                    (
-                        "conversation divergence original title",
-                        self.desired_original_name.as_deref(),
-                    ),
-                ] {
-                    if let Some(title) = title {
-                        validate_codex_thread_name(label, title)?;
-                    }
-                }
-                validate_codex_thread_name(
-                    "conversation divergence preserved title",
-                    &self.desired_fork_name,
-                )?;
-                validate_absolute_clean_path(
-                    "conversation divergence Codex executable",
-                    codex_executable,
-                )?;
-                validate_sha256(
-                    "conversation divergence Codex executable",
-                    codex_executable_sha256,
-                )?;
-                let expected = [
-                    CodexForkExecutor::AppServerStdio,
-                    CodexForkExecutor::NativePty,
-                ];
-                if available_executors.as_slice() != expected {
-                    return Err(
-                        "conversation divergence executors must be app-server then native PTY"
-                            .to_string(),
-                    );
-                }
-            }
-            DivergenceExecution::AdapterFileFork {
-                fork_provider_thread_id,
-                fork_transcript_path,
-            } => {
-                for (label, title) in [
-                    (
-                        "conversation divergence local title",
-                        self.pinned_local_title.as_deref(),
-                    ),
-                    (
-                        "conversation divergence cloud title",
-                        self.pinned_cloud_title.as_deref(),
-                    ),
-                ] {
-                    if let Some(title) = title {
-                        validate_display_text(label, title, false)?;
-                    }
-                }
-                validate_display_text(
-                    "conversation divergence preserved title",
-                    &self.desired_fork_name,
-                    false,
-                )?;
-                if self.desired_original_name.is_some() {
-                    return Err(
-                        "adapter file fork cannot rename the source conversation".to_string()
-                    );
-                }
-                validate_provider_thread_id(
-                    "conversation divergence fork provider thread",
-                    fork_provider_thread_id,
-                )?;
-                if fork_provider_thread_id == &self.source_provider_thread_id {
-                    return Err(
-                        "conversation divergence fork reuses the source provider thread"
-                            .to_string(),
-                    );
-                }
-                validate_absolute_clean_path(
-                    "conversation divergence fork transcript",
-                    fork_transcript_path,
-                )?;
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum ConversationReasonCode {
-    Identical,
-    StructuralRewriteOnly,
-    CloudPrefixOfLocal,
-    LocalPrefixOfCloud,
-    Diverged,
-    UnknownLineage,
-    LocalMissing,
-    CloudMissing,
-    BothMissing,
+    SyncCurrent,
+    SyncAdvanced,
+    LocalOutstanding,
+    CloudOutstanding,
+    Divergent,
+    MissingLocal,
+    MissingCloud,
+    MissingBoth,
+    UnknownEvidence,
+    DetachedRequiresPull,
+    CorruptionBlocked,
     ProviderNotQuiescent,
     CodecUnsupported,
     AmbiguousBinding,
     MissingBinding,
-    TombstoneUnchanged,
-    TombstoneModified,
     StalePlan,
-    ResolutionPending,
+    Busy,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -3521,13 +2982,34 @@ impl ProviderStateExpectation {
     }
 }
 
+/// The planned identities of a divergent keep-both: the minted logical thread
+/// that preserves the local branch, and the fresh provider alias that will
+/// track the cloud thread. All IDs are minted during planning; apply and
+/// recovery never mint.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KeepBothPlan {
+    pub preserved_thread_id: ThreadId,
+    pub remote_provider_thread_id: String,
+}
+
+impl KeepBothPlan {
+    fn validate(&self) -> Result<(), String> {
+        validate_provider_thread_id(
+            "conversation keep-both remote provider thread",
+            &self.remote_provider_thread_id,
+        )
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationPlanAction {
     pub action_id: ActionId,
     pub direction: ConversationPlanDirection,
     pub action: ConversationPlanActionType,
     pub reason_code: ConversationReasonCode,
-    pub relation: ConversationRelation,
+    pub relation: TailClassification,
     pub provider: ProviderKey,
     pub host_id: HostId,
     pub replica_id: ReplicaId,
@@ -3535,11 +3017,11 @@ pub struct ConversationPlanAction {
     pub provider_profile_id: LocalProviderProfileId,
     pub thread_id: ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub divergence: Option<ConversationDivergencePlan>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_resource_id: Option<ResourceId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_provider_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_both: Option<KeepBothPlan>,
     pub required_codec: String,
     pub pinned_revision: u64,
     pub pinned_commit_id: String,
@@ -3548,10 +3030,24 @@ pub struct ConversationPlanAction {
     /// against. Zero revision with an all-zero digest pins an absent scope.
     pub pinned_scope_revision: u64,
     pub pinned_scope_sha256: String,
+    /// The exact classifier evidence: accepted `P`, local `L`, cloud `C`.
+    /// Presence follows the pinned relation; apply re-runs the shared
+    /// classifier over these exact values and requires the planned relation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_accepted_tail: Option<PortableConversationTail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_local_tail: Option<PortableConversationTail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_cloud_tail: Option<PortableConversationTail>,
+    /// Cloud manifest whole-chain digests, pinned for materializing installs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_lineage_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_semantic_digest: Option<String>,
+    /// The raw unaccepted physical interval a publishing apply must find
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_raw_range: Option<RawRangePin>,
     pub expected_local_target: TargetExpectation,
     #[serde(default)]
     pub expected_provider_state: Vec<ProviderStateExpectation>,
@@ -3580,6 +3076,16 @@ impl ConversationPlanAction {
             );
         }
         validate_display_text("conversation plan codec", &self.required_codec, false)?;
+        for tail in [
+            self.pinned_accepted_tail.as_ref(),
+            self.pinned_local_tail.as_ref(),
+            self.pinned_cloud_tail.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            tail.validate()?;
+        }
         for (label, digest) in [
             (
                 "conversation plan lineage",
@@ -3596,6 +3102,9 @@ impl ConversationPlanAction {
         }
         if self.pinned_lineage_digest.is_some() != self.pinned_semantic_digest.is_some() {
             return Err("conversation plan must pin lineage and semantics together".to_string());
+        }
+        if let Some(pin) = &self.pinned_raw_range {
+            pin.validate()?;
         }
         self.expected_local_target.validate()?;
         if self.expected_provider_state.len() > 64 {
@@ -3617,102 +3126,177 @@ impl ConversationPlanAction {
         {
             return Err("conversation plan has an invalid provider thread id".to_string());
         }
-        if (self.direction == ConversationPlanDirection::Pull
-            && matches!(
-                self.action,
-                ConversationPlanActionType::FastForwardLocal
-                    | ConversationPlanActionType::CreateLocal
-                    | ConversationPlanActionType::ReplaceLocal
-            ))
-            && self.proposed_provider_thread_id.is_none()
+
+        let push_action = matches!(
+            self.action,
+            ConversationPlanActionType::Publish
+                | ConversationPlanActionType::CreateCloud
+                | ConversationPlanActionType::NoChanges
+                | ConversationPlanActionType::RequirePullMetadata
+                | ConversationPlanActionType::RequirePull
+                | ConversationPlanActionType::NotPushable
+        );
+        let pull_action = matches!(
+            self.action,
+            ConversationPlanActionType::AdoptCloudMetadata
+                | ConversationPlanActionType::ReportPushEligible
+                | ConversationPlanActionType::MaterializeCloud
+                | ConversationPlanActionType::KeepBoth
+                | ConversationPlanActionType::CreateLocal
+                | ConversationPlanActionType::ReportLocalOnly
+                | ConversationPlanActionType::NotFound
+        );
+        match self.direction {
+            ConversationPlanDirection::Push if pull_action => {
+                return Err("conversation Push plan contains a Pull-only action".to_string());
+            }
+            ConversationPlanDirection::Pull if push_action => {
+                return Err("conversation Pull plan contains a Push-only action".to_string());
+            }
+            _ => {}
+        }
+
+        // The fixed relation-to-action map: the plan may only record the
+        // action its resolver table assigns to the pinned relation.
+        let action_matches_relation = match self.action {
+            ConversationPlanActionType::Publish => {
+                self.relation == TailClassification::LocalOutstanding
+            }
+            ConversationPlanActionType::CreateCloud => {
+                self.relation == TailClassification::MissingCloud
+            }
+            ConversationPlanActionType::NoChanges => {
+                self.relation == TailClassification::Sync(SyncCurrency::Current)
+            }
+            ConversationPlanActionType::RequirePullMetadata => {
+                self.relation == TailClassification::Sync(SyncCurrency::Advanced)
+            }
+            ConversationPlanActionType::RequirePull => matches!(
+                self.relation,
+                TailClassification::CloudOutstanding | TailClassification::Divergent
+            ),
+            ConversationPlanActionType::NotPushable => matches!(
+                self.relation,
+                TailClassification::MissingLocal | TailClassification::MissingBoth
+            ),
+            ConversationPlanActionType::AdoptCloudMetadata => {
+                matches!(self.relation, TailClassification::Sync(_))
+            }
+            ConversationPlanActionType::ReportPushEligible => {
+                self.relation == TailClassification::LocalOutstanding
+            }
+            ConversationPlanActionType::MaterializeCloud => {
+                self.relation == TailClassification::CloudOutstanding
+            }
+            ConversationPlanActionType::KeepBoth => self.relation == TailClassification::Divergent,
+            ConversationPlanActionType::CreateLocal => {
+                self.relation == TailClassification::MissingLocal
+            }
+            ConversationPlanActionType::ReportLocalOnly => {
+                self.relation == TailClassification::MissingCloud
+            }
+            ConversationPlanActionType::NotFound => {
+                self.relation == TailClassification::MissingBoth
+            }
+            // Capability gates block any relation; the reason code carries
+            // the specific hold.
+            ConversationPlanActionType::Blocked => true,
+        };
+        if !action_matches_relation {
+            return Err("conversation plan action disagrees with its pinned relation".to_string());
+        }
+
+        // Evidence presence follows the pinned relation.
+        let (want_accepted, want_local, want_cloud) = match self.relation {
+            TailClassification::Sync(_)
+            | TailClassification::LocalOutstanding
+            | TailClassification::CloudOutstanding
+            | TailClassification::Divergent => (true, true, true),
+            TailClassification::MissingCloud => (false, true, false),
+            TailClassification::MissingLocal => (false, false, true),
+            TailClassification::MissingBoth => (false, false, false),
+            TailClassification::Unknown => (
+                self.pinned_accepted_tail.is_some(),
+                self.pinned_local_tail.is_some(),
+                self.pinned_cloud_tail.is_some(),
+            ),
+        };
+        if self.pinned_accepted_tail.is_some() != want_accepted
+            || self.pinned_local_tail.is_some() != want_local
+            || self.pinned_cloud_tail.is_some() != want_cloud
         {
             return Err(
-                "conversation materialization action lacks a provider thread id".to_string(),
+                "conversation plan evidence pins disagree with the pinned relation".to_string(),
             );
         }
-        if self.direction == ConversationPlanDirection::Push
-            && matches!(
-                self.action,
-                ConversationPlanActionType::FastForwardLocal
-                    | ConversationPlanActionType::StoreOnly
-                    | ConversationPlanActionType::CreateLocal
-                    | ConversationPlanActionType::KeepLocal
-                    | ConversationPlanActionType::ReplaceLocal
-            )
-        {
-            return Err("conversation Push plan contains a Pull-only action".to_string());
+
+        let publishes = matches!(
+            self.action,
+            ConversationPlanActionType::Publish | ConversationPlanActionType::CreateCloud
+        );
+        let materializes = matches!(
+            self.action,
+            ConversationPlanActionType::MaterializeCloud
+                | ConversationPlanActionType::KeepBoth
+                | ConversationPlanActionType::CreateLocal
+        );
+        if publishes != self.pinned_raw_range.is_some() {
+            return Err("conversation plan raw range pin disagrees with its action".to_string());
         }
-        if self.direction == ConversationPlanDirection::Pull
-            && matches!(
-                self.action,
-                ConversationPlanActionType::FastForwardCloud
-                    | ConversationPlanActionType::RequirePull
-                    | ConversationPlanActionType::CreateCloud
-                    | ConversationPlanActionType::ReplaceCloud
-                    | ConversationPlanActionType::TombstoneThread
-            )
-        {
-            return Err("conversation Pull plan contains a Push-only action".to_string());
+        if materializes && self.pinned_lineage_digest.is_none() {
+            return Err("conversation materializing action lacks manifest digest pins".to_string());
         }
-        if self.direction == ConversationPlanDirection::Push
-            && self.action == ConversationPlanActionType::ResolveDivergence
-        {
-            return Err("conversation Push plan contains a Pull-only action".to_string());
+        if (self.action == ConversationPlanActionType::KeepBoth) != self.keep_both.is_some() {
+            return Err("conversation keep-both state disagrees with its action".to_string());
         }
-        match (&self.action, &self.divergence) {
-            (ConversationPlanActionType::ResolveDivergence, Some(divergence)) => {
-                if self.relation != ConversationRelation::Diverged
-                    || self.proposed_provider_thread_id.is_some()
-                {
-                    return Err(
-                        "conversation divergence plan has an invalid action scope".to_string()
-                    );
-                }
-                if matches!(
-                    divergence.execution,
-                    DivergenceExecution::CodexNativeFork { .. }
-                ) && self.provider.as_str() != "codex"
-                {
-                    return Err(
-                        "Codex native fork execution requires the codex provider".to_string()
-                    );
-                }
-                divergence.validate(&self.thread_id)?;
-            }
-            (ConversationPlanActionType::ResolveDivergence, None) => {
-                return Err("conversation divergence action lacks its reviewed plan".to_string());
-            }
-            (_, Some(_)) => {
+        if let Some(keep_both) = &self.keep_both {
+            keep_both.validate()?;
+            if keep_both.preserved_thread_id == self.thread_id {
                 return Err(
-                    "non-divergence conversation action carries divergence state".to_string(),
+                    "conversation keep-both cannot preserve into its own thread".to_string()
                 );
             }
-            (_, None) => {}
+            if self.proposed_provider_thread_id.is_some() {
+                return Err(
+                    "conversation keep-both mints identities only in its keep-both plan"
+                        .to_string(),
+                );
+            }
         }
-        if self.action == ConversationPlanActionType::NoOp
-            && (self.proposed_provider_thread_id.is_some()
-                || !self.expected_provider_state.is_empty())
-        {
-            return Err("conversation no-op reserves mutation targets".to_string());
-        }
-        if matches!(
+        let needs_proposed_provider = matches!(
             self.action,
-            ConversationPlanActionType::KeepLocal
-                | ConversationPlanActionType::RequirePull
-                | ConversationPlanActionType::Blocked
-        ) && (self.proposed_provider_thread_id.is_some()
-            || !self.expected_provider_state.is_empty())
+            ConversationPlanActionType::MaterializeCloud | ConversationPlanActionType::CreateLocal
+        );
+        if needs_proposed_provider != self.proposed_provider_thread_id.is_some()
+            && self.keep_both.is_none()
         {
+            return Err(
+                "conversation materialization action provider identity is inconsistent".to_string(),
+            );
+        }
+        let informational = matches!(
+            self.action,
+            ConversationPlanActionType::NoChanges
+                | ConversationPlanActionType::RequirePullMetadata
+                | ConversationPlanActionType::RequirePull
+                | ConversationPlanActionType::NotPushable
+                | ConversationPlanActionType::AdoptCloudMetadata
+                | ConversationPlanActionType::ReportPushEligible
+                | ConversationPlanActionType::ReportLocalOnly
+                | ConversationPlanActionType::NotFound
+                | ConversationPlanActionType::Blocked
+        );
+        if informational && !self.expected_provider_state.is_empty() {
             return Err("informational conversation action reserves mutation targets".to_string());
         }
         Ok(())
     }
 }
-
 /// A reviewed multi-provider Push plan. Provider and profile pins live on
 /// every action, never at the top level, so one plan can carry actions for
 /// several providers with independent profile revisions.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationPushPlan {
     pub schema_version: u32,
     pub plan_id: PlanId,
@@ -3790,129 +3374,6 @@ impl ConversationPushPlan {
             }
         }
         Ok(())
-    }
-}
-
-/// Chain-level relation oracle. Production classification runs entirely on
-/// [`classify_thread_refresh`] (manifest metadata, local chain, pin); this
-/// full-chain twin remains as the test suite's independent witness that the
-/// metadata table agrees with chain-level truth.
-///
-/// `test-support` keeps this helper visible to the desktop crate's test
-/// suite now that the domain lives in its own crate; the feature is enabled
-/// only from dev-dependencies, so production builds still compile it out.
-#[cfg(any(test, feature = "test-support"))]
-pub fn classify_conversation_relation(
-    local: Option<&[CanonicalConversationMessage]>,
-    cloud: Option<&[CanonicalConversationMessage]>,
-) -> ConversationRelation {
-    match (local, cloud) {
-        (None, None) => ConversationRelation::BothMissing,
-        (None, Some(_)) => ConversationRelation::LocalMissing,
-        (Some(_), None) => ConversationRelation::CloudMissing,
-        (Some(local), Some(cloud)) => {
-            if validate_conversation_chain(local).is_err()
-                || validate_conversation_chain(cloud).is_err()
-            {
-                return ConversationRelation::Unknown;
-            }
-            let common = local.len().min(cloud.len());
-            for index in 0..common {
-                if local[index].message_id != cloud[index].message_id {
-                    return ConversationRelation::Diverged;
-                }
-                if local[index].parent_message_id != cloud[index].parent_message_id
-                    || local[index].semantic_fingerprint != cloud[index].semantic_fingerprint
-                {
-                    return ConversationRelation::Unknown;
-                }
-            }
-            match local.len().cmp(&cloud.len()) {
-                std::cmp::Ordering::Equal => ConversationRelation::Identical,
-                std::cmp::Ordering::Greater => ConversationRelation::CloudPrefixOfLocal,
-                std::cmp::Ordering::Less => ConversationRelation::LocalPrefixOfCloud,
-            }
-        }
-    }
-}
-
-/// The local side of a manifest-only refresh classification.
-#[derive(Clone, Copy, Debug)]
-pub enum RefreshLocalState<'a> {
-    /// No local conversation exists for this thread.
-    Missing,
-    /// A local conversation exists but its canonical chain is unavailable
-    /// (unreadable transcript, incomplete codec lineage).
-    Uncapturable,
-    /// The captured canonical chain.
-    Chain(&'a [CanonicalConversationMessage]),
-}
-
-/// The cloud side of a manifest-only refresh classification: the manifest's
-/// per-thread metadata, never transcript content.
-#[derive(Clone, Copy, Debug)]
-pub struct RefreshCloudMeta<'a> {
-    pub message_count: u64,
-    pub lineage_digest: &'a str,
-    pub semantic_digest: &'a str,
-}
-
-/// Classify a thread's sync state from manifest metadata, the local chain,
-/// and the binding's last-synced digest pin — no cloud payload reads.  See
-/// docs/DESIGN_MANIFEST_ONLY_THREAD_REFRESH.md for the decision table and
-/// its soundness argument.  Every branch is witnessed by content digests;
-/// anything unwitnessed classifies as `Diverged` (review) or `Unknown`,
-/// never as a fast-forward.
-pub fn classify_thread_refresh(
-    local: RefreshLocalState<'_>,
-    cloud: Option<RefreshCloudMeta<'_>>,
-    last_synced: Option<(&str, &str)>,
-) -> ConversationRelation {
-    let (chain, cloud) = match (local, cloud) {
-        (RefreshLocalState::Missing, None) => return ConversationRelation::BothMissing,
-        (RefreshLocalState::Missing, Some(_)) => return ConversationRelation::LocalMissing,
-        (_, None) => return ConversationRelation::CloudMissing,
-        (RefreshLocalState::Uncapturable, Some(_)) => return ConversationRelation::Unknown,
-        (RefreshLocalState::Chain(chain), Some(cloud)) => (chain, cloud),
-    };
-    let Ok((local_lineage, local_semantic)) = conversation_chain_digests(chain) else {
-        return ConversationRelation::Unknown;
-    };
-    if (local_lineage.as_str(), local_semantic.as_str())
-        == (cloud.lineage_digest, cloud.semantic_digest)
-    {
-        return ConversationRelation::Identical;
-    }
-    let local_count = chain.len() as u64;
-    match local_count.cmp(&cloud.message_count) {
-        std::cmp::Ordering::Greater => {
-            // The prefix is recomputed locally; a match proves the cloud
-            // thread is an ancestor of the local one.
-            let Ok((prefix_lineage, prefix_semantic)) =
-                conversation_chain_digests(&chain[..cloud.message_count as usize])
-            else {
-                return ConversationRelation::Unknown;
-            };
-            if (prefix_lineage.as_str(), prefix_semantic.as_str())
-                == (cloud.lineage_digest, cloud.semantic_digest)
-            {
-                ConversationRelation::CloudPrefixOfLocal
-            } else {
-                ConversationRelation::Diverged
-            }
-        }
-        std::cmp::Ordering::Less => {
-            // Equality with the last-synced pin proves nothing local is
-            // unsaved, which is exactly what a fast-forward pull needs.  A
-            // position or timestamp cannot witness this; only content can.
-            if last_synced == Some((local_lineage.as_str(), local_semantic.as_str())) {
-                ConversationRelation::LocalPrefixOfCloud
-            } else {
-                ConversationRelation::Diverged
-            }
-        }
-        // Equal counts with different digests cannot fast-forward either way.
-        std::cmp::Ordering::Equal => ConversationRelation::Diverged,
     }
 }
 
@@ -5044,6 +4505,7 @@ pub enum RestoreActionType {
     DeleteProjectDirectory,
     MergeFile,
     MaterializeConversation,
+    PublishConversation,
     Manual,
 }
 
@@ -5289,149 +4751,7 @@ pub enum ActionStatus {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct CodexDivergenceReceipt {
-    pub resolution: ConversationDivergenceResolution,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preserved_thread_id: Option<ThreadId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preserved_provider_thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub executor: Option<CodexForkExecutor>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub desired_fork_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_name_status: Option<ConversationNameStatus>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub desired_original_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub original_name_status: Option<ConversationNameStatus>,
-    pub inventory_refresh_status: CodexInventoryRefreshStatus,
-}
-
-/// Receipt for an adapter file fork: the preserved branch was rewritten to a
-/// fresh provider session and written beside the source before replacement.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct AdapterDivergenceReceipt {
-    pub resolution: ConversationDivergenceResolution,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preserved_thread_id: Option<ThreadId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preserved_provider_thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_transcript_path: Option<String>,
-}
-
-impl AdapterDivergenceReceipt {
-    fn validate(&self) -> Result<(), String> {
-        let preserved = [
-            self.preserved_thread_id.is_some(),
-            self.preserved_provider_thread_id.is_some(),
-            self.fork_transcript_path.is_some(),
-        ];
-        match self.resolution {
-            ConversationDivergenceResolution::PreserveLocalWithNativeFork => {
-                if preserved.contains(&false) {
-                    return Err("preserved adapter divergence receipt is incomplete".to_string());
-                }
-            }
-            ConversationDivergenceResolution::UseCloudOnly => {
-                if preserved.contains(&true) {
-                    return Err(
-                        "cloud-only adapter divergence receipt carries fork state".to_string()
-                    );
-                }
-            }
-        }
-        if let Some(thread_id) = &self.preserved_provider_thread_id {
-            validate_provider_thread_id("preserved provider thread", thread_id)?;
-        }
-        if let Some(path) = &self.fork_transcript_path {
-            validate_absolute_clean_path("preserved fork transcript", path)?;
-        }
-        Ok(())
-    }
-}
-
-/// Which divergence machinery produced a conversation receipt.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DivergenceReceiptKind {
-    CodexNativeFork(CodexDivergenceReceipt),
-    AdapterFileFork(AdapterDivergenceReceipt),
-}
-
-impl DivergenceReceiptKind {
-    fn validate(&self) -> Result<(), String> {
-        match self {
-            Self::CodexNativeFork(receipt) => receipt.validate(),
-            Self::AdapterFileFork(receipt) => receipt.validate(),
-        }
-    }
-
-    pub fn resolution(&self) -> ConversationDivergenceResolution {
-        match self {
-            Self::CodexNativeFork(receipt) => receipt.resolution,
-            Self::AdapterFileFork(receipt) => receipt.resolution,
-        }
-    }
-
-    pub fn preserved_thread_id(&self) -> Option<&ThreadId> {
-        match self {
-            Self::CodexNativeFork(receipt) => receipt.preserved_thread_id.as_ref(),
-            Self::AdapterFileFork(receipt) => receipt.preserved_thread_id.as_ref(),
-        }
-    }
-}
-
-impl CodexDivergenceReceipt {
-    fn validate(&self) -> Result<(), String> {
-        match self.resolution {
-            ConversationDivergenceResolution::PreserveLocalWithNativeFork => {
-                if self.preserved_thread_id.is_none()
-                    || self.preserved_provider_thread_id.is_none()
-                    || self.executor.is_none()
-                    || self.desired_fork_name.is_none()
-                    || self.fork_name_status.is_none()
-                {
-                    return Err("preserved divergence receipt is incomplete".to_string());
-                }
-            }
-            ConversationDivergenceResolution::UseCloudOnly => {
-                if self.preserved_thread_id.is_some()
-                    || self.preserved_provider_thread_id.is_some()
-                    || self.executor.is_some()
-                    || self.desired_fork_name.is_some()
-                    || self.fork_name_status.is_some()
-                {
-                    return Err("cloud-only divergence receipt carries fork state".to_string());
-                }
-            }
-        }
-        if let Some(thread_id) = &self.preserved_provider_thread_id {
-            validate_provider_thread_id("preserved provider thread", thread_id)?;
-        }
-        if self.original_name_status.is_none() {
-            return Err("Codex divergence receipt lacks an original naming result".to_string());
-        }
-        for (label, name) in [
-            ("preserved fork name", self.desired_fork_name.as_deref()),
-            (
-                "restored original name",
-                self.desired_original_name.as_deref(),
-            ),
-        ] {
-            if let Some(name) = name {
-                validate_codex_thread_name(label, name)?;
-            }
-        }
-        if self.inventory_refresh_status == CodexInventoryRefreshStatus::NotAttempted {
-            return Err("Codex divergence receipt lacks an inventory refresh result".to_string());
-        }
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationApplyReceipt {
     pub host_id: HostId,
     pub replica_id: ReplicaId,
@@ -5454,8 +4774,25 @@ pub struct ConversationApplyReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_origin_replica_token: Option<OriginReplicaToken>,
     pub journal_operation_id: ConversationOperationId,
+    /// The accepted portable tail after this operation, when it moved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub divergence: Option<DivergenceReceiptKind>,
+    pub accepted_tail: Option<PortableConversationTail>,
+    /// The minted logical thread that preserved the local branch of a
+    /// divergent keep-both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_thread_id: Option<ThreadId>,
+    /// Recorded for every consumed provider source; old sources are never
+    /// moved or deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_disposition: Option<ConversationSourceDisposition>,
+}
+
+/// The only source disposition this resolver records. Cleanup is a separate
+/// future operation, so the vocabulary is deliberately closed.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationSourceDisposition {
+    Retained,
 }
 
 impl ConversationApplyReceipt {
@@ -5495,8 +4832,11 @@ impl ConversationApplyReceipt {
         }) {
             return Err("conversation receipt has an invalid provider thread id".to_string());
         }
-        if let Some(divergence) = &self.divergence {
-            divergence.validate()?;
+        if let Some(tail) = &self.accepted_tail {
+            tail.validate()?;
+        }
+        if self.preserved_thread_id.as_ref() == Some(&self.thread_id) {
+            return Err("conversation receipt cannot preserve into its own thread".to_string());
         }
         Ok(())
     }
@@ -5641,6 +4981,21 @@ impl Materializations {
         Ok(())
     }
 }
+
+mod conversation_tail;
+mod conversation_tail_relation;
+
+pub use conversation_tail::{
+    compute_conversation_tail_state, compute_portable_conversation_tail,
+    conversation_prefix_witness, AcceptedConversationVersion, ConversationCheckpoint,
+    ConversationPrefixWitness, PhysicalMappingState, PortableConversationTail, RawRangePin,
+    RootPhysicalMapping, RootTailLayout, TailAccumulator, TailPartitionKind,
+    PORTABLE_TAIL_CODEC_V1,
+};
+pub use conversation_tail_relation::{
+    compare_conversation_tail, SyncCurrency, TailClassification, TailComparisonEvidence,
+    TailSideEvidence,
+};
 
 #[cfg(test)]
 mod tests;

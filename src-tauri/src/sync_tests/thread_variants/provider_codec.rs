@@ -6,8 +6,9 @@ use crate::project_sync::conversation_sync::{
     default_conversation_decision, ConversationCapabilities,
 };
 use crate::project_sync::domain::{
-    classify_thread_refresh, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationRelation, RefreshCloudMeta, RefreshLocalState, MAX_CONVERSATION_FILE_BYTES,
+    compare_conversation_tail, compute_portable_conversation_tail, ConversationPlanActionType,
+    ConversationPlanDirection, SyncCurrency, TailClassification, TailComparisonEvidence,
+    TailPartitionKind, TailSideEvidence, MAX_CONVERSATION_FILE_BYTES,
 };
 use serde_json::{json, Value};
 
@@ -79,13 +80,9 @@ fn committed_codex_fixture_proves_structural_rewrite_and_semantic_continuation()
     let continued = analyze_codex_transcript(&appended);
     assert!(continued.is_resumable());
     assert_eq!(continued.lineage.chain().unwrap().len(), 6);
-    assert_eq!(
-        crate::project_sync::domain::classify_conversation_relation(
-            continued.lineage.chain(),
-            after.lineage.chain(),
-        ),
-        ConversationRelation::CloudPrefixOfLocal
-    );
+    let continued_chain = continued.lineage.chain().unwrap();
+    let after_chain = after.lineage.chain().unwrap();
+    assert_eq!(&continued_chain[..after_chain.len()], after_chain);
 }
 
 /// Codex restamps every record envelope and re-serializes context records
@@ -119,21 +116,31 @@ fn canonical_digests_survive_envelope_restamps_and_context_reserialization() {
     assert!(after.is_resumable());
     assert_eq!(lineage_digests(&before), lineage_digests(&after));
 
-    // The stored metadata of the original classifies the rewritten local as
-    // in sync without any payload in hand.
-    let chain = after.lineage.chain().unwrap();
-    let (lineage_digest, semantic_digest) = lineage_digests(&before);
+    // The stored portable tail of the original classifies the rewritten
+    // local as in sync without any payload in hand.
+    let before_tail = compute_portable_conversation_tail(
+        TailPartitionKind::WholeThread,
+        0,
+        before.lineage.chain().unwrap(),
+    )
+    .unwrap();
+    let after_tail = compute_portable_conversation_tail(
+        TailPartitionKind::WholeThread,
+        0,
+        after.lineage.chain().unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        classify_thread_refresh(
-            RefreshLocalState::Chain(chain),
-            Some(RefreshCloudMeta {
-                message_count: chain.len() as u64,
-                lineage_digest,
-                semantic_digest,
-            }),
-            None,
-        ),
-        ConversationRelation::Identical
+        compare_conversation_tail(TailComparisonEvidence {
+            accepted: TailSideEvidence::Present(before_tail.clone()),
+            local: TailSideEvidence::Present(after_tail),
+            cloud: TailSideEvidence::Present(before_tail),
+            local_provenance_verified: true,
+            accepted_witness_verified: true,
+            cloud_ancestry_verified: true,
+            coordinates_verified: true,
+        }),
+        TailClassification::Sync(SyncCurrency::Current)
     );
 }
 
@@ -249,7 +256,7 @@ fn every_codex_unknown_reason_is_bounded_and_never_resumable() {
         );
         let push = default_conversation_decision(
             ConversationPlanDirection::Push,
-            ConversationRelation::Unknown,
+            TailClassification::Unknown,
             ConversationCapabilities {
                 local_safely_capturable: false,
                 ..ConversationCapabilities::default()
@@ -257,7 +264,7 @@ fn every_codex_unknown_reason_is_bounded_and_never_resumable() {
         );
         let pull = default_conversation_decision(
             ConversationPlanDirection::Pull,
-            ConversationRelation::Unknown,
+            TailClassification::Unknown,
             ConversationCapabilities {
                 cloud_safely_readable: false,
                 destination_codec_resumable: false,
@@ -271,7 +278,7 @@ fn every_codex_unknown_reason_is_bounded_and_never_resumable() {
         );
         assert_eq!(
             pull.action,
-            ConversationPlanActionType::StoreOnly,
+            ConversationPlanActionType::Blocked,
             "{name} Pull"
         );
     }

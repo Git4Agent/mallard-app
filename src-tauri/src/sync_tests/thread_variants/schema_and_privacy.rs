@@ -2,8 +2,8 @@ use super::harness::{chain, codex_scope, codex_scope_key, ThreadSpec, VariantWor
 use crate::project_sync::domain::{
     BundleId, BundleManifest, BundleScope, ConversationFileRef, ConversationFileRole,
     ConversationLineageStatus, ConversationMaterializationState, ConversationPlanActionType,
-    ConversationPlanDirection, ConversationRelation, LocalConversationBinding, LogicalPath,
-    OriginHostAlias, ProviderKey, ReplicaId, ThreadId, Tombstone, TombstoneTarget,
+    ConversationPlanDirection, LocalConversationBinding, LogicalPath, OriginHostAlias, ProviderKey,
+    ReplicaId, ThreadId, Tombstone, TombstoneTarget,
 };
 use crate::project_sync::storage_core::ObjectStore;
 use std::fs;
@@ -85,9 +85,11 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
 
     let (mut action, mut current) = super::relation_matrix::reviewed_action(
         ConversationPlanDirection::Push,
-        ConversationPlanActionType::NoOp,
-        crate::project_sync::domain::ConversationReasonCode::Identical,
-        ConversationRelation::Identical,
+        ConversationPlanActionType::NoChanges,
+        crate::project_sync::domain::ConversationReasonCode::SyncCurrent,
+        crate::project_sync::domain::TailClassification::Sync(
+            crate::project_sync::domain::SyncCurrency::Current,
+        ),
     );
     action.host_id = identity_a.host_id.clone();
     action.expected_host_identity_revision = identity_a.revision;
@@ -285,6 +287,26 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
             .tombstones
             .insert(tombstone.canonical_key(), tombstone);
     }));
+    // A simulated old writer publishing a tail-less schema-1 Codex successor
+    // is blocked on the next verified read, as is a tail whose accepted end
+    // disagrees with the recorded message count.
+    mutations.push(Box::new(|scope| {
+        scope
+            .conversations
+            .get_mut(&thread_id())
+            .unwrap()
+            .portable_tail = None;
+    }));
+    mutations.push(Box::new(|scope| {
+        scope
+            .conversations
+            .get_mut(&thread_id())
+            .unwrap()
+            .portable_tail
+            .as_mut()
+            .unwrap()
+            .accepted_end_record_count += 1;
+    }));
 
     for (index, mutate) in mutations.into_iter().enumerate() {
         // The scope digest is resealed over the corrupted content, so every
@@ -333,15 +355,13 @@ fn local_bindings_reject_duplicate_provider_thread_ownership_profile_wide() {
         provider_profile_id: scope.profile_id.clone(),
         thread_id: ThreadId::parse(thread).unwrap(),
         forked_from: None,
-        fork_stamp: None,
         provider_thread_id: Some("same-provider-thread".to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
-        last_observed_file_sha256: None,
-        last_observed_head_message_id: None,
-        last_observed_lineage_digest: None,
-        last_observed_semantic_digest: None,
-        source_revision: None,
-        source_manifest_sha256: None,
+        root_tail_layout: Some(mallard_domain::RootTailLayout {
+            codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
+            partition_kind: mallard_domain::TailPartitionKind::WholeThread,
+            start_record_count: 0,
+        }),
         revision: 0,
         created_at: 1,
         updated_at: 1,

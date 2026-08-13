@@ -45,6 +45,21 @@ test("project setup does not offer an immediate push", () => {
   assert.doesNotMatch(setupWorkspace, /Finish & push|finalize\("push"\)/);
 });
 
+test("project setup always finishes into Activity without opening Pull review", () => {
+  const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const completeSetup = workspace.slice(
+    workspace.indexOf("  const completeSetup = async"),
+    workspace.indexOf("\n  const saveStorageLink =", workspace.indexOf("  const completeSetup = async")),
+  );
+
+  assert.doesNotMatch(setupWorkspace, /SetupCompletion|Finish & review|finalize\("pull"\)/);
+  assert.match(setupWorkspace, /onClick=\{\(\) => void finalize\(\)\}/);
+  assert.match(completeSetup, /setActiveProjectId\(projectId\)/);
+  assert.match(completeSetup, /await loadProjectData\(projectId, nextConfig, storageId, workflowEpoch\)/);
+  assert.doesNotMatch(completeSetup, /planRestore|completion === "pull"|open Pull review/);
+});
+
 test("project setup configures the project without selecting sync contents", () => {
   const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
   const types = readFileSync("src/types.ts", "utf8");
@@ -58,6 +73,20 @@ test("project setup configures the project without selecting sync contents", () 
   );
   assert.doesNotMatch(api, /discoverProject|invoke<ProjectDiscovery>\("discover_project"/);
   assert.doesNotMatch(backend, /commands::discover_project/);
+});
+
+test("successful unlink and relink clear their stale storage notice", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const saveStart = workspace.indexOf("  const saveStorageLink = async");
+  const saveEnd = workspace.indexOf("\n  const linkStorage = async", saveStart);
+  const unlinkStart = workspace.indexOf("  const unlinkStorage = async");
+  const unlinkEnd = workspace.indexOf("\n  const applyReview = async", unlinkStart);
+  assert.ok(saveStart >= 0 && saveEnd > saveStart, "missing saveStorageLink");
+  assert.ok(unlinkStart >= 0 && unlinkEnd > unlinkStart, "missing unlinkStorage");
+
+  const clearsMatchingNotice = /setStorageNotice\(\(current\) => \(\s*current\?\.projectId === projectId && current\.storageId === storageId \? null : current\s*\)\)/;
+  assert.match(workspace.slice(saveStart, saveEnd), clearsMatchingNotice);
+  assert.match(workspace.slice(unlinkStart, unlinkEnd), clearsMatchingNotice);
 });
 
 test("Push requires the reviewed destination recipe", () => {
@@ -376,17 +405,12 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /\.sync-history-spine-fold\s*\{[^}]*position: absolute;[^}]*top: calc\(var\(--sync-history-row-anchor-y\) - 12px\);[^}]*left: calc\(var\(--sync-history-rail-x\) - var\(--sync-history-card-offset\) - 12px\);[^}]*width: 24px;[^}]*height: 24px;[^}]*background: transparent;/s);
   assert.match(retroCss, /\.sync-history-spine-fold:disabled\s*\{[^}]*opacity: 0\.35;/s);
   assert.doesNotMatch(retroCss, /sync-history-commit-node|--sync-history-node-size|--sync-history-node-half|--retro-pixel-ring|sync-history-group-toggle/);
-  // Storage-only rows and the fork banner live outside the timeline and need
-  // the same row tokens — they are not inherited, so a scope left off the
-  // list silently computes margin-left to 0 and leaves the rail column.
-  assert.match(retroCss, /\.sync-history-timeline,\s*\.sync-history-storage-only,\s*\.sync-history-fork-event\s*\{[^}]*--sync-history-row-actions-column: 148px;[^}]*--sync-history-commit-actions-column: 26px;[^}]*--sync-history-commit-date-column: 26ch;[^}]*--sync-history-row-icon-size: 18px;[^}]*--sync-history-row-anchor-y: 15px;[^}]*--sync-history-rail-x: 8px;[^}]*--sync-history-card-offset: 26px;/s);
-  // The storage-only card and the fork banner take the timeline's inset, so
-  // their rail marks land in the same column, and all three scopes take the
-  // wide anchor together.
+  // Storage-only rows live outside the timeline and need the same row tokens;
+  // they are not inherited, so leaving the scope out would lose the rail inset.
+  assert.match(retroCss, /\.sync-history-timeline,\s*\.sync-history-storage-only\s*\{[^}]*--sync-history-row-actions-column: 148px;[^}]*--sync-history-commit-actions-column: 26px;[^}]*--sync-history-commit-date-column: 26ch;[^}]*--sync-history-row-icon-size: 18px;[^}]*--sync-history-row-anchor-y: 15px;[^}]*--sync-history-rail-x: 8px;[^}]*--sync-history-card-offset: 26px;/s);
+  // The storage-only card takes the timeline's inset so its rail mark lands in
+  // the same column.
   assert.match(retroCss, /\.sync-history-storage-only\s*\{[^}]*margin: 12px 0 12px var\(--sync-history-card-offset\);/s);
-  assert.match(retroCss, /\.sync-history-fork-event\s*\{[^}]*margin: 12px 0 12px var\(--sync-history-card-offset\);/s);
-  // The banner has no rail control — its glyph lives in the heading — so the
-  // wide anchor stays a two-scope affair.
   assert.match(retroCss, /@container sync-history-layout \(min-width: 700px\)\s*\{[^{]*\.sync-history-timeline,\s*\.sync-history-storage-only\s*\{[^}]*--sync-history-row-anchor-y: 19px;/s);
   assert.doesNotMatch(retroCss, /sync-history-spine-mark/);
   assert.doesNotMatch(retroCss, /--sync-history-commit-thread-rail-x|--sync-history-commit-child-offset|--sync-history-commit-branch-length/);
@@ -471,8 +495,7 @@ test("the notice toast squares off and reports its own tone", () => {
   assert.match(workspace, /type SyncNoticeTone = "ok" \| "attention"/);
   assert.match(workspace, /notice\.tone === "attention" \? "alert-triangle" : "check-circle"/);
   assert.match(workspace, /notice\.tone === "attention" \? " is-attention" : ""/);
-  // The parked-fork and unconfirmed-binding notices are stops, not successes.
-  assert.match(workspace, /no original replaced\.`,\s*"attention"\)/);
+  // An unconfirmed binding is a stop, not a success.
   assert.match(workspace, /before pulling\.",\s*"attention"\)/);
   // Every other call site stays a one-argument confirmation.
   assert.match(workspace, /const notify = \(message: string, tone: SyncNoticeTone = "ok"\) => setNotice\(\{ message, tone \}\)/);
@@ -566,7 +589,7 @@ test("the shell verifies host identity and relies on backend auto-registration",
   assert.match(linksWorkspace, /const workspaceCanSync = workspaceBindingActive && workspaceProfilesReadable/);
   assert.match(linksWorkspace, /onConfigureBinding\(workspaceProject\.local_project_id\)/);
   assert.match(setupWorkspace, /mountedRef\.current && isWorkflowCurrent\(workflowEpoch\)/);
-  assert.match(setupWorkspace, /if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, completion, workflowEpoch\)/);
+  assert.match(setupWorkspace, /if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, workflowEpoch\)/);
   assert.doesNotMatch(workspace, /Host settings/);
 });
 
@@ -649,6 +672,11 @@ test("host-scoped workflows keep their originating epoch across async continuati
   assert.match(saveStorage, /await projectSyncApi\.getConfig\(\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return false;/);
   assert.match(saveStorage, /await projectSyncApi\.saveConfig\(update\(current\)\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return false;/);
 
+  const clearStorage = section(workspace, "clearStorageData", "removeStorage");
+  capturesBefore(clearStorage, "await confirm(");
+  assert.match(clearStorage, /await projectSyncApi\.clearStorageData\(/);
+  assert.match(clearStorage, /Permanently clear all Mallard data/);
+
   const removeStorage = section(workspace, "removeStorage", "openNewStorageConfiguration");
   capturesBefore(removeStorage, "await confirm(");
   assert.match(removeStorage, /Stored files were not deleted\.`, workflowEpoch\)/);
@@ -656,7 +684,7 @@ test("host-scoped workflows keep their originating epoch across async continuati
   assert.match(workspace, /workflowEpoch=\{hostWorkflowEpoch\.current\}/);
   assert.match(workspace, /isWorkflowCurrent=\{\(workflowEpoch\) => \([\s\S]*hostWorkflowEpoch\.current === workflowEpoch/);
   const finalize = section(setupWorkspace, "finalize", null);
-  assert.match(finalize, /const detail = await projectSyncApi\.finalizeProjectSetup\(draftId, expectedRevision\);\s*if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, completion, workflowEpoch\)/);
+  assert.match(finalize, /const detail = await projectSyncApi\.finalizeProjectSetup\(draftId, expectedRevision\);\s*if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, workflowEpoch\)/);
   assert.match(setupWorkspace, /mountedRef\.current = false;\s*inspectRequest\.current \+= 1;/);
 });
 

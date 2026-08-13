@@ -19,14 +19,14 @@ pub mod traits;
 pub use registry::ProviderRegistry;
 pub use traits::{
     AgentProviderAdapter, DiscoveredProviderState, DiscoveredSession, DiscoveredSidecar,
-    DiscoveredStateFile, DivergenceStyle, MaterializationTargetRequest, PlannedProviderTarget,
+    DiscoveredStateFile, MaterializationTargetRequest, PlannedProviderTarget,
     ProviderCapabilityLevel, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
-    SessionActionKind, SessionActionOutcome, SessionActionRequest, SessionActionSurface,
-    SessionAdapter, SessionAnalysis, SessionCheckpoint, SessionCount, SessionCountQuality,
-    SessionDetailWarning, SessionDiscovery, SessionDiscoveryContext, SessionEventCounts,
-    SessionEventDetail, SessionFileMetadata, SessionFileSummary, SessionRewriteRequest,
-    SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind,
-    SessionTimelineIndex, SessionTimelineIndexEntry, SessionTimelinePageSlice,
-    SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory,
-    SessionToolIndexEntry, SessionTurnToolSummary,
+    SessionActionKind, SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis,
+    SessionCheckpoint, SessionCount, SessionCountQuality, SessionDetailWarning, SessionDiscovery,
+    SessionDiscoveryContext, SessionEventCounts, SessionEventDetail, SessionFileMetadata,
+    SessionFileSummary, SessionRewriteRequest, SessionSourceSpan, SessionTimelineContext,
+    SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
+    SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
+    SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
+    SessionTurnToolSummary,
 };

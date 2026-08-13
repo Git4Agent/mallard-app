@@ -6,7 +6,7 @@
 //! removing, or renaming a command must fail this test until the frozen
 //! contract itself is deliberately changed outside that plan.
 
-/// The 92 registered commands, sorted: the provider-neutral project-sync
+/// The 94 registered commands, sorted: the provider-neutral project-sync
 /// surface plus the 20 scope-rowed Library resource commands.
 const EXPECTED: &[&str] = &[
     "apply_bundle_restore",
@@ -14,6 +14,7 @@ const EXPECTED: &[&str] = &[
     "apply_catalog_resource_pull",
     "audit_codex_conversation_paths",
     "cleanup_activity_logs",
+    "clear_storage_data",
     "connect_project_to_remote_bundle",
     "connect_r2_storage",
     "create_catalog_scope",
@@ -26,7 +27,6 @@ const EXPECTED: &[&str] = &[
     "execute_project_session_action",
     "finalize_project_setup",
     "find_remote_bundle_matches",
-    "fork_codex_thread",
     "get_activity_log_folder",
     "get_activity_log_stats",
     "get_bundle_inventory",
@@ -37,7 +37,6 @@ const EXPECTED: &[&str] = &[
     "get_host_identity_status",
     "get_local_project",
     "get_mallard_cli_path",
-    "get_pending_codex_divergence",
     "get_project",
     "get_project_activity",
     "get_project_binding",
@@ -48,7 +47,6 @@ const EXPECTED: &[&str] = &[
     "get_project_session_timeline_page",
     "get_project_sync_config",
     "get_push_destination_status",
-    "get_restore_plan",
     "get_restore_readiness",
     "get_setup_draft",
     "inspect_catalog_resource_link",
@@ -88,9 +86,9 @@ const EXPECTED: &[&str] = &[
     "rename_local_project",
     "rename_provider_profile",
     "repair_codex_conversation_paths",
+    "reset_project_sync_metadata",
     "resolve_origin_host_label",
     "restart_codex_app_after_pull",
-    "retry_codex_divergence",
     "rotate_host_identity",
     "save_bundle_recipe",
     "save_catalog_resource_profile",

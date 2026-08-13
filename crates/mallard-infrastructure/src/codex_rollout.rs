@@ -13,6 +13,17 @@ use mallard_domain::MAX_CONVERSATION_FILE_BYTES;
 pub const MAX_CODEX_FORK_DEPTH: usize = 256;
 pub const MAX_CODEX_RECORDS: usize = 100_000;
 
+/// A paginated rollout's reference to the physical segment it continues:
+/// the base rollout's thread plus its exact byte and record cutoffs. Both
+/// cutoffs must agree with the resolved canonical count before any tail
+/// boundary is seeded from them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodexHistoryBase {
+    pub thread_id: String,
+    pub end_ordinal_exclusive: u64,
+    pub end_byte_offset: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexSessionMetaRecord {
     pub record_index: usize,
@@ -23,6 +34,8 @@ pub struct CodexSessionMetaRecord {
     pub cwd: String,
     pub thread_source: Option<String>,
     pub is_internal_subagent: bool,
+    pub history_mode: Option<String>,
+    pub history_base: Option<CodexHistoryBase>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -304,6 +317,45 @@ pub fn analyze_codex_rollout_structure(
     structure.finalize()
 }
 
+/// Read one rollout's authoritative (first) `session_meta` without a full
+/// structural pass: the identity and history reference a graph resolver
+/// needs before deciding whether to read an ancestor. Conversation items
+/// before the authoritative metadata are rejected exactly like the full
+/// accumulator would.
+pub(crate) fn authoritative_session_meta(
+    bytes: &[u8],
+) -> Result<CodexSessionMetaRecord, CodexStructureError> {
+    check_rollout_bounds(bytes)?;
+    let mut record_index = 0_usize;
+    for raw in bytes.split(|byte| *byte == b'\n') {
+        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+        if raw.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_slice(raw).map_err(|_| {
+            error(
+                CodexStructureErrorKind::MalformedJson,
+                "Codex rollout contains malformed JSON",
+            )
+        })?;
+        match structural_record_type(&value) {
+            Some("session_meta") => return parse_session_meta(&value, record_index),
+            Some("response_item") | Some("event_msg") | Some("compacted") => {
+                return Err(error(
+                    CodexStructureErrorKind::MissingSessionMetadata,
+                    "Codex rollout contains conversation items before its authoritative session_meta",
+                ));
+            }
+            _ => {}
+        }
+        record_index += 1;
+    }
+    Err(error(
+        CodexStructureErrorKind::MissingSessionMetadata,
+        "Codex rollout has no session_meta record",
+    ))
+}
+
 pub fn structural_record_type(value: &Value) -> Option<&str> {
     value
         .get("type")
@@ -363,6 +415,13 @@ fn parse_session_meta(
                 .map_err(|_| malformed_meta("has an invalid source descriptor"))
         })
         .transpose()?;
+    let history_mode = optional_text(
+        payload,
+        &["history_mode", "historyMode"],
+        "history mode",
+        64,
+    )?;
+    let history_base = parse_history_base(payload)?;
     Ok(CodexSessionMetaRecord {
         record_index,
         id,
@@ -372,7 +431,50 @@ fn parse_session_meta(
         cwd,
         thread_source,
         is_internal_subagent: session_meta_is_internal_subagent(value),
+        history_mode,
+        history_base,
     })
+}
+
+fn parse_history_base(
+    payload: &Map<String, Value>,
+) -> Result<Option<CodexHistoryBase>, CodexStructureError> {
+    let Some(value) = ["history_base", "historyBase"]
+        .iter()
+        .find_map(|key| payload.get(*key))
+    else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let base = value
+        .as_object()
+        .ok_or_else(|| malformed_meta("has a non-object history base"))?;
+    let thread_id = string_field(base, &["thread_id", "threadId"])
+        .ok_or_else(|| malformed_meta("has a history base without a thread ID"))
+        .and_then(|value| validate_text("history base thread ID", value, 128))?;
+    let end_ordinal_exclusive = base
+        .get("end_ordinal_exclusive")
+        .or_else(|| base.get("endOrdinalExclusive"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| malformed_meta("has a history base without a record cutoff"))?;
+    let end_byte_offset = base
+        .get("end_byte_offset")
+        .or_else(|| base.get("endByteOffset"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| malformed_meta("has a history base without a byte cutoff"))?;
+    if end_ordinal_exclusive > MAX_CODEX_RECORDS as u64
+        || end_byte_offset > MAX_CONVERSATION_FILE_BYTES
+        || end_ordinal_exclusive > end_byte_offset
+    {
+        return Err(malformed_meta("has a history base with impossible cutoffs"));
+    }
+    Ok(Some(CodexHistoryBase {
+        thread_id,
+        end_ordinal_exclusive,
+        end_byte_offset,
+    }))
 }
 
 fn structural_cwd(value: &Value) -> Result<Option<String>, CodexStructureError> {

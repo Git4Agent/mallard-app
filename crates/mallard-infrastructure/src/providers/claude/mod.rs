@@ -9,7 +9,7 @@ pub mod history;
 pub mod materialization;
 
 use super::traits::{
-    AgentProviderAdapter, DivergenceStyle, MaterializationTargetRequest, PlannedProviderTarget,
+    AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget,
     ProviderCapabilityLevel, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
     SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
     SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
@@ -89,10 +89,6 @@ impl SessionAdapter for ClaudeAdapter {
 
     fn capability(&self) -> ProviderCapabilityLevel {
         ProviderCapabilityLevel::ResumableWithConflictPreservation
-    }
-
-    fn divergence_style(&self) -> DivergenceStyle {
-        DivergenceStyle::AdapterFileFork
     }
 
     fn discover(&self, context: &SessionDiscoveryContext<'_>) -> Result<SessionDiscovery, String> {

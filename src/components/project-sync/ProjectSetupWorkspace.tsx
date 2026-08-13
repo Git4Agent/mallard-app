@@ -23,8 +23,6 @@ import {
   repositoryFingerprintMatches,
 } from "./model";
 
-export type SetupCompletion = "open" | "pull";
-
 interface Props {
   draftId: string;
   workflowEpoch: number;
@@ -39,7 +37,6 @@ interface Props {
   onAddStorage: () => void;
   onFinalized: (
     detail: ProjectDetail,
-    completion: SetupCompletion,
     workflowEpoch: number,
   ) => void;
 }
@@ -328,7 +325,7 @@ export default function ProjectSetupWorkspace({
     edit((current) => ({ ...current, project_root: picked }));
   };
 
-  const finalize = async (completion: SetupCompletion) => {
+  const finalize = async () => {
     if (!draft || !workflowIsActive()) return;
     let expectedRevision = draft.revision;
     // Flush any pending edit before pinning the reviewed revision.
@@ -353,7 +350,7 @@ export default function ProjectSetupWorkspace({
     try {
       const detail = await projectSyncApi.finalizeProjectSetup(draftId, expectedRevision);
       if (!workflowIsActive()) return;
-      onFinalized(detail, completion, workflowEpoch);
+      onFinalized(detail, workflowEpoch);
     } catch (reason) {
       if (!workflowIsActive()) return;
       setError(errorMessage(reason));
@@ -732,7 +729,7 @@ export default function ProjectSetupWorkspace({
                     : current)}
                 />
                 <span>
-                  This repository could not be verified for this project. Connect it anyway and review the pull.
+                  This repository could not be verified for this project. Connect it anyway, then review its stored changes from Activity.
                 </span>
               </label>
             )}
@@ -756,19 +753,9 @@ export default function ProjectSetupWorkspace({
           <button type="button" className="btn btn-ghost" onClick={() => onDiscard(draftId)} disabled={finalizing}>
             Discard
           </button>
-          {usesExistingRepo ? (
-            <button type="button" className="btn btn-primary" disabled={!canFinalize} onClick={() => void finalize("pull")}>
-              {finalizing ? "Finishing…" : "Finish & review"}
-            </button>
-          ) : selectedStorage ? (
-            <button type="button" className="btn btn-primary" disabled={!canFinalize} onClick={() => void finalize("open")}>
-              {finalizing ? "Finishing…" : "Finish"}
-            </button>
-          ) : (
-            <button type="button" className="btn btn-primary" disabled={!canFinalize} onClick={() => void finalize("open")}>
-              {finalizing ? "Finishing…" : "Finish locally"}
-            </button>
-          )}
+          <button type="button" className="btn btn-primary" disabled={!canFinalize} onClick={() => void finalize()}>
+            {finalizing ? "Finishing…" : selectedStorage ? "Finish" : "Finish locally"}
+          </button>
         </div>
       </footer>
     </section>

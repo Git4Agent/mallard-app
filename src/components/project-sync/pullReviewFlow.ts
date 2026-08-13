@@ -1,6 +1,5 @@
 import type {
   BundleReadiness,
-  ConversationResolutionSelection,
   ProjectBinding,
   RestorePlan,
   RestoreResult,
@@ -33,14 +32,12 @@ export type PullApplyPhase = "idle" | "restoring" | "verifying" | "complete";
 export interface PullReviewSelection {
   resourceIds: string[];
   restoreActionIds: string[];
-  conversationResolutions: ConversationResolutionSelection[];
 }
 
 export interface PullReviewApplyApi {
   applyRestore: (
     planId: string,
     actionIds: string[],
-    conversationResolutions: ConversationResolutionSelection[],
   ) => Promise<RestoreResult>;
   getRestoreReadiness: (restorePlanId: string) => Promise<BundleReadiness>;
 }
@@ -54,18 +51,17 @@ export interface PullReviewApplyResult {
 }
 
 /**
- * A post-checkpoint replan can contain only informational conversation rows
- * (`NoOp` for the restored original and `KeepLocal` for its new fork). In that
- * case there is no second user decision to collect, but the backend still
- * needs one empty restore apply to advance the reviewed recipe base.
+ * Informational rows need no approval, but blocked rows still need a visible
+ * review. Metadata adoption is a real local mutation and must be selected.
  */
 export function hasPendingRestoreMutations(plan: RestorePlan): boolean {
   if (plan.actions.length > 0) return true;
   return plan.conversation_actions.some((action) => (
-    action.action === "fast_forward_local"
-    || action.action === "resolve_divergence"
+    action.action === "adopt_cloud_metadata"
+    || action.action === "materialize_cloud"
+    || action.action === "keep_both"
     || action.action === "create_local"
-    || action.action === "replace_local"
+    || action.action === "blocked"
   ));
 }
 
@@ -84,26 +80,6 @@ export function assertPullPlansAligned(
   ]);
   if (selection.restoreActionIds.some((actionId) => !restoreIds.has(actionId))) {
     throw new Error("The selected restore actions no longer belong to this Pull review.");
-  }
-  const selectedDivergences = new Set(
-    (restorePlan.conversation_actions ?? [])
-      .filter((action) => (
-        action.action === "resolve_divergence"
-        && selection.restoreActionIds.includes(action.action_id)
-      ))
-      .map((action) => action.action_id),
-  );
-  const resolutionIds = new Set<string>();
-  for (const selectionEntry of selection.conversationResolutions) {
-    if (
-      !selectedDivergences.has(selectionEntry.action_id)
-      || !resolutionIds.add(selectionEntry.action_id)
-    ) {
-      throw new Error("The selected conversation resolution no longer belongs to this Pull review.");
-    }
-  }
-  if (resolutionIds.size !== selectedDivergences.size) {
-    throw new Error("Choose one resolution for every selected conversation conflict.");
   }
 }
 
@@ -133,7 +109,6 @@ export async function applyPullReview(
     restoreResult = await api.applyRestore(
       restorePlan.plan_id,
       selection.restoreActionIds,
-      selection.conversationResolutions,
     );
   } catch (reason) {
     executionError = `Restore failed: ${errorMessage(reason)}`;

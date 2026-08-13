@@ -1,31 +1,19 @@
 use super::harness::{
-    assert_manifest_consistent, chain, codex, codex_scope, sha256, PublishedFixture, ThreadSpec,
-    VariantWorld,
+    assert_manifest_consistent, chain, codex, codex_scope, ThreadSpec, VariantWorld,
 };
-use super::recovery::{install_scope, InstalledScope};
+use super::recovery::install_scope;
 use crate::project_sync::commands::ThreadSyncState;
 use crate::project_sync::conversation_codec::{
-    analyze_codex_transcript, rewrite_codex_transcript, CodecLineage, CODEX_LINEAGE_CODEC_KEY,
-};
-use crate::project_sync::conversation_materialization::{
-    apply_conversation_cloud_publication, apply_conversation_materialization,
-    ConversationCloudPublication, ConversationMaterializationRequest, ConversationTargetPayload,
-    NoConversationFailpoints,
+    analyze_codex_transcript, rewrite_codex_transcript, CODEX_LINEAGE_CODEC_KEY,
 };
 use crate::project_sync::domain::{
-    ConversationCloudAnchor, ConversationFileRole, ConversationMaterializationState,
-    ConversationOperationId, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationRelation, ConversationSyncOperation, ConversationSyncOperationKind,
-    ConversationSyncPhase, LocalConversationBinding, PlanId, SessionPresentation,
-    TargetExpectation, ThreadId,
+    ConversationMaterializationState, ConversationPlanActionType, LocalConversationBinding,
+    SessionPresentation, TailClassification, ThreadId,
 };
-use crate::project_sync::persistence::LocalStateRepository;
 use crate::project_sync::provider_capture::{
     CapturedConversation, CapturedFile, CapturedResources,
 };
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
 
 #[test]
 fn current_schema_true_noop_does_not_publish_or_change_provenance() {
@@ -463,28 +451,60 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
         10,
     );
     t2.forked_from = Some(t1_id.clone());
-    let published = world.publish(
-        &[t1, t2.clone()],
+    let t3_id = ThreadId::parse("thread-v3").unwrap();
+    let mut t3 = ThreadSpec::new(
+        t3_id.as_str(),
+        "shared-source-thread",
+        chain(
+            "shared-source-thread",
+            &[
+                ("m-a", "base"),
+                ("m-b", "answer"),
+                ("m-c3", "cloud sibling"),
+            ],
+        ),
+        world.origin(&world.repo_b, "replica-b"),
+        10,
+    );
+    t3.forked_from = Some(t1_id.clone());
+    world.publish(
+        &[t1, t2.clone(), t3],
         world.origin(&world.repo_a, "replica-a"),
         10,
     );
 
-    let local_transcript = append_message(&t2.transcript, "m-d2", "continued here");
+    // The bound local copy lives in a real rollout under its own alias and
+    // has advanced past the published branch.
+    let rebound = rewrite_codex_transcript(
+        &t2.transcript,
+        "shared-source-thread",
+        "local-v2",
+        "/tmp/project",
+        &scope.project_root.to_string_lossy(),
+    )
+    .unwrap();
+    let local_transcript = append_message(&rebound, "m-d2", "continued here");
     let local_analysis = analyze_codex_transcript(&local_transcript);
-    let (head_message_id, lineage_digest, semantic_digest, record_count) =
-        match &local_analysis.lineage {
-            CodecLineage::Complete {
-                chain,
-                lineage_digest,
-                semantic_digest,
-            } => (
-                chain.last().unwrap().message_id.clone(),
-                lineage_digest.clone(),
-                semantic_digest.clone(),
-                local_analysis.record_count,
-            ),
-            other => panic!("local comparison fixture is not resumable: {other:?}"),
-        };
+    let record_count = local_analysis.record_count;
+    let sessions = scope.provider_root.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let local_path = sessions.join("rollout-1-local-v2.jsonl");
+    fs::write(&local_path, &local_transcript).unwrap();
+    // The third thread's bound local copy diverges from its published chain
+    // at the branch tip: it carries m-c2 where the cloud recorded m-c3.
+    let diverged_rebound = rewrite_codex_transcript(
+        &t2.transcript,
+        "shared-source-thread",
+        "local-v3",
+        "/tmp/project",
+        &scope.project_root.to_string_lossy(),
+    )
+    .unwrap();
+    let diverged_transcript = append_message(&diverged_rebound, "m-d3", "continued elsewhere");
+    let diverged_analysis = analyze_codex_transcript(&diverged_transcript);
+    let diverged_record_count = diverged_analysis.record_count;
+    let diverged_path = sessions.join("rollout-1-local-v3.jsonl");
+    fs::write(&diverged_path, &diverged_transcript).unwrap();
     world
         .repo_fresh
         .mutate_conversation_bindings(|document| {
@@ -495,15 +515,23 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
                 provider_profile_id: scope.profile_id.clone(),
                 thread_id: t2_id.clone(),
                 forked_from: None,
-                fork_stamp: None,
+                root_tail_layout: Some(whole_thread_layout()),
                 provider_thread_id: Some("local-v2".to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
-                last_observed_file_sha256: Some(sha256(&local_transcript)),
-                last_observed_head_message_id: Some(head_message_id.to_string()),
-                last_observed_lineage_digest: Some(lineage_digest.clone()),
-                last_observed_semantic_digest: Some(semantic_digest.clone()),
-                source_revision: Some(published.snapshot.head.revision),
-                source_manifest_sha256: Some(published.snapshot.head.manifest_sha256.clone()),
+                revision: 0,
+                created_at: 10,
+                updated_at: 20,
+            });
+            document.bindings.push(LocalConversationBinding {
+                host_id: scope.host_id.clone(),
+                replica_id: scope.replica_id.clone(),
+                local_project_id: scope.project_id.clone(),
+                provider_profile_id: scope.profile_id.clone(),
+                thread_id: t3_id.clone(),
+                forked_from: None,
+                root_tail_layout: Some(whole_thread_layout()),
+                provider_thread_id: Some("local-v3".to_string()),
+                materialization_state: ConversationMaterializationState::Resumable,
                 revision: 0,
                 created_at: 10,
                 updated_at: 20,
@@ -521,9 +549,9 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
             provider: codex(),
             lineage_codec: CODEX_LINEAGE_CODEC_KEY.to_string(),
             source_thread_id: Some("local-v2".to_string()),
-            source_cwd: Some(scope.provider_root.to_string_lossy().into_owned()),
+            source_cwd: Some(scope.project_root.to_string_lossy().into_owned()),
             transcript_logical_path: transcript_path.clone(),
-            source_physical_path: None,
+            source_physical_path: Some(local_path.clone()),
             sidecar_files: Vec::new(),
             record_count,
             lineage: local_analysis.lineage,
@@ -540,6 +568,33 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
             mode: 0o600,
         },
     );
+    let diverged_resource_id = "codex:session:local-v3".to_string();
+    let diverged_transcript_path = "state/codex/sessions/local-v3.jsonl".to_string();
+    captured.conversations.insert(
+        diverged_resource_id.clone(),
+        CapturedConversation {
+            provider: codex(),
+            lineage_codec: CODEX_LINEAGE_CODEC_KEY.to_string(),
+            source_thread_id: Some("local-v3".to_string()),
+            source_cwd: Some(scope.project_root.to_string_lossy().into_owned()),
+            transcript_logical_path: diverged_transcript_path.clone(),
+            source_physical_path: Some(diverged_path.clone()),
+            sidecar_files: Vec::new(),
+            record_count: diverged_record_count,
+            lineage: diverged_analysis.lineage,
+            presentation: SessionPresentation::default(),
+        },
+    );
+    captured.files.insert(
+        diverged_transcript_path.clone(),
+        CapturedFile {
+            logical_path: diverged_transcript_path,
+            resource_id: diverged_resource_id,
+            bytes: diverged_transcript,
+            source_mtime: 20,
+            mode: 0o600,
+        },
+    );
     let machine = world.repo_fresh.load_bindings().unwrap();
     let binding = machine.active_for(&scope.project_id).unwrap();
     let engine = world.engine();
@@ -554,14 +609,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     )
     .unwrap();
 
-    assert_eq!(entries.len(), 2);
-    assert_eq!(
-        entries
-            .iter()
-            .map(|entry| entry.display_name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Thread test conversation", "Thread test conversation"]
-    );
+    assert_eq!(entries.len(), 3);
     let origin_thread = entries
         .iter()
         .find(|entry| entry.cloud_thread_id.as_ref() == Some(&t1_id))
@@ -571,7 +619,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     assert_eq!(origin_thread.state, ThreadSyncState::StorageOnly);
     assert_eq!(
         origin_thread.relation,
-        Some(ConversationRelation::LocalMissing)
+        Some(TailClassification::MissingLocal)
     );
     assert_eq!(
         origin_thread.pull_decision.action,
@@ -579,9 +627,12 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     );
     assert!(origin_thread.provider_thread_id.is_none());
     assert!(origin_thread.origin_label.is_some());
-    assert!(!origin_thread.pull_decision.requires_explicit_approval);
     assert!(origin_thread.pull_decision.selectable);
 
+    // A bound thread with no accepted pin whose reviewed cloud tail refolds
+    // exactly as a prefix of the local chain re-establishes acceptance
+    // evidence at review: the local advance is proven, so Push publishes and
+    // Pull reports eligibility instead of holding a provable pair hostage.
     let bound = entries
         .iter()
         .find(|entry| entry.cloud_thread_id.as_ref() == Some(&t2_id))
@@ -592,144 +643,134 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
         "fork provenance is surfaced as a hint, never used for matching",
     );
     assert!(bound.local_present);
-    assert_eq!(bound.state, ThreadSyncState::LocalAhead);
-    assert_eq!(
-        bound.relation,
-        Some(ConversationRelation::CloudPrefixOfLocal)
-    );
+    assert_eq!(bound.relation, Some(TailClassification::LocalOutstanding));
     assert_eq!(
         bound.push_decision.action,
-        ConversationPlanActionType::FastForwardCloud
+        ConversationPlanActionType::Publish
+    );
+    assert_eq!(
+        bound.pull_decision.action,
+        ConversationPlanActionType::ReportPushEligible
     );
     assert_eq!(bound.provider_thread_id.as_deref(), Some("local-v2"));
-    assert!(bound.origin_label.is_some());
     assert_ne!(origin_thread.thread_id, bound.thread_id);
+
+    // A bound pair whose cloud value fails to refold against the local chain
+    // never bootstraps by guessing from titles, forks, or graph shape: it is
+    // Unknown and blocked both ways until a Pull resolves it explicitly.
+    let diverged = entries
+        .iter()
+        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&t3_id))
+        .unwrap();
+    assert!(diverged.local_present);
+    assert_eq!(diverged.relation, Some(TailClassification::Unknown));
+    assert_eq!(
+        diverged.push_decision.action,
+        ConversationPlanActionType::Blocked
+    );
+    assert_eq!(
+        diverged.pull_decision.action,
+        ConversationPlanActionType::Blocked
+    );
+    assert_eq!(diverged.provider_thread_id.as_deref(), Some("local-v3"));
 }
 
-#[test]
-fn current_schema_comparison_recovers_one_unbound_compatible_ancestor_without_provider_id_matching()
-{
-    let world = VariantWorld::new();
-    let scope = install_scope(
-        &world.repo_fresh,
-        &world.bundle_id,
-        "comparison-recovery",
-        "replica-comparison-recovery",
+fn append_message(bytes: &[u8], id: &str, text: &str) -> Vec<u8> {
+    let analysis = analyze_codex_transcript(bytes);
+    let parent = analysis
+        .lineage
+        .chain()
+        .unwrap()
+        .last()
+        .unwrap()
+        .message_id
+        .as_str()
+        .to_string();
+    let mut output = bytes.to_vec();
+    output.extend_from_slice(
+        serde_json::to_string(&serde_json::json!({
+            "timestamp": "2026-07-22T00:01:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": id,
+                "parent_id": parent,
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}]
+            }
+        }))
+        .unwrap()
+        .as_bytes(),
     );
-    let thread_id = ThreadId::parse("thread-cloud").unwrap();
-    let cloud = ThreadSpec::new(
-        thread_id.as_str(),
-        "cloud-provider-id",
-        chain("cloud-provider-id", &[("m-a", "base"), ("m-b", "answer")]),
-        world.origin(&world.repo_a, "replica-a"),
-        10,
-    );
-    world.publish(
-        std::slice::from_ref(&cloud),
-        world.origin(&world.repo_a, "replica-a"),
-        10,
-    );
-
-    let rebound = rewrite_codex_transcript(
-        &cloud.transcript,
-        "cloud-provider-id",
-        "different-local-provider-id",
-        "/tmp/project",
-        &scope.project_root.to_string_lossy(),
-    )
-    .unwrap();
-    let local_transcript = append_message(&rebound, "m-c", "continued locally");
-    let analysis = analyze_codex_transcript(&local_transcript);
-    let record_count = analysis.record_count;
-    let resource_id = "codex:session:different-local-provider-id".to_string();
-    let transcript_path = "state/codex/sessions/different-local-provider-id.jsonl".to_string();
-    let mut captured = CapturedResources::default();
-    captured.conversations.insert(
-        resource_id.clone(),
-        CapturedConversation {
-            provider: codex(),
-            lineage_codec: CODEX_LINEAGE_CODEC_KEY.to_string(),
-            source_thread_id: Some("different-local-provider-id".to_string()),
-            source_cwd: Some(scope.project_root.to_string_lossy().into_owned()),
-            transcript_logical_path: transcript_path.clone(),
-            source_physical_path: None,
-            sidecar_files: Vec::new(),
-            record_count,
-            lineage: analysis.lineage,
-            presentation: SessionPresentation::default(),
-        },
-    );
-    captured.files.insert(
-        transcript_path.clone(),
-        CapturedFile {
-            logical_path: transcript_path,
-            resource_id,
-            bytes: local_transcript,
-            source_mtime: 20,
-            mode: 0o600,
-        },
-    );
-
-    let engine = world.engine();
-    let snapshot = engine.inspect(&world.bundle_id).unwrap();
-    let mut bytes = engine.byte_source(&snapshot, None, None);
-    let machine = world.repo_fresh.load_bindings().unwrap();
-    let binding = machine.active_for(&scope.project_id).unwrap();
-    let entries = crate::project_sync::commands::thread_entries(
-        &world.repo_fresh,
-        &snapshot,
-        &mut bytes,
-        &captured,
-        binding,
-    )
-    .unwrap();
-
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].cloud_thread_id.as_ref(), Some(&thread_id));
-    assert_eq!(
-        entries[0].provider_thread_id.as_deref(),
-        Some("different-local-provider-id")
-    );
-    assert_eq!(
-        entries[0].relation,
-        Some(ConversationRelation::CloudPrefixOfLocal)
-    );
-    assert_eq!(
-        entries[0].push_decision.action,
-        ConversationPlanActionType::FastForwardCloud
-    );
-    assert!(entries[0].push_decision.selectable);
+    output.push(b'\n');
+    output
 }
 
-#[allow(clippy::too_many_arguments)]
+fn digests(
+    analysis: &crate::project_sync::conversation_codec::CodexTranscriptAnalysis,
+) -> (&str, &str) {
+    match &analysis.lineage {
+        CodecLineage::Complete {
+            lineage_digest,
+            semantic_digest,
+            ..
+        } => (lineage_digest, semantic_digest),
+        CodecLineage::Unknown { reason } => panic!("unexpected unknown lineage: {reason:?}"),
+    }
+}
+
+use super::harness::{sha256, PublishedFixture};
+use super::recovery::InstalledScope;
+use crate::project_sync::conversation_codec::CodecLineage;
+use crate::project_sync::conversation_materialization::{
+    apply_conversation_cloud_publication, apply_conversation_materialization,
+    ConversationCloudPublication, ConversationMaterializationRequest, ConversationTargetPayload,
+    NoConversationFailpoints,
+};
+use crate::project_sync::domain::{
+    compute_portable_conversation_tail, ConversationCloudAnchor, ConversationFileRole,
+    ConversationMaterializationOperation, ConversationOperationId,
+    ConversationPublicationOperation, ConversationSyncOperation, ConversationSyncOperationKind,
+    PlanId, PortableConversationTail, PullJournalPhase, PushJournalPhase, RootTailLayout,
+    TailPartitionKind, TargetExpectation, PORTABLE_TAIL_CODEC_V1,
+};
+use crate::project_sync::persistence::LocalStateRepository;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+fn whole_thread_layout() -> RootTailLayout {
+    RootTailLayout {
+        codec: PORTABLE_TAIL_CODEC_V1.to_string(),
+        partition_kind: TailPartitionKind::WholeThread,
+        start_record_count: 0,
+    }
+}
+
+fn transcript_tail(transcript: &[u8]) -> PortableConversationTail {
+    let analysis = analyze_codex_transcript(transcript);
+    match analysis.lineage {
+        CodecLineage::Complete { chain, .. } => {
+            compute_portable_conversation_tail(TailPartitionKind::WholeThread, 0, &chain).unwrap()
+        }
+        other => panic!("fixture transcript is not resumable: {other:?}"),
+    }
+}
+
 fn install_active_branch(
     repository: &LocalStateRepository,
     scope: &InstalledScope,
     thread_id: &ThreadId,
     provider_thread_id: &str,
     transcript: &[u8],
-    source: &PublishedFixture,
+    _source: &PublishedFixture,
     updated_at: u64,
 ) -> PathBuf {
     let sessions = scope.provider_root.join("sessions");
     fs::create_dir_all(&sessions).unwrap();
-    let transcript_path = sessions.join(format!("{provider_thread_id}.jsonl"));
+    let transcript_path = sessions.join(format!("rollout-1-{provider_thread_id}.jsonl"));
     fs::write(&transcript_path, transcript).unwrap();
     let index_path = scope.provider_root.join("session_index.jsonl");
     fs::write(&index_path, merge_index_target(None, provider_thread_id)).unwrap();
-    let analysis = analyze_codex_transcript(transcript);
-    let (head_message_id, lineage_digest, semantic_digest) = match analysis.lineage {
-        CodecLineage::Complete {
-            chain,
-            lineage_digest,
-            semantic_digest,
-        } => (
-            chain.last().unwrap().message_id.clone(),
-            lineage_digest,
-            semantic_digest,
-        ),
-        other => panic!("active branch is not resumable: {other:?}"),
-    };
     repository
         .mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
@@ -739,15 +780,9 @@ fn install_active_branch(
                 provider_profile_id: scope.profile_id.clone(),
                 thread_id: thread_id.clone(),
                 forked_from: None,
-                fork_stamp: None,
+                root_tail_layout: Some(whole_thread_layout()),
                 provider_thread_id: Some(provider_thread_id.to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
-                last_observed_file_sha256: Some(sha256(transcript)),
-                last_observed_head_message_id: Some(head_message_id.to_string()),
-                last_observed_lineage_digest: Some(lineage_digest),
-                last_observed_semantic_digest: Some(semantic_digest),
-                source_revision: Some(source.snapshot.head.revision),
-                source_manifest_sha256: Some(source.snapshot.head.manifest_sha256.clone()),
                 revision: 0,
                 created_at: updated_at,
                 updated_at,
@@ -794,46 +829,58 @@ fn publish_bound_thread(
                 && binding.thread_id == *bound_thread_id
         })
         .unwrap();
-    let analysis = analyze_codex_transcript(local_transcript);
-    let (lineage_digest, semantic_digest) = match analysis.lineage {
-        CodecLineage::Complete {
-            lineage_digest,
-            semantic_digest,
-            ..
-        } => (lineage_digest, semantic_digest),
-        other => panic!("published local branch is not resumable: {other:?}"),
+    let tail_after = transcript_tail(local_transcript);
+    let tail_before = current
+        .manifest
+        .find_conversation(bound_thread_id)
+        .and_then(|(_, thread)| thread.portable_tail.clone());
+    let planned_relation = if tail_before.is_some() {
+        crate::project_sync::domain::TailClassification::LocalOutstanding
+    } else {
+        crate::project_sync::domain::TailClassification::MissingCloud
     };
+    let config_before = repository.load_config().unwrap();
+    let mut config_after = config_before.clone();
+    config_after.revision = config_after.revision.saturating_add(1);
     let operation = ConversationSyncOperation {
         operation_id: ConversationOperationId::parse(operation_id).unwrap(),
         plan_id: Some(PlanId::parse(format!("plan-{operation_id}")).unwrap()),
         plan_action_id: None,
-        direction: ConversationPlanDirection::Push,
-        phase: ConversationSyncPhase::Prepared,
-        cloud: Some(ConversationCloudAnchor {
+        cloud: ConversationCloudAnchor {
             storage_id: world.storage_id.clone(),
             bundle_id: world.bundle_id.clone(),
             revision: current.head.revision,
-            commit_id: current.head.commit_id,
-            manifest_sha256: current.head.manifest_sha256,
-        }),
+            commit_id: current.head.commit_id.clone(),
+            manifest_sha256: current.head.manifest_sha256.clone(),
+        },
         host_id: scope.host_id.clone(),
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
         provider: codex(),
         thread_id: bound_thread_id.clone(),
-        operation: ConversationSyncOperationKind::CloudPublication,
-        binding_forked_from: None,
+        operation: ConversationSyncOperationKind::CloudPublication(
+            ConversationPublicationOperation {
+                phase: PushJournalPhase::CandidateUploaded,
+                candidate_commit_id: current.head.commit_id,
+                candidate_manifest_sha256: current.head.manifest_sha256,
+                artifact_sha256: sha256(local_transcript),
+                tail_before,
+                tail_after,
+                planned_relation,
+                sync_config_before: config_before,
+                sync_config_after: config_after,
+                bindings_before: bindings.clone(),
+                bindings_after: bindings.clone(),
+            },
+        ),
         provider_thread_id: Some(provider_thread_id.to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
-        lineage_digest: Some(lineage_digest),
-        semantic_digest: Some(semantic_digest),
         expected_host_identity_revision: scope.host_identity_revision,
         expected_bindings_document_revision: bindings.revision,
         expected_binding_revision: Some(binding.revision),
         expected_profile_revision: 0,
         expected_project_binding_revision: 0,
-        expected_local_digest: Some(sha256(local_transcript)),
         targets: Vec::new(),
         created_at: updated_at,
         updated_at,
@@ -849,6 +896,8 @@ fn publish_bound_thread(
                     revision: published.snapshot.head.revision,
                     commit_id: published.snapshot.head.commit_id,
                     manifest_sha256: published.snapshot.head.manifest_sha256,
+                    manifest_size: published.snapshot.head.manifest_size,
+                    scope_pins: BTreeMap::new(),
                 })
         },
         || Ok(None),
@@ -885,60 +934,111 @@ fn materialize_thread(
     )
     .unwrap();
     let analysis = analyze_codex_transcript(&rewritten);
-    let (lineage_digest, semantic_digest) = match analysis.lineage {
+    let (lineage_digest, semantic_digest, accepted_tail) = match analysis.lineage {
         CodecLineage::Complete {
+            chain,
             lineage_digest,
             semantic_digest,
-            ..
-        } => (lineage_digest, semantic_digest),
+        } => (
+            lineage_digest,
+            semantic_digest,
+            compute_portable_conversation_tail(TailPartitionKind::WholeThread, 0, &chain).unwrap(),
+        ),
         other => panic!("incoming branch is not resumable: {other:?}"),
     };
     let sessions = scope.provider_root.join("sessions");
     fs::create_dir_all(&sessions).unwrap();
-    let transcript_path = sessions.join(format!("{destination_thread_id}.jsonl"));
+    let transcript_path = sessions.join(format!("rollout-1-{destination_thread_id}.jsonl"));
     let index_path = scope.provider_root.join("session_index.jsonl");
     let existing_index = fs::read(&index_path).ok();
     let index = merge_index_target(existing_index.as_deref(), destination_thread_id);
-    let bindings = repository.load_conversation_bindings().unwrap();
-    let existing_binding = bindings.bindings.iter().find(|binding| {
+    let bindings_before = repository.load_conversation_bindings().unwrap();
+    let mut bindings_after = bindings_before.clone();
+    let existing_binding = bindings_before.bindings.iter().find(|binding| {
         binding.host_id == scope.host_id
             && binding.replica_id == scope.replica_id
             && binding.local_project_id == scope.project_id
             && binding.provider_profile_id == scope.profile_id
             && binding.thread_id == *thread_id
     });
+    let planned_relation = if existing_binding.is_some() {
+        crate::project_sync::domain::TailClassification::CloudOutstanding
+    } else {
+        crate::project_sync::domain::TailClassification::MissingLocal
+    };
+    match bindings_after.bindings.iter_mut().find(|binding| {
+        binding.host_id == scope.host_id
+            && binding.replica_id == scope.replica_id
+            && binding.local_project_id == scope.project_id
+            && binding.provider_profile_id == scope.profile_id
+            && binding.thread_id == *thread_id
+    }) {
+        Some(row) => {
+            row.provider_thread_id = Some(destination_thread_id.to_string());
+            row.root_tail_layout = Some(whole_thread_layout());
+            row.materialization_state = ConversationMaterializationState::Resumable;
+            row.revision = row.revision.saturating_add(1);
+            row.updated_at = updated_at;
+        }
+        None => bindings_after.bindings.push(LocalConversationBinding {
+            host_id: scope.host_id.clone(),
+            replica_id: scope.replica_id.clone(),
+            local_project_id: scope.project_id.clone(),
+            provider_profile_id: scope.profile_id.clone(),
+            thread_id: thread_id.clone(),
+            forked_from: None,
+            root_tail_layout: Some(whole_thread_layout()),
+            provider_thread_id: Some(destination_thread_id.to_string()),
+            materialization_state: ConversationMaterializationState::Resumable,
+            revision: 0,
+            created_at: updated_at,
+            updated_at,
+        }),
+    }
+    bindings_after.revision = bindings_after.revision.saturating_add(1);
+    let bindings_document_revision = bindings_before.revision;
+    let existing_binding_revision = existing_binding.map(|binding| binding.revision);
+    let config_before = repository.load_config().unwrap();
+    let mut config_after = config_before.clone();
+    config_after.revision = config_after.revision.saturating_add(1);
     let operation = ConversationSyncOperation {
         operation_id: ConversationOperationId::parse(operation_id).unwrap(),
         plan_id: Some(PlanId::parse(format!("plan-{operation_id}")).unwrap()),
         plan_action_id: None,
-        direction: ConversationPlanDirection::Pull,
-        phase: ConversationSyncPhase::Prepared,
-        cloud: Some(ConversationCloudAnchor {
+        cloud: ConversationCloudAnchor {
             storage_id: world.storage_id.clone(),
             bundle_id: world.bundle_id.clone(),
             revision: snapshot.head.revision,
             commit_id: snapshot.head.commit_id.clone(),
             manifest_sha256: snapshot.head.manifest_sha256.clone(),
-        }),
+        },
         host_id: scope.host_id.clone(),
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
         provider: codex(),
         thread_id: thread_id.clone(),
-        operation: ConversationSyncOperationKind::ProviderMaterialization,
-        binding_forked_from: None,
+        operation: ConversationSyncOperationKind::ProviderMaterialization(
+            ConversationMaterializationOperation {
+                phase: PullJournalPhase::TargetStaged,
+                planned_relation,
+                accepted_tail_after: accepted_tail,
+                pinned_lineage_digest: lineage_digest,
+                pinned_semantic_digest: semantic_digest,
+                keep_both: None,
+                sync_config_before: config_before,
+                sync_config_after: config_after,
+                bindings_before,
+                bindings_after,
+            },
+        ),
         provider_thread_id: Some(destination_thread_id.to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
-        lineage_digest: Some(lineage_digest),
-        semantic_digest: Some(semantic_digest),
         expected_host_identity_revision: scope.host_identity_revision,
-        expected_bindings_document_revision: bindings.revision,
-        expected_binding_revision: existing_binding.map(|binding| binding.revision),
+        expected_bindings_document_revision: bindings_document_revision,
+        expected_binding_revision: existing_binding_revision,
         expected_profile_revision: 0,
         expected_project_binding_revision: 0,
-        expected_local_digest: existing_binding
-            .and_then(|binding| binding.last_observed_file_sha256.clone()),
         targets: Vec::new(),
         created_at: updated_at,
         updated_at,
@@ -1004,6 +1104,8 @@ fn target_expectation(path: &Path) -> TargetExpectation {
     }
 }
 
+use std::collections::BTreeSet;
+
 fn assert_local_branch_state(
     repository: &LocalStateRepository,
     scope: &InstalledScope,
@@ -1053,48 +1155,4 @@ fn assert_local_branch_state(
         index_ids,
         expected.values().cloned().collect::<BTreeSet<_>>()
     );
-}
-
-fn append_message(bytes: &[u8], id: &str, text: &str) -> Vec<u8> {
-    let analysis = analyze_codex_transcript(bytes);
-    let parent = analysis
-        .lineage
-        .chain()
-        .unwrap()
-        .last()
-        .unwrap()
-        .message_id
-        .as_str()
-        .to_string();
-    let mut output = bytes.to_vec();
-    output.extend_from_slice(
-        serde_json::to_string(&serde_json::json!({
-            "timestamp": "2026-07-22T00:01:00Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "id": id,
-                "parent_id": parent,
-                "role": "user",
-                "content": [{"type": "input_text", "text": text}]
-            }
-        }))
-        .unwrap()
-        .as_bytes(),
-    );
-    output.push(b'\n');
-    output
-}
-
-fn digests(
-    analysis: &crate::project_sync::conversation_codec::CodexTranscriptAnalysis,
-) -> (&str, &str) {
-    match &analysis.lineage {
-        CodecLineage::Complete {
-            lineage_digest,
-            semantic_digest,
-            ..
-        } => (lineage_digest, semantic_digest),
-        CodecLineage::Unknown { reason } => panic!("unexpected unknown lineage: {reason:?}"),
-    }
 }

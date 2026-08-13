@@ -282,6 +282,7 @@ impl ClaudeTimelineBuilder {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn observe_assistant(
         &mut self,
         message_id: String,

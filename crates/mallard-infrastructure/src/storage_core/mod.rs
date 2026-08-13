@@ -39,6 +39,21 @@ pub const HEAD_FILE: &str = "_head.json";
 pub const TAG_FILE: &str = "_tag.json";
 pub const MAX_STORAGE_MARKER_BYTES: u64 = 4 * 1024;
 pub(crate) const MAX_LIST_PAGE: usize = 10_000;
+const STORAGE_CLEAR_PAGE_SIZE: usize = 1_000;
+const MAX_STORAGE_CLEAR_OBJECTS: u64 = 1_000_000;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ManagedStorageClearResult {
+    pub repository_objects_deleted: u64,
+    pub library_objects_deleted: u64,
+}
+
+impl ManagedStorageClearResult {
+    pub fn objects_deleted(&self) -> u64 {
+        self.repository_objects_deleted
+            .saturating_add(self.library_objects_deleted)
+    }
+}
 
 /// A validated absolute store key inside one of the closed `.mallard/`
 /// namespaces: the storage marker, one repository bundle's objects, or one
@@ -102,6 +117,49 @@ impl ObjectPrefix {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Delete every Mallard repository and Library object while retaining the
+/// storage marker and every object outside Mallard's two managed namespaces.
+/// Repeated first-page deletion avoids cursor gaps as the key set shrinks.
+pub fn clear_managed_storage_data<S: ObjectStore + ?Sized>(
+    store: &S,
+) -> Result<ManagedStorageClearResult, String> {
+    ensure_storage_marker(store)?;
+    let repository_objects_deleted = clear_managed_prefix(store, REPOSITORY_PREFIX, 0)?;
+    let library_objects_deleted =
+        clear_managed_prefix(store, LIBRARY_PREFIX, repository_objects_deleted)?;
+    let result = ManagedStorageClearResult {
+        repository_objects_deleted,
+        library_objects_deleted,
+    };
+    Ok(result)
+}
+
+fn clear_managed_prefix<S: ObjectStore + ?Sized>(
+    store: &S,
+    raw_prefix: &str,
+    already_deleted: u64,
+) -> Result<u64, String> {
+    let prefix = ObjectPrefix::parse(raw_prefix)?;
+    let mut deleted = 0_u64;
+    loop {
+        let page = store.list(&prefix, None, STORAGE_CLEAR_PAGE_SIZE)?;
+        if page.keys.is_empty() {
+            break;
+        }
+        for key in page.keys {
+            if already_deleted.saturating_add(deleted) >= MAX_STORAGE_CLEAR_OBJECTS {
+                return Err(format!(
+                    "storage clear exceeds the {}-object safety limit",
+                    MAX_STORAGE_CLEAR_OBJECTS
+                ));
+            }
+            store.delete(&key)?;
+            deleted = deleted.saturating_add(1);
+        }
+    }
+    Ok(deleted)
 }
 
 pub(crate) fn validate_store_path(value: &str, minimum_components: usize) -> Result<(), String> {
@@ -223,72 +281,6 @@ pub(crate) fn parse_json_reader<T: for<'de> Deserialize<'de>>(
         .map_err(|error| format!("parse {}: {}", label, error))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn bundle_id(number: u64) -> BundleId {
-        BundleId::parse(format!("{:032x}", number)).unwrap()
-    }
-
-    #[test]
-    fn object_keys_outside_the_repository_namespace_are_rejected() {
-        assert!(
-            ObjectKey::parse("unsupported/bundles/0123456789abcdef0123456789abcdef/_tag.json")
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn content_addressed_object_keys_stay_inside_the_allowlist() {
-        let id = bundle_id(7);
-        let digest = "a".repeat(64);
-        assert!(repository_object_key(&id, &format!("_objects/{}", digest)).is_ok());
-        assert!(repository_object_key(&id, "_objects/../escape").is_err());
-        assert!(repository_object_key(&id, "_payloads/unknown-namespace").is_err());
-    }
-
-    #[test]
-    fn repository_and_library_constructors_are_isolated() {
-        let id = bundle_id(9);
-        let library_id = "library-0123456789abcdef0123456789abcdef";
-        assert!(repository_object_key(&id, "library/_head.json").is_err());
-        assert!(
-            library_object_key(library_id, &format!("repositories/{}/_head.json", id)).is_err()
-        );
-        let repository = repository_object_key(&id, HEAD_FILE).unwrap();
-        assert!(repository.as_str().starts_with(REPOSITORY_PREFIX));
-        let library = library_object_key(library_id, HEAD_FILE).unwrap();
-        assert!(library.as_str().starts_with(LIBRARY_PREFIX));
-        assert!(!library.as_str().starts_with(REPOSITORY_PREFIX));
-    }
-
-    #[test]
-    fn library_keys_are_per_resource_and_legacy_catalog_listing_stays_closed() {
-        let repository_id = "library-0123456789abcdef0123456789abcdef";
-        assert_eq!(
-            library_object_key(repository_id, HEAD_FILE)
-                .unwrap()
-                .as_str(),
-            ".mallard/v1/library/library-0123456789abcdef0123456789abcdef/_head.json"
-        );
-        assert!(library_object_key(repository_id, TAG_FILE).is_ok());
-        assert!(library_object_key(repository_id, "_objects/../escape").is_err());
-        assert!(library_object_key("catalog-0123456789abcdef0123456789abcdef", HEAD_FILE).is_err());
-        assert!(ObjectPrefix::parse(LIBRARY_PREFIX).is_ok());
-        assert!(ObjectPrefix::parse(".mallard/v1/catalog").is_err());
-    }
-
-    #[test]
-    fn legacy_catalog_keys_do_not_parse() {
-        assert!(ObjectKey::parse(".mallard/v1/catalog/_head.json").is_err());
-        // The repository namespace keeps its five-component floor.
-        assert!(ObjectKey::parse(".mallard/v1/repositories/deadbeef").is_err());
-        // Nothing outside the two versioned namespaces parses.
-        assert!(ObjectKey::parse(".mallard/v1/other/_head.json").is_err());
-    }
-}
-
 /// Runtime dispatch between the two configured store kinds. Both storage
 /// protocols build their engines over this from one [`StorageConfig`].
 pub enum ConfiguredObjectStore {
@@ -367,6 +359,13 @@ impl ObjectStore for ConfiguredObjectStore {
         }
     }
 
+    fn delete(&self, key: &ObjectKey) -> Result<(), String> {
+        match self {
+            Self::Local(store) => store.delete(key),
+            Self::S3(store) => store.delete(key),
+        }
+    }
+
     fn list(
         &self,
         prefix: &ObjectPrefix,
@@ -384,5 +383,101 @@ impl ObjectStore for ConfiguredObjectStore {
             Self::Local(store) => store.local_root(),
             Self::S3(store) => store.local_root(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn bundle_id(number: u64) -> BundleId {
+        BundleId::parse(format!("{:032x}", number)).unwrap()
+    }
+
+    #[test]
+    fn object_keys_outside_the_repository_namespace_are_rejected() {
+        assert!(
+            ObjectKey::parse("unsupported/bundles/0123456789abcdef0123456789abcdef/_tag.json")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn content_addressed_object_keys_stay_inside_the_allowlist() {
+        let id = bundle_id(7);
+        let digest = "a".repeat(64);
+        assert!(repository_object_key(&id, &format!("_objects/{}", digest)).is_ok());
+        assert!(repository_object_key(&id, "_objects/../escape").is_err());
+        assert!(repository_object_key(&id, "_payloads/unknown-namespace").is_err());
+    }
+
+    #[test]
+    fn repository_and_library_constructors_are_isolated() {
+        let id = bundle_id(9);
+        let library_id = "library-0123456789abcdef0123456789abcdef";
+        assert!(repository_object_key(&id, "library/_head.json").is_err());
+        assert!(
+            library_object_key(library_id, &format!("repositories/{}/_head.json", id)).is_err()
+        );
+        let repository = repository_object_key(&id, HEAD_FILE).unwrap();
+        assert!(repository.as_str().starts_with(REPOSITORY_PREFIX));
+        let library = library_object_key(library_id, HEAD_FILE).unwrap();
+        assert!(library.as_str().starts_with(LIBRARY_PREFIX));
+        assert!(!library.as_str().starts_with(REPOSITORY_PREFIX));
+    }
+
+    #[test]
+    fn library_keys_are_per_resource_and_legacy_catalog_listing_stays_closed() {
+        let repository_id = "library-0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            library_object_key(repository_id, HEAD_FILE)
+                .unwrap()
+                .as_str(),
+            ".mallard/v1/library/library-0123456789abcdef0123456789abcdef/_head.json"
+        );
+        assert!(library_object_key(repository_id, TAG_FILE).is_ok());
+        assert!(library_object_key(repository_id, "_objects/../escape").is_err());
+        assert!(library_object_key("catalog-0123456789abcdef0123456789abcdef", HEAD_FILE).is_err());
+        assert!(ObjectPrefix::parse(LIBRARY_PREFIX).is_ok());
+        assert!(ObjectPrefix::parse(".mallard/v1/catalog").is_err());
+    }
+
+    #[test]
+    fn legacy_catalog_keys_do_not_parse() {
+        assert!(ObjectKey::parse(".mallard/v1/catalog/_head.json").is_err());
+        // The repository namespace keeps its five-component floor.
+        assert!(ObjectKey::parse(".mallard/v1/repositories/deadbeef").is_err());
+        // Nothing outside the two versioned namespaces parses.
+        assert!(ObjectKey::parse(".mallard/v1/other/_head.json").is_err());
+    }
+
+    #[test]
+    fn clear_managed_data_deletes_repository_and_library_objects_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("storage");
+        let store = LocalObjectStore::open(&root).unwrap();
+        let repository = repository_object_key(&bundle_id(11), HEAD_FILE).unwrap();
+        let library =
+            library_object_key("library-0123456789abcdef0123456789abcdef", HEAD_FILE).unwrap();
+        store.put_immutable(&repository, b"repository").unwrap();
+        store.put_immutable(&library, b"library").unwrap();
+        ensure_storage_marker(&store).unwrap();
+        fs::write(root.join("user-file.txt"), b"keep").unwrap();
+
+        let result = clear_managed_storage_data(&store).unwrap();
+
+        assert_eq!(result.repository_objects_deleted, 1);
+        assert_eq!(result.library_objects_deleted, 1);
+        assert!(store.get_metadata(&repository, 64).unwrap().is_none());
+        assert!(store.get_metadata(&library, 64).unwrap().is_none());
+        assert!(root.join(STORAGE_MARKER_KEY).is_file());
+        assert_eq!(fs::read(root.join("user-file.txt")).unwrap(), b"keep");
+        assert_eq!(
+            clear_managed_storage_data(&store)
+                .unwrap()
+                .objects_deleted(),
+            0
+        );
     }
 }

@@ -18,6 +18,8 @@ import SyncReviewTabs from "../sync-review/SyncReviewTabs";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import { type SyncReviewStep, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { categoryFor } from "./model";
+import ThreadStatusIcon from "./ThreadStatusIcon";
+import { isIrrecoverableSyncError } from "./syncError";
 
 const EMPTY_STATUSES = new Map<string, string>();
 const STORAGE_BLOCKING_STATES = new Set(["storage_only", "storage_ahead", "diverged"]);
@@ -62,6 +64,7 @@ interface Props {
   onPush: () => void;
   onPull?: () => void;
   onUnlinkStorage?: () => void;
+  onResetMetadata?: () => void;
 }
 
 function countSelected(items: ProjectResourceDescriptor[], selected: ReadonlySet<string>): number {
@@ -150,6 +153,7 @@ export function pushReviewPullHolds(
 ): ThreadSyncEntry[] {
   return (threadComparison?.entries ?? []).filter((entry) => (
     entry.push_decision?.action === "require_pull"
+    || entry.push_decision?.action === "require_pull_metadata"
   ));
 }
 
@@ -272,7 +276,6 @@ export function recommendedPushSelection(
     if (!comparison) continue;
     if (
       comparison.push_decision.selectable
-      && comparison.push_decision.selected_by_default
       && selectableIds.has(resource.resource_id)
     ) {
       recommended.add(resource.resource_id);
@@ -373,6 +376,7 @@ export default function PushResourceWorkspace({
   onPush,
   onPull,
   onUnlinkStorage,
+  onResetMetadata,
 }: Props) {
   const steps = useMemo(() => syncReviewSteps(showProjectFiles), [showProjectFiles]);
   const [uncontrolledActiveStep, setUncontrolledActiveStep] = useState<SyncReviewStep>(initialStep);
@@ -586,7 +590,7 @@ export default function PushResourceWorkspace({
                footer, beside the button they block. */
             <div className="sync-review-banners">
               <div className="sync-callout sync-sync-review-pull-holds" role="status">
-                <Icon name="git-compare-arrows" size={15} />
+                <ThreadStatusIcon status="divergent" size={16} />
                 <span>
                   <strong>
                     {`${heldConversationCount} conversation${heldConversationCount === 1 ? "" : "s"} held for Pull`}
@@ -672,7 +676,18 @@ export default function PushResourceWorkspace({
 
         </div>
 
-        {error && <div className="sync-callout error sync-pull-error"><Icon name="alert-triangle" size={15} /> {error}</div>}
+        {error && (
+          <div className="sync-callout error sync-pull-error" role="alert">
+            <Icon name="alert-triangle" size={15} />
+            <span>{error}</span>
+            {isIrrecoverableSyncError(error) && onResetMetadata && (
+              <button type="button" className="btn btn-ghost danger" onClick={onResetMetadata} disabled={busy}>
+                <Icon name="trash" size={13} />
+                Reset local sync state
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
@@ -686,7 +701,9 @@ export default function PushResourceWorkspace({
           disabled={busy || pushDisabledReason !== null}
           title={pushDisabledReason ?? undefined}
         >
-          <Icon name={busy ? "refresh" : "upload"} size={16} className={busy ? "icon-spin" : undefined} />
+          {busy
+            ? <Icon name="refresh" size={16} className="icon-spin" />
+            : <ThreadStatusIcon status="local-outstanding" size={16} />}
           {busy
             ? (fetchProgress && fetchProgress.phase === "push"
               ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>

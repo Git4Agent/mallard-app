@@ -10,7 +10,6 @@ import {
 const ACTION_ICONS: Record<SessionActionDescriptor["kind"], IconName> = {
   open_in_app: "play",
   open_in_terminal: "terminal",
-  fork_session: "git-fork",
 };
 
 interface Props {

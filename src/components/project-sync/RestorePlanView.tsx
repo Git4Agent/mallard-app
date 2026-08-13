@@ -1,8 +1,6 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type {
   BundleReadiness,
-  ConversationPlanAction,
-  ConversationResolutionSelection,
   LocalProjectSummary,
   ProjectBinding,
   RestorePlan,
@@ -15,6 +13,8 @@ import SyncReviewTabs from "../sync-review/SyncReviewTabs";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import { type SyncReviewStep, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { providerLabel } from "./model";
+import ThreadStatusIcon from "./ThreadStatusIcon";
+import { isIrrecoverableSyncError } from "./syncError";
 import type { PullApplyPhase, PullReviewSelection } from "./pullReviewFlow";
 import {
   buildPullReviewItems,
@@ -52,6 +52,7 @@ interface Props {
   onApply: (selection: PullReviewSelection) => void;
   onBack: () => void;
   onUnlinkStorage?: () => void;
+  onResetMetadata?: () => void;
   /**
    * Mirrors the footer primary out to the host, so the storage-card Pull
    * button can apply the review — including the empty, acknowledge-only
@@ -92,7 +93,6 @@ function ItemList({
   phase,
   disabled,
   onToggle,
-  rowResolution,
 }: {
   items: PullReviewItem[];
   selected: ReadonlySet<string>;
@@ -102,7 +102,6 @@ function ItemList({
   phase: PullApplyPhase;
   disabled: boolean;
   onToggle: (resourceId: string) => void;
-  rowResolution?: (resourceId: string) => ReactNode;
 }) {
   const [expandedItems, setExpandedItems] = useState<Set<string>>(() => new Set());
   const toggleDetails = (resourceId: string) => setExpandedItems((current) => {
@@ -126,14 +125,12 @@ function ItemList({
         const expanded = expandedItems.has(item.resourceId);
         const activeRestore = phase === "restoring" && checked && restoreActionIds(item).some((id) => !completedActionIds.has(id));
         const conversationAction = item.conversationActions[0]?.action;
-        const status: string | null = conversationAction === "no_op"
-          ? "Already up to date"
-          : conversationAction === "require_pull"
-            ? "Pull required"
-            : conversationAction === "blocked"
+        const status: string | null = conversationAction === "adopt_cloud_metadata"
+          ? checked ? "Mark synced" : "Not selected"
+          : conversationAction === "blocked"
               ? "Can't sync"
-              : conversationAction === "store_only" && !selectable
-                ? "Backup only"
+              : conversationAction === "keep_both" && checked
+                ? "Keep both"
                 : keepLocalConversation
           ? "Keep local"
           : manualResolution
@@ -188,7 +185,6 @@ function ItemList({
               </span>
               {status && <span className={`sync-pull-item-status ${status.toLowerCase().replace(/\s+/g, "-")}`}>{status}</span>}
             </button>
-            {rowResolution?.(item.resourceId)}
             {expanded && (
               <div className="sync-pull-item-detail">
                 <p>{item.detail}</p>
@@ -231,23 +227,10 @@ export default function RestorePlanView({
   onApply,
   onBack,
   onUnlinkStorage,
+  onResetMetadata,
   onPrimaryChange,
 }: Props) {
   const items = useMemo(() => buildPullReviewItems(plan), [plan]);
-  const divergenceActions = useMemo(
-    () => (plan.conversation_actions ?? []).filter((action) => action.action === "resolve_divergence"),
-    [plan],
-  );
-  const [conversationResolutions, setConversationResolutions] = useState<
-    Map<string, ConversationResolutionSelection>
-  >(() => new Map(divergenceActions.map((action) => [
-    action.action_id,
-    {
-      action_id: action.action_id,
-      resolution: action.divergence?.recommended_resolution ?? "preserve_local_with_native_fork",
-      destructive_approved: false,
-    },
-  ])));
   const conversationItems = useMemo(
     () => items.filter((item) => itemKindLabel(item) === "Conversation"),
     [items],
@@ -271,17 +254,6 @@ export default function RestorePlanView({
   ));
 
   useEffect(() => {
-    setConversationResolutions((current) => new Map(divergenceActions.map((action) => [
-      action.action_id,
-      current.get(action.action_id) ?? {
-        action_id: action.action_id,
-        resolution: action.divergence?.recommended_resolution ?? "preserve_local_with_native_fork",
-        destructive_approved: false,
-      },
-    ])));
-  }, [divergenceActions]);
-
-  useEffect(() => {
     const currentIds = new Set(items.map((item) => item.resourceId));
     setSelected((current) => {
       const next = new Set([...current].filter((resourceId) => (
@@ -302,29 +274,8 @@ export default function RestorePlanView({
       selected,
       completedActionIds,
       completedResourceIds,
-      conversationResolutions,
     ),
-    [items, selected, completedActionIds, completedResourceIds, conversationResolutions],
-  );
-  const selectedRestoreActionIds = new Set(selection.restoreActionIds);
-  const preservedDivergenceActionIds = useMemo(() => new Set(
-    divergenceActions
-      .filter((action) => action.divergence?.local_branch_preserved)
-      .map((action) => action.action_id),
-  ), [divergenceActions]);
-  const hasUnconfirmedCloudOnly = selection.conversationResolutions.some((resolution) => (
-    resolution.resolution === "use_cloud_only"
-    && !resolution.destructive_approved
-    && !preservedDivergenceActionIds.has(resolution.action_id)
-  ));
-  // Activity-page fork checkpoints stay on the Activity page; the Pull
-  // review drives only the checkpoints its own plan created.
-  const forkCheckpoints = (restoreResult?.fork_checkpoints ?? []).filter(
-    (checkpoint) => checkpoint.origin !== "manual",
-  );
-  const forkCheckpoint = forkCheckpoints[0] ?? null;
-  const forkCheckpointActive = Boolean(
-    forkCheckpoint && restoreResult?.status !== "complete",
+    [items, selected, completedActionIds, completedResourceIds],
   );
   const hasResult = phase === "complete" || restoreResult !== null;
   const approvalItems = items.filter((item) => (
@@ -339,18 +290,6 @@ export default function RestorePlanView({
   const keptLocalConversationItems = items.filter((item) => (
     keepsLocalConversation(item) && !completedResourceIds.has(item.resourceId)
   ));
-
-  // A result's banners (checkpoint, error) land in the zone at the top of
-  // whichever step is open; scrolling it into view replaces the old forced
-  // jump to the deleted Review step. Applying itself shows no banner — the
-  // progress lives on the Pull buttons — so only a result scrolls. The
-  // checkpoint-resume flow mounts with a result, and that mount-time scroll
-  // is deliberate.
-  useEffect(() => {
-    if (hasResult) {
-      bannerZoneRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
-    }
-  }, [hasResult]);
 
   useEffect(() => {
     if (!reviewSteps.includes(activeStep)) setActiveStep("history");
@@ -372,9 +311,7 @@ export default function RestorePlanView({
     ? null
     : embeddedHistoryInUse && !reviewListReady
       ? "Loading storage changes…"
-      : hasUnconfirmedCloudOnly
-        ? "Confirm the discard above first"
-        : null;
+      : null;
 
   // The storage-card Pull button is the same control as the footer primary,
   // so it must run the same apply under the same gating — including the
@@ -454,91 +391,7 @@ export default function RestorePlanView({
     completedActionIds,
     completedResourceIds,
   );
-  const bannerZoneRef = useRef<HTMLDivElement | null>(null);
   const storageReplacedGate = !hasResult && plan.remote_continuity?.state === "replaced";
-  // The conflict choice renders on the conflicted row itself. Hidden while a
-  // fork checkpoint is parked — that decision is already made — and after the
-  // pull is fully applied.
-  const divergenceActionByResource = useMemo(() => {
-    const map = new Map<string, ConversationPlanAction>();
-    for (const item of items) {
-      const action = item.conversationActions.find((candidate) => candidate.action === "resolve_divergence");
-      if (action) map.set(item.resourceId, action);
-    }
-    return map;
-  }, [items]);
-  const rowResolution = (resourceId: string) => {
-    if (forkCheckpointActive || finalReady) return null;
-    const action = divergenceActionByResource.get(resourceId);
-    const divergencePlan = action?.divergence;
-    if (!action || !divergencePlan) return null;
-    const resolutionSelection = conversationResolutions.get(action.action_id) ?? {
-      action_id: action.action_id,
-      resolution: divergencePlan.recommended_resolution,
-      destructive_approved: false,
-    };
-    const rowSelected = selectedRestoreActionIds.has(action.action_id);
-    const controlsDisabled = busy || !rowSelected;
-    const preserved = divergencePlan.local_branch_preserved;
-    const setResolution = (resolution: ConversationResolutionSelection["resolution"]) => (
-      setConversationResolutions((current) => {
-        const next = new Map(current);
-        next.set(action.action_id, { action_id: action.action_id, resolution, destructive_approved: false });
-        return next;
-      })
-    );
-    return (
-      <>
-        <div className="sync-divergence-inline">
-          <Icon name="git-compare-arrows" size={12} />
-          <span className="sync-divergence-choice" role="radiogroup" aria-label="Conflict resolution">
-            <button
-              type="button"
-              role="radio"
-              aria-checked={resolutionSelection.resolution === "preserve_local_with_native_fork"}
-              className={resolutionSelection.resolution === "preserve_local_with_native_fork" ? "active" : ""}
-              disabled={controlsDisabled}
-              title={preserved
-                ? "Keep another copy of the local branch as a new Codex fork before restoring the cloud conversation"
-                : "The local branch becomes a Codex fork — nothing is lost"}
-              onClick={() => setResolution("preserve_local_with_native_fork")}
-            >
-              Fork and overwrite
-            </button>
-            <button
-              type="button"
-              role="radio"
-              aria-checked={resolutionSelection.resolution === "use_cloud_only"}
-              className={resolutionSelection.resolution === "use_cloud_only" ? "active" : ""}
-              disabled={controlsDisabled}
-              title={preserved
-                ? "The local branch is already preserved in a Codex fork; restore the cloud conversation"
-                : "Replaces the local branch"}
-              onClick={() => setResolution("use_cloud_only")}
-            >
-              Overwrite
-            </button>
-          </span>
-        </div>
-        {resolutionSelection.resolution === "use_cloud_only" && !preserved && (
-          <label className="sync-divergence-inline-confirm">
-            <input
-              type="checkbox"
-              checked={resolutionSelection.destructive_approved}
-              disabled={controlsDisabled}
-              onChange={(event) => setConversationResolutions((current) => {
-                const next = new Map(current);
-                next.set(action.action_id, { ...resolutionSelection, destructive_approved: event.target.checked });
-                return next;
-              })}
-            />
-            <Icon name="alert-triangle" size={12} />
-            Discard the local branch — I understand it won&apos;t remain in Codex
-          </label>
-        )}
-      </>
-    );
-  };
   const projectContentRows: ProjectFileReviewRow[] = projectContentItems
     .filter((item) => item.projectContentPath && item.projectContentEntryType)
     .map((item) => {
@@ -619,8 +472,8 @@ export default function RestorePlanView({
         <div
           className="sync-inline-action-scroll sync-sync-review-scroll"
         >
-          {(storageReplacedGate || forkCheckpointActive || hasResult || Boolean(error && !hasResult)) && (
-            <div className="sync-review-banners" ref={bannerZoneRef}>
+          {(storageReplacedGate || Boolean(error && !hasResult)) && (
+            <div className="sync-review-banners">
               {storageReplacedGate && (
                 <div className="sync-callout warning" role="status">
                   <Icon name="alert-triangle" size={15} />
@@ -636,7 +489,16 @@ export default function RestorePlanView({
                 </div>
               )}
               {error && !hasResult && (
-                <div className="sync-callout error sync-pull-error" role="alert"><Icon name="alert-triangle" size={15} /> {error}</div>
+                <div className="sync-callout error sync-pull-error" role="alert">
+                  <Icon name="alert-triangle" size={15} />
+                  <span>{error}</span>
+                  {isIrrecoverableSyncError(error) && onResetMetadata && (
+                    <button type="button" className="btn btn-ghost danger" onClick={onResetMetadata} disabled={busy}>
+                      <Icon name="trash" size={13} />
+                      Reset local sync state
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -653,11 +515,10 @@ export default function RestorePlanView({
                   selectionMode="pull"
                   selectedResourceIds={selected}
                   selectableResourceIds={conversationIds}
-                  selectionDisabled={busy || finalReady || forkCheckpointActive}
+                  selectionDisabled={busy || finalReady}
                   onToggleResource={toggle}
                   onUnlinkStorage={onUnlinkStorage}
                   continuityActionBusy={busy || finalReady}
-                  rowResolution={rowResolution}
                   onReviewListReadyChange={setReviewListReady}
                 />
               ) : conversationItems.length > 0 ? (
@@ -668,9 +529,8 @@ export default function RestorePlanView({
                   completedResourceIds={completedResourceIds}
                   failedResourceIds={failedResourceIds}
                   phase={phase}
-                  disabled={busy || finalReady || forkCheckpointActive}
+                  disabled={busy || finalReady}
                   onToggle={toggle}
-                  rowResolution={rowResolution}
                 />
               ) : items.length === 0 && !supportLoading ? (
                 <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>Nothing to pull</strong><small>This project already matches the selected revision.</small></span></div>
@@ -683,7 +543,7 @@ export default function RestorePlanView({
                     <span><Icon name="settings" size={15} /><strong>Agent setup &amp; tools</strong></span>
                     <span>{selectedIn(otherItems)} selected<Icon name="chevron-right" size={13} /></span>
                   </summary>
-                  <ItemList items={otherItems} selected={selected} completedActionIds={completedActionIds} completedResourceIds={completedResourceIds} failedResourceIds={failedResourceIds} phase={phase} disabled={busy || finalReady || forkCheckpointActive} onToggle={toggle} />
+                  <ItemList items={otherItems} selected={selected} completedActionIds={completedActionIds} completedResourceIds={completedResourceIds} failedResourceIds={failedResourceIds} phase={phase} disabled={busy || finalReady} onToggle={toggle} />
                   {supportLoading && <div className="sync-pull-support-loading"><Icon name="refresh" className="icon-spin" size={14} /> Checking readiness…</div>}
                 </details>
               )}
@@ -734,7 +594,9 @@ export default function RestorePlanView({
           title={primaryDisabledReason ?? undefined}
           onClick={() => onApply(selection)}
         >
-          {busy ? <Icon name="refresh" size={16} className="icon-spin" /> : <Icon name="download" size={16} />}
+          {busy
+            ? <Icon name="refresh" size={16} className="icon-spin" />
+            : <ThreadStatusIcon status="cloud-outstanding" size={16} />}
           {busy ? "Pulling…" : "Pull"}
         </button>
       </footer>

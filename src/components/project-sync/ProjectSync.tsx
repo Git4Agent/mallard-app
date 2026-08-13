@@ -53,7 +53,7 @@ import PushResourceWorkspace, {
   recommendedPushSelection,
   sanitizePushSelection,
 } from "./PushResourceWorkspace";
-import ProjectSetupWorkspace, { type SetupCompletion } from "./ProjectSetupWorkspace";
+import ProjectSetupWorkspace from "./ProjectSetupWorkspace";
 import ProjectSidebar from "./ProjectSidebar";
 import type {
   ActiveProjectSubview,
@@ -213,8 +213,8 @@ function storedActiveStorages(): Record<string, string> {
 /** What happened, not how loud it was: the toast picks its glyph and rail
  *  colour from this. Default "ok" keeps every existing confirmation a
  *  one-argument call. "attention" is for the notices that report a stop —
- *  a parked fork, a binding that needs confirming — which a green tick was
- *  reporting as done. Hard failures still go to `error`, not here. */
+ *  a binding that needs confirming, for example — which a green tick would
+ *  report as done. Hard failures still go to `error`, not here. */
 type SyncNoticeTone = "ok" | "attention";
 
 interface SyncNotice {
@@ -1513,16 +1513,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   const completeSetup = async (
     detail: ProjectDetail,
-    completion: SetupCompletion,
     workflowEpoch: number,
   ) => {
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
     setSetupDraftId(null);
     const projectId = detail.project.local_project_id;
     const storageId = detail.links[0]?.storage_id ?? null;
-    notify(completion === "pull"
-      ? `${projectLabel(detail.project)} connected — open Pull review to apply.`
-      : `${projectLabel(detail.project)} is set up${storageId ? "" : " — link storage when ready"}.`);
+    notify(`${projectLabel(detail.project)} is set up${storageId ? "" : " — link storage when ready"}.`);
     const { nextConfig, hostIdentityReady } = await loadShell();
     if (!hostIdentityReady || hostWorkflowEpoch.current !== workflowEpoch) return;
     await refreshSetupDrafts(undefined, workflowEpoch);
@@ -1530,10 +1527,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setActiveProjectId(projectId);
     if (detail.binding) setBindings((current) => upsertBinding(current, detail.binding as ProjectBinding));
     await loadProjectData(projectId, nextConfig, storageId, workflowEpoch);
-    if (hostWorkflowEpoch.current !== workflowEpoch) return;
-    if (completion === "pull" && storageId && detail.binding) {
-      await planRestore(storageId, detail.project.bundle_id, detail.binding, projectLabel(detail.project));
-    }
   };
 
   const saveStorageLink = async (
@@ -1548,6 +1541,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       pinned: true,
     });
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
+    setStorageNotice((current) => (
+      current?.projectId === projectId && current.storageId === storageId ? null : current
+    ));
     const { nextConfig, hostIdentityReady } = await loadShell();
     if (!hostIdentityReady || hostWorkflowEpoch.current !== workflowEpoch) return;
     setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
@@ -2128,42 +2124,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setRestoreBinding(targetBinding);
     setRestoreProjectName(displayName);
     try {
-      const pendingDivergence = await projectSyncApi.getPendingCodexDivergence(
-        targetBinding.local_project_id,
-      );
-      if (restoreRequest.current !== requestId) return null;
-      // Manual-fork checkpoints belong to the Activity page, not to a Pull
-      // review; only a pull-origin checkpoint carries the plan this flow
-      // resumes.
-      const pullCheckpoints = (pendingDivergence?.fork_checkpoints ?? []).filter(
-        (checkpoint) => checkpoint.origin === "pull_preserve" && checkpoint.plan_id != null,
-      );
-      const pendingCheckpoint = pullCheckpoints[0];
-      if (pendingDivergence && pendingCheckpoint && pendingCheckpoint.plan_id) {
-        const pendingPlan = await projectSyncApi.getRestorePlan(pendingCheckpoint.plan_id);
-        if (restoreRequest.current !== requestId) return null;
-        const pendingAction = pendingPlan.conversation_actions.find(
-          (action) => action.action_id === pendingCheckpoint.action_id,
-        );
-        if (
-          pendingPlan.storage_id !== storageId
-          || pendingPlan.bundle_id !== bundleId
-          || pendingPlan.host_id !== targetBinding.host_id
-          || pendingPlan.replica_id !== targetBinding.replica_id
-          || pendingAction?.local_project_id !== targetBinding.local_project_id
-        ) {
-          throw new Error("The pending Codex fork belongs to a different Pull scope.");
-        }
-        setRestorePlan(pendingPlan);
-        setRestoreResult(pendingDivergence);
-        setPullApplyPhase("complete");
-        setReviewSupportLoading(false);
-        notify(pullCheckpoints.length === 1
-          ? `Pending Codex fork for ${displayName} — original not replaced.`
-          : `${pullCheckpoints.length} pending Codex forks for ${displayName} — no original replaced.`,
-          "attention");
-        return null;
-      }
       // The project-data review is the primary Pull surface. Render it as soon as it
       // is ready; optional dependency/readiness checks must never hide a valid
       // restore plan or its Apply button.
@@ -2177,7 +2137,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         !hasPendingRestoreMutations(review.restorePlan)
         && review.restorePlan.remote_continuity?.state !== "replaced"
       ) {
-        const finalization = await projectSyncApi.applyRestore(review.restorePlan.plan_id, [], []);
+        const finalization = await projectSyncApi.applyRestore(review.restorePlan.plan_id, []);
         if (restoreRequest.current !== requestId) return null;
         if (
           !finalization.success
@@ -2236,6 +2196,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const runOutcomeAction = async (outcome: SyncOutcome) => {
     const action = outcome.action;
     if (!action) return;
+    if (action.kind === "reset_metadata") {
+      await resetProjectSyncMetadata(outcome.projectId);
+      return;
+    }
     if (action.kind === "open_pull") {
       setStorageNotice(null);
       void beginProjectRestore(outcome.projectId, outcome.storageId);
@@ -2277,9 +2241,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
     setBusy(true);
     try {
-      const result = action.kind === "restart_codex"
-        ? await projectSyncApi.restartCodexAppAfterPull(action.operationId, action.appKind, true)
-        : await projectSyncApi.retryCodexDivergence(action.operationId);
+      const result = await projectSyncApi.restartCodexAppAfterPull(
+        action.operationId,
+        action.appKind,
+        true,
+      );
       setHistoryRefreshEpoch((epoch) => epoch + 1);
       if (result.success) {
         setStorageNotice(null);
@@ -2495,6 +2461,60 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setFailedPullResourceIds(new Set());
   };
 
+  async function resetProjectSyncMetadata(projectId: string): Promise<void> {
+    const workflowEpoch = hostWorkflowEpoch.current;
+    const summary = projects.find((candidate) => candidate.local_project_id === projectId);
+    if (!summary) {
+      setError("The selected local project no longer exists.");
+      return;
+    }
+    const approved = await confirm(
+      `Reset local sync state for “${projectLabel(summary)}”?\n\nMallard will forget this project's reviewed sync bases, conversation mappings, recovery records, Pull results, and saved Push/Pull plans. Project files, provider sessions, project setup, recipes, storage configuration, and cloud data will not be deleted.`,
+      { title: "Reset local sync state" },
+    );
+    if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
+
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await projectSyncApi.resetProjectSyncMetadata(
+        projectId,
+        summary.revision,
+      );
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+
+      closePullReview();
+      pullOutcomeInputs.current = null;
+      setPendingPush(null);
+      setPushError(null);
+      setStorageNotice(null);
+      setActiveProjectId(projectId);
+      setActiveProjectSubview({ kind: "overview" });
+      await refresh(workflowEpoch);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+
+      const removed = result.scope_bases_removed
+        + result.conversation_checkpoints_removed
+        + result.conversation_bindings_removed
+        + result.materializations_removed
+        + result.journal_operations_removed
+        + result.restore_plans_removed
+        + result.push_plans_removed;
+      if (result.unreadable_plan_files_retained > 0) {
+        notify(
+          `Local sync state reset (${removed} records removed). ${result.unreadable_plan_files_retained} unreadable saved plan file${result.unreadable_plan_files_retained === 1 ? " was" : "s were"} retained for inspection.`,
+          "attention",
+        );
+      } else {
+        notify(`Local sync state reset — ${removed} derived record${removed === 1 ? "" : "s"} removed; files and cloud data kept.`);
+      }
+    } catch (reason) {
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+    } finally {
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
+    }
+  }
+
   // Window-level controls: the theme toggle and the app menu. They belong to
   // the window, not to any screen, so whichever bar is at the top carries them
   // — the titlebar on most screens, the path bar in the project workspace.
@@ -2599,6 +2619,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     try {
       const removed = await projectSyncApi.removeLink(projectId, storageId);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      setStorageNotice((current) => (
+        current?.projectId === projectId && current.storageId === storageId ? null : current
+      ));
 
       if (pendingPush?.projectId === projectId && pendingPush.storageId === storageId) {
         setPendingPush(null);
@@ -2790,16 +2813,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  /**
-   * After the last checkpoint of the queue resolves (verified or canceled),
-   * replan against the same bundle so the review reflects the settled local
-   * state; when nothing mutable remains, one empty apply finalizes the
-   * reviewed Pull baseline.
-   */
-
-
-
-
   const saveStorageConfig = async (
     update: (current: SyncConfig) => SyncConfig,
     successNotice = "Project storage settings saved.",
@@ -2876,6 +2889,49 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         storages: applyStorageDraft(current.storages, storage, expectedBaseline),
       };
     });
+  };
+
+  const clearStorageData = async (storageId: string) => {
+    const workflowEpoch = hostWorkflowEpoch.current;
+    const storage = configRef.current.storages.find((candidate) => candidate.id === storageId);
+    if (!storage) {
+      setError("The selected storage no longer exists.");
+      return;
+    }
+    const storageName = storage.name || "Storage";
+    const approved = await confirm(
+      `Permanently clear all Mallard data from “${storageName}”?\n\nThis deletes every synced project repository and Library resource in this storage. It does not delete unrelated bucket/folder contents, local project files, provider sessions, or the storage connection. This cannot be undone.`,
+      { title: "Clear storage data" },
+    );
+    if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
+
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await projectSyncApi.clearStorageData(
+        storageId,
+        configRef.current.revision,
+      );
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      closePullReview();
+      pullOutcomeInputs.current = null;
+      setPendingPush(null);
+      setPushError(null);
+      await refresh(workflowEpoch);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      const deleted = result.repository_objects_deleted + result.library_objects_deleted;
+      const retained = result.unreadable_plan_files_retained;
+      notify(
+        retained > 0
+          ? `${storageName} cleared — ${deleted} object${deleted === 1 ? "" : "s"} deleted. ${retained} unreadable saved plan file${retained === 1 ? " was" : "s were"} retained for inspection.`
+          : `${storageName} cleared — ${deleted} Mallard object${deleted === 1 ? "" : "s"} deleted; storage settings and unrelated data kept.`,
+        retained > 0 ? "attention" : "ok",
+      );
+    } catch (reason) {
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+    } finally {
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
+    }
   };
 
   const removeStorage = async (storageId: string) => {
@@ -3051,6 +3107,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             "remote_history_missing",
           );
         }}
+        onResetMetadata={() => void resetProjectSyncMetadata(pendingPush.projectId)}
       />
     ),
   } : restorePlan && restoreBinding ? {
@@ -3093,6 +3150,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             "remote_history_missing",
           );
         }}
+        onResetMetadata={() => void resetProjectSyncMetadata(restoreBinding.local_project_id)}
         onPrimaryChange={setPullReviewPrimary}
       />
     ),
@@ -3186,6 +3244,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             requestId: (current?.requestId ?? 0) + 1,
           }));
         }}
+        onClearStorage={(storageId) => void clearStorageData(storageId)}
         onRemoveStorage={(storageId) => void removeStorage(storageId)}
         onAddStorage={openNewStorageConfiguration}
         onOpenCatalogMenu={openCatalogMenu}
@@ -3297,6 +3356,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onConfigureBinding={configureProjectBinding}
             onRepairConversationPaths={(projectId) => repairConversationPaths(projectId)}
             onRenameProject={(projectId, alias) => renameProject(projectId, alias)}
+            onResetProjectMetadata={(projectId) => resetProjectSyncMetadata(projectId)}
             onRefresh={() => void refresh()}
             onAddProject={() => void beginAddProject()}
             onSelectProject={openProject}
@@ -3328,8 +3388,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                 onClose={() => void closeSetupDraft()}
                 onDiscard={(draftId) => void discardSetupDraft(draftId)}
                 onAddStorage={openNewStorageConfiguration}
-                onFinalized={(detail, completion, workflowEpoch) => (
-                  void completeSetup(detail, completion, workflowEpoch)
+                onFinalized={(detail, workflowEpoch) => (
+                  void completeSetup(detail, workflowEpoch)
                 )}
               />
             ) : null}

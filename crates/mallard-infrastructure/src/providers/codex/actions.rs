@@ -1,10 +1,9 @@
-//! Safe Codex session actions: desktop-app deep links, Terminal resume, and
-//! the native fork entry surfaced through the generic action contract.
+//! Safe Codex session actions: desktop-app deep links and Terminal resume.
 
 use crate::providers::launch::shell_quote;
 use crate::providers::traits::{
     SessionActionContext, SessionActionDescriptor, SessionActionKind, SessionActionOutcome,
-    SessionActionRequest, SessionActionSurface,
+    SessionActionRequest,
 };
 use std::path::Path;
 #[cfg(target_os = "macos")]
@@ -16,7 +15,6 @@ use std::time::{Duration, SystemTime};
 
 pub(super) const OPEN_IN_APP: &str = "codex.open-in-app";
 pub(super) const OPEN_IN_TERMINAL: &str = "codex.open-in-terminal";
-pub const FORK_SESSION: &str = "codex.fork-session";
 
 #[cfg(target_os = "macos")]
 const CODEX_PROJECT_ROUTE_TIMEOUT: Duration = Duration::from_millis(2500);
@@ -238,7 +236,7 @@ pub(super) fn available_actions(
 ) -> Vec<SessionActionDescriptor> {
     let local_uuid = context.is_local && validate_thread_uuid(context.provider_session_id).is_ok();
     let not_local = (!local_uuid).then(|| "This session is not materialized locally.".to_string());
-    let mut actions = vec![
+    vec![
         SessionActionDescriptor {
             action_id: OPEN_IN_APP.to_string(),
             kind: SessionActionKind::OpenInApp,
@@ -253,17 +251,7 @@ pub(super) fn available_actions(
             enabled: local_uuid,
             disabled_reason: not_local.clone(),
         },
-    ];
-    if context.surface == SessionActionSurface::Activity {
-        actions.push(SessionActionDescriptor {
-            action_id: FORK_SESSION.to_string(),
-            kind: SessionActionKind::ForkSession,
-            label: "Fork in Codex".to_string(),
-            enabled: local_uuid,
-            disabled_reason: not_local,
-        });
-    }
-    actions
+    ]
 }
 
 pub(super) fn execute_action(
@@ -324,29 +312,16 @@ mod tests {
     }
 
     #[test]
-    fn fork_is_available_only_on_activity() {
+    fn available_actions_only_expose_safe_launches() {
         let provider_session_id = "0193b6c1-5352-7b12-9c6e-000000000001";
-        let activity = available_actions(&SessionActionContext {
+        let actions = available_actions(&SessionActionContext {
             provider_session_id,
             is_local: true,
             transcript_path: None,
-            surface: SessionActionSurface::Activity,
         });
-        let detail = available_actions(&SessionActionContext {
-            provider_session_id,
-            is_local: true,
-            transcript_path: None,
-            surface: SessionActionSurface::Detail,
-        });
-
-        assert!(activity.iter().any(|action| {
-            action.action_id == FORK_SESSION
-                && action.kind == SessionActionKind::ForkSession
-                && action.label == "Fork in Codex"
-                && action.enabled
-        }));
-        assert!(detail
-            .iter()
-            .all(|action| action.kind != SessionActionKind::ForkSession));
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].kind, SessionActionKind::OpenInApp);
+        assert_eq!(actions[1].kind, SessionActionKind::OpenInTerminal);
+        assert!(actions.iter().all(|action| action.enabled));
     }
 }

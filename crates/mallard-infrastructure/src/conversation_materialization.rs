@@ -11,36 +11,18 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::codex_native_fork::{
-    complete_codex_post_commit_presentation, coordinate_native_fork, preflight_native_fork,
-    verify_recorded_fork, verify_source_idle_and_title, CodexForkCoordinatorOutcome,
-    CodexForkExecutionRequest, CodexNameStatus, CodexPostCommitPresentationRequest,
-    CodexThreadRenameRequest, ForkPhaseObserver, VerifiedNativeFork,
-};
 use crate::conversation_codec::CodecLineage;
 use crate::persistence::LocalStateRepository;
 use mallard_domain::{
-    conversation_resource_id, ActionId, ActionStatus, ApplyReceipt, CodexDivergenceReceipt,
-    CodexForkAttempt, CodexForkAttemptStatus, CodexForkExecutor, CodexInventoryRefreshStatus,
-    ConversationApplyReceipt, ConversationCloudAnchor, ConversationDivergenceResolution,
-    ConversationFileRole, ConversationJournalTarget, ConversationMaterializationState,
-    ConversationNameStatus, ConversationOperationId, ConversationPlanDirection,
-    ConversationSyncOperation, ConversationSyncOperationKind, ConversationSyncPhase, ForkOrigin,
-    ForkStamp, LocalConversationBinding, MaterializationId, MaterializationRecord,
-    MaterializationStatus, RestoreActionType, TargetExpectation, ThreadId, LOCAL_SCHEMA,
+    conversation_resource_id, ActionId, ActionStatus, ApplyReceipt, ConversationApplyReceipt,
+    ConversationBindings, ConversationFileRole, ConversationJournalTarget,
+    ConversationMaterializationState, ConversationOperationId, ConversationPlanDirection,
+    ConversationSourceDisposition, ConversationSyncOperation, ConversationSyncOperationKind,
+    MaterializationId, MaterializationRecord, MaterializationStatus, PullJournalPhase,
+    PushJournalPhase, RestoreActionType, SyncConfig, TargetExpectation, LOCAL_SCHEMA,
 };
 
 const MAX_PROVIDER_TARGET_BYTES: u64 = 512 * 1024 * 1024;
-
-#[derive(Clone, Debug)]
-struct CodexPostCommitPresentationTask {
-    operation_id: ConversationOperationId,
-    request: CodexPostCommitPresentationRequest,
-    /// Pull operations record the deferred naming outcome into their
-    /// materialization receipt. A manual fork has no receipt to update; its
-    /// task still performs the rename and inventory refresh.
-    records_receipt: bool,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConversationTargetPayload {
@@ -56,38 +38,10 @@ pub struct ConversationMaterializationRequest {
     pub targets: Vec<ConversationTargetPayload>,
 }
 
-#[derive(Clone, Debug)]
-pub struct CodexDivergenceMaterializationRequest {
-    pub operation: ConversationSyncOperation,
-    pub targets: Vec<ConversationTargetPayload>,
-    pub fork: CodexForkExecutionRequest,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-// The committed receipt dwarfs the checkpoint variant by design; boxing it
-// would ripple through every caller for no behavioral gain.
-#[allow(clippy::large_enum_variant)]
-pub enum CodexDivergenceApplyOutcome {
-    Committed(ConversationApplyReceipt),
-    /// A manual-origin fork adopted and stamped; no cloud state, binding pin,
-    /// or materialization receipt exists to report.
-    ManualForkCommitted {
-        operation_id: ConversationOperationId,
-        preserved_thread_id: ThreadId,
-        preserved_provider_thread_id: String,
-        desired_fork_name: String,
-        executor: Option<CodexForkExecutor>,
-    },
-    ForkUnacknowledged {
-        operation_id: ConversationOperationId,
-        message: String,
-    },
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConversationFailpoint {
-    BeforePrepared,
-    AfterPrepared,
+    BeforeJournal,
+    AfterJournal,
     BeforeStage {
         index: usize,
         role: ConversationFileRole,
@@ -98,13 +52,10 @@ pub enum ConversationFailpoint {
     },
     BeforeStaged,
     AfterStaged,
-    AfterForkVerified,
-    AfterForkNamingRecorded,
-    AfterLocalForkBound,
     BeforeCloudPublication,
     AfterCloudHeadCas,
-    BeforeCloudPublished,
-    AfterCloudPublished,
+    BeforeHeadAdvanced,
+    AfterHeadAdvanced,
     BeforeTargetCommit {
         index: usize,
         role: ConversationFileRole,
@@ -121,10 +72,10 @@ pub enum ConversationFailpoint {
     AfterProviderCommitted,
     BeforeBindingCommit,
     AfterBindingCommit,
-    AfterBindingsCommitted,
+    BeforeConfigCommit,
+    AfterConfigCommit,
     BeforeReceipt,
     AfterReceipt,
-    AfterOriginalNamingRecorded,
     BeforeLocalCommitted,
     AfterLocalCommitted,
     BeforeCleanup,
@@ -156,69 +107,206 @@ pub struct ConversationCloudPublication {
     pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
+    pub manifest_size: u64,
+    /// Published per-provider scope coordinates, keyed by canonical scope
+    /// string, for ScopeBase advancement inside journaled after-states.
+    pub scope_pins: std::collections::BTreeMap<String, (u64, String)>,
 }
 
-/// Journal a reviewed Push, publish through the caller's production bundle
-/// engine, and finalize the local receipt. `inspect_after_error` closes the
-/// important CAS ambiguity: an object store may commit the head and then
-/// return an I/O error.
-#[cfg(any(test, feature = "test-support"))]
-pub fn apply_conversation_cloud_publication(
-    repository: &LocalStateRepository,
-    mut operation: ConversationSyncOperation,
-    publish: impl FnOnce() -> Result<ConversationCloudPublication, String>,
-    inspect_after_error: impl FnOnce() -> Result<Option<ConversationCloudPublication>, String>,
-    failpoints: &mut impl ConversationFailpoints,
-) -> Result<ConversationApplyReceipt, String> {
-    let _host_guard = repository.acquire_host_operation()?;
-    if operation.direction != ConversationPlanDirection::Push
-        || operation.phase != ConversationSyncPhase::Prepared
-        || operation.operation != ConversationSyncOperationKind::CloudPublication
-        || !operation.targets.is_empty()
-    {
-        return Err("cloud publication requires a new Prepared Push operation".to_string());
+fn push_phase(operation: &ConversationSyncOperation) -> Option<PushJournalPhase> {
+    match &operation.operation {
+        ConversationSyncOperationKind::CloudPublication(publication) => Some(publication.phase),
+        ConversationSyncOperationKind::ProviderMaterialization(_) => None,
     }
-    operation.validate()?;
-    validate_operation_scope(repository, &operation)?;
-    failpoints.hit(&ConversationFailpoint::BeforePrepared)?;
-    insert_operation(repository, &operation)?;
-    failpoints.hit(&ConversationFailpoint::AfterPrepared)?;
+}
 
-    failpoints.hit(&ConversationFailpoint::BeforeCloudPublication)?;
-    let publication = match publish() {
-        Ok(publication) => publication,
-        Err(error) => match inspect_after_error()? {
-            Some(publication) => publication,
-            None => {
-                cleanup_and_retire(repository, &operation.operation_id)?;
-                return Err(error);
+fn pull_phase(operation: &ConversationSyncOperation) -> Option<PullJournalPhase> {
+    match &operation.operation {
+        ConversationSyncOperationKind::ProviderMaterialization(materialization) => {
+            Some(materialization.phase)
+        }
+        ConversationSyncOperationKind::CloudPublication(_) => None,
+    }
+}
+
+fn set_push_phase(
+    repository: &LocalStateRepository,
+    operation_id: &ConversationOperationId,
+    phase: PushJournalPhase,
+    updated_at: u64,
+) -> Result<ConversationSyncOperation, String> {
+    let (_, updated) = mutate_operation(repository, operation_id, |operation| {
+        match &mut operation.operation {
+            ConversationSyncOperationKind::CloudPublication(publication) => {
+                publication.phase = phase;
             }
-        },
-    };
-    failpoints.hit(&ConversationFailpoint::AfterCloudHeadCas)?;
-    failpoints.hit(&ConversationFailpoint::BeforeCloudPublished)?;
-    let (_, updated) = mutate_operation(repository, &operation.operation_id, |operation| {
-        record_publication_anchor(operation, &publication)?;
-        operation.phase = ConversationSyncPhase::CloudPublished;
+            ConversationSyncOperationKind::ProviderMaterialization(_) => {
+                return Err("push phase on a materialization operation".to_string());
+            }
+        }
+        operation.updated_at = operation.updated_at.max(updated_at);
         Ok(())
     })?;
-    operation = updated;
-    failpoints.hit(&ConversationFailpoint::AfterCloudPublished)?;
+    Ok(updated)
+}
 
-    // Preserve the existing binding until immutable publication and the head
-    // CAS are proven complete. Recovery can safely finish this exact binding
-    // refresh after a post-CAS crash.
+fn set_pull_phase(
+    repository: &LocalStateRepository,
+    operation_id: &ConversationOperationId,
+    phase: PullJournalPhase,
+    updated_at: u64,
+) -> Result<ConversationSyncOperation, String> {
+    let (_, updated) = mutate_operation(repository, operation_id, |operation| {
+        match &mut operation.operation {
+            ConversationSyncOperationKind::ProviderMaterialization(materialization) => {
+                materialization.phase = phase;
+            }
+            ConversationSyncOperationKind::CloudPublication(_) => {
+                return Err("pull phase on a publication operation".to_string());
+            }
+        }
+        operation.updated_at = operation.updated_at.max(updated_at);
+        Ok(())
+    })?;
+    Ok(updated)
+}
+
+/// Install one journaled whole-document after-state: idempotent when the
+/// current document already equals the after-state, a plain replacement when
+/// it still equals the before-state, and a typed corruption block otherwise.
+fn install_journaled_bindings(
+    repository: &LocalStateRepository,
+    before: &ConversationBindings,
+    after: &ConversationBindings,
+) -> Result<(), String> {
+    let current = repository.load_conversation_bindings()?;
+    if &current == after {
+        return Ok(());
+    }
+    if &current != before {
+        return Err(
+            "conversation bindings are neither the journaled before nor after state".to_string(),
+        );
+    }
+    repository.install_conversation_bindings_snapshot(after.clone())
+}
+
+fn install_journaled_sync_config(
+    repository: &LocalStateRepository,
+    before: &SyncConfig,
+    after: &SyncConfig,
+) -> Result<(), String> {
+    let current = repository.load_config()?;
+    if &current == after {
+        return Ok(());
+    }
+    if &current != before {
+        return Err("sync config is neither the journaled before nor after state".to_string());
+    }
+    repository.install_config_snapshot(after.clone())
+}
+
+/// Complete journaled publication payloads with the exact coordinates the
+/// fused publish installed. Only rows this batch wrote are rewritten: each
+/// operation's after-document gets the batch checkpoints' accepted pins moved
+/// from the reviewed-anchor placeholder to the published head, and each
+/// successor's before-document is re-chained from its predecessor's patched
+/// after-document so sequential installation matches disk exactly. The first
+/// operation's before-document is the pristine pre-batch load and is never
+/// touched; pre-existing rows outside the batch are never touched either,
+/// even when their accepted pin happens to equal the reviewed anchor.
+fn patch_publication_payload(
+    payload: &mut mallard_domain::ConversationPublicationOperation,
+    storage_id: &mallard_domain::StorageId,
+    batch: &[(mallard_domain::SyncScopeKey, mallard_domain::ThreadId)],
+    publication: &ConversationCloudPublication,
+    chained_before: Option<&mallard_domain::SyncConfig>,
+) {
+    payload.candidate_commit_id = publication.commit_id.clone();
+    payload.candidate_manifest_sha256 = publication.manifest_sha256.clone();
+    if let Some(before) = chained_before {
+        payload.sync_config_before = before.clone();
+    }
+    for link in payload
+        .sync_config_after
+        .links
+        .iter_mut()
+        .filter(|link| &link.storage_id == storage_id)
+    {
+        for (scope, thread_id) in batch {
+            if let Some(accepted) = link
+                .conversation_checkpoints
+                .get_mut(scope)
+                .and_then(|threads| threads.get_mut(thread_id))
+                .and_then(|checkpoint| checkpoint.accepted.as_mut())
+            {
+                accepted.accepted_at_commit_id = publication.commit_id.clone();
+                accepted.accepted_at_manifest_sha256 = publication.manifest_sha256.clone();
+            }
+        }
+    }
+}
+
+/// Commit a publishing Push's local after-state and receipt from its
+/// journaled documents, then retire the operation. `publication` carries the
+/// exact head coordinates the CAS installed.
+fn finish_cloud_publication(
+    repository: &LocalStateRepository,
+    operation: &ConversationSyncOperation,
+    publication: &ConversationCloudPublication,
+    failpoints: &mut impl ConversationFailpoints,
+) -> Result<ConversationApplyReceipt, String> {
+    let ConversationSyncOperationKind::CloudPublication(payload) = &operation.operation else {
+        return Err("cloud publication finish requires a publication operation".to_string());
+    };
     failpoints.hit(&ConversationFailpoint::BeforeBindingCommit)?;
-    commit_binding(repository, &operation)?;
+    install_journaled_bindings(
+        repository,
+        &payload.bindings_before,
+        &payload.bindings_after,
+    )?;
     failpoints.hit(&ConversationFailpoint::AfterBindingCommit)?;
-    failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
-    let receipt = commit_receipt(repository, &operation)?;
-    failpoints.hit(&ConversationFailpoint::AfterReceipt)?;
-    failpoints.hit(&ConversationFailpoint::BeforeLocalCommitted)?;
-    set_phase(
+    failpoints.hit(&ConversationFailpoint::BeforeConfigCommit)?;
+    install_journaled_sync_config(
+        repository,
+        &payload.sync_config_before,
+        &payload.sync_config_after,
+    )?;
+    failpoints.hit(&ConversationFailpoint::AfterConfigCommit)?;
+    let operation = set_push_phase(
         repository,
         &operation.operation_id,
-        ConversationSyncPhase::LocalCommitted,
+        PushJournalPhase::LocalCommitted,
+        operation.updated_at,
+    )?;
+    failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
+    let receipt = commit_receipt(
+        repository,
+        &operation,
+        publication.revision,
+        &publication.commit_id,
+        &publication.manifest_sha256,
+    );
+    let (receipt, terminal_phase) = match receipt {
+        Ok(receipt) => (receipt, PushJournalPhase::Complete),
+        Err(_) => {
+            // The local commit is durable; regenerate the receipt from the
+            // journal and terminalize with a warning instead of failing.
+            let regenerated = conversation_receipt(
+                &operation,
+                publication.revision,
+                &publication.commit_id,
+                &publication.manifest_sha256,
+            );
+            (regenerated, PushJournalPhase::CompleteWithWarnings)
+        }
+    };
+    failpoints.hit(&ConversationFailpoint::AfterReceipt)?;
+    failpoints.hit(&ConversationFailpoint::BeforeLocalCommitted)?;
+    set_push_phase(
+        repository,
+        &operation.operation_id,
+        terminal_phase,
         operation.updated_at,
     )?;
     failpoints.hit(&ConversationFailpoint::AfterLocalCommitted)?;
@@ -228,9 +316,38 @@ pub fn apply_conversation_cloud_publication(
     Ok(receipt)
 }
 
+/// Journal a reviewed Push, publish through the caller's production bundle
+/// engine, and finalize the local receipt. `inspect_after_error` closes the
+/// important CAS ambiguity: an object store may commit the head and then
+/// return an I/O error.
+#[cfg(any(test, feature = "test-support"))]
+pub fn apply_conversation_cloud_publication(
+    repository: &LocalStateRepository,
+    operation: ConversationSyncOperation,
+    publish: impl FnOnce() -> Result<ConversationCloudPublication, String>,
+    inspect_after_error: impl FnOnce() -> Result<Option<ConversationCloudPublication>, String>,
+    failpoints: &mut impl ConversationFailpoints,
+) -> Result<ConversationApplyReceipt, String> {
+    let _host_guard = repository.acquire_host_operation()?;
+    let receipts = apply_conversation_cloud_publications_locked(
+        repository,
+        vec![operation],
+        publish,
+        inspect_after_error,
+        failpoints,
+    )?;
+    receipts
+        .into_iter()
+        .next()
+        .ok_or_else(|| "cloud publication produced no receipt".to_string())
+}
+
 /// Publish a reviewed set of Push conversation actions while the command
 /// orchestrator holds the host-operation guard across generic and
-/// conversation publication.
+/// conversation publication. Candidate objects, the immutable manifest, and
+/// the candidate commit are already uploaded (orphan-safe) by the caller;
+/// this function journals the decision, advances the head once by CAS, and
+/// installs the exact journaled local after-states.
 pub fn apply_conversation_cloud_publications_locked(
     repository: &LocalStateRepository,
     operations: Vec<ConversationSyncOperation>,
@@ -245,12 +362,10 @@ pub fn apply_conversation_cloud_publications_locked(
     let mut result_threads = std::collections::BTreeSet::new();
     let first = &operations[0];
     for operation in &operations {
-        if operation.direction != ConversationPlanDirection::Push
-            || operation.phase != ConversationSyncPhase::Prepared
-            || operation.operation != ConversationSyncOperationKind::CloudPublication
+        if push_phase(operation) != Some(PushJournalPhase::CandidateUploaded)
             || !operation.targets.is_empty()
         {
-            return Err("cloud publication requires Prepared Push operations".to_string());
+            return Err("cloud publication requires CandidateUploaded Push operations".to_string());
         }
         operation.validate()?;
         validate_operation_scope(repository, operation)?;
@@ -271,9 +386,9 @@ pub fn apply_conversation_cloud_publications_locked(
         }
     }
 
-    failpoints.hit(&ConversationFailpoint::BeforePrepared)?;
+    failpoints.hit(&ConversationFailpoint::BeforeJournal)?;
     insert_operations(repository, &operations)?;
-    failpoints.hit(&ConversationFailpoint::AfterPrepared)?;
+    failpoints.hit(&ConversationFailpoint::AfterJournal)?;
     failpoints.hit(&ConversationFailpoint::BeforeCloudPublication)?;
     let publication = match publish() {
         Ok(publication) => publication,
@@ -281,6 +396,12 @@ pub fn apply_conversation_cloud_publications_locked(
             Some(publication) => publication,
             None => {
                 for operation in &operations {
+                    set_push_phase(
+                        repository,
+                        &operation.operation_id,
+                        PushJournalPhase::AbortedCasLost,
+                        operation.updated_at,
+                    )?;
                     cleanup_and_retire(repository, &operation.operation_id)?;
                 }
                 return Err(error);
@@ -288,21 +409,45 @@ pub fn apply_conversation_cloud_publications_locked(
         },
     };
     failpoints.hit(&ConversationFailpoint::AfterCloudHeadCas)?;
-    failpoints.hit(&ConversationFailpoint::BeforeCloudPublished)?;
+    failpoints.hit(&ConversationFailpoint::BeforeHeadAdvanced)?;
+    let batch_pairs: Vec<(mallard_domain::SyncScopeKey, mallard_domain::ThreadId)> = operations
+        .iter()
+        .map(|operation| {
+            (
+                mallard_domain::SyncScopeKey::Provider(operation.provider.clone()),
+                operation.thread_id.clone(),
+            )
+        })
+        .collect();
     let journal = repository.load_conversation_sync_journal()?;
     repository.mutate_conversation_sync_journal(journal.revision, |journal| {
+        let mut chained_before: Option<mallard_domain::SyncConfig> = None;
         for operation_id in &operation_ids {
             let operation = journal
                 .operations
                 .iter_mut()
                 .find(|operation| &operation.operation_id == operation_id)
                 .ok_or_else(|| format!("conversation operation '{}' disappeared", operation_id))?;
-            record_publication_anchor(operation, &publication)?;
-            operation.phase = ConversationSyncPhase::CloudPublished;
+            match &mut operation.operation {
+                ConversationSyncOperationKind::CloudPublication(publication_payload) => {
+                    publication_payload.phase = PushJournalPhase::HeadAdvanced;
+                    patch_publication_payload(
+                        publication_payload,
+                        &operation.cloud.storage_id,
+                        &batch_pairs,
+                        &publication,
+                        chained_before.as_ref(),
+                    );
+                    chained_before = Some(publication_payload.sync_config_after.clone());
+                }
+                ConversationSyncOperationKind::ProviderMaterialization(_) => {
+                    return Err("publication batch contains a materialization".to_string());
+                }
+            }
         }
         Ok(())
     })?;
-    failpoints.hit(&ConversationFailpoint::AfterCloudPublished)?;
+    failpoints.hit(&ConversationFailpoint::AfterHeadAdvanced)?;
 
     let mut receipts = Vec::with_capacity(operation_ids.len());
     for operation_id in operation_ids {
@@ -312,37 +457,20 @@ pub fn apply_conversation_cloud_publications_locked(
             .into_iter()
             .find(|operation| operation.operation_id == operation_id)
             .ok_or_else(|| format!("conversation operation '{}' disappeared", operation_id))?;
-        let operation = rebase_operation_after_batch_progress(repository, &operation)?;
-        failpoints.hit(&ConversationFailpoint::BeforeBindingCommit)?;
-        commit_binding(repository, &operation)?;
-        failpoints.hit(&ConversationFailpoint::AfterBindingCommit)?;
-        set_phase(
+        receipts.push(finish_cloud_publication(
             repository,
-            &operation.operation_id,
-            ConversationSyncPhase::BindingsCommitted,
-            operation.updated_at,
-        )?;
-        failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
-        receipts.push(commit_receipt(repository, &operation)?);
-        failpoints.hit(&ConversationFailpoint::AfterReceipt)?;
-        failpoints.hit(&ConversationFailpoint::BeforeLocalCommitted)?;
-        set_phase(
-            repository,
-            &operation.operation_id,
-            ConversationSyncPhase::LocalCommitted,
-            operation.updated_at,
-        )?;
-        failpoints.hit(&ConversationFailpoint::AfterLocalCommitted)?;
-        failpoints.hit(&ConversationFailpoint::BeforeCleanup)?;
-        cleanup_and_retire(repository, &operation.operation_id)?;
-        failpoints.hit(&ConversationFailpoint::AfterCleanup)?;
+            &operation,
+            &publication,
+            failpoints,
+        )?);
     }
     Ok(receipts)
 }
 
 /// Recover Push operations with a caller-supplied immutable-head inspector.
-/// The inspector must return a publication only after validating that the
-/// reviewed result variant and digests are present in that exact manifest.
+/// The inspector must prove the candidate commit is the current head or a
+/// verified descendant before returning a publication; orphan objects never
+/// justify promotion.
 #[cfg(any(test, feature = "test-support"))]
 pub fn recover_conversation_cloud_publications(
     repository: &LocalStateRepository,
@@ -353,70 +481,74 @@ pub fn recover_conversation_cloud_publications(
     let _host_guard = repository.acquire_host_operation()?;
     let mut report = ConversationRecoveryReport::default();
     let operations = repository.load_conversation_sync_journal()?.operations;
-    for mut operation in operations
-        .into_iter()
-        .filter(|operation| operation.direction == ConversationPlanDirection::Push)
-    {
+    let mut no_failpoints = NoConversationFailpoints;
+    for operation in operations {
+        let Some(phase) = push_phase(&operation) else {
+            continue;
+        };
         let operation_id = operation.operation_id.clone();
-        if operation.phase == ConversationSyncPhase::Prepared {
-            match inspect(&operation)? {
+        if phase.is_blocked() {
+            report.recovery_required.push(operation_id);
+            continue;
+        }
+        if phase.is_terminal() {
+            cleanup_and_retire(repository, &operation_id)?;
+            report.completed.push(operation_id);
+            continue;
+        }
+        match phase {
+            PushJournalPhase::CandidateUploaded => match inspect(&operation)? {
                 Some(publication) => {
-                    let (_, updated) = mutate_operation(repository, &operation_id, |operation| {
-                        record_publication_anchor(operation, &publication)?;
-                        operation.phase = ConversationSyncPhase::CloudPublished;
-                        Ok(())
-                    })?;
-                    operation = updated;
+                    let operation = set_push_phase(
+                        repository,
+                        &operation_id,
+                        PushJournalPhase::HeadAdvanced,
+                        operation.updated_at,
+                    )?;
+                    finish_cloud_publication(
+                        repository,
+                        &operation,
+                        &publication,
+                        &mut no_failpoints,
+                    )?;
+                    report.completed.push(operation_id);
                 }
                 None => {
+                    set_push_phase(
+                        repository,
+                        &operation_id,
+                        PushJournalPhase::AbortedCasLost,
+                        operation.updated_at,
+                    )?;
                     cleanup_and_retire(repository, &operation_id)?;
                     report.rolled_back.push(operation_id);
-                    continue;
+                }
+            },
+            PushJournalPhase::HeadAdvanced | PushJournalPhase::LocalCommitted => {
+                match inspect(&operation)? {
+                    Some(publication) => {
+                        finish_cloud_publication(
+                            repository,
+                            &operation,
+                            &publication,
+                            &mut no_failpoints,
+                        )?;
+                        report.completed.push(operation_id);
+                    }
+                    None => {
+                        mark_recovery_blocked(repository, &operation_id)?;
+                        report.recovery_required.push(operation_id);
+                    }
                 }
             }
+            _ => unreachable!("terminal and blocked phases handled above"),
         }
-        if operation.phase == ConversationSyncPhase::RecoveryRequired {
-            if let Some(publication) = inspect(&operation)? {
-                let (_, updated) = mutate_operation(repository, &operation_id, |operation| {
-                    record_publication_anchor(operation, &publication)?;
-                    operation.phase = ConversationSyncPhase::CloudPublished;
-                    Ok(())
-                })?;
-                operation = updated;
-            } else {
-                report.recovery_required.push(operation_id);
-                continue;
-            }
-        }
-        if operation.phase == ConversationSyncPhase::CloudPublished {
-            operation = rebase_operation_after_batch_progress(repository, &operation)?;
-            commit_binding(repository, &operation)?;
-            operation = set_phase(
-                repository,
-                &operation_id,
-                ConversationSyncPhase::BindingsCommitted,
-                operation.updated_at,
-            )?;
-        }
-        if operation.phase == ConversationSyncPhase::BindingsCommitted {
-            commit_receipt(repository, &operation)?;
-            operation = set_phase(
-                repository,
-                &operation_id,
-                ConversationSyncPhase::LocalCommitted,
-                operation.updated_at,
-            )?;
-        }
-        if operation.phase == ConversationSyncPhase::LocalCommitted {
-            cleanup_and_retire(repository, &operation_id)?;
-        }
-        report.completed.push(operation_id);
     }
     Ok(report)
 }
 
 /// Apply one reviewed Pull materialization. All target expectations and local
-/// scope revisions are checked before the Prepared record is written.
+/// scope revisions are checked before the TargetStaged record is written.
 #[cfg(any(test, feature = "test-support"))]
 pub fn apply_conversation_materialization(
     repository: &LocalStateRepository,
@@ -427,47 +559,28 @@ pub fn apply_conversation_materialization(
     apply_conversation_materialization_locked(repository, request, failpoints)
 }
 
+/// Apply one reviewed materializing Pull (including keep-both) while the
+/// command orchestrator holds the host-operation guard. The journaled
+/// operation embeds the exact whole-document bindings and `SyncConfig`
+/// before/after states; committing local state is installation, never
+/// recomputation.
 pub fn apply_conversation_materialization_locked(
     repository: &LocalStateRepository,
     request: ConversationMaterializationRequest,
     failpoints: &mut impl ConversationFailpoints,
 ) -> Result<ConversationApplyReceipt, String> {
     request.operation.validate()?;
-    if request.operation.operation != ConversationSyncOperationKind::ProviderMaterialization {
-        return Err("generic materialization cannot execute a Codex divergence".to_string());
+    if pull_phase(&request.operation) != Some(PullJournalPhase::TargetStaged) {
+        return Err("conversation materialization must begin TargetStaged".to_string());
     }
-    run_generic_materialization(repository, request, failpoints)
-}
-
-/// Apply one adapter file-fork divergence: the preserved branch is written
-/// beside the source and the reviewed replacement lands in the same
-/// crash-consistent operation. No external executor is involved, so the
-/// generic staged flow carries the whole ladder.
-pub fn apply_adapter_divergence_locked(
-    repository: &LocalStateRepository,
-    request: ConversationMaterializationRequest,
-    failpoints: &mut impl ConversationFailpoints,
-) -> Result<ConversationApplyReceipt, String> {
-    request.operation.validate()?;
-    if request.operation.adapter_divergence().is_none() {
-        return Err("adapter divergence requires an adapter divergence journal".to_string());
-    }
-    run_generic_materialization(repository, request, failpoints)
-}
-
-fn run_generic_materialization(
-    repository: &LocalStateRepository,
-    request: ConversationMaterializationRequest,
-    failpoints: &mut impl ConversationFailpoints,
-) -> Result<ConversationApplyReceipt, String> {
     validate_operation_scope(repository, &request.operation)?;
     ensure_provider_target_parents(repository, &request.operation, &request.targets)?;
-    let (mut operation, payloads) = prepare_operation(repository, request)?;
+    let (operation, payloads) = prepare_operation(repository, request)?;
     validate_target_expectations(&operation.targets)?;
 
-    failpoints.hit(&ConversationFailpoint::BeforePrepared)?;
+    failpoints.hit(&ConversationFailpoint::BeforeJournal)?;
     insert_operation(repository, &operation)?;
-    failpoints.hit(&ConversationFailpoint::AfterPrepared)?;
+    failpoints.hit(&ConversationFailpoint::AfterJournal)?;
 
     for (index, bytes) in payloads.iter().enumerate() {
         write_intent_payload(repository, &operation.operation_id, index, bytes)?;
@@ -475,1120 +588,175 @@ fn run_generic_materialization(
 
     stage_targets(repository, &operation, failpoints)?;
     failpoints.hit(&ConversationFailpoint::BeforeStaged)?;
-    operation = set_phase(
-        repository,
-        &operation.operation_id,
-        ConversationSyncPhase::ReplacementStaged,
-        operation.updated_at,
-    )?;
     failpoints.hit(&ConversationFailpoint::AfterStaged)?;
+    finish_materialization(repository, operation, failpoints)
+}
 
-    commit_provider_targets(repository, &operation.operation_id, failpoints)?;
+/// Drive a TargetStaged materialization to its terminal phase: commit
+/// provider targets no-clobber, install the journaled document after-states,
+/// and write the receipt.
+fn finish_materialization(
+    repository: &LocalStateRepository,
+    operation: ConversationSyncOperation,
+    failpoints: &mut impl ConversationFailpoints,
+) -> Result<ConversationApplyReceipt, String> {
+    let ConversationSyncOperationKind::ProviderMaterialization(payload) = &operation.operation
+    else {
+        return Err("materialization finish requires a materialization operation".to_string());
+    };
+    let payload = payload.clone();
+    if let Err(error) = commit_provider_targets(repository, &operation.operation_id, failpoints) {
+        // A foreign target collision aborts safely: no clobber, the original
+        // graph preserved, committed Mallard targets recorded as recoverable
+        // orphans through the terminal journal record. Every other failure
+        // (crash, I/O) leaves the journal at its durable phase for recovery.
+        if is_target_collision(&error) {
+            set_pull_phase(
+                repository,
+                &operation.operation_id,
+                PullJournalPhase::AbortedProviderCollision,
+                operation.updated_at,
+            )?;
+            cleanup_and_retire(repository, &operation.operation_id)?;
+        }
+        return Err(error);
+    }
     failpoints.hit(&ConversationFailpoint::BeforeProviderCommitted)?;
-    operation = set_phase(
+    let operation = set_pull_phase(
         repository,
         &operation.operation_id,
-        ConversationSyncPhase::ProviderCommitted,
+        PullJournalPhase::ProviderCommitted,
         operation.updated_at,
     )?;
     failpoints.hit(&ConversationFailpoint::AfterProviderCommitted)?;
 
     failpoints.hit(&ConversationFailpoint::BeforeBindingCommit)?;
-    commit_binding(repository, &operation)?;
+    install_journaled_bindings(
+        repository,
+        &payload.bindings_before,
+        &payload.bindings_after,
+    )?;
     failpoints.hit(&ConversationFailpoint::AfterBindingCommit)?;
-    operation = set_phase(
+    failpoints.hit(&ConversationFailpoint::BeforeConfigCommit)?;
+    install_journaled_sync_config(
+        repository,
+        &payload.sync_config_before,
+        &payload.sync_config_after,
+    )?;
+    failpoints.hit(&ConversationFailpoint::AfterConfigCommit)?;
+    let operation = set_pull_phase(
         repository,
         &operation.operation_id,
-        ConversationSyncPhase::BindingsCommitted,
+        PullJournalPhase::LocalCommitted,
         operation.updated_at,
     )?;
 
     failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
-    let receipt = commit_receipt(repository, &operation)?;
+    let anchor = operation.cloud.clone();
+    let receipt = commit_receipt(
+        repository,
+        &operation,
+        anchor.revision,
+        &anchor.commit_id,
+        &anchor.manifest_sha256,
+    );
+    let (receipt, terminal_phase) = match receipt {
+        Ok(receipt) => (receipt, PullJournalPhase::Complete),
+        Err(_) => {
+            let regenerated = conversation_receipt(
+                &operation,
+                anchor.revision,
+                &anchor.commit_id,
+                &anchor.manifest_sha256,
+            );
+            (regenerated, PullJournalPhase::CompleteWithWarnings)
+        }
+    };
     failpoints.hit(&ConversationFailpoint::AfterReceipt)?;
-
     failpoints.hit(&ConversationFailpoint::BeforeLocalCommitted)?;
-    set_phase(
+    set_pull_phase(
         repository,
         &operation.operation_id,
-        ConversationSyncPhase::LocalCommitted,
+        terminal_phase,
         operation.updated_at,
     )?;
     failpoints.hit(&ConversationFailpoint::AfterLocalCommitted)?;
-
     failpoints.hit(&ConversationFailpoint::BeforeCleanup)?;
     cleanup_and_retire(repository, &operation.operation_id)?;
     failpoints.hit(&ConversationFailpoint::AfterCleanup)?;
     Ok(receipt)
 }
 
-pub fn apply_codex_divergence_locked(
-    repository: &LocalStateRepository,
-    request: CodexDivergenceMaterializationRequest,
-    failpoints: &mut impl ConversationFailpoints,
-    on_phase: ForkPhaseObserver<'_>,
-) -> Result<CodexDivergenceApplyOutcome, String> {
-    request.operation.validate()?;
-    if !matches!(
-        request.operation.operation,
-        ConversationSyncOperationKind::CodexDivergence(_)
-    ) {
-        return Err("Codex divergence apply requires a divergence journal".to_string());
-    }
-    validate_operation_scope(repository, &request.operation)?;
-    ensure_provider_target_parents(repository, &request.operation, &request.targets)?;
-    validate_fork_request(&request.operation, &request.fork)?;
-    if request.operation.divergence().is_some_and(|divergence| {
-        divergence.resolution == ConversationDivergenceResolution::PreserveLocalWithNativeFork
-    }) {
-        preflight_native_fork(&request.fork, on_phase)?;
-    }
-    let (mut operation, payloads) = prepare_operation(
-        repository,
-        ConversationMaterializationRequest {
-            operation: request.operation,
-            targets: request.targets,
-        },
-    )?;
-    validate_target_expectations(&operation.targets)?;
-
-    failpoints.hit(&ConversationFailpoint::BeforePrepared)?;
-    insert_operation(repository, &operation)?;
-    failpoints.hit(&ConversationFailpoint::AfterPrepared)?;
-    for (index, bytes) in payloads.iter().enumerate() {
-        write_intent_payload(repository, &operation.operation_id, index, bytes)?;
-    }
-    stage_targets(repository, &operation, failpoints)?;
-    failpoints.hit(&ConversationFailpoint::BeforeStaged)?;
-    operation = set_phase(
-        repository,
-        &operation.operation_id,
-        ConversationSyncPhase::ReplacementStaged,
-        operation.updated_at,
-    )?;
-    failpoints.hit(&ConversationFailpoint::AfterStaged)?;
-
-    let resolution = operation
-        .divergence()
-        .ok_or_else(|| "Codex divergence journal disappeared".to_string())?
-        .resolution;
-    if resolution == ConversationDivergenceResolution::PreserveLocalWithNativeFork {
-        match continue_fork_attempts(repository, operation, &request.fork, on_phase)? {
-            ForkAttemptContinuation::Verified(updated) => operation = updated,
-            ForkAttemptContinuation::AbortedBeforeFork { operation, message } => {
-                rollback_prepared(repository, &operation)?;
-                return Err(message);
-            }
-            ForkAttemptContinuation::Unacknowledged { operation, message } => {
-                return Ok(CodexDivergenceApplyOutcome::ForkUnacknowledged {
-                    operation_id: operation.operation_id,
-                    message,
-                });
-            }
-        }
-        failpoints.hit(&ConversationFailpoint::AfterForkVerified)?;
-        return finish_verified_codex_divergence(repository, operation, &request.fork, failpoints);
-    } else {
-        if let Err(error) = verify_source_idle_and_title(&request.fork) {
-            rollback_prepared(repository, &operation)?;
-            return Err(error);
-        }
-    }
-
-    finish_codex_divergence(repository, operation, &request.fork, failpoints)
-}
-
-pub fn retry_codex_divergence_locked(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-    mut fork: CodexForkExecutionRequest,
-    failpoints: &mut impl ConversationFailpoints,
-    on_phase: ForkPhaseObserver<'_>,
-) -> Result<CodexDivergenceApplyOutcome, String> {
-    let mut operation = load_operation(repository, operation_id)?;
-    validate_operation_scope_for_resume(repository, &operation)?;
-    validate_fork_request(&operation, &fork)?;
-    let divergence = operation
-        .divergence()
-        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
-    if divergence.resolution != ConversationDivergenceResolution::PreserveLocalWithNativeFork
-        || operation.phase != ConversationSyncPhase::ForkUnacknowledged
-    {
-        return Err("only an unacknowledged Codex fork can be retried".to_string());
-    }
-    let executor = divergence
-        .attempts
-        .last()
-        .filter(|attempt| attempt.status == CodexForkAttemptStatus::Unacknowledged)
-        .map(|attempt| attempt.executor)
-        .ok_or_else(|| "Codex fork retry lacks an unacknowledged attempt".to_string())?;
-    let retry_start = divergence
-        .available_executors
-        .iter()
-        .position(|available| *available == executor)
-        .ok_or_else(|| "Codex fork retry executor is no longer available".to_string())?;
-    let prior_attempts = divergence.attempts.clone();
-    // The user-authorized retry starts again at the unacknowledged executor.
-    // A definitive no-fork result may then use a later executor, while another
-    // unacknowledged result still stops the sequence immediately.
-    fork.available_executors = divergence.available_executors[retry_start..].to_vec();
-    match coordinate_native_fork(
-        &fork,
-        |executor, status| record_fork_attempt(repository, operation_id, executor, status),
-        on_phase,
-    )? {
-        CodexForkCoordinatorOutcome::Verified(verified) => {
-            operation = record_verified_fork(repository, &operation, &verified)?;
-        }
-        CodexForkCoordinatorOutcome::Unacknowledged { message, .. } => {
-            operation = load_operation(repository, operation_id)?;
-            return Ok(CodexDivergenceApplyOutcome::ForkUnacknowledged {
-                operation_id: operation.operation_id,
-                message,
-            });
-        }
-        CodexForkCoordinatorOutcome::AbortedBeforeInvocation { message } => {
-            restore_unacknowledged_retry_checkpoint(
-                repository,
-                operation_id,
-                executor,
-                prior_attempts,
-            )?;
-            return Ok(CodexDivergenceApplyOutcome::ForkUnacknowledged {
-                operation_id: operation_id.clone(),
-                message: format!("The fork retry was not invoked: {message}"),
-            });
-        }
-    }
-    failpoints.hit(&ConversationFailpoint::AfterForkVerified)?;
-    finish_verified_codex_divergence(repository, operation, &fork, failpoints)
-}
-
-fn finish_verified_codex_divergence(
-    repository: &LocalStateRepository,
-    mut operation: ConversationSyncOperation,
-    fork: &CodexForkExecutionRequest,
-    failpoints: &mut impl ConversationFailpoints,
-) -> Result<CodexDivergenceApplyOutcome, String> {
-    if operation.phase == ConversationSyncPhase::ForkVerified {
-        operation = set_phase(
-            repository,
-            &operation.operation_id,
-            ConversationSyncPhase::ForkNamingRecorded,
-            operation.updated_at,
-        )?;
-        failpoints.hit(&ConversationFailpoint::AfterForkNamingRecorded)?;
-    }
-    if operation.phase == ConversationSyncPhase::ForkNamingRecorded {
-        verify_journaled_fork(&operation, fork)?;
-        operation = commit_preserved_fork_binding(repository, &operation)?;
-        operation = set_phase(
-            repository,
-            &operation.operation_id,
-            ConversationSyncPhase::LocalForkBound,
-            operation.updated_at,
-        )?;
-        failpoints.hit(&ConversationFailpoint::AfterLocalForkBound)?;
-    }
-    finish_codex_divergence(repository, operation, fork, failpoints)
-}
-
-enum ForkAttemptContinuation {
-    Verified(ConversationSyncOperation),
-    AbortedBeforeFork {
-        operation: ConversationSyncOperation,
-        message: String,
-    },
-    Unacknowledged {
-        operation: ConversationSyncOperation,
-        message: String,
-    },
-}
-
-fn continue_fork_attempts(
-    repository: &LocalStateRepository,
-    operation: ConversationSyncOperation,
-    fork: &CodexForkExecutionRequest,
-    on_phase: ForkPhaseObserver<'_>,
-) -> Result<ForkAttemptContinuation, String> {
-    let divergence = operation
-        .divergence()
-        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
-    if let Some(attempt) = divergence.attempts.last() {
-        if attempt.status == CodexForkAttemptStatus::Pending {
-            record_fork_attempt(
-                repository,
-                &operation.operation_id,
-                attempt.executor,
-                CodexForkAttemptStatus::Unacknowledged,
-            )?;
-            let operation = load_operation(repository, &operation.operation_id)?;
-            return Ok(ForkAttemptContinuation::Unacknowledged {
-                operation,
-                message:
-                    "Mallard restarted before acknowledging the Codex fork; the result was ignored"
-                        .to_string(),
-            });
-        }
-        if attempt.status == CodexForkAttemptStatus::Unacknowledged {
-            return Ok(ForkAttemptContinuation::Unacknowledged {
-                operation,
-                message:
-                    "Mallard did not acknowledge the Codex fork; retrying may create another fork"
-                        .to_string(),
-            });
-        }
-        if attempt.status != CodexForkAttemptStatus::DefinitiveNoFork {
-            return Err("Codex fork attempt journal cannot be continued safely".to_string());
-        }
-    }
-
-    let completed_attempts = divergence.attempts.len();
-    let remaining_executors = divergence
-        .available_executors
-        .get(completed_attempts..)
-        .ok_or_else(|| "Codex fork attempt journal exceeds its executor list".to_string())?
-        .to_vec();
-    if remaining_executors.is_empty() {
-        return Err("Codex fork attempt journal has no remaining executor".to_string());
-    }
-    let mut remaining_request = fork.clone();
-    remaining_request.available_executors = remaining_executors;
-    let operation_id = operation.operation_id.clone();
-    match coordinate_native_fork(
-        &remaining_request,
-        |executor, status| record_fork_attempt(repository, &operation_id, executor, status),
-        on_phase,
-    )? {
-        CodexForkCoordinatorOutcome::Verified(verified) => {
-            record_verified_fork(repository, &operation, &verified)
-                .map(ForkAttemptContinuation::Verified)
-        }
-        CodexForkCoordinatorOutcome::AbortedBeforeInvocation { message } => {
-            let operation = load_operation(repository, &operation_id)?;
-            Ok(ForkAttemptContinuation::AbortedBeforeFork { operation, message })
-        }
-        CodexForkCoordinatorOutcome::Unacknowledged { message, .. } => {
-            let operation = load_operation(repository, &operation_id)?;
-            Ok(ForkAttemptContinuation::Unacknowledged { operation, message })
-        }
-    }
-}
-
-fn finish_codex_divergence(
-    repository: &LocalStateRepository,
-    mut operation: ConversationSyncOperation,
-    fork: &CodexForkExecutionRequest,
-    failpoints: &mut impl ConversationFailpoints,
-) -> Result<CodexDivergenceApplyOutcome, String> {
-    let origin = operation.fork_origin();
-    if origin == Some(ForkOrigin::Manual)
-        && operation.phase == ConversationSyncPhase::LocalForkBound
-    {
-        operation = record_post_commit_presentation(repository, &operation)?;
-        failpoints.hit(&ConversationFailpoint::AfterOriginalNamingRecorded)?;
-    }
-    let may_commit_provider = origin != Some(ForkOrigin::Manual)
-        && (operation.phase == ConversationSyncPhase::LocalForkBound
-            || (operation.phase == ConversationSyncPhase::ReplacementStaged
-                && operation.divergence().is_some_and(|divergence| {
-                    divergence.resolution == ConversationDivergenceResolution::UseCloudOnly
-                })));
-    if may_commit_provider {
-        commit_provider_targets(repository, &operation.operation_id, failpoints)?;
-        failpoints.hit(&ConversationFailpoint::BeforeProviderCommitted)?;
-        operation = set_phase(
-            repository,
-            &operation.operation_id,
-            ConversationSyncPhase::ProviderCommitted,
-            operation.updated_at,
-        )?;
-        failpoints.hit(&ConversationFailpoint::AfterProviderCommitted)?;
-    }
-
-    if operation.phase == ConversationSyncPhase::ProviderCommitted {
-        failpoints.hit(&ConversationFailpoint::BeforeBindingCommit)?;
-        commit_binding(repository, &operation)?;
-        failpoints.hit(&ConversationFailpoint::AfterBindingCommit)?;
-        operation = set_phase(
-            repository,
-            &operation.operation_id,
-            ConversationSyncPhase::BindingsCommitted,
-            operation.updated_at,
-        )?;
-        failpoints.hit(&ConversationFailpoint::AfterBindingsCommitted)?;
-    }
-
-    if operation.phase == ConversationSyncPhase::BindingsCommitted {
-        operation = record_post_commit_presentation(repository, &operation)?;
-        failpoints.hit(&ConversationFailpoint::AfterOriginalNamingRecorded)?;
-    }
-
-    if operation.phase == ConversationSyncPhase::OriginalNamingRecorded {
-        let presentation_task = post_commit_presentation_task(&operation, fork)?;
-        let outcome = if origin == Some(ForkOrigin::Manual) {
-            manual_fork_outcome(&operation)?
-        } else {
-            failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
-            let receipt = commit_receipt(repository, &operation)?;
-            failpoints.hit(&ConversationFailpoint::AfterReceipt)?;
-            CodexDivergenceApplyOutcome::Committed(receipt)
-        };
-        failpoints.hit(&ConversationFailpoint::BeforeLocalCommitted)?;
-        operation = set_phase(
-            repository,
-            &operation.operation_id,
-            ConversationSyncPhase::LocalCommitted,
-            operation.updated_at,
-        )?;
-        failpoints.hit(&ConversationFailpoint::AfterLocalCommitted)?;
-        failpoints.hit(&ConversationFailpoint::BeforeCleanup)?;
-        cleanup_and_retire(repository, &operation.operation_id)?;
-        failpoints.hit(&ConversationFailpoint::AfterCleanup)?;
-        if let Some(task) = presentation_task {
-            dispatch_post_commit_presentation(repository.clone(), task);
-        }
-        return Ok(outcome);
-    }
-    if operation.phase == ConversationSyncPhase::LocalCommitted {
-        let outcome = if origin == Some(ForkOrigin::Manual) {
-            manual_fork_outcome(&operation)?
-        } else {
-            CodexDivergenceApplyOutcome::Committed(conversation_receipt(
-                &operation,
-                operation.cloud_anchor()?,
-            ))
-        };
-        let presentation_task = post_commit_presentation_task(&operation, fork)?;
-        cleanup_and_retire(repository, &operation.operation_id)?;
-        if let Some(task) = presentation_task {
-            dispatch_post_commit_presentation(repository.clone(), task);
-        }
-        return Ok(outcome);
-    }
-    Err(format!(
-        "Codex divergence cannot continue safely from phase '{:?}'",
-        operation.phase
-    ))
-}
-
-fn manual_fork_outcome(
-    operation: &ConversationSyncOperation,
-) -> Result<CodexDivergenceApplyOutcome, String> {
-    let divergence = operation
-        .divergence()
-        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
-    let preserved_provider_thread_id = divergence
-        .fork_provider_thread_id
-        .clone()
-        .ok_or_else(|| "manual fork outcome lacks a verified fork".to_string())?;
-    Ok(CodexDivergenceApplyOutcome::ManualForkCommitted {
-        operation_id: operation.operation_id.clone(),
-        preserved_thread_id: divergence.preserved_thread_id.clone(),
-        preserved_provider_thread_id,
-        desired_fork_name: divergence.desired_fork_name.clone(),
-        executor: divergence.successful_executor,
-    })
-}
-
-fn validate_fork_request(
-    operation: &ConversationSyncOperation,
-    fork: &CodexForkExecutionRequest,
-) -> Result<(), String> {
-    let divergence = operation
-        .divergence()
-        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
-    if operation.provider_thread_id.as_deref() != Some(&divergence.source_provider_thread_id)
-        || fork.source_provider_thread_id != divergence.source_provider_thread_id
-        || fork.source_transcript_path.as_path()
-            != std::path::Path::new(&divergence.source_transcript_path)
-        || fork.source_transcript_sha256 != operation.expected_local_digest.as_deref().unwrap_or("")
-        || fork.local_lineage_digest != divergence.local_lineage_digest
-        || fork.local_semantic_digest != divergence.local_semantic_digest
-        || fork.pinned_local_title != divergence.pinned_local_title
-        || fork.desired_fork_name != divergence.desired_fork_name
-        || fork.codex_executable.to_string_lossy() != divergence.codex_executable
-        || fork.codex_executable_sha256 != divergence.codex_executable_sha256
-        || fork.available_executors != divergence.available_executors
-    {
-        return Err("Codex fork executor inputs differ from the reviewed journal".to_string());
-    }
-    Ok(())
-}
-
-fn load_operation(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-) -> Result<ConversationSyncOperation, String> {
-    repository
-        .load_conversation_sync_journal()?
-        .operations
-        .into_iter()
-        .find(|operation| &operation.operation_id == operation_id)
-        .ok_or_else(|| format!("conversation operation '{}' does not exist", operation_id))
-}
-
-fn validate_operation_scope_for_resume(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-) -> Result<(), String> {
-    let identity = repository.load_or_create_host_identity()?;
-    if identity.host_id != operation.host_id
-        || identity.revision != operation.expected_host_identity_revision
-    {
-        return Err("conversation operation belongs to a different or changed host".to_string());
-    }
-    let machine = repository.load_bindings()?;
-    let binding = machine
-        .bindings
-        .iter()
-        .find(|binding| {
-            binding.host_id == operation.host_id
-                && binding.replica_id == operation.replica_id
-                && binding.local_project_id == operation.local_project_id
-        })
-        .ok_or_else(|| "conversation operation references a missing project replica".to_string())?;
-    if binding.revision != operation.expected_project_binding_revision
-        || binding.profile_ids.get(&operation.provider) != Some(&operation.provider_profile_id)
-    {
-        return Err("conversation project binding changed after review".to_string());
-    }
-    let profile = machine
-        .profiles
-        .iter()
-        .find(|profile| profile.profile_id == operation.provider_profile_id)
-        .ok_or_else(|| "conversation provider profile disappeared".to_string())?;
-    if profile.revision != operation.expected_profile_revision {
-        return Err("conversation provider profile changed after review".to_string());
-    }
-    Ok(())
-}
-
-pub fn codex_fork_request_for_operation(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-) -> Result<CodexForkExecutionRequest, String> {
-    operation.validate()?;
-    let divergence = operation
-        .divergence()
-        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
-    let machine = repository.load_bindings()?;
-    let project_binding = machine
-        .bindings
-        .iter()
-        .find(|binding| {
-            binding.host_id == operation.host_id
-                && binding.replica_id == operation.replica_id
-                && binding.local_project_id == operation.local_project_id
-        })
-        .ok_or_else(|| "conversation operation references a missing project replica".to_string())?;
-    let profile = machine
-        .profiles
-        .iter()
-        .find(|profile| profile.profile_id == operation.provider_profile_id)
-        .ok_or_else(|| {
-            "conversation operation references a missing provider profile".to_string()
-        })?;
-    Ok(CodexForkExecutionRequest {
-        codex_home: PathBuf::from(&profile.canonical_path),
-        project_directory: PathBuf::from(&project_binding.project_root),
-        codex_executable: PathBuf::from(&divergence.codex_executable),
-        codex_executable_sha256: divergence.codex_executable_sha256.clone(),
-        source_provider_thread_id: divergence.source_provider_thread_id.clone(),
-        source_transcript_path: PathBuf::from(&divergence.source_transcript_path),
-        source_transcript_sha256: operation
-            .expected_local_digest
-            .clone()
-            .ok_or_else(|| "Codex divergence lacks its source transcript pin".to_string())?,
-        local_lineage_digest: divergence.local_lineage_digest.clone(),
-        local_semantic_digest: divergence.local_semantic_digest.clone(),
-        pinned_local_title: divergence.pinned_local_title.clone(),
-        desired_fork_name: divergence.desired_fork_name.clone(),
-        available_executors: divergence.available_executors.clone(),
-    })
-}
-
-fn divergence_mut(
-    operation: &mut ConversationSyncOperation,
-) -> Result<&mut mallard_domain::CodexDivergenceOperation, String> {
-    match &mut operation.operation {
-        ConversationSyncOperationKind::CodexDivergence(divergence) => Ok(divergence),
-        _ => Err("conversation operation is not a Codex divergence".to_string()),
-    }
-}
-
-fn record_fork_attempt(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-    executor: CodexForkExecutor,
-    status: CodexForkAttemptStatus,
-) -> Result<(), String> {
-    // A verified executor result is not durable until its exact provider ID,
-    // path, digest, and naming outcome can be committed in one mutation. If
-    // Mallard stops in that narrow window, startup marks Pending as
-    // Unacknowledged and deliberately does not discover or adopt a child.
-    if status == CodexForkAttemptStatus::Verified {
-        return Ok(());
-    }
-    mutate_operation(repository, operation_id, |journaled| {
-        let divergence = divergence_mut(journaled)?;
-        if let Some(attempt) = divergence
-            .attempts
-            .iter_mut()
-            .find(|attempt| attempt.executor == executor)
-        {
-            attempt.status = status;
-        } else {
-            divergence
-                .attempts
-                .push(CodexForkAttempt { executor, status });
-        }
-        divergence.current_executor = matches!(
-            status,
-            CodexForkAttemptStatus::Pending | CodexForkAttemptStatus::Unacknowledged
-        )
-        .then_some(executor);
-        match status {
-            CodexForkAttemptStatus::Pending => {
-                journaled.phase = ConversationSyncPhase::ForkAttemptPending
-            }
-            CodexForkAttemptStatus::Unacknowledged => {
-                journaled.phase = ConversationSyncPhase::ForkUnacknowledged
-            }
-            CodexForkAttemptStatus::DefinitiveNoFork | CodexForkAttemptStatus::Verified => {}
-        }
-        Ok(())
-    })
-    .map(|_| ())
-}
-
-fn restore_unacknowledged_retry_checkpoint(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-    executor: CodexForkExecutor,
-    prior_attempts: Vec<CodexForkAttempt>,
-) -> Result<(), String> {
-    mutate_operation(repository, operation_id, |journaled| {
-        let divergence = divergence_mut(journaled)?;
-        divergence.attempts = prior_attempts.clone();
-        divergence.current_executor = Some(executor);
-        journaled.phase = ConversationSyncPhase::ForkUnacknowledged;
-        Ok(())
-    })
-    .map(|_| ())
-}
-
-fn record_verified_fork(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-    fork: &VerifiedNativeFork,
-) -> Result<ConversationSyncOperation, String> {
-    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
-        let divergence = divergence_mut(journaled)?;
-        let mut attempts = Vec::new();
-        for executor in &divergence.available_executors {
-            if *executor == fork.executor {
-                attempts.push(CodexForkAttempt {
-                    executor: *executor,
-                    status: CodexForkAttemptStatus::Verified,
-                });
-                break;
-            }
-            attempts.push(CodexForkAttempt {
-                executor: *executor,
-                status: CodexForkAttemptStatus::DefinitiveNoFork,
-            });
-        }
-        divergence.attempts = attempts;
-        divergence.current_executor = None;
-        divergence.successful_executor = Some(fork.executor);
-        divergence.fork_provider_thread_id = Some(fork.provider_thread_id.clone());
-        divergence.fork_transcript_path = Some(fork.transcript_path.to_string_lossy().into_owned());
-        divergence.fork_transcript_sha256 = Some(fork.transcript_sha256.clone());
-        divergence.fork_name_status = Some(map_name_status(&fork.name_status));
-        journaled.phase = ConversationSyncPhase::ForkVerified;
-        Ok(())
-    })?;
-    Ok(updated)
-}
-
-fn map_name_status(status: &CodexNameStatus) -> ConversationNameStatus {
-    match status {
-        CodexNameStatus::Applied => ConversationNameStatus::Applied,
-        CodexNameStatus::UserOverride => ConversationNameStatus::UserOverride,
-        CodexNameStatus::Unchanged => ConversationNameStatus::Unchanged,
-        CodexNameStatus::Deferred => ConversationNameStatus::Deferred,
-        CodexNameStatus::Failed(_) => ConversationNameStatus::Failed,
-    }
-}
-
-fn verify_journaled_fork(
-    operation: &ConversationSyncOperation,
-    fork: &CodexForkExecutionRequest,
-) -> Result<(), String> {
-    let divergence = operation
-        .divergence()
-        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
-    let provider_thread_id = divergence
-        .fork_provider_thread_id
-        .as_deref()
-        .ok_or_else(|| "verified Codex fork lacks a provider thread id".to_string())?;
-    let transcript_path = divergence
-        .fork_transcript_path
-        .as_deref()
-        .map(Path::new)
-        .ok_or_else(|| "verified Codex fork lacks a transcript path".to_string())?;
-    let transcript_sha256 = divergence
-        .fork_transcript_sha256
-        .as_deref()
-        .ok_or_else(|| "verified Codex fork lacks a transcript digest".to_string())?;
-    verify_recorded_fork(fork, provider_thread_id, transcript_path, transcript_sha256)
-}
-
-fn commit_preserved_fork_binding(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-) -> Result<ConversationSyncOperation, String> {
-    let divergence = operation
-        .divergence()
-        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
-    let fork_provider_thread_id = divergence
-        .fork_provider_thread_id
-        .as_ref()
-        .ok_or_else(|| "verified Codex fork lacks a provider thread id".to_string())?;
-    let fork_transcript_path = divergence
-        .fork_transcript_path
-        .as_ref()
-        .ok_or_else(|| "verified Codex fork lacks a transcript path".to_string())?;
-    let fork_sha256 = divergence
-        .fork_transcript_sha256
-        .as_ref()
-        .ok_or_else(|| "verified Codex fork lacks a transcript digest".to_string())?;
-    let expected_stamp = ForkStamp {
-        fork_thread_id: divergence.preserved_thread_id.clone(),
-        fork_provider_thread_id: fork_provider_thread_id.clone(),
-        fork_transcript_path: fork_transcript_path.clone(),
-        lineage_digest: divergence.local_lineage_digest.clone(),
-        semantic_digest: divergence.local_semantic_digest.clone(),
-        message_count: divergence.local_message_count,
-        forked_at: operation.updated_at,
-    };
-    let stamp_matches = |stamp: Option<&ForkStamp>| {
-        stamp.is_some_and(|stamp| {
-            stamp.fork_thread_id == expected_stamp.fork_thread_id
-                && stamp.fork_provider_thread_id == expected_stamp.fork_provider_thread_id
-                && stamp.fork_transcript_path == expected_stamp.fork_transcript_path
-                && stamp.lineage_digest == expected_stamp.lineage_digest
-                && stamp.semantic_digest == expected_stamp.semantic_digest
-                && stamp.message_count == expected_stamp.message_count
-        })
-    };
-    let current = repository.load_conversation_bindings()?;
-    let source_scope = |binding: &LocalConversationBinding| {
-        binding.host_id == operation.host_id
-            && binding.replica_id == operation.replica_id
-            && binding.local_project_id == operation.local_project_id
-            && binding.provider_profile_id == operation.provider_profile_id
-            && binding.thread_id == operation.thread_id
-    };
-    let existing = current.bindings.iter().find(|binding| {
-        binding.host_id == operation.host_id
-            && binding.replica_id == operation.replica_id
-            && binding.local_project_id == operation.local_project_id
-            && binding.provider_profile_id == operation.provider_profile_id
-            && binding.thread_id == divergence.preserved_thread_id
-    });
-    let exact_existing = existing.is_some_and(|binding| {
-        binding.forked_from.as_ref() == Some(&operation.thread_id)
-            && binding.provider_thread_id.as_ref() == Some(fork_provider_thread_id)
-            && binding.materialization_state == ConversationMaterializationState::Resumable
-            && binding.last_observed_file_sha256.as_ref() == Some(fork_sha256)
-            && binding.last_observed_lineage_digest.as_ref()
-                == Some(&divergence.local_lineage_digest)
-            && binding.last_observed_semantic_digest.as_ref()
-                == Some(&divergence.local_semantic_digest)
-            && binding.source_revision.is_none()
-            && binding.source_manifest_sha256.is_none()
-    }) && current
-        .bindings
-        .iter()
-        .find(|binding| source_scope(binding))
-        .is_some_and(|source| stamp_matches(source.fork_stamp.as_ref()));
-    if existing.is_some() && !exact_existing {
-        return Err("preserved conversation binding is occupied".to_string());
-    }
-    if !exact_existing {
-        if current.revision != operation.expected_bindings_document_revision {
-            return Err("conversation bindings changed after review".to_string());
-        }
-        repository.mutate_conversation_bindings(|document| {
-            let source_index = document
-                .bindings
-                .iter()
-                .position(source_scope)
-                .ok_or_else(|| "conversation divergence source binding disappeared".to_string())?;
-            let source = &document.bindings[source_index];
-            if source.revision != operation.expected_binding_revision.unwrap_or(u64::MAX)
-                || source.provider_thread_id.as_deref()
-                    != Some(&divergence.source_provider_thread_id)
-            {
-                return Err("conversation divergence source binding changed".to_string());
-            }
-            document.bindings.push(LocalConversationBinding {
-                host_id: operation.host_id.clone(),
-                replica_id: operation.replica_id.clone(),
-                local_project_id: operation.local_project_id.clone(),
-                provider_profile_id: operation.provider_profile_id.clone(),
-                thread_id: divergence.preserved_thread_id.clone(),
-                forked_from: Some(operation.thread_id.clone()),
-                fork_stamp: None,
-                provider_thread_id: Some(fork_provider_thread_id.clone()),
-                materialization_state: ConversationMaterializationState::Resumable,
-                last_observed_file_sha256: Some(fork_sha256.clone()),
-                last_observed_head_message_id: None,
-                last_observed_lineage_digest: Some(divergence.local_lineage_digest.clone()),
-                last_observed_semantic_digest: Some(divergence.local_semantic_digest.clone()),
-                source_revision: None,
-                source_manifest_sha256: None,
-                revision: 0,
-                created_at: operation.updated_at,
-                updated_at: operation.updated_at,
-            });
-            let source = &mut document.bindings[source_index];
-            source.fork_stamp = Some(expected_stamp.clone());
-            source.revision = source.revision.saturating_add(1);
-            source.updated_at = operation.updated_at;
-            Ok(())
-        })?;
-    }
-    let document = repository.load_conversation_bindings()?;
-    let source_revision = document
-        .bindings
-        .iter()
-        .find(|binding| source_scope(binding))
-        .map(|binding| binding.revision);
-    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
-        journaled.expected_bindings_document_revision = document.revision;
-        if let Some(revision) = source_revision {
-            journaled.expected_binding_revision = Some(revision);
-        }
-        Ok(())
-    })?;
-    Ok(updated)
-}
-
-fn record_post_commit_presentation(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-) -> Result<ConversationSyncOperation, String> {
-    let divergence = operation
-        .divergence()
-        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
-    let original_name_status = if divergence.desired_original_name.as_deref()
-        == divergence.pinned_local_title.as_deref()
-        || divergence.desired_original_name.is_none()
-    {
-        ConversationNameStatus::Unchanged
-    } else {
-        ConversationNameStatus::Deferred
-    };
-    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
-        let divergence = divergence_mut(journaled)?;
-        divergence.original_name_status = Some(original_name_status);
-        divergence.inventory_refresh_status = CodexInventoryRefreshStatus::Deferred;
-        journaled.phase = ConversationSyncPhase::OriginalNamingRecorded;
-        Ok(())
-    })?;
-    Ok(updated)
-}
-
-fn post_commit_presentation_task(
-    operation: &ConversationSyncOperation,
-    fork: &CodexForkExecutionRequest,
-) -> Result<Option<CodexPostCommitPresentationTask>, String> {
-    let divergence = operation
-        .divergence()
-        .ok_or_else(|| "conversation operation is not a Codex divergence".to_string())?;
-    let fork_rename = divergence
-        .fork_provider_thread_id
-        .as_ref()
-        .filter(|_| divergence.fork_name_status == Some(ConversationNameStatus::Deferred))
-        .map(|thread_id| CodexThreadRenameRequest {
-            thread_id: thread_id.clone(),
-            expected_current: divergence.pinned_local_title.clone(),
-            desired: divergence.desired_fork_name.clone(),
-        });
-    let original_rename = divergence
-        .desired_original_name
-        .as_ref()
-        .filter(|_| divergence.original_name_status == Some(ConversationNameStatus::Deferred))
-        .map(|desired| CodexThreadRenameRequest {
-            thread_id: divergence.source_provider_thread_id.clone(),
-            expected_current: divergence.pinned_local_title.clone(),
-            desired: desired.clone(),
-        });
-    if fork_rename.is_none()
-        && original_rename.is_none()
-        && divergence.inventory_refresh_status != CodexInventoryRefreshStatus::Deferred
-    {
-        return Ok(None);
-    }
-    Ok(Some(CodexPostCommitPresentationTask {
-        operation_id: operation.operation_id.clone(),
-        request: CodexPostCommitPresentationRequest {
-            codex_executable: fork.codex_executable.clone(),
-            codex_home: fork.codex_home.clone(),
-            project_directory: fork.project_directory.clone(),
-            fork_rename,
-            original_rename,
-        },
-        records_receipt: operation.fork_origin() != Some(ForkOrigin::Manual),
-    }))
-}
-
-fn complete_post_commit_presentation_task(
-    repository: &LocalStateRepository,
-    task: &CodexPostCommitPresentationTask,
-) -> Result<(), String> {
-    let outcome = complete_codex_post_commit_presentation(&task.request);
-    if !task.records_receipt {
-        return Ok(());
-    }
-    repository.mutate_materializations(|_, materializations| {
-        let conversation = materializations
-            .records
-            .iter_mut()
-            .flat_map(|record| record.receipts.iter_mut())
-            .filter_map(|receipt| receipt.conversation.as_mut())
-            .find(|conversation| conversation.journal_operation_id == task.operation_id)
-            .ok_or_else(|| "deferred Codex presentation receipt disappeared".to_string())?;
-        let mallard_domain::DivergenceReceiptKind::CodexNativeFork(divergence) = conversation
-            .divergence
-            .as_mut()
-            .ok_or_else(|| "deferred Codex presentation lacks a divergence receipt".to_string())?
-        else {
-            return Err("deferred Codex presentation receipt is not a native fork".to_string());
-        };
-        if let Some(status) = outcome.fork_name_status.as_ref() {
-            divergence.fork_name_status = Some(map_name_status(status));
-        }
-        divergence.original_name_status = Some(map_name_status(&outcome.original_name_status));
-        divergence.inventory_refresh_status = if outcome.inventory_refreshed {
-            CodexInventoryRefreshStatus::Refreshed
-        } else {
-            CodexInventoryRefreshStatus::Failed
-        };
-        Ok(())
-    })
-}
-
-fn dispatch_post_commit_presentation(
-    repository: LocalStateRepository,
-    task: CodexPostCommitPresentationTask,
-) {
-    // Activity reloads immediately after a manual fork command returns. Finish
-    // its best-effort rename and inventory refresh first so that reload cannot
-    // race the inherited title. Pull presentation remains detached because its
-    // durable receipt records the eventual outcome.
-    if !task.records_receipt {
-        let _ = complete_post_commit_presentation_task(&repository, &task);
-        return;
-    }
-    // Test builds (including dependent crates' suites via `test-support`)
-    // must not spawn the detached presentation thread: receipts would race
-    // the assertions that pin the deferred naming contract.
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
-        let _ = std::thread::Builder::new()
-            .name("mallard-codex-presentation".to_string())
-            .spawn(move || {
-                let _ = complete_post_commit_presentation_task(&repository, &task);
-            });
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    {
-        let _ = (repository, task);
-    }
-}
-
-/// Recover every local operation after reopening the repository. Calling this
-/// twice is intentionally a supported fixed-point check.
+/// Reconcile every durable nonterminal journal operation to one
+/// deterministic fixed point. Pull operations roll forward from their last
+/// durable phase or abort before any visible mutation; Push operations need
+/// head inspection and are only marked for the caller's publication-recovery
+/// entry point.
 pub fn recover_conversation_materializations(
     repository: &LocalStateRepository,
 ) -> Result<ConversationRecoveryReport, String> {
     let _host_guard = repository.acquire_host_operation()?;
     let mut report = ConversationRecoveryReport::default();
     let operations = repository.load_conversation_sync_journal()?.operations;
-    for mut operation in operations {
+    for operation in operations {
         let operation_id = operation.operation_id.clone();
-        let is_codex_divergence = matches!(
-            &operation.operation,
-            ConversationSyncOperationKind::CodexDivergence(_)
-        );
         let result = (|| -> Result<RecoveryOutcome, String> {
-            if operation.direction == ConversationPlanDirection::Push {
-                mark_recovery_required(repository, &operation_id)?;
+            if operation.direction() == ConversationPlanDirection::Push {
+                // Head inspection needs the caller's storage engine; startup
+                // recovery only surfaces the pending operation.
                 return Ok(RecoveryOutcome::RecoveryRequired);
             }
-            if is_codex_divergence {
-                if operation.phase == ConversationSyncPhase::Prepared {
-                    if operation.targets.iter().all(staged_target_is_valid) {
-                        operation = set_phase(
-                            repository,
-                            &operation_id,
-                            ConversationSyncPhase::ReplacementStaged,
-                            operation.updated_at,
-                        )?;
-                    } else if operation.targets.iter().all(target_is_uncommitted) {
-                        rollback_prepared(repository, &operation)?;
-                        return Ok(RecoveryOutcome::RolledBack);
-                    } else {
-                        return Ok(RecoveryOutcome::RecoveryRequired);
-                    }
-                }
-                if matches!(
-                    operation.phase,
-                    ConversationSyncPhase::ForkUnacknowledged
-                        | ConversationSyncPhase::RecoveryRequired
-                ) {
-                    return Ok(RecoveryOutcome::RecoveryRequired);
-                }
-                if operation.phase == ConversationSyncPhase::LocalCommitted {
-                    let fork = codex_fork_request_for_operation(repository, &operation)?;
-                    let presentation_task = post_commit_presentation_task(&operation, &fork)?;
-                    cleanup_and_retire(repository, &operation_id)?;
-                    if let Some(task) = presentation_task {
-                        dispatch_post_commit_presentation(repository.clone(), task);
-                    }
-                    return Ok(RecoveryOutcome::Completed);
-                }
-                let fork = codex_fork_request_for_operation(repository, &operation)?;
-                if operation.phase == ConversationSyncPhase::ReplacementStaged
-                    && operation.divergence().is_some_and(|divergence| {
-                        divergence.resolution == ConversationDivergenceResolution::UseCloudOnly
-                    })
-                    && verify_source_idle_and_title(&fork).is_err()
-                {
-                    rollback_prepared(repository, &operation)?;
-                    return Ok(RecoveryOutcome::RolledBack);
-                }
-                let mut no_failpoints = NoConversationFailpoints;
-                if operation.phase == ConversationSyncPhase::ForkAttemptPending {
-                    let attempt = operation
-                        .divergence()
-                        .and_then(|divergence| divergence.attempts.last())
-                        .ok_or_else(|| {
-                            "pending Codex fork lacks its durable executor attempt".to_string()
-                        })?;
-                    return match attempt.status {
-                        CodexForkAttemptStatus::Pending => {
-                            record_fork_attempt(
-                                repository,
-                                &operation_id,
-                                attempt.executor,
-                                CodexForkAttemptStatus::Unacknowledged,
-                            )?;
-                            Ok(RecoveryOutcome::RecoveryRequired)
-                        }
-                        CodexForkAttemptStatus::DefinitiveNoFork => {
-                            rollback_prepared(repository, &operation)?;
-                            Ok(RecoveryOutcome::RolledBack)
-                        }
-                        _ => Err("pending Codex fork has an invalid durable executor outcome"
-                            .to_string()),
-                    };
-                }
-                if operation.phase == ConversationSyncPhase::ReplacementStaged {
-                    // No executor was durably marked Pending, so no fork was
-                    // invoked. Startup recovery is deliberately inert: roll
-                    // back staging and let a user start a fresh operation.
-                    rollback_prepared(repository, &operation)?;
-                    return Ok(RecoveryOutcome::RolledBack);
-                }
-                if matches!(
-                    operation.phase,
-                    ConversationSyncPhase::ForkVerified
-                        | ConversationSyncPhase::ForkNamingRecorded
-                        | ConversationSyncPhase::LocalForkBound
-                        | ConversationSyncPhase::ProviderCommitted
-                        | ConversationSyncPhase::BindingsCommitted
-                        | ConversationSyncPhase::OriginalNamingRecorded
-                        | ConversationSyncPhase::LocalCommitted
-                ) {
-                    return match finish_verified_codex_divergence(
-                        repository,
-                        operation,
-                        &fork,
-                        &mut no_failpoints,
-                    )? {
-                        CodexDivergenceApplyOutcome::Committed(_)
-                        | CodexDivergenceApplyOutcome::ManualForkCommitted { .. } => {
-                            Ok(RecoveryOutcome::Completed)
-                        }
-                        CodexDivergenceApplyOutcome::ForkUnacknowledged { .. } => {
-                            Ok(RecoveryOutcome::RecoveryRequired)
-                        }
-                    };
-                }
+            let Some(phase) = pull_phase(&operation) else {
+                return Ok(RecoveryOutcome::RecoveryRequired);
+            };
+            if phase.is_blocked() {
+                return Ok(RecoveryOutcome::RecoveryRequired);
             }
-            match operation.phase {
-                ConversationSyncPhase::Prepared => {
-                    if operation.targets.iter().all(staged_target_is_valid) {
-                        operation = set_phase(
-                            repository,
-                            &operation_id,
-                            ConversationSyncPhase::ReplacementStaged,
-                            operation.updated_at,
-                        )?;
-                    } else if operation.targets.iter().all(target_is_uncommitted) {
-                        rollback_prepared(repository, &operation)?;
-                        return Ok(RecoveryOutcome::RolledBack);
-                    } else {
-                        mark_recovery_required(repository, &operation_id)?;
-                        return Ok(RecoveryOutcome::RecoveryRequired);
-                    }
-                }
-                ConversationSyncPhase::RecoveryRequired => {
-                    return Ok(RecoveryOutcome::RecoveryRequired)
-                }
-                _ => {}
-            }
-
-            if operation.phase == ConversationSyncPhase::ReplacementStaged {
-                let mut no_failpoints = NoConversationFailpoints;
-                commit_provider_targets(repository, &operation_id, &mut no_failpoints)?;
-                operation = set_phase(
-                    repository,
-                    &operation_id,
-                    ConversationSyncPhase::ProviderCommitted,
-                    operation.updated_at,
-                )?;
-            }
-            if matches!(
-                operation.phase,
-                ConversationSyncPhase::ProviderCommitted | ConversationSyncPhase::CloudPublished
-            ) {
-                commit_binding(repository, &operation)?;
-                operation = set_phase(
-                    repository,
-                    &operation_id,
-                    ConversationSyncPhase::BindingsCommitted,
-                    operation.updated_at,
-                )?;
-            }
-            if operation.phase == ConversationSyncPhase::BindingsCommitted {
-                commit_receipt(repository, &operation)?;
-                operation = set_phase(
-                    repository,
-                    &operation_id,
-                    ConversationSyncPhase::LocalCommitted,
-                    operation.updated_at,
-                )?;
-            }
-            if operation.phase == ConversationSyncPhase::LocalCommitted {
+            if phase.is_terminal() {
                 cleanup_and_retire(repository, &operation_id)?;
+                return Ok(RecoveryOutcome::Completed);
             }
-            Ok(RecoveryOutcome::Completed)
+            let mut no_failpoints = NoConversationFailpoints;
+            match phase {
+                PullJournalPhase::TargetStaged => {
+                    // The journal is the durable commit decision: roll
+                    // forward whenever the staged state can be completed —
+                    // re-staging from intent payloads when a crash landed
+                    // between the journal and the stage files.
+                    let can_restage = operation.targets.iter().enumerate().all(|(index, _)| {
+                        intent_payload_path(repository, &operation_id, index).is_file()
+                    });
+                    if operation.targets.iter().all(staged_target_is_valid)
+                        || operation.targets.iter().any(|target| target.committed)
+                        || can_restage
+                    {
+                        if !operation.targets.iter().all(staged_target_is_valid) {
+                            stage_targets(repository, &operation, &mut no_failpoints)?;
+                        }
+                        finish_materialization(repository, operation, &mut no_failpoints)?;
+                        Ok(RecoveryOutcome::Completed)
+                    } else if operation.targets.iter().all(target_is_uncommitted) {
+                        // Nothing visible was mutated and the payloads are
+                        // gone: abort before commit.
+                        set_pull_phase(
+                            repository,
+                            &operation_id,
+                            PullJournalPhase::AbortedPrecommit,
+                            operation.updated_at,
+                        )?;
+                        rollback_staged(repository, &operation)?;
+                        Ok(RecoveryOutcome::RolledBack)
+                    } else {
+                        mark_recovery_blocked(repository, &operation_id)?;
+                        Ok(RecoveryOutcome::RecoveryRequired)
+                    }
+                }
+                PullJournalPhase::ProviderCommitted | PullJournalPhase::LocalCommitted => {
+                    finish_materialization(repository, operation, &mut no_failpoints)?;
+                    Ok(RecoveryOutcome::Completed)
+                }
+                _ => unreachable!("terminal and blocked phases handled above"),
+            }
         })();
         match result {
             Ok(RecoveryOutcome::Completed) => report.completed.push(operation_id),
@@ -1604,7 +772,7 @@ pub fn recover_conversation_materializations(
                     report.rolled_back.push(operation_id);
                     continue;
                 }
-                let _ = mark_recovery_required(repository, &operation_id);
+                let _ = mark_recovery_blocked(repository, &operation_id);
                 report.recovery_required.push(operation_id);
                 if error.contains("different host") {
                     continue;
@@ -1626,26 +794,20 @@ fn prepare_operation(
     request: ConversationMaterializationRequest,
 ) -> Result<(ConversationSyncOperation, Vec<Vec<u8>>), String> {
     let mut operation = request.operation;
-    if operation.direction != ConversationPlanDirection::Pull {
-        return Err("provider materialization requires a Pull operation".to_string());
-    }
     if !matches!(
         operation.operation,
-        ConversationSyncOperationKind::ProviderMaterialization
-            | ConversationSyncOperationKind::CodexDivergence(_)
-            | ConversationSyncOperationKind::AdapterDivergence(_)
+        ConversationSyncOperationKind::ProviderMaterialization(_)
     ) {
         return Err("provider materialization requires a materialization journal".to_string());
     }
-    if operation.phase != ConversationSyncPhase::Prepared || !operation.targets.is_empty() {
-        return Err("new conversation operation must begin Prepared without targets".to_string());
+    if !operation.targets.is_empty() {
+        return Err("new conversation operation must begin without journaled targets".to_string());
     }
     if request.targets.len() > 64 {
         return Err("conversation materialization has too many provider targets".to_string());
     }
     if operation.materialization_state == ConversationMaterializationState::Resumable
         && request.targets.is_empty()
-        && operation.fork_origin() != Some(ForkOrigin::Manual)
     {
         return Err("resumable conversation materialization has no provider files".to_string());
     }
@@ -1946,52 +1108,6 @@ fn mutate_operation<T>(
     ))
 }
 
-fn set_phase(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-    phase: ConversationSyncPhase,
-    updated_at: u64,
-) -> Result<ConversationSyncOperation, String> {
-    let (_, operation) = mutate_operation(repository, operation_id, |operation| {
-        operation.phase = phase;
-        operation.updated_at = operation.updated_at.max(updated_at);
-        Ok(())
-    })?;
-    Ok(operation)
-}
-
-/// A reviewed batch pins one bindings-document revision for every action.
-/// Earlier actions in the same journal batch legitimately advance that
-/// document. Rebase only the global revision, and only while this action's
-/// own binding pin still matches exactly.
-fn rebase_operation_after_batch_progress(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-) -> Result<ConversationSyncOperation, String> {
-    let document = repository.load_conversation_bindings()?;
-    if document.revision == operation.expected_bindings_document_revision {
-        return Ok(operation.clone());
-    }
-    let current_binding = document.bindings.iter().find(|binding| {
-        binding.host_id == operation.host_id
-            && binding.replica_id == operation.replica_id
-            && binding.local_project_id == operation.local_project_id
-            && binding.provider_profile_id == operation.provider_profile_id
-            && binding.thread_id == operation.thread_id
-    });
-    match (operation.expected_binding_revision, current_binding) {
-        (Some(expected), Some(binding)) if binding.revision == expected => {}
-        (None, None) => {}
-        _ if binding_commit_is_complete(&document, operation) => return Ok(operation.clone()),
-        _ => return Err("conversation binding changed after review".to_string()),
-    }
-    let (_, updated) = mutate_operation(repository, &operation.operation_id, |journaled| {
-        journaled.expected_bindings_document_revision = document.revision;
-        Ok(())
-    })?;
-    Ok(updated)
-}
-
 fn stage_targets(
     repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
@@ -2064,12 +1180,6 @@ fn verify_target_role_set(
         }
         return Ok(());
     }
-    if operation.fork_origin() == Some(ForkOrigin::Manual) {
-        if !targets.is_empty() {
-            return Err("manual fork operation writes no provider files".to_string());
-        }
-        return Ok(());
-    }
     if operation.materialization_state != ConversationMaterializationState::Resumable {
         return Err(
             "new conversation materialization must resolve to resumable or stored-only".to_string(),
@@ -2083,21 +1193,8 @@ fn verify_target_role_set(
         .iter()
         .filter(|target| target.role == ConversationFileRole::ProviderIndexFragment)
         .count();
-    // An adapter file fork writes the preserved branch beside the source in
-    // the same operation: exactly two transcripts (fork, then replacement).
-    let expected_transcripts = if operation
-        .adapter_divergence()
-        .is_some_and(|divergence| divergence.fork_provider_thread_id.is_some())
-    {
-        2
-    } else {
-        1
-    };
-    if transcripts != expected_transcripts {
-        return Err(format!(
-            "resumable conversation requires exactly {} transcript(s)",
-            expected_transcripts
-        ));
+    if transcripts != 1 {
+        return Err("resumable conversation requires exactly one transcript".to_string());
     }
     // Provider index rows are conditional presentation metadata (Codex keeps
     // `session_index.jsonl`); the registered adapter declares how many one
@@ -2137,32 +1234,6 @@ fn verify_provider_payload(
             let adapter = crate::providers::ProviderRegistry::production()
                 .require_sessions(&operation.provider)?;
             let analysis = adapter.analyze(&bytes);
-            // An adapter file fork's preserved-branch target verifies against
-            // the fork identity and the reviewed LOCAL digests instead.
-            if let Some(divergence) = operation.adapter_divergence() {
-                if divergence.fork_transcript_path.as_deref() == Some(target.target_path.as_str()) {
-                    if analysis.source_provider_session_id.as_deref()
-                        != divergence.fork_provider_thread_id.as_deref()
-                    {
-                        return Err(
-                            "staged fork transcript has the wrong provider session id".to_string()
-                        );
-                    }
-                    match analysis.lineage {
-                        CodecLineage::Complete {
-                            lineage_digest,
-                            semantic_digest,
-                            ..
-                        } if lineage_digest == divergence.local_lineage_digest
-                            && semantic_digest == divergence.local_semantic_digest => {}
-                        _ => {
-                            return Err("staged fork transcript changed the preserved local branch"
-                                .to_string())
-                        }
-                    }
-                    return Ok(());
-                }
-            }
             if analysis.source_provider_session_id.as_deref()
                 != operation.provider_thread_id.as_deref()
             {
@@ -2189,13 +1260,18 @@ fn verify_provider_payload(
                     operation.provider
                 ));
             }
+            let ConversationSyncOperationKind::ProviderMaterialization(materialization) =
+                &operation.operation
+            else {
+                return Err("staged transcript outside a materialization".to_string());
+            };
             match analysis.lineage {
                 CodecLineage::Complete {
                     lineage_digest,
                     semantic_digest,
                     ..
-                } if Some(&lineage_digest) == operation.lineage_digest.as_ref()
-                    && Some(&semantic_digest) == operation.semantic_digest.as_ref() => {}
+                } if lineage_digest == materialization.pinned_lineage_digest
+                    && semantic_digest == materialization.pinned_semantic_digest => {}
                 _ => {
                     return Err(format!(
                         "staged {} transcript changed lineage or semantic content",
@@ -2219,6 +1295,14 @@ fn verify_provider_payload(
         }
     }
     Ok(())
+}
+
+/// The no-clobber verdicts from `commit_one_target` that prove a foreign
+/// writer owns the target. Everything else is retryable.
+fn is_target_collision(error: &str) -> bool {
+    error.contains("cannot prove ownership")
+        || error.contains("changed during apply")
+        || error.contains("committed conversation provider target changed")
 }
 
 fn commit_provider_targets(
@@ -2343,189 +1427,32 @@ fn commit_one_target(target: &ConversationJournalTarget) -> Result<(), String> {
     )
 }
 
-fn record_publication_anchor(
-    operation: &mut ConversationSyncOperation,
-    publication: &ConversationCloudPublication,
-) -> Result<(), String> {
-    let anchor = operation
-        .cloud
-        .as_mut()
-        .ok_or_else(|| "conversation operation lacks a cloud anchor".to_string())?;
-    anchor.revision = publication.revision;
-    anchor.commit_id = publication.commit_id.clone();
-    anchor.manifest_sha256 = publication.manifest_sha256.clone();
-    Ok(())
-}
-
-fn commit_binding(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-) -> Result<(), String> {
-    let anchor = operation.cloud_anchor()?.clone();
-    let current = repository.load_conversation_bindings()?;
-    if binding_commit_is_complete(&current, operation) {
-        return Ok(());
-    }
-    repository.mutate_conversation_bindings(|document| {
-        if document.revision != operation.expected_bindings_document_revision {
-            return Err("conversation bindings changed after review".to_string());
-        }
-
-        let binding_target_thread_id = operation.binding_target_thread_id();
-        if let Some(divergence) = operation.adapter_divergence() {
-            if let (Some(fork_provider_thread_id), Some(fork_transcript_path), Some(fork_sha256)) = (
-                divergence.fork_provider_thread_id.clone(),
-                divergence.fork_transcript_path.clone(),
-                divergence.fork_transcript_sha256.clone(),
-            ) {
-                let fork_exists = document.bindings.iter().any(|binding| {
-                    binding.host_id == operation.host_id
-                        && binding.replica_id == operation.replica_id
-                        && binding.local_project_id == operation.local_project_id
-                        && binding.provider_profile_id == operation.provider_profile_id
-                        && binding.thread_id == divergence.preserved_thread_id
-                });
-                if !fork_exists {
-                    document.bindings.push(LocalConversationBinding {
-                        host_id: operation.host_id.clone(),
-                        replica_id: operation.replica_id.clone(),
-                        local_project_id: operation.local_project_id.clone(),
-                        provider_profile_id: operation.provider_profile_id.clone(),
-                        thread_id: divergence.preserved_thread_id.clone(),
-                        forked_from: Some(binding_target_thread_id.clone()),
-                        fork_stamp: None,
-                        provider_thread_id: Some(fork_provider_thread_id.clone()),
-                        materialization_state: ConversationMaterializationState::Resumable,
-                        last_observed_file_sha256: Some(fork_sha256.clone()),
-                        last_observed_head_message_id: None,
-                        last_observed_lineage_digest: Some(
-                            divergence.local_lineage_digest.clone(),
-                        ),
-                        last_observed_semantic_digest: Some(
-                            divergence.local_semantic_digest.clone(),
-                        ),
-                        source_revision: None,
-                        source_manifest_sha256: None,
-                        revision: 0,
-                        created_at: operation.updated_at,
-                        updated_at: operation.updated_at,
-                    });
-                }
-                if let Some(source) = document.bindings.iter_mut().find(|binding| {
-                    binding.host_id == operation.host_id
-                        && binding.replica_id == operation.replica_id
-                        && binding.local_project_id == operation.local_project_id
-                        && binding.provider_profile_id == operation.provider_profile_id
-                        && binding.thread_id == *binding_target_thread_id
-                }) {
-                    source.fork_stamp = Some(mallard_domain::ForkStamp {
-                        fork_thread_id: divergence.preserved_thread_id.clone(),
-                        fork_provider_thread_id,
-                        fork_transcript_path,
-                        lineage_digest: divergence.local_lineage_digest.clone(),
-                        semantic_digest: divergence.local_semantic_digest.clone(),
-                        message_count: divergence.local_message_count,
-                        forked_at: operation.updated_at,
-                    });
-                }
-            }
-        }
-        if let Some(binding) = document.bindings.iter_mut().find(|binding| {
-            binding.host_id == operation.host_id
-                && binding.replica_id == operation.replica_id
-                && binding.local_project_id == operation.local_project_id
-                && binding.provider_profile_id == operation.provider_profile_id
-                && binding.thread_id == *binding_target_thread_id
-        }) {
-            if operation.expected_binding_revision.is_some()
-                && binding.revision != operation.expected_binding_revision.unwrap()
-            {
-                return Err("conversation binding changed after review".to_string());
-            }
-            binding.provider_thread_id = operation.provider_thread_id.clone();
-            binding.forked_from = operation.binding_forked_from.clone();
-            binding.materialization_state = operation.materialization_state;
-            binding.last_observed_file_sha256 = transcript_target_digest(operation);
-            binding.last_observed_lineage_digest = operation.lineage_digest.clone();
-            binding.last_observed_semantic_digest = operation.semantic_digest.clone();
-            binding.source_revision = Some(anchor.revision);
-            binding.source_manifest_sha256 = Some(anchor.manifest_sha256.clone());
-            binding.revision = binding.revision.saturating_add(1);
-            binding.updated_at = operation.updated_at;
-        } else {
-            document.bindings.push(LocalConversationBinding {
-                host_id: operation.host_id.clone(),
-                replica_id: operation.replica_id.clone(),
-                local_project_id: operation.local_project_id.clone(),
-                provider_profile_id: operation.provider_profile_id.clone(),
-                thread_id: binding_target_thread_id.clone(),
-                forked_from: operation.binding_forked_from.clone(),
-                fork_stamp: None,
-                provider_thread_id: operation.provider_thread_id.clone(),
-                materialization_state: operation.materialization_state,
-                last_observed_file_sha256: transcript_target_digest(operation),
-                last_observed_head_message_id: None,
-                last_observed_lineage_digest: operation.lineage_digest.clone(),
-                last_observed_semantic_digest: operation.semantic_digest.clone(),
-                source_revision: Some(anchor.revision),
-                source_manifest_sha256: Some(anchor.manifest_sha256.clone()),
-                revision: 0,
-                created_at: operation.updated_at,
-                updated_at: operation.updated_at,
-            });
-        }
-        Ok(())
-    })
-}
-
-fn binding_commit_is_complete(
-    document: &mallard_domain::ConversationBindings,
-    operation: &ConversationSyncOperation,
-) -> bool {
-    let materialized_exists = document.bindings.iter().any(|binding| {
-        let in_scope = binding.host_id == operation.host_id
-            && binding.replica_id == operation.replica_id
-            && binding.local_project_id == operation.local_project_id
-            && binding.provider_profile_id == operation.provider_profile_id
-            && binding.thread_id == *operation.binding_target_thread_id();
-        if !in_scope {
-            return false;
-        }
-        binding.provider_thread_id == operation.provider_thread_id
-            && binding.forked_from == operation.binding_forked_from
-            && binding.materialization_state == operation.materialization_state
-            && binding.last_observed_file_sha256 == transcript_target_digest(operation)
-            && binding.last_observed_lineage_digest == operation.lineage_digest
-            && binding.last_observed_semantic_digest == operation.semantic_digest
-            && binding.source_revision == operation.cloud.as_ref().map(|anchor| anchor.revision)
-            && binding.source_manifest_sha256.as_deref()
-                == operation
-                    .cloud
-                    .as_ref()
-                    .map(|anchor| anchor.manifest_sha256.as_str())
-    });
-    materialized_exists
-}
-
 fn transcript_target_digest(operation: &ConversationSyncOperation) -> Option<String> {
     operation
         .targets
         .iter()
         .find(|target| target.role == ConversationFileRole::Transcript)
         .and_then(|target| target.staged_sha256.clone())
-        .or_else(|| operation.expected_local_digest.clone())
 }
 
 fn commit_receipt(
     repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
+    cloud_revision: u64,
+    cloud_commit_id: &str,
+    cloud_manifest_sha256: &str,
 ) -> Result<ConversationApplyReceipt, String> {
-    let anchor = operation.cloud_anchor()?.clone();
-    let receipt = conversation_receipt(operation, &anchor);
+    let anchor = operation.cloud.clone();
+    let receipt = conversation_receipt(
+        operation,
+        cloud_revision,
+        cloud_commit_id,
+        cloud_manifest_sha256,
+    );
     let plan_id = operation
         .plan_id
         .clone()
-        .ok_or_else(|| "conversation materialization lacks a plan id".to_string())?;
+        .ok_or_else(|| "conversation operation lacks a plan id".to_string())?;
     repository.mutate_materializations(|_, materializations| {
         if materializations.records.iter().any(|record| {
             record.receipts.iter().any(|receipt| {
@@ -2542,12 +1469,15 @@ fn commit_receipt(
             .clone()
             .map(Ok)
             .unwrap_or_else(|| stable_action_id(&operation.operation_id))?;
-        let resource_id =
-            conversation_resource_id(&operation.provider, operation.binding_target_thread_id())?;
+        let resource_id = conversation_resource_id(&operation.provider, &operation.thread_id)?;
+        let action_type = match operation.direction() {
+            ConversationPlanDirection::Push => RestoreActionType::PublishConversation,
+            ConversationPlanDirection::Pull => RestoreActionType::MaterializeConversation,
+        };
         let apply_receipt = ApplyReceipt {
             action_id,
             resource_id,
-            action_type: RestoreActionType::MaterializeConversation,
+            action_type,
             logical_path: None,
             source_sha256: None,
             target_path: operation
@@ -2571,9 +1501,6 @@ fn commit_receipt(
                 || record.local_project_id != operation.local_project_id
                 || record.storage_id != anchor.storage_id
                 || record.bundle_id != anchor.bundle_id
-                || record.revision != anchor.revision
-                || record.commit_id != anchor.commit_id
-                || record.manifest_sha256 != anchor.manifest_sha256
             {
                 return Err(
                     "conversation receipt plan scope disagrees with materialization".to_string(),
@@ -2590,9 +1517,9 @@ fn commit_receipt(
                 local_project_id: operation.local_project_id.clone(),
                 storage_id: anchor.storage_id.clone(),
                 bundle_id: anchor.bundle_id.clone(),
-                revision: anchor.revision,
-                commit_id: anchor.commit_id.clone(),
-                manifest_sha256: anchor.manifest_sha256.clone(),
+                revision: cloud_revision,
+                commit_id: cloud_commit_id.to_string(),
+                manifest_sha256: cloud_manifest_sha256.to_string(),
                 binding_revision: operation.expected_project_binding_revision,
                 status: MaterializationStatus::Complete,
                 applied_at: operation.updated_at,
@@ -2607,8 +1534,25 @@ fn commit_receipt(
 
 fn conversation_receipt(
     operation: &ConversationSyncOperation,
-    anchor: &ConversationCloudAnchor,
+    cloud_revision: u64,
+    cloud_commit_id: &str,
+    cloud_manifest_sha256: &str,
 ) -> ConversationApplyReceipt {
+    let (accepted_tail, preserved_thread_id, source_disposition) = match &operation.operation {
+        ConversationSyncOperationKind::CloudPublication(publication) => (
+            Some(publication.tail_after.clone()),
+            None,
+            Some(ConversationSourceDisposition::Retained),
+        ),
+        ConversationSyncOperationKind::ProviderMaterialization(materialization) => (
+            Some(materialization.accepted_tail_after.clone()),
+            materialization
+                .keep_both
+                .as_ref()
+                .map(|keep_both| keep_both.preserved_thread_id.clone()),
+            Some(ConversationSourceDisposition::Retained),
+        ),
+    };
     ConversationApplyReceipt {
         host_id: operation.host_id.clone(),
         replica_id: operation.replica_id.clone(),
@@ -2616,59 +1560,19 @@ fn conversation_receipt(
         provider_profile_id: operation.provider_profile_id.clone(),
         provider_thread_id: operation.provider_thread_id.clone(),
         materialization_state: operation.materialization_state,
-        lineage_digest: operation.lineage_digest.clone(),
-        semantic_digest: operation.semantic_digest.clone(),
+        lineage_digest: None,
+        semantic_digest: None,
         local_file_sha256_after: transcript_target_digest(operation),
-        cloud_revision: anchor.revision,
-        cloud_commit_id: anchor.commit_id.clone(),
-        cloud_manifest_sha256: anchor.manifest_sha256.clone(),
+        cloud_revision,
+        cloud_commit_id: cloud_commit_id.to_string(),
+        cloud_manifest_sha256: cloud_manifest_sha256.to_string(),
         published_origin_host_token: None,
         published_origin_replica_token: None,
         journal_operation_id: operation.operation_id.clone(),
-        divergence: divergence_receipt_kind(operation),
+        accepted_tail,
+        preserved_thread_id,
+        source_disposition,
     }
-}
-
-/// The typed divergence receipt for one committed operation, covering both
-/// the Codex native-fork ladder and adapter file forks.
-fn divergence_receipt_kind(
-    operation: &ConversationSyncOperation,
-) -> Option<mallard_domain::DivergenceReceiptKind> {
-    if let Some(divergence) = operation.divergence() {
-        return Some(mallard_domain::DivergenceReceiptKind::CodexNativeFork(
-            CodexDivergenceReceipt {
-                resolution: divergence.resolution,
-                preserved_thread_id: divergence
-                    .fork_provider_thread_id
-                    .as_ref()
-                    .map(|_| divergence.preserved_thread_id.clone()),
-                preserved_provider_thread_id: divergence.fork_provider_thread_id.clone(),
-                executor: divergence.successful_executor,
-                desired_fork_name: divergence
-                    .fork_provider_thread_id
-                    .as_ref()
-                    .map(|_| divergence.desired_fork_name.clone()),
-                fork_name_status: divergence.fork_name_status,
-                desired_original_name: divergence.desired_original_name.clone(),
-                original_name_status: divergence.original_name_status,
-                inventory_refresh_status: divergence.inventory_refresh_status,
-            },
-        ));
-    }
-    if let Some(divergence) = operation.adapter_divergence() {
-        return Some(mallard_domain::DivergenceReceiptKind::AdapterFileFork(
-            mallard_domain::AdapterDivergenceReceipt {
-                resolution: divergence.resolution,
-                preserved_thread_id: divergence
-                    .fork_provider_thread_id
-                    .as_ref()
-                    .map(|_| divergence.preserved_thread_id.clone()),
-                preserved_provider_thread_id: divergence.fork_provider_thread_id.clone(),
-                fork_transcript_path: divergence.fork_transcript_path.clone(),
-            },
-        ));
-    }
-    None
 }
 
 fn cleanup_and_retire(
@@ -2699,7 +1603,7 @@ fn cleanup_and_retire(
     })
 }
 
-fn rollback_prepared(
+fn rollback_staged(
     repository: &LocalStateRepository,
     operation: &ConversationSyncOperation,
 ) -> Result<(), String> {
@@ -2711,17 +1615,24 @@ fn rollback_prepared(
     cleanup_and_retire(repository, &operation.operation_id)
 }
 
-fn mark_recovery_required(
+/// Gate the touched resources for explicit repair: the blocked phase is
+/// durable and is neither retried nor released by routine recovery.
+fn mark_recovery_blocked(
     repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
 ) -> Result<(), String> {
-    set_phase(
-        repository,
-        operation_id,
-        ConversationSyncPhase::RecoveryRequired,
-        0,
-    )
-    .map(|_| ())
+    let (_, _) = mutate_operation(repository, operation_id, |operation| {
+        match &mut operation.operation {
+            ConversationSyncOperationKind::CloudPublication(publication) => {
+                publication.phase = PushJournalPhase::RecoveryBlockedCorruption;
+            }
+            ConversationSyncOperationKind::ProviderMaterialization(materialization) => {
+                materialization.phase = PullJournalPhase::RecoveryBlockedCorruption;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn staged_target_is_valid(target: &ConversationJournalTarget) -> bool {
@@ -2987,67 +1898,4 @@ fn sha256(bytes: &[u8]) -> String {
 
 fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn manual_post_commit_presentation_finishes_before_dispatch_returns() {
-        let temp = tempfile::tempdir().unwrap();
-        let mallard_home = temp.path().join("mallard");
-        let codex_home = temp.path().join("codex");
-        let project = temp.path().join("project");
-        fs::create_dir(&mallard_home).unwrap();
-        fs::create_dir(&codex_home).unwrap();
-        fs::create_dir(&project).unwrap();
-        let repository = LocalStateRepository::from_home_dir(&mallard_home).unwrap();
-        let executable = temp.path().join("fake-codex");
-        let script = r#"#!/bin/sh
-while IFS= read -r line
-do
-  case "$line" in
-    *'"method":"initialize"'*)
-      printf '%s\n' '{"id":1,"result":{}}'
-      ;;
-    *'"method":"thread/read"'*)
-      printf '%s\n' '{"id":2,"result":{"thread":{"name":null}}}'
-      ;;
-    *'"method":"thread/name/set"'*)
-      printf '%s\n' '{"id":3,"result":{}}'
-      ;;
-    *'"method":"thread/list"'*)
-      printf '%s\n' complete > "$CODEX_HOME/manual-presentation-complete"
-      printf '%s\n' '{"id":4,"result":{"data":[],"nextCursor":null}}'
-      ;;
-  esac
-done
-"#;
-        fs::write(&executable, script).unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        let task = CodexPostCommitPresentationTask {
-            operation_id: ConversationOperationId::parse("operation-manual-presentation").unwrap(),
-            request: CodexPostCommitPresentationRequest {
-                codex_executable: executable,
-                codex_home: codex_home.clone(),
-                project_directory: project,
-                fork_rename: Some(CodexThreadRenameRequest {
-                    thread_id: "fork-thread".to_string(),
-                    expected_current: None,
-                    desired: "Fork title".to_string(),
-                }),
-                original_rename: None,
-            },
-            records_receipt: false,
-        };
-
-        dispatch_post_commit_presentation(repository, task);
-
-        assert_eq!(
-            fs::read_to_string(codex_home.join("manual-presentation-complete")).unwrap(),
-            "complete\n"
-        );
-    }
 }

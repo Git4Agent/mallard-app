@@ -542,14 +542,20 @@ test("the storage group is skipped when it would frame nothing", () => {
   assert.match(workspace, /if \(!activeNotice && !reviewOpen\) return null;/);
 });
 
-test("the storage sidebar opens the overview folded and the gear opens settings", () => {
+test("the storage sidebar opens the overview and puts settings and clear behind overflow", () => {
   const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
   const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
 
-  assert.match(sidebar, /onClick=\{\(\) => onOpenStorage\(storage\.id, false\)\}/);
-  assert.match(sidebar, /onClick=\{\(\) => onOpenStorage\(storage\.id, true\)\}/);
+  assert.match(sidebar, /onOpenStorage\(storage\.id, false\)/);
+  assert.match(sidebar, /onOpenStorage\(storage\.id, true\)/);
+  assert.match(sidebar, /aria-haspopup="menu"/);
+  assert.match(sidebar, /<Icon name="more" size=\{14\} \/>/);
+  assert.match(sidebar, />Storage settings</);
+  assert.match(sidebar, />Clear storage data</);
+  assert.match(sidebar, /onClearStorage\(storage\.id\)/);
   assert.match(shell, /onOpenStorage=\{\(storageId, settingsExpanded\) => \{/);
+  assert.match(shell, /onClearStorage=\{\(storageId\) => void clearStorageData\(storageId\)\}/);
   assert.match(shell, /mode: "open",\s*storageId,\s*settingsExpanded,/);
   assert.match(workspace, /setStorageDetailsExpanded\(storageEditorRequest\.settingsExpanded\)/);
   assert.match(
@@ -572,6 +578,10 @@ test("the storage sidebar opens the overview folded and the gear opens settings"
   assert.match(workspace, /label: "Reveal in Finder",\s*detail: compactProjectPath\(workspaceProject\.project_root\)/);
   assert.match(workspace, /label: "Agent profile",\s*detail: workspaceProfileLabel/);
   assert.match(workspace, /label: "Rename project"/);
+  assert.match(workspace, /label: "Reset local sync state"/);
+  assert.match(workspace, /onResetProjectMetadata\(workspaceProject\.local_project_id\)/);
+  assert.match(workspace, /isIrrecoverableSyncError\(activeNotice\.message\)/);
+  assert.match(workspace, /Reset local sync state/);
   assert.match(workspace, /aria-label="Rename storage"/);
   assert.match(workspace, /<Icon name="edit" size=\{13\} \/>/);
   assert.match(workspace, /`rename-storage:\$\{storageDraft\.id\}`/);

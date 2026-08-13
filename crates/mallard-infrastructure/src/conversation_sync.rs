@@ -2,22 +2,22 @@
 //!
 //! Filesystem, Tauri, and object-store code call these functions rather than
 //! reimplementing relation-to-action policy. This keeps Push, Pull, recovery,
-//! and the integration harness on one state machine.
+//! and the integration harness on one state machine. The relation itself is
+//! computed only by `mallard_domain::compare_conversation_tail`; this module
+//! maps the returned classification to typed actions and never refines it.
 
 use std::collections::BTreeMap;
 
 use mallard_domain::{
-    classify_thread_refresh, ActionId, CanonicalConversationMessage, ConversationDivergencePlan,
-    ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationReasonCode, ConversationRelation, HostId, LocalProjectId, LocalProviderProfileId,
-    ProviderKey, ProviderStateExpectation, RefreshCloudMeta, RefreshLocalState, ReplicaId,
-    ResourceId, TargetExpectation, ThreadId,
+    ActionId, ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
+    ConversationReasonCode, HostId, KeepBothPlan, LocalProjectId, LocalProviderProfileId,
+    PortableConversationTail, ProviderKey, ProviderStateExpectation, RawRangePin, ReplicaId,
+    ResourceId, SyncCurrency, TailClassification, TargetExpectation, ThreadId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BindingResolution {
     Bound,
-    UniqueCompatibleAncestor,
     Missing,
     Ambiguous,
 }
@@ -29,13 +29,13 @@ pub struct ConversationCapabilities {
     pub cloud_safely_readable: bool,
     pub destination_codec_resumable: bool,
     pub provider_quiescent: bool,
-    /// True only when raw bytes differ solely through fields the verified
-    /// codec declares structural (thread ID and mapped cwd).
-    pub structural_rewrite_only: bool,
-    /// True while a journaled sync operation (for example a paused Codex
-    /// fork checkpoint) still owns this thread. Every new mutation is
-    /// blocked until that operation is verified or canceled.
+    /// True while a journaled sync operation still owns this thread. Every
+    /// new mutation is blocked until that operation reaches a terminal phase.
     pub resolution_pending: bool,
+    /// True when the destination checkpoint is `Detached`: the bound alias
+    /// was replaced by another operation, so Push has no derivable local
+    /// value and the thread needs a Pull first.
+    pub physical_detached: bool,
 }
 
 impl Default for ConversationCapabilities {
@@ -46,8 +46,8 @@ impl Default for ConversationCapabilities {
             cloud_safely_readable: true,
             destination_codec_resumable: true,
             provider_quiescent: true,
-            structural_rewrite_only: false,
             resolution_pending: false,
+            physical_detached: false,
         }
     }
 }
@@ -57,130 +57,117 @@ pub struct ConversationDecision {
     pub action: ConversationPlanActionType,
     pub reason_code: ConversationReasonCode,
     pub selectable: bool,
-    pub selected_by_default: bool,
-    pub requires_explicit_approval: bool,
     pub blocked_reason: Option<String>,
 }
 
-/// Map a proven relation to one typed default action. Push never publishes a
-/// divergent or unknown branch: divergence requires a reviewed Pull, and
-/// unknown lineage is blocked. Pull exposes one explicit divergence action.
+/// Map a classified relation to one typed default action. The map is fixed by
+/// the resolver contract: Push never runs Pull's path, publishes only
+/// `LocalOutstanding`/`MissingCloud`, and defers every conflict to Pull;
+/// Pull's only divergence resolution is keep-both.
 pub fn default_conversation_decision(
     direction: ConversationPlanDirection,
-    relation: ConversationRelation,
+    relation: TailClassification,
     capabilities: ConversationCapabilities,
 ) -> ConversationDecision {
     use ConversationPlanActionType as Action;
     use ConversationReasonCode as Reason;
-    use ConversationRelation as Relation;
+    use TailClassification as Relation;
 
     if capabilities.resolution_pending {
-        return decision(Action::Blocked, Reason::ResolutionPending);
+        return decision(Action::Blocked, Reason::Busy);
+    }
+    if capabilities.physical_detached && relation == Relation::Unknown {
+        return decision(Action::Blocked, Reason::DetachedRequiresPull);
     }
 
-    if relation == Relation::Identical && capabilities.structural_rewrite_only {
-        return decision(Action::NoOp, Reason::StructuralRewriteOnly);
-    }
+    let binding_block = |capabilities: ConversationCapabilities| match capabilities.binding {
+        BindingResolution::Ambiguous => Some(Reason::AmbiguousBinding),
+        BindingResolution::Missing => Some(Reason::MissingBinding),
+        BindingResolution::Bound => None,
+    };
 
     match direction {
         ConversationPlanDirection::Push => match relation {
-            Relation::Identical => decision(Action::NoOp, Reason::Identical),
-            Relation::CloudPrefixOfLocal => {
-                if !capabilities.local_safely_capturable {
+            Relation::Sync(SyncCurrency::Current) => {
+                decision(Action::NoChanges, Reason::SyncCurrent)
+            }
+            Relation::Sync(SyncCurrency::Advanced) => {
+                decision(Action::RequirePullMetadata, Reason::SyncAdvanced)
+            }
+            Relation::LocalOutstanding => {
+                if let Some(reason) = binding_block(capabilities) {
+                    decision(Action::Blocked, reason)
+                } else if !capabilities.local_safely_capturable {
                     decision(Action::Blocked, Reason::CodecUnsupported)
-                } else if matches!(
-                    capabilities.binding,
-                    BindingResolution::Missing | BindingResolution::Ambiguous
-                ) {
-                    decision(
-                        Action::Blocked,
-                        if capabilities.binding == BindingResolution::Ambiguous {
-                            Reason::AmbiguousBinding
-                        } else {
-                            Reason::MissingBinding
-                        },
-                    )
                 } else {
-                    decision(Action::FastForwardCloud, Reason::CloudPrefixOfLocal)
+                    decision(Action::Publish, Reason::LocalOutstanding)
                 }
             }
-            Relation::LocalPrefixOfCloud => {
-                decision(Action::RequirePull, Reason::LocalPrefixOfCloud)
-            }
-            Relation::Diverged => decision(Action::RequirePull, Reason::Diverged),
-            Relation::Unknown => decision(Action::Blocked, Reason::UnknownLineage),
-            Relation::LocalMissing => decision(Action::NoOp, Reason::LocalMissing),
-            Relation::CloudMissing => {
+            Relation::CloudOutstanding => decision(Action::RequirePull, Reason::CloudOutstanding),
+            Relation::Divergent => decision(Action::RequirePull, Reason::Divergent),
+            Relation::MissingCloud => {
                 if capabilities.binding == BindingResolution::Ambiguous {
                     decision(Action::Blocked, Reason::AmbiguousBinding)
-                } else if capabilities.local_safely_capturable {
-                    decision(Action::CreateCloud, Reason::CloudMissing)
-                } else {
+                } else if !capabilities.local_safely_capturable {
                     decision(Action::Blocked, Reason::CodecUnsupported)
+                } else {
+                    decision(Action::CreateCloud, Reason::MissingCloud)
                 }
             }
-            Relation::BothMissing => decision(Action::NoOp, Reason::BothMissing),
+            Relation::MissingLocal => decision(Action::NotPushable, Reason::MissingLocal),
+            Relation::MissingBoth => decision(Action::NotPushable, Reason::MissingBoth),
+            Relation::Unknown => decision(Action::Blocked, Reason::UnknownEvidence),
         },
         ConversationPlanDirection::Pull => match relation {
-            Relation::Identical => decision(Action::NoOp, Reason::Identical),
-            Relation::CloudPrefixOfLocal => decision(Action::KeepLocal, Reason::CloudPrefixOfLocal),
-            Relation::LocalPrefixOfCloud => {
-                if !capabilities.cloud_safely_readable || !capabilities.destination_codec_resumable
-                {
-                    decision(Action::StoreOnly, Reason::CodecUnsupported)
-                } else if !capabilities.provider_quiescent {
-                    decision(Action::StoreOnly, Reason::ProviderNotQuiescent)
-                } else if matches!(
-                    capabilities.binding,
-                    BindingResolution::Missing | BindingResolution::Ambiguous
-                ) {
-                    decision(
-                        Action::Blocked,
-                        if capabilities.binding == BindingResolution::Ambiguous {
-                            Reason::AmbiguousBinding
-                        } else {
-                            Reason::MissingBinding
-                        },
-                    )
+            Relation::Sync(currency) => decision(
+                Action::AdoptCloudMetadata,
+                match currency {
+                    SyncCurrency::Current => Reason::SyncCurrent,
+                    SyncCurrency::Advanced => Reason::SyncAdvanced,
+                },
+            ),
+            Relation::LocalOutstanding => {
+                decision(Action::ReportPushEligible, Reason::LocalOutstanding)
+            }
+            Relation::CloudOutstanding => materializing_decision(
+                Action::MaterializeCloud,
+                Reason::CloudOutstanding,
+                capabilities,
+            ),
+            Relation::Divergent => {
+                if !capabilities.local_safely_capturable {
+                    decision(Action::Blocked, Reason::CodecUnsupported)
                 } else {
-                    decision(Action::FastForwardLocal, Reason::LocalPrefixOfCloud)
+                    materializing_decision(Action::KeepBoth, Reason::Divergent, capabilities)
                 }
             }
-            Relation::Diverged => {
-                if !capabilities.local_safely_capturable
-                    || !capabilities.cloud_safely_readable
-                    || !capabilities.destination_codec_resumable
-                {
-                    decision(Action::StoreOnly, Reason::CodecUnsupported)
-                } else if !capabilities.provider_quiescent {
-                    decision(Action::StoreOnly, Reason::ProviderNotQuiescent)
-                } else if matches!(
-                    capabilities.binding,
-                    BindingResolution::Bound | BindingResolution::UniqueCompatibleAncestor
-                ) {
-                    decision(Action::ResolveDivergence, Reason::Diverged)
-                } else {
-                    decision(
-                        Action::Blocked,
-                        if capabilities.binding == BindingResolution::Ambiguous {
-                            Reason::AmbiguousBinding
-                        } else {
-                            Reason::MissingBinding
-                        },
-                    )
-                }
+            Relation::MissingLocal => {
+                materializing_decision(Action::CreateLocal, Reason::MissingLocal, capabilities)
             }
-            Relation::Unknown => decision(Action::StoreOnly, Reason::UnknownLineage),
-            Relation::LocalMissing => {
-                if capabilities.cloud_safely_readable && capabilities.destination_codec_resumable {
-                    decision(Action::CreateLocal, Reason::LocalMissing)
-                } else {
-                    decision(Action::StoreOnly, Reason::CodecUnsupported)
-                }
-            }
-            Relation::CloudMissing => decision(Action::KeepLocal, Reason::CloudMissing),
-            Relation::BothMissing => decision(Action::NoOp, Reason::BothMissing),
+            Relation::MissingCloud => decision(Action::ReportLocalOnly, Reason::MissingCloud),
+            Relation::MissingBoth => decision(Action::NotFound, Reason::MissingBoth),
+            Relation::Unknown => decision(Action::Blocked, Reason::UnknownEvidence),
         },
+    }
+}
+
+fn materializing_decision(
+    action: ConversationPlanActionType,
+    reason: ConversationReasonCode,
+    capabilities: ConversationCapabilities,
+) -> ConversationDecision {
+    use ConversationPlanActionType as Action;
+    use ConversationReasonCode as Reason;
+    if !capabilities.cloud_safely_readable || !capabilities.destination_codec_resumable {
+        decision(Action::Blocked, Reason::CodecUnsupported)
+    } else if !capabilities.provider_quiescent {
+        decision(Action::Blocked, Reason::ProviderNotQuiescent)
+    } else if capabilities.binding == BindingResolution::Ambiguous {
+        decision(Action::Blocked, Reason::AmbiguousBinding)
+    } else if capabilities.binding == BindingResolution::Missing && action != Action::CreateLocal {
+        decision(Action::Blocked, Reason::MissingBinding)
+    } else {
+        decision(action, reason)
     }
 }
 
@@ -188,30 +175,19 @@ fn decision(
     action: ConversationPlanActionType,
     reason_code: ConversationReasonCode,
 ) -> ConversationDecision {
-    let requires_explicit_approval = matches!(
-        action,
-        ConversationPlanActionType::ReplaceLocal
-            | ConversationPlanActionType::ReplaceCloud
-            | ConversationPlanActionType::TombstoneThread
-    );
     let selectable = matches!(
         action,
-        ConversationPlanActionType::FastForwardLocal
-            | ConversationPlanActionType::FastForwardCloud
-            | ConversationPlanActionType::ResolveDivergence
+        ConversationPlanActionType::Publish
             | ConversationPlanActionType::CreateCloud
+            | ConversationPlanActionType::AdoptCloudMetadata
+            | ConversationPlanActionType::MaterializeCloud
+            | ConversationPlanActionType::KeepBoth
             | ConversationPlanActionType::CreateLocal
-            | ConversationPlanActionType::ReplaceLocal
-            | ConversationPlanActionType::ReplaceCloud
-            | ConversationPlanActionType::TombstoneThread
     );
-    let selected_by_default = selectable && !requires_explicit_approval;
     ConversationDecision {
         action,
         reason_code,
         selectable,
-        selected_by_default,
-        requires_explicit_approval,
         blocked_reason: (action == ConversationPlanActionType::Blocked)
             .then(|| blocked_reason(reason_code).to_string()),
     }
@@ -234,9 +210,17 @@ fn blocked_reason(reason: ConversationReasonCode) -> &'static str {
         ConversationReasonCode::StalePlan => {
             "The reviewed conversation state changed. Refresh before applying."
         }
-        ConversationReasonCode::ResolutionPending => {
-            "A Codex fork checkpoint from an earlier Pull is still pending. \
-             Retry it in the Pull review first."
+        ConversationReasonCode::Busy => {
+            "A journaled sync operation still owns this conversation. \
+             Finish or recover it first."
+        }
+        ConversationReasonCode::DetachedRequiresPull => {
+            "This conversation's local mapping was replaced. Pull to \
+             re-establish it."
+        }
+        ConversationReasonCode::CorruptionBlocked => {
+            "This conversation's local state failed verification and needs \
+             explicit repair."
         }
         _ => "This conversation cannot be changed safely.",
     }
@@ -249,9 +233,9 @@ fn blocked_reason(reason: ConversationReasonCode) -> &'static str {
 pub struct ConversationPlanActionRequest {
     pub action_id: ActionId,
     pub direction: ConversationPlanDirection,
-    /// Classified by the caller from the manifest-only decision table; the
-    /// action pins re-prove it against actual content at apply time.
-    pub relation: ConversationRelation,
+    /// Classified by `compare_conversation_tail`; the action pins the exact
+    /// evidence and apply re-proves it before any mutation.
+    pub relation: TailClassification,
     pub capabilities: ConversationCapabilities,
     pub provider: ProviderKey,
     pub host_id: HostId,
@@ -259,9 +243,9 @@ pub struct ConversationPlanActionRequest {
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
     pub thread_id: ThreadId,
-    pub divergence: Option<ConversationDivergencePlan>,
     pub source_resource_id: Option<ResourceId>,
     pub proposed_provider_thread_id: Option<String>,
+    pub keep_both: Option<KeepBothPlan>,
     pub required_codec: String,
     pub pinned_revision: u64,
     pub pinned_commit_id: String,
@@ -270,8 +254,12 @@ pub struct ConversationPlanActionRequest {
     /// absent scope.
     pub pinned_scope_revision: u64,
     pub pinned_scope_sha256: String,
+    pub pinned_accepted_tail: Option<PortableConversationTail>,
+    pub pinned_local_tail: Option<PortableConversationTail>,
+    pub pinned_cloud_tail: Option<PortableConversationTail>,
     pub pinned_lineage_digest: Option<String>,
     pub pinned_semantic_digest: Option<String>,
+    pub pinned_raw_range: Option<RawRangePin>,
     pub expected_local_target: TargetExpectation,
     pub expected_provider_state: Vec<ProviderStateExpectation>,
     pub expected_profile_revision: u64,
@@ -302,17 +290,21 @@ pub fn build_conversation_plan_action(
         local_project_id: request.local_project_id,
         provider_profile_id: request.provider_profile_id,
         thread_id: request.thread_id,
-        divergence: request.divergence,
         source_resource_id: request.source_resource_id,
         proposed_provider_thread_id: request.proposed_provider_thread_id,
+        keep_both: request.keep_both,
         required_codec: request.required_codec,
         pinned_revision: request.pinned_revision,
         pinned_commit_id: request.pinned_commit_id,
         pinned_manifest_sha256: request.pinned_manifest_sha256,
         pinned_scope_revision: request.pinned_scope_revision,
         pinned_scope_sha256: request.pinned_scope_sha256,
+        pinned_accepted_tail: request.pinned_accepted_tail,
+        pinned_local_tail: request.pinned_local_tail,
+        pinned_cloud_tail: request.pinned_cloud_tail,
         pinned_lineage_digest: request.pinned_lineage_digest,
         pinned_semantic_digest: request.pinned_semantic_digest,
+        pinned_raw_range: request.pinned_raw_range,
         expected_local_target: request.expected_local_target,
         expected_provider_state: request.expected_provider_state,
         expected_profile_revision: request.expected_profile_revision,
@@ -324,70 +316,6 @@ pub fn build_conversation_plan_action(
     };
     action.validate()?;
     Ok(action)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BindingRecoveryResult {
-    Unique(ThreadId),
-    Missing,
-    Ambiguous,
-    Unknown,
-}
-
-/// A recovery candidate known only by its manifest metadata.
-#[derive(Clone, Debug)]
-pub struct MetaBindingRecoveryCandidate<'a> {
-    pub thread_id: ThreadId,
-    pub meta: RefreshCloudMeta<'a>,
-}
-
-/// Recover a missing binding only from one unique longest compatible cloud
-/// ancestor among all threads.  Ancestry is witnessed by locally recomputed
-/// prefix digests against the manifest's digest pair, so recovery never
-/// reads cloud transcripts.  Names, titles, and provider IDs are
-/// intentionally absent from this API and therefore cannot influence the
-/// result.  Callers must skip conversations that are already bound: a
-/// deliberately forked conversation is always bound to its minted thread and
-/// must never be silently re-attached to a compatible ancestor.
-pub fn recover_unique_compatible_binding_from_meta(
-    local_chain: Option<&[CanonicalConversationMessage]>,
-    candidates: &[MetaBindingRecoveryCandidate<'_>],
-) -> BindingRecoveryResult {
-    let Some(local_chain) = local_chain else {
-        return BindingRecoveryResult::Unknown;
-    };
-    unique_longest_compatible(candidates.iter().filter_map(|candidate| {
-        matches!(
-            classify_thread_refresh(
-                RefreshLocalState::Chain(local_chain),
-                Some(candidate.meta),
-                None,
-            ),
-            ConversationRelation::Identical | ConversationRelation::CloudPrefixOfLocal
-        )
-        .then_some((candidate.meta.message_count, candidate.thread_id.clone()))
-    }))
-}
-
-fn unique_longest_compatible(
-    compatible: impl Iterator<Item = (u64, ThreadId)>,
-) -> BindingRecoveryResult {
-    let compatible = compatible.collect::<Vec<_>>();
-    let Some(longest) = compatible.iter().map(|(length, _)| *length).max() else {
-        return BindingRecoveryResult::Missing;
-    };
-    let mut longest_matches = compatible
-        .into_iter()
-        .filter(|(length, _)| *length == longest)
-        .map(|(_, thread_id)| thread_id);
-    let Some(result) = longest_matches.next() else {
-        return BindingRecoveryResult::Missing;
-    };
-    if longest_matches.next().is_some() {
-        BindingRecoveryResult::Ambiguous
-    } else {
-        BindingRecoveryResult::Unique(result)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,8 +331,12 @@ pub enum ConversationStalePin {
     Manifest,
     ScopeRevision,
     ScopeDigest,
+    AcceptedTail,
+    LocalTail,
+    CloudTail,
     LineageDigest,
     SemanticDigest,
+    RawRange,
     LocalTarget,
     ProviderState,
     ProfileRevision,
@@ -428,8 +360,12 @@ pub struct ConversationApplyContext {
     pub manifest_sha256: String,
     pub scope_revision: u64,
     pub scope_sha256: String,
+    pub accepted_tail: Option<PortableConversationTail>,
+    pub local_tail: Option<PortableConversationTail>,
+    pub cloud_tail: Option<PortableConversationTail>,
     pub lineage_digest: Option<String>,
     pub semantic_digest: Option<String>,
+    pub raw_range: Option<RawRangePin>,
     pub local_target: TargetExpectation,
     pub provider_state: BTreeMap<String, TargetExpectation>,
     pub profile_revision: u64,
@@ -480,11 +416,23 @@ pub fn validate_conversation_action_pins(
     if current.scope_sha256 != action.pinned_scope_sha256 {
         return Err(ConversationStalePin::ScopeDigest);
     }
+    if current.accepted_tail != action.pinned_accepted_tail {
+        return Err(ConversationStalePin::AcceptedTail);
+    }
+    if current.local_tail != action.pinned_local_tail {
+        return Err(ConversationStalePin::LocalTail);
+    }
+    if current.cloud_tail != action.pinned_cloud_tail {
+        return Err(ConversationStalePin::CloudTail);
+    }
     if current.lineage_digest != action.pinned_lineage_digest {
         return Err(ConversationStalePin::LineageDigest);
     }
     if current.semantic_digest != action.pinned_semantic_digest {
         return Err(ConversationStalePin::SemanticDigest);
+    }
+    if current.raw_range != action.pinned_raw_range {
+        return Err(ConversationStalePin::RawRange);
     }
     if current.local_target != action.expected_local_target {
         return Err(ConversationStalePin::LocalTarget);
@@ -514,9 +462,9 @@ pub fn validate_conversation_action_pins(
     }
     if matches!(
         action.action,
-        ConversationPlanActionType::FastForwardLocal
-            | ConversationPlanActionType::ResolveDivergence
-            | ConversationPlanActionType::ReplaceLocal
+        ConversationPlanActionType::MaterializeCloud
+            | ConversationPlanActionType::KeepBoth
+            | ConversationPlanActionType::CreateLocal
     ) && !current.provider_quiescent
     {
         return Err(ConversationStalePin::ProviderQuiescence);
@@ -529,198 +477,184 @@ mod tests {
     use super::*;
 
     #[test]
-    fn relation_policy_exposes_both_push_prefix_outcomes() {
+    fn push_maps_every_relation_exactly() {
+        use ConversationPlanActionType as Action;
         let capabilities = ConversationCapabilities::default();
-        assert_eq!(
-            default_conversation_decision(
-                ConversationPlanDirection::Push,
-                ConversationRelation::CloudPrefixOfLocal,
-                capabilities,
-            )
-            .action,
-            ConversationPlanActionType::FastForwardCloud
-        );
-        assert_eq!(
-            default_conversation_decision(
-                ConversationPlanDirection::Push,
-                ConversationRelation::LocalPrefixOfCloud,
-                capabilities,
-            )
-            .action,
-            ConversationPlanActionType::RequirePull
-        );
+        let rows = [
+            (
+                TailClassification::Sync(SyncCurrency::Current),
+                Action::NoChanges,
+            ),
+            (
+                TailClassification::Sync(SyncCurrency::Advanced),
+                Action::RequirePullMetadata,
+            ),
+            (TailClassification::LocalOutstanding, Action::Publish),
+            (TailClassification::CloudOutstanding, Action::RequirePull),
+            (TailClassification::Divergent, Action::RequirePull),
+            (TailClassification::MissingCloud, Action::CreateCloud),
+            (TailClassification::MissingLocal, Action::NotPushable),
+            (TailClassification::MissingBoth, Action::NotPushable),
+            (TailClassification::Unknown, Action::Blocked),
+        ];
+        for (relation, expected) in rows {
+            assert_eq!(
+                default_conversation_decision(
+                    ConversationPlanDirection::Push,
+                    relation,
+                    capabilities
+                )
+                .action,
+                expected,
+                "{relation:?}"
+            );
+        }
     }
 
     #[test]
-    fn unknown_policy_never_guesses_a_missing_binding() {
-        let bound = default_conversation_decision(
-            ConversationPlanDirection::Push,
-            ConversationRelation::Unknown,
-            ConversationCapabilities::default(),
-        );
-        assert_eq!(bound.action, ConversationPlanActionType::Blocked);
-        assert_eq!(bound.reason_code, ConversationReasonCode::UnknownLineage);
+    fn pull_maps_every_relation_exactly() {
+        use ConversationPlanActionType as Action;
+        let capabilities = ConversationCapabilities::default();
+        let rows = [
+            (
+                TailClassification::Sync(SyncCurrency::Current),
+                Action::AdoptCloudMetadata,
+            ),
+            (
+                TailClassification::Sync(SyncCurrency::Advanced),
+                Action::AdoptCloudMetadata,
+            ),
+            (
+                TailClassification::LocalOutstanding,
+                Action::ReportPushEligible,
+            ),
+            (
+                TailClassification::CloudOutstanding,
+                Action::MaterializeCloud,
+            ),
+            (TailClassification::Divergent, Action::KeepBoth),
+            (TailClassification::MissingLocal, Action::CreateLocal),
+            (TailClassification::MissingCloud, Action::ReportLocalOnly),
+            (TailClassification::MissingBoth, Action::NotFound),
+            (TailClassification::Unknown, Action::Blocked),
+        ];
+        for (relation, expected) in rows {
+            assert_eq!(
+                default_conversation_decision(
+                    ConversationPlanDirection::Pull,
+                    relation,
+                    capabilities
+                )
+                .action,
+                expected,
+                "{relation:?}"
+            );
+        }
+    }
 
-        let missing = default_conversation_decision(
-            ConversationPlanDirection::Push,
-            ConversationRelation::Unknown,
+    #[test]
+    fn gates_block_instead_of_degrading() {
+        let unquiescent = default_conversation_decision(
+            ConversationPlanDirection::Pull,
+            TailClassification::Divergent,
             ConversationCapabilities {
-                binding: BindingResolution::Missing,
+                provider_quiescent: false,
                 ..ConversationCapabilities::default()
             },
         );
-        assert_eq!(missing.action, ConversationPlanActionType::Blocked);
-        assert_eq!(missing.reason_code, ConversationReasonCode::UnknownLineage);
-
-        let pull = default_conversation_decision(
-            ConversationPlanDirection::Pull,
-            ConversationRelation::Unknown,
-            ConversationCapabilities::default(),
+        assert_eq!(unquiescent.action, ConversationPlanActionType::Blocked);
+        assert_eq!(
+            unquiescent.reason_code,
+            ConversationReasonCode::ProviderNotQuiescent
         );
-        assert_eq!(pull.action, ConversationPlanActionType::StoreOnly);
-    }
+        assert!(unquiescent.blocked_reason.is_some());
 
-    #[test]
-    fn divergence_requires_pull_on_push_and_resolution_on_pull() {
-        let push = default_conversation_decision(
+        let ambiguous = default_conversation_decision(
             ConversationPlanDirection::Push,
-            ConversationRelation::Diverged,
-            ConversationCapabilities::default(),
-        );
-        assert_eq!(push.action, ConversationPlanActionType::RequirePull);
-        assert!(!push.selectable);
-        let pull = default_conversation_decision(
-            ConversationPlanDirection::Pull,
-            ConversationRelation::Diverged,
-            ConversationCapabilities::default(),
-        );
-        assert_eq!(pull.action, ConversationPlanActionType::ResolveDivergence);
-        assert!(pull.selected_by_default);
-        let create = default_conversation_decision(
-            ConversationPlanDirection::Push,
-            ConversationRelation::CloudMissing,
-            ConversationCapabilities::default(),
-        );
-        assert_eq!(create.action, ConversationPlanActionType::CreateCloud);
-        let materialize = default_conversation_decision(
-            ConversationPlanDirection::Pull,
-            ConversationRelation::LocalMissing,
-            ConversationCapabilities::default(),
-        );
-        assert_eq!(materialize.action, ConversationPlanActionType::CreateLocal);
-    }
-
-    #[test]
-    fn a_pending_resolution_blocks_both_directions() {
-        for direction in [
-            ConversationPlanDirection::Push,
-            ConversationPlanDirection::Pull,
-        ] {
-            for relation in [
-                ConversationRelation::Identical,
-                ConversationRelation::Diverged,
-                ConversationRelation::LocalPrefixOfCloud,
-                ConversationRelation::CloudPrefixOfLocal,
-            ] {
-                let decision = default_conversation_decision(
-                    direction,
-                    relation,
-                    ConversationCapabilities {
-                        resolution_pending: true,
-                        ..ConversationCapabilities::default()
-                    },
-                );
-                assert_eq!(decision.action, ConversationPlanActionType::Blocked);
-                assert_eq!(
-                    decision.reason_code,
-                    ConversationReasonCode::ResolutionPending
-                );
-                assert!(!decision.selectable);
-                assert!(!decision.selected_by_default);
-                assert!(decision.blocked_reason.is_some());
-            }
-        }
-    }
-
-    #[test]
-    fn pull_mutations_require_one_verified_binding() {
-        for relation in [
-            ConversationRelation::LocalPrefixOfCloud,
-            ConversationRelation::Diverged,
-        ] {
-            for (binding, reason) in [
-                (
-                    BindingResolution::Missing,
-                    ConversationReasonCode::MissingBinding,
-                ),
-                (
-                    BindingResolution::Ambiguous,
-                    ConversationReasonCode::AmbiguousBinding,
-                ),
-            ] {
-                let blocked = default_conversation_decision(
-                    ConversationPlanDirection::Pull,
-                    relation,
-                    ConversationCapabilities {
-                        binding,
-                        ..ConversationCapabilities::default()
-                    },
-                );
-                assert_eq!(blocked.action, ConversationPlanActionType::Blocked);
-                assert_eq!(blocked.reason_code, reason);
-                assert!(!blocked.selectable);
-                assert!(!blocked.selected_by_default);
-            }
-        }
-
-        for binding in [
-            BindingResolution::Bound,
-            BindingResolution::UniqueCompatibleAncestor,
-        ] {
-            let fast_forward = default_conversation_decision(
-                ConversationPlanDirection::Pull,
-                ConversationRelation::LocalPrefixOfCloud,
-                ConversationCapabilities {
-                    binding,
-                    ..ConversationCapabilities::default()
-                },
-            );
-            assert_eq!(
-                fast_forward.action,
-                ConversationPlanActionType::FastForwardLocal
-            );
-            assert!(fast_forward.selected_by_default);
-
-            let resolution = default_conversation_decision(
-                ConversationPlanDirection::Pull,
-                ConversationRelation::Diverged,
-                ConversationCapabilities {
-                    binding,
-                    ..ConversationCapabilities::default()
-                },
-            );
-            assert_eq!(
-                resolution.action,
-                ConversationPlanActionType::ResolveDivergence
-            );
-            assert!(resolution.selected_by_default);
-        }
-
-        let ambiguous_new_thread = default_conversation_decision(
-            ConversationPlanDirection::Push,
-            ConversationRelation::CloudMissing,
+            TailClassification::LocalOutstanding,
             ConversationCapabilities {
                 binding: BindingResolution::Ambiguous,
                 ..ConversationCapabilities::default()
             },
         );
+        assert_eq!(ambiguous.action, ConversationPlanActionType::Blocked);
         assert_eq!(
-            ambiguous_new_thread.action,
-            ConversationPlanActionType::Blocked
-        );
-        assert_eq!(
-            ambiguous_new_thread.reason_code,
+            ambiguous.reason_code,
             ConversationReasonCode::AmbiguousBinding
         );
+
+        // CreateLocal is the one materializing action that legitimately has
+        // no existing binding.
+        let create_local = default_conversation_decision(
+            ConversationPlanDirection::Pull,
+            TailClassification::MissingLocal,
+            ConversationCapabilities {
+                binding: BindingResolution::Missing,
+                ..ConversationCapabilities::default()
+            },
+        );
+        assert_eq!(create_local.action, ConversationPlanActionType::CreateLocal);
+    }
+
+    #[test]
+    fn pending_and_detached_states_block_with_typed_reasons() {
+        for direction in [
+            ConversationPlanDirection::Push,
+            ConversationPlanDirection::Pull,
+        ] {
+            let busy = default_conversation_decision(
+                direction,
+                TailClassification::Sync(SyncCurrency::Current),
+                ConversationCapabilities {
+                    resolution_pending: true,
+                    ..ConversationCapabilities::default()
+                },
+            );
+            assert_eq!(busy.action, ConversationPlanActionType::Blocked);
+            assert_eq!(busy.reason_code, ConversationReasonCode::Busy);
+            assert!(!busy.selectable);
+        }
+
+        let detached = default_conversation_decision(
+            ConversationPlanDirection::Push,
+            TailClassification::Unknown,
+            ConversationCapabilities {
+                physical_detached: true,
+                ..ConversationCapabilities::default()
+            },
+        );
+        assert_eq!(detached.action, ConversationPlanActionType::Blocked);
+        assert_eq!(
+            detached.reason_code,
+            ConversationReasonCode::DetachedRequiresPull
+        );
+    }
+
+    #[test]
+    fn only_mutating_actions_are_selectable() {
+        let publish = default_conversation_decision(
+            ConversationPlanDirection::Push,
+            TailClassification::LocalOutstanding,
+            ConversationCapabilities::default(),
+        );
+        assert!(publish.selectable);
+        let require_pull = default_conversation_decision(
+            ConversationPlanDirection::Push,
+            TailClassification::Divergent,
+            ConversationCapabilities::default(),
+        );
+        assert!(!require_pull.selectable);
+        let report = default_conversation_decision(
+            ConversationPlanDirection::Pull,
+            TailClassification::LocalOutstanding,
+            ConversationCapabilities::default(),
+        );
+        assert!(!report.selectable);
+        let keep_both = default_conversation_decision(
+            ConversationPlanDirection::Pull,
+            TailClassification::Divergent,
+            ConversationCapabilities::default(),
+        );
+        assert!(keep_both.selectable);
     }
 }

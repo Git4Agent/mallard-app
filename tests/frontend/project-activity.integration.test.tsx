@@ -5,16 +5,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import Icon from "../../src/components/Icons";
 import ProjectActivityPage, {
   BranchPicker,
-  ForkActivityPanel,
   ProjectChatHistoryContent,
   SessionMetrics,
-  refreshActivityAndHandleForkFeedback,
   sessionDebugCopyText,
   sessionSyncPresentation,
   unresolvedSyncPresentation,
 } from "../../src/components/project-sync/ProjectActivityPage";
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
-import { sessionName } from "../../src/components/project-sync/syncOutcome";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../../src/components/project-sync/ThreadStatusIcon";
 import { createSingleFlight } from "../../src/components/project-sync/api";
 
@@ -78,6 +75,7 @@ const codexSession = {
   source: "local_only" as const,
   access: "bound_ready" as const,
   title: "Add Git history mapping",
+  is_preserved_local: false,
   summary: "Map project-owned sessions onto the first-parent rail.",
   started_at: 1_752_800_000,
   ended_at: 1_752_803_600,
@@ -154,153 +152,6 @@ function emptyComparison(overrides: Record<string, unknown> = {}) {
   };
 }
 
-test("a completed fork renders as a rail event carrying the thread it created", () => {
-  const html = renderToStaticMarkup(
-    <ForkActivityPanel
-      feedback={{
-        message: "Created the Codex fork 'Respond to greeting — fork · 2026-08-01 20:35Z — fork · 2026-08-06 02:01Z'",
-        success: true,
-        fork: {
-          name: "Respond to greeting — fork · 2026-08-01 20:35Z — fork · 2026-08-06 02:01Z",
-          providerThreadId: "019fca55-6b21-70d4-a3e7-9c04b2f81de6",
-          createdAt: 1_785_996_060,
-        },
-      }}
-      checkpoint={null}
-      resolving={false}
-      onRetry={() => undefined}
-      onDismissFeedback={() => undefined}
-    />,
-  );
-  assert.match(html, /class="sync-history-fork-event" role="status"/);
-  // The identity glyph leads the heading like the cloud and pencil on the
-  // group bars — in the card, not out on the rail, where no line passes and
-  // a mark would float in empty space.
-  assert.match(html, /class="sync-history-fork-line"><svg[^>]*data-icon="git-fork"/);
-  assert.doesNotMatch(html, /sync-history-spine-mark/);
-  // The app's phrase and the user's name split by element, not by regex — and
-  // the name arrives compacted through the same function the outcome rows use.
-  assert.match(html, /class="sync-history-fork-label">Created the Codex fork<\/span><strong>Respond to greeting<\/strong>/);
-  assert.doesNotMatch(html, /— fork ·/);
-  assert.doesNotMatch(html, /sync-callout-label|sync-callout-title/);
-  // Line 2 is the row grammar: the fork's whole id, then its stamp.
-  assert.match(html, /class="sync-history-stored-thread-id"><code>019fca55-6b21-70d4-a3e7-9c04b2f81de6<\/code><\/span><time dateTime=/);
-  assert.match(html, /aria-label="Dismiss fork notice"/);
-  assert.doesNotMatch(html, /class="sync-callout"/);
-
-  // The card exists only when the result names the fork; prose results — an
-  // acknowledged retry, a failure — keep the plain callout.
-  const proseHtml = renderToStaticMarkup(
-    <ForkActivityPanel
-      feedback={{
-        message: "Acknowledged the Codex fork and restored the cloud conversation",
-        success: true,
-      }}
-      checkpoint={null}
-      resolving={false}
-      onRetry={() => undefined}
-      onDismissFeedback={() => undefined}
-    />,
-  );
-  assert.match(proseHtml, /class="sync-callout"/);
-  assert.match(proseHtml, /role="status"/);
-  assert.doesNotMatch(proseHtml, /sync-history-fork-event/);
-  assert.doesNotMatch(proseHtml, /sync-callout success/);
-  assert.doesNotMatch(proseHtml, /sync-callout error/);
-
-  const failureHtml = renderToStaticMarkup(
-    <ForkActivityPanel
-      feedback={{
-        message: "Mallard did not acknowledge the Codex fork.",
-        success: false,
-      }}
-      checkpoint={{
-        operation_id: "operation-manual-fork",
-        origin: "manual",
-        plan_id: null,
-        action_id: null,
-        thread_id: "thread-manual-fork",
-        source_provider_thread_id: CODEX_SESSION_ID,
-        suggested_fork_name: "Fork title",
-        status: "fork_unacknowledged",
-        message: "Mallard did not acknowledge the Codex fork.",
-      }}
-      resolving={false}
-      onRetry={() => undefined}
-      onDismissFeedback={() => undefined}
-    />,
-  );
-  assert.match(failureHtml, /class="sync-callout error"/);
-  assert.match(failureHtml, /role="alert"/);
-  assert.match(failureHtml, /sync-fork-checkpoint/);
-  assert.match(failureHtml, /Fork not acknowledged/);
-  assert.match(failureHtml, /Retry fork/);
-
-  const css = readFileSync("src/App.css", "utf8");
-  assert.doesNotMatch(css, /\.sync-callout\.success\s*\{/);
-  assert.match(
-    css,
-    /\.sync-callout\.error\s*\{[^}]*color:\s*var\(--red\);[^}]*background:\s*var\(--danger-soft\)/s,
-  );
-  // The regex-split spans died with splitQuotedTitle; their styling goes too.
-  const retro = readFileSync("src/RetroTheme.css", "utf8");
-  assert.doesNotMatch(retro, /sync-callout-label|sync-callout-title/);
-
-  // The banner shares the cards' geometry: it must declare the tokens (they
-  // are not inherited) and take the same inset, and its heading wears the
-  // group headings' clothes — 18px glyph box, pixel label at the heading
-  // size, the name in the clean face beside it.
-  assert.match(retro, /\.sync-history-storage-only,\s*\.sync-history-fork-event\s*\{[^}]*--sync-history-card-offset: 26px;/s);
-  assert.match(retro, /\.sync-history-fork-event\s*\{[^}]*margin: 12px 0 12px var\(--sync-history-card-offset\);/s);
-  assert.match(retro, /\.sync-history-fork-line > svg\s*\{[^}]*width: var\(--sync-history-row-icon-size\);[^}]*color: var\(--text-2\);/s);
-  assert.match(retro, /\.sync-history-fork-label\s*\{[^}]*color: var\(--text-0\);[^}]*font-size: var\(--type-md\);/s);
-  assert.match(retro, /\.sync-history-fork-line > strong\s*\{[^}]*font-family: var\(--font-sans\);[^}]*font-size: var\(--type-md\);[^}]*font-weight: var\(--weight-semibold\);/s);
-});
-
-test("sessionName strips the whole fork chain and counts its links", () => {
-  assert.deepEqual(
-    sessionName("Respond to greeting — fork · 2026-08-01 20:35Z — fork · 2026-08-02 02:36Z — fork · 2026-08-06 02:01Z"),
-    { name: "Respond to greeting", forks: 3 },
-  );
-  assert.deepEqual(sessionName("Plain title"), { name: "Plain title", forks: 0 });
-  assert.deepEqual(
-    sessionName(" — fork · 2026-08-06 02:01Z"),
-    { name: "Untitled session", forks: 1 },
-  );
-});
-
-test("the forced post-fork refresh preserves feedback until a later refresh finishes", async () => {
-  let finishHistory: (() => void) | null = null;
-  let finishComparison: (() => void) | null = null;
-  let dismissed = false;
-  const historyRefresh = new Promise<void>((resolve) => { finishHistory = resolve; });
-  const comparisonRefresh = new Promise<void>((resolve) => { finishComparison = resolve; });
-
-  const forcedRefresh = refreshActivityAndHandleForkFeedback(
-    () => historyRefresh,
-    () => comparisonRefresh,
-    () => { dismissed = true; },
-    false,
-  );
-  assert.equal(dismissed, false);
-
-  finishHistory?.();
-  await Promise.resolve();
-  assert.equal(dismissed, false);
-
-  finishComparison?.();
-  await forcedRefresh;
-  assert.equal(dismissed, false);
-
-  await refreshActivityAndHandleForkFeedback(
-    async () => undefined,
-    async () => undefined,
-    () => { dismissed = true; },
-    true,
-  );
-  assert.equal(dismissed, true);
-});
-
 test("the branch picker exposes branch state without using the native select menu", () => {
   const html = renderToStaticMarkup(
     <BranchPicker
@@ -332,7 +183,7 @@ test("session indicators use the quiet desktop sync vocabulary", () => {
   );
 
   assert.deepEqual(
-    ["synced", "local_only", "local_ahead", "storage_only", "storage_ahead", "diverged", "diverged_forked", "unavailable", "unknown"].map((state) => {
+    ["synced", "local_only", "local_ahead", "storage_only", "storage_ahead", "diverged", "unavailable", "unknown"].map((state) => {
       const { status, className } = presentation(state as Parameters<typeof presentation>[0]);
       return { status, className };
     }),
@@ -343,7 +194,6 @@ test("session indicators use the quiet desktop sync vocabulary", () => {
       { status: "cloud-outstanding", className: "storage" },
       { status: "cloud-outstanding", className: "storage" },
       { status: "divergent", className: "diverged" },
-      { status: "divergent-forked", className: "diverged-forked" },
       { status: "unavailable", className: "unavailable" },
       { status: "conflict", className: "conflict" },
     ],
@@ -358,10 +208,10 @@ test("session indicators use the quiet desktop sync vocabulary", () => {
 
   const pending = sessionSyncPresentation({
     state: "synced",
-    status_detail: "A fork checkpoint is pending.",
+    status_detail: "The provider is still writing this task.",
     push_decision: {
       action: "blocked",
-      reason_code: "resolution_pending",
+      reason_code: "provider_not_quiescent",
     },
   } as Parameters<typeof sessionSyncPresentation>[0], "Storage");
   assert.deepEqual(
@@ -391,14 +241,13 @@ test("session indicators use the quiet desktop sync vocabulary", () => {
       reason_code: "codec_unsupported",
     },
   } as Parameters<typeof sessionSyncPresentation>[0], "Storage");
-  assert.match(claudeBlocked.label, /older Claude version/);
+  assert.match(claudeBlocked.label, /can't safely capture this Claude session/i);
 
   const css = readFileSync("src/App.css", "utf8");
   assert.match(css, /\.sync-thread-sync-indicator\.synced \{ color: var\(--thread-status-synced\); \}/);
   assert.match(css, /\.sync-thread-sync-indicator\.local \{ color: var\(--thread-status-local\); \}/);
   assert.match(css, /\.sync-thread-sync-indicator\.storage \{ color: var\(--thread-status-cloud\); \}/);
   assert.match(css, /\.sync-thread-sync-indicator\.diverged \{ color: var\(--thread-status-divergent\); \}/);
-  assert.match(css, /\.sync-thread-sync-indicator\.diverged-forked \{ color: var\(--thread-status-forked\); \}/);
   assert.match(css, /\.sync-thread-sync-indicator\.pending \{ color: var\(--thread-status-pending\); \}/);
   assert.match(css, /\.sync-thread-sync-indicator\.conflict \{ color: var\(--thread-status-conflict\); \}/);
   assert.match(css, /\.sync-thread-sync-indicator\.unavailable \{ color: var\(--thread-status-unavailable\); \}/);
@@ -423,11 +272,6 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
     divergent: {
       color: "#7655d6",
       glyph: "M6 6h4v5h1v1h1v2h1v-1h1v-2h1v-1h-1v-4h4v4h-1v2h-1v2h-1v1h-1v1h-1v2h-2v-3h-1v-2h-1v-1h-1v-2h-2ZM7 7v2h2v-2ZM15 7v2h2v-2Z",
-    },
-    // forked deliberately reuses the synced check; only the colour differs
-    "divergent-forked": {
-      color: "#9a45c5",
-      glyph: "M16 9h2v2h-1v1h-1v2h-1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h-1v-2h2v1h1v1h2v-1h1v-2h1v-1h1Z",
     },
     pending: {
       color: "#e59b1b",
@@ -550,14 +394,12 @@ test("every row leads with exactly one glyph, so the titles form a column", () =
   }
 });
 
-test("fresh storage matches portable Activity rows to capture-resource comparisons", () => {
-  const syncResourceId = `codex:session:${CODEX_SESSION_ID}`;
+test("fresh storage matches portable Activity rows to conversation comparisons", () => {
+  const syncResourceId = `codex:conversation:${CODEX_SESSION_ID}`;
   const decision = (action: string, selectable: boolean) => ({
     action,
-    reason_code: "cloud_missing",
+    reason_code: "missing_cloud",
     selectable,
-    selected_by_default: selectable,
-    requires_explicit_approval: false,
   });
   const comparison = emptyComparison({
     counts: { synced: 0, local: 1, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
@@ -574,7 +416,7 @@ test("fresh storage matches portable Activity rows to capture-resource compariso
       cloud_thread_id: CODEX_SESSION_ID,
       provider_thread_id: CODEX_SESSION_ID,
       push_decision: decision("create_cloud", true),
-      pull_decision: decision("keep_local", false),
+      pull_decision: decision("report_local_only", false),
     }],
   });
   const browseHtml = renderToStaticMarkup(
@@ -590,7 +432,6 @@ test("fresh storage matches portable Activity rows to capture-resource compariso
   assert.match(browseHtml, /aria-label="Only on this computer\. Push to save it in Local storage 1\."/);
   assert.doesNotMatch(browseHtml, /cannot read this session well enough to match it/);
 
-  let resolutionResourceId: string | null = null;
   const reviewHtml = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
@@ -602,16 +443,11 @@ test("fresh storage matches portable Activity rows to capture-resource compariso
       selectedResourceIds={new Set([syncResourceId])}
       selectableResourceIds={new Set([syncResourceId])}
       onToggleResource={() => undefined}
-      rowResolution={(resourceId) => {
-        resolutionResourceId = resourceId;
-        return null;
-      }}
     />,
   );
 
   assert.match(reviewHtml, /aria-label="Exclude Add Git history mapping"/);
   assert.match(reviewHtml, /<input[^>]*checked=""/);
-  assert.equal(resolutionResourceId, syncResourceId);
 });
 
 test("an unlinked project still draws a badge on every row", () => {
@@ -1172,6 +1008,34 @@ test("embedded activity follows the project workspace without repeating project 
   assert.doesNotMatch(html, /Local storage 1/);
 });
 
+test("Activity badges only the receipt-proven preserved side of a divergent Pull", () => {
+  const mintedTitle = "Respond to greeting — local before Pull · 2026-08-02 07:54Z";
+  const renderSession = (isPreservedLocal: boolean) => renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      embedded
+      activity={{
+        ...activity,
+        git: null,
+        sessions: [{
+          ...codexSession,
+          title: mintedTitle,
+          is_preserved_local: isPreservedLocal,
+        }],
+      }}
+    />,
+  );
+
+  const preserved = renderSession(true);
+  assert.match(preserved, /class="sync-history-preserved-badge"/);
+  assert.match(preserved, /title="Local branch preserved during a divergent Pull\."/);
+  assert.match(preserved, />Preserved<\/span>/);
+  assert.match(preserved, /Respond to greeting — local before Pull/);
+
+  const titleOnly = renderSession(false);
+  assert.doesNotMatch(titleOnly, /sync-history-preserved-badge|>Preserved<\/span>/);
+});
+
 test("embedded non-Git activity is named once, and not on screen", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
@@ -1222,8 +1086,8 @@ test("selection review removes repeated history and storage labels", () => {
 test("Push review renders checkboxes only for selectable bound-ready rows", () => {
   const localAheadId = "019f7798-5437-7632-9dbc-5b589cf68bf1";
   const localAheadResourceId = `codex:conversation:${localAheadId}`;
-  const syncedSyncResourceId = `codex:session:${CODEX_SESSION_ID}`;
-  const localAheadSyncResourceId = `codex:session:${localAheadId}`;
+  const syncedSyncResourceId = `codex:conversation:${CODEX_SESSION_ID}`;
+  const localAheadSyncResourceId = `codex:conversation:${localAheadId}`;
   const localAheadSession = {
     ...codexSession,
     resource_id: localAheadResourceId,
@@ -1235,10 +1099,8 @@ test("Push review renders checkboxes only for selectable bound-ready rows", () =
   };
   const decision = (action: string, selectable: boolean) => ({
     action,
-    reason_code: "identical",
+    reason_code: "sync_current",
     selectable,
-    selected_by_default: selectable,
-    requires_explicit_approval: false,
   });
   const comparison = emptyComparison({
     counts: { synced: 1, local: 1, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
@@ -1255,8 +1117,8 @@ test("Push review renders checkboxes only for selectable bound-ready rows", () =
         storage_present: true,
         cloud_thread_id: CODEX_SESSION_ID,
         provider_thread_id: CODEX_SESSION_ID,
-        push_decision: decision("no_op", false),
-        pull_decision: decision("no_op", false),
+        push_decision: decision("no_changes", false),
+        pull_decision: decision("no_changes", false),
       },
       {
         provider: "codex",
@@ -1270,8 +1132,8 @@ test("Push review renders checkboxes only for selectable bound-ready rows", () =
         storage_present: true,
         cloud_thread_id: localAheadId,
         provider_thread_id: localAheadId,
-        push_decision: { ...decision("fast_forward_cloud", true), reason_code: "cloud_prefix_of_local" },
-        pull_decision: { ...decision("keep_local", false), reason_code: "cloud_prefix_of_local" },
+        push_decision: { ...decision("publish", true), reason_code: "local_outstanding" },
+        pull_decision: { ...decision("report_push_eligible", false), reason_code: "local_outstanding" },
       },
     ],
   });
@@ -1302,8 +1164,8 @@ test("Push review renders checkboxes only for selectable bound-ready rows", () =
 test("selected storage adds directional indicators and remote-only session rows", () => {
   const remoteId = "019f7798-5437-7632-9dbc-5b589cf68bf1";
   const remoteResourceId = `codex:conversation:${remoteId}`;
-  const localSyncResourceId = `codex:session:${CODEX_SESSION_ID}`;
-  const remoteSyncResourceId = `codex:session:${remoteId}`;
+  const localSyncResourceId = `codex:conversation:${CODEX_SESSION_ID}`;
+  const remoteSyncResourceId = `codex:conversation:${remoteId}`;
   const olderId = "019f7798-5437-7632-9dbc-5b589cf68bf2";
   const remoteSession = {
     ...codexSession,
@@ -1355,7 +1217,7 @@ test("selected storage adds directional indicators and remote-only session rows"
         provider_display_name: "Codex",
         access: "bound_ready",
         thread_id: olderId,
-        resource_id: `codex:session:${olderId}`,
+        resource_id: `codex:conversation:${olderId}`,
         display_name: olderId,
         state: "local_ahead",
         local_present: true,
@@ -1419,7 +1281,7 @@ test("unavailable sessions explain why they cannot be synced", () => {
       provider_display_name: "Codex",
       access: "bound_ready",
       thread_id: CODEX_SESSION_ID,
-      resource_id: `codex:session:${CODEX_SESSION_ID}`,
+      resource_id: `codex:conversation:${CODEX_SESSION_ID}`,
       display_name: CODEX_SESSION_ID,
       state: "unavailable",
       local_present: true,
@@ -1448,7 +1310,7 @@ test("mixed-provider rows sort deterministically and never collide on native ids
   // Both providers use the very same provider-native session id: only the
   // resource id — provider-qualified — may key the rows.
   const nativeId = "0000aaaa-1111-2222-3333-444455556666";
-  const codexSyncResourceId = `codex:session:${nativeId}`;
+  const codexSyncResourceId = `codex:conversation:${nativeId}`;
   const claudeSyncResourceId = `claude:session:${nativeId}`;
   const codexTwin = {
     ...codexSession,
@@ -1486,10 +1348,8 @@ test("mixed-provider rows sort deterministically and never collide on native ids
   };
   const decision = {
     action: "create_cloud",
-    reason_code: "cloud_missing",
+    reason_code: "missing_cloud",
     selectable: true,
-    selected_by_default: true,
-    requires_explicit_approval: false,
   };
   const comparison = emptyComparison({
     entries: [
@@ -1506,7 +1366,7 @@ test("mixed-provider rows sort deterministically and never collide on native ids
         cloud_thread_id: nativeId,
         provider_thread_id: nativeId,
         push_decision: decision,
-        pull_decision: { ...decision, action: "keep_local", selectable: false, selected_by_default: false },
+        pull_decision: { ...decision, action: "report_push_eligible", selectable: false },
       },
       {
         provider: "claude",
@@ -1521,7 +1381,7 @@ test("mixed-provider rows sort deterministically and never collide on native ids
         cloud_thread_id: nativeId,
         provider_thread_id: nativeId,
         push_decision: decision,
-        pull_decision: { ...decision, action: "keep_local", selectable: false, selected_by_default: false },
+        pull_decision: { ...decision, action: "report_push_eligible", selectable: false },
       },
     ],
   });
@@ -1624,35 +1484,17 @@ test("session actions render from backend descriptors with disabled reasons", ()
     logical_thread_id: "held-thread",
     title: "Held session",
     ended_at: codexSession.ended_at - 100,
-    actions: [
-      ...codexActions(false),
-      {
-        action_id: "codex.fork-session",
-        kind: "fork_session" as const,
-        label: "Fork in Codex",
-        enabled: false,
-        disabled_reason: "This session is not materialized locally.",
-      },
-    ],
+    actions: codexActions(false),
   };
-  const forkableSession = {
+  const localSession = {
     ...codexSession,
-    actions: [
-      ...codexActions(),
-      {
-        action_id: "codex.fork-session",
-        kind: "fork_session" as const,
-        label: "Fork in Codex",
-        enabled: true,
-        disabled_reason: null,
-      },
-    ],
+    actions: codexActions(),
   };
   const browseHtml = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
       embedded
-      activity={{ ...activity, git: null, sessions: [forkableSession, heldSession] }}
+      activity={{ ...activity, git: null, sessions: [localSession, heldSession] }}
     />,
   );
 
@@ -1669,23 +1511,19 @@ test("session actions render from backend descriptors with disabled reasons", ()
   assert.match(openButton[1] ?? "", /title="This session is not materialized locally\."/);
   const terminalButtons = browseHtml.match(/<button[^>]*aria-label="Open in Terminal"[^>]*>[\s\S]*?<\/button>/g) ?? [];
   assert.match(terminalButtons[0] ?? "", /data-icon="terminal"/);
-  const forkButtons = browseHtml.match(/<button[^>]*aria-label="Fork in Codex"[^>]*>[\s\S]*?<\/button>/g) ?? [];
-  assert.equal(forkButtons.length, 2);
-  assert.match(forkButtons[0] ?? "", /data-icon="git-fork"/);
-
-  // Selection reviews hide only the fork maintenance action; open actions
-  // stay so a held row can still be inspected in its own app.
+  // Selection reviews retain safe launch actions so a held row can still be
+  // inspected in its own app or terminal.
   const reviewHtml = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
       embedded
-      activity={{ ...activity, git: null, sessions: [forkableSession, heldSession] }}
+      activity={{ ...activity, git: null, sessions: [localSession, heldSession] }}
       selectionMode="push"
       selectableResourceIds={new Set()}
     />,
   );
-  assert.doesNotMatch(reviewHtml, /aria-label="Fork in Codex"/);
   assert.equal((reviewHtml.match(/aria-label="Open in Codex"/g) ?? []).length, 2);
+  assert.equal((reviewHtml.match(/aria-label="Open in Terminal"/g) ?? []).length, 2);
 });
 
 test("provider comparison failures render isolated warnings", () => {
@@ -1761,20 +1599,15 @@ test("the page speaks only the provider-neutral activity contracts", () => {
   assert.match(source, /onOpenSessionDetail/);
   assert.doesNotMatch(source, /getProjectSessionDetails|getProjectChatHistory|getProjectChatThreadDetails|openCodexThreadInApp|openCodexThreadInTerminal|getThreadSyncComparison/);
 
-  // RestoreResult.codex_fork_checkpoints was renamed; the checkpoint panel
-  // must consume the new field.
-  assert.match(source, /\.fork_checkpoints/);
-  assert.doesNotMatch(source, /codex_fork_checkpoints/);
-
-  // Retained Codex maintenance is reached through the generic action
-  // descriptor kind, never through a provider-key comparison in common flow.
-  assert.match(source, /"fork_session"/);
+  // Provider launches are reached through generic action descriptors, never
+  // through a provider-key comparison in common flow.
+  assert.doesNotMatch(source, /fork_session|forkCodexThread|retryCodexDivergence/);
   assert.doesNotMatch(source, /===\s*"codex"|"codex"\s*===/);
   assert.doesNotMatch(source, /provider_ids\?\.codex|profile_ids\?\.codex/);
 
   // Rows key and select by the provider-qualified resource id.
   assert.match(source, /session\.resource_id/);
-  assert.doesNotMatch(source, /codex:session:/);
+  assert.doesNotMatch(source, /codex:conversation:/);
 });
 
 test("the Git project icon uses the downloaded pixel-folder language", () => {
@@ -2007,6 +1840,7 @@ test("completed projects use their main row for history and only mark Git reposi
       onAddProject={() => undefined}
       onRefresh={() => undefined}
       onOpenStorage={() => undefined}
+      onClearStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
       onOpenCatalogMenu={() => undefined}
@@ -2099,6 +1933,7 @@ test("the project menu accepts multiple bound provider profiles", () => {
       onToggleActivity={() => undefined}
       onAddProject={() => undefined}
       onOpenStorage={() => undefined}
+      onClearStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
       onOpenCatalogMenu={() => undefined}
@@ -2172,6 +2007,7 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
         onToggleActivity={() => undefined}
         onAddProject={() => undefined}
         onOpenStorage={() => undefined}
+        onClearStorage={() => undefined}
         onRemoveStorage={() => undefined}
         onAddStorage={() => undefined}
         onOpenCatalogMenu={() => undefined}
@@ -2244,6 +2080,7 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
       onAddProject={() => undefined}
       onRefresh={() => undefined}
       onOpenStorage={() => undefined}
+      onClearStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
       onOpenCatalogMenu={() => undefined}

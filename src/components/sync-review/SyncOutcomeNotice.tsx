@@ -10,8 +10,8 @@ export interface SyncOutcomeRowPresentation {
 
 /**
  * One outcome row. The shared renderer knows nothing about threads,
- * resources, or catalogs: an optional monospace identifier, an optional
- * counted annotation mark, and a timestamp are the whole vocabulary.
+ * resources, or catalogs: an optional monospace identifier and timestamp are
+ * the whole vocabulary.
  */
 export interface SyncOutcomeRowView {
   key: string;
@@ -20,7 +20,6 @@ export interface SyncOutcomeRowView {
   /** Why this row did not land the way the others did. */
   reason?: string | null;
   identifier?: string | null;
-  annotation?: { icon: IconName; count: number; title: string } | null;
   updatedAt?: number | null;
 }
 
@@ -141,7 +140,6 @@ export default function SyncOutcomeNotice({
         <div className="sync-history-thread-list sync-outcome-threads">
           {view.rows.map((row) => {
             const presentation = row.presentation;
-            const annotation = row.annotation ?? null;
             return (
               <article key={row.key} className="sync-history-thread-card">
                 <div className="sync-history-thread-topline">
@@ -170,26 +168,15 @@ export default function SyncOutcomeNotice({
                     )}
                   </div>
                 </div>
-                {(row.identifier || row.updatedAt != null || annotation) && (
+                {(row.identifier || row.updatedAt != null) && (
                   <div className="sync-history-session-details">
                     <div className="sync-history-session-summary">
                       {/* Line 2 is which one it is: the whole identifier —
-                          never a truncated stub — with the annotation mark
-                          and the stamp beside it. */}
+                          never a truncated stub — and the stamp beside it. */}
                       <div className="sync-history-thread-meta">
                         {row.identifier && (
                           <span className="sync-outcome-threadid">
                             <code>{row.identifier}</code>
-                          </span>
-                        )}
-                        {annotation && (
-                          <span
-                            className="sync-outcome-forkmark"
-                            title={annotation.title}
-                            aria-label={annotation.title}
-                          >
-                            <Icon name={annotation.icon} size={11} />
-                            {annotation.count}
                           </span>
                         )}
                         {row.updatedAt != null && (
@@ -208,7 +195,7 @@ export default function SyncOutcomeNotice({
           })}
         </div>
         {view.tone === "warning" && view.technical.length > 0 && (
-          <details className="sync-fork-technical">
+          <details className="sync-outcome-technical">
             <summary>Technical results</summary>
             <dl>
               {view.technical.map((entry) => (
