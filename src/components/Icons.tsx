@@ -18,7 +18,9 @@ export type IconName =
   | "clock"
   | "cloud"
   | "cloud-off"
+  | "code"
   | "computer"
+  | "copy"
   | "check-circle"
   | "download"
   | "drive"
@@ -61,6 +63,18 @@ interface IconProps extends SVGProps<SVGSVGElement> {
   size?: number;
 }
 
+/**
+ * Every mark below is drawn as whole cells on a 24-unit grid, and the SVG asks
+ * for crispEdges — so a cell is never antialiased, it is *rounded*. A stem
+ * therefore keeps one uniform width only when `size × devicePixelRatio ÷ 24` is
+ * a whole number. On the Retina displays this app targets that means **12 or
+ * 24**; at 13, 14, 17 or 18 the same shape comes out with some stems one device
+ * pixel and others two, which is what reads as "not pixel art".
+ *
+ * 12 for inline and button icons, 24 for the large glyph on an empty or error
+ * state. The `size = 14` default predates this and is still what most of the
+ * app passes; new code should name 12 or 24 explicitly.
+ */
 export default function Icon({ name, size = 14, ...props }: IconProps) {
   return (
     <svg
@@ -114,6 +128,21 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
         <g className="icon-pixel-fill" fill="currentColor" stroke="none">
           <path d="M22 12v-1h-2V9h-1V8h-1V7h-3v1h-1V6h-1V5H8v1H7v1H6v1H5v3H2v1H1v5h1v1h1v1h2v1h14v-1h2v-1h1v-1h1v-5h-1Zm-2 6H6v-1H4v-1H3v-3h3V9h1V8h1V7h4v1h1v2h3V9h1v1h1v2h3v1h1v3h-1v1h-1v1Z" />
           <path d="M3 1h2v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1H9V9H8V8H7V7H6V6H5V5H4V4H3V3H2V2h1V1Z" />
+        </g>
+      )}
+      {/* The two chevrons need a gap wide enough to survive 12px: at a 2-unit
+          separation their arms nearly met and the pair read as a ring of dots
+          rather than as < >. Four units apart they stay two marks. */}
+      {name === "code" && (
+        <g className="icon-pixel-fill" fill="currentColor" stroke="none">
+          <path d="M8 6h2v2H8ZM6 8h2v2H6ZM4 10h2v4H4ZM6 14h2v2H6ZM8 16h2v2H8Z" />
+          <path d="M14 6h2v2h-2ZM16 8h2v2h-2ZM18 10h2v4h-2ZM16 14h2v2h-2ZM14 16h2v2h-2Z" />
+        </g>
+      )}
+      {name === "copy" && (
+        <g className="icon-pixel-fill" fill="currentColor" stroke="none">
+          <path d="M8 8h13v13H8Zm1 1v11h11V9Z" />
+          <path d="M3 3h13v5h-1V4H4v11h4v1H3Z" />
         </g>
       )}
       {name === "computer" && (

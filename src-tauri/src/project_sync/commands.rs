@@ -4338,6 +4338,9 @@ fn synthesized_whole_thread_tail(
     }
 }
 
+/// A parallel observation worker's slot value.
+type ObservationOutcome = Result<(LocalTailObservation, Option<CodexSeededRoot>), String>;
+
 /// One reviewed thread's derived local state.
 struct LocalTailObservation {
     evidence: TailSideEvidence,
@@ -4896,6 +4899,87 @@ fn provider_thread_review(
         })
         .unwrap_or_else(absent_bundle_head_pin);
 
+    // Codex local observation is the one expensive Phase B stage — full
+    // resolves on first contact, adoption probes, and imported layouts. It
+    // is pure per-thread filesystem work, so it runs through the bounded
+    // worker pool; everything consuming the results below (evidence
+    // upgrades, classification, decisions, plan pins) stays serial and
+    // looks the observations up by thread ID, so worker count never changes
+    // the review's output. Tasks are dispatched in thread-ID order: an
+    // error at task k proves every earlier task was already dispatched and
+    // completes, so the earliest failing thread's error is reported at
+    // every worker count, exactly like the serial loop this replaces.
+    let mut codex_observations: BTreeMap<ThreadId, LocalTailObservation> = BTreeMap::new();
+    if is_codex {
+        let observation_tasks: Vec<_> = thread_ids
+            .iter()
+            .filter_map(|thread_id| {
+                let local = local_threads.get(thread_id);
+                let local_binding = local
+                    .and_then(|local| local.binding.as_ref())
+                    .or_else(|| bindings_by_thread.get(thread_id));
+                let expected_local_missing = local.is_none()
+                    && local_binding.is_some_and(|binding| binding.provider_thread_id.is_some());
+                if expected_local_missing {
+                    return None;
+                }
+                let checkpoint = checkpoints.get(thread_id);
+                let layout = local_binding.and_then(|binding| binding.root_tail_layout.as_ref());
+                let adoption_probe = checkpoint
+                    .and_then(|checkpoint| checkpoint.accepted.as_ref())
+                    .is_none()
+                    .then(|| {
+                        provider_scope
+                            .and_then(|scope| scope.conversations.get(thread_id))
+                            .and_then(|thread| thread.portable_tail.as_ref())
+                    })
+                    .flatten();
+                Some((thread_id, local, checkpoint, layout, adoption_probe))
+            })
+            .collect();
+        let mut slots: Vec<std::sync::OnceLock<ObservationOutcome>> = observation_tasks
+            .iter()
+            .map(|_| std::sync::OnceLock::new())
+            .collect();
+        if !observation_tasks.is_empty() {
+            let workers = provider_capture::bounded_refresh_workers(observation_tasks.len());
+            let cursor = std::sync::atomic::AtomicUsize::new(0);
+            let failed = std::sync::atomic::AtomicBool::new(false);
+            let tasks = &observation_tasks;
+            let task_slots = &slots;
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    scope.spawn(|| loop {
+                        if failed.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        let index = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some((_, local, checkpoint, layout, probe)) = tasks.get(index) else {
+                            break;
+                        };
+                        let outcome = observe_codex_local(
+                            *local,
+                            *checkpoint,
+                            *layout,
+                            provider_home,
+                            *probe,
+                        );
+                        if outcome.is_err() {
+                            failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        let _ = task_slots[index].set(outcome);
+                    });
+                }
+            });
+        }
+        for ((thread_id, ..), slot) in observation_tasks.iter().zip(slots.iter_mut()) {
+            let (observation, _) = slot
+                .take()
+                .expect("in-order dispatch settles every slot before the first failure")?;
+            codex_observations.insert((*thread_id).clone(), observation);
+        }
+    }
+
     for thread_id in thread_ids {
         let thread = provider_scope.and_then(|scope| scope.conversations.get(&thread_id));
         let local = local_threads.get(&thread_id);
@@ -4903,7 +4987,6 @@ fn provider_thread_review(
             .and_then(|local| local.binding.as_ref())
             .or_else(|| bindings_by_thread.get(&thread_id));
         let checkpoint = checkpoints.get(&thread_id);
-        let layout = local_binding.and_then(|binding| binding.root_tail_layout.as_ref());
         let cloud_descriptor = thread.and_then(|thread| {
             provider_scope.and_then(|scope| scope.resources.get(&thread.resource_id))
         });
@@ -4935,21 +5018,16 @@ fn provider_thread_review(
         // confirmed absence.
         let expected_local_missing = local.is_none()
             && local_binding.is_some_and(|binding| binding.provider_thread_id.is_some());
-        let (local_observation, _) = if expected_local_missing {
-            (
-                LocalTailObservation {
-                    evidence: TailSideEvidence::Invalid,
-                    raw_range_pin: None,
-                    verified_prefix_tail: None,
-                },
-                None,
-            )
+        let local_observation = if expected_local_missing {
+            LocalTailObservation {
+                evidence: TailSideEvidence::Invalid,
+                raw_range_pin: None,
+                verified_prefix_tail: None,
+            }
         } else if is_codex {
-            let adoption_probe = match (&accepted_evidence, &cloud_evidence) {
-                (TailSideEvidence::ConfirmedAbsent, TailSideEvidence::Present(tail)) => Some(tail),
-                _ => None,
-            };
-            observe_codex_local(local, checkpoint, layout, provider_home, adoption_probe)?
+            codex_observations
+                .remove(&thread_id)
+                .ok_or_else(|| "codex local observation missing for reviewed thread".to_string())?
         } else {
             let evidence = match local {
                 None => TailSideEvidence::ConfirmedAbsent,
@@ -4966,20 +5044,15 @@ fn provider_thread_review(
                     CodecLineage::Unknown { .. } => TailSideEvidence::Invalid,
                 },
             };
-            (
-                LocalTailObservation {
-                    evidence,
-                    raw_range_pin: local.map(|local| RawRangePin {
-                        start_byte_offset: 0,
-                        end_byte_offset: local.transcript.bytes.len() as u64,
-                        range_sha256: hex_digest(
-                            Sha256::digest(&local.transcript.bytes).as_slice(),
-                        ),
-                    }),
-                    verified_prefix_tail: None,
-                },
-                None,
-            )
+            LocalTailObservation {
+                evidence,
+                raw_range_pin: local.map(|local| RawRangePin {
+                    start_byte_offset: 0,
+                    end_byte_offset: local.transcript.bytes.len() as u64,
+                    range_sha256: hex_digest(Sha256::digest(&local.transcript.bytes).as_slice()),
+                }),
+                verified_prefix_tail: None,
+            }
         };
         // A proven prefix re-establishes acceptance evidence for this review
         // only; the durable pin is written by the Push or Pull it enables.

@@ -280,15 +280,186 @@ pub fn capture_from_discovery(
     discovery: &Discovery,
     selected_resource_ids: &BTreeSet<String>,
 ) -> Result<CapturedResources, String> {
+    capture_from_discovery_with_workers(
+        registry,
+        request,
+        discovery,
+        selected_resource_ids,
+        bounded_refresh_workers(selected_resource_ids.len()),
+    )
+}
+
+/// Bounded worker count for the parallel refresh stages. The per-item work
+/// is CPU-bound (serde and SHA-256), so more than four workers erodes into
+/// the largest-file floor while multiplying transient parse-tree memory;
+/// retained capture bytes are unconditional and do not scale with workers.
+pub fn bounded_refresh_workers(items: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1)
+        .min(4)
+        .min(items)
+        .max(1)
+}
+
+/// One selected resource's read-free preflight output: the shared walk data
+/// plus single-stat file metadata, with every cross-resource check already
+/// settled so the parallel worker touches no shared state.
+struct CapturePlanItem<'a> {
+    resource_id: &'a str,
+    discovered: &'a DiscoveredResource,
+    directory: Option<&'a SourceDirectory>,
+    /// `(source_mtime, mode)` per source file, in file order, from the
+    /// preflight's single stat.
+    file_meta: Vec<(u64, u32)>,
+    directory_meta: Option<(u64, u32)>,
+}
+
+/// One resource captured by a worker, merged serially in resource-ID order.
+struct CapturedUnit {
+    files: Vec<CapturedFile>,
+    directory: Option<CapturedDirectory>,
+    conversation: Option<CapturedConversation>,
+    resource: CapturedResource,
+    warnings: Vec<String>,
+}
+
+/// The per-resource parallel stage: read, secret-scan, digest, analyze, and
+/// summarize one preflighted resource. A transcript's read and the
+/// summarizer's re-read stay in the same worker so each file's view is
+/// per-worker coherent.
+fn capture_resource(
+    registry: &crate::providers::ProviderRegistry,
+    item: &CapturePlanItem<'_>,
+) -> Result<CapturedUnit, String> {
+    let resource_id = item.resource_id;
+    let mut warnings = Vec::new();
+    let mut files = Vec::with_capacity(item.discovered.files.len());
+    for (source, (source_mtime, mode)) in item
+        .discovered
+        .files
+        .iter()
+        .zip(item.file_meta.iter().copied())
+    {
+        let bytes = match &source.derived_bytes {
+            Some(bytes) => bytes.clone(),
+            None => fs::read(&source.physical_path)
+                .map_err(|e| format!("read '{}': {}", source.physical_path.display(), e))?,
+        };
+        if let Some(secret) = detect_secret_material(&bytes) {
+            if source.opaque_content {
+                warnings.push(format!(
+                    "{} may contain {} (opaque user content requires review)",
+                    source.logical_path, secret
+                ));
+            } else {
+                return Err(format!(
+                    "resource '{}' contains possible {} in '{}'",
+                    resource_id, secret, source.logical_path
+                ));
+            }
+        }
+        files.push(CapturedFile {
+            logical_path: source.logical_path.clone(),
+            resource_id: resource_id.to_string(),
+            source_mtime,
+            mode,
+            bytes,
+        });
+    }
+    let directory = item.directory.map(|source| {
+        let (source_mtime, mode) = item
+            .directory_meta
+            .expect("preflight recorded directory metadata");
+        CapturedDirectory {
+            logical_path: source.logical_path.clone(),
+            resource_id: resource_id.to_string(),
+            source_mtime,
+            mode,
+        }
+    });
+    let content_sha256 = resource_digest(&files, directory.as_ref());
+    let conversation = if let Some(conversation_meta) = &item.discovered.conversation {
+        let adapter = registry.require_sessions(&conversation_meta.provider)?;
+        let transcript = files
+            .iter()
+            .find(|file| file.logical_path == conversation_meta.transcript_logical_path)
+            .ok_or_else(|| format!("conversation '{}' transcript was not captured", resource_id))?;
+        let transcript_source = item
+            .discovered
+            .files
+            .iter()
+            .find(|source| source.logical_path == conversation_meta.transcript_logical_path)
+            .ok_or_else(|| {
+                format!(
+                    "conversation '{}' transcript source is missing",
+                    resource_id
+                )
+            })?;
+        let analysis = adapter.analyze(&transcript.bytes);
+        let presentation = match adapter.summarize_file(&transcript_source.physical_path) {
+            Ok(file_summary) => session_presentation(
+                &file_summary,
+                item.discovered.descriptor.relative_cwd.as_deref(),
+            ),
+            Err(_) => domain::SessionPresentation {
+                relative_cwd: item.discovered.descriptor.relative_cwd.clone(),
+                ..domain::SessionPresentation::default()
+            },
+        };
+        Some(CapturedConversation {
+            provider: conversation_meta.provider.clone(),
+            lineage_codec: adapter.codec_key().to_string(),
+            source_thread_id: analysis.source_provider_session_id,
+            source_cwd: analysis.source_cwd,
+            transcript_logical_path: conversation_meta.transcript_logical_path.clone(),
+            source_physical_path: Some(transcript_source.physical_path.clone()),
+            sidecar_files: conversation_meta.sidecars.clone(),
+            record_count: analysis.record_count,
+            lineage: analysis.lineage,
+            presentation,
+        })
+    } else {
+        None
+    };
+    Ok(CapturedUnit {
+        files,
+        directory,
+        conversation,
+        resource: CapturedResource {
+            descriptor: item.discovered.descriptor.clone(),
+            content_sha256,
+        },
+        warnings,
+    })
+}
+
+/// The staged capture pipeline with an explicit worker count; `workers = 1`
+/// is the serial degenerate of the same phases. Tests pin worker-count
+/// invariance through this entry.
+fn capture_from_discovery_with_workers(
+    registry: &crate::providers::ProviderRegistry,
+    request: &CaptureRequest,
+    discovery: &Discovery,
+    selected_resource_ids: &BTreeSet<String>,
+    workers: usize,
+) -> Result<CapturedResources, String> {
     let canonical_project = canonical_existing_dir(&request.project_root, "project root")?;
     let mut result = CapturedResources {
         warnings: discovery.warnings.clone(),
         excluded_subagent_session_ids: discovery.excluded_subagent_session_ids.clone(),
         ..CapturedResources::default()
     };
+
+    // Phase 1 — serial, read-free preflight. Every cross-resource check
+    // (case-fold collisions, logical-path ownership, per-file and aggregate
+    // size gates) settles here from one stat per file, before any worker
+    // reads a byte.
     let mut total_bytes = 0_u64;
     let mut casefold_paths = BTreeMap::<String, String>::new();
-
+    let mut owned_file_paths = BTreeSet::<String>::new();
+    let mut owned_directory_paths = BTreeSet::<String>::new();
+    let mut items = Vec::new();
     for resource_id in selected_resource_ids {
         let Some(discovered) = discovery.resources.get(resource_id) else {
             result.unavailable_resource_ids.push(resource_id.clone());
@@ -298,9 +469,8 @@ pub fn capture_from_discovery(
             result.unavailable_resource_ids.push(resource_id.clone());
             continue;
         }
-
         let file_limit = capture_file_limit(&discovered.descriptor.kind);
-        let mut resource_files = Vec::new();
+        let mut file_meta = Vec::with_capacity(discovered.files.len());
         for source in &discovered.files {
             validate_logical_path(&source.logical_path)?;
             let folded = source.logical_path.to_lowercase();
@@ -343,45 +513,16 @@ pub fn capture_from_discovery(
                     MAX_CAPTURE_BYTES
                 ));
             }
-            let bytes = match &source.derived_bytes {
-                Some(bytes) => bytes.clone(),
-                None => fs::read(&source.physical_path)
-                    .map_err(|e| format!("read '{}': {}", source.physical_path.display(), e))?,
-            };
-            if let Some(secret) = detect_secret_material(&bytes) {
-                if source.opaque_content {
-                    result.warnings.push(format!(
-                        "{} may contain {} (opaque user content requires review)",
-                        source.logical_path, secret
-                    ));
-                } else {
-                    return Err(format!(
-                        "resource '{}' contains possible {} in '{}'",
-                        resource_id, secret, source.logical_path
-                    ));
-                }
-            }
-            let captured = CapturedFile {
-                logical_path: source.logical_path.clone(),
-                resource_id: resource_id.clone(),
-                source_mtime: modified_secs(&meta),
-                mode: safe_mode(&meta),
-                bytes,
-            };
-            if result
-                .files
-                .insert(source.logical_path.clone(), captured.clone())
-                .is_some()
-            {
+            if !owned_file_paths.insert(source.logical_path.clone()) {
                 return Err(format!(
                     "logical path '{}' is owned by more than one resource",
                     source.logical_path
                 ));
             }
-            resource_files.push(captured);
+            file_meta.push((modified_secs(&meta), safe_mode(&meta)));
         }
-
-        let captured_directory = if let Some(source) = discovery.directories.get(resource_id) {
+        let directory = discovery.directories.get(resource_id);
+        let directory_meta = if let Some(source) = directory {
             validate_logical_path(&source.logical_path)?;
             let folded = source.logical_path.to_lowercase();
             if let Some(existing) = casefold_paths.insert(folded, source.logical_path.clone()) {
@@ -401,80 +542,80 @@ pub fn capture_from_discovery(
             let meta = fs::symlink_metadata(&source.physical_path).map_err(|error| {
                 format!("inspect '{}': {}", source.physical_path.display(), error)
             })?;
-            let captured = CapturedDirectory {
-                logical_path: source.logical_path.clone(),
-                resource_id: resource_id.clone(),
-                source_mtime: modified_secs(&meta),
-                mode: safe_mode(&meta),
-            };
-            if result
-                .directories
-                .insert(source.logical_path.clone(), captured.clone())
-                .is_some()
-            {
+            if !owned_directory_paths.insert(source.logical_path.clone()) {
                 return Err(format!(
                     "logical directory '{}' is owned by more than one resource",
                     source.logical_path
                 ));
             }
-            Some(captured)
+            Some((modified_secs(&meta), safe_mode(&meta)))
         } else {
             None
         };
+        items.push(CapturePlanItem {
+            resource_id,
+            discovered,
+            directory,
+            file_meta,
+            directory_meta,
+        });
+    }
 
-        let content_sha256 = resource_digest(&resource_files, captured_directory.as_ref());
-        if let Some(conversation_meta) = &discovered.conversation {
-            let adapter = registry.require_sessions(&conversation_meta.provider)?;
-            let transcript = resource_files
-                .iter()
-                .find(|file| file.logical_path == conversation_meta.transcript_logical_path)
-                .ok_or_else(|| {
-                    format!("conversation '{}' transcript was not captured", resource_id)
-                })?;
-            let transcript_source = discovered
-                .files
-                .iter()
-                .find(|source| source.logical_path == conversation_meta.transcript_logical_path)
-                .ok_or_else(|| {
-                    format!(
-                        "conversation '{}' transcript source is missing",
-                        resource_id
-                    )
-                })?;
-            let analysis = adapter.analyze(&transcript.bytes);
-            let presentation = match adapter.summarize_file(&transcript_source.physical_path) {
-                Ok(file_summary) => session_presentation(
-                    &file_summary,
-                    discovered.descriptor.relative_cwd.as_deref(),
-                ),
-                Err(_) => domain::SessionPresentation {
-                    relative_cwd: discovered.descriptor.relative_cwd.clone(),
-                    ..domain::SessionPresentation::default()
-                },
-            };
-            result.conversations.insert(
-                resource_id.clone(),
-                CapturedConversation {
-                    provider: conversation_meta.provider.clone(),
-                    lineage_codec: adapter.codec_key().to_string(),
-                    source_thread_id: analysis.source_provider_session_id,
-                    source_cwd: analysis.source_cwd,
-                    transcript_logical_path: conversation_meta.transcript_logical_path.clone(),
-                    source_physical_path: Some(transcript_source.physical_path.clone()),
-                    sidecar_files: conversation_meta.sidecars.clone(),
-                    record_count: analysis.record_count,
-                    lineage: analysis.lineage,
-                    presentation,
-                },
-            );
+    // Phase 2 — bounded parallel per-resource capture. Items are dispatched
+    // in resource-ID order: an error at item k proves every earlier item was
+    // already dispatched and will complete, so the merge's earliest-failure
+    // rule stays deterministic at every worker count even with fast-fail
+    // cancellation.
+    let mut slots: Vec<std::sync::OnceLock<Result<CapturedUnit, String>>> =
+        items.iter().map(|_| std::sync::OnceLock::new()).collect();
+    if !items.is_empty() {
+        let cursor = std::sync::atomic::AtomicUsize::new(0);
+        let failed = std::sync::atomic::AtomicBool::new(false);
+        let item_slots = &slots;
+        let work_items = &items;
+        std::thread::scope(|scope| {
+            for _ in 0..workers.clamp(1, work_items.len()) {
+                scope.spawn(|| loop {
+                    if failed.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let index = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(item) = work_items.get(index) else {
+                        break;
+                    };
+                    let outcome = capture_resource(registry, item);
+                    if outcome.is_err() {
+                        failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let _ = item_slots[index].set(outcome);
+                });
+            }
+        });
+    }
+
+    // Phase 3 — serial merge in resource-ID order: deterministic output and
+    // the earliest failing resource's error, regardless of completion order.
+    for (item, slot) in items.iter().zip(slots.iter_mut()) {
+        let unit = slot
+            .take()
+            .expect("in-order dispatch settles every slot before the first failure")?;
+        result
+            .resources
+            .insert(item.resource_id.to_string(), unit.resource);
+        if let Some(conversation) = unit.conversation {
+            result
+                .conversations
+                .insert(item.resource_id.to_string(), conversation);
         }
-        result.resources.insert(
-            resource_id.clone(),
-            CapturedResource {
-                descriptor: discovered.descriptor.clone(),
-                content_sha256,
-            },
-        );
+        for file in unit.files {
+            result.files.insert(file.logical_path.clone(), file);
+        }
+        if let Some(directory) = unit.directory {
+            result
+                .directories
+                .insert(directory.logical_path.clone(), directory);
+        }
+        result.warnings.extend(unit.warnings);
     }
     result.unavailable_resource_ids.sort();
     result.warnings.sort();
@@ -2600,5 +2741,206 @@ mod tests {
         request.include_project_content = true;
         let error = discover_project(registry(), &request).unwrap_err();
         assert!(error.contains("exceeds 20000 resources"), "{error}");
+    }
+
+    /// Build a Discovery directly so the pipeline tests control resources
+    /// and physical files without walk heuristics. All files are
+    /// provider-state resources under the request's codex home.
+    fn synthetic_discovery(resources: Vec<(&str, Vec<SourceFile>)>) -> Discovery {
+        Discovery {
+            resources: resources
+                .into_iter()
+                .map(|(id, files)| {
+                    (
+                        id.to_string(),
+                        DiscoveredResource {
+                            descriptor: ResourceCandidate {
+                                resource_id: id.to_string(),
+                                kind: CaptureResourceKind::ProviderState,
+                                provider: None,
+                                provider_resource_type: None,
+                                display_name: id.to_string(),
+                                relative_cwd: None,
+                                apply_policy: CaptureApplyPolicy::SafeFile,
+                                selected_by_default: true,
+                                blocked_reason: None,
+                                logical_paths: files
+                                    .iter()
+                                    .map(|file| file.logical_path.clone())
+                                    .collect(),
+                                metadata: BTreeMap::new(),
+                            },
+                            files,
+                            conversation: None,
+                        },
+                    )
+                })
+                .collect(),
+            directories: BTreeMap::new(),
+            warnings: Vec::new(),
+            ignored_count: 0,
+            blocked_count: 0,
+            excluded_subagent_session_ids: BTreeMap::new(),
+            excluded_subagent_resource_ids: BTreeSet::new(),
+        }
+    }
+
+    fn pipeline_fixture(temp: &Path) -> (CaptureRequest, PathBuf) {
+        let project = temp.join("project");
+        let home = temp.join("home");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        // Physical fixture paths must be canonical, as discovery's are.
+        let project = fs::canonicalize(&project).unwrap();
+        let home = fs::canonicalize(&home).unwrap();
+        let mut request = CaptureRequest::for_project(&project);
+        request.provider_homes.insert(codex_key(), home.clone());
+        (request, home)
+    }
+
+    fn source_file(home: &Path, name: &str, bytes: &[u8], opaque: bool) -> SourceFile {
+        let physical = home.join(name);
+        fs::write(&physical, bytes).unwrap();
+        SourceFile {
+            physical_path: physical,
+            logical_path: format!("state/codex/{name}"),
+            opaque_content: opaque,
+            derived_bytes: None,
+        }
+    }
+
+    #[test]
+    fn parallel_capture_is_worker_count_invariant() {
+        let temp = tempfile::tempdir().unwrap();
+        let (request, home) = pipeline_fixture(temp.path());
+        let discovery = synthetic_discovery(vec![
+            (
+                "r0",
+                vec![source_file(&home, "r0.json", b"{\"a\":1}", false)],
+            ),
+            (
+                "r1",
+                vec![source_file(&home, "r1.json", &vec![b'x'; 200_000], false)],
+            ),
+            (
+                "r2",
+                vec![
+                    source_file(&home, "r2-a.json", b"first", false),
+                    source_file(&home, "r2-b.json", &vec![b'y'; 40_000], false),
+                ],
+            ),
+            (
+                "r3",
+                // Opaque user content with a token shape captures with a
+                // warning instead of failing.
+                vec![source_file(&home, "r3.json", b"note ghp_abcdef123", true)],
+            ),
+            (
+                "r4",
+                vec![source_file(
+                    &home,
+                    "r4.json",
+                    "unicode \u{2713}".as_bytes(),
+                    false,
+                )],
+            ),
+        ]);
+        let selected: BTreeSet<String> = ["r0", "r1", "r2", "r3", "r4"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let serial =
+            capture_from_discovery_with_workers(registry(), &request, &discovery, &selected, 1)
+                .unwrap();
+        let parallel =
+            capture_from_discovery_with_workers(registry(), &request, &discovery, &selected, 4)
+                .unwrap();
+        assert_eq!(serial, parallel);
+        assert_eq!(serial.resources.len(), 5);
+        assert_eq!(serial.files.len(), 6);
+        assert!(serial
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("credential-shaped token")));
+    }
+
+    #[test]
+    fn parallel_capture_reports_the_earliest_failing_resource() {
+        let temp = tempfile::tempdir().unwrap();
+        let (request, home) = pipeline_fixture(temp.path());
+        let secret = b"-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n";
+        let discovery = synthetic_discovery(vec![
+            (
+                "a-clean",
+                vec![source_file(&home, "a.json", &vec![b'z'; 100_000], false)],
+            ),
+            (
+                "b-secret",
+                vec![source_file(&home, "b.json", secret, false)],
+            ),
+            (
+                "c-secret",
+                vec![source_file(&home, "c.json", secret, false)],
+            ),
+        ]);
+        let selected: BTreeSet<String> = ["a-clean", "b-secret", "c-secret"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let serial =
+            capture_from_discovery_with_workers(registry(), &request, &discovery, &selected, 1)
+                .unwrap_err();
+        let parallel =
+            capture_from_discovery_with_workers(registry(), &request, &discovery, &selected, 4)
+                .unwrap_err();
+        // Both failing resources race; the merge always reports the
+        // earliest resource ID with today's exact message.
+        assert_eq!(serial, parallel);
+        assert!(serial.contains("'b-secret'"), "{serial}");
+        assert!(serial.contains("private key material"), "{serial}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aggregate_capture_gate_fails_in_preflight_without_reading() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let (request, home) = pipeline_fixture(temp.path());
+        // 33 sparse files at exactly the per-file limit total 528 MiB,
+        // crossing the 512 MiB aggregate cap. Every file is unreadable, so
+        // any attempt to read bytes would surface a permission error
+        // instead of the aggregate message.
+        let mut files = Vec::new();
+        for index in 0..33 {
+            let physical = home.join(format!("big-{index:02}.bin"));
+            let file = fs::File::create(&physical).unwrap();
+            file.set_len(MAX_FILE_BYTES).unwrap();
+            drop(file);
+            let mut permissions = fs::metadata(&physical).unwrap().permissions();
+            permissions.set_mode(0o000);
+            fs::set_permissions(&physical, permissions).unwrap();
+            files.push(SourceFile {
+                physical_path: physical,
+                logical_path: format!("state/codex/big-{index:02}.bin"),
+                opaque_content: false,
+                derived_bytes: None,
+            });
+        }
+        let discovery = synthetic_discovery(vec![("big", files)]);
+        let selected: BTreeSet<String> = [String::from("big")].into_iter().collect();
+        for workers in [1, 4] {
+            let error = capture_from_discovery_with_workers(
+                registry(),
+                &request,
+                &discovery,
+                &selected,
+                workers,
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("selected resources exceed"),
+                "workers {workers}: {error}"
+            );
+        }
     }
 }

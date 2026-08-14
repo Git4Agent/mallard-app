@@ -30,33 +30,52 @@ export interface SessionDetailFilters {
   intermediateSteps: boolean;
   checkpoints: boolean;
   toolCalls: boolean;
-  toolCategories: Record<SessionToolCategory, boolean>;
 }
 
-export const SESSION_TOOL_CATEGORIES: readonly SessionToolCategory[] = [
+export type SessionFilterKey = keyof SessionDetailFilters;
+
+/**
+ * The timeline query still takes a category list, so the page names every
+ * category on every request. Sorting by category was removed with the
+ * inspector: three of the four buckets read zero on a typical session and the
+ * only populated one is `other`, the fallback — four rows of chrome that
+ * partitioned nothing.
+ */
+export const ALL_SESSION_TOOL_CATEGORIES: readonly SessionToolCategory[] = [
   "file_edit",
   "shell",
   "read",
   "other",
 ];
 
-export const SESSION_TOOL_CATEGORY_LABELS: Record<SessionToolCategory, string> = {
-  file_edit: "File edits",
-  shell: "Bash / Shell",
-  read: "Read",
-  other: "Other",
-};
-
+/**
+ * Who spoke, not what the record calls it. A response is labelled with the
+ * provider's own name, so this entry is only the fallback for a provider that
+ * reports none.
+ */
 export const SESSION_EVENT_KIND_LABELS: Record<SessionTimelineEventKind, string> = {
-  prompt: "Prompt",
+  prompt: "You",
   response: "Response",
-  intermediate_step: "Intermediate step",
+  intermediate_step: "Step",
   checkpoint: "Checkpoint",
   tool_call: "Tool call",
 };
 
-export function sessionCountSupported(count: SessionCount): boolean {
+const SESSION_FILTER_LABELS: Record<SessionFilterKey, string> = {
+  prompts: "Prompts",
+  responses: "Replies",
+  intermediateSteps: "Steps",
+  checkpoints: "Checkpoints",
+  toolCalls: "Tool calls",
+};
+
+function sessionCountSupported(count: SessionCount): boolean {
   return count.quality !== "unsupported";
+}
+
+/** A supported count that is provably zero. Unknown (`null`) is not empty. */
+function sessionCountEmpty(count: SessionCount): boolean {
+  return sessionCountSupported(count) && count.value === 0;
 }
 
 export function createDefaultSessionDetailFilters(
@@ -68,13 +87,72 @@ export function createDefaultSessionDetailFilters(
     intermediateSteps: false,
     checkpoints: sessionCountSupported(counts.checkpoints),
     toolCalls: false,
-    toolCategories: {
-      file_edit: sessionCountSupported(counts.file_edits),
-      shell: sessionCountSupported(counts.shell_calls),
-      read: sessionCountSupported(counts.reads),
-      other: sessionCountSupported(counts.other_tools),
-    },
   };
+}
+
+function sessionFilterCount(
+  counts: SessionEventCounts,
+  key: SessionFilterKey,
+): SessionCount {
+  switch (key) {
+    case "prompts": return counts.prompts;
+    case "responses": return counts.responses;
+    case "intermediateSteps": return counts.intermediate_steps;
+    case "checkpoints": return counts.checkpoints;
+    case "toolCalls": return counts.tool_calls;
+  }
+}
+
+export interface SessionFilterToggle {
+  key: SessionFilterKey;
+  label: string;
+  count: SessionCount;
+}
+
+const SESSION_FILTER_ORDER: readonly SessionFilterKey[] = [
+  "prompts",
+  "responses",
+  "intermediateSteps",
+  "checkpoints",
+  "toolCalls",
+];
+
+/**
+ * A toggle appears only when this session actually holds that kind. A control
+ * for an empty set is a control that can only disappoint — the previous panel
+ * rendered a disabled checkpoint picker and three zero-count categories on a
+ * session that had neither.
+ */
+export function sessionDetailFilterToggles(
+  counts: SessionEventCounts,
+): SessionFilterToggle[] {
+  return SESSION_FILTER_ORDER
+    .map((key) => ({ key, label: SESSION_FILTER_LABELS[key], count: sessionFilterCount(counts, key) }))
+    .filter((toggle) => sessionCountSupported(toggle.count) && !sessionCountEmpty(toggle.count));
+}
+
+export interface SessionEventCoverage {
+  total: number | null;
+  approximate: boolean;
+}
+
+/**
+ * Every event this session holds, across all kinds — the denominator the page
+ * never used to state. `approximate` is set when any contributing count is a
+ * lower bound, so the readout can say `31+` rather than claim precision the
+ * transcript cannot support.
+ */
+export function sessionEventCoverage(counts: SessionEventCounts): SessionEventCoverage {
+  let total = 0;
+  let approximate = false;
+  for (const key of SESSION_FILTER_ORDER) {
+    const count = sessionFilterCount(counts, key);
+    if (!sessionCountSupported(count)) continue;
+    if (count.value == null) return { total: null, approximate: false };
+    total += count.value;
+    if (count.quality !== "exact") approximate = true;
+  }
+  return { total, approximate };
 }
 
 export function includedSessionEventKinds(
@@ -89,73 +167,29 @@ export function includedSessionEventKinds(
   return kinds;
 }
 
-export function includedSessionToolCategories(
-  filters: SessionDetailFilters,
-): SessionToolCategory[] {
-  return SESSION_TOOL_CATEGORIES.filter((category) => filters.toolCategories[category]);
-}
-
 export function sessionDetailFilterFingerprint(filters: SessionDetailFilters): string {
-  return JSON.stringify([
-    includedSessionEventKinds(filters),
-    includedSessionToolCategories(filters),
-  ]);
-}
-
-export function sessionToolParentState(
-  filters: SessionDetailFilters,
-  counts: SessionEventCounts,
-): { checked: boolean; indeterminate: boolean; disabled: boolean } {
-  const supported = SESSION_TOOL_CATEGORIES.filter((category) => (
-    sessionCountSupported(sessionToolCategoryCount(counts, category))
-  ));
-  const selected = supported.filter((category) => filters.toolCategories[category]).length;
-  return {
-    checked: filters.toolCalls && selected > 0 && selected === supported.length,
-    indeterminate: filters.toolCalls && selected > 0 && selected < supported.length,
-    disabled: !sessionCountSupported(counts.tool_calls),
-  };
-}
-
-export function sessionToolCategoryCount(
-  counts: SessionEventCounts,
-  category: SessionToolCategory,
-): SessionCount {
-  switch (category) {
-    case "file_edit": return counts.file_edits;
-    case "shell": return counts.shell_calls;
-    case "read": return counts.reads;
-    case "other": return counts.other_tools;
-  }
-}
-
-export function toggleSessionToolParent(
-  filters: SessionDetailFilters,
-  counts: SessionEventCounts,
-): SessionDetailFilters {
-  if (!sessionCountSupported(counts.tool_calls)) return filters;
-  if (filters.toolCalls) return { ...filters, toolCalls: false };
-
-  const hasSelectedSupportedCategory = SESSION_TOOL_CATEGORIES.some((category) => (
-    sessionCountSupported(sessionToolCategoryCount(counts, category))
-    && filters.toolCategories[category]
-  ));
-  return {
-    ...filters,
-    toolCalls: true,
-    toolCategories: hasSelectedSupportedCategory
-      ? filters.toolCategories
-      : Object.fromEntries(SESSION_TOOL_CATEGORIES.map((category) => [
-        category,
-        sessionCountSupported(sessionToolCategoryCount(counts, category)),
-      ])) as Record<SessionToolCategory, boolean>,
-  };
+  return JSON.stringify(includedSessionEventKinds(filters));
 }
 
 export function formatSessionCount(count: SessionCount): string {
   if (count.quality === "unsupported" || count.value == null) return "Unavailable";
   const value = new Intl.NumberFormat().format(count.value);
   return count.quality === "lower_bound" ? `${value}+` : value;
+}
+
+/**
+ * Header figures are read at a glance and sit in a row that must not reflow, so
+ * they are abbreviated; the exact value stays in the element's title.
+ */
+export function formatCompactCount(count: SessionCount): string {
+  if (count.quality === "unsupported" || count.value == null) return "Unavailable";
+  const value = count.value;
+  const compact = value >= 1_000_000
+    ? `${(value / 1_000_000).toFixed(2)}M`
+    : value >= 10_000
+      ? `${Math.round(value / 1_000)}K`
+      : new Intl.NumberFormat().format(value);
+  return count.quality === "lower_bound" ? `${compact}+` : compact;
 }
 
 export function sessionCountQualityLabel(count: SessionCount): string | null {
@@ -184,12 +218,6 @@ export function eventAnchorId(eventId: string): string {
   return `session-event-${eventId.replace(/[^a-z0-9_-]/gi, "-")}`;
 }
 
-export function checkpointAnchorEventId(
-  checkpoint: SessionCheckpointJump,
-): string {
-  return checkpoint.event_id;
-}
-
 export function findCheckpointJump(
   checkpoints: SessionCheckpointJump[],
   identifier: string,
@@ -202,10 +230,14 @@ export function findCheckpointJump(
   )) ?? null;
 }
 
+/** Providers record either seconds or milliseconds; both reach this page. */
+function toMilliseconds(value: number): number {
+  return value > 10_000_000_000 ? value : value * 1_000;
+}
+
 export function formatSessionDetailTimestamp(value?: number | null): string {
   if (value == null) return "Time unavailable";
-  const milliseconds = value > 10_000_000_000 ? value : value * 1_000;
-  return new Date(milliseconds).toLocaleString(undefined, {
+  return new Date(toMilliseconds(value)).toLocaleString(undefined, {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -216,8 +248,250 @@ export function formatSessionDetailTimestamp(value?: number | null): string {
 
 export function sessionDetailDateTime(value?: number | null): string | undefined {
   if (value == null) return undefined;
-  const milliseconds = value > 10_000_000_000 ? value : value * 1_000;
-  return new Date(milliseconds).toISOString();
+  return new Date(toMilliseconds(value)).toISOString();
+}
+
+/**
+ * Clock time alone; the day it belongs to is stated once, by the divider.
+ * 24-hour deliberately: this is a fixed-width column read down the page, and a
+ * locale AM/PM adds three characters of chrome to every row for a distinction
+ * the column already makes by sorting.
+ */
+export function formatSessionDetailClock(value?: number | null): string {
+  if (value == null) return "--:--";
+  return new Date(toMilliseconds(value)).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function sessionDetailDayKey(value?: number | null): string | null {
+  if (value == null) return null;
+  const date = new Date(toMilliseconds(value));
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+function formatSessionDetailDay(value?: number | null): string {
+  if (value == null) return "Undated";
+  return new Date(toMilliseconds(value)).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function elapsedSeconds(from: number, to: number): number {
+  return Math.max(0, Math.round((toMilliseconds(to) - toMilliseconds(from)) / 1_000));
+}
+
+export function formatSessionDuration(
+  started?: number | null,
+  ended?: number | null,
+): string | null {
+  if (started == null || ended == null) return null;
+  const seconds = elapsedSeconds(started, ended);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
+}
+
+/**
+ * One field instead of two. `Started` and `Ended` spelled the same date twice
+ * and still left the reader to subtract; the range states the day once and the
+ * duration outright.
+ */
+export function formatSessionRange(
+  started?: number | null,
+  ended?: number | null,
+): string | null {
+  if (started == null) return null;
+  const startDay = formatSessionDetailDay(started).replace(/,\s*\d{4}$/, "");
+  const startClock = formatSessionDetailClock(started);
+  if (ended == null) return `${startDay} · ${startClock}`;
+  const sameDay = sessionDetailDayKey(started) === sessionDetailDayKey(ended);
+  if (sameDay) return `${startDay} · ${startClock} → ${formatSessionDetailClock(ended)}`;
+  const endDay = formatSessionDetailDay(ended).replace(/,\s*\d{4}$/, "");
+  return `${startDay} ${startClock} → ${endDay} ${formatSessionDetailClock(ended)}`;
+}
+
+/**
+ * The wait between one turn and the next. Rendered beside the clock so a stall
+ * — the four minutes an agent spent retrying — is visible without arithmetic.
+ * Gaps under a minute are noise and return null.
+ */
+export function formatSessionGap(
+  previous?: number | null,
+  current?: number | null,
+): string | null {
+  if (previous == null || current == null) return null;
+  const seconds = elapsedSeconds(previous, current);
+  if (seconds < 60) return null;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `+${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `+${hours}h`;
+  return `+${Math.round(hours / 24)}d`;
+}
+
+export interface SessionDayGroup {
+  key: string;
+  label: string;
+  events: SessionTimelineEvent[];
+}
+
+/**
+ * The date belongs to the day, not to every line inside it. Undated events join
+ * the group they arrived in rather than opening one of their own.
+ */
+export function groupSessionEventsByDay(
+  events: SessionTimelineEvent[],
+): SessionDayGroup[] {
+  const groups: SessionDayGroup[] = [];
+  for (const event of events) {
+    const key = sessionDetailDayKey(event.timestamp);
+    const current = groups[groups.length - 1];
+    if (!current || (key !== null && key !== current.key)) {
+      groups.push({
+        key: key ?? current?.key ?? "undated",
+        label: key === null && !current
+          ? formatSessionDetailDay(null)
+          : key === null
+            ? current.label
+            : formatSessionDetailDay(event.timestamp),
+        events: [event],
+      });
+      continue;
+    }
+    current.events.push(event);
+  }
+  return groups;
+}
+
+/**
+ * `completed` on every row said nothing 24 times over. Only the exceptions are
+ * worth counting, and only rows actually loaded can be counted at all.
+ */
+export function countSessionToolFailures(events: SessionTimelineEvent[]): number {
+  return events.filter((event) => (
+    event.tool != null && event.tool.status !== "completed"
+  )).length;
+}
+
+/**
+ * Providers hand us the call as the agent wrote it, which for Codex means the
+ * whole JS wrapper: `const r = await tools.exec_command({cmd:"…","workdir":…})`.
+ * Printed verbatim, all 24 rows open with the same 34 characters and the part
+ * that tells them apart is exactly what the truncation eats. This lifts the
+ * command out; anything it does not recognise is returned untouched, and the
+ * full original stays one click away in the Arguments tab.
+ */
+const WRAPPED_COMMAND = /\b(?:exec_command|run_command|shell|run)\s*\(\s*\{\s*["']?cmd["']?\s*:\s*"((?:[^"\\]|\\.)*)"/;
+
+/** Checked in order: the first one present is what the call is *about*. */
+const PRIMARY_ARGUMENT_KEYS = [
+  "cmd",
+  "command",
+  "file_path",
+  "path",
+  "prompt",
+  "query",
+  "pattern",
+  "url",
+];
+
+function decodeJsonFragment(value: string): string {
+  try {
+    return JSON.parse(`"${value}"`) as string;
+  } catch {
+    return value;
+  }
+}
+
+export function toolCommandLabel(summary: string): string {
+  const trimmed = summary.trim();
+  if (!trimmed) return trimmed;
+
+  const wrapped = WRAPPED_COMMAND.exec(trimmed);
+  if (wrapped) return decodeJsonFragment(wrapped[1]).trim();
+
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (typeof parsed === "object" && parsed !== null) {
+        const fields = parsed as Record<string, unknown>;
+        for (const key of PRIMARY_ARGUMENT_KEYS) {
+          const value = fields[key];
+          if (typeof value === "string" && value.trim()) return value.trim();
+        }
+      }
+    } catch {
+      // Not JSON after all; fall through to the first line.
+    }
+  }
+
+  // A multi-line body would break the row's single line either way.
+  return trimmed.split("\n")[0].trim();
+}
+
+export interface SessionPayloadView {
+  /** What the pane shows by default. */
+  text: string;
+  /** The stored string, reachable through the raw toggle. */
+  raw: string;
+  /** Whether the two differ, i.e. whether the raw toggle has a job. */
+  transformed: boolean;
+}
+
+function unescapePayload(value: string): string {
+  const replacements: Record<string, string> = {
+    n: "\n",
+    t: "\t",
+    r: "",
+    '"': '"',
+    "\\": "\\",
+  };
+  return value.replace(/\\([ntr"\\])/g, (match, character: string) => (
+    replacements[character] ?? match
+  ));
+}
+
+function isTextPart(value: unknown): value is { text: string } {
+  return typeof value === "object"
+    && value !== null
+    && typeof (value as { text?: unknown }).text === "string";
+}
+
+/**
+ * Tool results arrive as a stored transport string: usually a JSON envelope
+ * whose payload is prose with the newlines escaped. Printing it verbatim — the
+ * page's previous behaviour — produced a wall of `\n` that no one can read.
+ * This lifts the text out; the raw toggle keeps the original one click away, so
+ * nothing is hidden, only unwrapped.
+ */
+export function readableToolPayload(value: string): SessionPayloadView {
+  const raw = value;
+  try {
+    const parsed: unknown = JSON.parse(value.trim());
+    if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(isTextPart)) {
+      const text = parsed.map((part) => part.text).join("\n\n").trim();
+      return { text, raw, transformed: text !== raw };
+    }
+    if (typeof parsed === "string") {
+      return { text: parsed, raw, transformed: parsed !== raw };
+    }
+    if (typeof parsed === "object" && parsed !== null) {
+      const text = JSON.stringify(parsed, null, 2);
+      return { text, raw, transformed: text !== raw };
+    }
+  } catch {
+    // Not JSON. Fall through to plain unescaping.
+  }
+  const text = unescapePayload(value);
+  return { text, raw, transformed: text !== raw };
 }
 
 const EXTERNAL_MARKDOWN_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);

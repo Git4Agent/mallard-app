@@ -45,6 +45,7 @@ import BundleConnectionDialog from "./BundleConnectionDialog";
 import LogManagerDialog from "./LogManagerDialog";
 import ProjectBindingEditor, { type ProjectBindingDraft } from "./ProjectBindingEditor";
 import ProjectLinksWorkspace, { type StorageNotice } from "./ProjectLinksWorkspace";
+import type { PathBarMenuGroup } from "./SyncPathBar";
 import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
   preserveSyncedPushRecipeEntries,
@@ -2515,9 +2516,39 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   }
 
+  // The same two app-level commands the titlebar carries as buttons, shaped as
+  // menu items for the project workspace's single overflow. The path bar there
+  // already holds the two verbs and a project refresh; a theme button and a
+  // second `⋯` beside them were furniture, and the reload's refresh glyph read
+  // as a duplicate of the refresh button 40px to its left. Named scope and a
+  // separator do that job without spending a slot on either.
+  const appActions: PathBarMenuGroup[] = [{
+    label: "Mallard",
+    items: [
+      {
+        id: "theme",
+        label: `Switch to ${theme === "dark" ? "light" : "dark"} theme`,
+        icon: theme === "dark" ? ("sun" as const) : ("moon" as const),
+        onSelect: () => onThemeChange(theme === "dark" ? "light" : "dark"),
+      },
+      {
+        id: "reload",
+        label: "Reload app data",
+        detail: "Every project and storage, from disk",
+        // Not `refresh`: the bar's refresh button is one project's activity,
+        // and two identical glyphs in one row is the confusion this redesign
+        // set out to remove. This one reloads what the machine knows.
+        icon: "computer" as const,
+        disabled: loading || busy,
+        onSelect: () => { void refresh(); },
+      },
+    ],
+  }];
+
   // Window-level controls: the theme toggle and the app menu. They belong to
   // the window, not to any screen, so whichever bar is at the top carries them
-  // — the titlebar on most screens, the path bar in the project workspace.
+  // — the titlebar on the screens that have one; the project workspace folds
+  // them into its path bar's menu instead.
   const windowActions = (
     <div className="sync-titlebar-actions">
       <button
@@ -3360,7 +3391,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onRefresh={() => void refresh()}
             onAddProject={() => void beginAddProject()}
             onSelectProject={openProject}
-            windowActions={windowActions}
+            appActions={appActions}
             onOpenStorageSettings={openNewStorageConfiguration}
             onSaveStorage={saveInlineStorage}
             storageEditorRequest={storageEditorRequest}

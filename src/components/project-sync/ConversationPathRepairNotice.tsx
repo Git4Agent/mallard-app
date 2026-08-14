@@ -13,6 +13,13 @@ interface Props {
   onRepair: () => Promise<void> | void;
 }
 
+export function shouldShowConversationPathRepairNotice(
+  audit?: CodexConversationPathAudit,
+  auditError?: string,
+): boolean {
+  return !!auditError || (!!audit && !audit.ready);
+}
+
 export default function ConversationPathRepairNotice({
   audit,
   auditError,
@@ -23,7 +30,7 @@ export default function ConversationPathRepairNotice({
   busy,
   onRepair,
 }: Props) {
-  if (!auditError && (!audit || audit.ready)) return null;
+  if (!shouldShowConversationPathRepairNotice(audit, auditError)) return null;
 
   const issueCount = audit?.issues.length ?? 0;
   const recordedPaths = [...new Set(audit?.issues.map((issue) => issue.recorded_cwd) ?? [])];

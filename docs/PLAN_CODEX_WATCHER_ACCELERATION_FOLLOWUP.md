@@ -1,537 +1,596 @@
-# Plan: Codex session watcher acceleration — backend follow-up
+# Plan: Codex watcher-backed observation reuse
 
-- Status: Deferred follow-up
-- Date: August 10, 2026
-- Depends on:
-  [PLAN_MINIMAL_CONVERSATION_CONFLICT_RESOLVER_BACKEND.md](PLAN_MINIMAL_CONVERSATION_CONFLICT_RESOLVER_BACKEND.md)
-- Scope: Advisory local Codex session watching, bounded dirty-state caching,
-  refresh scheduling, and backend tests
-- Excluded: Conflict resolution, standalone reconstruction semantics, schema
-  definitions, cloud metadata, Push/Pull authorization, React UI, and any
-  legacy migration or translation path
-- Cutover contract: Optional runtime acceleration built only on the active
-  schema-1 product; checkpoint-only execution remains the complete behavior
-  and no legacy reader or writer is supported
-
-This follow-up is intentionally not part of the minimal conversation conflict
-resolver cutover. Implement it only after the portable-tail checkpoint and
-incremental append-range refresh path are stable. Removing or disabling every
-watcher component must leave refresh, Push, Pull, recovery, and cloud results
-unchanged.
+- Status: Proposed
+- Date: August 13, 2026
+- Scope: Codex session discovery, local-tail observation, Refresh, Push/Pull
+  review, one process-local filesystem watcher, and bounded runtime caches
+- Deferred: event-driven UI freshness — the watcher never pushes updates to
+  the frontend; all operations stay demand-driven (section 13)
+- Excluded: portable schema changes, sync-policy changes, background
+  transcript parsing, apply-time verification shortcuts, subagent
+  synchronization, and legacy compatibility paths
+- Compatibility: clean cutover; no migration and no legacy execution path
 
 ## 1. Objective
 
-Use filesystem events to schedule local Codex refresh work earlier and avoid
-reparsing unchanged rollout metadata. The main benefit is lower latency for
-no-op refreshes, passive status updates, and large profiles with many unchanged
-rollouts.
+Make repeated Codex session work proportional to changed sessions by reusing
+cached local results whenever the watcher proves quiet, and recomputing only
+what changed when it does not:
 
-This is a second-level optimization. `FixedPaginatedTail` partitions and local
-rolling scan cursors remove the dominant inherited-prefix rehashing cost.
-`WholeThread` retains its authoritative full comparison. Watching does not
-eliminate:
+```text
+first operation for a profile
+  arm watcher over sessions trees        -> generation a
+  bounded discovery + observation        -> cache (local_results_a, a)
 
-- bounded reconciliation of known root/history-source paths and unknown
-  candidates needed to discover new roots during an authoritative refresh or
-  Push/Pull planning pass; recognized subagent paths are ignored;
-- authoritative reads and hashes of every pending append range;
-- standalone reconstruction and complete immutable-object hashing;
-- remote manifest/head reads; or
-- Push compare-and-swap and Pull transaction verification.
+no change since a
+  Refresh / Push review / Pull review reuse local_results_a directly;
+  only the remote head/manifest is re-read and P/L/C re-classified
 
-Conflict identity is root-only. Subagent rollout bytes are incidental files in
-the complete conversation snapshot: they may be copied and SHA-256-verified
-when a root action already consumes bytes, but they never participate in the
-root tail value or the `P`/`L`/`C` relation. The watcher must preserve
-that boundary. It may make later artifact capture cheaper; it must not invent
-an independent subagent synchronization path.
+changes since a (generation b, dirty paths D)
+  recompute only D: dirty roots ride the bounded probe/append reader from
+  their persisted checkpoints; membership changes re-enumerate only the
+  affected subtrees                      -> cache (local_results_b, b)
 
-Filesystem events may be coalesced, dropped, reordered, delayed, or lost while
-Mallard is stopped or the machine sleeps. A missing event is never proof that a
-rollout is unchanged.
+reliability signal, restart, or resume doubt
+  drop the cache and rebaseline through the same bounded path
+```
 
-## 2. Safety and clean-cutover contract
+`local_results` means the local side only: the metadata inventory and the
+per-root tail observations. The remote head/manifest is read fresh on every
+operation and classification always re-runs — cloud changes must appear even
+when the local watcher is quiet.
 
-The watcher is an advisory scheduler and cache accelerator, not a correctness
-witness.
+The previously measured 31-session serial baseline was:
 
-1. Portable tail layouts, checkpoint generations, physical scan cursors,
-   source-range pins, apply-generated complete output hashes, journal phases,
-   cloud revisions, and CAS remain the only durable authority.
-2. Watcher state is bounded and process-local. It never enters the active
-   machine-local schema 1, portable bundle schema 1, reviewed plan, journal,
-   receipt, or cloud object. The follow-up adds no alternate schema version or
-   legacy interpretation.
-3. Startup failure, backend failure, event loss, overflow, restart, and
-   sleep/wake fall back to the checkpoint-driven path without changing a
-   relation, action, receipt, or recovery decision.
-4. Absolute provider-home and rollout paths never enter frontend events,
-   activity logs, portable data, or diagnostics exposed to users.
-5. The callback performs no parsing, hashing, cloud access, blocking I/O, or
-   sync decision. It only scopes events and updates a bounded queue/generation.
-6. No filesystem event authorizes Push/Pull or promotes an accepted cloud
-   version, cumulative tail state, physical cursor, or checkpoint generation.
-7. A known subagent-only event is ignored. It never changes watcher state,
-   dirties the root conflict relation, or creates an advisory attachment
-   state. A later root-driven byte-consuming Push/Pull discovers and captures
-   the complete bounded subagent closure authoritatively without relying on a
-   watcher hint.
+```text
+discover local state                 0.833s
+capture local conversations          6.129s
+classify threads and build actions   2.284s
+total                                9.285s
+```
 
-## 3. Required foundation
+Those numbers predate the bounded parallel capture/observation pipeline that
+has since landed, which cut wall-clock by roughly the worker factor without
+cutting bytes read. This plan cuts the bytes: discovery head-reads every
+rollout in the provider home, capture reads every transcript, and observation
+re-reads every leaf. Step 1 re-measures the baseline before acceptance is
+judged.
 
-The follow-up consumes, but does not redefine, these contracts from the main
-backend plan:
+## 2. Product and safety contract
 
-- destination-scoped accepted complete conversation versions and portable
-  cumulative tail states;
-- `ConversationCheckpoint` and its generation;
-- provider-local physical-source descriptors;
-- `FollowEof` and `FixedHistoryCutoff` logical segments;
-- newline-safe append-range discovery, raw pins, and canonical tail
-  accumulator extension;
-- the root-only portable partition kind/start and observation;
-- the single `Detached` physical-mapping invalidation after provider-alias
-  changes; and
-- transaction receipts that can seed a newly materialized checkpoint directly.
+1. There is exactly one execution path. A cold start, a reliability signal,
+   and a fully dirty cache all run the same bounded discovery/observation
+   code the warm path runs for its dirty subset. No mode switch, no
+   compatibility reader, and no second all-session capture/review
+   implementation after the cutover.
+2. The watcher is a reuse oracle, never a correctness authority. A watcher
+   event or cache entry never promotes accepted cloud state, authorizes an
+   action, or replaces an authoritative plan/apply digest. `accepted` never
+   changes during Refresh.
+3. Reused local results are display and planning evidence only. Every apply
+   retains all existing source, target, digest, object, journal, revision,
+   quiescence, no-clobber, and compare-and-swap verification, so a stale
+   plan fails closed at apply exactly as it does today.
+4. Trust boundary, stated plainly: watcher silence is trusted only between
+   reliability signals. Queue or map overflow, `need_rescan`, backend error
+   or disconnect, watched-root removal or replacement, profile path change,
+   process restart, and resume without provable uninterrupted delivery each
+   drop the profile's cache and force rebaseline. The accepted residual
+   risk is a silently dropped event with no signal: rows may render stale
+   until the next event, signal, or restart — and such staleness can never
+   corrupt an apply (rule 3).
+5. Watcher and cache state are bounded and process-local. They are absent
+   from `SyncConfig`, machine bindings, portable manifests, plans, journals,
+   receipts, and cloud objects. The durable `ConversationCheckpoint` remains
+   the only persisted observation state, and no reliable generation is ever
+   persisted across restart.
+6. Absolute provider-home paths, rollout paths, and transcript content never
+   enter frontend events, activity logs, or portable data. The notify
+   callback performs no filesystem I/O, parsing, hashing, persistence, cloud
+   access, or sync classification.
+7. Existing no-follow traversal, canonical containment, regular-file checks,
+   size limits, capture-time secret scanning, immutable publication, and
+   no-clobber apply rules remain intact.
+8. Internal Codex subagent rollouts retain current behavior: discovery
+   excludes them from local session capture and they do not enter conflict
+   identity.
+9. Any capture-time blocked condition that can now first surface at
+   observation time produces the same user-visible row detail as the
+   discovery/capture path (section 5).
 
-If any of these are unavailable, keep the watcher disabled rather than adding
-a second refresh or conflict-classification implementation.
+## 3. Current implementation constraints
 
-`FollowEof` and `FixedHistoryCutoff` are machine-local physical source-segment
-roles for reconstructing the root. All `history_base` ancestor segments
-flatten into the one root transcript and the portable tail has one fixed root
-start. A watcher event may dirty several physical consumers, but it must never
-create a second conflict value. Subagent rollouts remain incidental
-snapshot files and have no portable-tail entry.
+The design builds on the active schema-1 implementation; each fact below is
+verified in the current tree:
 
-## 4. Watch scope
+- `provider_capture::discover_full` walks `sessions/` and `archived_sessions/`
+  of the whole provider home and head-reads every rollout to determine
+  project ownership, so discovery cost scales with the home, not the project.
+- `provider_capture::capture_from_discovery` reads, secret-scans, hashes,
+  analyzes, and summarizes every selected conversation, and thread status
+  selects every discovered conversation before local-tail observation.
+- `observe_codex_local` re-reads the complete leaf through
+  `read_rollout_bounded` even when the outcome is `Unchanged`.
+- the observation stage already returns the refreshed seeded checkpoint value
+  and the merge discards it; only first-contact seeding persists, so cursor
+  advancement is durable only at apply and every Refresh re-derives from the
+  last applied pin.
+- `RootPhysicalMapping` already carries the incremental-fold resume cursors
+  (`last_canonical_message_id`, `last_synthetic_turn_id`,
+  `next_synthetic_turn_ordinal`) and the 4-KiB trailing probe window, so the
+  bounded reader requires no durable schema change.
+- the discovery metadata scan is already bounded to head lines per file; no
+  metadata extension is required by this plan.
+- a matching ready checkpoint can incrementally extend either `WholeThread`
+  or `FixedPaginatedTail`; the cursor path reads only the leaf, and prefix
+  integrity is carried by the fold-chain state and the publish-time prefix
+  witness, so leaf-scoped invalidation gives a reused observation exactly
+  the sensitivity of the current authoritative cursor path — no ancestor
+  dependency map is required.
+- `ConversationCheckpoint.observed_tail` is a replaceable Refresh cache while
+  `accepted` is destination-scoped cloud evidence; checkpoints live on the
+  storage link, so observation entries are per destination.
+- the status path already mutates local state (first-contact seeding and
+  binding layout), so persisting checkpoint maintenance in the same phase
+  adds no new state-mutation surface.
+- the conversation file bound is 100 MiB.
 
-Maintain one process-lifetime registry entry per exact canonical bound
-`CODEX_HOME`/provider profile. Multiple projects and storage links using that
-profile share the operating-system watcher but retain independent reconciliation
-state.
+## 4. Architecture
 
-Do not recursively watch all of `~/.codex`. Watch only:
+```text
+filesystem watcher (one per canonical Codex home)
+  -> profile generation + dirty root set + inventory/titles dirty flags
+  -> cached metadata inventory and cached per-root observations
+     (durable checkpoints make dirty-root recompute proportional to append)
+  -> Refresh and Push/Pull review
+  -> lazy authoritative capture for byte-pinning candidates only
+```
 
-- `<CODEX_HOME>/sessions/` recursively when it exists;
-- `<CODEX_HOME>/archived_sessions/` recursively when it exists; and
-- the canonical `CODEX_HOME` non-recursively, filtered to those directory names
-  and `session_index.jsonl`, to observe tree creation/replacement and atomic
-  index replacement.
+There is no per-path generation table, no input fingerprint, and no ancestor
+dependency map: invalidation is a dirty set, reuse is generation equality
+plus the in-process revisions already known exactly (binding, config,
+checkpoint generation), and cursor reuse is leaf-scoped by the argument in
+section 3.
 
-Never follow symlinks. Continue to require canonical containment, no-follow
-regular-file checks, and bounded path components before an event becomes a
-candidate rollout. A `session_index.jsonl` event invalidates only presentation
-or title caches; it does not dirty canonical conversation content.
+### 4.1 Metadata-only local session view
 
-Mallard already depends on `notify = "8.2"`. Model the process lifetime and
-managed-state ownership on `project_sync/config_watcher.rs`. The removed fork
-watcher may be read only as an implementation reference for bounded queue and
-`need_rescan` handling. Do not import its executor, reuse its persisted state,
-or expose a legacy execution path.
-
-## 5. Runtime model
-
-Keep only bounded in-memory state:
+Add a provider-neutral, backend-only view derived from `Discovery`:
 
 ```rust
-struct CodexWatchEpoch {
-    provider_profile_id: LocalProviderProfileId,
-    epoch_id: u64,
-    event_generation: u64,
-    reliability: WatchReliability,
-    path_generations: BoundedMap<PathBuf, u64>,
-    dirty_thread_keys: BoundedSet<ThreadCheckpointKey>,
-    inventory_generation: u64,
-}
-
-enum WatchReliability {
-    Reliable,
-    ReconcileRequired(WatchInvalidationReason),
-    Disabled,
-}
-
-struct WatchCleanStamp {
-    epoch_id: u64,
-    checkpoint_generation: u64,
-    reconciled_path_generations: BoundedMap<PathBuf, u64>,
-    reconciled_inventory_generation: u64,
+struct LocalSessionView {
+    provider: ProviderKey,
+    provider_thread_id: String,
+    resource_id: ResourceId,
+    relative_cwd: String,
+    display_name: String,
+    source_path: PathBuf,
+    source_size: u64,
+    source_mtime: u64,
+    blocked_reason: Option<String>,
 }
 ```
 
-Names are illustrative; use the repository's validated bounded types.
+Names are illustrative; the physical path is backend-private, and size/mtime
+are presentation data. Status and preliminary review classification consume
+these rows; they do not require `CapturedFile`, codec analysis, a content
+digest, or a portable `ResourceDescriptor`. The review's local-thread map is
+built from inventory rows and binding resolution; observation opens the
+source path from the row; first-contact seeding reads only the layout-less
+bound roots it seeds.
 
-Store each `WatchCleanStamp` only in the runtime registry, keyed by the exact
-local consumer scope `(provider profile, project, storage link, scope, thread)`.
-It is not a field of the durable `ConversationCheckpoint`.
+`CapturedResources` remains the byte-bearing input for actions that publish,
+preserve, replace, or otherwise pin local content. Its checks are unchanged.
 
-Change generations are monotonic and are never globally consumed. Each
-destination-scoped observation has its own `WatchCleanStamp`. Refreshing
-storage A cannot make storage B clean when both reference the same rollout at
-different cursors.
+### 4.2 Bounded probe/append reader
 
-Maintain a one-to-many reverse index from a physical rollout path to every
-physical source-segment consumer owned by a canonical root. A paginated
-ancestor may serve many roots, and one physical rollout may participate in
-more than one segment role. An event therefore dirties all dependent root
-observations. A
-`FixedHistoryCutoff` consumer may later prove that an append occurred strictly
-beyond its cutoff and remain logically unchanged; a `FollowEof` consumer stays
-dirty.
+Replace the cursor path's whole-file `read_rollout_bounded` call with a
+bounded reader that:
 
-Do not track known subagent paths or generations. Their events are outside the
-watcher's conflict-acceleration model. If a root action later requires full
-snapshot bytes, the ordinary bounded capture freshly discovers all retained
-subagents and verifies the final artifact hashes.
+1. opens the exact expected path without following a final symlink;
+2. requires a regular file within the 100-MiB conversation bound;
+3. records a runtime file stamp from the opened handle;
+4. reads and hashes the saved probe window ending at `consumed_byte_offset`;
+5. reads from `consumed_byte_offset` through the bounded current EOF;
+6. exposes only complete newline-terminated append bytes;
+7. retains an incomplete suffix as dirty, unconsumed data;
+8. re-stats the opened handle before accepting the result; and
+9. retries a small bounded number of times if size or identity changes
+   during the read, then fails closed.
 
-Bound all of the following:
+Refactor `refresh_codex_tail` to consume the validated probe and append
+slices instead of a vector containing the complete file; the resume cursors
+in `RootPhysicalMapping` already carry the incremental-fold state. First
+contact, adoption probes, detached mappings, layout disagreement,
+truncation, probe mismatch, malformed append, and unresolved ancestry still
+use the bounded full resolver or fail closed, unchanged.
 
-- watched homes;
-- consumers per home;
-- callback queue depth and event paths;
-- path-generation entries;
-- dirty-thread keys;
-- reverse-index fanout;
-- clean-stamp entries; and
-- retained generations.
+### 4.3 Checkpoint maintenance
 
-Failure to record or retain any required entry atomically marks the complete
-profile `ReconcileRequired`. If the watcher cannot be rearmed within bounds,
-mark it `Disabled`. Never evict evidence and leave any consumer partially
-clean. Increment generations with checked arithmetic; exhaustion starts a
-fresh `ReconcileRequired` epoch and never wraps a generation.
+Refresh persists the advanced observation it already computes:
 
-## 6. Watcher lifecycle
+- a no-op observation reuses the checkpoint's existing raw range pin and
+  persists nothing;
+- when the cursor extends, persist the complete replacement — observed tail,
+  root mapping, and accepted-anchored raw range pin — as one unit; hashing
+  cost is that root's accepted-to-current interval only;
+- when the full resolver runs for an already-bound thread, persist its
+  seeded observation the same way;
+- persistence increments the checkpoint generation under the existing
+  config/checkpoint and binding revision checks; a concurrent promotion,
+  binding edit, or host operation prevents stale persistence;
+- a failed raw-range refresh never persists a torn mapping/pin pair; and
+- `accepted` never changes during Refresh.
 
-### Registry creation and profile changes
+Maintenance runs serially after the parallel observation merge and before
+the pure-read classification phase pins revisions, extending the existing
+post-seeding revision rule to post-maintenance. Persisted cursors are what
+make a dirty root's recompute proportional to its append rather than its
+length.
 
-Every new registry entry starts `ReconcileRequired`. Watcher creation failure
-selects `Disabled` immediately. Reconcile registry entries whenever configured
-provider profiles or project bindings change; stop and drop entries with no
-live consumers. If an existing profile identifier resolves to a different
-canonical `CODEX_HOME`, tear down the old watch and start a fresh
-`ReconcileRequired` epoch for the new exact path.
+### 4.4 Watcher service
 
-### Watch-before-scan baseline
+One Tauri-managed service owns one watcher per exact canonical Codex home,
+shared by every project bound to that profile and armed lazily on the first
+operation that needs it. For each home, watch only:
 
-Avoid the initial scan race:
+- `sessions/` recursively when it exists;
+- `archived_sessions/` recursively when it exists; and
+- the home non-recursively, to observe creation, removal, or replacement of
+  those directories and atomic replacement of `session_index.jsonl`.
 
-1. Create the root watcher and attach every existing narrow session-tree watch.
-2. Record the current event generation.
-3. Run ordinary bounded discovery and checkpoint refresh.
-4. Drain/coalesce events and verify that the generation stayed stable.
-5. Publish a clean watermark only when the scan and generation agree.
-6. Retry a bounded number of times; otherwise remain
-   `ReconcileRequired`/`Busy`.
+Never watch the complete provider home recursively and never follow
+symlinks.
 
-A reliable epoch is never persisted across process restart.
+Per-profile state, all bounded:
 
-### Loss, replacement, and rearming
+```rust
+struct ProfileWatchState {
+    canonical_home: PathBuf,
+    healthy: bool,
+    generation: u64,
+    dirty_roots: BoundedSet<PathBuf>,
+    inventory_dirty: bool,
+    titles_dirty: bool,
+}
+```
 
-Queue overflow, `Event::need_rescan()`, backend error/disconnect, excessive
-paths, watched-tree removal or replacement, app restart, and sleep/resume mark
-the complete profile `ReconcileRequired`.
+The notify callback bounds event and path counts and forwards to a
+coalescing worker; it does nothing else. The worker classifies:
 
-Add an explicit backend lifecycle input for sleep/resume when the platform
-provides one. Otherwise use a conservative application-resume/focus or
-heartbeat-gap signal to request reconciliation; do not claim that watcher
-delivery alone detects time spent suspended. Correctness remains independent
-because every authoritative pass performs the reconciliation below.
+- modify of a known rollout path: add to `dirty_roots`, bump `generation`;
+- create, remove, rename, archive movement, an unknown JSONL path, or a
+  directory event: set `inventory_dirty`, bump `generation`;
+- `session_index.jsonl` change: set `titles_dirty` only;
+- a known excluded subagent path: ignore for root state; and
+- overflow, `need_rescan`, backend error or disconnect, watched-root removal
+  or replacement, or a full `dirty_roots` set: mark unhealthy and drop the
+  profile's caches.
 
-After backend error/disconnect, tree replacement, or failed rearm, tear down
-the obsolete operating-system watcher. Recreate the narrow watches, rebuild the
-reverse index, assign a fresh epoch, and repeat watch-before-scan. Do not return
-to `Reliable` while using an obsolete watch handle or before the new baseline
-finishes.
+Arm-before-scan baseline: arm the watcher first, then run bounded discovery,
+then publish the cache. Events delivered during the baseline land in the
+dirty sets like any others and simply make the first reuse partial — no
+re-stat or retry protocol is needed. An unhealthy or unarmable watcher means
+every operation for that profile runs the bounded path; restart and resume
+doubt reset to unarmed.
 
-## 7. Event classification and background work
+### 4.5 Cached local results
 
-Event handling is conservative:
+Two bounded process-local maps, invalidated by the watcher state and by
+in-process revisions that are known exactly:
 
-- modify, create, or rename-to of a known root/history-source rollout
-  increments its path generation and dirties every dependent root
-  observation;
-- removal, rename-from, or source-identity change invalidates affected physical
-  observations instead of representing an empty pending range;
-- an unknown rollout or directory event increments `inventory_generation` and
-  requires bounded provider discovery only to determine whether it is a new
-  root or a history source segment; a discovered subagent is discarded from
-  watcher state;
-- create, modify, remove, or rename of a known subagent rollout is ignored;
-- a root append that mentions a subagent is still a root append, so the root
-  file event dirties the root. Canonical refresh may then prove the append is
-  excluded subagent bookkeeping and leave the root tail unchanged; it
-  does not register or inventory the child;
-- `session_index.jsonl` updates affect presentation state only; and
-- incomplete trailing JSONL remains dirty until a complete newline-safe
-  boundary exists.
+- Inventory: keyed by provider profile, local project, binding revision, and
+  adapter version; stores the `LocalSessionView` rows and parsed titles.
+  Reuse requires a healthy watcher, matching key, and `inventory_dirty`
+  false; `titles_dirty` alone re-reads titles through the existing filtered
+  read. When `inventory_dirty` is set, re-enumerate only the subtrees
+  containing dirty or unknown paths, head-reading only new or changed files,
+  then clear the flag under the generation observed before the walk.
+- Observations: keyed by thread and storage; stores the derived
+  `LocalTailObservation` with the checkpoint generation and binding revision
+  it was derived from. Reuse requires a healthy watcher, the root absent
+  from `dirty_roots`, and matching generations/revisions. A dirty root runs
+  the bounded reader from its persisted checkpoint (or the full resolver on
+  any miss) through the existing worker pool, then clears its dirty entry
+  under the pre-dispatch generation.
 
-Debounce and coalesce per profile. Background work may pre-read a candidate
-append range and cache its raw hash/canonical result, but it does not advance a
-durable physical cursor, accepted cloud version, or accepted cumulative tail
-state. Do not issue a cloud request for every local
-filesystem event; normal refresh/status cadence performs remote comparison.
-Background preprocessing must call the existing bounded, no-follow,
-newline-safe incremental reader rather than introduce a second parser. Discard
-its result if the watcher epoch, path generation, checkpoint generation, or
-host-operation generation changes before publication; it must never delay
-Push/Pull quiescence.
+Reuse performs no stat, no probe, and no read for clean entries — that is
+the point. Adoption probes force the full-resolve path today and continue
+to: a thread whose checkpoint lacks accepted evidence is never served from
+the observation cache while a cloud tail is present for it.
 
-## 8. Authoritative operation integration
+Source removal or identity change invalidates the entry rather than
+representing an empty append; an incomplete JSONL suffix keeps its root
+dirty until a complete record boundary is observed. If an update cannot be
+retained atomically, drop the whole profile's caches. Never retain partial
+evidence while a consumer is marked clean.
 
-Every user-invoked refresh and Push/Pull planning pass still performs bounded
-root inventory reconciliation: check known root/history-source paths, detect
-unknown/moved/removed root candidates, and perform cheap filesystem metadata
-checks. Recognized subagent paths are ignored; unknown candidates that parse
-as subagents are discarded immediately. This does not re-read every rollout's
-structural `session_meta`. The watcher avoids JSONL metadata reparsing and
-prioritizes root-content work; it does not establish root-inventory
-completeness. Full subagent closure discovery happens only after a root
-relation has independently selected a byte-consuming operation.
+### 4.6 Lazy candidate capture
 
-For each destination-scoped root observation:
+Push/Pull review first classifies P/L/C from inventory and observation and
+determines candidate action intent. It then captures and pins only
+candidates whose final capability or plan requires local bytes:
+`CreateCloud`, `Publish`, conflict preservation, overwrite, preserve, or
+rebind targets.
 
-1. If it is dirty/unreconciled or has a pending append range, run the existing
-   incremental refresh path. Every authoritative refresh or Push/Pull planning
-   pass re-reads and hashes that pending range because watcher silence plus
-   unchanged length cannot exclude a same-length edit.
-2. If the raw range hash and exact boundaries reproduce a background
-   observation, reuse its canonical parse/rolling result. Otherwise parse and
-   canonicalize the range again.
-3. Allow the no-content-read fast path only for `FixedPaginatedTail` when the
-   pending append range is empty and every observed end equals its saved scan
-   cursor. `WholeThread` still reruns its complete canonical comparison. Probe
-   every physical
-   source for canonical path/file identity, regular-file kind, expected length,
-   and safe boundary. Any mismatch takes the ordinary incremental or
-   invalidation path.
-4. Advance only that destination's `WatchCleanStamp`, conditional on the
-   watcher epoch/path generations and checkpoint generation observed at the
-   start. A concurrent event or checkpoint promotion leaves it dirty.
-5. Continue remote head/manifest refresh and call the same shared
-   `P`/`L`/`C` tail-value classifier used by Refresh, Push, and Pull;
-   local watcher state says nothing about cloud movement and never creates an
-   operation-specific comparison path.
+Candidate selection is a conservative work scheduler, not a second
+sync-policy engine. It may capture a false-positive candidate, but it must
+never omit a resource that the existing decision/capability path could
+require; ambiguity selects capture. Capture runs through the existing
+selected-resource `capture_from_discovery` with every current check. The
+final user-visible decision is produced only after that authoritative
+candidate work succeeds; no provisional action is exposed. Final decisions
+continue through the one shared decision implementation, and candidate
+capture failure returns the same blocked capability/decision the full path
+would return.
 
-Subagent watcher generations are deliberately absent from these five steps.
-They do not cause a root reclassification or a byte-consuming action. When a
-root action independently requires complete snapshot bytes, the ordinary
-capture/materialization path enumerates, bounds, copies, and SHA-256-verifies
-the root's retained subagent rollouts. A manifest-only `Sync` or
-`LocalOutstanding` action neither publishes nor installs a subagent-only
-change. Mallard stores no accepted subagent tail and offers no
-independent subagent reconciliation.
+## 5. Row parity and warning semantics
 
-The optimization is intentionally asymmetric:
+Two behavior deltas are intended, bounded, and tested; nothing else about
+row output may change.
 
-| Operation | Watcher assistance | Verification retained |
-| --- | --- | --- |
-| Refresh/status | Identify dirty roots, precompute advisory append-range observations, and reuse `FixedPaginatedTail` cumulative state when no append is pending after metadata probes. | Rehash every pending fixed-tail range and every `WholeThread`, reconcile unreliable epochs, read the remote manifest, and never promote accepted state. Subagent events do not change status. |
-| Push review | Skip fixed-tail content reads when no append is pending and detect a relevant post-plan event early. | Rehash and pin every pending fixed-tail range and every `WholeThread` range, read the remote manifest, and call the shared accepted-pin/local/cloud-tail classifier. |
-| Push apply | Fail early when the epoch changed. | Stream the exact planned ranges once, verifying identity/EOF/raw pins while reconstructing; hash/verify each output once, check the head, and CAS. |
-| Pull review | Skip fixed-tail content reads for roots with no pending append and prioritize dirty roots. | Rehash pending fixed-tail ranges and every `WholeThread`; call the shared accepted-pin/local/cloud-tail classifier. Materializing review pins immutable manifest/object metadata and fixed IDs/paths only; it downloads, reconstructs, hashes, and stages nothing. |
-| Pull apply | Report local interference early. | Preserve the journal-free atomic SyncConfig write for zero-target actions. For materialization, download/verify pinned objects once, reconstruct/reidentify the one remote target once while validating typed invariants and serializing/hashing emitted bytes once, journal the apply-generated stage, then preserve provider quiescence, no-clobber writes, retained-source pins, recovery, and checkpoint finalization. Divergent C reuses P-local. |
+1. Blocked-detail parity. A condition that discovery or capture reports
+   today — most concretely a rollout crossing the 100-MiB bound by append,
+   or a transcript whose lineage cannot be resolved — can now first surface
+   at observation. One shared mapping produces the identical blocked row
+   detail regardless of which stage detected the condition. No
+   stage-dependent reason codes.
+2. Advisory secret warnings. Capture-time secret scanning is unchanged, but
+   Refresh no longer captures unchanged transcripts, so per-Refresh
+   "possible secret" advisories for non-candidate rows disappear. The
+   authoritative secret gate is unaffected: every push candidate is captured
+   and scanned before publication. The equivalence tests normalize exactly
+   this advisory difference and nothing else.
 
-An early “watch epoch changed since Push review” check may use only an
-ephemeral in-process `plan_id -> watch snapshot` entry. Do not serialize watcher
-fields into a reviewed plan. After restart, eviction, or a missing hint, skip
-the early check and run the ordinary complete apply preflight.
+## 6. Operation flows
 
-### Mallard-generated writes
+### 6.1 Refresh
 
-Materializing Pull apply knows the exact files and verified bytes it has just
-generated. Seed the destination checkpoint directly from the transaction
-receipt; do not wait for an event. Do not suppress self-generated events by path
-or a time window. Keep the watcher stamp dirty until the journaled after-state
-is durable and a post-write reconciliation observes stable path generations.
-This prevents suppression of an external append racing with Mallard's write.
+1. Resolve the binding and exact canonical provider profile; arm the
+   watcher if this is the profile's first operation.
+2. Reuse the cached inventory when permitted by 4.5, else re-enumerate the
+   dirty subtrees (or run full bounded discovery cold/unhealthy).
+3. Build local rows from `LocalSessionView` without capture.
+4. Seed first-contact state for layout-less bound threads, reading only
+   those roots.
+5. Reuse clean cached observations; run only dirty and cache-miss roots
+   through the existing bounded worker pool, merging in deterministic
+   thread-ID order with the existing earliest-failure rule.
+6. Persist advanced checkpoints under generation compare-and-swap (4.3) and
+   update the observation cache.
+7. Read the remote head/manifest and classify the same P/L/C values through
+   the single `compare_conversation_tail` call site.
 
-The same transaction may install subagent snapshot files because the selected
-root action already consumes the complete artifact. Those writes require no
-watcher update and create no accepted subagent state, extra checkpoint
-relation, or follow-up subagent synchronization.
+The warm no-change floor is step 7's remote read; steps 2–6 are cache
+lookups.
 
-In Divergent Pull, reassigning the existing P-local binding from T to C does
-not write provider files and therefore produces no watcher event. Only the one
-new P-remote target is a Mallard-generated provider write.
+### 6.2 Push review
 
-When a materializing Pull changes a provider alias, apply the main plan's journaled
-invalidation to every other destination checkpoint that references the old
-alias. Set the one `Detached` physical-mapping state while preserving each
-destination's independent accepted pin. Rebuild watcher reverse-index consumers
-only after that durable mutation; watcher state does not replace it.
+1. Reuse inventory and observations as in Refresh.
+2. Classify P/L/C and derive candidate Push intent without capturing
+   unrelated transcripts.
+3. For byte-pinning candidates, run authoritative selected-resource capture
+   and derive every required source, range, target, artifact,
+   provider-state, and secret-review pin.
+4. Recheck the normal plan inputs — config, checkpoint, and binding
+   revisions — before publishing the final review.
+5. If candidate capture fails, return the same blocked capability/decision
+   the full path would return.
 
-## 9. Ownership and modules
+Synced, cloud-ahead, metadata-only, unavailable, and unrelated sessions do
+not force transcript capture.
 
-Add provider-format logic under:
+### 6.3 Pull review
+
+1. Reuse inventory and observations as in Refresh.
+2. Classify P/L/C and derive candidate Pull intent without capturing
+   unrelated transcripts.
+3. Perform authoritative local target reads and capture only for candidates
+   that overwrite, preserve, rebind, or otherwise pin local bytes.
+4. Read immutable remote payloads only for candidate validation that cannot
+   be proven from manifest metadata; reuse the existing digest-keyed object
+   cache.
+5. Recheck the normal plan inputs before returning the final review.
+
+Storage-only, synced, local-ahead, metadata-only, blocked, and unrelated
+rows do not force transcript capture unless their selected action requires a
+local-byte pin.
+
+### 6.4 Push/Pull apply
+
+Apply is unchanged and is the correctness backstop for every reuse above.
+It still re-opens and verifies exact local sources and targets, verifies
+reviewed raw ranges and target digests, reconstructs and hashes provider
+output, downloads and verifies immutable objects, enforces provider
+quiescence and no-clobber writes, preserves journal and recovery behavior,
+and verifies the remote head with compare-and-swap where required. A plan
+built on stale reused evidence fails closed here exactly as a raced plan
+does today.
+
+Mallard-generated writes need no suppression: pull apply seeds its durable
+checkpoint from verified transaction output as today, and its file writes
+arrive as ordinary watcher events that dirty the affected roots for the
+next operation.
+
+## 7. Concurrency and bounds
+
+- The observation worker pool keeps the existing bounded policy: ID-order
+  dispatch, deterministic merge, deterministic earliest-failure selection.
+  Parallelism applies only to dirty and cache-miss roots and never changes
+  row order, error selection, or review output.
+- Watcher and cache state live behind one service lock; dirty-set drain and
+  cache publish happen under the generation observed before the recompute,
+  so an event racing a recompute leaves its path dirty for the next
+  operation instead of being lost.
+- All sets and maps are bounded; a bound overflow marks the profile
+  unhealthy and drops its caches whole. Never evict part of the evidence
+  while a consumer is marked clean.
+- Checkpoint persistence uses the generation compare-and-swap semantics of
+  4.3; there is a single checkpoint writer per operation.
+
+## 8. Module ownership
 
 ```text
-crates/mallard-infrastructure/src/providers/codex/watch.rs
+crates/mallard-infrastructure/src/codex_history_graph.rs
+  Bounded probe/append reader, runtime file stamps, and the refactored
+  refresh_codex_tail consuming probe and append slices.
+
+crates/mallard-infrastructure/src/provider_capture.rs
+  LocalSessionView projection from Discovery; the existing selected-resource
+  byte capture, unchanged.
+
+src-tauri/src/project_sync/codex_watch_service.rs
+  notify watchers, per-profile generation and dirty state, and the bounded
+  inventory and observation caches.
+
+src-tauri/src/project_sync/commands.rs
+  Refresh and review orchestration, checkpoint maintenance, lazy candidate
+  capture, P/L/C comparison, and plan construction.
+
+src-tauri/src/lib.rs
+  Process-lifetime managed service ownership.
 ```
 
-This module owns pure event scoping/classification, bounded generation
-accumulators, and dirty-snapshot/acknowledgment types. It does not own Tauri
-handles, parse complete conversation graphs, or make sync decisions.
+No file moves. Watcher and cache types remain outside `mallard-domain` and
+serialized frontend DTOs.
 
-Add process-lifetime integration under:
+## 9. Implementation sequence
 
-```text
-src-tauri/src/project_sync/codex_session_watcher.rs
-```
+Each step lands green on the full gate battery and deletes the path it
+replaces in the same change. Steps 2–4 cut the bytes and stand on their own;
+the watcher then removes the residual per-operation discovery and probe
+work.
 
-This module owns `notify` watchers, debouncing, registry/profile lifecycle, and
-background work scheduling. `src-tauri/src/lib.rs` keeps the registry alive as
-managed state. Existing refresh/Push/Pull orchestration consumes an internal
-snapshot and conditionally updates clean stamps.
+1. Add instrumentation counters — directories visited, files head-read,
+   transcript bytes read, probe/append bytes read, records parsed, bytes
+   hashed, full resolves, selected captures, cache reuse hits — and
+   re-measure the baseline on the current parallel pipeline.
+2. Persist refreshed observations under generation checks (4.3); add race
+   tests proving `accepted` never changes.
+3. Add the bounded probe/append reader (4.2) with equivalence tests against
+   the whole-buffer cursor path, including the blocked-detail parity rule.
+4. Add `LocalSessionView` and cut Refresh over from full capture, landing
+   the advisory-warning semantics of section 5 explicitly.
+5. Add the watcher service, arm-before-scan baseline, dirty-set
+   invalidation, and the inventory/observation caches with reuse (4.4, 4.5).
+6. Route Push/Pull review through cached results with lazy candidate
+   capture (4.6). Highest-risk step; lands last.
+7. Benchmark cold baseline, warm no-change, sparse append, new rollout, and
+   Push/Pull review with mixed actionable and irrelevant sessions.
 
-Keep watcher DTOs out of `mallard-domain`. If the frontend receives passive
-status invalidation, expose at most an opaque provider-profile identifier and
-generation—never absolute paths or transcript content.
+## 10. Test plan
 
-## 10. Implementation sequence
+All tests use temporary Codex, Mallard, project, and storage roots. They
+never watch a real provider home.
 
-1. Land and stabilize the checkpoint-only conflict-resolver plan, including
-   incremental range tests and generation-CAS behavior.
-2. Record checkpoint-only refresh/Push/Pull measurements for unchanged root,
-   root append, paginated ancestor, and incidental subagent-inventory cases.
-3. Implement pure event scoping, bounded generations, reverse-index fanout,
-   overflow behavior, and deterministic unit tests.
-4. Add the Tauri-managed per-profile registry and lifecycle reconciliation.
-5. Implement watch-before-scan, fresh-epoch rearming, and checkpoint-only
-   fallback.
-6. Feed dirty candidates into the existing incremental refresh path and add
-   conditional destination-specific clean stamps.
-7. Add passive background preprocessing and the no-pending-append metadata fast
-   path without changing authoritative operation results.
-8. Integrate early Push/Pull staleness and safe handling of Mallard-generated
-   writes.
-9. Run race/fault tests and compare all watcher-enabled outcomes against
-   checkpoint-only execution.
-10. Re-measure performance and keep the feature only where it materially
-    improves latency or foreground I/O.
+### 10.1 Reader and checkpoint tests
 
-## 11. Backend test plan
+- whole-buffer and probe/append readers produce identical unchanged,
+  incomplete-tail, extended, malformed, truncated, and replaced outcomes;
+- same-length file replacement with a changed runtime identity and any
+  probe mismatch fail closed;
+- a moving EOF retries within bounds and never consumes an incomplete
+  record;
+- an oversize or lineage-broken condition detected at observation produces
+  the identical blocked row detail as the discovery/capture path;
+- Refresh advances only replaceable observed fields, increments the
+  generation, and preserves accepted evidence exactly;
+- a generation or binding race prevents stale persistence; and
+- a failed raw-range refresh never persists a torn mapping/pin pair.
 
-All tests use temporary Codex, Mallard, project, and storage roots. They never
-watch a real user home.
+### 10.2 Watcher and cache tests
 
-### Lifecycle and event tests
+- watcher arming precedes baseline discovery, and events delivered during
+  the baseline leave their paths dirty rather than published clean;
+- append, create, remove, rename, archive movement, session-index
+  replacement, and watched-root replacement produce the expected dirty
+  state (roots, inventory, titles, unhealthy respectively);
+- known subagent events do not change root state, while unknown candidates
+  set `inventory_dirty` and are boundedly classified on the next operation;
+- overflow, `need_rescan`, backend error, disconnect, dirty-set overflow,
+  restart, and resume uncertainty drop the caches and rebaseline;
+- an event racing a recompute leaves its path dirty for the next operation;
+- two projects sharing one profile retain independent inventories;
+- a suppressed event (test seam) yields stale rows, the stale plan fails
+  closed at apply, and the next event or rebaseline recovers — proving
+  contract rule 4's blast radius; and
+- cache reuse for clean entries performs no stat, probe, or read, asserted
+  through the instrumentation counters.
 
-- watcher arming precedes baseline discovery, and an event during baseline
-  prevents a false clean watermark;
-- append, create, rename-to/from, removal, sessions-to-archive movement,
-  session-root creation, and custom/multiple `CODEX_HOME` profiles produce the
-  expected scoped generations;
-- `session_index.jsonl` changes invalidate only presentation/title state;
-- unknown rollout creation dirties inventory and requires discovery/edge
-  validation;
-- incomplete trailing JSONL remains dirty until a complete safe boundary;
-- debounce, coalescing, and reordering never lose dirtiness;
-- queue/path/reverse-map/clean-stamp overflow, `need_rescan`, backend error,
-  disconnect, root replacement, restart, and sleep/wake force profile-wide
-  reconciliation with no partially clean consumer; and
-- disconnect/root replacement tears down the obsolete watcher and cannot
-  produce `Reliable` until a new epoch and baseline complete.
+### 10.3 Refresh and review equivalence tests
 
-### Shared-graph and destination tests
+- a warm no-change Refresh performs no tree enumeration and reads no local
+  session bytes; its only external read is the remote head/manifest;
+- one append among many sessions reads and parses only the affected root's
+  probe and appended range, and the next Refresh starts from the persisted
+  cursor;
+- storage A and storage B retain independent checkpoints and observation
+  entries;
+- watcher-enabled, forced-rebaseline, and unhealthy-watcher runs produce
+  identical rows, relations, decisions, and plans after normalizing exactly
+  the advisory-warning delta of section 5;
+- Push/Pull review performs no transcript capture for unchanged or
+  irrelevant sessions, and every actionable candidate still receives all
+  required capture, secret, range, source, target, and artifact checks;
+- candidate capture failure produces the same final blocked decision as the
+  full-capture path; and
+- apply outcomes, cloud heads, bindings, checkpoints, receipts, and
+  recovery fixed points are identical with the watcher healthy, unhealthy,
+  or freshly rebaselined.
 
-- one physical ancestor used by multiple roots dirties every dependent
-  checkpoint;
-- adding or invalidating P0/P1-style physical segment consumers changes
-  watcher dirtiness only; it does not add a conflict input or change any root
-  tail layout;
-- storage A and B keep independent reconciled generations, so refreshing A
-  never consumes B's evidence;
-- appends beyond a `FixedHistoryCutoff` can reconcile as irrelevant for that
-  segment while a `FollowEof` consumer remains dirty;
-- a physical source used in several root segment roles keeps distinct
-  consumers;
-- different local/cloud subagent rollout bytes with identical root tails leave
-  `P`, `L`, `C`, and the resulting `Sync` relation unchanged;
-- a known subagent-only event changes no watcher or sync state and never
-  creates an independent plan action or a durable accepted subagent
-  tail value; and
-- provider-alias replacement invalidates every affected durable checkpoint
-  before rebuilding runtime reverse indexes.
+## 11. Acceptance criteria
 
-### Correctness-equivalence and race tests
+1. A warm no-change Refresh performs no transcript capture, no tree
+   enumeration, and no local session reads; its floor is the remote
+   head/manifest read.
+2. Sparse local changes perform read, parse, and hash work proportional to
+   dirty roots, and advanced cursors persist so the work does not repeat.
+3. Push/Pull review captures only byte-pinning candidates.
+4. Healthy, unhealthy, and rebaselined runs produce identical relations,
+   decisions, plans, apply outcomes, and recovery outcomes, modulo the
+   documented advisory-warning delta.
+5. No watcher event or cache entry authorizes mutation or replaces an
+   authoritative digest; `accepted` never changes during Refresh; stale
+   reuse can at worst produce a plan that apply rejects.
+6. The optimization adds no durable or portable schema field, no legacy
+   compatibility path, and no second execution path; conditions surface
+   with stage-independent row details.
+7. Watcher and cache state remain bounded, process-local, destination-aware
+   for observations, and path-private, and current subagent exclusion and
+   root-only conflict identity remain unchanged.
 
-- a clean hint still performs no-follow metadata/cursor checks;
-- simulated missed append, truncation, rename, symlink replacement, or file
-  identity change enters ordinary invalidation;
-- a watcher-clean pending append range is authoritatively re-read, and a missed
-  same-length mutation changes its raw pin;
-- only a `FixedPaginatedTail` with no pending append can take the metadata-only
-  content fast path; its cumulative portable tail may still be nonempty, while
-  `WholeThread` remains a complete comparison;
-- a newer event or checkpoint promotion prevents a stale clean-stamp update;
-- a `FollowEof` event after Push planning reports early staleness, but no event
-  ever skips Push apply's exact range/EOF/output/CAS verification;
-- Pull receipts seed checkpoints directly, self-generated events remain dirty
-  until stable post-commit reconciliation, and an external racing append is not
-  suppressed;
-- a byte-consuming root Push/Pull includes and SHA-256-verifies retained
-  subagent snapshot files, while a manifest-only root action ignores a
-  subagent-only difference;
-- watcher-disabled and forced-loss execution produce the same relations,
-  plans, receipts, cloud heads, local bindings, and recovery fixed points as
-  watcher-enabled execution; and
-- frontend events and logs contain no provider-home path or transcript content.
-
-### Performance tests
-
-Measure at least:
-
-- an unchanged large profile;
-- one appended root among many unchanged roots;
-- one append to a shared paginated ancestor;
-- one new or extended incidental subagent snapshot, proving zero root
-  reclassification work;
-- watcher-disabled fallback; and
-- overflow followed by full reconciliation.
-
-Report directory entries enumerated, metadata records reparsed, transcript
-bytes read/hashed, canonical records parsed, foreground wall time, and
-background work. Do not claim that watcher assistance removes mandatory
-publication or materialization I/O.
-
-## 12. Acceptance criteria
-
-1. Watcher-enabled and checkpoint-only execution produce identical sync
-   relations, plans, receipts, cloud heads, local bindings, and recovery
-   outcomes.
-2. No event, clean stamp, or background cache can authorize Push/Pull, promote
-   trusted state, replace a source/output hash, or replace CAS.
-3. A healthy reconciled epoch can reuse `FixedPaginatedTail` cumulative state
-   when no append is pending after cheap no-follow metadata probes; every
-   pending fixed-tail range and every `WholeThread` remains authoritatively
-   re-read and hashed before use.
-4. Event loss, overflow, restart, sleep/wake, and backend failure converge to
-   bounded checkpoint reconciliation without a partially clean profile.
-5. Shared physical sources and multiple storage destinations never consume one
-   another's dirty evidence.
-6. Pull/materialization does not wait for watcher delivery and cannot suppress
-   a racing external append.
-7. Watcher state remains bounded, process-local, provider-path private, and
-   absent from every durable or portable schema.
-8. Subagent rollout state is never a conflict input: equal root tails classify
-   `Sync` despite different subagent bytes, and there is no subagent-only sync
-   relation or action. Subagents travel only inside an already byte-consuming
-   complete root snapshot.
-9. Disabling or removing the watcher changes no schema-1 document and leaves
-   the checkpoint-only product fully supported; there is no migration or
-   compatibility path.
-10. Performance measurements show a material improvement in at least no-op
-   refresh or sparse-change foreground work before the follow-up ships.
-
-## 13. Verification commands
+## 12. Verification
 
 ```text
 cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test -p mallard-domain
 cargo test -p mallard-infrastructure
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 npm run test:backend-integration
 ```
 
-Run watcher integration tests only against explicitly created temporary
-provider homes.
+Run the instrumented benchmark at cold baseline, warm no-change, after one
+append, after one new rollout, and during Push/Pull review with a mixture of
+actionable and irrelevant sessions.
+
+## 13. Deferred and rejected
+
+Deferred: event-driven UI freshness. The armed watcher could push a "local
+sessions changed" hint to the frontend to prompt an automatic Refresh; that
+is deliberately out of scope. Operations remain demand-driven, and the
+watcher is consulted only when the user acts. If auto-refresh becomes a
+goal, it layers onto this service as a frontend hint without changing the
+reuse rule, the checkpoint authority, or the single execution path.
+
+Rejected: per-operation stat revalidation as the reuse witness (re-stat
+every visited directory and known root before serving the cache). It makes
+reuse independent of watcher delivery but re-introduces per-operation
+filesystem work proportional to the profile and duplicates what apply
+already guarantees. This plan instead trusts watcher silence between
+reliability signals, keeps apply authoritative, and accepts the bounded
+staleness window of contract rule 4.
+
+Rejected: ancestor dependency maps, per-path generation counters, and
+observation input fingerprints from the earlier draft — leaf-scoped
+invalidation matches the authoritative cursor path's sensitivity (section
+3), and in-process revisions are known exactly without fingerprints.

@@ -21,12 +21,14 @@ import type {
   StorageConfig,
 } from "../../types";
 import Icon from "../Icons";
-import ProjectActivityPage from "./ProjectActivityPage";
+import ProjectActivityPage, { BranchPicker, type ActivityHeaderModel } from "./ProjectActivityPage";
 import type {
   ActiveProjectSubview,
   OpenSessionDetailRequest,
 } from "./session-detail/sessionDetailModel";
-import ConversationPathRepairNotice from "./ConversationPathRepairNotice";
+import ConversationPathRepairNotice, {
+  shouldShowConversationPathRepairNotice,
+} from "./ConversationPathRepairNotice";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "./SyncPathBar";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
 import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
@@ -108,8 +110,13 @@ interface Props {
   onRefresh: () => void;
   onAddProject: () => void;
   onSelectProject: (projectId: string) => void;
-  /** Theme toggle and app menu — the path bar doubles as the window titlebar. */
-  windowActions: ReactNode;
+  /**
+   * Theme and app-wide commands. The path bar doubles as the window titlebar
+   * here, but it carries one overflow menu, not two — a second `⋯` 90px from
+   * the first, in the same glyph and at the same weight, made the only way to
+   * find a command opening both. These join the end of that one menu.
+   */
+  appActions: PathBarMenuGroup[];
   onOpenStorageSettings: (storageId?: string) => void;
   onSaveStorage: (
     storage: StorageConfig,
@@ -488,7 +495,7 @@ export default function ProjectLinksWorkspace({
   onRefresh,
   onAddProject,
   onSelectProject,
-  windowActions,
+  appActions,
   onOpenStorageSettings,
   onSaveStorage,
   storageEditorRequest,
@@ -517,6 +524,15 @@ export default function ProjectLinksWorkspace({
   const [bundleError, setBundleError] = useState<string | null>(null);
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [projectAliasDraft, setProjectAliasDraft] = useState("");
+  // The activity list speaks through the path bar: it owns the branches and the
+  // storage comparison, the bar owns the row they belong in. The callback has
+  // to be stable — the list reports through an effect, and a new identity every
+  // render would put the two of them in a loop.
+  const [activityHeader, setActivityHeader] = useState<ActivityHeaderModel | null>(null);
+  const handleActivityHeaderChange = useCallback(
+    (model: ActivityHeaderModel | null) => setActivityHeader(model),
+    [],
+  );
   const bundleRequestRef = useRef(0);
   const storageSettingsRef = useRef<HTMLDivElement>(null);
   const workspaceScrollRef = useRef<HTMLElement>(null);
@@ -1325,6 +1341,18 @@ export default function ProjectLinksWorkspace({
         id: "section",
         label: workspaceSectionLabel,
         tone: "section",
+        // Which branch the history is showing is part of where you are, so it
+        // rides the crumb that names the section rather than a row of its own.
+        // A session replaces this crumb outright, and the branch goes with it:
+        // the branch scopes the list, and inside a session there is no list.
+        scope: activityHeader && activityHeader.branches.length > 0 ? (
+          <BranchPicker
+            branches={activityHeader.branches}
+            selectedBranch={activityHeader.selectedBranch}
+            disabled={activityHeader.refreshing}
+            onChange={activityHeader.onSelectBranch}
+          />
+        ) : undefined,
       });
     }
   }
@@ -1392,9 +1420,55 @@ export default function ProjectLinksWorkspace({
         },
       ],
     }] : []),
+    // App scope last, behind its own rule: everything above acts on this
+    // project or its storage, everything here acts on Mallard.
+    ...appActions,
   ] : [];
 
+  // A badge on the button that clears it, rather than a tally beside it: "3 to
+  // push" is what Push does, said once. The counts stand down while that
+  // button is mid-review or mid-transfer, where its own label is the readout.
+  const pullCount = activityHeader?.counts.pull ?? 0;
+  const pushCount = activityHeader?.counts.push ?? 0;
+  const showPullCount = pullCount > 0 && !workspacePullReviewOpen && !workspacePullProgress;
+  const showPushCount = pushCount > 0 && !workspacePushReviewOpen && !workspacePushProgress;
+  const attention = activityHeader?.counts.attention ?? 0;
+
   const pathActions = workspaceProject && workspaceStorage ? (
+    <>
+      {/* One chip for everything neither button can clear. Four coloured
+          tallies said the same thing in a vocabulary nothing else on the page
+          used, and none of them was actionable. */}
+      {attention > 0 && (
+        <span
+          className={`sync-path-attention ${activityHeader?.counts.severity ?? "warning"}`}
+          tabIndex={0}
+          role="status"
+          data-tooltip={activityHeader?.counts.detail}
+          aria-label={`${attention} thread${attention === 1 ? "" : "s"} need attention: ${activityHeader?.counts.detail}`}
+        >
+          <Icon name="alert-triangle" size={13} />
+          <b>{attention}</b>
+        </span>
+      )}
+      {activityHeader && (
+        <button
+          type="button"
+          className={`sync-path-icon-action${activityHeader.refreshing ? " loading" : ""}`}
+          onClick={activityHeader.onRefresh}
+          disabled={activityHeader.refreshing}
+          aria-busy={activityHeader.refreshing}
+          title={activityHeader.refreshing ? "Refreshing activity" : "Refresh activity"}
+          aria-label={activityHeader.refreshing ? "Refreshing activity" : "Refresh activity"}
+        >
+          <span
+            aria-hidden="true"
+            className={`icon-spin-frame${activityHeader.refreshing ? " spinning" : ""}`}
+          >
+            <Icon name="refresh" size={16} />
+          </span>
+        </button>
+      )}
     <div className="sync-path-action-group" role="group" aria-label="Sync actions">
       <button
         type="button"
@@ -1432,7 +1506,9 @@ export default function ProjectLinksWorkspace({
           ? "Set up project before Pull"
           : workspacePullReviewOpen
           ? `Pull selected changes from ${workspaceStorage.name || "storage"}`
-          : `Pull from ${workspaceStorage.name || "storage"}`}
+          : showPullCount
+            ? `Pull ${pullCount} newer thread${pullCount === 1 ? "" : "s"} from ${workspaceStorage.name || "storage"}`
+            : `Pull from ${workspaceStorage.name || "storage"}`}
         aria-expanded={workspacePullReviewOpen}
       >
         <Icon
@@ -1443,7 +1519,8 @@ export default function ProjectLinksWorkspace({
         />
         {workspacePullReadout
           ? <span className="sync-btn-readout">{workspacePullReadout}</span>
-          : projectPullActionLabel({ preparing: workspacePullPreparing, applying: workspacePullApplying })}
+          : <span className="sync-path-sync-label">{projectPullActionLabel({ preparing: workspacePullPreparing, applying: workspacePullApplying })}</span>}
+        {showPullCount && <span className="sync-path-count" aria-hidden="true">{pullCount}</span>}
       </button>
       <button
         type="button"
@@ -1472,7 +1549,9 @@ export default function ProjectLinksWorkspace({
             : "Choose resources, then push them to this storage")}
         aria-label={workspacePushReviewOpen
           ? `Push selected resources to ${workspaceStorage.name || "storage"}`
-          : `Push to ${workspaceStorage.name || "storage"}`}
+          : showPushCount
+            ? `Push ${pushCount} newer thread${pushCount === 1 ? "" : "s"} to ${workspaceStorage.name || "storage"}`
+            : `Push to ${workspaceStorage.name || "storage"}`}
         aria-expanded={workspacePushReviewOpen}
       >
         <Icon
@@ -1483,9 +1562,11 @@ export default function ProjectLinksWorkspace({
         />
         {workspacePushReadout
           ? <span className="sync-btn-readout">{workspacePushReadout}</span>
-          : projectPushActionLabel({ preparing: workspacePushPreparing, publishing: workspacePushPublishing })}
+          : <span className="sync-path-sync-label">{projectPushActionLabel({ preparing: workspacePushPreparing, publishing: workspacePushPublishing })}</span>}
+        {showPushCount && <span className="sync-path-count" aria-hidden="true">{pushCount}</span>}
       </button>
     </div>
+    </>
   ) : null;
 
   return (
@@ -1497,7 +1578,6 @@ export default function ProjectLinksWorkspace({
         overflowLabel="Project and storage actions"
         overflowDisabled={workspaceControlsLocked}
         actions={pathActions}
-        windowActions={windowActions}
         ariaLabel={`${projectLabel(workspaceProject)} path`}
       />
     )}
@@ -1642,7 +1722,12 @@ export default function ProjectLinksWorkspace({
               const conversationPathAuditError = conversationPathAuditErrors[project.local_project_id];
               const conversationPathNoticeBlocked = !!conversationPathAuditError
                 || !!conversationPathAudit?.blockers.length;
-              const conversationPathNotice = codexConfigured && !conversationPathAuditLoading ? (
+              const conversationPathNotice = codexConfigured
+                && !conversationPathAuditLoading
+                && shouldShowConversationPathRepairNotice(
+                  conversationPathAudit,
+                  conversationPathAuditError,
+                ) ? (
                 <ConversationPathRepairNotice
                   audit={conversationPathAudit}
                   auditError={conversationPathAuditError}
@@ -1958,6 +2043,7 @@ export default function ProjectLinksWorkspace({
                 );
               } : undefined}
               continuityActionBusy={busy || !!runningAction}
+              onHeaderModelChange={handleActivityHeaderChange}
               onOpenSessionDetail={(request, trigger) => (
                 openSessionDetail(activeProject.local_project_id, request, trigger)
               )}

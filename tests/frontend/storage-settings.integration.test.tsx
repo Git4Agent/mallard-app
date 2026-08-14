@@ -536,6 +536,7 @@ test("the storage group is skipped when it would frame nothing", () => {
   // empty frame collapses into a rule above the history. It renders only when
   // it has a repair notice, a storage banner, an open review, an unlinked
   // project to prompt, or the link picker open.
+  assert.match(workspace, /shouldShowConversationPathRepairNotice\(\s*conversationPathAudit,\s*conversationPathAuditError,\s*\)/);
   assert.match(workspace, /const storageGroupEmpty = !storageGroupNotice\s*&& !!selectedStorage\s*&& projectLinks\.length > 0\s*&& !storageBlockShown\s*&& linkingProjectId !== project\.local_project_id;/);
   assert.match(workspace, /if \(storageGroupEmpty\) return null;/);
   // …and the block inside it goes the same way when it has no banner to carry.

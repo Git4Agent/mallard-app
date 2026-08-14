@@ -1,5 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
   GitBranchSummary,
   LocalProjectSummary,
@@ -16,6 +16,25 @@ import { projectSyncApi } from "./api";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
 import type { OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "./ThreadStatusIcon";
+
+/**
+ * What the workspace path bar renders on this page's behalf.
+ *
+ * The list owns the data — branches arrive with the activity page, counts with
+ * the storage comparison — but the controls belong in the bar, beside the Push
+ * and Pull buttons the numbers describe. Rather than fetch the same two things
+ * twice, the page hands the bar a model and the handlers to drive it.
+ */
+export interface ActivityHeaderModel {
+  branches: GitBranchSummary[];
+  selectedBranch: string;
+  onSelectBranch: (branch: string) => void;
+  counts: ActivityHeaderCounts;
+  /** The whole comparison failed, as against one provider's failing. */
+  comparisonError: string | null;
+  refreshing: boolean;
+  onRefresh: () => void;
+}
 
 interface PageProps {
   project: LocalProjectSummary;
@@ -44,6 +63,12 @@ interface PageProps {
    * nothing is applied sight unseen.
    */
   onReviewListReadyChange?: (ready: boolean) => void;
+  /**
+   * Hands the workspace path bar what it needs to speak for this page, and
+   * null when there is nothing to say. Only the workspace passes it; the two
+   * review hosts render this page inside their own chrome.
+   */
+  onHeaderModelChange?: (model: ActivityHeaderModel | null) => void;
 }
 
 interface ContentProps {
@@ -55,8 +80,6 @@ interface ContentProps {
   actionError: string | null;
   actionBusyResourceId: string | null;
   actionBusyActionId?: string | null;
-  onBranchChange: (branch: string) => void;
-  onRefresh: () => void;
   onLoadMore: () => void;
   /** Dispatches one backend-declared row action. */
   onSessionAction: (session: ProjectSessionSummary, action: SessionActionDescriptor) => void;
@@ -148,9 +171,21 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
 
   if (!selected) return null;
 
+  // The trigger is the whole pill — icon, name and chevron in one target —
+  // because it now sits in the path bar beside crumbs that behave the same way.
+  const label = `Branch: ${selected.name}${selected.is_current ? ", current branch" : ""}${!selected.available ? ", history only" : ""}`;
+  const face = (
+    <>
+      <Icon name="git-branch" size={12} />
+      {/* Just the branch name: the pill always shows the selected branch, so
+          "Current" belongs in the open menu, not here. */}
+      <span className="sync-history-branch-name" title={selected.name}>{selected.name}</span>
+      {!selected.available && <span className="sync-history-branch-state history-only">History only</span>}
+    </>
+  );
+
   return (
     <div ref={rootRef} className={`sync-history-branch-select${open ? " open" : ""}`}>
-      <Icon name="git-branch" size={15} />
       <button
         ref={triggerRef}
         type="button"
@@ -159,7 +194,7 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menuId}
-        aria-label={`Branch: ${selected.name}${selected.is_current ? ", current branch" : ""}${!selected.available ? ", history only" : ""}`}
+        aria-label={label}
         title="Choose a branch"
         onClick={() => open ? closeMenu() : openMenu()}
         onKeyDown={(event) => {
@@ -168,11 +203,8 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
           openMenu(event.key === "ArrowDown" ? "first" : "last");
         }}
       >
-        {/* The trigger is just the branch name: it always shows the selected
-            branch, so "Current" belongs in the open menu, not here. */}
-        <span className="sync-history-branch-name" title={selected.name}>{selected.name}</span>
-        {!selected.available && <span className="sync-history-branch-state history-only">History only</span>}
-        <Icon name="chevron-down" size={12} className="sync-history-branch-chevron" />
+        {face}
+        <Icon name="chevron-down" size={11} className="sync-history-branch-chevron" />
       </button>
       <div
         ref={menuRef}
@@ -451,6 +483,72 @@ export function sessionSyncPresentation(
         label: `Comparison needs attention. ${entry.status_detail ?? "Mallard could not prove this thread's ancestry safely."}`,
       };
   }
+}
+
+/** What the path bar says on the activity list's behalf: two numbers that ride
+ *  the buttons resolving them, and one for everything neither button can.
+ *
+ *  The tallies run over the whole comparison, not the rows on screen. Push and
+ *  Pull act on the project, so a badge scoped to the visible 30-day window
+ *  would promise a number the very next click disproves. */
+export interface ActivityHeaderCounts {
+  /** Newer here than in storage — what Push sends. */
+  push: number;
+  /** Newer in storage than here — what Pull fetches. */
+  pull: number;
+  /** Divergent, held, conflicting or unsyncable: needs a person, not a verb. */
+  attention: number;
+  /** Conflicts and unsyncable threads read louder than a review or a hold. */
+  severity: "warning" | "danger";
+  /** The breakdown the single chip stands in for. */
+  detail: string;
+}
+
+function countPhrase(count: number, singular: string, plural: string): string | null {
+  if (count === 0) return null;
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+export function activityHeaderCounts(
+  comparison: ThreadSyncComparison | null,
+  storageName: string,
+): ActivityHeaderCounts {
+  let push = 0;
+  let pull = 0;
+  let review = 0;
+  let waiting = 0;
+  let conflict = 0;
+  let unsyncable = 0;
+
+  for (const entry of comparison?.entries ?? []) {
+    // An entry present on neither side is a ghost of a thread that has been
+    // removed from both; it is nobody's work.
+    if (!entry.local_present && !entry.storage_present) continue;
+    switch (sessionSyncPresentation(entry, storageName).status) {
+      case "local-outstanding": push += 1; break;
+      case "cloud-outstanding": pull += 1; break;
+      case "divergent": review += 1; break;
+      case "pending": waiting += 1; break;
+      case "conflict": conflict += 1; break;
+      case "unavailable": unsyncable += 1; break;
+      default: break;
+    }
+  }
+
+  const detail = [
+    countPhrase(review, "thread changed on both sides", "threads changed on both sides"),
+    countPhrase(waiting, "thread waiting to sync", "threads waiting to sync"),
+    countPhrase(conflict, "thread Mallard could not match", "threads Mallard could not match"),
+    countPhrase(unsyncable, "thread that can't be synced", "threads that can't be synced"),
+  ].filter((phrase): phrase is string => phrase !== null).join(", ");
+
+  return {
+    push,
+    pull,
+    attention: review + waiting + conflict + unsyncable,
+    severity: conflict > 0 || unsyncable > 0 ? "danger" : "warning",
+    detail,
+  };
 }
 
 /** The badge, from a presentation the caller has already resolved. Every row
@@ -1349,7 +1447,7 @@ function providerNoticeCopy(state: ProviderActivityState): string {
 
 export function ProjectChatHistoryContent({
   project, binding, activity, loading, loadingMore, actionError, actionBusyResourceId, actionBusyActionId = null,
-  onBranchChange, onRefresh, onLoadMore,
+  onLoadMore,
   onSessionAction, onOpenSessionDetail, embedded = false, comparison = null,
   comparisonLoading = false, comparisonError = null, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
@@ -1418,39 +1516,12 @@ export function ProjectChatHistoryContent({
     storageName: comparison?.storage_name ?? activeStorageName,
     hasBoundProvider,
   }), [comparison, comparisonLoading, comparisonError, activeStorageName, hasBoundProvider]);
-  const embeddedTitle = activity?.git ? "Git history" : activity ? "Sessions" : "Activity";
-  const embeddedSessionCount = activity ? sessions.length : null;
-  const visibleComparisonCounts = useMemo(() => {
-    const counts: Record<ComparisonStatus, number> = {
-      synced: 0,
-      "cloud-outstanding": 0,
-      "local-outstanding": 0,
-      divergent: 0,
-      pending: 0,
-      conflict: 0,
-      unavailable: 0,
-    };
-
-    for (const entry of matchedSyncEntries) {
-      counts[sessionSyncPresentation(entry, comparisonStorageName).status] += 1;
-    }
-
-    return counts;
-  }, [comparisonStorageName, matchedSyncEntries]);
-  const visibleComparisonChangeCount = visibleComparisonCounts["local-outstanding"]
-    + visibleComparisonCounts["cloud-outstanding"]
-    + visibleComparisonCounts.divergent
-    + visibleComparisonCounts.pending
-    + visibleComparisonCounts.conflict
-    + visibleComparisonCounts.unavailable;
-  const refreshing = loading || comparisonLoading;
+  const sectionTitle = activity?.git ? "Git history" : activity ? "Sessions" : "Activity";
   const refreshStatus = comparisonLoading
     ? `Comparing threads with ${activeStorageName ?? "storage"}`
     : loading
       ? "Refreshing project activity"
       : null;
-  const showEmbeddedSessionCount = embedded && !compactSelectionReview && !activity?.git && embeddedSessionCount !== null;
-  const showComparisonSummary = comparison != null && visibleComparisonChangeCount > 0;
   const renderSession = (
     session: ProjectSessionSummary,
     key: string,
@@ -1499,80 +1570,14 @@ export function ProjectChatHistoryContent({
   const content = (
       <section
         className={embedded ? "sync-history-content" : "profile-links-section"}
-        aria-labelledby={embedded || compactSelectionReview ? undefined : "project-activity-heading"}
-        aria-label={embedded || compactSelectionReview ? embeddedTitle : undefined}
+        aria-label={sectionTitle}
       >
-        {!compactSelectionReview && <header className={`profile-links-heading sync-history-header${embedded ? " embedded" : ""}`}>
-          {/* Embedded in the project workspace, the path bar above already says
-              which section this is and which storage it compares against, so the
-              header keeps only the controls. */}
-          {!embedded && (
-            <div className="profile-links-copy">
-              <h1 id="project-activity-heading" className="settings-section-title">{label}</h1>
-            </div>
-          )}
-          <div className="sync-history-toolbar">
-            {activeStorageName && !embedded && !compactSelectionReview && (
-              <span
-                className="sync-history-storage-lens"
-                title={`Comparing threads with ${activeStorageName}`}
-                aria-label={`Comparing threads with ${activeStorageName}`}
-              >
-                <Icon name="drive" size={13} />
-                <span>{activeStorageName}</span>
-              </span>
-            )}
-            {activity?.git && (
-              <BranchPicker
-                branches={activity.git.branches}
-                selectedBranch={activity.git.selected_branch}
-                disabled={loading}
-                onChange={onBranchChange}
-              />
-            )}
-            {(showEmbeddedSessionCount || showComparisonSummary) && (
-              <span className="sync-history-toolbar-stats">
-                {showEmbeddedSessionCount && (
-                  <span
-                    className="sync-history-heading-count sync-history-toolbar-count"
-                    title={`${embeddedSessionCount} session${embeddedSessionCount === 1 ? "" : "s"} shown`}
-                    aria-label={`${embeddedSessionCount} session${embeddedSessionCount === 1 ? "" : "s"}`}
-                  >
-                    <Icon name="message" size={12} />{embeddedSessionCount}
-                  </span>
-                )}
-                {showComparisonSummary && (
-                  <span className="sync-thread-sync-summary" aria-label={`Visible thread comparison with ${comparisonStorageName}`}>
-                    {visibleComparisonCounts["local-outstanding"] > 0 && <span className="local" title={`${visibleComparisonCounts["local-outstanding"]} local thread change${visibleComparisonCounts["local-outstanding"] === 1 ? "" : "s"}`}><ThreadStatusIcon status="local-outstanding" size={12} />{visibleComparisonCounts["local-outstanding"]}</span>}
-                    {visibleComparisonCounts["cloud-outstanding"] > 0 && <span className="storage" title={`${visibleComparisonCounts["cloud-outstanding"]} thread change${visibleComparisonCounts["cloud-outstanding"] === 1 ? "" : "s"} in ${comparisonStorageName}`}><ThreadStatusIcon status="cloud-outstanding" size={12} />{visibleComparisonCounts["cloud-outstanding"]}</span>}
-                    {visibleComparisonCounts.divergent > 0 && <span className="diverged" title={`${visibleComparisonCounts.divergent} divergent thread${visibleComparisonCounts.divergent === 1 ? "" : "s"}`}><ThreadStatusIcon status="divergent" size={12} />{visibleComparisonCounts.divergent}</span>}
-                    {visibleComparisonCounts.pending > 0 && <span className="pending" title={`${visibleComparisonCounts.pending} thread${visibleComparisonCounts.pending === 1 ? " is" : "s are"} waiting to sync`}><ThreadStatusIcon status="pending" size={12} />{visibleComparisonCounts.pending}</span>}
-                    {visibleComparisonCounts.conflict > 0 && <span className="conflict" title={`${visibleComparisonCounts.conflict} thread conflict${visibleComparisonCounts.conflict === 1 ? "" : "s"} need attention`}><ThreadStatusIcon status="conflict" size={12} />{visibleComparisonCounts.conflict}</span>}
-                    {visibleComparisonCounts.unavailable > 0 && <span className="unavailable" title={`${visibleComparisonCounts.unavailable} thread${visibleComparisonCounts.unavailable === 1 ? " is" : "s are"} unavailable for sync`}><ThreadStatusIcon status="unavailable" size={12} />{visibleComparisonCounts.unavailable}</span>}
-                  </span>
-                )}
-              </span>
-            )}
-            {comparisonError && <span className="sync-thread-sync-error" tabIndex={0} data-tooltip={comparisonError} aria-label={`Storage comparison failed: ${comparisonError}`}><ThreadStatusIcon status="conflict" size={24} /></span>}
-            <button
-              type="button"
-              className={`sync-history-icon-action sync-history-refresh${refreshing ? " loading" : ""}`}
-              onClick={onRefresh}
-              disabled={refreshing}
-              aria-busy={refreshing}
-              title={refreshing ? "Refreshing activity" : "Refresh activity"}
-              aria-label={refreshing ? "Refreshing activity" : "Refresh activity"}
-            >
-              <span
-                aria-hidden="true"
-                className={`icon-spin-frame${refreshing ? " spinning" : ""}`}
-              >
-                <Icon name="refresh" size={16} />
-              </span>
-            </button>
-            {refreshStatus && <span className="sync-visually-hidden" role="status">{refreshStatus}</span>}
-          </div>
-        </header>}
+        {/* No header. Branch, counts and refresh are the workspace path bar's
+            now — the branch is where you are, and the two tallies belong on the
+            Push and Pull buttons that clear them. A row holding one control
+            that belonged in the trail and one that belonged on a button was a
+            row with nothing of its own to say. */}
+        {refreshStatus && <span className="sync-visually-hidden" role="status">{refreshStatus}</span>}
 
         {actionError && <div className="sync-callout error sync-history-error" role="alert"><Icon name="alert-triangle" size={15} /><span>{actionError}</span></div>}
         {comparison?.remote_continuity?.state === "replaced" && (
@@ -1606,6 +1611,19 @@ export function ProjectChatHistoryContent({
             </span>
           </div>
         ))}
+        {/* The whole comparison failed, as against one provider's failing. It
+            used to be a 24px glyph in the header's corner with the reason on a
+            tooltip; with the header gone it says its piece where the other
+            comparison failures already do. */}
+        {comparisonError && (
+          <div className="sync-callout warning sync-history-comparison-error" role="alert">
+            <Icon name="alert-triangle" size={15} />
+            <span>
+              <strong>{`Comparison with ${comparisonStorageName} failed`}</strong>
+              {` — ${comparisonError} Every row below falls back to an unknown status.`}
+            </span>
+          </div>
+        )}
         {/* Comparison failures are isolated per provider: one failed provider
             warns here while every other provider's rows keep their statuses. */}
         {providerErrors.map(([provider, message]) => (
@@ -1814,6 +1832,7 @@ export default function ProjectActivityPage({
   continuityActionBusy = false,
   comparisonOverride,
   onReviewListReadyChange,
+  onHeaderModelChange,
   onOpenSessionDetail,
 }: PageProps) {
   const [activity, setActivity] = useState<ProjectActivity | null>(null);
@@ -1903,10 +1922,59 @@ export default function ProjectActivityPage({
     onReviewListReadyChange?.(reviewListReady);
   }, [reviewListReady, onReviewListReadyChange]);
 
-  const changeBranch = (nextBranch: string) => { setBranch(nextBranch); setActivity(null); void load(null, nextBranch); };
-  const refreshActivity = async () => {
-    await Promise.all([load(null, branch, true), loadComparison()]);
-  };
+  // The path bar holds onto whatever model it was last handed, so a model that
+  // is a new object every render would drive it into a re-render loop. These
+  // two handlers are the only mutable part of it; a latest-ref keeps their
+  // identity fixed while they still see this render's `load` and `branch`.
+  const latest = useRef({ load, loadComparison, branch });
+  latest.current = { load, loadComparison, branch };
+
+  const changeBranch = useCallback((nextBranch: string) => {
+    setBranch(nextBranch);
+    setActivity(null);
+    void latest.current.load(null, nextBranch);
+  }, []);
+  const refreshActivity = useCallback(() => {
+    void Promise.all([
+      latest.current.load(null, latest.current.branch, true),
+      latest.current.loadComparison(),
+    ]);
+  }, []);
+
+  const headerCounts = useMemo(
+    () => activityHeaderCounts(
+      comparison,
+      comparison?.storage_name ?? activeStorageName ?? "selected storage",
+    ),
+    [comparison, activeStorageName],
+  );
+  const headerModel = useMemo<ActivityHeaderModel>(() => ({
+    // A project with no repository has no branches to offer; the bar simply
+    // draws no chip, and the counts and refresh still stand.
+    branches: activity?.git?.branches ?? [],
+    selectedBranch: activity?.git?.selected_branch ?? "",
+    onSelectBranch: changeBranch,
+    counts: headerCounts,
+    comparisonError,
+    refreshing: loading || comparisonLoading,
+    onRefresh: refreshActivity,
+  }), [
+    activity?.git?.branches,
+    activity?.git?.selected_branch,
+    changeBranch,
+    headerCounts,
+    comparisonError,
+    loading,
+    comparisonLoading,
+    refreshActivity,
+  ]);
+  useEffect(() => {
+    onHeaderModelChange?.(headerModel);
+  }, [headerModel, onHeaderModelChange]);
+  // Leaving the page has to empty the bar, or its controls outlive the list
+  // they speak for.
+  useEffect(() => () => { onHeaderModelChange?.(null); }, [onHeaderModelChange]);
+
   const runSessionAction = async (session: ProjectSessionSummary, action: SessionActionDescriptor) => {
     if (!action.enabled) return;
     setActionError(null);
@@ -1920,5 +1988,5 @@ export default function ProjectActivityPage({
       setActionBusyActionId(null);
     }
   };
-  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onBranchChange={changeBranch} onRefresh={() => { void refreshActivity(); }} onLoadMore={() => void load(activity?.next_before ?? null, branch)} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
+  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.next_before ?? null, branch)} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
 }

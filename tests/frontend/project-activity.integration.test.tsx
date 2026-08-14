@@ -4,6 +4,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import Icon from "../../src/components/Icons";
 import ProjectActivityPage, {
+  activityHeaderCounts,
   BranchPicker,
   ProjectChatHistoryContent,
   SessionMetrics,
@@ -175,6 +176,106 @@ test("the branch picker exposes branch state without using the native select men
   assert.match(html, />History only</);
   assert.match(html, /This branch is no longer available locally/);
   assert.doesNotMatch(html, /<select/);
+});
+
+test("path bar counts tally the whole comparison, split by the button that clears them", () => {
+  const decision = (action: string, reason_code = "ready") => ({
+    action,
+    reason_code,
+    selectable: true,
+  });
+  const entry = (
+    state: string,
+    overrides: Record<string, unknown> = {},
+  ) => ({
+    provider: "codex",
+    provider_display_name: "Codex",
+    access: "bound_ready",
+    thread_id: `thread-${state}-${JSON.stringify(overrides)}`,
+    resource_id: `codex:conversation:${state}-${JSON.stringify(overrides)}`,
+    display_name: state,
+    state,
+    local_present: true,
+    storage_present: true,
+    push_decision: decision("noop"),
+    pull_decision: decision("noop"),
+    ...overrides,
+  }) as Parameters<typeof sessionSyncPresentation>[0];
+
+  const counts = activityHeaderCounts({
+    entries: [
+      entry("local_only"),
+      entry("local_ahead"),
+      entry("storage_ahead"),
+      entry("diverged"),
+      entry("synced"),
+      entry("unavailable"),
+      entry("unknown"),
+      // Waiting on a provider that is still writing: work, but nobody's to do.
+      entry("local_ahead", { push_decision: decision("hold", "busy") }),
+      // A ghost of a thread removed on both sides belongs to no one.
+      entry("local_only", { local_present: false, storage_present: false }),
+    ],
+  } as Parameters<typeof activityHeaderCounts>[0], "Local storage 1");
+
+  // Two states push, one pulls; nothing else is claimed by either verb.
+  assert.equal(counts.push, 2);
+  assert.equal(counts.pull, 1);
+  // diverged + pending + unavailable + unknown-as-conflict.
+  assert.equal(counts.attention, 4);
+  // A conflict or an unsyncable thread is louder than a review or a hold.
+  assert.equal(counts.severity, "danger");
+  assert.match(counts.detail, /1 thread changed on both sides/);
+  assert.match(counts.detail, /1 thread waiting to sync/);
+  assert.match(counts.detail, /1 thread Mallard could not match/);
+  assert.match(counts.detail, /1 thread that can't be synced/);
+
+  // A blocked push is not pushable, however the state reads on its own.
+  const blocked = activityHeaderCounts({
+    entries: [entry("local_ahead", { push_decision: { action: "blocked", reason_code: "ready", selectable: false } })],
+  } as Parameters<typeof activityHeaderCounts>[0], "Local storage 1");
+  assert.equal(blocked.push, 0);
+  assert.equal(blocked.attention, 1);
+
+  // No comparison yet is not "nothing to do" — it is no answer, and the bar
+  // draws no badge rather than a confident zero.
+  const empty = activityHeaderCounts(null, "Local storage 1");
+  assert.deepEqual(
+    { push: empty.push, pull: empty.pull, attention: empty.attention },
+    { push: 0, pull: 0, attention: 0 },
+  );
+  assert.equal(empty.detail, "");
+});
+
+test("the path bar hangs the branch on the section crumb and keeps one overflow", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  const bar = readFileSync("src/components/project-sync/SyncPathBar.tsx", "utf8");
+  const sync = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+
+  // The branch scopes the section, so it rides that crumb rather than standing
+  // as a fourth one — and a session replaces the crumb, taking the chip with it.
+  assert.match(workspace, /id: "section",[\s\S]*?scope: activityHeader && activityHeader\.branches\.length > 0 \? \(\s*<BranchPicker/);
+  assert.match(bar, /\{crumb\.scope\}/);
+
+  // Counts ride the buttons that clear them, and stand down while that button
+  // is mid-review or mid-transfer and its label is the readout.
+  assert.match(workspace, /const showPullCount = pullCount > 0 && !workspacePullReviewOpen && !workspacePullProgress;/);
+  assert.match(workspace, /const showPushCount = pushCount > 0 && !workspacePushReviewOpen && !workspacePushProgress;/);
+  assert.match(workspace, /\{showPullCount && <span className="sync-path-count" aria-hidden="true">\{pullCount\}<\/span>\}/);
+  assert.match(workspace, /\{showPushCount && <span className="sync-path-count" aria-hidden="true">\{pushCount\}<\/span>\}/);
+  // The number is decorative only because the button's own name already says
+  // it — never let the badge become the only place the count is spoken.
+  assert.match(workspace, /`Pull \$\{pullCount\} newer thread\$\{pullCount === 1 \? "" : "s"\} from /);
+  assert.match(workspace, /`Push \$\{pushCount\} newer thread\$\{pushCount === 1 \? "" : "s"\} to /);
+
+  // One overflow, at the end of the row. Two `⋯` in one bar was the reason a
+  // command could only be found by opening both.
+  assert.doesNotMatch(bar, /windowActions/);
+  assert.doesNotMatch(workspace, /windowActions/);
+  assert.match(sync, /appActions: PathBarMenuGroup\[\] = \[\{\s*label: "Mallard",/);
+  // And one refresh glyph: the app-wide reload cannot wear the same mark as
+  // the project refresh sitting a few pixels from it.
+  assert.match(sync, /label: "Reload app data",[\s\S]*?icon: "computer" as const,/);
 });
 
 test("session indicators use the quiet desktop sync vocabulary", () => {
@@ -464,7 +565,7 @@ test("an unlinked project still draws a badge on every row", () => {
   assert.match(html, /aria-label="Only on this Mac\. Link a storage to compare and sync it\."/);
 });
 
-test("refreshing project activity uses the centered pixel refresh icon", () => {
+test("refreshing project activity spins in the path bar, and announces from the list", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
@@ -475,15 +576,22 @@ test("refreshing project activity uses the centered pixel refresh icon", () => {
     />,
   );
 
-  assert.equal(html.match(/icon-spin-frame spinning/g)?.length, 1);
-  assert.doesNotMatch(html, /sync-thread-sync-loading/);
-  assert.match(html, /sync-history-refresh loading/);
-  assert.match(html, /aria-busy="true"/);
+  // The button moved to the path bar with the rest of the header. What has to
+  // stay with the list is the announcement, because it describes this list's
+  // work — and it is the only thing a screen reader had from that row.
+  assert.doesNotMatch(html, /data-icon="refresh"/);
+  assert.doesNotMatch(html, /icon-spin-frame/);
   assert.match(html, /role="status">Comparing threads with R2 storage 1/);
-  assert.match(html, /data-icon="refresh"/);
+
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /className=\{`sync-path-icon-action\$\{activityHeader\.refreshing \? " loading" : ""\}`\}/);
+  assert.match(workspace, /aria-busy=\{activityHeader\.refreshing\}/);
+  assert.match(workspace, /className=\{`icon-spin-frame\$\{activityHeader\.refreshing \? " spinning" : ""\}`\}/);
 
   const css = readFileSync("src/App.css", "utf8");
-  assert.match(css, /\.sync-history-icon-action\.loading:disabled\s*\{[^}]*color:\s*var\(--blue\);[^}]*opacity:\s*1;/s);
+  // Turning is work in progress, not a disabled control: the one place a
+  // disabled button is allowed to keep full opacity.
+  assert.match(css, /\.sync-path-icon-action\.loading:disabled\s*\{[^}]*opacity:\s*1;/s);
   assert.match(css, /\.icon-spin-frame\s*\{[^}]*width:\s*16px;[^}]*height:\s*16px;[^}]*transform-origin:\s*8px 8px;/s);
   assert.match(css, /\.icon-spin-frame\.spinning\s*\{[^}]*animation:\s*icon-spin 0\.8s linear infinite;/s);
 });
@@ -658,7 +766,9 @@ test("activity content uses the local alias and renders commit and session rows"
   );
   const commitHeading = html.match(/<div class="sync-history-commit-heading">([\s\S]*?)<\/div>/)?.[1] ?? "";
   assert.doesNotMatch(html, /Project Name/);
-  assert.match(html, /Mallard local/);
+  // The alias is the path bar's to say. The list used to print it again as an
+  // <h1> directly under the crumb that already carried it.
+  assert.doesNotMatch(html, /Mallard local/);
   assert.match(html, /sync-history-project-context/);
   // The provider-neutral page no longer prints a provider home path; identity
   // and provenance live in the per-row debug panel instead.
@@ -1052,7 +1162,9 @@ test("embedded non-Git activity is named once, and not on screen", () => {
   assert.equal(html.match(/aria-label="Sessions"/g)?.length, 1);
   assert.doesNotMatch(html, />Activity</);
   assert.doesNotMatch(html, /Codex threads/);
-  assert.match(html, /aria-label="1 session"/);
+  // The tally went with the header. It counted the rows on screen, which is
+  // not what Push and Pull act on; the bar counts the whole comparison.
+  assert.doesNotMatch(html, /aria-label="1 session"/);
 });
 
 test("selection review removes repeated history and storage labels", () => {
@@ -1239,12 +1351,11 @@ test("selected storage adds directional indicators and remote-only session rows"
     />,
   );
 
-  // The storage lens is gone from the embedded header: the path bar's root
-  // crumb is the one place that names the storage being compared against.
+  // The header is gone entirely: the path bar's root crumb names the storage
+  // being compared against, and the tallies ride Push and Pull.
   assert.doesNotMatch(html, /sync-history-storage-lens/);
-  assert.match(html, /aria-label="Visible thread comparison with Local storage 1"/);
-  assert.match(html, /title="1 local thread change"/);
-  assert.doesNotMatch(html, /title="2 local thread changes"/);
+  assert.doesNotMatch(html, /Visible thread comparison/);
+  assert.doesNotMatch(html, /sync-thread-sync-summary/);
   assert.match(html, /aria-label="Newer on this computer\. Push to update Local storage 1\."/);
   assert.match(html, /aria-label="Only in Local storage 1\. Pull to download it here\."/);
   assert.match(html, /sync-thread-sync-indicator local[^>]+aria-label="Newer on this computer\.[^"]+"[^>]*><svg[^>]+>/);
@@ -1257,7 +1368,6 @@ test("selected storage adds directional indicators and remote-only session rows"
   // action to hang it on.
   assert.doesNotMatch(html, /sync-history-stored-thread-location/);
   assert.match(html, /class="sync-history-launch-action sync-history-provider-inert"/);
-  assert.match(html, /aria-label="2 sessions"/);
   assert.ok(
     html.indexOf('aria-label="Newer on this computer. Push to update Local storage 1."')
       < html.indexOf("Add Git history mapping"),
@@ -1302,7 +1412,6 @@ test("unavailable sessions explain why they cannot be synced", () => {
   );
 
   assert.match(html, /aria-label="Unavailable for sync\. Session file exceeds the 100 MiB per-file sync limit\."/);
-  assert.match(html, /title="1 thread is unavailable for sync"/);
   assert.doesNotMatch(html, /can.t tell which copy is newer/);
 });
 

@@ -440,7 +440,10 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /@container sync-history-layout \(min-width: 700px\)/);
   // The status legend was removed, so none of its styling should linger.
   assert.doesNotMatch(retroCss, /\.sync-history-status-legend/);
-  assert.match(retroCss, /@container sync-history-layout \(max-width: 760px\)\s*\{[^}]*\.sync-history-header\s*\{[^}]*flex-direction: column;/s);
+  // The list has no header to reflow: branch, counts and refresh are the path
+  // bar's, and the bar carries its own narrow behaviour.
+  assert.doesNotMatch(retroCss, /\.sync-history-header/);
+  assert.doesNotMatch(retroCss, /\.sync-history-toolbar/);
   assert.doesNotMatch(retroCss, /\.sync-history-commit > \.sync-history-thread-list > \.sync-history-thread-card::before/);
   assert.doesNotMatch(retroCss, /\.sync-history-commit > \.sync-history-thread-list > \.sync-history-thread-card::after/);
   assert.match(retroCss, /\.sync-history-commit > \.sync-history-thread-list > \.sync-history-thread-card\s*\{[^}]*border: 0;[^}]*border-radius: 0;/s);

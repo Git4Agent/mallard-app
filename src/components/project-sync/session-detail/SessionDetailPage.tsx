@@ -1,31 +1,28 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
 import type {
   ProjectSessionDetail,
   SessionActionDescriptor,
-  SessionCheckpointJump,
   SessionDetailWarning,
   SessionTimelineEvent,
 } from "../../../types";
 import Icon from "../../Icons";
 import { projectSyncApi } from "../api";
 import SessionDetailHeader from "./SessionDetailHeader";
-import SessionDetailInspector from "./SessionDetailInspector";
 import SessionDetailTimeline from "./SessionDetailTimeline";
+import SessionDetailToolbar from "./SessionDetailToolbar";
 import type { SessionTurnToolState } from "./SessionDetailEvent";
 import type { SessionToolDetailState } from "./SessionDetailToolCall";
 import {
-  checkpointAnchorEventId,
+  ALL_SESSION_TOOL_CATEGORIES,
   createDefaultSessionDetailFilters,
   eventAnchorId,
   findCheckpointJump,
   includedSessionEventKinds,
-  includedSessionToolCategories,
   mergeSessionTimelinePages,
   normalizeSessionDetailFailure,
   sessionDetailFilterFingerprint,
@@ -65,7 +62,7 @@ function SessionDetailEntryState({
   return (
     <section className="session-detail-page session-detail-entry-state" aria-labelledby="session-detail-entry-heading">
       <div className={`session-detail-state${error ? " error" : ""}`} role={error ? "alert" : "status"}>
-        {loading ? <span className="status-loader" /> : <Icon name="alert-triangle" size={18} />}
+        {loading ? <span className="status-loader" /> : <Icon name="alert-triangle" size={24} />}
         <h1 id="session-detail-entry-heading">{loading ? "Loading session detail…" : "Session detail unavailable"}</h1>
         <span>{error ?? "Preparing the local, bounded timeline."}</span>
         {error && <button type="button" className="btn btn-ghost" onClick={onRetry}>Try again</button>}
@@ -92,12 +89,10 @@ export default function SessionDetailPage({
   const [timelineError, setTimelineError] = useState<string | null>(null);
   const [snapshotChanged, setSnapshotChanged] = useState(false);
   const [timelineWarnings, setTimelineWarnings] = useState<SessionDetailWarning[]>([]);
-  const [selectedCheckpointId, setSelectedCheckpointId] = useState("");
   const [timelineReloadEpoch, setTimelineReloadEpoch] = useState(0);
   const [turnToolStates, setTurnToolStates] = useState<Record<string, SessionTurnToolState>>({});
   const [toolDetails, setToolDetails] = useState<Record<string, SessionToolDetailState>>({});
   const [expandedToolIds, setExpandedToolIds] = useState<Set<string>>(new Set());
-  const [expandFollowsLoadedTools, setExpandFollowsLoadedTools] = useState(false);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const detailRequestRef = useRef(0);
@@ -125,14 +120,12 @@ export default function SessionDetailPage({
       initialCheckpointRef.current = null;
       pendingAnchorRef.current = initialCheckpoint?.event_id ?? null;
       focusAnchorRef.current = initialCheckpoint?.event_id ?? null;
-      setSelectedCheckpointId(initialCheckpoint?.event_id ?? "");
       setSnapshotChanged(false);
       setTimelineError(null);
       setTimelineWarnings([]);
       setTurnToolStates({});
       setToolDetails({});
       setExpandedToolIds(new Set());
-      setExpandFollowsLoadedTools(false);
       setDetail(next);
       setFilters((current) => preserveFilters && current
         ? current
@@ -212,7 +205,7 @@ export default function SessionDetailPage({
           anchor_event_id: anchorEventId,
           limit: TIMELINE_PAGE_SIZE,
           included_event_kinds: includedSessionEventKinds(activeFilters),
-          included_tool_categories: includedSessionToolCategories(activeFilters),
+          included_tool_categories: [...ALL_SESSION_TOOL_CATEGORIES],
           turn_id: null,
         },
       );
@@ -252,7 +245,6 @@ export default function SessionDetailPage({
     pendingAnchorRef.current = null;
     setTurnToolStates({});
     setExpandedToolIds(new Set());
-    setExpandFollowsLoadedTools(false);
     void requestTimelinePage({
       sessionDetail: detail,
       activeFilters: filters,
@@ -283,7 +275,7 @@ export default function SessionDetailPage({
           anchor_event_id: null,
           limit: TIMELINE_PAGE_SIZE,
           included_event_kinds: ["tool_call"],
-          included_tool_categories: includedSessionToolCategories(filters),
+          included_tool_categories: [...ALL_SESSION_TOOL_CATEGORIES],
           turn_id: turnId,
         },
       );
@@ -351,30 +343,6 @@ export default function SessionDetailPage({
     }
   }, [detail, localProjectId, resourceId, toolDetails]);
 
-  const loadedToolEvents = useMemo(() => {
-    const byId = new Map<string, SessionTimelineEvent>();
-    events.filter((event) => event.kind === "tool_call")
-      .forEach((event) => byId.set(event.event_id, event));
-    Object.values(turnToolStates).forEach((state) => {
-      state.page?.events.filter((event) => event.kind === "tool_call")
-        .forEach((event) => byId.set(event.event_id, event));
-    });
-    return [...byId.values()];
-  }, [events, turnToolStates]);
-
-  useEffect(() => {
-    if (!expandFollowsLoadedTools || loadedToolEvents.length === 0) return;
-    setExpandedToolIds((current) => {
-      const next = new Set(current);
-      loadedToolEvents.forEach((event) => next.add(event.event_id));
-      return next;
-    });
-    loadedToolEvents.forEach((event) => void requestToolDetail(event.event_id));
-  }, [expandFollowsLoadedTools, loadedToolEvents, requestToolDetail]);
-
-  const allLoadedToolsExpanded = loadedToolEvents.length > 0
-    && loadedToolEvents.every((event) => expandedToolIds.has(event.event_id));
-
   const handleToolExpandedChange = (eventId: string, expanded: boolean) => {
     setExpandedToolIds((current) => {
       const next = new Set(current);
@@ -383,26 +351,6 @@ export default function SessionDetailPage({
       return next;
     });
     if (expanded) void requestToolDetail(eventId);
-    else setExpandFollowsLoadedTools(false);
-  };
-
-  const toggleAllLoadedTools = () => {
-    if (allLoadedToolsExpanded) {
-      setExpandFollowsLoadedTools(false);
-      setExpandedToolIds((current) => {
-        const next = new Set(current);
-        loadedToolEvents.forEach((event) => next.delete(event.event_id));
-        return next;
-      });
-      return;
-    }
-    setExpandFollowsLoadedTools(true);
-    setExpandedToolIds((current) => {
-      const next = new Set(current);
-      loadedToolEvents.forEach((event) => next.add(event.event_id));
-      return next;
-    });
-    loadedToolEvents.forEach((event) => void requestToolDetail(event.event_id));
   };
 
   const handleTurnToolExpandedChange = (turnId: string, open: boolean) => {
@@ -417,17 +365,6 @@ export default function SessionDetailPage({
     }));
     const current = turnToolStates[turnId];
     if (open && !current?.page && !current?.loading) void loadTurnTools(turnId);
-  };
-
-  const jumpToCheckpoint = (checkpoint: SessionCheckpointJump) => {
-    if (!filters) return;
-    const eventId = checkpointAnchorEventId(checkpoint);
-    const nextFilters = filters.checkpoints ? filters : { ...filters, checkpoints: true };
-    pendingAnchorRef.current = eventId;
-    focusAnchorRef.current = eventId;
-    setSelectedCheckpointId(checkpoint.event_id);
-    if (nextFilters === filters) setTimelineReloadEpoch((epoch) => epoch + 1);
-    else setFilters(nextFilters);
   };
 
   const runAction = async (action: SessionActionDescriptor) => {
@@ -473,7 +410,7 @@ export default function SessionDetailPage({
 
       {snapshotChanged && (
         <div className="sync-callout warning session-detail-stale" role="alert">
-          <Icon name="refresh" size={14} />
+          <Icon name="refresh" size={12} />
           <span><strong>This session changed.</strong> Refresh before continuing so pages are not mixed across snapshots.</span>
           <button type="button" className="btn btn-ghost" onClick={() => void loadDetail(true)}>Refresh</button>
         </div>
@@ -483,7 +420,7 @@ export default function SessionDetailPage({
         <section className="session-detail-warnings" aria-label="Session detail warnings">
           {warnings.map((warning) => (
             <div key={`${warning.code}:${warning.message}`} className="sync-callout warning" role="status">
-              <Icon name="alert-triangle" size={13} />
+              <Icon name="alert-triangle" size={12} />
               <span>{warning.message}</span>
             </div>
           ))}
@@ -492,6 +429,12 @@ export default function SessionDetailPage({
 
       {filters && (
         <div className="session-detail-layout">
+          <SessionDetailToolbar
+            counts={detail.event_counts}
+            filters={filters}
+            loadedCount={events.length}
+            onFiltersChange={setFilters}
+          />
           <SessionDetailTimeline
             events={events}
             providerDisplayName={detail.provider_display_name}
@@ -515,16 +458,6 @@ export default function SessionDetailPage({
               turnId,
               turnToolStates[turnId]?.page?.next_cursor,
             )}
-          />
-          <SessionDetailInspector
-            detail={detail}
-            filters={filters}
-            loadedToolCount={loadedToolEvents.length}
-            allLoadedToolsExpanded={allLoadedToolsExpanded}
-            selectedCheckpointId={selectedCheckpointId}
-            onFiltersChange={setFilters}
-            onCheckpointJump={jumpToCheckpoint}
-            onToggleAllLoadedTools={toggleAllLoadedTools}
           />
         </div>
       )}

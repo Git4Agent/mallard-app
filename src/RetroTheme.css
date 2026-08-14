@@ -325,12 +325,11 @@ body {
 .session-detail-provider-badge,
 .session-detail-active-badge,
 .session-detail-event-heading h3,
-.session-detail-section-heading span,
-.session-detail-checkpoint-jump h2,
-.session-detail-filters legend,
-.session-detail-tool-view h2,
-.session-detail-tool-payload h4,
-.session-detail-tool-paths h4 {
+.session-detail-day-divider > span,
+.session-detail-meta-label,
+.session-detail-toolbar-label,
+.session-detail-filter-name,
+.session-detail-payload-tab {
   font-family: var(--font-pixel);
   /* One weight exists, and synthesis is off, so asking for anything heavier
      here would be a declaration that quietly does nothing. Pixel hierarchy is
@@ -1329,66 +1328,13 @@ summary {
   padding-top: 0;
 }
 
-.sync-history-embedded .sync-history-header {
-  min-height: 50px;
-  margin-bottom: 10px;
-  padding: 0 2px;
-  border-bottom: 0;
-}
-
-/* The 50px reserved a line for the section title. The path bar carries that
-   name now, so the row is only as tall as the controls left in it. */
-.sync-history-embedded .sync-history-header.embedded {
-  min-height: 0;
-  margin-bottom: 6px;
-  align-items: center;
-}
-
-.sync-history-toolbar {
-  gap: 4px;
-}
-
-.sync-history-storage-lens {
-  color: var(--text-2);
-  font-size: 13px;
-}
-
-.sync-history-storage-lens > svg,
-.sync-history-branch-select > svg {
-  color: var(--text-1);
-}
-
-/* A rule divides the storage lens from the branch picker — the same separator
-   the project heading meta uses, rather than a chevron that reads as a step. */
-.sync-history-storage-lens::after {
-  content: "";
-  width: 1px;
-  height: 14px;
-  flex: 0 0 auto;
-  margin-left: 5px;
-  background: var(--border-mid);
-}
-
-/* The branch name is the control. No frame and no reserved width — it is plain
-   text that only picks up a hover wash, so the toolbar reads as one line.
-
-   The button holds no text of its own: the name and the state pill are both
-   wrapped, so each picks its own face rather than inheriting one from here. */
-/* The mark, the name, and the chevron read as one control. The select's flex
-   gap and the trigger's own left padding were stacking into 12px between the
-   mark and the name, which broke it into three loose pieces. */
-.sync-history-branch-select {
-  gap: 2px;
-}
-
+/* The mark, the name and the chevron read as one control — one pill hanging
+   off the crumb it qualifies, sized to the crumbs beside it rather than to the
+   toolbar it used to live in. */
 .sync-history-branch-trigger {
-  min-width: 0;
-  height: 30px;
-  gap: 4px;
-  padding: 0 4px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
+  height: 26px;
+  gap: 5px;
+  border-radius: var(--r-pill);
   color: var(--text-0);
 }
 
@@ -1397,11 +1343,6 @@ summary {
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   font-weight: var(--weight-semibold);
-}
-
-.sync-history-branch-trigger:hover:not(:disabled) {
-  border-color: transparent;
-  background: var(--bg-hover);
 }
 
 .sync-history-branch-state {
@@ -1430,6 +1371,34 @@ summary {
   border-color: var(--border);
 }
 
+/* The path bar's refresh, on the same face as the list's icon actions — square
+   corners, the accent mark, a border only on hover. */
+.sync-path-icon-action {
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+/* Counts and the attention tally are measurements: mono, tabular, holding
+   their width as the numbers change, the same as every other figure here. */
+.sync-path-count,
+.sync-path-attention > b {
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-semibold);
+}
+
+/* `--r-pill` is 4px here: the skin squares everything off, and a stadium badge
+   among 4px controls would be the only rounded thing on the row. */
+.sync-path-attention,
+.sync-path-count {
+  border-radius: var(--r-pill);
+}
+
+.sync-path-attention {
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+}
+
 .sync-history-section-heading {
   margin: 18px 0 6px;
 }
@@ -1447,12 +1416,6 @@ summary {
 .sync-history-section-heading h2 .sync-history-storage-name {
   font-family: var(--font-sans);
   font-weight: var(--weight-semibold);
-}
-
-/* The storage lens names a storage, so it is data too. */
-.sync-history-storage-lens > span {
-  font-family: var(--font-sans);
-  font-size: var(--type-xs);
 }
 
 /* Every list of session rows needs these, not just the timeline: the flat list
@@ -2178,8 +2141,7 @@ summary {
 /* Counts and metrics form columns down the list, so they read as identifiers
    and hold their width as the numbers change. */
 .sync-history-thread-meta b,
-.sync-history-heading-count,
-.sync-thread-sync-summary > span {
+.sync-history-heading-count {
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   font-weight: var(--weight-semibold);
@@ -2411,21 +2373,6 @@ summary {
 .sync-history-older-inert {
   border-color: var(--border-mid);
   border-radius: 4px;
-}
-
-@container sync-history-layout (max-width: 760px) {
-  .sync-history-header {
-    position: static;
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .sync-history-toolbar {
-    width: 100%;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-
 }
 
 .sync-pull-outcome li {
@@ -3245,13 +3192,17 @@ summary {
   font-family: var(--font-sans);
 }
 
-.session-detail-meta-item code,
-.session-detail-meta-item time,
-.session-detail-event-heading time,
+.session-detail-meta-value,
+.session-detail-event-gutter time,
+.session-detail-event-gap,
+.session-detail-event-undated,
+.session-detail-toolbar-readout,
 .session-detail-filter-count,
+.session-detail-turn-tools > summary strong,
+.session-detail-turn-failures,
 .session-detail-tool-call > summary strong,
-.session-detail-tool-call > summary time,
-.session-detail-tool-payload pre,
+.session-detail-tool-summary,
+.session-detail-payload-body,
 .session-detail-checkpoint-body code,
 .session-detail-checkpoint-body time {
   font-family: var(--font-mono);
@@ -3289,8 +3240,7 @@ summary {
   color: var(--text-1);
 }
 
-.session-detail-prompt-card,
-.session-detail-inspector {
+.session-detail-prompt-card {
   border-radius: var(--r-sm);
   background: var(--surface-card);
   box-shadow: var(--shadow-card);
@@ -3308,17 +3258,11 @@ summary {
   box-shadow: none;
 }
 
-.session-detail-checkpoint-jump select {
-  appearance: none;
-  background-color: var(--button-bg);
-  background-image: var(--retro-chevron-down);
-  background-position: right 6px center;
-  background-repeat: no-repeat;
-  background-size: 14px 14px;
-}
-
-.session-detail-filter-row input {
-  border-radius: 2px;
+/* The filter toggle is a pressed state, not a painted control: square box,
+   square corners, no accent fill from the platform checkbox it replaces. */
+.session-detail-filter-toggle,
+.session-detail-filter-box {
+  border-radius: 0;
 }
 
 .session-detail-tool-call > summary:active,

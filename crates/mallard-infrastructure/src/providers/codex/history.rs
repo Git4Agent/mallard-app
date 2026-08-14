@@ -10,7 +10,7 @@ use crate::providers::traits::{
     SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
     SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
     SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
-    SessionTurnToolSummary,
+    SessionTurnToolSummary, TIMELINE_TOOL_PREVIEW_BYTES,
 };
 use serde::de::{Deserializer, IgnoredAny, Visitor};
 use serde::{Deserialize, Serialize};
@@ -20,13 +20,15 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Component, Path};
 
-pub(crate) const MAX_LINE_BYTES: usize = 1024 * 1024;
+/// A single Codex JSONL record may embed a generated image or a tool result.
+/// Match the transcript bound so every record admitted by the transcript
+/// safety policy can also be indexed and opened by session detail.
+pub(crate) const MAX_LINE_BYTES: usize = mallard_domain::MAX_CONVERSATION_FILE_BYTES as usize;
 const MAX_SUMMARY_CHARS: usize = 180;
 const TIMELINE_MESSAGE_PREVIEW_BYTES: usize = 16 * 1024;
-const TIMELINE_TOOL_PREVIEW_BYTES: usize = 4 * 1024;
 const TIMELINE_DETAIL_BYTES: usize = 64 * 1024;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
-pub(crate) const TIMELINE_PARSER_VERSION: u32 = 1;
+pub(crate) const TIMELINE_PARSER_VERSION: u32 = 3;
 
 pub(crate) fn normalize_summary(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -773,6 +775,7 @@ impl TimelineBuilder {
         call_id: &str,
         status: SessionToolCallStatus,
         result_source: SessionSourceSpan,
+        allow_nested_completion: bool,
     ) {
         let current_turn = self.current_turn_id.as_deref();
         let position = self
@@ -788,6 +791,23 @@ impl TimelineBuilder {
                 .then_some(position)
             });
         let Some(position) = position else {
+            // Code mode durably records the parent `exec` call, but may emit
+            // completion-only lifecycle events for tools invoked inside it.
+            // Those inner events are telemetry for the open parent, not
+            // orphaned top-level calls.
+            let nested_under_code_mode = allow_nested_completion
+                && self.events.iter().rev().any(|pending| {
+                    let Some(tool) = pending.entry.tool.as_ref() else {
+                        return false;
+                    };
+                    tool.native_name.eq_ignore_ascii_case("exec")
+                        && tool.status == SessionToolCallStatus::Incomplete
+                        && current_turn
+                            .is_none_or(|turn_id| pending.entry.turn_id.as_deref() == Some(turn_id))
+                });
+            if nested_under_code_mode {
+                return;
+            }
             self.mark_tools_lower_bound(
                 "orphan_tool_result",
                 "A Codex tool result had no durable matching call start.",
@@ -963,7 +983,7 @@ fn count_with_quality(
 
 fn tool_count_explanation(quality: SessionCountQuality) -> Option<&'static str> {
     (quality == SessionCountQuality::LowerBound).then_some(
-        "Some Codex tool activity may be absent because the durable rollout was incomplete or used nested code-mode execution.",
+        "Some Codex tool activity may be absent because the durable rollout was incomplete.",
     )
 }
 
@@ -1209,7 +1229,6 @@ fn canonical_tool(
     SessionToolCategory,
     SessionToolCallStatus,
     Vec<String>,
-    bool,
 )> {
     let item_type = normalized_type(item.get("type").and_then(Value::as_str));
     let id = string_alias(item, &["id", "call_id", "callId"])?.to_string();
@@ -1251,14 +1270,13 @@ fn canonical_tool(
         context.project_root,
         category == SessionToolCategory::FileEdit,
     );
-    let is_code_mode = native_name.eq_ignore_ascii_case("exec");
     let mut status = canonical_item_status(item);
     if status == SessionToolCallStatus::Incomplete
         && matches!(item_type.as_str(), "websearch" | "imageview" | "filechange")
     {
         status = SessionToolCallStatus::Completed;
     }
-    Some((id, native_name, category, status, paths, is_code_mode))
+    Some((id, native_name, category, status, paths))
 }
 
 fn consume_canonical_item(
@@ -1280,14 +1298,7 @@ fn consume_canonical_item(
     let item_type = normalized_type(item.get("type").and_then(Value::as_str));
     let turn_id = canonical_turn_id(payload, item, source);
     if !completed {
-        if let Some((call_id, name, category, _, paths, code_mode)) = canonical_tool(item, context)
-        {
-            if code_mode {
-                builder.mark_tools_lower_bound(
-                    "code_mode_nested_calls",
-                    "Codex code-mode can execute nested tools that are not all durable in the rollout.",
-                );
-            }
+        if let Some((call_id, name, category, _, paths)) = canonical_tool(item, context) {
             let parent = builder.latest_assistant_event_id(&turn_id);
             builder.add_tool(
                 call_id,
@@ -1389,15 +1400,7 @@ fn consume_canonical_item(
         "reasoning" | "contextcompaction" | "hookprompt" | "enteredreviewmode"
         | "exitedreviewmode" | "subagentactivity" => {}
         _ => {
-            if let Some((call_id, name, category, status, paths, code_mode)) =
-                canonical_tool(item, context)
-            {
-                if code_mode {
-                    builder.mark_tools_lower_bound(
-                        "code_mode_nested_calls",
-                        "Codex code-mode can execute nested tools that are not all durable in the rollout.",
-                    );
-                }
+            if let Some((call_id, name, category, status, paths)) = canonical_tool(item, context) {
                 let parent = builder.latest_assistant_event_id(&turn_id);
                 builder.add_tool(
                     call_id,
@@ -1462,12 +1465,6 @@ fn consume_legacy_response_item(
     match payload_type.as_str() {
         "functioncall" | "customtoolcall" => {
             let name = string_alias(payload, &["name"]).unwrap_or("unknown");
-            if name.eq_ignore_ascii_case("exec") {
-                builder.mark_tools_lower_bound(
-                    "code_mode_nested_calls",
-                    "Codex code-mode can execute nested tools that are not all durable in the rollout.",
-                );
-            }
             let category = classify_codex_tool(name);
             let paths = affected_paths_from_value(
                 payload
@@ -1543,6 +1540,7 @@ fn consume_legacy_response_item(
                     status
                 },
                 source,
+                false,
             );
         }
         "message" | "agentmessage" | "reasoning" | "compaction" | "contextcompaction"
@@ -1702,7 +1700,7 @@ fn consume_legacy_event(
             if status == SessionToolCallStatus::Incomplete {
                 status = SessionToolCallStatus::Completed;
             }
-            builder.complete_tool(&call_id, status, source);
+            builder.complete_tool(&call_id, status, source, true);
         }
         "viewimagetoolcall" | "requestuserinput" => {
             let call_id = legacy_call_id(payload, source);
@@ -1850,11 +1848,11 @@ pub(crate) fn build_timeline_index(
         if line == BoundedLine::Oversized {
             canonical.mark_all_lower_bound(
                 "oversized_record",
-                "At least one Codex record exceeded the one-MiB timeline parsing limit.",
+                "At least one Codex record exceeded the 100-MiB timeline parsing limit.",
             );
             legacy.mark_all_lower_bound(
                 "oversized_record",
-                "At least one Codex record exceeded the one-MiB timeline parsing limit.",
+                "At least one Codex record exceeded the 100-MiB timeline parsing limit.",
             );
             continue;
         }
@@ -2098,12 +2096,15 @@ fn bounded_text(value: Option<String>, limit: usize) -> (Option<String>, bool) {
     if value.len() <= limit {
         return (Some(value), false);
     }
-    let mut end = limit.min(value.len());
+    const ELLIPSIS: &str = "…";
+    let mut end = limit.saturating_sub(ELLIPSIS.len()).min(value.len());
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
     let mut preview = value[..end].to_string();
-    preview.push('…');
+    if ELLIPSIS.len() <= limit {
+        preview.push_str(ELLIPSIS);
+    }
     (Some(preview), true)
 }
 
@@ -2440,6 +2441,140 @@ mod tests {
         let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
         assert!(detail.arguments.as_deref().unwrap().contains("src/lib.rs"));
         assert_eq!(detail.result.as_deref(), Some("file contents"));
+    }
+
+    #[test]
+    fn nested_code_mode_completions_do_not_degrade_durable_tool_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","cwd":project_root}}),
+                json!({"type":"event_msg","payload":{"type":"user_message","message":"Generate and apply the result"}}),
+                json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"exec-1","name":"exec","input":"run nested tools"}}),
+                json!({"type":"event_msg","payload":{"type":"image_generation_end","call_id":"image-1","status":"completed","result":"generated"}}),
+                json!({"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"patch-1","success":true,"changes":{}}}),
+                json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"exec-1","output":"done"}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        assert_eq!(index.parser_version, TIMELINE_PARSER_VERSION);
+        assert_eq!(count_value(&index.counts.tool_calls), 1);
+        assert_eq!(index.counts.tool_calls.quality, SessionCountQuality::Exact);
+        assert!(index.warnings.is_empty(), "{:?}", index.warnings);
+        let tool = index
+            .events
+            .iter()
+            .find_map(|event| event.tool.as_ref())
+            .unwrap();
+        assert_eq!(tool.provider_call_id, "exec-1");
+        assert_eq!(tool.status, SessionToolCallStatus::Completed);
+    }
+
+    #[test]
+    fn unmatched_completion_outside_code_mode_remains_an_orphan() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","cwd":project_root}}),
+                json!({"type":"event_msg","payload":{"type":"user_message","message":"Apply the result"}}),
+                json!({"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"patch-1","success":true,"changes":{}}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        assert_eq!(count_value(&index.counts.tool_calls), 0);
+        assert_eq!(
+            index.counts.tool_calls.quality,
+            SessionCountQuality::LowerBound
+        );
+        assert!(index
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "orphan_tool_result"));
+    }
+
+    #[test]
+    fn timeline_indexes_multi_mib_tool_outputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        let large_output = "tool output ".repeat(5 * 1024 * 1024 / 12);
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","cwd":project_root}}),
+                json!({"type":"event_msg","payload":{"type":"user_message","message":"Read the generated output"}}),
+                json!({"type":"response_item","payload":{"type":"function_call","call_id":"read-1","name":"read_file","arguments":"{}"}}),
+                json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"read-1","output":large_output}}),
+            ],
+        );
+
+        assert_eq!(
+            MAX_LINE_BYTES as u64,
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
+        );
+        assert!(fs::metadata(&transcript).unwrap().len() > 4 * 1024 * 1024);
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        assert!(!index.truncated);
+        assert!(index.warnings.is_empty(), "{:?}", index.warnings);
+        assert_eq!(index.counts.tool_calls.quality, SessionCountQuality::Exact);
+        assert!(!index
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "incomplete_tool_call"));
+        let tool_entry = index
+            .events
+            .iter()
+            .find(|entry| entry.tool.is_some())
+            .unwrap();
+        assert_eq!(
+            tool_entry.tool.as_ref().unwrap().status,
+            SessionToolCallStatus::Completed
+        );
+        let query = SessionTimelineQuery {
+            start_index: None,
+            anchor_event_id: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
+            included_tool_categories: BTreeSet::from([SessionToolCategory::Read]),
+            turn_id: None,
+        };
+        let page = read_timeline_page(&transcript, &index, &query).unwrap();
+        let preview = page.events[0]
+            .tool
+            .as_ref()
+            .and_then(|tool| tool.result_preview.as_ref())
+            .unwrap();
+        assert!(page.events[0].tool.as_ref().unwrap().result_truncated);
+        assert!(preview.ends_with('…'));
+        assert!(preview.len() <= TIMELINE_TOOL_PREVIEW_BYTES);
+        assert!(read_event_detail(&transcript, &index, &tool_entry.event_id)
+            .unwrap()
+            .result
+            .is_some());
+    }
+
+    #[test]
+    fn bounded_text_includes_ellipsis_within_the_byte_limit() {
+        let (preview, truncated) = bounded_text(
+            Some("鹅".repeat(TIMELINE_TOOL_PREVIEW_BYTES)),
+            TIMELINE_TOOL_PREVIEW_BYTES,
+        );
+        let preview = preview.unwrap();
+
+        assert!(truncated);
+        assert!(preview.ends_with('…'));
+        assert!(preview.len() <= TIMELINE_TOOL_PREVIEW_BYTES);
     }
 
     #[test]

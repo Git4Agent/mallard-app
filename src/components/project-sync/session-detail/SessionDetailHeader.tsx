@@ -1,10 +1,11 @@
-import type { RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 import type { ProjectSessionDetail, SessionActionDescriptor } from "../../../types";
 import Icon, { type IconName } from "../../Icons";
 import {
+  formatCompactCount,
   formatSessionCount,
-  formatSessionDetailTimestamp,
-  sessionDetailDateTime,
+  formatSessionDuration,
+  formatSessionRange,
 } from "./sessionDetailModel";
 
 const ACTION_ICONS: Record<SessionActionDescriptor["kind"], IconName> = {
@@ -21,12 +22,15 @@ interface Props {
   onAction: (action: SessionActionDescriptor) => void;
 }
 
-function HeaderTime({ label, value }: { label: string; value?: number | null }) {
-  if (value == null) return null;
+function MetaItem({ label, children, title }: {
+  label: string;
+  children: ReactNode;
+  title?: string;
+}) {
   return (
     <span className="session-detail-meta-item">
-      <span>{label}</span>
-      <time dateTime={sessionDetailDateTime(value)}>{formatSessionDetailTimestamp(value)}</time>
+      <span className="session-detail-meta-label">{label}</span>
+      <span className="session-detail-meta-value" title={title}>{children}</span>
     </span>
   );
 }
@@ -41,6 +45,16 @@ export default function SessionDetailHeader({
 }: Props) {
   // No breadcrumb and no back button: the workspace path bar above carries the
   // trail, and its section crumb is the way back.
+  const title = detail.title || "Untitled session";
+  // For most providers the summary is derived from the opening prompt, which is
+  // also the title — printing both put the same sentence on screen twice before
+  // the transcript printed it a third time.
+  const summary = detail.summary && detail.summary.trim() !== title.trim()
+    ? detail.summary
+    : null;
+  const range = formatSessionRange(detail.started_at, detail.ended_at);
+  const duration = formatSessionDuration(detail.started_at, detail.ended_at);
+
   return (
     <header className="session-detail-header">
       <div className="session-detail-heading-row">
@@ -49,10 +63,8 @@ export default function SessionDetailHeader({
             <span className="session-detail-provider-badge">{detail.provider_display_name}</span>
             {detail.is_active && <span className="session-detail-active-badge">Active</span>}
           </div>
-          <h1 id="session-detail-heading" ref={headingRef} tabIndex={-1}>
-            {detail.title || "Untitled session"}
-          </h1>
-          {detail.summary && <p>{detail.summary}</p>}
+          <h1 id="session-detail-heading" ref={headingRef} tabIndex={-1}>{title}</h1>
+          {summary && <p>{summary}</p>}
         </div>
 
         <div className="session-detail-header-actions" aria-label="Session actions">
@@ -69,55 +81,53 @@ export default function SessionDetailHeader({
               >
                 <Icon
                   name={pending ? "refresh" : ACTION_ICONS[action.kind]}
-                  size={14}
+                  size={12}
                   className={pending ? "icon-spin" : undefined}
                 />
                 {action.label}
               </button>
             );
           })}
+          {/* Refresh is maintenance, not one of the two things you came to do,
+              so it keeps the column without competing for the same reading. */}
           <button
             type="button"
             className="btn btn-ghost session-detail-refresh"
-            onClick={onRefresh}
+            aria-label="Refresh session detail"
             title="Refresh session detail"
+            onClick={onRefresh}
           >
-            <Icon name="refresh" size={14} />
-            Refresh
+            <Icon name="refresh" size={12} />
           </button>
         </div>
       </div>
 
       <div className="session-detail-metadata" aria-label="Session metadata">
         {detail.branch && (
-          <span className="session-detail-meta-item">
-            <Icon name="git-branch" size={12} />
-            <span>Branch</span>
-            <code>{detail.branch}</code>
-          </span>
+          <MetaItem label="Branch"><code>{detail.branch}</code></MetaItem>
         )}
         {detail.recorded_sha && (
-          <span className="session-detail-meta-item">
-            <Icon name="git-commit" size={12} />
-            <span>Recorded at</span>
-            <code>{detail.recorded_sha.slice(0, 7)}</code>
-          </span>
+          <MetaItem label="Commit" title={detail.recorded_sha}>
+            <code>#{detail.recorded_sha.slice(0, 7)}</code>
+          </MetaItem>
         )}
-        <HeaderTime label="Started" value={detail.started_at} />
-        <HeaderTime label={detail.is_active ? "Last activity" : "Ended"} value={detail.ended_at} />
-        <span
-          className={`session-detail-meta-item quality-${detail.tokens.quality}`}
-          title={detail.tokens.explanation ?? undefined}
+        {range && (
+          <MetaItem label="Ran">
+            <time dateTime={detail.started_at != null ? String(detail.started_at) : undefined}>{range}</time>
+            {duration && <b className="session-detail-meta-duration">{duration}</b>}
+          </MetaItem>
+        )}
+        <MetaItem
+          label="Tokens"
+          title={detail.tokens.explanation ?? formatSessionCount(detail.tokens)}
         >
-          <Icon name="token" size={12} />
-          <span>Tokens</span>
-          <code>{formatSessionCount(detail.tokens)}</code>
-        </span>
+          <code className={`quality-${detail.tokens.quality}`}>{formatCompactCount(detail.tokens)}</code>
+        </MetaItem>
       </div>
 
       {actionError && (
         <div className="sync-callout error session-detail-action-error" role="alert">
-          <Icon name="alert-triangle" size={14} />
+          <Icon name="alert-triangle" size={12} />
           <span>{actionError}</span>
         </div>
       )}

@@ -7,7 +7,7 @@ use crate::providers::traits::{
     SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
     SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
     SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
-    SessionTurnToolSummary,
+    SessionTurnToolSummary, TIMELINE_TOOL_PREVIEW_BYTES,
 };
 use mallard_domain::MAX_CONVERSATION_FILE_BYTES;
 use serde_json::Value;
@@ -21,7 +21,6 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_CLAUDE_RECORDS: usize = 100_000;
 const TIMELINE_MESSAGE_PREVIEW_BYTES: usize = 16 * 1024;
-const TIMELINE_TOOL_PREVIEW_BYTES: usize = 4 * 1024;
 const TIMELINE_DETAIL_BYTES: usize = 64 * 1024;
 pub(crate) const TIMELINE_PARSER_VERSION: u32 = 1;
 
@@ -1237,12 +1236,15 @@ fn bounded_text(value: Option<String>, limit: usize) -> (Option<String>, bool) {
     if value.len() <= limit {
         return (Some(value), false);
     }
-    let mut end = limit.min(value.len());
+    const ELLIPSIS: &str = "…";
+    let mut end = limit.saturating_sub(ELLIPSIS.len()).min(value.len());
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
     let mut preview = value[..end].to_string();
-    preview.push('…');
+    if ELLIPSIS.len() <= limit {
+        preview.push_str(ELLIPSIS);
+    }
     (Some(preview), true)
 }
 
@@ -1610,5 +1612,18 @@ mod tests {
             .find(|entry| entry.kind == SessionTimelineEventKind::Prompt)
             .unwrap();
         assert_eq!(prompt.quality, SessionCountQuality::LowerBound);
+    }
+
+    #[test]
+    fn tool_preview_respects_the_shared_byte_limit() {
+        let (preview, truncated) = bounded_text(
+            Some("鹅".repeat(TIMELINE_TOOL_PREVIEW_BYTES)),
+            TIMELINE_TOOL_PREVIEW_BYTES,
+        );
+        let preview = preview.unwrap();
+
+        assert!(truncated);
+        assert!(preview.ends_with('…'));
+        assert!(preview.len() <= TIMELINE_TOOL_PREVIEW_BYTES);
     }
 }

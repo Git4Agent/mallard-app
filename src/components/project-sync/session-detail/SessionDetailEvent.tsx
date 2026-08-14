@@ -8,9 +8,12 @@ import type {
 import Icon from "../../Icons";
 import SessionDetailToolCall, { type SessionToolDetailState } from "./SessionDetailToolCall";
 import {
+  countSessionToolFailures,
   eventAnchorId,
   formatSessionCount,
+  formatSessionDetailClock,
   formatSessionDetailTimestamp,
+  formatSessionGap,
   isSafeExternalMarkdownUrl,
   safeMarkdownUrl,
   SESSION_EVENT_KIND_LABELS,
@@ -27,6 +30,8 @@ export interface SessionTurnToolState {
 interface Props {
   event: SessionTimelineEvent;
   providerDisplayName: string;
+  /** The event above this one, so the gutter can show the wait between them. */
+  previousTimestamp?: number | null;
   expandedToolIds: ReadonlySet<string>;
   toolDetails: Readonly<Record<string, SessionToolDetailState>>;
   turnToolState?: SessionTurnToolState;
@@ -88,7 +93,7 @@ function CheckpointBody({ event }: { event: SessionTimelineEvent }) {
   const sha = checkpoint?.short_sha ?? checkpoint?.sha.slice(0, 7);
   return (
     <div className="session-detail-checkpoint-body">
-      <span className="session-detail-checkpoint-icon"><Icon name="git-commit" size={14} /></span>
+      <span className="session-detail-checkpoint-icon"><Icon name="git-commit" size={12} /></span>
       <div>
         <strong>{subject}</strong>
         <span>
@@ -125,6 +130,9 @@ function TurnToolDisclosure({
   const summary = event.turn_tool_summary;
   if (!summary) return null;
   const open = state?.open ?? false;
+  // Only rows that have actually loaded can be judged, so the failure note
+  // appears with them rather than being claimed up front.
+  const failures = state?.page ? countSessionToolFailures(state.page.events) : 0;
   return (
     <details
       className="session-detail-turn-tools"
@@ -136,12 +144,14 @@ function TurnToolDisclosure({
     >
       <summary>
         <Icon name={open ? "chevron-down" : "chevron-right"} size={12} />
-        <Icon name="tool" size={12} />
         <strong>{formatSessionCount(summary.tool_calls)} tool calls</strong>
         {summary.tool_calls.quality !== "exact" && (
           <span className={`session-detail-quality quality-${summary.tool_calls.quality}`}>
             {summary.tool_calls.quality === "lower_bound" ? "At least" : "Inferred"}
           </span>
+        )}
+        {failures > 0 && (
+          <span className="session-detail-turn-failures">{failures} failed</span>
         )}
       </summary>
       <div className="session-detail-turn-tool-list" aria-busy={state?.loading || undefined}>
@@ -152,7 +162,7 @@ function TurnToolDisclosure({
         )}
         {state?.error && (
           <div className="session-detail-local-state error" role="alert">
-            <Icon name="alert-triangle" size={13} />
+            <Icon name="alert-triangle" size={12} />
             {state.error}
           </div>
         )}
@@ -160,7 +170,6 @@ function TurnToolDisclosure({
           <SessionDetailToolCall
             key={toolEvent.event_id}
             event={toolEvent}
-            compact
             expanded={expandedToolIds.has(toolEvent.event_id)}
             detailState={toolDetails[toolEvent.event_id]}
             onExpandedChange={onToolExpandedChange}
@@ -187,6 +196,7 @@ function TurnToolDisclosure({
 export default function SessionDetailEvent({
   event,
   providerDisplayName,
+  previousTimestamp,
   expandedToolIds,
   toolDetails,
   turnToolState,
@@ -194,7 +204,10 @@ export default function SessionDetailEvent({
   onTurnToolExpandedChange,
   onLoadMoreTurnTools,
 }: Props) {
-  const label = event.kind === "response" ? providerDisplayName : SESSION_EVENT_KIND_LABELS[event.kind];
+  const speaker = event.kind === "response"
+    ? providerDisplayName
+    : SESSION_EVENT_KIND_LABELS[event.kind];
+  const gap = formatSessionGap(previousTimestamp, event.timestamp);
   const classes = [
     "session-detail-event",
     `event-${event.kind.replace(/_/g, "-")}`,
@@ -209,39 +222,38 @@ export default function SessionDetailEvent({
       data-event-kind={event.kind}
       tabIndex={event.kind === "checkpoint" ? -1 : undefined}
     >
-      <span className="session-detail-rail-mark" aria-hidden="true" />
+      {/* Clock time in a fixed column, the date stated once by the day divider
+          above. What used to be `Aug 13, 2026 at 11:10 AM` on every row is now
+          `11:10`, and the space it freed carries the wait since the last turn. */}
+      <div className="session-detail-event-gutter">
+        {event.timestamp != null ? (
+          <time dateTime={sessionDetailDateTime(event.timestamp)}>
+            {formatSessionDetailClock(event.timestamp)}
+          </time>
+        ) : (
+          <span className="session-detail-event-undated">--:--</span>
+        )}
+        {gap && <span className="session-detail-event-gap">{gap}</span>}
+      </div>
 
-      {event.kind === "tool_call" ? (
-        <SessionDetailToolCall
-          event={event}
-          expanded={expandedToolIds.has(event.event_id)}
-          detailState={toolDetails[event.event_id]}
-          onExpandedChange={onToolExpandedChange}
-        />
-      ) : event.kind === "checkpoint" ? (
-        <>
-          <div className="session-detail-event-heading">
-            <h3>{label}</h3>
-            <EventQuality event={event} />
-            {event.timestamp != null && (
-              <time dateTime={sessionDetailDateTime(event.timestamp)}>
-                {formatSessionDetailTimestamp(event.timestamp)}
-              </time>
-            )}
-          </div>
+      <span className="session-detail-event-rail" aria-hidden="true" />
+
+      <div className="session-detail-event-body">
+        <div className="session-detail-event-heading">
+          <h3>{speaker}</h3>
+          <EventQuality event={event} />
+        </div>
+
+        {event.kind === "tool_call" ? (
+          <SessionDetailToolCall
+            event={event}
+            expanded={expandedToolIds.has(event.event_id)}
+            detailState={toolDetails[event.event_id]}
+            onExpandedChange={onToolExpandedChange}
+          />
+        ) : event.kind === "checkpoint" ? (
           <CheckpointBody event={event} />
-        </>
-      ) : (
-        <>
-          <div className="session-detail-event-heading">
-            <h3>{label}</h3>
-            <EventQuality event={event} />
-            {event.timestamp != null && (
-              <time dateTime={sessionDetailDateTime(event.timestamp)}>
-                {formatSessionDetailTimestamp(event.timestamp)}
-              </time>
-            )}
-          </div>
+        ) : (
           <div className={`session-detail-event-copy ${event.kind === "prompt"
             ? "session-detail-prompt-card"
             : event.kind === "response"
@@ -251,20 +263,20 @@ export default function SessionDetailEvent({
               <p className="session-detail-event-empty">No visible text is available for this event.</p>
             )}
           </div>
-        </>
-      )}
+        )}
 
-      {event.kind !== "tool_call" && (
-        <TurnToolDisclosure
-          event={event}
-          state={turnToolState}
-          expandedToolIds={expandedToolIds}
-          toolDetails={toolDetails}
-          onToolExpandedChange={onToolExpandedChange}
-          onExpandedChange={onTurnToolExpandedChange}
-          onLoadMore={onLoadMoreTurnTools}
-        />
-      )}
+        {event.kind !== "tool_call" && (
+          <TurnToolDisclosure
+            event={event}
+            state={turnToolState}
+            expandedToolIds={expandedToolIds}
+            toolDetails={toolDetails}
+            onToolExpandedChange={onToolExpandedChange}
+            onExpandedChange={onTurnToolExpandedChange}
+            onLoadMore={onLoadMoreTurnTools}
+          />
+        )}
+      </div>
     </article>
   );
 }

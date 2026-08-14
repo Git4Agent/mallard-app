@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+/// Maximum UTF-8 bytes returned for either the arguments or result preview of
+/// one timeline tool call. A tool event can contain both fields, so 8 KiB per
+/// field keeps its total preview budget aligned with a 16-KiB message event.
+pub(crate) const TIMELINE_TOOL_PREVIEW_BYTES: usize = 8 * 1024;
+
 /// Typed capability ladder. Levels are ordered: each level includes every
 /// weaker level's abilities.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

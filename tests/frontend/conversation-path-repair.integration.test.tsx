@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import ConversationPathRepairNotice from "../../src/components/project-sync/ConversationPathRepairNotice";
+import ConversationPathRepairNotice, {
+  shouldShowConversationPathRepairNotice,
+} from "../../src/components/project-sync/ConversationPathRepairNotice";
 import { conversationPathsBlockSync } from "../../src/components/project-sync/ProjectLinksWorkspace";
 import type { CodexConversationPathAudit } from "../../src/types";
 
@@ -49,15 +51,16 @@ test("stale assigned conversations expose a scoped repair action", () => {
 });
 
 test("safe conversations do not render the repair callout", () => {
+  const readyAudit = audit({
+    assigned_thread_count: 1,
+    matching_thread_count: 1,
+    issues: [],
+    ready: true,
+    can_repair: false,
+  });
   const html = renderToStaticMarkup(
     <ConversationPathRepairNotice
-      audit={audit({
-        assigned_thread_count: 1,
-        matching_thread_count: 1,
-        issues: [],
-        ready: true,
-        can_repair: false,
-      })}
+      audit={readyAudit}
       projectName="healthGame"
       profileName="Default Codex"
       profilePath="/Users/hequ/.codex"
@@ -67,6 +70,10 @@ test("safe conversations do not render the repair callout", () => {
   );
 
   assert.equal(html, "");
+  assert.equal(shouldShowConversationPathRepairNotice(readyAudit), false);
+  assert.equal(shouldShowConversationPathRepairNotice(undefined), false);
+  assert.equal(shouldShowConversationPathRepairNotice(audit()), true);
+  assert.equal(shouldShowConversationPathRepairNotice(readyAudit, "audit failed"), true);
 });
 
 test("a grouped configuration can omit the repeated scope label", () => {

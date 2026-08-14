@@ -7,6 +7,7 @@
 
 use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
 use crate::project_activity::{parse_conversation_resource_id, resolve_activity_project};
+use crate::providers::traits::TIMELINE_TOOL_PREVIEW_BYTES;
 use crate::providers::{
     ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionCheckpoint,
     SessionCount, SessionCountQuality, SessionDetailWarning, SessionDiscoveryContext,
@@ -472,11 +473,11 @@ fn validate_page_slice(
             if tool
                 .argument_preview
                 .as_ref()
-                .is_some_and(|text| text.len() > 4096)
+                .is_some_and(|text| text.len() > TIMELINE_TOOL_PREVIEW_BYTES)
                 || tool
                     .result_preview
                     .as_ref()
-                    .is_some_and(|text| text.len() > 4096)
+                    .is_some_and(|text| text.len() > TIMELINE_TOOL_PREVIEW_BYTES)
                 || tool
                     .affected_paths
                     .iter()
@@ -1061,6 +1062,19 @@ fn append_unique_warnings(
     }
 }
 
+/// Preserve the provider's typed reason for a lower-bound timeline. The
+/// generic `truncated` bit covers malformed, oversized, record-limited, and
+/// event-limited inputs, so it cannot safely be translated into an event-limit
+/// warning on its own.
+fn timeline_warnings(
+    index: &SessionTimelineIndex,
+    cache_warnings: Vec<SessionDetailWarning>,
+) -> Vec<SessionDetailWarning> {
+    let mut warnings = index.warnings.clone();
+    append_unique_warnings(&mut warnings, cache_warnings);
+    warnings
+}
+
 fn ensure_response_bound<T: Serialize>(value: T, max_bytes: usize) -> SessionDetailResult<T> {
     let encoded = serde_json::to_vec(&value).map_err(|_| {
         SessionDetailError::new(
@@ -1334,18 +1348,7 @@ pub fn get_project_session_detail(
         }
         _ => Vec::new(),
     };
-    let mut warnings = index.warnings.clone();
-    append_unique_warnings(&mut warnings, cache_warnings);
-    if index.truncated {
-        append_unique_warnings(
-            &mut warnings,
-            [SessionDetailWarning {
-                code: "timeline_truncated".to_string(),
-                message: "The timeline reached Mallard's event limit; counts are lower bounds."
-                    .to_string(),
-            }],
-        );
-    }
+    let mut warnings = timeline_warnings(&index, cache_warnings);
     sanitize_warnings(&mut warnings, &session);
     let title = summary
         .title
@@ -1522,8 +1525,7 @@ pub fn get_project_session_timeline_page(
             })
         })
         .transpose()?;
-    let mut warnings = index.warnings.clone();
-    append_unique_warnings(&mut warnings, cache_warnings);
+    let mut warnings = timeline_warnings(&index, cache_warnings);
     sanitize_warnings(&mut warnings, &session);
     let page = ProjectSessionTimelinePage {
         resource_id: session.resource_id,
@@ -1679,6 +1681,22 @@ mod tests {
             .expect_err("absolute path must fail closed");
         assert_eq!(error.code, SessionDetailErrorCode::ProviderError);
         assert!(validate_index(&index_with_path("src/main.rs"), 4).is_ok());
+    }
+
+    #[test]
+    fn truncated_timeline_does_not_invent_an_event_limit_warning() {
+        let mut index = index_with_path("src/main.rs");
+        index.truncated = true;
+        index.warnings.push(SessionDetailWarning {
+            code: "oversized_record".to_string(),
+            message: "A provider record exceeded its parsing limit.".to_string(),
+        });
+
+        let warnings = timeline_warnings(&index, Vec::new());
+        assert_eq!(warnings, index.warnings);
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "timeline_truncated"));
     }
 
     #[test]

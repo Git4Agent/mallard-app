@@ -5319,7 +5319,11 @@ summary:focus-visible {
 /* It carries .sync-titlebar too: same 52px window row, same drag region, and
    the sidebar-hidden rule that insets it past the traffic lights still lands
    because that selector is more specific than this one. */
+/* The bar sizes against the sidebar, not the window, so what it can hold is a
+   question about itself. Inline-size containment only — no paint containment,
+   so the menus still open past its edge. */
 .sync-pathbar {
+  container: sync-pathbar / inline-size;
   position: relative;
   z-index: 6;
   width: 100%;
@@ -5346,15 +5350,22 @@ summary:focus-visible {
   list-style: none;
 }
 
-/* Ancestors keep their width: the crumbs that decide what Push writes are
-   never the ones that get shortened. Only the leaf gives way.
+/* The leaf gives way first and by a long way; the ancestors only yield once it
+   has floored. They used to refuse outright — `flex: 0 0 auto` — which held
+   while the leaf could absorb the whole squeeze. It cannot any more: the leaf
+   now carries the branch chip as well as its own name. Measured at 620px with
+   the ancestors fixed, 142px of trail, chip included, sat outside the trail box
+   and painted under the action cluster.
 
    They stretch to the bar's full height so a popover anchored at 100% opens
    below the bar rather than 6px above its own edge. */
 .sync-path-item {
   position: relative;
+  /* Without this the item's automatic min-content floor is its whole label,
+     and `flex-shrink` on it does nothing at all. The floors that matter are
+     the ones on the labels inside. */
   min-width: 0;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   display: flex;
   align-items: center;
 }
@@ -5364,9 +5375,38 @@ summary:focus-visible {
   align-self: stretch;
 }
 
+/* Outermost first: the storage is the crumb whose name the root icon already
+   stands for, so it is the cheapest label on the row to lose. */
+.sync-path-item:first-child {
+  flex-shrink: 6;
+}
+
+/* `auto`, so the item floors at what its contents actually need — the label at
+   its own floor plus the branch chip, which never shrinks. A `0` here let the
+   trail collapse the item and its contents spilled out of it: measured at
+   620px, the chip painted 46px into the action cluster. What keeps that floor
+   from being the label at full length is the max-width the container queries
+   below put on it; a min-content contribution is clamped by max-width, so the
+   label stops inflating the item's minimum as soon as the bar is tight. */
 .sync-path-item.leaf-item {
-  flex: 0 1 auto;
-  min-width: 44px;
+  min-width: auto;
+  flex-shrink: 100;
+}
+
+/* The leaf has to give way legibly. Without a floor the label shrank straight
+   past its ellipsis to zero — at 700px the section name simply vanished —
+   which reads as a missing crumb rather than a shortened one. 5ch keeps two
+   characters and the ellipsis. The branch chip beside it never shrinks: it is
+   the part of the trail you cannot infer from anywhere else on screen. */
+.sync-path-crumb.leaf > span,
+.sync-path-crumb.section > span {
+  min-width: 5ch;
+}
+
+/* The project keeps enough to be recognised; the storage may fall back to its
+   icon alone, which still opens the same switcher. */
+.sync-path-crumb-link > span {
+  min-width: 4ch;
 }
 
 .sync-path-crumb {
@@ -5594,10 +5634,165 @@ span.sync-path-crumb {
   cursor: default;
 }
 
+/* The count rides the button that clears it: "3" on Push is the whole of
+   "3 threads are newer here than in storage", said once, where you can act on
+   it. A fixed floor so the bar does not twitch as the number changes width. */
+.sync-path-count {
+  min-width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+  margin-right: -3px;
+  margin-left: -1px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--chip-strong-bg);
+  color: var(--text-0);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.sync-path-sync:disabled .sync-path-count {
+  background: var(--chip-bg);
+}
+
+/* Everything neither verb can clear, in one chip instead of four tallies: a
+   review, a hold, a conflict and an unsyncable thread all mean "look at this",
+   and only the last two mean it loudly. */
+.sync-path-attention {
+  height: 26px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px 0 6px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: default;
+}
+
+.sync-path-attention.warning {
+  background: var(--warning-soft);
+  color: var(--yellow);
+}
+
+.sync-path-attention.danger {
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}
+
+.sync-path-attention > svg {
+  flex: 0 0 auto;
+}
+
+.sync-path-attention > b {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-path-attention:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* Refresh: maintenance, not one of the two verbs, so it keeps the row without
+   taking a button's weight in it. */
+.sync-path-icon-action {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.sync-path-icon-action:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--bg-hover);
+  color: var(--text-0);
+}
+
+.sync-path-icon-action:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.sync-path-icon-action:disabled {
+  opacity: .42;
+  cursor: default;
+}
+
+/* Turning is work in progress, not a disabled control. */
+.sync-path-icon-action.loading:disabled {
+  opacity: 1;
+  color: var(--text-1);
+}
+
 .sync-path-sync.active {
   border-color: var(--button-primary-border);
   background: var(--button-primary-bg);
   color: var(--button-primary-text);
+}
+
+/* Below this the row cannot hold three names, two verbs and the branch at once.
+   The verbs give up their words first: an upload arrow with a 3 on it is still
+   unmistakably Push, and the 3 is the part you cannot infer from the icon. The
+   floor that has to survive is 580px — an 800px minimum window less the 220px
+   minimum sidebar — and everything below is dead space the window cannot reach.
+   The full label stays in each button's aria-label at every width. */
+@container sync-pathbar (max-width: 760px) {
+  .sync-path-sync-label {
+    display: none;
+  }
+
+  .sync-path-sync {
+    padding: 0 8px;
+  }
+
+  /* The storage keeps its icon, which opens the same switcher and is the mark
+     people aim at anyway. Ancestor names go before the section's, and the
+     section's before the branch's — outermost first, because the outer scopes
+     are the ones the icons and the page itself still say. */
+  .sync-path-crumb.root > span {
+    display: none;
+  }
+
+  .sync-path-crumb-link > span {
+    max-width: 7ch;
+  }
+
+  .sync-path-crumb.leaf > span,
+  .sync-path-crumb.section > span {
+    max-width: 9ch;
+  }
+}
+
+/* Near the floor — 580px, an 800px minimum window less a 220px minimum sidebar
+   — both ancestors are down to their icons and the section keeps six
+   characters. The branch never gives up a letter: it is the only thing in the
+   row that nothing else on screen repeats. */
+@container sync-pathbar (max-width: 640px) {
+  .sync-path-crumb-link > span {
+    display: none;
+  }
+
+  .sync-path-crumb.leaf > span,
+  .sync-path-crumb.section > span {
+    max-width: 6ch;
+  }
 }
 
 .sync-path-menu {
@@ -8635,7 +8830,6 @@ span.sync-path-crumb {
 }
 
 @media (max-width: 760px) {
-  .sync-capability-page .sync-history-toolbar { flex-wrap: wrap; justify-content: flex-end; }
   .sync-capability-row-main { grid-template-columns: 24px 26px minmax(0, 1fr) 16px; }
   .sync-capability-row-status { grid-column: 3; justify-items: start; text-align: left; }
   .sync-capability-chevron { grid-column: 4; grid-row: 1 / span 2; }
@@ -8671,32 +8865,6 @@ span.sync-path-crumb {
 
 .sync-history-content {
   width: 100%;
-}
-
-.sync-history-embedded .sync-history-header {
-  position: static;
-  margin-bottom: 0;
-  padding: 0 0 12px;
-  border-bottom: 0;
-}
-
-.sync-history-header {
-  position: sticky;
-  z-index: 4;
-  top: 0;
-  align-items: center;
-  gap: 24px;
-  padding: 4px 0 12px;
-  background: var(--bg-0);
-}
-
-/* Embedded, the header has lost its title to the path bar, so the controls are
-   all that is left and they sit at the end of the row instead of leaving a
-   title-shaped hole at the start of it. */
-.sync-history-header.embedded {
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 0 0 10px;
 }
 
 .sync-visually-hidden {
@@ -8769,103 +8937,51 @@ span.sync-path-crumb {
 
 .sync-history-settings { margin-left: auto; }
 
-.sync-history-toolbar {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 6px;
-}
-
-.sync-history-storage-lens {
-  min-width: 0;
-  max-width: 180px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0 6px;
-  color: var(--text-2);
-  font-size: 10.5px;
-}
-
-.sync-history-storage-lens > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sync-history-toolbar-stats {
-  min-height: 22px;
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  margin-left: 2px;
-  padding-left: 10px;
-  border-left: 1px solid var(--border);
-}
-
-.sync-history-toolbar-count {
-  flex: 0 0 auto;
-}
-
-.sync-thread-sync-summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0;
-  color: var(--text-3);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-}
-
-.sync-thread-sync-summary > span {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.sync-thread-sync-summary .local { color: var(--thread-status-local); }
-.sync-thread-sync-summary .storage { color: var(--thread-status-cloud); }
-.sync-thread-sync-summary .diverged { color: var(--thread-status-divergent); }
-.sync-thread-sync-summary .pending { color: var(--thread-status-pending); }
-.sync-thread-sync-summary .conflict { color: var(--thread-status-conflict); }
-.sync-thread-sync-summary .unavailable { color: var(--thread-status-unavailable); }
-
+/* A qualifier on the crumb before it, not another crumb: the pill shape and
+   the missing separator are what say so. It lives in the path bar now, so the
+   whole pill is one target rather than an icon sitting outside a button. */
 .sync-history-branch-select {
   position: relative;
   min-width: 0;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 6px;
+  margin-left: 8px;
   color: var(--text-3);
 }
 
-.sync-history-branch-select > svg {
-  flex: 0 0 auto;
-}
-
 .sync-history-branch-trigger {
-  min-width: 164px;
-  max-width: 280px;
-  height: 30px;
+  min-width: 0;
+  max-width: 200px;
+  height: 26px;
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 0 7px 0 9px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
+  gap: 5px;
+  padding: 0 6px 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--chip-bg);
   color: var(--text-1);
   font: inherit;
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
-.sync-history-branch-trigger:hover:not(:disabled),
+.sync-history-branch-trigger > svg:first-child {
+  flex: 0 0 auto;
+  color: var(--text-3);
+}
+
+button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-history-branch-select.open .sync-history-branch-trigger {
-  background: var(--bg-hover);
+  border-color: var(--border-mid);
+  background: var(--chip-strong-bg);
   color: var(--text-0);
+}
+
+.sync-history-branch-trigger:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 .sync-history-branch-trigger:disabled {
@@ -8873,8 +8989,10 @@ span.sync-path-crumb {
   cursor: default;
 }
 
+/* The branch name is the part of the trail you cannot infer from anywhere
+   else, so it is the last thing in the bar allowed to give up its width. */
 .sync-history-branch-name {
-  min-width: 38px;
+  min-width: 30px;
   overflow: hidden;
   color: currentColor;
   font-family: var(--font-mono);
@@ -8923,11 +9041,14 @@ span.sync-path-crumb {
   transform: rotate(180deg);
 }
 
+/* Anchored to the chip's left edge: in the path bar the branch sits at the
+   start of the row, so a right-anchored menu opened off toward the window's
+   middle with nothing under it. */
 .sync-history-branch-menu {
   position: absolute;
   z-index: 12;
   top: calc(100% + 6px);
-  right: 0;
+  left: 0;
   width: clamp(240px, 28vw, 320px);
   max-width: calc(100vw - 32px);
   max-height: min(360px, calc(100vh - 130px));
@@ -10664,10 +10785,6 @@ button.sync-project-file-expand { cursor: pointer; }
 }
 
 @media (max-width: 900px) {
-  .sync-history-header { position: static; align-items: stretch; flex-direction: column; }
-  .sync-history-toolbar { align-items: flex-end; }
-  .sync-history-branch-select { min-width: 0; flex: 1; }
-  .sync-history-branch-trigger { min-width: 0; max-width: none; flex: 1; }
   .sync-history-settings { margin-left: 0; }
 }
 
@@ -10990,12 +11107,26 @@ button.sync-project-file-expand { cursor: pointer; }
   max-width: 1380px;
   margin: 0 auto;
   color: var(--text-0);
+  /* Two signal hues do not survive as text on light paper: --yellow measures
+     2.45:1 and --blue 3.84:1, against the 4.5:1 a sentence needs. Mixing the
+     body colour in clears the bar without leaving the family, and on the dark
+     palette — where both already passed — it only adds headroom. The rails and
+     borders keep the pure hue, where 3:1 is the bar. */
+  --session-detail-amber: color-mix(in srgb, var(--yellow) 60%, var(--text-0));
+  --session-detail-link: color-mix(in srgb, var(--blue) 85%, var(--text-0));
 }
 
-.session-detail-page button,
-.session-detail-page select,
-.session-detail-page input {
-  font: inherit;
+/* The page used to reset `font: inherit` on its own controls. The global
+   `button, input, select, textarea, summary` reset already does that, and this
+   copy outranked the pixel-face rule on specificity — which is why a tab label
+   naming itself in the app's voice came out in the system sans. */
+
+/* An SVG is a flex item like any other, so in a tight row it gets squeezed
+   before the text beside it — a 12px mark was rendering at 5.4px inside the
+   tool-call summary. Any fractional width silently breaks the whole-cell grid
+   these marks are drawn on, so they never shrink. */
+.session-detail-page svg {
+  flex: 0 0 auto;
 }
 
 .session-detail-header {
@@ -11085,99 +11216,222 @@ button.sync-project-file-expand { cursor: pointer; }
   font-size: 11px;
 }
 
+/* Refresh is icon-only, so it takes a square rather than a label's padding. */
+.session-detail-header-actions .btn.session-detail-refresh {
+  width: 31px;
+  justify-content: center;
+  padding: 0;
+}
+
 .session-detail-metadata {
   flex-wrap: wrap;
-  gap: 7px 16px;
+  gap: 7px 14px;
   color: var(--text-2);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 
 .session-detail-meta-item {
   min-width: 0;
-  gap: 5px;
+  gap: 6px;
 }
 
-.session-detail-meta-item > span:first-of-type {
-  color: var(--text-3);
+/* --text-3 measures 3.36:1 on this paper, short of the 4.5:1 a 9px label
+   needs. The label carries information, so it takes --text-2 (5.76:1). */
+.session-detail-meta-label {
+  color: var(--text-2);
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
 }
 
-.session-detail-meta-item code,
-.session-detail-meta-item time {
+.session-detail-meta-value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
   color: var(--text-1);
-  font-family: var(--font-mono);
-  font-size: inherit;
   font-variant-numeric: tabular-nums;
 }
 
+.session-detail-meta-value code,
+.session-detail-meta-value time {
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* The one number the header never used to state. */
+.session-detail-meta-duration {
+  color: var(--text-0);
+  font-weight: 400;
+}
+
+/* One column. The rail this replaces held four controls behind a permanent
+   284px reservation, and filtering is a property of the list anyway — so it
+   sits over the list, and the transcript takes the width back. */
 .session-detail-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(240px, 284px);
-  align-items: start;
-  gap: clamp(28px, 4vw, 58px);
+  gap: 14px;
 }
 
 .session-detail-timeline {
   min-width: 0;
 }
 
-.session-detail-section-heading {
+/* ---- filter toolbar ---------------------------------------------------- */
+
+.session-detail-toolbar {
   display: flex;
-  align-items: end;
-  justify-content: space-between;
-  gap: 18px;
-  margin-bottom: 18px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border);
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-footer);
 }
 
-.session-detail-section-heading > div {
-  display: grid;
-  gap: 2px;
-}
-
-.session-detail-section-heading span {
-  color: var(--text-3);
+.session-detail-toolbar-label {
+  margin-right: 2px;
+  color: var(--text-2);
   font-size: 9px;
-  font-weight: 650;
-  letter-spacing: 0.07em;
+  letter-spacing: 1px;
   text-transform: uppercase;
 }
 
-.session-detail-section-heading h2 {
-  font-size: 17px;
-  line-height: 1.2;
+.session-detail-toolbar-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
-.session-detail-section-heading > code {
-  color: var(--text-3);
+/* 26px tall, clearing the 24px minimum target size (WCAG 2.2 AA 2.5.8) that
+   the 14px checkbox it replaces never met. */
+.session-detail-filter-toggle {
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-4);
+  color: var(--text-2);
+  cursor: pointer;
   font-size: 10px;
 }
 
+.session-detail-filter-toggle:hover {
+  border-color: var(--button-border);
+  color: var(--text-0);
+}
+
+.session-detail-filter-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.session-detail-filter-box {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-mid);
+  background: var(--bg-1);
+}
+
+.session-detail-filter-toggle.is-on {
+  border-color: var(--border-strong);
+  background: var(--bg-active);
+  color: var(--text-0);
+}
+
+.session-detail-filter-toggle.is-on .session-detail-filter-box {
+  border-color: var(--text-0);
+  background: var(--text-0);
+  box-shadow: inset 0 0 0 2px var(--bg-active);
+}
+
+.session-detail-filter-count {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-detail-filter-toggle.is-on .session-detail-filter-count {
+  color: var(--text-1);
+}
+
+.session-detail-filter-count.quality-lower_bound { color: var(--session-detail-amber); }
+.session-detail-filter-count.quality-inferred { color: var(--purple); }
+
+/* The one count on the page. It used to carry three, measuring three different
+   things, and none of them stated the denominator. */
+.session-detail-toolbar-readout {
+  margin-left: auto;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- day dividers ------------------------------------------------------ */
+
+.session-detail-day {
+  min-width: 0;
+}
+
+.session-detail-day-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 0;
+}
+
+.session-detail-day:first-child .session-detail-day-divider {
+  margin-top: 4px;
+}
+
+.session-detail-day-divider > span {
+  color: var(--text-2);
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.session-detail-day-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
 .session-detail-event-list {
-  position: relative;
+  min-width: 0;
   display: grid;
   gap: 0;
   list-style: none;
-}
-
-.session-detail-event-list::before {
-  content: "";
-  position: absolute;
-  top: 9px;
-  bottom: 9px;
-  left: 7px;
-  width: 1px;
-  background: var(--border-mid);
 }
 
 .session-detail-event-list > li {
   min-width: 0;
 }
 
+.session-detail-event-list > li + li {
+  border-top: 1px solid var(--border);
+}
+
+/* ---- one turn ---------------------------------------------------------- */
+
+/* Three columns: the clock, the kind rail, the turn. The date is stated once
+   by the divider above, so the row carries `11:10` where it used to spell
+   `Aug 13, 2026 at 11:10 AM` on every single event. */
 .session-detail-event {
-  position: relative;
   min-width: 0;
-  padding: 0 0 30px 30px;
+  display: grid;
+  grid-template-columns: 58px 3px minmax(0, 1fr);
+  gap: 0 14px;
+  padding: 11px 0 13px;
   scroll-margin: 80px 0;
 }
 
@@ -11187,53 +11441,83 @@ button.sync-project-file-expand { cursor: pointer; }
   outline-offset: 3px;
 }
 
-.session-detail-rail-mark {
-  position: absolute;
-  z-index: 1;
-  top: 6px;
-  left: 3px;
-  width: 9px;
-  height: 9px;
-  border: 2px solid var(--bg-0);
-  border-radius: 50%;
-  background: var(--text-3);
-  box-shadow: 0 0 0 1px var(--border-mid);
+.session-detail-event-gutter {
+  display: grid;
+  align-content: start;
+  justify-items: end;
+  gap: 3px;
+  padding-top: 1px;
+  text-align: right;
 }
 
-.session-detail-event.event-prompt .session-detail-rail-mark { background: var(--red); }
-.session-detail-event.event-response .session-detail-rail-mark { background: var(--blue); }
-.session-detail-event.event-intermediate-step .session-detail-rail-mark,
-.session-detail-event.event-tool-call .session-detail-rail-mark { background: var(--purple); }
-.session-detail-event.event-checkpoint .session-detail-rail-mark { background: var(--green); }
+.session-detail-event-gutter time,
+.session-detail-event-undated {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The wait before this turn. Four idle minutes while an agent retried are part
+   of what happened, and nothing on the page used to show them. */
+.session-detail-event-gap {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-detail-event-rail {
+  border-radius: 1px;
+  background: var(--border-mid);
+}
+
+.event-prompt .session-detail-event-rail { background: var(--red); }
+.event-response .session-detail-event-rail { background: var(--blue); }
+.event-intermediate-step .session-detail-event-rail { background: var(--purple); }
+.event-tool-call .session-detail-event-rail { background: var(--purple); }
+.event-checkpoint .session-detail-event-rail { background: var(--green); }
+
+.session-detail-event-body {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
 
 .session-detail-event-heading {
-  min-height: 21px;
+  min-height: 13px;
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
 }
 
+/* The rail beside this label already carries the hue at full strength, where
+   3:1 is the bar it has to clear. A 10px label needs 4.5:1, which the pure
+   accents miss on light paper — mixing in 15% of the body colour clears it
+   without leaving the family. */
 .session-detail-event-heading h3 {
   color: var(--text-1);
   font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
+  font-weight: 400;
+  letter-spacing: 1px;
   text-transform: uppercase;
 }
 
-.event-prompt .session-detail-event-heading h3 { color: var(--red); }
-.event-response .session-detail-event-heading h3 { color: var(--blue); }
-.event-intermediate-step .session-detail-event-heading h3,
-.event-tool-call .session-detail-event-heading h3 { color: var(--purple); }
-.event-checkpoint .session-detail-event-heading h3 { color: var(--green); }
+.event-prompt .session-detail-event-heading h3 {
+  color: color-mix(in srgb, var(--red) 85%, var(--text-0));
+}
 
-.session-detail-event-heading time {
-  margin-left: auto;
-  color: var(--text-3);
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  font-variant-numeric: tabular-nums;
+.event-response .session-detail-event-heading h3 {
+  color: color-mix(in srgb, var(--blue) 85%, var(--text-0));
+}
+
+.event-intermediate-step .session-detail-event-heading h3,
+.event-tool-call .session-detail-event-heading h3 {
+  color: color-mix(in srgb, var(--purple) 85%, var(--text-0));
+}
+
+.event-checkpoint .session-detail-event-heading h3 {
+  color: color-mix(in srgb, var(--green) 85%, var(--text-0));
 }
 
 .session-detail-quality {
@@ -11247,11 +11531,16 @@ button.sync-project-file-expand { cursor: pointer; }
   font-size: 9px;
 }
 
-.session-detail-quality.quality-lower_bound { color: var(--yellow); }
+.session-detail-quality.quality-lower_bound { color: var(--session-detail-amber); }
 .session-detail-quality.quality-inferred { color: var(--purple); }
-.session-detail-quality.quality-unsupported { color: var(--text-3); }
+.session-detail-quality.quality-unsupported { color: var(--text-2); }
 
+/* ---- conversation copy ------------------------------------------------- */
+
+/* Prose is held to a reading measure. Run across the full page width it was
+   well past the 45-75 characters a line can be tracked at. */
 .session-detail-event-copy {
+  max-width: 68ch;
   min-width: 0;
   color: var(--text-0);
   font-size: 13.5px;
@@ -11260,20 +11549,19 @@ button.sync-project-file-expand { cursor: pointer; }
 }
 
 .session-detail-prompt-card {
-  padding: 14px 16px;
+  padding: 12px 14px;
   border: 1px solid var(--border-mid);
   border-radius: var(--r);
   background: var(--surface-card);
 }
 
 .session-detail-response-prose {
-  padding: 3px 1px 0;
+  padding: 0;
   border: 0;
   background: transparent;
 }
 
 .session-detail-intermediate-prose {
-  margin-left: 7px;
   padding: 2px 0 2px 12px;
   border-left: 2px solid color-mix(in srgb, var(--purple) 45%, var(--border));
   color: var(--text-1);
@@ -11348,7 +11636,7 @@ button.sync-project-file-expand { cursor: pointer; }
 }
 
 .session-detail-event-copy a {
-  color: var(--blue);
+  color: var(--session-detail-link);
   text-underline-offset: 2px;
 }
 
@@ -11367,17 +11655,20 @@ button.sync-project-file-expand { cursor: pointer; }
 
 .session-detail-event-empty,
 .session-detail-tool-empty {
-  color: var(--text-3);
+  color: var(--text-2);
   font-style: italic;
 }
 
+/* ---- checkpoints ------------------------------------------------------- */
+
 .session-detail-checkpoint-body {
+  max-width: 68ch;
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 11px 12px;
-  border-top: 1px solid color-mix(in srgb, var(--green) 38%, var(--border));
-  border-bottom: 1px solid color-mix(in srgb, var(--green) 38%, var(--border));
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--green) 38%, var(--border));
+  border-radius: var(--r-sm);
   background: var(--surface-subtle);
 }
 
@@ -11412,8 +11703,16 @@ button.sync-project-file-expand { cursor: pointer; }
   font-size: inherit;
 }
 
+/* ---- tool calls -------------------------------------------------------- */
+
+/* One block per turn instead of a nested rail: the payload already sits three
+   levels in, and every level of indent came out of the column that holds the
+   widest content on the page. */
 .session-detail-turn-tools {
-  margin-top: 10px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-subtle);
   color: var(--text-1);
 }
 
@@ -11429,154 +11728,250 @@ button.sync-project-file-expand { cursor: pointer; }
 }
 
 .session-detail-turn-tools > summary {
-  width: fit-content;
+  min-height: 28px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 7px;
-  border-radius: var(--r-sm);
+  gap: 8px;
+  padding: 4px 9px;
   color: var(--text-2);
   font-size: 10.5px;
 }
 
 .session-detail-turn-tools > summary:hover {
-  background: var(--surface-subtle-hover);
+  background: var(--bg-hover);
   color: var(--text-0);
 }
 
+/* Assembled in TS from a figure and two words, so it takes the machine face
+   whole rather than splitting one label across two voices. */
 .session-detail-turn-tools > summary strong {
+  color: var(--text-1);
   font-family: var(--font-mono);
-  font-size: inherit;
+  font-size: 10.5px;
   font-weight: 600;
+}
+
+/* `completed` was rendered on all 24 rows and said nothing. The exception is
+   worth a word; the norm is worth none. */
+.session-detail-turn-failures {
+  margin-left: auto;
+  color: var(--danger-text);
+  font-family: var(--font-mono);
+  font-size: 10px;
 }
 
 .session-detail-turn-tool-list {
   display: grid;
-  gap: 6px;
-  margin: 7px 0 0 9px;
-  padding: 9px 0 0 12px;
-  border-left: 1px solid var(--border-mid);
 }
 
 .session-detail-tool-call {
   min-width: 0;
   border-top: 1px solid var(--border);
-  border-bottom: 1px solid transparent;
 }
 
-.session-detail-tool-call[open] {
-  border-bottom-color: var(--border);
+.session-detail-event-body > .session-detail-tool-call {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
 }
 
 .session-detail-tool-call > summary {
-  min-height: 35px;
+  min-height: 28px;
   display: grid;
-  grid-template-columns: 16px auto auto minmax(80px, 1fr) auto auto;
+  grid-template-columns: 14px auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 7px;
-  padding: 5px 7px;
+  gap: 9px;
+  padding: 4px 9px;
   color: var(--text-1);
 }
 
 .session-detail-tool-call > summary:hover {
-  background: var(--surface-subtle-hover);
+  background: var(--bg-hover);
+}
+
+.session-detail-tool-call[open] > summary {
+  background: var(--surface-row-active);
 }
 
 .session-detail-tool-call > summary:focus-visible,
 .session-detail-turn-tools > summary:focus-visible {
   border-radius: var(--r-sm);
   outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 .session-detail-tool-disclosure {
   display: inline-flex;
-  color: var(--text-3);
-}
-
-.session-detail-tool-kind,
-.session-detail-tool-status {
-  padding: 2px 5px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
   color: var(--text-2);
-  font-size: 9px;
-  white-space: nowrap;
 }
 
 .session-detail-tool-call > summary strong {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 600;
+  color: var(--text-2);
+  font-size: 10px;
+  font-weight: 400;
 }
 
+/* The command, not the wrapper that invoked it. */
 .session-detail-tool-summary {
   min-width: 0;
   overflow: hidden;
-  color: var(--text-2);
+  color: var(--text-0);
+  font-family: var(--font-mono);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.session-detail-tool-status.status-completed { color: var(--green); }
-.session-detail-tool-status.status-failed { color: var(--red); }
-.session-detail-tool-status.status-incomplete { color: var(--yellow); }
-
-.session-detail-tool-call > summary time {
-  color: var(--text-3);
-  font-family: var(--font-mono);
+.session-detail-tool-status {
+  padding: 1px 5px;
+  border: 1px solid var(--danger-text);
+  border-radius: 3px;
+  color: var(--danger-text);
   font-size: 9px;
   white-space: nowrap;
 }
 
+.session-detail-tool-status.status-incomplete {
+  border-color: var(--session-detail-amber);
+  color: var(--session-detail-amber);
+}
+
+/* Symmetric, and aligned with the row above rather than indented under it: the
+   open row is already tinted, and the panel draws its own border, so a deep
+   left inset only made the block look ragged against the flush rows below. */
 .session-detail-tool-body {
   display: grid;
-  gap: 10px;
-  padding: 5px 7px 12px 23px;
+  gap: 8px;
+  padding: 7px 9px 9px;
 }
 
-.session-detail-tool-payload,
-.session-detail-tool-paths {
+/* ---- payload pane ------------------------------------------------------ */
+
+/* No gap: the selected tab has to sit directly on the panel for the seam
+   between them to disappear. The truncation note carries its own margin. */
+.session-detail-tool-payload {
   min-width: 0;
   display: grid;
-  gap: 5px;
+  gap: 0;
 }
 
-.session-detail-tool-payload h4,
-.session-detail-tool-paths h4 {
+/* Real tabs, not a Material underline: the selected one is a tile that joins
+   the panel below it, drawn with the same hard 1px edge the rest of the app
+   uses. Nothing here is a rounded control or a coloured indicator bar. */
+.session-detail-payload-tabs {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  margin-bottom: -1px;
+}
+
+.session-detail-payload-tab {
+  min-height: 24px;
+  padding: 4px 9px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--text-2);
-  font-size: 9px;
-  font-weight: 650;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  cursor: pointer;
+  font-size: 10px;
 }
 
-.session-detail-tool-payload pre {
+.session-detail-payload-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-0);
+}
+
+/* Border on three sides and the panel's own fill, so the seam between tab and
+   panel simply is not drawn — the tab reads as the front of the panel. */
+.session-detail-payload-tab.is-on {
+  border-color: var(--border-mid);
+  background: var(--bg-4);
+  color: var(--text-0);
+}
+
+.session-detail-payload-tab:focus-visible,
+.session-detail-payload-action:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.session-detail-payload-tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-bottom: 2px;
+}
+
+/* Square keycaps rather than ghost buttons: same border and press-shift as
+   every other retro control, and a whole-pixel 22px box for a 12px mark. */
+.session-detail-payload-action {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  /* 24px square, the minimum target size (WCAG 2.2 AA 2.5.8), and the same
+     edge every other button in the app draws — --border is a divider colour
+     and left these reading as barely-there. */
+  border: 1px solid var(--button-border);
+  border-radius: 0;
+  background: var(--button-bg);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.session-detail-payload-action:hover {
+  border-color: var(--button-border);
+  background: var(--button-bg-hover);
+  color: var(--text-0);
+}
+
+.session-detail-payload-action:active {
+  transform: translate(1px, 1px);
+}
+
+.session-detail-payload-action.is-on {
+  border-color: var(--border-strong);
+  background: var(--bg-active);
+  color: var(--text-0);
+}
+
+/* The panel the tabs front. Bounded, always: one unbounded result used to push
+   the rest of the conversation off the screen. */
+.session-detail-payload-body {
   max-width: 100%;
-  max-height: 420px;
+  max-height: 240px;
   overflow: auto;
-  padding: 10px 11px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface-muted);
+  padding: 9px 10px;
+  border: 1px solid var(--border-mid);
+  border-radius: 0;
+  background: var(--bg-4);
   color: var(--text-1);
   font-family: var(--font-mono);
-  font-size: 10.5px;
-  line-height: 1.5;
+  font-size: 11px;
+  line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .session-detail-truncation {
-  color: var(--yellow);
+  margin-top: 6px;
+  color: var(--session-detail-amber);
   font-size: 9.5px;
 }
 
-.session-detail-tool-paths ul {
+/* The Paths tab fronts the same panel the other two do. */
+.session-detail-tool-paths {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
+  padding: 8px 9px;
+  border: 1px solid var(--border-mid);
+  background: var(--bg-4);
   list-style: none;
 }
 
@@ -11608,147 +12003,17 @@ button.sync-project-file-expand { cursor: pointer; }
 .session-detail-load-more {
   min-height: 34px;
   gap: 7px;
-  margin: 2px 0 0 30px;
+  margin: 10px 0 0 72px;
 }
 
 .session-detail-turn-load-more {
   width: fit-content;
   min-height: 28px;
+  margin: 6px 9px 8px;
   font-size: 10px;
 }
 
-.session-detail-inspector {
-  position: sticky;
-  top: 0;
-  min-width: 0;
-  border: 1px solid var(--border-mid);
-  border-radius: var(--r);
-  background: var(--surface-card);
-}
-
-.session-detail-options-toggle {
-  display: none;
-}
-
-.session-detail-inspector-body {
-  display: grid;
-}
-
-.session-detail-checkpoint-jump,
-.session-detail-filters,
-.session-detail-tool-view {
-  min-width: 0;
-  padding: 14px;
-  border: 0;
-}
-
-.session-detail-checkpoint-jump,
-.session-detail-filters {
-  border-bottom: 1px solid var(--border);
-}
-
-.session-detail-checkpoint-jump h2,
-.session-detail-filters legend,
-.session-detail-tool-view h2 {
-  width: auto;
-  margin-bottom: 9px;
-  color: var(--text-1);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.session-detail-checkpoint-jump label {
-  display: grid;
-  gap: 5px;
-  color: var(--text-2);
-  font-size: 10px;
-}
-
-.session-detail-checkpoint-jump select {
-  width: 100%;
-  min-height: 32px;
-  padding: 4px 26px 4px 8px;
-  border: 1px solid var(--button-border);
-  border-radius: var(--r-sm);
-  background-color: var(--button-bg);
-  color: var(--text-0);
-  font-size: 10.5px;
-}
-
-.session-detail-checkpoint-jump p {
-  margin-top: 7px;
-  color: var(--text-3);
-  font-size: 9.5px;
-  line-height: 1.4;
-}
-
-.session-detail-filter-row {
-  min-height: 28px;
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  color: var(--text-1);
-  cursor: pointer;
-  font-size: 10.5px;
-}
-
-.session-detail-filter-row.disabled {
-  color: var(--text-3);
-  cursor: default;
-}
-
-.session-detail-filter-row input {
-  width: 14px;
-  height: 14px;
-  accent-color: var(--accent);
-}
-
-.session-detail-filter-count {
-  min-width: 22px;
-  color: var(--text-2);
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
-.session-detail-filter-count.quality-lower_bound { color: var(--yellow); }
-.session-detail-filter-count.quality-inferred { color: var(--purple); }
-.session-detail-filter-count.quality-unsupported { color: var(--text-3); font-family: inherit; }
-
-.session-detail-tool-filters {
-  margin-top: 3px;
-  padding-top: 3px;
-  border-top: 1px solid var(--border);
-}
-
-.session-detail-filter-row.tool-parent {
-  font-weight: 600;
-}
-
-.session-detail-tool-filter-children {
-  margin-left: 7px;
-  padding-left: 15px;
-  border-left: 1px solid var(--border);
-}
-
-.session-detail-tool-view .btn {
-  width: 100%;
-  min-height: 30px;
-  justify-content: flex-start;
-  gap: 7px;
-  padding: 5px 7px;
-  font-size: 10px;
-}
-
-.session-detail-tool-view p {
-  margin-top: 6px;
-  color: var(--text-3);
-  font-size: 9px;
-}
+/* ---- page states ------------------------------------------------------- */
 
 .session-detail-state {
   min-height: 170px;
@@ -11800,12 +12065,7 @@ button.sync-project-file-expand { cursor: pointer; }
   margin-left: auto;
 }
 
-@container session-detail-layout (max-width: 980px) {
-  .session-detail-layout {
-    grid-template-columns: minmax(0, 1fr) 230px;
-    gap: 25px;
-  }
-
+@container session-detail-layout (max-width: 720px) {
   .session-detail-heading-row {
     flex-direction: column;
   }
@@ -11814,111 +12074,71 @@ button.sync-project-file-expand { cursor: pointer; }
     justify-content: flex-start;
   }
 
-  .session-detail-tool-call > summary {
-    grid-template-columns: 16px auto auto minmax(60px, 1fr) auto;
-  }
-
-  .session-detail-tool-call > summary time {
-    display: none;
-  }
-}
-
-@container session-detail-layout (max-width: 720px) {
-  .session-detail-layout {
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-  }
-
-  .session-detail-inspector {
-    position: static;
-    order: -1;
-    width: 100%;
-  }
-
-  .session-detail-options-toggle {
-    width: 100%;
-    min-height: 36px;
-    display: flex;
-    justify-content: flex-start;
-    gap: 7px;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-  }
-
-  .session-detail-options-toggle > svg:last-child {
-    margin-left: auto;
-  }
-
-  .session-detail-inspector:not(.options-open) .session-detail-inspector-body {
-    display: none;
-  }
-
-  .session-detail-inspector-body {
-    grid-template-columns: 1fr 1fr;
-    border-top: 1px solid var(--border);
-  }
-
-  .session-detail-checkpoint-jump {
-    grid-column: 1 / -1;
-  }
-
-  .session-detail-filters {
-    border-right: 1px solid var(--border);
-    border-bottom: 0;
-  }
-
   .session-detail-heading-copy h1 {
-    font-size: 24px;
-  }
-}
-
-@container session-detail-layout (max-width: 500px) {
-  .session-detail-inspector-body {
-    grid-template-columns: 1fr;
-  }
-
-  .session-detail-checkpoint-jump,
-  .session-detail-filters {
-    grid-column: auto;
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
+    font-size: 22px;
   }
 
   .session-detail-event {
-    padding-left: 25px;
+    grid-template-columns: 46px 3px minmax(0, 1fr);
+    gap: 0 10px;
   }
 
-  .session-detail-event-list::before {
-    left: 6px;
+  .session-detail-event-copy {
+    max-width: none;
   }
 
-  .session-detail-rail-mark {
-    left: 2px;
+  .session-detail-load-more {
+    margin-left: 56px;
+  }
+}
+
+/* Below this the gutter costs more than the alignment buys, so the clock joins
+   the speaker line and the turn takes the full width. */
+@container session-detail-layout (max-width: 500px) {
+  .session-detail-event {
+    grid-template-columns: 3px minmax(0, 1fr);
+    gap: 0 10px;
+    padding-top: 13px;
   }
 
-  .session-detail-event-heading {
-    align-items: flex-start;
-    flex-wrap: wrap;
+  .session-detail-event-gutter {
+    grid-row: 1;
+    grid-column: 2;
+    display: flex;
+    align-items: baseline;
+    justify-content: flex-start;
+    gap: 8px;
+    padding: 0;
   }
 
-  .session-detail-event-heading time {
-    width: 100%;
-    margin-left: 0;
+  .session-detail-event-rail {
+    grid-row: 1 / -1;
+    grid-column: 1;
+  }
+
+  .session-detail-event-body {
+    grid-column: 2;
   }
 
   .session-detail-tool-call > summary {
-    grid-template-columns: 16px auto minmax(0, 1fr) auto;
+    grid-template-columns: 14px minmax(0, 1fr) auto;
+    gap: 7px;
   }
 
-  .session-detail-tool-kind,
-  .session-detail-tool-call > summary time {
-    display: none;
+  .session-detail-tool-call > summary strong {
+    grid-column: 2;
   }
 
   .session-detail-tool-summary {
     grid-column: 2 / -1;
+  }
+
+  .session-detail-tool-body {
+    padding-left: 12px;
+  }
+
+  .session-detail-load-more {
+    margin-left: 13px;
   }
 
   .session-detail-metadata {

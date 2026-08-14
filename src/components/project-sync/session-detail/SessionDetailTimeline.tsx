@@ -2,6 +2,7 @@ import type { SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
 import SessionDetailEvent, { type SessionTurnToolState } from "./SessionDetailEvent";
 import type { SessionToolDetailState } from "./SessionDetailToolCall";
+import { groupSessionEventsByDay } from "./sessionDetailModel";
 
 interface Props {
   events: SessionTimelineEvent[];
@@ -36,16 +37,12 @@ export default function SessionDetailTimeline({
   onTurnToolExpandedChange,
   onLoadMoreTurnTools,
 }: Props) {
-  return (
-    <section className="session-detail-timeline" aria-labelledby="session-detail-timeline-heading">
-      <div className="session-detail-section-heading">
-        <div>
-          <span>Chronological record</span>
-          <h2 id="session-detail-timeline-heading">Timeline</h2>
-        </div>
-        {events.length > 0 && <code>{events.length} loaded</code>}
-      </div>
+  // The record is the page; it needs no eyebrow announcing that it is a record,
+  // and no count of its own now that the toolbar states one.
+  const days = groupSessionEventsByDay(events);
 
+  return (
+    <section className="session-detail-timeline" aria-label="Session timeline">
       {loading && events.length === 0 && (
         <div className="session-detail-state" role="status" aria-live="polite">
           <span className="status-loader" />
@@ -56,7 +53,7 @@ export default function SessionDetailTimeline({
 
       {error && (
         <div className="session-detail-state error" role="alert">
-          <Icon name="alert-triangle" size={17} />
+          <Icon name="alert-triangle" size={24} />
           <strong>Timeline unavailable</strong>
           <span>{error}</span>
           <button type="button" className="btn btn-ghost" onClick={onRetry}>Try again</button>
@@ -65,30 +62,39 @@ export default function SessionDetailTimeline({
 
       {!loading && !error && events.length === 0 && (
         <div className="session-detail-state empty">
-          <Icon name="message" size={18} />
+          <Icon name="message" size={24} />
           <strong>No events match these filters.</strong>
-          <span>Enable another event kind in View options.</span>
+          <span>Turn another kind back on in the row above.</span>
         </div>
       )}
 
-      {events.length > 0 && (
-        <ol className="session-detail-event-list">
-          {events.map((event) => (
-            <li key={event.event_id}>
-              <SessionDetailEvent
-                event={event}
-                providerDisplayName={providerDisplayName}
-                expandedToolIds={expandedToolIds}
-                toolDetails={toolDetails}
-                turnToolState={event.turn_id ? turnToolStates[event.turn_id] : undefined}
-                onToolExpandedChange={onToolExpandedChange}
-                onTurnToolExpandedChange={onTurnToolExpandedChange}
-                onLoadMoreTurnTools={onLoadMoreTurnTools}
-              />
-            </li>
-          ))}
-        </ol>
-      )}
+      {days.map((day, dayIndex) => (
+        <div className="session-detail-day" key={`${day.key}:${dayIndex}`}>
+          <h3 className="session-detail-day-divider"><span>{day.label}</span></h3>
+          <ol className="session-detail-event-list">
+            {day.events.map((event, index) => {
+              const previousDay = days[dayIndex - 1]?.events;
+              return (
+              <li key={event.event_id}>
+                <SessionDetailEvent
+                  event={event}
+                  providerDisplayName={providerDisplayName}
+                  previousTimestamp={index === 0
+                    ? previousDay?.[previousDay.length - 1]?.timestamp
+                    : day.events[index - 1].timestamp}
+                  expandedToolIds={expandedToolIds}
+                  toolDetails={toolDetails}
+                  turnToolState={event.turn_id ? turnToolStates[event.turn_id] : undefined}
+                  onToolExpandedChange={onToolExpandedChange}
+                  onTurnToolExpandedChange={onTurnToolExpandedChange}
+                  onLoadMoreTurnTools={onLoadMoreTurnTools}
+                />
+              </li>
+              );
+            })}
+          </ol>
+        </div>
+      ))}
 
       {nextCursor && !error && (
         <button
@@ -97,7 +103,7 @@ export default function SessionDetailTimeline({
           disabled={loadingMore}
           onClick={onLoadMore}
         >
-          {loadingMore ? <span className="status-loader" /> : <Icon name="chevron-down" size={13} />}
+          {loadingMore ? <span className="status-loader" /> : <Icon name="chevron-down" size={12} />}
           {loadingMore ? "Loading more…" : "Load 50 more"}
         </button>
       )}

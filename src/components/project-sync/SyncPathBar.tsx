@@ -50,6 +50,14 @@ export interface PathBarCrumb {
   /** A crumb that navigates instead of opening a menu — the way back. */
   onActivate?: () => void;
   disabled?: boolean;
+  /**
+   * A control that narrows this crumb rather than descending from it — the
+   * branch a Git history is showing. It rides inside the crumb's own item with
+   * no separator before it, so it reads as a qualifier on the name beside it
+   * and not as another step down the path. Drilling into a session appends a
+   * leaf after it and the qualifier stays where it belongs.
+   */
+  scope?: ReactNode;
 }
 
 interface Props {
@@ -59,11 +67,6 @@ interface Props {
   overflowDisabled?: boolean;
   /** Pull and Push: rendered by the caller, which owns their state. */
   actions?: ReactNode;
-  /**
-   * Theme toggle and app menu. The bar doubles as the window titlebar in the
-   * project workspace, so it carries the window's own controls at the far end.
-   */
-  windowActions?: ReactNode;
   ariaLabel?: string;
 }
 
@@ -155,7 +158,6 @@ export default function SyncPathBar({
   overflowLabel = "More actions",
   overflowDisabled,
   actions,
-  windowActions,
   ariaLabel = "Workspace path",
 }: Props) {
   const baseId = useId().replace(/[^a-zA-Z0-9_-]/g, "-");
@@ -313,6 +315,7 @@ export default function SyncPathBar({
                   <span>{crumb.label}</span>
                 </span>
               )}
+              {crumb.scope}
               {menu && (
                 <PathBarMenu
                   id={menuId}
@@ -329,49 +332,43 @@ export default function SyncPathBar({
         })}
       </ol>
 
+      {/* Actions first, overflow last: the two verbs are what the bar is for,
+          and the menu is where everything that is not a verb went. */}
       <div className="sync-path-actions" data-tauri-drag-region>
+        {actions}
         {hasItems(overflow) && (
-          <div className={`sync-path-overflow${overflowOpen ? " open" : ""}`}>
-            <button
-              type="button"
-              className="sync-path-more"
-              disabled={overflowDisabled}
-              title={overflowLabel}
-              aria-label={overflowLabel}
-              aria-haspopup="menu"
-              aria-expanded={overflowOpen}
-              aria-controls={overflowOpen ? overflowMenuId : undefined}
-              onClick={() => setOpenMenu((current) => (current === "overflow" ? null : "overflow"))}
-              onKeyDown={(event) => {
-                if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-                event.preventDefault();
-                setOpenMenu("overflow");
-                focusMenuOption("overflow", event.key === "ArrowDown" ? "first" : "last");
-              }}
-            >
-              <Icon name="more" size={16} />
-            </button>
-            <PathBarMenu
-              id={overflowMenuId}
-              groups={overflow}
-              label={overflowLabel}
-              align="end"
-              open={overflowOpen}
-              registerRef={registerMenuRef("overflow")}
-              onClose={() => setOpenMenu(null)}
-            />
-          </div>
-        )}
-        {actions && (
           <>
-            {hasItems(overflow) && <span className="sync-path-divider" aria-hidden="true" data-tauri-drag-region />}
-            {actions}
-          </>
-        )}
-        {windowActions && (
-          <>
-            <span className="sync-path-divider" aria-hidden="true" data-tauri-drag-region />
-            {windowActions}
+            {actions && <span className="sync-path-divider" aria-hidden="true" data-tauri-drag-region />}
+            <div className={`sync-path-overflow${overflowOpen ? " open" : ""}`}>
+              <button
+                type="button"
+                className="sync-path-more"
+                disabled={overflowDisabled}
+                title={overflowLabel}
+                aria-label={overflowLabel}
+                aria-haspopup="menu"
+                aria-expanded={overflowOpen}
+                aria-controls={overflowOpen ? overflowMenuId : undefined}
+                onClick={() => setOpenMenu((current) => (current === "overflow" ? null : "overflow"))}
+                onKeyDown={(event) => {
+                  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+                  event.preventDefault();
+                  setOpenMenu("overflow");
+                  focusMenuOption("overflow", event.key === "ArrowDown" ? "first" : "last");
+                }}
+              >
+                <Icon name="more" size={16} />
+              </button>
+              <PathBarMenu
+                id={overflowMenuId}
+                groups={overflow}
+                label={overflowLabel}
+                align="end"
+                open={overflowOpen}
+                registerRef={registerMenuRef("overflow")}
+                onClose={() => setOpenMenu(null)}
+              />
+            </div>
           </>
         )}
       </div>
