@@ -201,6 +201,8 @@ struct SourceDirectory {
 #[derive(Clone, Debug)]
 struct DiscoveredConversationMeta {
     provider: domain::ProviderKey,
+    /// The provider-native session id from the bounded head-of-file scan.
+    provider_session_id: String,
     transcript_logical_path: String,
     sidecars: Vec<CapturedSidecarRef>,
 }
@@ -333,6 +335,9 @@ fn capture_resource(
     item: &CapturePlanItem<'_>,
 ) -> Result<CapturedUnit, String> {
     let resource_id = item.resource_id;
+    if let Some(source) = item.discovered.files.first() {
+        crate::sync_metrics::record_selected_capture(&source.physical_path);
+    }
     let mut warnings = Vec::new();
     let mut files = Vec::with_capacity(item.discovered.files.len());
     for (source, (source_mtime, mode)) in item
@@ -346,6 +351,10 @@ fn capture_resource(
             None => fs::read(&source.physical_path)
                 .map_err(|e| format!("read '{}': {}", source.physical_path.display(), e))?,
         };
+        crate::sync_metrics::record_transcript_bytes_read(
+            &source.physical_path,
+            bytes.len() as u64,
+        );
         if let Some(secret) = detect_secret_material(&bytes) {
             if source.opaque_content {
                 warnings.push(format!(
@@ -378,6 +387,14 @@ fn capture_resource(
             mode,
         }
     });
+    if let Some(source) = item.discovered.files.first() {
+        // The resource digest folds every captured byte (plus bounded
+        // metadata strings the count ignores).
+        crate::sync_metrics::record_bytes_hashed(
+            &source.physical_path,
+            files.iter().map(|file| file.bytes.len() as u64).sum(),
+        );
+    }
     let content_sha256 = resource_digest(&files, directory.as_ref());
     let conversation = if let Some(conversation_meta) = &item.discovered.conversation {
         let adapter = registry.require_sessions(&conversation_meta.provider)?;
@@ -694,48 +711,149 @@ pub fn domain_resources(
 ) -> Result<BTreeMap<domain::ResourceId, domain::ResourceDescriptor>, String> {
     let mut resources = BTreeMap::new();
     for resource in captured.resources.values() {
-        let candidate = &resource.descriptor;
-        let resource_id = domain::ResourceId::parse(candidate.resource_id.clone())?;
-        let kind = domain_kind(&candidate.kind);
-        let provenance = match candidate.kind {
-            CaptureResourceKind::ProjectContentFile
-            | CaptureResourceKind::ProjectContentDirectory => {
-                let relative_path = candidate
-                    .logical_paths
-                    .first()
-                    .and_then(|path| path.strip_prefix("project/"))
-                    .unwrap_or(&candidate.display_name)
-                    .to_string();
-                domain::Provenance::ProjectLocal { relative_path }
-            }
-            _ => domain::Provenance::Unknown,
-        };
-        let mut metadata = candidate.metadata.clone();
-        metadata.retain(|key, _| !key.starts_with("_local_"));
-        metadata.insert(
-            "content_sha256".to_string(),
-            resource.content_sha256.clone(),
-        );
-        let descriptor = domain::ResourceDescriptor {
-            resource_id: resource_id.clone(),
-            kind,
-            provider: candidate.provider.clone(),
-            provider_resource_type: candidate
-                .provider_resource_type
-                .as_deref()
-                .map(domain::ResourceTypeKey::parse)
-                .transpose()?,
-            display_name: candidate.display_name.clone(),
-            provenance,
-            apply_policy: domain_apply_policy(&candidate.apply_policy),
-            relative_cwd: candidate.relative_cwd.clone(),
-            codec_version: 1,
-            metadata,
-        };
-        descriptor.validate()?;
-        resources.insert(resource_id, descriptor);
+        let descriptor =
+            domain_resource_descriptor(&resource.descriptor, Some(&resource.content_sha256))?;
+        resources.insert(descriptor.resource_id.clone(), descriptor);
     }
     Ok(resources)
+}
+
+/// The typed domain descriptor for one discovered candidate. A captured
+/// resource carries its content digest; a metadata-only view has none and
+/// omits the `content_sha256` metadata key.
+pub fn domain_resource_descriptor(
+    candidate: &ResourceCandidate,
+    content_sha256: Option<&str>,
+) -> Result<domain::ResourceDescriptor, String> {
+    let resource_id = domain::ResourceId::parse(candidate.resource_id.clone())?;
+    let kind = domain_kind(&candidate.kind);
+    let provenance = match candidate.kind {
+        CaptureResourceKind::ProjectContentFile | CaptureResourceKind::ProjectContentDirectory => {
+            let relative_path = candidate
+                .logical_paths
+                .first()
+                .and_then(|path| path.strip_prefix("project/"))
+                .unwrap_or(&candidate.display_name)
+                .to_string();
+            domain::Provenance::ProjectLocal { relative_path }
+        }
+        _ => domain::Provenance::Unknown,
+    };
+    let mut metadata = candidate.metadata.clone();
+    metadata.retain(|key, _| !key.starts_with("_local_"));
+    if let Some(content_sha256) = content_sha256 {
+        metadata.insert("content_sha256".to_string(), content_sha256.to_string());
+    }
+    let descriptor = domain::ResourceDescriptor {
+        resource_id,
+        kind,
+        provider: candidate.provider.clone(),
+        provider_resource_type: candidate
+            .provider_resource_type
+            .as_deref()
+            .map(domain::ResourceTypeKey::parse)
+            .transpose()?,
+        display_name: candidate.display_name.clone(),
+        provenance,
+        apply_policy: domain_apply_policy(&candidate.apply_policy),
+        relative_cwd: candidate.relative_cwd.clone(),
+        codec_version: 1,
+        metadata,
+    };
+    descriptor.validate()?;
+    Ok(descriptor)
+}
+
+/// One discovered session as bounded metadata: identity, ownership, display
+/// name, physical source, and a fresh no-follow stamp — everything status
+/// and preliminary review classification need, with no transcript read.
+#[derive(Clone, Debug)]
+pub struct LocalSessionView {
+    pub descriptor: ResourceCandidate,
+    pub provider: domain::ProviderKey,
+    pub provider_thread_id: String,
+    pub transcript_logical_path: String,
+    pub source_path: PathBuf,
+    pub source_mtime: u64,
+    pub source_size: u64,
+}
+
+/// Re-run only the session-index title enrichment over a cached discovery:
+/// a replaced `session_index.jsonl` invalidates display titles, never tail
+/// evidence or membership.
+pub fn refresh_codex_session_titles(
+    discovery: &mut Discovery,
+    canonical_home: &Path,
+) -> Result<(), String> {
+    let codex = domain::ProviderKey::parse("codex")?;
+    let ids = discovery
+        .resources
+        .values()
+        .filter_map(|resource| resource.conversation.as_ref())
+        .filter(|conversation| conversation.provider == codex)
+        .map(|conversation| conversation.provider_session_id.clone())
+        .collect::<BTreeSet<_>>();
+    let index = canonical_home.join("session_index.jsonl");
+    let titles = if !ids.is_empty() && index.is_file() {
+        crate::providers::codex::history::parse_session_index_titles(&filter_jsonl_by_ids(
+            &index, &ids,
+        )?)
+    } else {
+        BTreeMap::new()
+    };
+    for resource in discovery.resources.values_mut() {
+        let Some(conversation) = &resource.conversation else {
+            continue;
+        };
+        if conversation.provider != codex {
+            continue;
+        }
+        resource.descriptor.display_name = titles
+            .get(&conversation.provider_session_id)
+            .cloned()
+            .unwrap_or_else(|| conversation.provider_session_id.clone());
+    }
+    Ok(())
+}
+
+/// Project the discovery's conversation candidates into metadata-only
+/// session views. A source that fails its fresh no-follow stat becomes a
+/// blocked view, matching the row discovery would have blocked.
+pub fn local_session_views(discovery: &Discovery) -> Vec<LocalSessionView> {
+    let mut views = Vec::new();
+    for resource in discovery.resources.values() {
+        let Some(conversation) = &resource.conversation else {
+            continue;
+        };
+        let Some(source) = resource
+            .files
+            .iter()
+            .find(|file| file.logical_path == conversation.transcript_logical_path)
+        else {
+            continue;
+        };
+        let mut descriptor = resource.descriptor.clone();
+        let (source_mtime, source_size) = match fs::symlink_metadata(&source.physical_path) {
+            Ok(meta) if meta.is_file() => (modified_secs(&meta), meta.len()),
+            _ => {
+                if descriptor.blocked_reason.is_none() {
+                    descriptor.blocked_reason =
+                        Some("session file is no longer readable".to_string());
+                }
+                (0, 0)
+            }
+        };
+        views.push(LocalSessionView {
+            provider: conversation.provider.clone(),
+            provider_thread_id: conversation.provider_session_id.clone(),
+            transcript_logical_path: conversation.transcript_logical_path.clone(),
+            source_path: source.physical_path.clone(),
+            source_mtime,
+            source_size,
+            descriptor,
+        });
+    }
+    views
 }
 
 fn domain_kind(kind: &CaptureResourceKind) -> domain::ResourceKind {
@@ -902,6 +1020,7 @@ fn install_provider_discovery(
                 files,
                 conversation: Some(DiscoveredConversationMeta {
                     provider: provider.clone(),
+                    provider_session_id: session.session_id,
                     transcript_logical_path: transcript_logical,
                     sidecars: sidecar_refs,
                 }),
@@ -1479,6 +1598,7 @@ pub fn scan_session_metadata_with(
     path: &Path,
     spec: &MetadataScanSpec,
 ) -> Result<crate::providers::SessionFileMetadata, String> {
+    crate::sync_metrics::record_file_head_read(path);
     let file = fs::File::open(path).map_err(|e| format!("open: {}", e))?;
     let mut reader = BufReader::new(file);
     let mut total = 0_usize;
@@ -2015,6 +2135,9 @@ fn is_windows_reserved(component: &str) -> bool {
 }
 
 pub(crate) fn provider_walk_entry(entry: &DirEntry) -> bool {
+    if entry.file_type().is_dir() {
+        crate::sync_metrics::record_directory_visited(entry.path());
+    }
     if entry.depth() == 0 || !entry.file_type().is_dir() {
         return true;
     }

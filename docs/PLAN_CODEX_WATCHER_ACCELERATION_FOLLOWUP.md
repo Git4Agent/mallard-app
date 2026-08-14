@@ -1,6 +1,6 @@
 # Plan: Codex watcher-backed observation reuse
 
-- Status: Proposed
+- Status: Implemented (August 13, 2026); section 14 records the deltas
 - Date: August 13, 2026
 - Scope: Codex session discovery, local-tail observation, Refresh, Push/Pull
   review, one process-local filesystem watcher, and bounded runtime caches
@@ -594,3 +594,70 @@ Rejected: ancestor dependency maps, per-path generation counters, and
 observation input fingerprints from the earlier draft — leaf-scoped
 invalidation matches the authoritative cursor path's sensitivity (section
 3), and in-process revisions are known exactly without fingerprints.
+
+## 14. Implementation deltas
+
+The implementation landed as planned with these recorded differences:
+
+1. Service ownership: `codex_watch_service.rs` holds the service in a
+   process-lifetime static rather than `lib.rs`-managed Tauri state — the
+   service needs no app handle, and a static is the same lifetime with less
+   machinery.
+2. Test backend: notify's `PollWatcher` manual polling is asynchronous (a
+   `poll()` only signals its internal thread), which cannot give tests
+   deterministic delivery. The test backend is instead a synchronous
+   in-service scanner that diffs file contents on every drain (length-only
+   past the conversation bound), so a mutation between two operations is
+   always visible to the second one. Production uses the platform watcher
+   unchanged.
+3. Observation dependencies are stored per entry: a cursor-derived
+   observation depends on its leaf alone (the planned sensitivity), and a
+   full-resolve-derived one lists its complete segment chain, making
+   checkpoint-less local-only threads cacheable with correct ancestor
+   sensitivity — slightly stronger than the leaf-only rule in section 3.
+4. Reuse with dirty roots re-stats exactly the dirty paths to keep row
+   presentation stamps (mtime/size) fresh and to catch a source that grew
+   past the conversation bound, which forces rediscovery so the blocked row
+   detail is stage-independent (section 5 parity). A fully quiet reuse
+   still performs no filesystem work at all, which the counter tests pin.
+5. The inventory cache covers pure-Codex requests (exactly one provider
+   home, no project content). Mixed-provider bindings run bounded discovery
+   every time, though their Codex observations still reuse; providers
+   without a cursor codec are always captured for their tail evidence.
+6. Candidate selection is decision-driven: one classification pass (served
+   from the caches when quiet) runs with actions disabled, then push
+   captures its selectable local rows ({Publish, CreateCloud}) and pull its
+   selectable byte-pinning local rows ({MaterializeCloud, KeepBoth}), and
+   the final pass builds actions from the captured bytes. The caches make
+   the second pass free.
+7. AdoptCloudMetadata no longer pins local bytes on either side: review
+   leaves its `expected_local_target` Absent and apply derives Absent for
+   that action type, since adopting metadata neither reads nor writes the
+   local transcript. Every other reviewed-without-bytes row also pins
+   Absent, which makes any out-of-contract apply attempt fail the
+   stale-pin check instead of running.
+8. Checkpoint maintenance additionally skips byte-identical replacements
+   (no generation churn on full-resolve no-ops) and never writes for
+   unbound threads — those cache their observations process-locally
+   instead, under full-resolve dependencies.
+9. Benchmarks: the instrumentation counters attribute work by registered
+   root for the tests, and `MALLARD_SYNC_METRICS=1` prints per-refresh
+   counter deltas for the real-profile benchmark, which remains to be run
+   on the measured 31-session machine.
+10. Candidate byte pins ride the watcher too. The first real-profile run
+    showed the worst case the candidate rule alone cannot help: a backlog
+    where every thread is pushable captures everything on every review.
+    The service therefore also caches each captured candidate's frozen
+    `expected_local_target` digest keyed by its transcript path; a quiet
+    review serves the pin with no reads, and a dirty candidate recaptures.
+    A served-stale pin (silently dropped event) makes apply fail the
+    stale-pin check — the same contract-rule-4 blast radius as every other
+    reuse. Two supporting rules came out of its tests: every path the
+    service stores is canonicalized at the store boundary (macOS tempdir
+    aliasing otherwise splits dirty paths from dependency paths), and
+    clearing a dirty path on observation store evicts every other cached
+    derivation of that path (candidate pins, other storages'
+    observations) so nothing rides a flag another scope consumed.
+    Advisory secret warnings for candidates surface when a candidate is
+    actually captured — the first review and any review after its
+    transcript changed — extending the section 5 advisory semantics.

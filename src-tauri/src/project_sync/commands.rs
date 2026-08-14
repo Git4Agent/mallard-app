@@ -4128,6 +4128,17 @@ pub(crate) struct LocalThreadReview {
     pub(crate) binding_resolution: BindingResolution,
     pub(crate) resource_id: ResourceId,
     pub(crate) descriptor: Option<ResourceDescriptor>,
+    pub(crate) provider_thread_id: String,
+    pub(crate) source_path: PathBuf,
+    pub(crate) source_mtime: u64,
+    pub(crate) captured: Option<CapturedThread>,
+}
+
+/// Captured transcript bytes attached to a reviewed local thread when a
+/// capture selected it: always for providers without a cursor codec, and
+/// only for byte-pinning work on providers with one.
+#[derive(Clone)]
+pub(crate) struct CapturedThread {
     pub(crate) conversation: provider_capture::CapturedConversation,
     pub(crate) transcript: provider_capture::CapturedFile,
 }
@@ -4195,7 +4206,9 @@ fn thread_review(
     repository: &LocalStateRepository,
     snapshot: Option<&BundleSnapshot>,
     bytes: &mut dyn BundleBytes,
+    views: &[provider_capture::LocalSessionView],
     captured: &provider_capture::CapturedResources,
+    candidate_pins: &BTreeMap<String, TargetExpectation>,
     resolved: &ResolvedBinding,
     storage_id: Option<&StorageId>,
     created_at: u64,
@@ -4223,7 +4236,9 @@ fn thread_review(
                 repository,
                 snapshot,
                 bytes,
+                views,
                 captured,
+                candidate_pins,
                 resolved,
                 provider,
                 Path::new(home),
@@ -4338,11 +4353,21 @@ fn synthesized_whole_thread_tail(
     }
 }
 
+/// A worker's complete observation outcome.
+pub(crate) struct CodexLocalObservation {
+    observation: LocalTailObservation,
+    seeded: Option<CodexSeededRoot>,
+    /// Physical files the derivation read; empty when the outcome must not
+    /// be retained by the watch service.
+    depends_on: Vec<PathBuf>,
+}
+
 /// A parallel observation worker's slot value.
-type ObservationOutcome = Result<(LocalTailObservation, Option<CodexSeededRoot>), String>;
+type ObservationOutcome = Result<CodexLocalObservation, String>;
 
 /// One reviewed thread's derived local state.
-struct LocalTailObservation {
+#[derive(Clone)]
+pub(crate) struct LocalTailObservation {
     evidence: TailSideEvidence,
     /// The checkpoint-format raw range pin for a publishing plan.
     raw_range_pin: Option<RawRangePin>,
@@ -4370,29 +4395,19 @@ fn observe_codex_local(
     layout: Option<&RootTailLayout>,
     provider_home: &Path,
     adoption_probe: Option<&PortableConversationTail>,
-) -> Result<(LocalTailObservation, Option<CodexSeededRoot>), String> {
+) -> Result<CodexLocalObservation, String> {
     let Some(local) = local else {
-        return Ok((
-            LocalTailObservation {
+        return Ok(CodexLocalObservation {
+            observation: LocalTailObservation {
                 evidence: TailSideEvidence::ConfirmedAbsent,
                 raw_range_pin: None,
                 verified_prefix_tail: None,
             },
-            None,
-        ));
+            seeded: None,
+            depends_on: Vec::new(),
+        });
     };
-    // A capture without a machine-local source cannot prove any tail; the
-    // row fails closed by itself instead of failing the provider review.
-    let Ok(source) = captured_transcript_source(&local.conversation) else {
-        return Ok((
-            LocalTailObservation {
-                evidence: TailSideEvidence::Invalid,
-                raw_range_pin: None,
-                verified_prefix_tail: None,
-            },
-            None,
-        ));
-    };
+    let source = local.source_path.clone();
     let lookup = codex_rollout_lookup(provider_home);
 
     // A valid Ready checkpoint under a matching layout rides the cursor;
@@ -4407,36 +4422,39 @@ fn observe_codex_local(
             if layout.matches(&checkpoint.observed_tail)
                 && root_mapping.root_path == source.to_string_lossy()
             {
-                let current = match codex_history_graph::read_rollout_bounded(&source) {
-                    Ok(bytes) => bytes,
-                    Err(_) => {
-                        return Ok((
-                            LocalTailObservation {
-                                evidence: TailSideEvidence::Invalid,
-                                raw_range_pin: None,
-                                verified_prefix_tail: None,
-                            },
-                            None,
-                        ))
-                    }
-                };
+                let tail =
+                    match codex_history_graph::read_rollout_tail_window(&source, root_mapping) {
+                        Ok(tail) => tail,
+                        Err(_) => {
+                            return Ok(CodexLocalObservation {
+                                observation: LocalTailObservation {
+                                    evidence: TailSideEvidence::Invalid,
+                                    raw_range_pin: None,
+                                    verified_prefix_tail: None,
+                                },
+                                seeded: None,
+                                depends_on: Vec::new(),
+                            })
+                        }
+                    };
                 match codex_history_graph::refresh_codex_tail(
                     layout,
                     &checkpoint.observed_tail,
                     root_mapping,
-                    &current,
+                    &tail,
                 )? {
                     codex_history_graph::CodexTailRefresh::Unchanged => {
-                        return Ok((
-                            LocalTailObservation {
+                        return Ok(CodexLocalObservation {
+                            observation: LocalTailObservation {
                                 evidence: TailSideEvidence::Present(
                                     checkpoint.observed_tail.clone(),
                                 ),
                                 raw_range_pin: Some(raw_range_pin.clone()),
                                 verified_prefix_tail: None,
                             },
-                            None,
-                        ));
+                            seeded: None,
+                            depends_on: vec![source.clone()],
+                        });
                     }
                     codex_history_graph::CodexTailRefresh::Extended {
                         observed_tail,
@@ -4451,24 +4469,64 @@ fn observe_codex_local(
                             })
                             .unwrap_or(raw_range_pin.start_byte_offset);
                         let range_start = accepted_end.min(mapping.consumed_byte_offset);
+                        // Re-prove the accepted-to-current interval. Bytes at
+                        // or past the tail window are already trusted from
+                        // the fold; an earlier range start needs one bounded
+                        // range read whose overlap with the window must match
+                        // byte-for-byte, else the file raced and the
+                        // observation fails closed.
+                        let range_bytes = if range_start >= tail.window_offset {
+                            tail.bytes[(range_start - tail.window_offset) as usize
+                                ..(mapping.consumed_byte_offset - tail.window_offset) as usize]
+                                .to_vec()
+                        } else {
+                            let range = match codex_history_graph::read_rollout_range(
+                                &source,
+                                range_start,
+                                mapping.consumed_byte_offset,
+                            ) {
+                                Ok(range) => range,
+                                Err(_) => {
+                                    return Ok(CodexLocalObservation {
+                                        observation: LocalTailObservation {
+                                            evidence: TailSideEvidence::Invalid,
+                                            raw_range_pin: None,
+                                            verified_prefix_tail: None,
+                                        },
+                                        seeded: None,
+                                        depends_on: Vec::new(),
+                                    })
+                                }
+                            };
+                            let overlap_from = (tail.window_offset - range_start) as usize;
+                            let trusted = &tail.bytes
+                                [..(mapping.consumed_byte_offset - tail.window_offset) as usize];
+                            if &range[overlap_from..] != trusted {
+                                return Ok(CodexLocalObservation {
+                                    observation: LocalTailObservation {
+                                        evidence: TailSideEvidence::Invalid,
+                                        raw_range_pin: None,
+                                        verified_prefix_tail: None,
+                                    },
+                                    seeded: None,
+                                    depends_on: Vec::new(),
+                                });
+                            }
+                            range
+                        };
+                        super::sync_metrics::record_bytes_hashed(&source, range_bytes.len() as u64);
                         let pin = RawRangePin {
                             start_byte_offset: range_start,
                             end_byte_offset: mapping.consumed_byte_offset,
-                            range_sha256: hex_digest(
-                                Sha256::digest(
-                                    &current[range_start as usize
-                                        ..mapping.consumed_byte_offset as usize],
-                                )
-                                .as_slice(),
-                            ),
+                            range_sha256: hex_digest(Sha256::digest(&range_bytes).as_slice()),
                         };
-                        return Ok((
-                            LocalTailObservation {
+                        return Ok(CodexLocalObservation {
+                            observation: LocalTailObservation {
                                 evidence: TailSideEvidence::Present(observed_tail.clone()),
                                 raw_range_pin: Some(pin.clone()),
                                 verified_prefix_tail: None,
                             },
-                            Some(CodexSeededRoot {
+                            seeded: Some(CodexSeededRoot {
                                 layout: layout.clone(),
                                 observed_tail,
                                 prefix_witness: checkpoint.prefix_witness.clone(),
@@ -4476,17 +4534,19 @@ fn observe_codex_local(
                                 lineage_digest: String::new(),
                                 semantic_digest: String::new(),
                             }),
-                        ));
+                            depends_on: vec![source.clone()],
+                        });
                     }
                     codex_history_graph::CodexTailRefresh::Invalid { .. } => {
-                        return Ok((
-                            LocalTailObservation {
+                        return Ok(CodexLocalObservation {
+                            observation: LocalTailObservation {
                                 evidence: TailSideEvidence::Invalid,
                                 raw_range_pin: None,
                                 verified_prefix_tail: None,
                             },
-                            None,
-                        ));
+                            seeded: None,
+                            depends_on: Vec::new(),
+                        });
                     }
                 }
             }
@@ -4497,14 +4557,15 @@ fn observe_codex_local(
     let resolved = match codex_history_graph::resolve_codex_root(&source, &lookup) {
         Ok(resolved) => resolved,
         Err(_) => {
-            return Ok((
-                LocalTailObservation {
+            return Ok(CodexLocalObservation {
+                observation: LocalTailObservation {
                     evidence: TailSideEvidence::Invalid,
                     raw_range_pin: None,
                     verified_prefix_tail: None,
                 },
-                None,
-            ))
+                seeded: None,
+                depends_on: Vec::new(),
+            })
         }
     };
     // The stored layout stays authoritative — including a paginated layout
@@ -4513,14 +4574,15 @@ fn observe_codex_local(
     let Ok((effective_kind, effective_start)) =
         codex_history_graph::effective_tail_partition(layout, &resolved)
     else {
-        return Ok((
-            LocalTailObservation {
+        return Ok(CodexLocalObservation {
+            observation: LocalTailObservation {
                 evidence: TailSideEvidence::Invalid,
                 raw_range_pin: None,
                 verified_prefix_tail: None,
             },
-            None,
-        ));
+            seeded: None,
+            depends_on: Vec::new(),
+        });
     };
     // First-contact adoption: an unpinned cloud tail that refolds exactly at
     // its recorded end over this canonical chain is a proven prefix of the
@@ -4565,14 +4627,19 @@ fn observe_codex_local(
             .as_slice(),
         ),
     };
-    Ok((
-        LocalTailObservation {
+    Ok(CodexLocalObservation {
+        observation: LocalTailObservation {
             evidence: TailSideEvidence::Present(seeded.observed_tail.clone()),
             raw_range_pin: Some(pin),
             verified_prefix_tail,
         },
-        Some(seeded),
-    ))
+        seeded: Some(seeded),
+        depends_on: resolved
+            .segments
+            .iter()
+            .map(|segment| segment.path.clone())
+            .collect(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4580,7 +4647,9 @@ fn provider_thread_review(
     repository: &LocalStateRepository,
     snapshot: Option<&BundleSnapshot>,
     bytes: &mut dyn BundleBytes,
+    views: &[provider_capture::LocalSessionView],
     captured: &provider_capture::CapturedResources,
+    candidate_pins: &BTreeMap<String, TargetExpectation>,
     resolved: &ResolvedBinding,
     provider: &ProviderKey,
     provider_home: &Path,
@@ -4645,18 +4714,49 @@ fn provider_thread_review(
             })
             .collect::<BTreeMap<_, _>>();
         let mut local_threads = BTreeMap::<ThreadId, LocalThreadReview>::new();
-        for (resource_id_text, conversation) in &captured.conversations {
-            if &conversation.provider != provider {
+        // Every local row starts from bounded discovery metadata; captured
+        // bytes attach when a capture selected the session. Identity comes
+        // from the captured analysis when bytes are present (the stricter
+        // reading) and from the bounded head scan otherwise.
+        for view in views {
+            if &view.provider != provider || view.descriptor.blocked_reason.is_some() {
                 continue;
             }
-            let provider_thread_id =
-                conversation.source_thread_id.as_deref().ok_or_else(|| {
-                    format!(
-                        "captured {} conversation lacks an active session id",
-                        provider_label
-                    )
-                })?;
-            let local_binding = by_provider.get(provider_thread_id).cloned();
+            let resource_id_text = view.descriptor.resource_id.as_str();
+            let captured_thread = captured
+                .conversations
+                .get(resource_id_text)
+                .map(|conversation| -> Result<CapturedThread, String> {
+                    let transcript = captured
+                        .files
+                        .get(&conversation.transcript_logical_path)
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!(
+                                "captured conversation '{}' has no transcript payload",
+                                resource_id_text
+                            )
+                        })?;
+                    Ok(CapturedThread {
+                        conversation: conversation.clone(),
+                        transcript,
+                    })
+                })
+                .transpose()?;
+            let provider_thread_id = match &captured_thread {
+                Some(captured_thread) => captured_thread
+                    .conversation
+                    .source_thread_id
+                    .clone()
+                    .ok_or_else(|| {
+                        format!(
+                            "captured {} conversation lacks an active session id",
+                            provider_label
+                        )
+                    })?,
+                None => view.provider_thread_id.clone(),
+            };
+            let local_binding = by_provider.get(&provider_thread_id).cloned();
             let (logical_thread_id, binding_resolution) = match &local_binding {
                 Some(local_binding) => {
                     (local_binding.thread_id.clone(), BindingResolution::Bound)
@@ -4668,7 +4768,7 @@ fn provider_thread_review(
                     initial_conversation_thread_id(
                         &binding.bundle_id,
                         provider,
-                        provider_thread_id,
+                        &provider_thread_id,
                     )?,
                     BindingResolution::Missing,
                 ),
@@ -4679,18 +4779,14 @@ fn provider_thread_review(
                     provider_label, logical_thread_id
                 ));
             }
-            let resource_id = ResourceId::parse(resource_id_text.clone())?;
-            let descriptor = domain_resources.get(&resource_id).cloned();
-            let transcript = captured
-                .files
-                .get(&conversation.transcript_logical_path)
-                .cloned()
-                .ok_or_else(|| {
-                    format!(
-                        "captured conversation '{}' has no transcript payload",
-                        resource_id
-                    )
-                })?;
+            let resource_id = ResourceId::parse(resource_id_text.to_string())?;
+            let descriptor = match domain_resources.get(&resource_id).cloned() {
+                Some(descriptor) => Some(descriptor),
+                None => Some(provider_capture::domain_resource_descriptor(
+                    &view.descriptor,
+                    None,
+                )?),
+            };
             local_threads.insert(
                 logical_thread_id.clone(),
                 LocalThreadReview {
@@ -4698,8 +4794,10 @@ fn provider_thread_review(
                     binding_resolution,
                     resource_id,
                     descriptor,
-                    conversation: conversation.clone(),
-                    transcript,
+                    provider_thread_id,
+                    source_path: view.source_path.clone(),
+                    source_mtime: view.source_mtime,
+                    captured: captured_thread,
                 },
             );
         }
@@ -4720,9 +4818,7 @@ fn provider_thread_review(
             if local_binding.root_tail_layout.is_some() {
                 continue;
             }
-            let Ok(source) = captured_transcript_source(&local.conversation) else {
-                continue;
-            };
+            let source = local.source_path.clone();
             let lookup = codex_rollout_lookup(provider_home);
             let Ok(resolved_root) = codex_history_graph::resolve_codex_root(&source, &lookup)
             else {
@@ -4881,10 +4977,9 @@ fn provider_thread_review(
         (true, Some(path)) => Some(bounded_file_expectation(path)?),
         _ => None,
     };
-    let mut occupied_provider_ids = captured
-        .conversations
+    let mut occupied_provider_ids = local_threads
         .values()
-        .filter_map(|conversation| conversation.source_thread_id.clone())
+        .map(|local| local.provider_thread_id.clone())
         .collect::<BTreeSet<_>>();
     let mut entries = Vec::new();
     let mut push_actions = Vec::new();
@@ -4910,6 +5005,8 @@ fn provider_thread_review(
     // completes, so the earliest failing thread's error is reported at
     // every worker count, exactly like the serial loop this replaces.
     let mut codex_observations: BTreeMap<ThreadId, LocalTailObservation> = BTreeMap::new();
+    let mut codex_refreshed: BTreeMap<ThreadId, CodexSeededRoot> = BTreeMap::new();
+    let mut codex_deps: BTreeMap<ThreadId, Vec<PathBuf>> = BTreeMap::new();
     if is_codex {
         let observation_tasks: Vec<_> = thread_ids
             .iter()
@@ -4934,9 +5031,48 @@ fn provider_thread_review(
                             .and_then(|thread| thread.portable_tail.as_ref())
                     })
                     .flatten();
-                Some((thread_id, local, checkpoint, layout, adoption_probe))
+                Some((
+                    thread_id,
+                    local,
+                    checkpoint,
+                    layout,
+                    adoption_probe,
+                    local_binding.map(|binding| binding.revision),
+                ))
             })
             .collect();
+        // Cache-eligible tasks (a local source, no adoption probe) consult
+        // the watch service first: a served thread performs no filesystem
+        // work at all. Misses and ineligible tasks run the bounded worker
+        // pool exactly as before, in thread-ID order.
+        let cached: BTreeMap<ThreadId, LocalTailObservation> = match storage_id {
+            Some(storage_id) => {
+                let queries: Vec<_> = observation_tasks
+                    .iter()
+                    .filter(|(_, local, _, _, probe, _)| local.is_some() && probe.is_none())
+                    .map(|(thread_id, _, checkpoint, _, _, binding_revision)| {
+                        super::codex_watch_service::ObservationQuery {
+                            thread_id: (**thread_id).clone(),
+                            checkpoint_generation: checkpoint
+                                .map(|checkpoint| checkpoint.generation),
+                            binding_revision: *binding_revision,
+                        }
+                    })
+                    .collect();
+                super::codex_watch_service::codex_watch_service().take_reusable_observations(
+                    provider_home,
+                    &binding.local_project_id,
+                    storage_id,
+                    &queries,
+                )
+            }
+            None => BTreeMap::new(),
+        };
+        let observation_tasks: Vec<_> = observation_tasks
+            .into_iter()
+            .filter(|(thread_id, ..)| !cached.contains_key(*thread_id))
+            .collect();
+        codex_observations.extend(cached);
         let mut slots: Vec<std::sync::OnceLock<ObservationOutcome>> = observation_tasks
             .iter()
             .map(|_| std::sync::OnceLock::new())
@@ -4954,7 +5090,8 @@ fn provider_thread_review(
                             break;
                         }
                         let index = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some((_, local, checkpoint, layout, probe)) = tasks.get(index) else {
+                        let Some((_, local, checkpoint, layout, probe, _)) = tasks.get(index)
+                        else {
                             break;
                         };
                         let outcome = observe_codex_local(
@@ -4973,10 +5110,158 @@ fn provider_thread_review(
             });
         }
         for ((thread_id, ..), slot) in observation_tasks.iter().zip(slots.iter_mut()) {
-            let (observation, _) = slot
+            let CodexLocalObservation {
+                observation,
+                seeded,
+                depends_on,
+            } = slot
                 .take()
                 .expect("in-order dispatch settles every slot before the first failure")?;
+            if let Some(seeded) = seeded {
+                codex_refreshed.insert((*thread_id).clone(), seeded);
+            }
+            if !depends_on.is_empty() {
+                codex_deps.insert((*thread_id).clone(), depends_on);
+            }
             codex_observations.insert((*thread_id).clone(), observation);
+        }
+    }
+
+    // Checkpoint maintenance: persist each advanced observation so the next
+    // Refresh rides the new cursor instead of re-deriving from the last
+    // applied pin. Generation compare-and-swap skips any checkpoint a
+    // concurrent operation moved, a Detached mapping is never reattached by
+    // observation, byte-identical replacements are skipped, and `accepted`
+    // never changes here.
+    let mut maintained: BTreeMap<ThreadId, u64> = BTreeMap::new();
+    if let Some(storage_id) = storage_id {
+        for (thread_id, seeded) in &codex_refreshed {
+            let Some(pin) = codex_observations
+                .get(thread_id)
+                .and_then(|observation| observation.raw_range_pin.clone())
+            else {
+                continue;
+            };
+            let Some(local_binding) = local_threads
+                .get(thread_id)
+                .and_then(|local| local.binding.as_ref())
+                .or_else(|| bindings_by_thread.get(thread_id))
+            else {
+                continue;
+            };
+            let stored = checkpoints.get(thread_id);
+            if matches!(
+                stored.map(|checkpoint| &checkpoint.physical),
+                Some(PhysicalMappingState::Detached { .. })
+            ) {
+                continue;
+            }
+            let replacement = ConversationCheckpoint {
+                generation: stored
+                    .map(|checkpoint| checkpoint.generation.saturating_add(1))
+                    .unwrap_or(0),
+                accepted: stored.and_then(|checkpoint| checkpoint.accepted.clone()),
+                observed_tail: seeded.observed_tail.clone(),
+                physical: PhysicalMappingState::Ready {
+                    root_mapping: seeded.mapping.clone(),
+                    raw_range_pin: pin,
+                },
+                prefix_witness: seeded.prefix_witness.clone(),
+                binding_revision: local_binding.revision,
+            };
+            if stored.is_some_and(|checkpoint| {
+                checkpoint.observed_tail == replacement.observed_tail
+                    && checkpoint.physical == replacement.physical
+                    && checkpoint.prefix_witness == replacement.prefix_witness
+                    && checkpoint.binding_revision == replacement.binding_revision
+            }) {
+                continue;
+            }
+            let expected_generation = stored.map(|checkpoint| checkpoint.generation);
+            let scope = SyncScopeKey::Provider(provider.clone());
+            let thread_id = thread_id.clone();
+            let replacement_generation = replacement.generation;
+            let persisted = repository.mutate_config(|config| {
+                let Some(link) = config.links.iter_mut().find(|link| {
+                    link.local_project_id == binding.local_project_id
+                        && &link.storage_id == storage_id
+                }) else {
+                    return Ok(false);
+                };
+                let threads = link
+                    .conversation_checkpoints
+                    .entry(scope.clone())
+                    .or_default();
+                match (threads.get(&thread_id), expected_generation) {
+                    (Some(stored), Some(expected)) if stored.generation == expected => {
+                        threads.insert(thread_id.clone(), replacement.clone());
+                        Ok(true)
+                    }
+                    (None, None) => {
+                        threads.insert(thread_id.clone(), replacement.clone());
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
+            })?;
+            if persisted {
+                maintained.insert(thread_id, replacement_generation);
+            }
+        }
+    }
+
+    // Retain freshly derived observations for the next operation, keyed by
+    // the post-maintenance checkpoint generation and validated against the
+    // watcher's dirty paths. Adoption-probe threads are never retained: a
+    // thread without accepted evidence re-proves its refold every review
+    // while a cloud tail exists for it.
+    if let Some(storage_id) = storage_id {
+        if is_codex && !codex_deps.is_empty() {
+            let stored: Vec<_> = codex_deps
+                .iter()
+                .filter_map(|(thread_id, depends_on)| {
+                    let observation = codex_observations.get(thread_id)?;
+                    if !matches!(observation.evidence, TailSideEvidence::Present(_)) {
+                        return None;
+                    }
+                    let local = local_threads.get(thread_id)?;
+                    let checkpoint = checkpoints.get(thread_id);
+                    let probe_active = checkpoint
+                        .and_then(|checkpoint| checkpoint.accepted.as_ref())
+                        .is_none()
+                        && provider_scope
+                            .and_then(|scope| scope.conversations.get(thread_id))
+                            .and_then(|thread| thread.portable_tail.as_ref())
+                            .is_some();
+                    if probe_active {
+                        return None;
+                    }
+                    let local_binding = local
+                        .binding
+                        .as_ref()
+                        .or_else(|| bindings_by_thread.get(thread_id));
+                    let checkpoint_generation = match maintained.get(thread_id) {
+                        Some(generation) => Some(*generation),
+                        None => checkpoint.map(|checkpoint| checkpoint.generation),
+                    };
+                    Some(super::codex_watch_service::StoredObservation {
+                        thread_id: thread_id.clone(),
+                        source_path: local.source_path.clone(),
+                        depends_on: depends_on.clone(),
+                        checkpoint_generation,
+                        binding_revision: local_binding.map(|binding| binding.revision),
+                        observation: observation.clone(),
+                    })
+                })
+                .collect();
+            if !stored.is_empty() {
+                super::codex_watch_service::codex_watch_service().store_observations(
+                    provider_home,
+                    &binding.local_project_id,
+                    storage_id,
+                    stored,
+                );
+            }
         }
     }
 
@@ -5029,9 +5314,21 @@ fn provider_thread_review(
                 .remove(&thread_id)
                 .ok_or_else(|| "codex local observation missing for reviewed thread".to_string())?
         } else {
-            let evidence = match local {
+            // Providers without a cursor codec prove their tail from
+            // captured bytes; a local row without them cannot happen in a
+            // correctly assembled review and fails the provider closed.
+            let captured = match local {
+                None => None,
+                Some(local) => Some(local.captured.as_ref().ok_or_else(|| {
+                    format!(
+                        "{} conversation was reviewed without captured bytes",
+                        provider_label
+                    )
+                })?),
+            };
+            let evidence = match captured {
                 None => TailSideEvidence::ConfirmedAbsent,
-                Some(local) => match &local.conversation.lineage {
+                Some(captured) => match &captured.conversation.lineage {
                     CodecLineage::Complete {
                         chain,
                         semantic_digest,
@@ -5046,10 +5343,10 @@ fn provider_thread_review(
             };
             LocalTailObservation {
                 evidence,
-                raw_range_pin: local.map(|local| RawRangePin {
+                raw_range_pin: captured.map(|captured| RawRangePin {
                     start_byte_offset: 0,
-                    end_byte_offset: local.transcript.bytes.len() as u64,
-                    range_sha256: hex_digest(Sha256::digest(&local.transcript.bytes).as_slice()),
+                    end_byte_offset: captured.transcript.bytes.len() as u64,
+                    range_sha256: hex_digest(Sha256::digest(&captured.transcript.bytes).as_slice()),
                 }),
                 verified_prefix_tail: None,
             }
@@ -5089,8 +5386,12 @@ fn provider_thread_review(
         let local_capturable = if is_codex {
             local.is_some() && matches!(&local_observation.evidence, TailSideEvidence::Present(_))
         } else {
-            local.is_some_and(|local| local.conversation.lineage.is_complete())
-                && !matches!(local_observation.evidence, TailSideEvidence::Invalid)
+            local.is_some_and(|local| {
+                local
+                    .captured
+                    .as_ref()
+                    .is_some_and(|captured| captured.conversation.lineage.is_complete())
+            }) && !matches!(local_observation.evidence, TailSideEvidence::Invalid)
         };
         let cloud_readable = thread.is_some_and(|thread| {
             matches!(thread.lineage_status, ConversationLineageStatus::Complete)
@@ -5131,7 +5432,7 @@ fn provider_thread_review(
             .map(|local| local.resource_id.clone())
             .or_else(|| thread.map(|thread| thread.resource_id.clone()));
         let provider_thread_id = local
-            .and_then(|local| local.conversation.source_thread_id.clone())
+            .map(|local| local.provider_thread_id.clone())
             .or_else(|| local_binding.and_then(|binding| binding.provider_thread_id.clone()));
         let origin_label = thread
             .and_then(|thread| {
@@ -5195,7 +5496,7 @@ fn provider_thread_review(
                     (relation == TailClassification::Unknown)
                         .then(|| "Conversation state could not be proven safely.".to_string())
                 }),
-            local_updated_at: local.map(|local| local.transcript.source_mtime),
+            local_updated_at: local.map(|local| local.source_mtime),
             storage_updated_at: thread.map(|thread| thread.updated_at),
             cloud_thread_id: Some(thread_id.clone()),
             forked_from: thread
@@ -5211,16 +5512,29 @@ fn provider_thread_review(
         if !build_push_actions && !build_pull_actions {
             continue;
         }
+        // Executable actions freeze the local target from captured bytes,
+        // or from the watcher-clean pin a previous capture froze. A local
+        // row reviewed without either can only produce non-selectable
+        // actions; its Absent pin makes any out-of-contract apply attempt
+        // fail the stale-pin check instead of running.
         let expected_local_target = local
-            .map(|local| {
+            .and_then(|local| local.captured.as_ref())
+            .map(|captured| {
                 TargetExpectation::Sha256(hex_digest(
-                    Sha256::digest(&local.transcript.bytes).as_slice(),
+                    Sha256::digest(&captured.transcript.bytes).as_slice(),
                 ))
+            })
+            .or_else(|| {
+                local.and_then(|local| candidate_pins.get(local.resource_id.as_str()).cloned())
             })
             .unwrap_or(TargetExpectation::Absent);
         let required_codec = thread
             .map(|thread| thread.lineage_codec.clone())
-            .or_else(|| local.map(|local| local.conversation.lineage_codec.clone()))
+            .or_else(|| {
+                local
+                    .and_then(|local| local.captured.as_ref())
+                    .map(|captured| captured.conversation.lineage_codec.clone())
+            })
             .unwrap_or_else(|| adapter.codec_key().to_string());
         let accepted_tail_pin = match &accepted_evidence {
             TailSideEvidence::Present(tail) => Some(tail.clone()),
@@ -5298,7 +5612,7 @@ fn provider_thread_review(
                     let local = local.ok_or_else(|| {
                         "cloud materialization lacks a captured local state".to_string()
                     })?;
-                    let target = captured_transcript_source(&local.conversation)?;
+                    let target = local.source_path.clone();
                     expected_provider_state.push(ProviderStateExpectation {
                         target_path: target.to_string_lossy().into_owned(),
                         expectation: bounded_file_expectation(&target)?,
@@ -5351,7 +5665,7 @@ fn provider_thread_review(
                     let local = local.ok_or_else(|| {
                         "conversation keep-both lacks a captured local branch".to_string()
                     })?;
-                    let target = captured_transcript_source(&local.conversation)?;
+                    let target = local.source_path.clone();
                     expected_provider_state.push(ProviderStateExpectation {
                         target_path: target.to_string_lossy().into_owned(),
                         expectation: bounded_file_expectation(&target)?,
@@ -5549,6 +5863,18 @@ fn conversation_sidecar_refs(
 }
 
 #[cfg(test)]
+impl LocalTailObservation {
+    /// Bare observation for the watch service's own suite.
+    pub(crate) fn for_watch_service_tests(evidence: TailSideEvidence) -> Self {
+        Self {
+            evidence,
+            raw_range_pin: None,
+            verified_prefix_tail: None,
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn thread_entries(
     repository: &LocalStateRepository,
     snapshot: &BundleSnapshot,
@@ -5558,11 +5884,56 @@ pub(crate) fn thread_entries(
 ) -> Result<Vec<ThreadSyncEntry>, String> {
     let created_at = now_secs();
     let resolved = resolve_project_binding(repository, binding)?;
+    // Synthesize metadata views from the hand-built capture so tests drive
+    // the review through the same assembly production uses.
+    let views = captured
+        .conversations
+        .iter()
+        .map(
+            |(resource_id, conversation)| provider_capture::LocalSessionView {
+                provider: conversation.provider.clone(),
+                provider_thread_id: conversation.source_thread_id.clone().unwrap_or_default(),
+                transcript_logical_path: conversation.transcript_logical_path.clone(),
+                source_path: conversation
+                    .source_physical_path
+                    .clone()
+                    .unwrap_or_default(),
+                source_mtime: captured
+                    .files
+                    .get(&conversation.transcript_logical_path)
+                    .map(|file| file.source_mtime)
+                    .unwrap_or(0),
+                source_size: captured
+                    .files
+                    .get(&conversation.transcript_logical_path)
+                    .map(|file| file.bytes.len() as u64)
+                    .unwrap_or(0),
+                descriptor: provider_capture::ResourceCandidate {
+                    metadata: BTreeMap::new(),
+                    resource_id: resource_id.clone(),
+                    kind: CaptureResourceKind::Conversation,
+                    provider: Some(conversation.provider.clone()),
+                    provider_resource_type: Some("session".to_string()),
+                    display_name: conversation
+                        .source_thread_id
+                        .clone()
+                        .unwrap_or_else(|| resource_id.clone()),
+                    relative_cwd: None,
+                    apply_policy: provider_capture::CaptureApplyPolicy::SafeFile,
+                    selected_by_default: true,
+                    blocked_reason: None,
+                    logical_paths: vec![conversation.transcript_logical_path.clone()],
+                },
+            },
+        )
+        .collect::<Vec<_>>();
     let review = thread_review(
         repository,
         Some(snapshot),
         bytes,
+        &views,
         captured,
+        &BTreeMap::new(),
         &resolved,
         Some(&snapshot.storage_id),
         created_at,
@@ -5596,6 +5967,7 @@ fn get_project_thread_sync_comparison_with_progress(
     storage_id: &StorageId,
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<ThreadSyncComparison, String> {
+    let metrics_before = super::sync_metrics::global_snapshot();
     let phase_started = Instant::now();
     let config = repository.load_config()?;
     let project = config
@@ -5624,7 +5996,11 @@ fn get_project_thread_sync_comparison_with_progress(
     let phase_started = Instant::now();
     let resolved = resolve_project_binding(repository, &binding)?;
     let capture_request = capture_request_for_binding(repository, &binding)?;
-    let discovery = provider_capture::discover_full(provider_registry(), &capture_request)?;
+    let (discovery, views) = super::codex_watch_service::codex_watch_service().discovery_for(
+        provider_registry(),
+        local_project_id,
+        &capture_request,
+    )?;
     on_phase("discover local state", phase_started.elapsed());
     let phase_started = Instant::now();
     let (_, engine) = storage_engine(repository, storage_id)?;
@@ -5638,7 +6014,7 @@ fn get_project_thread_sync_comparison_with_progress(
         repository_base_from_link(&link).as_ref(),
         &mut continuity_probe(&engine, &project.bundle_id),
     );
-    Ok(build_thread_sync_comparison(
+    let comparison = build_thread_sync_comparison(
         repository,
         local_project_id,
         storage_id,
@@ -5647,18 +6023,106 @@ fn get_project_thread_sync_comparison_with_progress(
         &resolved,
         &capture_request,
         &discovery,
+        &views,
         &engine,
         current.as_ref(),
         false,
         remote_continuity,
         on_phase,
     )?
-    .comparison)
+    .comparison;
+    super::sync_metrics::log_operation_delta("refresh", &metrics_before);
+    Ok(comparison)
 }
 
 struct ThreadComparisonBuild {
     comparison: ThreadSyncComparison,
     push_actions: Vec<ConversationPlanAction>,
+}
+
+/// Split reviewed candidates into watcher-served byte pins and the set that
+/// still needs authoritative capture. Non-Codex candidates always capture.
+fn reuse_candidate_pins(
+    capture_request: &CaptureRequest,
+    local_project_id: &LocalProjectId,
+    views: &[provider_capture::LocalSessionView],
+    base_selection: &BTreeSet<String>,
+    selection: BTreeSet<String>,
+) -> (BTreeSet<String>, BTreeMap<String, TargetExpectation>) {
+    let Some(home) = codex_home_of(capture_request) else {
+        return (selection, BTreeMap::new());
+    };
+    let codex_candidates: BTreeSet<String> = selection
+        .iter()
+        .filter(|resource_id| !base_selection.contains(*resource_id))
+        .filter(|resource_id| {
+            views.iter().any(|view| {
+                view.descriptor.resource_id == **resource_id && view.provider.as_str() == "codex"
+            })
+        })
+        .cloned()
+        .collect();
+    let served = super::codex_watch_service::codex_watch_service().take_reusable_candidate_pins(
+        &home,
+        local_project_id,
+        &codex_candidates,
+    );
+    let remaining = selection
+        .into_iter()
+        .filter(|resource_id| !served.contains_key(resource_id))
+        .collect();
+    (remaining, served)
+}
+
+/// Freeze the byte pins of every freshly captured Codex candidate for the
+/// next quiet review.
+fn store_candidate_pins_from_capture(
+    capture_request: &CaptureRequest,
+    local_project_id: &LocalProjectId,
+    views: &[provider_capture::LocalSessionView],
+    base_selection: &BTreeSet<String>,
+    captured: &provider_capture::CapturedResources,
+) {
+    let Some(home) = codex_home_of(capture_request) else {
+        return;
+    };
+    let stored: Vec<_> = captured
+        .conversations
+        .iter()
+        .filter(|(resource_id, conversation)| {
+            conversation.provider.as_str() == "codex" && !base_selection.contains(*resource_id)
+        })
+        .filter_map(|(resource_id, conversation)| {
+            let transcript = captured.files.get(&conversation.transcript_logical_path)?;
+            let source_path = views
+                .iter()
+                .find(|view| view.descriptor.resource_id == *resource_id)
+                .map(|view| view.source_path.clone())?;
+            Some(super::codex_watch_service::StoredCandidatePin {
+                resource_id: resource_id.clone(),
+                depends_on: vec![source_path],
+                expected_local_target: TargetExpectation::Sha256(hex_digest(
+                    Sha256::digest(&transcript.bytes).as_slice(),
+                )),
+            })
+        })
+        .collect();
+    if !stored.is_empty() {
+        super::codex_watch_service::codex_watch_service().store_candidate_pins(
+            &home,
+            local_project_id,
+            stored,
+        );
+    }
+}
+
+/// The bound Codex home of a capture request, when one is bound.
+fn codex_home_of(capture_request: &CaptureRequest) -> Option<PathBuf> {
+    capture_request
+        .provider_homes
+        .iter()
+        .find(|(provider, _)| provider.as_str() == "codex")
+        .map(|(_, home)| home.clone())
 }
 
 /// Thread-comparison section over a shared Discovery and one already-read
@@ -5674,6 +6138,7 @@ fn build_thread_sync_comparison(
     resolved: &ResolvedBinding,
     capture_request: &CaptureRequest,
     discovery: &provider_capture::Discovery,
+    views: &[provider_capture::LocalSessionView],
     engine: &StorageEngine,
     current: Option<&BundleSnapshot>,
     build_push_actions: bool,
@@ -5684,56 +6149,126 @@ fn build_thread_sync_comparison(
     let discovered = discovery.project_inventory();
     let mut warnings = discovered.warnings.clone();
     // Every bound provider's conversations enter the typed pipeline; no
-    // provider filter and no generic fallback.
-    let selected_resource_ids = discovered
+    // provider filter and no generic fallback. Codex status rows classify
+    // from bounded metadata plus checkpoint observation, so a plain
+    // comparison reads no Codex transcript; providers without a cursor
+    // codec still prove their tail from captured bytes, and action-building
+    // reviews capture everything their byte pins require.
+    // Providers without a cursor codec always prove their tail from
+    // captured bytes; Codex rows classify from bounded metadata plus
+    // checkpoint observation and are captured only as byte-pinning
+    // candidates below.
+    let base_selection = discovered
         .resources
         .iter()
         .filter(|candidate| candidate.kind == CaptureResourceKind::Conversation)
+        .filter(|candidate| {
+            candidate
+                .provider
+                .as_ref()
+                .map(|provider| provider.as_str())
+                != Some("codex")
+        })
         .map(|candidate| candidate.resource_id.clone())
         .collect::<BTreeSet<_>>();
+    let created_at = now_secs();
+    let run_review = |captured: &provider_capture::CapturedResources,
+                      candidate_pins: &BTreeMap<String, TargetExpectation>,
+                      push_actions: bool|
+     -> Result<ThreadReview, String> {
+        match current {
+            Some(snapshot) => {
+                let mut bytes = engine.byte_source(snapshot, Some(object_cache()), None);
+                thread_review(
+                    repository,
+                    Some(snapshot),
+                    &mut bytes,
+                    views,
+                    captured,
+                    candidate_pins,
+                    resolved,
+                    Some(storage_id),
+                    created_at,
+                    created_at.saturating_add(PLAN_LIFETIME_SECS),
+                    push_actions,
+                    false,
+                )
+            }
+            None => {
+                let mut bytes = EmptyBundleBytes;
+                thread_review(
+                    repository,
+                    None,
+                    &mut bytes,
+                    views,
+                    captured,
+                    candidate_pins,
+                    resolved,
+                    Some(storage_id),
+                    created_at,
+                    created_at.saturating_add(PLAN_LIFETIME_SECS),
+                    push_actions,
+                    false,
+                )
+            }
+        }
+    };
     let captured = provider_capture::capture_from_discovery(
         provider_registry(),
         capture_request,
         discovery,
-        &selected_resource_ids,
+        &base_selection,
     )?;
+    let no_pins = BTreeMap::new();
+    let (captured, mut review) = if build_push_actions {
+        // Candidate selection is a conservative work scheduler, never a
+        // second policy engine: one classification pass (served from the
+        // caches when quiet) picks every selectable push row; candidates
+        // the watcher proves unchanged reuse their frozen byte pin, the
+        // rest are captured authoritatively, and the final decisions come
+        // from the same shared decision path.
+        let preliminary = run_review(&captured, &no_pins, false)?;
+        let mut selection = base_selection.clone();
+        for entry in preliminary
+            .entries
+            .iter()
+            .filter(|entry| entry.push_decision.selectable && entry.local_present)
+        {
+            selection.insert(entry.resource_id.to_string());
+        }
+        let (selection, candidate_pins) = reuse_candidate_pins(
+            capture_request,
+            local_project_id,
+            views,
+            &base_selection,
+            selection,
+        );
+        let captured = if selection == base_selection {
+            captured
+        } else {
+            provider_capture::capture_from_discovery(
+                provider_registry(),
+                capture_request,
+                discovery,
+                &selection,
+            )?
+        };
+        store_candidate_pins_from_capture(
+            capture_request,
+            local_project_id,
+            views,
+            &base_selection,
+            &captured,
+        );
+        let review = run_review(&captured, &candidate_pins, true)?;
+        (captured, review)
+    } else {
+        let review = run_review(&captured, &no_pins, false)?;
+        (captured, review)
+    };
     warnings.extend(captured.warnings.clone());
     on_phase("capture local conversations", phase_started.elapsed());
     let phase_started = Instant::now();
-
-    let created_at = now_secs();
-    let mut review = match current {
-        Some(snapshot) => {
-            let mut bytes = engine.byte_source(snapshot, Some(object_cache()), None);
-            thread_review(
-                repository,
-                Some(snapshot),
-                &mut bytes,
-                &captured,
-                resolved,
-                Some(storage_id),
-                created_at,
-                created_at.saturating_add(PLAN_LIFETIME_SECS),
-                build_push_actions,
-                false,
-            )?
-        }
-        None => {
-            let mut bytes = EmptyBundleBytes;
-            thread_review(
-                repository,
-                None,
-                &mut bytes,
-                &captured,
-                resolved,
-                Some(storage_id),
-                created_at,
-                created_at.saturating_add(PLAN_LIFETIME_SECS),
-                build_push_actions,
-                false,
-            )?
-        }
-    };
 
     // Locally discovered but uncapturable sessions of any bound provider
     // hold their own row instead of failing the review.
@@ -6393,7 +6928,11 @@ fn prepare_push_review_with_progress(
     // storage-side inventory below without any local content walk.
     let eligibility = project_file_sync_eligibility(&binding);
     let capture_request = capture_request_for_binding(repository, &binding)?;
-    let discovery = provider_capture::discover_full(provider_registry(), &capture_request)?;
+    let (discovery, views) = super::codex_watch_service::codex_watch_service().discovery_for(
+        provider_registry(),
+        local_project_id,
+        &capture_request,
+    )?;
     on_phase("discover local state", phase_started.elapsed());
     let phase_started = Instant::now();
 
@@ -6459,6 +6998,7 @@ fn prepare_push_review_with_progress(
                     &resolved,
                     &capture_request,
                     &discovery,
+                    &views,
                     engine,
                     current.as_ref(),
                     true,
@@ -8626,20 +9166,82 @@ fn plan_bundle_restore_with_progress(
         let mut byte_source =
             engine.byte_source(&snapshot, Some(object_cache()), Some(on_progress));
         let capture_request = capture_request_for_binding(repository, &binding)?;
-        let discovery = provider_capture::discover_full(provider_registry(), &capture_request)?;
-        let selected_resource_ids = discovery
+        let (discovery, views) = super::codex_watch_service::codex_watch_service().discovery_for(
+            provider_registry(),
+            &binding.local_project_id,
+            &capture_request,
+        )?;
+        // Providers without a cursor codec capture up front; Codex rows are
+        // captured only when one classification pass (cache-served when
+        // quiet) marks them byte-pinning Pull candidates. Adopting cloud
+        // metadata pins no local bytes and CreateLocal has none, so
+        // storage-only, synced, and unrelated sessions read nothing.
+        let base_selection = discovery
             .project_inventory()
             .resources
             .into_iter()
             .filter(|candidate| candidate.kind == CaptureResourceKind::Conversation)
+            .filter(|candidate| {
+                candidate
+                    .provider
+                    .as_ref()
+                    .map(|provider| provider.as_str())
+                    != Some("codex")
+            })
             .map(|candidate| candidate.resource_id)
             .collect::<BTreeSet<_>>();
         let captured = provider_capture::capture_from_discovery(
             provider_registry(),
             &capture_request,
             &discovery,
-            &selected_resource_ids,
+            &base_selection,
         )?;
+        let preliminary = thread_review(
+            repository,
+            Some(&snapshot),
+            &mut byte_source,
+            &views,
+            &captured,
+            &BTreeMap::new(),
+            &resolved,
+            Some(&plan.storage_id),
+            plan.created_at,
+            plan.expires_at,
+            false,
+            false,
+        )?;
+        let mut selection = base_selection.clone();
+        for entry in preliminary.entries.iter().filter(|entry| {
+            entry.pull_decision.selectable
+                && entry.local_present
+                && entry.pull_decision.action != ConversationPlanActionType::AdoptCloudMetadata
+        }) {
+            selection.insert(entry.resource_id.to_string());
+        }
+        let (selection, candidate_pins) = reuse_candidate_pins(
+            &capture_request,
+            &binding.local_project_id,
+            &views,
+            &base_selection,
+            selection,
+        );
+        let captured = if selection == base_selection {
+            captured
+        } else {
+            provider_capture::capture_from_discovery(
+                provider_registry(),
+                &capture_request,
+                &discovery,
+                &selection,
+            )?
+        };
+        store_candidate_pins_from_capture(
+            &capture_request,
+            &binding.local_project_id,
+            &views,
+            &base_selection,
+            &captured,
+        );
         on_phase(
             "discover and capture local conversations",
             phase_started.elapsed(),
@@ -8649,7 +9251,9 @@ fn plan_bundle_restore_with_progress(
             repository,
             Some(&snapshot),
             &mut byte_source,
+            &views,
             &captured,
+            &candidate_pins,
             &resolved,
             Some(&plan.storage_id),
             plan.created_at,
@@ -8702,7 +9306,13 @@ struct SelectedPullConversation {
 fn capture_all_local_conversations(
     repository: &LocalStateRepository,
     resolved: &ResolvedBinding,
-) -> Result<provider_capture::CapturedResources, String> {
+) -> Result<
+    (
+        Vec<provider_capture::LocalSessionView>,
+        provider_capture::CapturedResources,
+    ),
+    String,
+> {
     let capture_request = capture_request_for_binding(repository, &resolved.binding)?;
     let discovery = provider_capture::discover_full(provider_registry(), &capture_request)?;
     let selected = discovery
@@ -8712,12 +9322,13 @@ fn capture_all_local_conversations(
         .filter(|candidate| candidate.kind == CaptureResourceKind::Conversation)
         .map(|candidate| candidate.resource_id)
         .collect::<BTreeSet<_>>();
-    provider_capture::capture_from_discovery(
+    let captured = provider_capture::capture_from_discovery(
         provider_registry(),
         &capture_request,
         &discovery,
         &selected,
-    )
+    )?;
+    Ok((provider_capture::local_session_views(&discovery), captured))
 }
 
 fn local_target_expectation_for_action(
@@ -8726,6 +9337,12 @@ fn local_target_expectation_for_action(
     document: &super::domain::ConversationBindings,
     captured: &provider_capture::CapturedResources,
 ) -> TargetExpectation {
+    // Metadata-only actions neither read nor write the local transcript:
+    // their stale-pin guard covers everything except the local file, so
+    // review never captures them and apply derives no local digest.
+    if action.action == ConversationPlanActionType::AdoptCloudMetadata {
+        return TargetExpectation::Absent;
+    }
     let provider_thread_id = document
         .bindings
         .iter()
@@ -8775,7 +9392,7 @@ fn prepare_pull_conversation_actions(
     if actions.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
-    let captured = capture_all_local_conversations(repository, resolved)?;
+    let (_, captured) = capture_all_local_conversations(repository, resolved)?;
     let binding = &resolved.binding;
     let document = repository.load_conversation_bindings()?;
     let machine = repository.load_bindings()?;
@@ -17143,6 +17760,485 @@ mod tests {
     /// without opening it, while Pull planning — which does read payloads —
     /// still refuses to offer it.  If refresh ever starts hiding the row
     /// again, payload reads have crept back into the manifest-only path.
+    /// Pinned by docs/PLAN_CODEX_WATCHER_ACCELERATION_FOLLOWUP.md §5:
+    /// a rollout crossing the conversation bound by append surfaces the
+    /// identical blocked row whether the cached-inventory path or a cold
+    /// rediscovery detects it.
+    #[test]
+    fn an_oversize_append_blocks_identically_under_cache_and_rediscovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("oversize-parity-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let provider_id = "019fb004-0000-7000-8000-00000000dd05";
+        let base = command_test_transcript(provider_id, &project_root, &[("m-1", "user", "hi")]);
+        let session_path = codex_home
+            .join("sessions/2026/07/28")
+            .join(format!("rollout-2026-07-28T12-00-00-{provider_id}.jsonl"));
+        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        std::fs::write(&session_path, &base).unwrap();
+
+        // Warm the caches, then grow the file past the bound in place.
+        get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&session_path)
+            .unwrap()
+            .set_len(MAX_CONVERSATION_FILE_BYTES + 1)
+            .unwrap();
+        let cached_path = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        let canonical_home = std::fs::canonicalize(&codex_home).unwrap();
+        super::super::codex_watch_service::codex_watch_service()
+            .force_rebaseline_for_tests(&canonical_home);
+        let rediscovered = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&cached_path.entries).unwrap(),
+            serde_json::to_value(&rediscovered.entries).unwrap(),
+            "oversize detection is stage-independent"
+        );
+        let row = cached_path
+            .entries
+            .iter()
+            .find(|entry| entry.provider_thread_id.as_deref() == Some(provider_id))
+            .unwrap();
+        assert_eq!(row.state, ThreadSyncState::Unavailable);
+        assert!(
+            row.status_detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("exceeds the 100 MiB per-file sync limit"),
+            "blocked detail comes from the discovery mapping: {:?}",
+            row.status_detail
+        );
+    }
+
+    /// Pinned by docs/PLAN_CODEX_WATCHER_ACCELERATION_FOLLOWUP.md §4.6:
+    /// Push review captures exactly its byte-pinning candidates, Pull
+    /// review captures none for synced/local-only rows (adopting cloud
+    /// metadata pins no local bytes), and a quiet second review does no
+    /// observation or discovery filesystem work at all.
+    #[test]
+    fn reviews_capture_only_byte_pinning_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("lazy-candidate-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        let binding =
+            bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let synced_id = "019fb003-0000-7000-8000-00000000cc03";
+        let synced = command_test_transcript(synced_id, &project_root, &[("s-1", "user", "hi")]);
+        let synced_path = codex_home
+            .join("sessions/2026/07/28")
+            .join(format!("rollout-2026-07-28T12-00-00-{synced_id}.jsonl"));
+        std::fs::create_dir_all(synced_path.parent().unwrap()).unwrap();
+        std::fs::write(&synced_path, &synced).unwrap();
+        let review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let entry_id = review
+            .thread_comparison
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .find(|entry| entry.provider_thread_id.as_deref() == Some(synced_id))
+            .map(|entry| review.conversation_action_ids[&entry.resource_id].clone())
+            .unwrap();
+        push_bundle_reviewed_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            recommended_review_recipe(&review, &storage_id),
+            empty_project_content_review(),
+            review.conversation_push_plan_id.clone(),
+            vec![entry_id],
+            &mut |_| {},
+        )
+        .unwrap();
+
+        // A second, local-only session is the sole push candidate.
+        let local_only_id = "019fb003-0000-7000-8000-00000000cc04";
+        let local_only =
+            command_test_transcript(local_only_id, &project_root, &[("l-1", "user", "new")]);
+        let local_only_path = codex_home
+            .join("sessions/2026/07/28")
+            .join(format!("rollout-2026-07-28T12-00-00-{local_only_id}.jsonl"));
+        std::fs::write(&local_only_path, &local_only).unwrap();
+
+        let canonical_home = std::fs::canonicalize(&codex_home).unwrap();
+        let metrics = super::super::sync_metrics::register_root(&canonical_home);
+        let review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let comparison = review.thread_comparison.as_ref().unwrap();
+        assert_eq!(comparison.entries.len(), 2);
+        let counted = metrics.snapshot();
+        assert_eq!(
+            counted.selected_captures, 1,
+            "only the CreateCloud candidate is captured"
+        );
+
+        // Quiet second review: inventory, observations, and the candidate's
+        // frozen byte pin all come from the caches — the review does no
+        // local filesystem work at all.
+        let before = metrics.snapshot();
+        prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        let delta = metrics.snapshot().delta_since(&before);
+        assert_eq!(delta.selected_captures, 0, "candidate pin reused");
+        assert_eq!(delta.files_head_read, 0, "inventory reused");
+        assert_eq!(delta.probe_bytes_read, 0, "observations reused");
+        assert_eq!(delta.full_graph_resolves, 0);
+        assert_eq!(delta.transcript_bytes_read, 0, "no content read at all");
+
+        // Pull review: the synced row adopts metadata without local bytes
+        // and the local-only row is not a pull candidate — zero captures.
+        let before = metrics.snapshot();
+        let restore =
+            plan_bundle_restore_with_repository(&repo, &storage_id, &project.bundle_id, &binding)
+                .unwrap();
+        assert_eq!(restore.conversation_actions.len(), 2);
+        let delta = metrics.snapshot().delta_since(&before);
+        assert_eq!(delta.selected_captures, 0, "pull review captures nothing");
+        assert_eq!(delta.transcript_bytes_read, 0);
+    }
+
+    /// Pinned by docs/PLAN_CODEX_WATCHER_ACCELERATION_FOLLOWUP.md §4.3:
+    /// Refresh persists the advanced observed checkpoint under a generation
+    /// bump, preserves `accepted` byte-for-byte, skips no-op replacements,
+    /// and never reattaches a Detached mapping.
+    #[test]
+    fn refresh_persists_the_advanced_observed_checkpoint_and_never_touches_accepted() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("observe-maintenance-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let provider_id = "019fb001-0000-7000-8000-00000000aa01";
+        let base = command_test_transcript(provider_id, &project_root, &[("m-1", "user", "hello")]);
+        let session_path = codex_home
+            .join("sessions/2026/07/28")
+            .join(format!("rollout-2026-07-28T12-00-00-{provider_id}.jsonl"));
+        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        std::fs::write(&session_path, &base).unwrap();
+
+        // Push binds the session and writes acceptance evidence + checkpoint.
+        let review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let comparison = review.thread_comparison.as_ref().unwrap();
+        let entry = comparison
+            .entries
+            .iter()
+            .find(|entry| entry.provider_thread_id.as_deref() == Some(provider_id))
+            .unwrap();
+        let action_id = review.conversation_action_ids[&entry.resource_id].clone();
+        push_bundle_reviewed_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            recommended_review_recipe(&review, &storage_id),
+            empty_project_content_review(),
+            review.conversation_push_plan_id.clone(),
+            vec![action_id],
+            &mut |_| {},
+        )
+        .unwrap();
+
+        let checkpoint_of = |repo: &LocalStateRepository| {
+            let config = repo.load_config().unwrap();
+            let link = config
+                .links
+                .iter()
+                .find(|link| {
+                    link.local_project_id == project.local_project_id
+                        && link.storage_id == storage_id
+                })
+                .unwrap();
+            let threads = link
+                .conversation_checkpoints
+                .get(&SyncScopeKey::Provider(codex_key()))
+                .unwrap();
+            assert_eq!(threads.len(), 1);
+            threads.values().next().unwrap().clone()
+        };
+        let after_push = checkpoint_of(&repo);
+        let accepted = after_push
+            .accepted
+            .clone()
+            .expect("push records acceptance");
+
+        // A no-change refresh replaces nothing.
+        get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(checkpoint_of(&repo), after_push);
+
+        // One appended record: refresh persists the advanced cursor under
+        // the next generation while preserving accepted exactly.
+        let extended = command_test_transcript(
+            provider_id,
+            &project_root,
+            &[("m-1", "user", "hello"), ("m-2", "assistant", "appended")],
+        );
+        assert_eq!(&extended[..base.len()], &base[..]);
+        std::fs::write(&session_path, &extended).unwrap();
+        get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        let after_append = checkpoint_of(&repo);
+        assert_eq!(after_append.generation, after_push.generation + 1);
+        assert_eq!(after_append.accepted, Some(accepted));
+        assert!(
+            after_append.observed_tail.accepted_end_record_count
+                > after_push.observed_tail.accepted_end_record_count
+        );
+        let PhysicalMappingState::Ready {
+            root_mapping,
+            raw_range_pin,
+        } = &after_append.physical
+        else {
+            panic!("advanced checkpoint keeps a ready mapping");
+        };
+        assert_eq!(root_mapping.consumed_byte_offset, extended.len() as u64);
+        assert_eq!(raw_range_pin.end_byte_offset, extended.len() as u64);
+
+        // The next refresh rides the persisted cursor: no further churn.
+        get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(checkpoint_of(&repo), after_append);
+
+        // A Detached mapping is never reattached by observation.
+        repo.mutate_config(|config| {
+            let link = config
+                .links
+                .iter_mut()
+                .find(|link| {
+                    link.local_project_id == project.local_project_id
+                        && link.storage_id == storage_id
+                })
+                .unwrap();
+            let threads = link
+                .conversation_checkpoints
+                .get_mut(&SyncScopeKey::Provider(codex_key()))
+                .unwrap();
+            for checkpoint in threads.values_mut() {
+                checkpoint.physical = PhysicalMappingState::Detached {
+                    expected_provider_thread_id: provider_id.to_string(),
+                    expected_binding_revision: checkpoint.binding_revision,
+                };
+            }
+            Ok(())
+        })
+        .unwrap();
+        let detached = checkpoint_of(&repo);
+        get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(checkpoint_of(&repo), detached);
+    }
+
+    /// Pinned by docs/PLAN_CODEX_WATCHER_ACCELERATION_FOLLOWUP.md §6.1: once
+    /// a Codex thread rides a ready checkpoint, a plain comparison performs
+    /// no capture and reads no transcript bytes beyond the probe window —
+    /// and one appended record costs only the probe plus the append.
+    #[test]
+    fn a_comparison_reads_no_codex_transcript_bytes_beyond_the_probe_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("metadata-refresh-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let provider_id = "019fb002-0000-7000-8000-00000000bb02";
+        let base = command_test_transcript(
+            provider_id,
+            &project_root,
+            &[("m-1", "user", "hello"), ("m-2", "assistant", "answer")],
+        );
+        let session_path = codex_home
+            .join("sessions/2026/07/28")
+            .join(format!("rollout-2026-07-28T12-00-00-{provider_id}.jsonl"));
+        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        std::fs::write(&session_path, &base).unwrap();
+
+        let review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let comparison = review.thread_comparison.as_ref().unwrap();
+        let entry = comparison
+            .entries
+            .iter()
+            .find(|entry| entry.provider_thread_id.as_deref() == Some(provider_id))
+            .unwrap();
+        let action_id = review.conversation_action_ids[&entry.resource_id].clone();
+        push_bundle_reviewed_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            recommended_review_recipe(&review, &storage_id),
+            empty_project_content_review(),
+            review.conversation_push_plan_id.clone(),
+            vec![action_id],
+            &mut |_| {},
+        )
+        .unwrap();
+
+        // Warm no-change comparison: no capture, no full resolve, no
+        // transcript bytes, and the push review's inventory is reused so no
+        // head scan runs either. The applied push moved the checkpoint
+        // generation, so the cursor revalidates through one probe window.
+        let canonical_home = std::fs::canonicalize(&codex_home).unwrap();
+        let metrics = super::super::sync_metrics::register_root(&canonical_home);
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(comparison.entries.len(), 1);
+        let counted = metrics.snapshot();
+        assert_eq!(counted.selected_captures, 0, "no codex capture on refresh");
+        assert_eq!(counted.transcript_bytes_read, 0, "no whole-file reads");
+        assert_eq!(counted.full_graph_resolves, 0, "cursor rides the probe");
+        assert_eq!(
+            counted.files_head_read, 0,
+            "push review's inventory is reused"
+        );
+        assert!(counted.probe_bytes_read > 0);
+        assert_eq!(counted.append_bytes_read, 0);
+
+        // One appended record: the refresh reads the probe plus exactly the
+        // appended bytes and nothing else.
+        let extended = command_test_transcript(
+            provider_id,
+            &project_root,
+            &[
+                ("m-1", "user", "hello"),
+                ("m-2", "assistant", "answer"),
+                ("m-3", "user", "appended"),
+            ],
+        );
+        assert_eq!(&extended[..base.len()], &base[..]);
+        std::fs::write(&session_path, &extended).unwrap();
+        // A distinct mtime makes presentation-staleness deterministic: the
+        // dirty root's row must carry this stamp, cached or rebaselined.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&session_path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000))
+            .unwrap();
+        let before_append = metrics.snapshot();
+        get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        let delta = metrics.snapshot().delta_since(&before_append);
+        assert_eq!(delta.selected_captures, 0);
+        assert_eq!(delta.transcript_bytes_read, 0);
+        assert_eq!(delta.full_graph_resolves, 0);
+        assert_eq!(
+            delta.append_bytes_read,
+            (extended.len() - base.len()) as u64,
+            "the append is the only content read"
+        );
+        assert_eq!(delta.records_parsed, 1);
+
+        let appended_row = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            appended_row.entries[0].local_updated_at,
+            Some(1_800_000_000),
+            "a dirty root's presentation stamp is fresh even under reuse"
+        );
+
+        // Quiet watcher: the next comparison serves inventory and
+        // observation from the caches with zero local filesystem work.
+        let before_quiet = metrics.snapshot();
+        let quiet = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        let delta = metrics.snapshot().delta_since(&before_quiet);
+        assert_eq!(delta.files_head_read, 0, "inventory reused, no head scan");
+        assert_eq!(delta.directories_visited, 0, "no tree walk");
+        assert_eq!(delta.probe_bytes_read, 0, "observation reused, no probe");
+        assert_eq!(delta.append_bytes_read, 0);
+        assert_eq!(delta.transcript_bytes_read, 0);
+        assert_eq!(delta.inventory_reuse_hits, 1);
+        assert_eq!(delta.observation_reuse_hits, 1);
+
+        // A forced rebaseline (the reliability-signal path) runs the
+        // bounded pipeline and produces identical rows.
+        let canonical = std::fs::canonicalize(&codex_home).unwrap();
+        super::super::codex_watch_service::codex_watch_service()
+            .force_rebaseline_for_tests(&canonical);
+        let before_cold = metrics.snapshot();
+        let rebaselined = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        let delta = metrics.snapshot().delta_since(&before_cold);
+        assert_eq!(delta.inventory_reuse_hits, 0);
+        assert_eq!(delta.observation_reuse_hits, 0);
+        assert!(delta.files_head_read > 0, "rebaseline rediscovers");
+        assert_eq!(
+            serde_json::to_value(&quiet.entries).unwrap(),
+            serde_json::to_value(&rebaselined.entries).unwrap(),
+            "cached and rebaselined comparisons produce identical rows"
+        );
+    }
+
     #[test]
     fn previously_stored_subagent_tasks_are_hidden_from_pull_but_not_refresh() {
         let temp = tempfile::tempdir().unwrap();
@@ -17323,7 +18419,7 @@ mod tests {
 
         let snapshot = engine.inspect(&project.bundle_id).unwrap();
         let resolved = resolve_project_binding(&repo, &binding).unwrap();
-        let captured = capture_all_local_conversations(&repo, &resolved).unwrap();
+        let (views, captured) = capture_all_local_conversations(&repo, &resolved).unwrap();
         let now = now_secs();
         let offerable = snapshot
             .manifest
@@ -17345,7 +18441,9 @@ mod tests {
                 &repo,
                 Some(&snapshot),
                 &mut bytes,
+                &views,
                 &captured,
+                &BTreeMap::new(),
                 &resolved,
                 Some(&snapshot.storage_id),
                 now,
@@ -17373,7 +18471,9 @@ mod tests {
             &repo,
             Some(&snapshot),
             &mut bytes,
+            &views,
             &captured,
+            &BTreeMap::new(),
             &resolved,
             Some(&snapshot.storage_id),
             now,
@@ -17425,7 +18525,9 @@ mod tests {
             &repo,
             Some(&oversized_snapshot),
             &mut bytes,
+            &views,
             &captured,
+            &BTreeMap::new(),
             &resolved,
             Some(&snapshot.storage_id),
             now,

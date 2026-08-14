@@ -24,3 +24,4 @@ pub mod providers;
 pub mod r2_setup_journal;
 pub mod session_detail;
 pub mod storage_core;
+pub mod sync_metrics;

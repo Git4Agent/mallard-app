@@ -3,8 +3,9 @@
 //! Current state is isolated below `~/.mallard`. This module has no migration
 //! or compatibility path for pre-cutover state.
 
-pub mod commands;
 #[cfg_attr(test, allow(dead_code))]
+pub mod codex_watch_service;
+pub mod commands;
 pub mod config_watcher;
 
 // Temporary reorganization shims (PLAN_PROJECT_STRUCTURE_REORGANIZATION.md
@@ -28,3 +29,4 @@ pub use mallard_infrastructure::provider_capture;
 pub use mallard_infrastructure::providers;
 pub use mallard_infrastructure::session_detail;
 pub use mallard_infrastructure::storage_core;
+pub use mallard_infrastructure::sync_metrics;
