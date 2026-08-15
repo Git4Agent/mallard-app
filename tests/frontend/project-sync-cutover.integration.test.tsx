@@ -277,16 +277,9 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.ok(!/\.sync-path-crumb(?![.\w-])/.test(pixelSelectors));
   assert.match(retroCss, /\.sync-path-crumb\s*\{[^}]*font-family: var\(--font-sans\)/s);
   assert.match(retroCss, /\.sync-path-menu-copy > small\s*\{[^}]*font-family: var\(--font-mono\)/s);
-  assert.match(retroCss, /\.sync-project-heading-name h1\s*\{[^}]*font-family: var\(--font-sans\)/s);
-  // Longhands, not the font: shorthand — it resets the grid-fitting properties
-  // these rules go on to re-state, and one bad var() would unset all three.
-  assert.match(retroCss, /\.sync-project-heading-meta\s*\{[^}]*font-family: var\(--font-sans\);[^}]*font-size: var\(--type-md\);[^}]*font-weight: var\(--weight-regular\);[^}]*line-height: 18px;[^}]*font-kerning: none;[^}]*font-synthesis: none;[^}]*font-variant-ligatures: none;[^}]*letter-spacing: 0;[^}]*overflow: hidden;/s);
-  assert.match(retroCss, /\.sync-project-heading-meta-item\s*\{[^}]*font-family: var\(--font-sans\);[^}]*font-size: var\(--type-md\);[^}]*font-weight: var\(--weight-regular\);[^}]*line-height: 18px;[^}]*font-kerning: none;[^}]*font-synthesis: none;[^}]*font-variant-ligatures: none;[^}]*letter-spacing: 0;/s);
-  assert.match(retroCss, /\.sync-project-heading-meta-item > span\s*\{[^}]*display: block;[^}]*font-family: var\(--font-sans\);[^}]*font-size: var\(--type-md\);[^}]*font-weight: var\(--weight-regular\);[^}]*line-height: 18px;[^}]*font-kerning: none;[^}]*font-synthesis: none;[^}]*font-variant-ligatures: none;[^}]*letter-spacing: 0;/s);
-  // The root is the one identifier in a strip of display names, and it has to
-  // come after the rule above — same specificity, so source order decides.
-  assert.match(retroCss, /\.sync-project-heading-path > span\s*\{[^}]*font-family: var\(--font-mono\)/s);
-  assert.match(retroCss, /\.sync-project-heading-meta-item \+ \.sync-project-heading-meta-item::before\s*\{[^}]*content: "";[^}]*width: 1px;[^}]*height: 14px;[^}]*background: var\(--border-mid\);/s);
+  // The old page-heading identity block is gone everywhere — the path bar is
+  // the identity now, on the storage screens as well as the project ones.
+  assert.doesNotMatch(retroCss, /sync-project-heading/);
   assert.match(retroCss, /\.sync-titlebar-context strong\s*\{[^}]*font-family: var\(--font-sans\)/s);
   // One surface across the bar: no second panel ending mid-titlebar.
   assert.match(retroCss, /\.sync-titlebar-context\s*\{[^}]*border: 0;[^}]*border-radius: 0;[^}]*background: transparent;/s);
@@ -689,6 +682,35 @@ test("host-scoped workflows keep their originating epoch across async continuati
   const finalize = section(setupWorkspace, "finalize", null);
   assert.match(finalize, /const detail = await projectSyncApi\.finalizeProjectSetup\(draftId, expectedRevision\);\s*if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, workflowEpoch\)/);
   assert.match(setupWorkspace, /mountedRef\.current = false;\s*inspectRequest\.current \+= 1;/);
+});
+
+// One home per scope: each crumb's menu is a header naming its object, that
+// object's verbs, then Switch-to commands. The old shape — a radio switcher on
+// the crumb and the verbs in the far-right ⋯ — is gone, not aliased.
+test("path bar menus keep one home per scope", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  const sync = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const bar = readFileSync("src/components/project-sync/SyncPathBar.tsx", "utf8");
+
+  // Storage crumb: header block, settings + unlink beside their noun, and the
+  // link row that stays put at zero candidates with its reason spelled out.
+  assert.match(workspace, /menuHeader: \{\s*label: workspaceStorage\.name \|\| "\(unnamed\)",/);
+  assert.match(workspace, /label: "Storage settings…"/);
+  assert.match(workspace, /label: `Unlink from \$\{projectLabel\(workspaceProject\)\}…`/);
+  assert.match(workspace, /icon: "link-off" as const/);
+  assert.match(workspace, /disabledReason: workspaceAvailableStorages\.length === 0/);
+  assert.doesNotMatch(workspace, /checked: storage\.id === workspaceStorage\.id/);
+  assert.doesNotMatch(workspace, /label: "Unlink storage"/);
+
+  // The workspace ⋯ holds app scope alone; the theme item is a checked item
+  // with a stable label, not a verb that rewrites itself.
+  assert.match(workspace, /const pathOverflow: PathBarMenuGroup\[\] = workspaceProject \? appActions : \[\];/);
+  assert.match(sync, /label: "Dark theme",\s*icon: "moon" as const,\s*checked: theme === "dark",/);
+
+  // The bar renders no radio items anywhere, and inert rows stay focusable.
+  assert.doesNotMatch(bar, /menuitemradio/);
+  assert.match(bar, /role=\{checkable \? "menuitemcheckbox" : "menuitem"\}/);
+  assert.match(bar, /aria-disabled=\{inert \|\| undefined\}/);
 });
 
 test("refocus reconciles external changes narrowly and the full reload lives in the titlebar menu", () => {

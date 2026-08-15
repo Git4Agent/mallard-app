@@ -14,6 +14,7 @@ import type {
 import Icon, { type IconName } from "../Icons";
 import { projectSyncApi } from "./api";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
+import ProviderMark from "./ProviderMark";
 import type { OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "./ThreadStatusIcon";
 
@@ -619,29 +620,6 @@ export function unresolvedSyncPresentation({
       ? `Not compared with ${storageName}. Mallard cannot read this session well enough to match it.`
       : `Not compared with ${storageName} yet.`,
   };
-}
-
-/** Marks Mallard ships art for. Providers are an open registry
- *  (`types.ts`: the frontend "never holds a fixed provider array"), so anything
- *  absent here falls back to a monogram off the display name rather than to an
- *  empty slot — which is the same defect this change exists to remove. */
-const PROVIDER_MARKS: Record<string, IconName> = {
-  codex: "openai",
-  claude: "claude",
-};
-
-function ProviderMark({ provider, displayName, size = 14 }: {
-  provider: string;
-  displayName: string;
-  size?: number;
-}) {
-  const mark = PROVIDER_MARKS[provider];
-  if (mark) return <Icon name={mark} size={size} className={`sync-provider-mark ${provider}`} />;
-  return (
-    <span className="sync-provider-mark sync-provider-monogram" aria-hidden="true">
-      {displayName.trim().charAt(0).toUpperCase() || "?"}
-    </span>
-  );
 }
 
 /* One absolute stamp, pushed to the far edge so it forms a column down the

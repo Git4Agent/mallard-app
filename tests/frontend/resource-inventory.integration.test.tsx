@@ -268,6 +268,108 @@ test("blocked resources remain unselectable in the inventory", () => {
   assert.doesNotMatch(html, /type="checkbox"/);
 });
 
+test("a group states its own name once, and counts its blocked rows rather than assuming them", () => {
+  const requirement = (name: string, blockedReason: string | null = null) => ({
+    ...memoryResource(name, blockedReason),
+    resource_id: `codex:requirement:${name}`,
+    kind: "requirement" as const,
+    category: "tools",
+  });
+  const html = renderToStaticMarkup(
+    <ResourceInventory
+      resources={[requirement("missing", "Resource is unavailable at the mapped paths"), requirement("present")]}
+      selected={new Set()}
+      statuses={new Map()}
+      defaultCollapsed
+      onToggle={() => undefined}
+    />,
+  );
+
+  // One header for one list. The push step used to wrap this in a <details>
+  // that repeated the word, the chevron and a count of its own.
+  assert.equal((html.match(/>Requirements</g) ?? []).length, 1);
+  assert.equal((html.match(/sync-resource-group-chevron/g) ?? []).length, 1);
+  // Counted, not assumed: two rows, one blocked. The wrapper called both
+  // unavailable while the row below it still offered a checkbox.
+  assert.match(html, /sync-resource-group-unavailable[^>]*title="1 of 2 unavailable on this machine"/);
+  assert.match(html, /1 unavailable/);
+  assert.match(html, /sync-resource-group-count">0\/2</);
+  // Folded on request, so the header is all a secondary group costs.
+  assert.doesNotMatch(html, /sync-resource-list/);
+
+  // A group with nothing blocked shows no tally at all.
+  const clean = renderToStaticMarkup(
+    <ResourceInventory
+      resources={[requirement("present")]}
+      selected={new Set()}
+      statuses={new Map()}
+      onToggle={() => undefined}
+    />,
+  );
+  assert.doesNotMatch(clean, /sync-resource-group-unavailable/);
+  assert.match(clean, /sync-resource-list/);
+});
+
+test("a resource named by its own id states that id once, and says why once", () => {
+  // The shape the backend fabricates for a recipe entry that no longer
+  // resolves locally: the id is the only name it has, so display_name is the
+  // id (commands.rs, "resource is unavailable" branch).
+  const ghostId = "codex:conversation:thread-687bc2c49612313da3d26d29d1b003a0";
+  const ghost: ProjectResourceDescriptor = {
+    ...memoryResource("ghost", "Selected for sync, but unavailable at the mapped paths on this machine"),
+    resource_id: ghostId,
+    display_name: ghostId,
+    kind: "requirement",
+    category: "tools",
+    description: null,
+    logical_paths: [],
+  };
+  const html = renderToStaticMarkup(
+    <ResourceInventory
+      resources={[ghost]}
+      selected={new Set()}
+      statuses={new Map()}
+      onToggle={() => undefined}
+    />,
+  );
+
+  // The collapsed row prints the id once, as its title.
+  assert.equal((html.match(new RegExp(ghostId, "g")) ?? []).length, 1);
+  // The hidden `provider · kind` line is gone with its display:none rule, so
+  // the name is the only thing in the copy slot.
+  assert.match(html, /sync-resource-copy"><strong>codex:conversation:thread-[^<]*<\/strong><\/span>/);
+
+  // The fold is internal state, so static rendering cannot open it — pin the
+  // guard at the source instead, and that the caption survives for a resource
+  // whose name is not its id.
+  const inventory = readFileSync("src/components/project-sync/ResourceInventory.tsx", "utf8");
+  assert.match(
+    inventory,
+    /\{resource\.resource_id !== resource\.display_name && \(\s*<><span>Resource ID<\/span><code>\{resource\.resource_id\}<\/code><\/>\s*\)\}/,
+  );
+  assert.match(inventory, /<span>Kind<\/span><code>\{resource\.kind\}<\/code>/);
+  assert.doesNotMatch(inventory, /providerLabel/);
+});
+
+test("the backend fabricates one unavailability sentence, not two", () => {
+  const commands = readFileSync("src-tauri/src/project_sync/commands.rs", "utf8");
+
+  assert.match(commands, /description: None,\s*\n\s*logical_paths: Vec::new\(\),\s*\n\s*default_selected: true,\s*\n\s*blocked_reason: Some\(\s*\n\s*"Selected for sync, but unavailable at the mapped paths on this machine"/);
+  // The retired sentence survives only as the comment explaining why it went.
+  assert.doesNotMatch(commands, /description: Some\("Selected resource is unavailable on this machine"/);
+});
+
+test("the push step renders the requirements group without a second disclosure", () => {
+  const push = readFileSync("src/components/project-sync/PushResourceWorkspace.tsx", "utf8");
+  const pull = readFileSync("src/components/project-sync/RestorePlanView.tsx", "utf8");
+
+  assert.doesNotMatch(push, /sync-sync-review-other/);
+  assert.match(push, /<ResourceInventory\s+resources=\{other\}[\s\S]*?defaultCollapsed/);
+  // The pull side keeps its wrapper: ItemList has no header of its own, so
+  // there the <details> is the only thing naming the group.
+  assert.match(pull, /<details className="sync-sync-review-other">/);
+});
+
 test("blocked resources cannot enter a published recipe", () => {
   const allowed = memoryResource("frontend-memory");
   const blocked = memoryResource("broken-memory", "context.md is unreadable");

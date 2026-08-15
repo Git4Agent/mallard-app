@@ -21,8 +21,8 @@ import {
   reconcileStorageDraft,
   StorageRepositoryDetails,
   StorageRepositoryRow,
-  StorageSettingsMeta,
 } from "../../src/components/project-sync/ProjectLinksWorkspace";
+import StorageIndexPage from "../../src/components/project-sync/StorageIndexPage";
 import {
   applyStorageDraft,
   shouldReloadConfigRevision,
@@ -425,9 +425,10 @@ test("configured storage can move name editing into its page heading", () => {
 test("the repositories heading is text-only", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
 
+  // Refresh moved to the path bar; the heading holds nothing but its name.
   assert.match(
     workspace,
-    /className="sync-storage-repositories-heading">\s*<h2 id="storage-repositories-heading">Repositories<\/h2>/,
+    /className="sync-storage-repositories-heading">\s*<h2 id="storage-repositories-heading">Repositories<\/h2>\s*<\/div>/,
   );
 });
 
@@ -506,26 +507,57 @@ test("the details fold carries the complete id and skips absent facts", () => {
   assert.doesNotMatch(bare, /Updated|Resources|Agents|Fingerprint|—/);
 });
 
-test("storage settings identify the destination with its storage icon", () => {
-  const localHtml = renderToStaticMarkup(
-    <StorageSettingsMeta
-      storage={{
-        ...r2Storage(),
-        id: "storage-local",
-        name: "Local storage 1",
-        kind: "local",
-        local_dir: "/Users/test/storage",
-      }}
+test("the Storages index lists every storage as a row that opens its page", () => {
+  const html = renderToStaticMarkup(
+    <StorageIndexPage
+      storages={[
+        r2Storage({ id: "storage-local", name: "Local storage 1", kind: "local", local_dir: "/Users/test/storage" }),
+        r2Storage({ bucket: "mallard-team" }),
+      ]}
+      links={[
+        { local_project_id: "p1", storage_id: "storage-local", state: "active", revision: 1, updated_at: 1 },
+        { local_project_id: "p2", storage_id: "storage-local", state: "active", revision: 1, updated_at: 1 },
+      ] as never}
+      storageIssues={{ "storage-r2": "Bucket unreachable" }}
+      busy={false}
+      appActions={[{ label: "Mallard", items: [{ id: "theme", label: "Switch theme", onSelect: () => undefined }] }]}
+      onOpenStorage={() => undefined}
+      onAddStorage={() => undefined}
     />,
   );
-  const cloudHtml = renderToStaticMarkup(
-    <StorageSettingsMeta storage={r2Storage()} />,
+
+  // The bar is the page's whole chrome: a single root crumb that is also the
+  // leaf, the one page verb, and the app scope behind ⋯.
+  assert.match(html, /sync-pathbar sync-titlebar/);
+  assert.match(html, /sync-path-crumb root leaf[^>]*aria-current="page"/);
+  assert.match(html, /aria-label="Storages path"/);
+  assert.match(html, /sync-path-sync-label">Add storage/);
+  assert.match(html, /aria-label="App actions"/);
+
+  // Rows: name, subtitle, linked-project tally; the issue marks its row.
+  assert.match(html, /aria-label="Open Local storage 1"[\s\S]*?<strong>Local storage 1<\/strong><small>~\/storage<\/small>/);
+  assert.match(html, /sync-storage-repo-chip[^>]*><span>Projects<\/span><b>2<\/b>/);
+  assert.match(html, /aria-label="Open R2 storage\. Storage issue: Bucket unreachable"/);
+  assert.match(html, /sync-storage-index-warning/);
+  assert.match(html, /sync-storage-repo-chip[^>]*><span>Projects<\/span><b>0<\/b>/);
+});
+
+test("the Storages index offers Add storage as its empty state", () => {
+  const html = renderToStaticMarkup(
+    <StorageIndexPage
+      storages={[]}
+      links={[] as never}
+      storageIssues={{}}
+      busy={false}
+      appActions={[]}
+      onOpenStorage={() => undefined}
+      onAddStorage={() => undefined}
+    />,
   );
 
-  assert.match(localHtml, /sync-storage-settings-meta/);
-  assert.match(localHtml, /title="Local folder: Local storage 1"/);
-  assert.match(localHtml, />Local storage 1</);
-  assert.match(cloudHtml, /title="Cloudflare R2: R2 storage"/);
+  assert.match(html, /profile-links-empty/);
+  assert.match(html, /Add a storage to choose where projects sync\./);
+  assert.doesNotMatch(html, /sync-storage-index-row/);
 });
 
 test("the storage group is skipped when it would frame nothing", () => {
@@ -543,7 +575,7 @@ test("the storage group is skipped when it would frame nothing", () => {
   assert.match(workspace, /if \(!activeNotice && !reviewOpen\) return null;/);
 });
 
-test("the storage sidebar opens the overview and puts settings and clear behind overflow", () => {
+test("the storage page is a rooted trail; sidebar and banners deep-link into it", () => {
   const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
   const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
@@ -555,36 +587,71 @@ test("the storage sidebar opens the overview and puts settings and clear behind 
   assert.match(sidebar, />Storage settings</);
   assert.match(sidebar, />Clear storage data</);
   assert.match(sidebar, /onClearStorage\(storage\.id\)/);
-  assert.match(shell, /onOpenStorage=\{\(storageId, settingsExpanded\) => \{/);
-  assert.match(shell, /onClearStorage=\{\(storageId\) => void clearStorageData\(storageId\)\}/);
+
+  // One route into a storage page, shared by every caller; every storage
+  // screen suppresses the titlebar because the trail is the titlebar.
+  assert.match(shell, /onOpenStorage=\{openStorageWorkspace\}/);
   assert.match(shell, /mode: "open",\s*storageId,\s*settingsExpanded,/);
+  assert.match(shell, /onClearStorage=\{\(storageId\) => void clearStorageData\(storageId\)\}/);
+  assert.match(shell, /storageIndexOpen \? \(\s*<StorageIndexPage/);
+  assert.match(shell, /\(!!activeSummary \|\| storageIndexOpen \|\| activeStorageSettingsId != null\)/);
+  // Removing the storage whose page is open lands on the trail's root.
+  assert.match(shell, /if \(activeStorageSettingsId === storageId\) setStorageIndexOpen\(true\);/);
+
+  // The storage page: Storages / name ⌄ / Repositories, with the old header's
+  // gear, pencil, and ✕ folded into the bar's single overflow.
+  assert.match(workspace, /label: "Storages",\s*icon: "drive",\s*tone: "root"/);
+  assert.match(workspace, /onActivate: onOpenStorageIndex/);
+  assert.match(workspace, /label: "Repositories",\s*tone: "section"/);
+  assert.match(workspace, /menuLabel: "Storage"/);
+  // The crumb menu is a header naming the storage plus switch commands — the
+  // current storage is the header block, never a checked row.
+  assert.match(workspace, /menuHeader: \{\s*label: storageName,/);
+  assert.match(workspace, /label: "Switch to"/);
+  assert.doesNotMatch(workspace, /menuitemradio|checked: candidate\.id === editedStorageConfig\.id/);
+  assert.match(workspace, /\{ id: "storage", label: "New storage" \}/);
+  assert.match(workspace, /label: storageDetailsExpanded \? "Hide storage settings" : "Storage settings"/);
+  assert.match(workspace, /label: "Rename storage…"/);
+  assert.match(workspace, /label: "Clear storage data…"/);
+  assert.match(workspace, /label: "Remove storage…"/);
+  assert.match(workspace, /onClearStorage\(editedStorageConfig\.id\)/);
+  assert.match(workspace, /onRemoveStorage\(editedStorageConfig\.id\)/);
+  assert.match(workspace, /detail: compactProjectPath\(editedStorageConfig\.local_dir\)/);
+  assert.match(workspace, /htmlFor="sync-storage-rename-input"/);
+  assert.match(workspace, /`rename-storage:\$\{storageDraft\.id\}`/);
+  assert.match(workspace, /const renamedStorage = \{ \.\.\.editedStorageConfig, name \}/);
+  assert.match(workspace, /aria-label=\{`Refresh repositories in \$\{storageName\}`\}/);
+
+  // The drawer still opens where the request says and commits from its own
+  // footer; only the draft's create moved into the bar.
   assert.match(workspace, /setStorageDetailsExpanded\(storageEditorRequest\.settingsExpanded\)/);
   assert.match(
     workspace,
     /const openStorageEditorWithSettings = async[\s\S]*setStorageDetailsExpanded\(true\);/,
   );
   assert.match(workspace, /void openStorageEditorWithSettings\(workspaceStorage\);/);
-  assert.match(workspace, /aria-expanded=\{storageDetailsExpanded\}/);
-  assert.match(workspace, /aria-label=\{storageDetailsExpanded \? "Hide storage settings" : "Edit storage settings"\}/);
   assert.match(workspace, /showStorageDetails \? " settings-expanded" : " settings-collapsed"/);
   assert.match(workspace, /hidden=\{!showStorageDetails\}/);
   assert.match(workspace, /\{showStorageDetails && \(/);
   assert.match(workspace, /setStorageDetailsExpanded\(false\);\s*await loadStorageBundles/);
-  // The storage editor keeps the heading block; the project's own identity
-  // moved to the path bar, where the folder and the agent live behind ···.
-  assert.match(workspace, /className="sync-project-heading-name"/);
-  assert.match(workspace, /<Icon name="folder" size=\{12\} \/>/);
-  assert.doesNotMatch(workspace, /sync-project-heading-path/);
-  assert.doesNotMatch(workspace, /sync-project-heading-agent/);
-  assert.match(workspace, /label: "Reveal in Finder",\s*detail: compactProjectPath\(workspaceProject\.project_root\)/);
-  assert.match(workspace, /label: "Agent profile",\s*detail: workspaceProfileLabel/);
-  assert.match(workspace, /label: "Rename project"/);
-  assert.match(workspace, /label: "Reset local sync state"/);
+  assert.match(workspace, /primaryAction=\{creatingStorage \? undefined : \(/);
+  assert.match(workspace, /"Creating…" : "Create storage"/);
+
+  // The header block the trail replaced stays gone.
+  assert.doesNotMatch(workspace, /sync-project-heading/);
+  assert.doesNotMatch(workspace, /sync-storage-settings-icon/);
+  assert.doesNotMatch(workspace, /sync-storage-settings-actions/);
+  assert.doesNotMatch(workspace, /StorageSettingsMeta/);
+  assert.doesNotMatch(workspace, /Close storage settings/);
+
+  // One home per scope: the project verbs ride the project crumb's own menu
+  // (no path detail on Reveal — the menu header already shows it), and the
+  // workspace ⋯ is left holding app scope alone.
+  assert.match(workspace, /const pathOverflow: PathBarMenuGroup\[\] = workspaceProject \? appActions : \[\];/);
+  assert.match(workspace, /label: "Reveal in Finder",\s*icon: "folder" as const/);
+  assert.match(workspace, /label: "Agent profile…",\s*detail: workspaceProfileLabel/);
+  assert.match(workspace, /label: "Rename project…"/);
+  assert.match(workspace, /label: "Reset local sync state…"/);
   assert.match(workspace, /onResetProjectMetadata\(workspaceProject\.local_project_id\)/);
   assert.match(workspace, /isIrrecoverableSyncError\(activeNotice\.message\)/);
-  assert.match(workspace, /Reset local sync state/);
-  assert.match(workspace, /aria-label="Rename storage"/);
-  assert.match(workspace, /<Icon name="edit" size=\{13\} \/>/);
-  assert.match(workspace, /`rename-storage:\$\{storageDraft\.id\}`/);
-  assert.match(workspace, /const renamedStorage = \{ \.\.\.editedStorageConfig, name \}/);
 });

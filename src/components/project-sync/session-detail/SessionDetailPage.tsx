@@ -15,7 +15,6 @@ import { projectSyncApi } from "../api";
 import SessionDetailHeader from "./SessionDetailHeader";
 import SessionDetailTimeline from "./SessionDetailTimeline";
 import SessionDetailToolbar from "./SessionDetailToolbar";
-import type { SessionTurnToolState } from "./SessionDetailEvent";
 import type { SessionToolDetailState } from "./SessionDetailToolCall";
 import {
   ALL_SESSION_TOOL_CATEGORIES,
@@ -31,17 +30,32 @@ import {
 
 const TIMELINE_PAGE_SIZE = 50;
 
+/**
+ * What the workspace path bar needs to stand in as this page's header: the
+ * leaf crumb renders the title behind the provider's mark (with a dot when the
+ * session is live), and the bar's single refresh points here instead of at the
+ * activity comparison the page is covering.
+ */
+export interface SessionHeaderModel {
+  title: string;
+  provider: string;
+  providerDisplayName: string;
+  active: boolean;
+  refreshing: boolean;
+  onRefresh: () => void;
+}
+
 interface Props {
   localProjectId: string;
   resourceId: string;
   occurrenceKey: string;
   initialCheckpointId?: string;
   /**
-   * Reports the loaded session title so the workspace path bar can append it as
-   * the trail's leaf. Called with null while the detail is still loading or has
-   * failed, and once more on unmount so the crumb never outlives the page.
+   * Reports the loaded session's identity and refresh handle for the path bar.
+   * Called with null while the detail is still loading or has failed, and once
+   * more on unmount so the crumb never outlives the page.
    */
-  onTitleChange: (title: string | null) => void;
+  onHeaderChange: (header: SessionHeaderModel | null) => void;
 }
 
 function mergeWarnings(...groups: SessionDetailWarning[][]): SessionDetailWarning[] {
@@ -76,7 +90,7 @@ export default function SessionDetailPage({
   resourceId,
   occurrenceKey,
   initialCheckpointId,
-  onTitleChange,
+  onHeaderChange,
 }: Props) {
   const [detail, setDetail] = useState<ProjectSessionDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
@@ -90,14 +104,12 @@ export default function SessionDetailPage({
   const [snapshotChanged, setSnapshotChanged] = useState(false);
   const [timelineWarnings, setTimelineWarnings] = useState<SessionDetailWarning[]>([]);
   const [timelineReloadEpoch, setTimelineReloadEpoch] = useState(0);
-  const [turnToolStates, setTurnToolStates] = useState<Record<string, SessionTurnToolState>>({});
   const [toolDetails, setToolDetails] = useState<Record<string, SessionToolDetailState>>({});
   const [expandedToolIds, setExpandedToolIds] = useState<Set<string>>(new Set());
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const detailRequestRef = useRef(0);
   const timelineRequestRef = useRef(0);
-  const turnRequestRef = useRef<Record<string, number>>({});
   const eventDetailRequestRef = useRef<Record<string, number>>({});
   const sequenceRef = useRef(0);
   const pendingAnchorRef = useRef<string | null>(null);
@@ -123,7 +135,6 @@ export default function SessionDetailPage({
       setSnapshotChanged(false);
       setTimelineError(null);
       setTimelineWarnings([]);
-      setTurnToolStates({});
       setToolDetails({});
       setExpandedToolIds(new Set());
       setDetail(next);
@@ -151,16 +162,30 @@ export default function SessionDetailPage({
     return () => {
       detailRequestRef.current += 1;
       timelineRequestRef.current += 1;
-      turnRequestRef.current = {};
       eventDetailRequestRef.current = {};
     };
   }, [localProjectId, resourceId, occurrenceKey, initialCheckpointId, loadDetail]);
 
-  useEffect(() => {
-    onTitleChange(detail ? detail.title || "Untitled session" : null);
-  }, [detail, onTitleChange]);
+  // The refresh handle stays one stable function so the bar's button never
+  // remounts mid-spin; the loader it calls is read through a ref.
+  const loadDetailRef = useRef(loadDetail);
+  loadDetailRef.current = loadDetail;
+  const refreshSession = useCallback(() => {
+    void loadDetailRef.current(true);
+  }, []);
 
-  useEffect(() => () => onTitleChange(null), [onTitleChange]);
+  useEffect(() => {
+    onHeaderChange(detail ? {
+      title: detail.title || "Untitled session",
+      provider: detail.provider,
+      providerDisplayName: detail.provider_display_name,
+      active: detail.is_active,
+      refreshing: detailLoading,
+      onRefresh: refreshSession,
+    } : null);
+  }, [detail, detailLoading, onHeaderChange, refreshSession]);
+
+  useEffect(() => () => onHeaderChange(null), [onHeaderChange]);
 
   useEffect(() => {
     if (!detail || focusedHeadingRef.current) return;
@@ -243,7 +268,6 @@ export default function SessionDetailPage({
     if (!detail || !filters) return;
     const anchorEventId = pendingAnchorRef.current;
     pendingAnchorRef.current = null;
-    setTurnToolStates({});
     setExpandedToolIds(new Set());
     void requestTimelinePage({
       sessionDetail: detail,
@@ -251,60 +275,6 @@ export default function SessionDetailPage({
       anchorEventId,
     });
   }, [detail, filterFingerprint, timelineReloadEpoch, requestTimelinePage]);
-
-  const loadTurnTools = useCallback(async (turnId: string, cursor?: string | null) => {
-    if (!detail || !filters) return;
-    const requestId = ++sequenceRef.current;
-    turnRequestRef.current[turnId] = requestId;
-    setTurnToolStates((current) => ({
-      ...current,
-      [turnId]: {
-        open: true,
-        loading: true,
-        error: null,
-        page: current[turnId]?.page ?? null,
-      },
-    }));
-    try {
-      const page = await projectSyncApi.getProjectSessionTimelinePage(
-        localProjectId,
-        resourceId,
-        {
-          snapshot_id: detail.snapshot_id,
-          cursor: cursor ?? null,
-          anchor_event_id: null,
-          limit: TIMELINE_PAGE_SIZE,
-          included_event_kinds: ["tool_call"],
-          included_tool_categories: [...ALL_SESSION_TOOL_CATEGORIES],
-          turn_id: turnId,
-        },
-      );
-      if (turnRequestRef.current[turnId] !== requestId) return;
-      setTurnToolStates((current) => {
-        const previous = current[turnId]?.page;
-        const merged = previous && cursor
-          ? { ...page, events: mergeSessionTimelinePages(previous.events, page) }
-          : page;
-        return {
-          ...current,
-          [turnId]: { open: true, loading: false, error: null, page: merged },
-        };
-      });
-    } catch (reason) {
-      if (turnRequestRef.current[turnId] !== requestId) return;
-      const failure = normalizeSessionDetailFailure(reason);
-      if (failure.code === "snapshot_changed") setSnapshotChanged(true);
-      setTurnToolStates((current) => ({
-        ...current,
-        [turnId]: {
-          open: true,
-          loading: false,
-          error: failure.message,
-          page: current[turnId]?.page ?? null,
-        },
-      }));
-    }
-  }, [detail, filters, localProjectId, resourceId]);
 
   const requestToolDetail = useCallback(async (eventId: string) => {
     if (!detail) return;
@@ -353,20 +323,6 @@ export default function SessionDetailPage({
     if (expanded) void requestToolDetail(eventId);
   };
 
-  const handleTurnToolExpandedChange = (turnId: string, open: boolean) => {
-    setTurnToolStates((current) => ({
-      ...current,
-      [turnId]: {
-        open,
-        loading: current[turnId]?.loading ?? false,
-        error: current[turnId]?.error ?? null,
-        page: current[turnId]?.page ?? null,
-      },
-    }));
-    const current = turnToolStates[turnId];
-    if (open && !current?.page && !current?.loading) void loadTurnTools(turnId);
-  };
-
   const runAction = async (action: SessionActionDescriptor) => {
     if (!action.enabled || actionBusyId) return;
     setActionBusyId(action.action_id);
@@ -404,7 +360,6 @@ export default function SessionDetailPage({
         headingRef={headingRef}
         actionBusyId={actionBusyId}
         actionError={actionError}
-        onRefresh={() => void loadDetail(true)}
         onAction={(action) => void runAction(action)}
       />
 
@@ -437,6 +392,7 @@ export default function SessionDetailPage({
           />
           <SessionDetailTimeline
             events={events}
+            provider={detail.provider}
             providerDisplayName={detail.provider_display_name}
             loading={timelineLoading}
             loadingMore={timelineLoadingMore}
@@ -444,7 +400,6 @@ export default function SessionDetailPage({
             error={timelineError}
             expandedToolIds={expandedToolIds}
             toolDetails={toolDetails}
-            turnToolStates={turnToolStates}
             onRetry={() => setTimelineReloadEpoch((epoch) => epoch + 1)}
             onLoadMore={() => void requestTimelinePage({
               sessionDetail: detail,
@@ -453,11 +408,6 @@ export default function SessionDetailPage({
               append: true,
             })}
             onToolExpandedChange={handleToolExpandedChange}
-            onTurnToolExpandedChange={handleTurnToolExpandedChange}
-            onLoadMoreTurnTools={(turnId) => void loadTurnTools(
-              turnId,
-              turnToolStates[turnId]?.page?.next_cursor,
-            )}
           />
         </div>
       )}

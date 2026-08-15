@@ -1,0 +1,1187 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mallard · option A, refined</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+@font-face {
+  font-family: "Departure Mono";
+  src: url("/fonts/DepartureMono-Regular.woff2") format("woff2");
+  font-style: normal; font-weight: 400; font-display: swap;
+}
+
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+    "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Roboto Mono",
+    "Liberation Mono", Menlo, Consolas, monospace;
+  --font-pixel: "Departure Mono", var(--font-mono);
+  --type-3xs: 9px; --type-2xs: 10px; --type-xs: 11px; --type-sm: 12px;
+  --type-md: 13px; --type-lg: 14px; --type-xl: 17px;
+  --leading-snug: 1.35; --leading-prose: 1.5;
+}
+
+/* Shipping palette, verbatim from RetroTheme.css. */
+:root, :root[data-theme="dark"] {
+  --color-scheme: dark;
+  --bg-0: #12100d; --bg-1: #0d0b09; --bg-2: #1a1714; --bg-3: #282420;
+  --bg-hover: rgba(255, 238, 217, 0.065); --bg-active: rgba(255, 238, 217, 0.11);
+  --border: #2e2925; --border-mid: #443d36; --border-strong: #7a7065;
+  --button-bg: #181512; --button-bg-hover: #27221d; --button-border: #6f6459;
+  --button-radius: 4px;
+  --app-shell: #0b0908; --surface-card: #171412;
+  --surface-row-hover: #201c18;
+  --surface-popover: #1b1815; --surface-footer: #0f0d0b;
+  --surface-subtle: rgba(255, 238, 217, 0.035);
+  --surface-overlay: rgba(23, 20, 18, 0.97);
+  --chip-bg: rgba(255, 238, 217, 0.08); --chip-strong-bg: rgba(255, 238, 217, 0.13);
+  --danger-soft: rgba(251, 115, 97, 0.11); --warning-soft: rgba(244, 185, 79, 0.11);
+  --accent-soft: rgba(239, 231, 212, 0.1);
+  --text-0: #f6f1e6; --text-1: #d8d2c5; --text-2: #a59d8f; --text-3: #756e62;
+  --accent: #efe7d4; --accent-glow: rgba(239, 231, 212, 0.15);
+  --primary: #efe7d4; --primary-text: #161210;
+  --green: #63cd82; --red: #fb7361; --yellow: #f4b94f;
+  --danger-text: var(--red);
+  --focus-ring: var(--accent);
+  --r: 6px; --r-sm: 4px;
+  --shadow-overlay: 4px 4px 0 rgba(26, 16, 8, 0.4);
+  --shadow-popover: 4px 4px 0 rgba(26, 16, 8, 0.46);
+  --spec-grid: rgba(255, 238, 217, 0.05);
+}
+
+:root[data-theme="light"] {
+  --color-scheme: light;
+  --bg-0: #fefbf6; --bg-1: #fdf9f4; --bg-2: #faf3eb; --bg-3: #f2e8dd;
+  --bg-hover: rgba(82, 58, 43, 0.045); --bg-active: #f0e3d5;
+  --border: #d8cec4; --border-mid: #aa998d; --border-strong: #66574f;
+  --button-bg: #fdf8f1; --button-bg-hover: #f5eadf; --button-border: #9d8b7f;
+  --app-shell: #f6eee5; --surface-card: #fcf7f0;
+  --surface-row-hover: #faf2e9;
+  --surface-popover: #fffaf4; --surface-footer: #faf3eb;
+  --surface-subtle: rgba(82, 58, 43, 0.025);
+  --surface-overlay: rgba(254, 251, 246, 0.97);
+  --chip-bg: rgba(82, 58, 43, 0.065); --chip-strong-bg: rgba(82, 58, 43, 0.12);
+  --danger-soft: rgba(205, 69, 49, 0.09); --warning-soft: rgba(192, 124, 12, 0.1);
+  --accent-soft: rgba(82, 58, 43, 0.075);
+  --text-0: #1e1817; --text-1: #3d332e; --text-2: #6f6159; --text-3: #96877d;
+  --accent: #2a211d; --accent-glow: rgba(82, 58, 43, 0.12);
+  --primary: #2a211d; --primary-text: #fffaf4;
+  --green: #4b9661; --red: #d8523e; --yellow: #d99609;
+  --danger-text: #c73d28;
+  --focus-ring: var(--accent);
+  --shadow-overlay: 4px 4px 0 rgba(82, 58, 43, 0.11);
+  --shadow-popover: 4px 4px 0 rgba(82, 58, 43, 0.14);
+  --spec-grid: rgba(82, 58, 43, 0.05);
+}
+
+html { color-scheme: var(--color-scheme); }
+
+body {
+  min-height: 100%;
+  padding: 0 0 96px;
+  background: var(--app-shell);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-size: var(--type-md);
+  line-height: var(--leading-snug);
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+
+/* ── spec chrome ─────────────────────────────────────────────────────────── */
+.spec-masthead {
+  position: sticky; top: 0; z-index: 40;
+  display: flex; align-items: center; gap: 16px;
+  padding: 18px 32px;
+  border-bottom: 1px solid var(--border-mid);
+  background: var(--surface-overlay);
+  backdrop-filter: blur(8px);
+}
+.spec-masthead h1 { font-family: var(--font-pixel); font-size: var(--type-xl); font-weight: 400; color: var(--text-0); }
+.spec-masthead p { margin-top: 4px; font-size: var(--type-sm); color: var(--text-2); }
+.spec-spacer { flex: 1 1 auto; }
+.spec-toggle {
+  height: 30px; padding: 0 14px;
+  border: 1px solid var(--button-border); border-radius: var(--button-radius);
+  background: var(--button-bg); color: var(--text-1);
+  font-family: var(--font-pixel); font-size: var(--type-xs);
+  text-transform: uppercase; letter-spacing: 0.06em; cursor: pointer;
+}
+.spec-toggle:hover { background: var(--button-bg-hover); color: var(--text-0); }
+
+.spec-nav {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 12px 32px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+.spec-nav a {
+  padding: 4px 9px; border: 1px solid transparent; border-radius: var(--r-sm);
+  color: var(--text-2); font-family: var(--font-pixel); font-size: var(--type-2xs);
+  text-transform: uppercase; letter-spacing: 0.07em; text-decoration: none;
+}
+.spec-nav a:hover { color: var(--text-0); border-color: var(--border-mid); background: var(--bg-2); }
+
+.spec-wrap { max-width: 1180px; margin: 0 auto; padding: 0 32px; }
+.spec-section { padding: 44px 0 8px; border-bottom: 1px solid var(--border); }
+.spec-section:last-of-type { border-bottom: 0; }
+.spec-section > h2 {
+  font-family: var(--font-pixel); font-weight: 400; font-size: var(--type-lg);
+  color: var(--text-0); text-transform: uppercase; letter-spacing: 0.05em;
+}
+.spec-section > h2 em {
+  font-family: var(--font-sans); font-style: normal; text-transform: none;
+  letter-spacing: 0; font-size: var(--type-md); color: var(--text-2); margin-left: 10px;
+}
+.spec-section h3 {
+  margin: 30px 0 12px;
+  font-family: var(--font-pixel); font-weight: 400; font-size: var(--type-xs);
+  color: var(--text-2); text-transform: uppercase; letter-spacing: 0.08em;
+}
+.spec-lede { max-width: 76ch; margin: 12px 0 24px; font-size: var(--type-md); line-height: var(--leading-prose); color: var(--text-2); }
+.spec-lede strong { color: var(--text-0); font-weight: 600; }
+code, .spec-note code, td code {
+  font-family: var(--font-mono); font-size: 0.92em;
+  padding: 1px 4px; border-radius: 3px; background: var(--chip-bg); color: var(--text-1);
+}
+.spec-note {
+  max-width: 76ch; margin: 18px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border); border-left: 3px solid var(--border-mid);
+  border-radius: var(--r-sm);
+  background: var(--surface-subtle);
+  font-size: var(--type-sm); line-height: var(--leading-prose); color: var(--text-2);
+}
+.spec-note b { color: var(--text-0); font-weight: 600; }
+.spec-note.good { border-left-color: var(--green); }
+
+.stage {
+  position: relative;
+  display: flex; align-items: flex-start; justify-content: center;
+  min-height: 120px; padding: 34px 24px;
+  border: 1px solid var(--border); border-radius: var(--r);
+  background:
+    linear-gradient(var(--spec-grid) 1px, transparent 1px) 0 0 / 100% 12px,
+    linear-gradient(90deg, var(--spec-grid) 1px, transparent 1px) 0 0 / 12px 100%,
+    var(--bg-2);
+}
+.stage.left { justify-content: flex-start; }
+.stage.tight { padding: 20px; min-height: 0; }
+.stage-caption {
+  position: absolute; top: 8px; left: 12px;
+  font-family: var(--font-pixel); font-size: var(--type-3xs);
+  text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-3);
+}
+.mini-cap {
+  margin: 0 0 8px 2px;
+  font-family: var(--font-pixel); font-size: var(--type-3xs);
+  text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-3);
+}
+.specrow { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+.split2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 900px) { .split2 { grid-template-columns: minmax(0, 1fr); } }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; align-items: start; }
+
+.flags { list-style: none; display: grid; gap: 14px; }
+.flags > li { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 12px; align-items: start; }
+.flag-n {
+  display: grid; place-items: center;
+  width: 20px; height: 20px; margin-top: 1px;
+  border-radius: 50%;
+  background: var(--red); color: #fff;
+  font-family: var(--font-pixel); font-size: var(--type-2xs);
+}
+.flag-copy { font-size: var(--type-sm); line-height: var(--leading-prose); color: var(--text-2); }
+.flag-copy b { display: block; color: var(--text-0); font-weight: 600; font-size: var(--type-md); margin-bottom: 2px; }
+.flag-src {
+  display: inline-block; margin-top: 5px;
+  font-family: var(--font-pixel); font-size: var(--type-3xs);
+  text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-3);
+}
+.flag-src::before { content: "▸ "; }
+.pin {
+  position: absolute; z-index: 5;
+  display: grid; place-items: center;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--red); color: #fff;
+  font-family: var(--font-pixel); font-size: var(--type-3xs);
+  box-shadow: 0 0 0 2px var(--surface-popover);
+}
+
+table { width: 100%; border-collapse: collapse; margin: 8px 0 4px; font-size: var(--type-sm); }
+th, td { padding: 9px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); line-height: var(--leading-prose); }
+th {
+  font-family: var(--font-pixel); font-weight: 400; font-size: var(--type-2xs);
+  text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--text-3); border-bottom: 1px solid var(--border-mid);
+}
+td { color: var(--text-2); }
+td:first-child { color: var(--text-0); }
+kbd {
+  display: inline-block; min-width: 20px; padding: 1px 6px;
+  border: 1px solid var(--border-mid); border-bottom-width: 2px; border-radius: 3px;
+  background: var(--bg-3); color: var(--text-1);
+  font-family: var(--font-pixel); font-size: var(--type-2xs); text-align: center;
+}
+
+/* ── bar ─────────────────────────────────────────────────────────────────── */
+.bar {
+  position: relative;
+  width: 100%; max-width: 720px;
+  height: 52px;
+  display: flex; align-items: stretch; justify-content: space-between; gap: 12px;
+  padding: 0 12px 0 16px;
+  border: 1px solid var(--border); border-bottom-color: var(--border-mid);
+  border-radius: var(--r-sm);
+  background: var(--bg-0);
+}
+.bar-trail { display: flex; align-items: stretch; gap: 1px; min-width: 0; }
+.bar-item { position: relative; display: flex; align-items: center; }
+.crumb {
+  height: 28px; display: inline-flex; align-items: center; gap: 6px;
+  padding: 0 7px;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-1);
+  font: inherit; line-height: 1; cursor: pointer; white-space: nowrap;
+}
+.crumb > svg { flex: 0 0 auto; color: var(--text-3); }
+.crumb.open, .crumb:hover { background: var(--bg-hover); color: var(--text-0); }
+.crumb.open { border-color: var(--border-mid); background: var(--bg-active); }
+.crumb.section { font-family: var(--font-pixel); font-size: var(--type-sm); text-transform: uppercase; letter-spacing: 0.05em; }
+.sep { padding: 0 2px; color: var(--text-3); align-self: center; }
+.bar-actions { display: flex; align-items: center; gap: 6px; }
+.bar-btn {
+  height: 28px; padding: 0 11px;
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--button-border); border-radius: var(--button-radius);
+  background: var(--button-bg); color: var(--text-1);
+  font-family: var(--font-pixel); font-size: var(--type-xs);
+  text-transform: uppercase; letter-spacing: 0.05em; cursor: pointer;
+}
+.bar-badge {
+  display: inline-grid; place-items: center;
+  min-width: 18px; height: 16px; padding: 0 4px;
+  border-radius: 3px;
+  background: var(--chip-strong-bg); color: var(--text-0);
+  font-family: var(--font-mono); font-size: var(--type-2xs);
+}
+.bar-icon {
+  width: 28px; height: 28px; display: grid; place-items: center;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2); cursor: pointer;
+}
+.bar-divider { width: 1px; height: 18px; align-self: center; background: var(--border-mid); }
+.bar-more {
+  width: 28px; height: 28px; display: grid; place-items: center;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2); cursor: pointer;
+}
+.bar-more.open { border-color: var(--border-mid); background: var(--bg-active); color: var(--text-0); }
+
+/* ── the menu, refined ──────────────────────────────────────────────────── */
+/*
+ * Two columns only: a 16px icon gutter and the copy. No tick column, no
+ * trailing tag column. The current object is a header block, not a row, so
+ * selection needs no mark at all — position says it.
+ */
+.pm {
+  position: relative;
+  width: 288px;
+  padding: 5px;
+  border: 1px solid var(--border-strong); border-radius: var(--r-sm);
+  background: var(--surface-popover);
+  box-shadow: var(--shadow-popover);
+  text-align: left;
+}
+
+/* The current object. Context, not a command: no hover, no cursor. */
+.pm-current {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 9px;
+  align-items: start;
+  padding: 8px;
+}
+.pm-current > svg { color: var(--text-3); margin-top: 1px; }
+.pm-current .pm-name { color: var(--text-0); font-weight: 600; }
+.pm-current.warn > svg { color: var(--yellow); }
+.pm-current.warn .pm-sub { color: var(--yellow); }
+
+.pm-label {
+  display: block;
+  padding: 7px 8px 5px;
+  font-family: var(--font-pixel); font-size: var(--type-2xs);
+  text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-3);
+}
+.pm-sep { height: 1px; margin: 5px 3px; background: var(--border); }
+
+.pm-item {
+  position: relative;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid transparent; border-radius: 3px;
+  background: transparent; color: var(--text-1);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.pm-item.endcap { grid-template-columns: 16px minmax(0, 1fr) auto; }
+.pm-item > svg { color: var(--text-3); }
+.pm-copy { min-width: 0; display: block; }
+.pm-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
+.pm-sub {
+  display: block; margin-top: 2px;
+  font-family: var(--font-mono); font-size: var(--type-2xs); color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pm-sub.phrase { font-family: var(--font-sans); font-size: var(--type-xs); }
+.pm-end { color: var(--text-0); }
+.pm-end > svg { color: var(--text-0); }
+
+.pm-item:hover { color: var(--text-0); background: var(--surface-row-hover); }
+.pm-item.danger, .pm-item.danger > svg { color: var(--danger-text); }
+.pm-item.danger:hover { background: var(--danger-soft); }
+.pm-item[aria-disabled="true"] { opacity: 0.45; cursor: default; }
+.pm-item[aria-disabled="true"]:hover { background: transparent; color: var(--text-1); }
+.pm-item.focused { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+
+.pm-banner {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 9px; align-items: center;
+  margin: 0 0 5px;
+  padding: 8px;
+  border-radius: 3px;
+  background: var(--warning-soft);
+  font-size: var(--type-xs); line-height: var(--leading-snug); color: var(--text-1);
+}
+.pm-banner > svg { color: var(--yellow); }
+
+/* Before-specimen leftovers (the elements being removed). */
+.pm-item.cols4 { grid-template-columns: 16px 16px minmax(0, 1fr) auto; }
+.pm-tick { width: 16px; height: 16px; display: grid; place-items: center; }
+.pm-tick > svg { color: var(--text-0); }
+.pm-trail { font-family: var(--font-mono); font-size: var(--type-2xs); color: var(--text-3); white-space: nowrap; }
+.pm-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  padding: 7px 8px 5px;
+}
+.pm-head-title {
+  font-family: var(--font-pixel); font-size: var(--type-2xs);
+  text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-3);
+}
+.pm-head-count { font-family: var(--font-mono); font-size: var(--type-2xs); color: var(--text-3); }
+.pm-label .obj {
+  font-family: var(--font-sans); text-transform: none; letter-spacing: 0;
+  font-size: var(--type-xs); color: var(--text-2);
+}
+.pm-item[aria-checked="true"] { color: var(--text-0); background: var(--chip-bg); }
+
+.redline .pm-item, .redline .pm-current { outline: 1px dashed var(--border-mid); outline-offset: -1px; }
+.redline .pm-item > svg, .redline .pm-current > svg { background: var(--accent-glow); border-radius: 2px; }
+.rl-note {
+  display: flex; gap: 8px; align-items: baseline;
+  font-family: var(--font-mono); font-size: var(--type-2xs); color: var(--text-2);
+  padding: 3px 0;
+}
+.rl-note b { font-family: var(--font-pixel); color: var(--text-0); font-weight: 400; min-width: 92px; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <g id="i-drive"><path fill="currentColor" d="M3 2h18v2H3ZM3 7h18v2H3ZM1 4h2v3H1ZM21 4h2v3h-2ZM19 9h2v11h-2ZM3 9h2v11H3ZM5 20h14v2H5ZM9 11h6v2H9Z"/></g>
+  <g id="i-cloud"><path fill="currentColor" d="M22 12v-1h-2V9h-1V8h-1V7h-3v1h-1V6h-1V5H8v1H7v1H6v1H5v3H2v1H1v5h1v1h1v1h2v1h14v-1h2v-1h1v-1h1v-5h-1Zm0 4h-1v1h-1v1h-2v1H6v-1H4v-1H3v-1H2v-3h1v-1h3V9h1V8h1V7h1V6h3v1h1v2h3V8h1v1h1v1h1v2h2v1h1v3Z"/></g>
+  <g id="i-cloud-off">
+    <path fill="currentColor" d="M22 12v-1h-2V9h-1V8h-1V7h-3v1h-1V6h-1V5H8v1H7v1H6v1H5v3H2v1H1v5h1v1h1v1h2v1h14v-1h2v-1h1v-1h1v-5h-1Zm-2 6H6v-1H4v-1H3v-3h3V9h1V8h1V7h4v1h1v2h3V9h1v1h1v2h3v1h1v3h-1v1h-1v1Z"/>
+    <path fill="currentColor" d="M3 1h2v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1H9V9H8V8H7V7H6V6H5V5H4V4H3V3H2V2h1V1Z"/>
+  </g>
+  <g id="i-git-folder">
+    <path fill="currentColor" d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/>
+    <path fill="currentColor" d="M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z"/>
+  </g>
+  <g id="i-chevron-down"><path fill="currentColor" d="M20 8v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-4v-1H9v-1H8v-1H7v-1H6v-1H5v-1H4V8h2v1h1v1h1v1h1v1h1v1h4v-1h1v-1h1v-1h1V9h1V8h2Z"/></g>
+  <g id="i-more"><path fill="currentColor" d="M3 9h2v2H3ZM11 9h2v2h-2ZM19 9h2v2h-2ZM1 11h2v2H1ZM9 11h2v2H9ZM17 11h2v2h-2ZM3 13h2v2H3ZM11 13h2v2h-2ZM19 13h2v2h-2ZM5 11h2v2H5ZM13 11h2v2h-2ZM21 11h2v2h-2Z"/></g>
+  <g id="i-link">
+    <path fill="currentColor" d="M16 10h1v7h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H5v-1H4v-1H3v-1H2v-1H1v-5h1v-1h1v-1h1v-1h1v3H4v1H3v3h1v1h1v1h1v1h4v-1h1v-1h1v-1h1v-1h1v-1h1v-5h-1v-1h-1V9h1V8h1v1h1v1Z"/>
+    <path fill="currentColor" d="M23 5v5h-1v1h-1v1h-1v1h-1v-3h1V9h1V6h-1V5h-1V4h-1V3h-4v1h-1v1h-1v1h-1v1h-1v1H9v5h1v1h1v1h-1v1H9v-1H8v-1H7V7h1V6h1V5h1V4h1V3h1V2h1V1h6v1h1v1h1v1h1v1h1Z"/>
+  </g>
+  <g id="i-link-off">
+    <path fill="currentColor" d="M16 10h1v7h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H5v-1H4v-1H3v-1H2v-1H1v-5h1v-1h1v-1h1v-1h1v3H4v1H3v3h1v1h1v1h1v1h4v-1h1v-1h1v-1h1v-1h1v-1h1v-5h-1v-1h-1V9h1V8h1v1h1v1Z"/>
+    <path fill="currentColor" d="M23 5v5h-1v1h-1v1h-1v1h-1v-3h1V9h1V6h-1V5h-1V4h-1V3h-4v1h-1v1h-1v1h-1v1h-1v1H9v5h1v1h1v1h-1v1H9v-1H8v-1H7V7h1V6h1V5h1V4h1V3h1V2h1V1h6v1h1v1h1v1h1v1h1Z"/>
+    <path fill="currentColor" d="M3 1h2v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1H9V9H8V8H7V7H6V6H5V5H4V4H3V3H2V2h1V1Z"/>
+  </g>
+  <g id="i-plus"><path fill="currentColor" d="M13 11h7v2h-7v7h-2v-7H4v-2h7V4h2v7Z"/></g>
+  <g id="i-settings"><path fill="currentColor" d="M15 2h4v2h3v2h-3v2h-4v-2h-13v-2h13ZM5 9h4v2h13v2h-13v2h-4v-2h-3v-2h3ZM11 16h4v2h7v2h-7v2h-4v-2h-9v-2h9Z"/></g>
+  <g id="i-check"><path fill="currentColor" d="M17 9v2h-1v1h-1v1h-1v1h-1v1h-1v1h-2v-1H9v-1H8v-1H7v-2h1v-1h1v1h1v1h2v-1h1v-1h1V9h1V8h1v1h1Z"/></g>
+  <g id="i-alert">
+    <path fill="currentColor" d="M14 11v3h-1v3h-2v-3h-1v-3h4Z"/><path fill="currentColor" d="M11 18h2v2h-2Z"/>
+    <path fill="currentColor" d="M22 20v-2h-1v-2h-1v-2h-1v-2h-1v-2h-1V8h-1V6h-1V4h-1V2h-1V1h-2v1h-1v2H9v2H8v2H7v2H6v2H5v2H4v2H3v2H2v2H1v2h1v1h20v-1h1v-2h-1ZM3 21v-1h1v-2h1v-2h1v-2h1v-2h1v-2h1V8h1V6h1V4h2v2h1v2h1v2h1v2h1v2h1v2h1v2h1v2h1v1H3Z"/>
+  </g>
+  <g id="i-refresh">
+    <path fill="currentColor" d="M23 14v1h-1v2h-1v2h-1v1h-1v1h-2v1h-2v1H9v-1H7v-1H5v-1H3v1H2v1H1v-7h7v1H7v1H6v2h1v1h2v1h6v-1h2v-1h2v-2h1v-3h3Z"/>
+    <path fill="currentColor" d="M23 2v7h-7V8h1V7h1V5h-1V4h-2V3H9v1H7v1H5v2H4v3H1V9h1V7h1V5h1V4h1V3h2V2h2V1h6v1h2v1h2v1h2V3h1V2h1Z"/>
+  </g>
+  <g id="i-catalog"><path fill="currentColor" d="M4 4h5v5H4ZM15 4h5v5h-5ZM4 15h5v5H4ZM15 15h5v5h-5Z"/></g>
+  <g id="i-edit">
+    <path fill="currentColor" d="M22 4v3h-1v1h-1V7h-1V6h2V5h-1V4h-1v2h-1V5h-1V4h1V3h3v1h1Z"/>
+    <path fill="currentColor" d="M18 14v7h-1v1H2v-1H1V6h1V5h12v1h-1v1H3v13h13v-5h1v-1h1Z"/>
+    <path fill="currentColor" d="M18 8V7h-1V6h-2v1h-1v1h-1v1h-1v1h-1v1h-1v1H9v1H8v1H7v4h4v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1V9h-1Zm-1 2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H8v-2h1v-1h1v-1h1v-1h1v-1h1v-1h1V9h1V8h2v2Z"/>
+  </g>
+  <g id="i-trash"><path fill="currentColor" d="M9 1h6v2H9ZM3 4h18v2H3ZM5 7h2v15H5ZM17 7h2v15h-2ZM7 20h10v2H7ZM9 9h2v9H9ZM13 9h2v9h-2Z"/></g>
+  <g id="i-folder"><path fill="currentColor" d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/></g>
+  <g id="i-terminal"><path fill="currentColor" d="M4 6h2v2H4ZM6 8h2v2H6ZM8 10h2v2H8ZM10 12h2v2h-2ZM8 14h2v2H8ZM6 16h2v2H6ZM4 18h2v2H4ZM14 18h6v2h-6Z"/></g>
+  <g id="i-moon"><path fill="currentColor" d="M6 2h8v2h-2v2h-2V4H6V2ZM4 6V4h2v2H4Zm0 10H2V6h2v10Zm2 2H4v-2h2v2Zm2 2H6v-2h2v2Zm10 0v2H8v-2h10Zm2-2v2h-2v-2h2Zm-2-4h2v4h2v-8h-2v2h-2v2Zm-6 0v2h6v-2h-6Zm-2-2h2v2h-2v-2Zm0 0V6H8v6h2Z"/></g>
+  <g id="i-computer"><path fill="currentColor" d="M2 4h20v2H2ZM2 16h20v2H2ZM2 6h2v10H2ZM20 6h2v10h-2ZM11 18h2v2h-2ZM7 20h10v2H7Z"/></g>
+  <g id="i-download"><path fill="currentColor" d="M4 20h16v2H4ZM11 2h2v16h-2ZM13 14h2v2h-2ZM15 12h2v2h-2ZM17 10h2v2h-2ZM9 14h2v2H9ZM7 12h2v2H7ZM5 10h2v2H5Z"/></g>
+  <g id="i-upload"><path fill="currentColor" d="M4 4h16V2H4ZM11 22h2V6h-2ZM13 10h2V8h-2ZM15 12h2v-2h-2ZM17 14h2v-2h-2ZM9 10h2V8H9ZM7 12h2v-2H7ZM5 14h2v-2H5Z"/></g>
+</defs></svg>
+
+<div class="spec-masthead">
+  <div>
+    <h1>Option A · refined</h1>
+    <p>One home per scope, stripped to two columns · the current object is the header, not a row · no app code touched</p>
+  </div>
+  <div class="spec-spacer"></div>
+  <button class="spec-toggle" type="button" id="theme-toggle">Dark</button>
+</div>
+
+<nav class="spec-nav">
+  <a href="#cleanup">0 · The cleanup</a>
+  <a href="#choices">1 · Three cuts</a>
+  <a href="#set">2 · The set</a>
+  <a href="#states">3 · States</a>
+  <a href="#redlines">4 · Redlines</a>
+  <a href="#contract">5 · Contract</a>
+  <a href="#summary">6 · Summary</a>
+</nav>
+
+<div class="spec-wrap">
+
+<!-- ═════════════════════════════ 0 · CLEANUP ═════════════════════════════ -->
+<section class="spec-section" id="cleanup">
+  <h2>0 · The cleanup <em>seven elements removed; every job they did is re-homed</em></h2>
+  <p class="spec-lede">
+    The unlock is one move: <strong>the current storage stops being a list row and becomes the
+    menu's header</strong> — the Chrome-profile / GitHub “signed in as…” shape. Once position says
+    “this is the one you're on”, the checkmark, the radio semantics, the <code>This storage ·</code>
+    caption and the section header are all saying something the layout already says. Two columns
+    survive: an icon gutter and the words.
+  </p>
+
+  <div class="split2">
+    <div>
+      <div class="mini-cap">before · option A as first drawn — removals pinned</div>
+      <div class="stage tight">
+        <div class="pm" style="width: 316px;">
+          <div class="pm-head">
+            <span class="pin" style="top: 7px; left: -9px;">1</span>
+            <span class="pm-head-title">Storage</span><span class="pm-head-count">1 linked</span>
+          </div>
+          <button class="pm-item cols4" role="menuitemradio" aria-checked="true">
+            <span class="pin" style="top: 12px; left: -9px;">2</span>
+            <span class="pm-tick"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-check"/></svg></span>
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+            <span class="pm-copy"><span class="pm-name">Local storage 1</span><span class="pm-sub">~/Desktop/project/myconfstorage</span></span>
+            <span class="pm-trail">local</span>
+            <span class="pin" style="top: 12px; right: -9px;">3</span>
+          </button>
+          <div class="pm-sep"></div>
+          <div class="pm-label" style="position: relative;">This storage · <span class="obj">Local storage 1</span>
+            <span class="pin" style="top: 1px; left: -9px;">4</span>
+          </div>
+          <button class="pm-item cols4" role="menuitem">
+            <span class="pm-tick"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg>
+            <span class="pm-copy"><span class="pm-name">Storage settings…</span></span>
+          </button>
+          <button class="pm-item cols4" role="menuitem">
+            <span class="pin" style="top: 6px; left: -9px;">5</span>
+            <span class="pm-tick"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-folder"/></svg>
+            <span class="pm-copy"><span class="pm-name">Reveal in Finder</span></span>
+          </button>
+          <button class="pm-item cols4 danger" role="menuitem">
+            <span class="pm-tick"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link-off"/></svg>
+            <span class="pm-copy"><span class="pm-name">Unlink from HorrorGame…</span><span class="pm-sub phrase">Files stay on disk</span></span>
+            <span class="pin" style="bottom: 5px; right: -9px;">7</span>
+          </button>
+          <div class="pm-sep"></div>
+          <button class="pm-item cols4" role="menuitem">
+            <span class="pm-tick"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link"/></svg>
+            <span class="pm-copy"><span class="pm-name">Link storage…</span></span>
+            <span class="pm-trail">2 available</span>
+            <span class="pin" style="top: 6px; right: -9px;">6</span>
+          </button>
+          <button class="pm-item cols4" role="menuitem">
+            <span class="pm-tick"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg>
+            <span class="pm-copy"><span class="pm-name">Add storage…</span></span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="mini-cap">after · the same menu, two columns, four commands</div>
+      <div class="stage tight">
+        <div class="pm">
+          <div class="pm-current">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+            <span class="pm-copy">
+              <span class="pm-name">Local storage 1</span>
+              <span class="pm-sub">~/Desktop/project/myconfstorage</span>
+            </span>
+          </div>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg>
+            <span class="pm-copy"><span class="pm-name">Storage settings…</span></span>
+          </button>
+          <button class="pm-item danger" role="menuitem">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link-off"/></svg>
+            <span class="pm-copy"><span class="pm-name">Unlink from HorrorGame…</span></span>
+          </button>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link"/></svg>
+            <span class="pm-copy"><span class="pm-name">Link storage…</span></span>
+          </button>
+          <button class="pm-item" role="menuitem">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg>
+            <span class="pm-copy"><span class="pm-name">Add storage…</span></span>
+          </button>
+        </div>
+      </div>
+      <div class="spec-note good" style="margin-bottom: 0;">
+        With one linked storage — the everyday case — the menu is a header and four one-line
+        commands. Nothing left to parse: what you're on, what you can do to it, how to get more.
+      </div>
+    </div>
+  </div>
+
+  <h3>The removal ledger</h3>
+  <ol class="flags" style="max-width: 82ch;">
+    <li><span class="flag-n">1</span><span class="flag-copy">
+      <b>“STORAGE · 1 linked” header — removed.</b>
+      The crumb you just clicked is the menu's label, and a one-item list is its own count. Chrome's
+      profile menu and GNOME primary menus carry no title either. The tally's one real job — “there
+      are others” — is done better by the Switch-to section simply existing.
+      <span class="flag-src">GNOME HIG · Chrome profile menu</span>
+    </span></li>
+    <li><span class="flag-n">2</span><span class="flag-copy">
+      <b>Checkmark gutter and radio semantics — removed.</b>
+      The current storage is promoted out of the list into a header block, so “which one am I on”
+      is answered by position, not by a mark. Other storages become plain <em>switch</em> commands.
+      This is the GitHub “Signed in as…” / Chrome current-profile shape, and it deletes a whole
+      column from every row.
+      <span class="flag-src">Chrome · Slack · GitHub user menu</span>
+    </span></li>
+    <li><span class="flag-n">3</span><span class="flag-copy">
+      <b>Kind tags “local / s3” — removed.</b>
+      The drive/cloud glyph already says it, and the second line (a path, or “Bucket · …”) says it
+      again. A third telling earned a column; two are enough.
+      <span class="flag-src">redundancy — same fact, three encodings</span>
+    </span></li>
+    <li><span class="flag-n">4</span><span class="flag-copy">
+      <b>“This storage · Local storage 1” caption — removed.</b>
+      It repeated a name visible twice already — in the header block directly above and in the crumb
+      the menu hangs from. Proximity now does the scoping: verbs directly under the header act on
+      the header. The name still appears where it must: inside the unlink label and its confirm.
+      <span class="flag-src">Gestalt proximity · Apple HIG</span>
+    </span></li>
+    <li><span class="flag-n">5</span><span class="flag-copy">
+      <b>“Reveal in Finder” (storage) — removed.</b>
+      My own addition in the first draft, not a shipping command. It rides along inside Storage
+      settings, one hop away. The project menu keeps its Reveal — that one ships today.
+      <span class="flag-src">YAGNI — don't grow the menu to justify the band</span>
+    </span></li>
+    <li><span class="flag-n">6</span><span class="flag-copy">
+      <b>“2 available” count — removed.</b>
+      The picker that Link storage… opens shows the candidates anyway; the count bought a trailing
+      column for a number you act on once a month. The one state that matters — zero — keeps its
+      explanation, as a disabled row with a reason (§2).
+      <span class="flag-src">NN/g — explain the disabled, not the ordinary</span>
+    </span></li>
+    <li><span class="flag-n">7</span><span class="flag-copy">
+      <b>“Files stay on disk” sub-line — moved, not lost.</b>
+      The ellipsis on Unlink… promises a confirmation, and the confirmation is where the blast
+      radius now lives, stated once at the real decision. Menu rows drop to one line each.
+      <span class="flag-src">NN/g — state consequences at the point of commitment</span>
+    </span></li>
+  </ol>
+
+  <div class="spec-note">
+    <b>Net effect.</b> Four grid columns → two. Nine text styles in the menu → four (name, path,
+    section label, danger). The 1-linked menu: 7 visual units → 5. Row grid, heights, danger and
+    disabled conventions are unchanged from the options page — this is subtraction, not a new
+    system.
+  </div>
+</section>
+
+<!-- ═════════════════════════════ 1 · THREE CUTS ══════════════════════════ -->
+<section class="spec-section" id="choices">
+  <h2>1 · Three cuts <em>how far to take the knife — pick one</em></h2>
+  <p class="spec-lede">
+    Same rulebook, same verbs, three depths of cut. They differ on exactly two questions:
+    <strong>does the current storage stay a list row or become the header</strong>, and
+    <strong>how much data do rows carry</strong>. Everything after this section is drawn as A1.
+  </p>
+
+  <div class="grid3">
+
+    <div>
+      <h3>A1 · Header-first <span style="color: var(--green);">— recommended</span></h3>
+      <div class="stage tight">
+        <div class="pm">
+          <div class="pm-current">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+            <span class="pm-copy"><span class="pm-name">Local storage 1</span><span class="pm-sub">~/Desktop/project/myconfstorage</span></span>
+          </div>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg><span class="pm-copy"><span class="pm-name">Storage settings…</span></span></button>
+          <button class="pm-item danger" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link-off"/></svg><span class="pm-copy"><span class="pm-name">Unlink from HorrorGame…</span></span></button>
+          <div class="pm-sep"></div>
+          <div class="pm-label">Switch to</div>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-cloud"/></svg><span class="pm-copy"><span class="pm-name">Team bucket</span><span class="pm-sub phrase">Bucket · mallard-team</span></span></button>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link"/></svg><span class="pm-copy"><span class="pm-name">Link storage…</span></span></button>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg><span class="pm-copy"><span class="pm-name">Add storage…</span></span></button>
+        </div>
+      </div>
+      <div class="spec-note good">
+        Current storage is the <b>header</b>; verbs sit right under it, so no caption and no
+        checkmark exist at all. Two columns, zero ARIA state to maintain. The Chrome-profile /
+        “Signed in as…” shape.
+      </div>
+    </div>
+
+    <div>
+      <h3>A2 · Switcher-first</h3>
+      <div class="stage tight">
+        <div class="pm" style="width: 296px;">
+          <button class="pm-item cols4" role="menuitemradio" aria-checked="true" style="grid-template-columns: 16px 16px minmax(0,1fr);">
+            <span class="pm-tick"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-check"/></svg></span>
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+            <span class="pm-copy"><span class="pm-name">Local storage 1</span><span class="pm-sub">~/Desktop/project/myconfstorage</span></span>
+          </button>
+          <button class="pm-item cols4" role="menuitemradio" aria-checked="false" style="grid-template-columns: 16px 16px minmax(0,1fr);">
+            <span class="pm-tick"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-cloud"/></svg>
+            <span class="pm-copy"><span class="pm-name">Team bucket</span><span class="pm-sub phrase">Bucket · mallard-team</span></span>
+          </button>
+          <div class="pm-sep"></div>
+          <div class="pm-label">This storage</div>
+          <button class="pm-item cols4" role="menuitem" style="grid-template-columns: 16px 16px minmax(0,1fr);">
+            <span class="pm-tick"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg>
+            <span class="pm-copy"><span class="pm-name">Storage settings…</span></span>
+          </button>
+          <button class="pm-item cols4 danger" role="menuitem" style="grid-template-columns: 16px 16px minmax(0,1fr);">
+            <span class="pm-tick"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link-off"/></svg>
+            <span class="pm-copy"><span class="pm-name">Unlink from HorrorGame…</span></span>
+          </button>
+          <div class="pm-sep"></div>
+          <button class="pm-item cols4" role="menuitem" style="grid-template-columns: 16px 16px minmax(0,1fr);">
+            <span class="pm-tick"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link"/></svg>
+            <span class="pm-copy"><span class="pm-name">Link storage…</span></span>
+          </button>
+          <button class="pm-item cols4" role="menuitem" style="grid-template-columns: 16px 16px minmax(0,1fr);">
+            <span class="pm-tick"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg>
+            <span class="pm-copy"><span class="pm-name">Add storage…</span></span>
+          </button>
+        </div>
+      </div>
+      <div class="spec-note">
+        Keeps today's mental model: a <b>checked list first</b>, switching stays the top rows. The
+        macOS-menu shape. Price of familiarity: the tick column returns on every row, and because
+        the current storage is just a checked row, a small <b>“This storage”</b> caption has to
+        come back to scope the verbs. One column and one label heavier than A1.
+      </div>
+    </div>
+
+    <div>
+      <h3>A3 · Names only</h3>
+      <div class="stage tight">
+        <div class="pm" style="width: 248px;">
+          <div class="pm-current" style="padding: 8px;">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+            <span class="pm-copy"><span class="pm-name">Local storage 1</span></span>
+          </div>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg><span class="pm-copy"><span class="pm-name">Storage settings…</span></span></button>
+          <button class="pm-item danger" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link-off"/></svg><span class="pm-copy"><span class="pm-name">Unlink from HorrorGame…</span></span></button>
+          <div class="pm-sep"></div>
+          <div class="pm-label">Switch to</div>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-cloud"/></svg><span class="pm-copy"><span class="pm-name">Team bucket</span></span></button>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link"/></svg><span class="pm-copy"><span class="pm-name">Link storage…</span></span></button>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg><span class="pm-copy"><span class="pm-name">Add storage…</span></span></button>
+        </div>
+      </div>
+      <div class="spec-note">
+        A1 with the data lines cut too: <b>no paths anywhere</b>, every row one line, the menu
+        shrinks to 248 px. The path moves to the crumb's tooltip and Storage settings. Cleanest
+        possible — but two storages with similar names become indistinguishable here, and the
+        header stops telling you <em>which folder</em> you're syncing to. Choose only if storage
+        names are kept unique and meaningful.
+      </div>
+    </div>
+
+  </div>
+
+  <div class="spec-note good">
+    <b>Recommendation.</b> A1. It deletes the most chrome without deleting data (A3's cut) and
+    without re-buying the tick column and caption (A2's price). If switching storages turns out to
+    be the dominant action, A2 is the fallback — it is the same menu with the bands reordered.
+  </div>
+</section>
+
+<!-- ══════════════════════════════ 2 · THE SET ════════════════════════════ -->
+<section class="spec-section" id="set">
+  <h2>2 · The set <em>three menus, one grammar — drawn as A1</em></h2>
+  <p class="spec-lede">
+    Header names the object → verbs act on it → <strong>Switch to</strong> lists the alternatives →
+    grow the list. The project menu is the same sentence with different nouns; the ⋯ holds only the
+    app. Drawn with two linked storages so the Switch-to section is visible.
+  </p>
+
+  <div class="stage left" style="padding-bottom: 60px;">
+    <div class="stage-caption">in place · storage menu open under its crumb</div>
+    <div style="min-width: 0; width: 100%; max-width: 1080px; margin-top: 12px;">
+      <div class="bar" style="max-width: none;">
+        <div class="bar-trail">
+          <div class="bar-item">
+            <button class="crumb open" type="button">
+              <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+              <span>Local storage 1</span>
+              <svg width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg>
+            </button>
+          </div>
+          <div class="bar-item">
+            <span class="sep">/</span>
+            <button class="crumb" type="button">
+              <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg>
+              <span>HorrorGame (Codex)</span>
+              <svg width="11" height="11" viewBox="0 0 24 24"><use href="#i-chevron-down"/></svg>
+            </button>
+          </div>
+          <div class="bar-item">
+            <span class="sep">/</span>
+            <span class="crumb section">Git history</span>
+          </div>
+        </div>
+        <div class="bar-actions">
+          <button class="bar-icon" type="button" title="Refresh">
+            <svg width="15" height="15" viewBox="0 0 24 24"><use href="#i-refresh"/></svg>
+          </button>
+          <button class="bar-btn" type="button">
+            <svg width="13" height="13" viewBox="0 0 24 24"><use href="#i-download"/></svg>
+            Pull
+          </button>
+          <button class="bar-btn" type="button">
+            <svg width="13" height="13" viewBox="0 0 24 24"><use href="#i-upload"/></svg>
+            Push
+            <span class="bar-badge">31</span>
+          </button>
+          <span class="bar-divider"></span>
+          <button class="bar-more" type="button">
+            <svg width="16" height="16" viewBox="0 0 24 24"><use href="#i-more"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="specrow" style="margin: 8px 0 0 16px;">
+        <div class="pm">
+          <div class="pm-current">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+            <span class="pm-copy">
+              <span class="pm-name">Local storage 1</span>
+              <span class="pm-sub">~/Desktop/project/myconfstorage</span>
+            </span>
+          </div>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg>
+            <span class="pm-copy"><span class="pm-name">Storage settings…</span></span>
+          </button>
+          <button class="pm-item danger" role="menuitem">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link-off"/></svg>
+            <span class="pm-copy"><span class="pm-name">Unlink from HorrorGame…</span></span>
+          </button>
+          <div class="pm-sep"></div>
+          <div class="pm-label">Switch to</div>
+          <button class="pm-item" role="menuitem">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-cloud"/></svg>
+            <span class="pm-copy"><span class="pm-name">Team bucket</span><span class="pm-sub phrase">Bucket · mallard-team</span></span>
+          </button>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link"/></svg>
+            <span class="pm-copy"><span class="pm-name">Link storage…</span></span>
+          </button>
+          <button class="pm-item" role="menuitem">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg>
+            <span class="pm-copy"><span class="pm-name">Add storage…</span></span>
+          </button>
+        </div>
+
+        <div>
+          <div class="mini-cap">project crumb · same sentence</div>
+          <div class="pm">
+            <div class="pm-current">
+              <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg>
+              <span class="pm-copy">
+                <span class="pm-name">HorrorGame</span>
+                <span class="pm-sub">~/Desktop/project/HorrorGame</span>
+              </span>
+            </div>
+            <div class="pm-sep"></div>
+            <button class="pm-item" role="menuitem">
+              <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-folder"/></svg>
+              <span class="pm-copy"><span class="pm-name">Reveal in Finder</span></span>
+            </button>
+            <button class="pm-item" role="menuitem">
+              <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-terminal"/></svg>
+              <span class="pm-copy"><span class="pm-name">Agent profile…</span><span class="pm-sub phrase">Default Codex</span></span>
+            </button>
+            <button class="pm-item" role="menuitem">
+              <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-edit"/></svg>
+              <span class="pm-copy"><span class="pm-name">Rename project…</span></span>
+            </button>
+            <button class="pm-item danger" role="menuitem">
+              <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-trash"/></svg>
+              <span class="pm-copy"><span class="pm-name">Reset local sync state…</span></span>
+            </button>
+            <div class="pm-sep"></div>
+            <div class="pm-label">Switch to</div>
+            <button class="pm-item" role="menuitem">
+              <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-git-folder"/></svg>
+              <span class="pm-copy"><span class="pm-name">mallard-app</span><span class="pm-sub">~/Desktop/project/mallard-app</span></span>
+            </button>
+            <div class="pm-sep"></div>
+            <button class="pm-item" role="menuitem">
+              <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg>
+              <span class="pm-copy"><span class="pm-name">Add project…</span></span>
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <div class="mini-cap">⋯ · app scope, no header needed</div>
+          <div class="pm" style="width: 264px;">
+            <button class="pm-item endcap" role="menuitemcheckbox" aria-checked="true">
+              <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-moon"/></svg>
+              <span class="pm-copy"><span class="pm-name">Dark theme</span></span>
+              <span class="pm-end"><svg width="13" height="13" viewBox="0 0 24 24"><use href="#i-check"/></svg></span>
+            </button>
+            <button class="pm-item" role="menuitem">
+              <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-computer"/></svg>
+              <span class="pm-copy"><span class="pm-name">Reload app data</span><span class="pm-sub phrase">Every project and storage, from disk</span></span>
+            </button>
+          </div>
+          <div class="spec-note" style="margin: 14px 0 0; max-width: 264px;">
+            Two rows, one scope. The section header went with the other scopes; a two-item menu
+            doesn't need a title. Dark theme keeps a stable label — state is the trailing check.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="spec-note good">
+    <b>Order of bands.</b> Verbs come before Switch to — the Chrome-profile order. With one linked
+    storage (the common case) there is no list at all and the menu is four rows; with several, the
+    switch rows sit two rows down, still first-letter reachable by type-ahead
+    (<kbd>t</kbd> → Team bucket).
+  </div>
+</section>
+
+<!-- ══════════════════════════════ 3 · STATES ═════════════════════════════ -->
+<section class="spec-section" id="states">
+  <h2>3 · States <em>the ones the workspace can reach today</em></h2>
+
+  <div class="grid3">
+
+    <div>
+      <h3>Many linked</h3>
+      <div class="stage tight">
+        <div class="pm">
+          <div class="pm-current">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+            <span class="pm-copy"><span class="pm-name">Local storage 1</span><span class="pm-sub">~/Desktop/project/myconfstorage</span></span>
+          </div>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg><span class="pm-copy"><span class="pm-name">Storage settings…</span></span></button>
+          <button class="pm-item danger" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link-off"/></svg><span class="pm-copy"><span class="pm-name">Unlink from HorrorGame…</span></span></button>
+          <div class="pm-sep"></div>
+          <div class="pm-label">Switch to</div>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-cloud"/></svg><span class="pm-copy"><span class="pm-name">Team bucket</span><span class="pm-sub phrase">Bucket · mallard-team</span></span></button>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg><span class="pm-copy"><span class="pm-name">Backup drive</span><span class="pm-sub">/Volumes/Archive/mallard</span></span></button>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link"/></svg><span class="pm-copy"><span class="pm-name">Link storage…</span></span></button>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-catalog"/></svg><span class="pm-copy"><span class="pm-name">Manage links in Library…</span></span></button>
+        </div>
+      </div>
+      <div class="spec-note">
+        At 2+ links a single row points at the <b>Library</b> — the surface that can show every
+        link with per-row unlink. The menu itself never grows verbs for storages you're not on.
+      </div>
+    </div>
+
+    <div>
+      <h3>Current storage unreachable</h3>
+      <div class="stage tight">
+        <div class="pm">
+          <div class="pm-current warn">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-cloud-off"/></svg>
+            <span class="pm-copy"><span class="pm-name">Team bucket</span><span class="pm-sub phrase">Can't reach the endpoint</span></span>
+          </div>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-refresh"/></svg><span class="pm-copy"><span class="pm-name">Retry connection</span></span></button>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg><span class="pm-copy"><span class="pm-name">Storage settings…</span></span></button>
+          <button class="pm-item danger" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link-off"/></svg><span class="pm-copy"><span class="pm-name">Unlink from HorrorGame…</span></span></button>
+          <div class="pm-sep"></div>
+          <div class="pm-label">Switch to</div>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg><span class="pm-copy"><span class="pm-name">Local storage 1</span><span class="pm-sub">…/project/myconfstorage</span></span></button>
+        </div>
+      </div>
+      <div class="spec-note">
+        The header block carries the failure — glyph swaps to <b>cloud-off</b>, the second line
+        turns into the reason — and <b>Retry connection</b> leads the verbs. Failure, remedy and
+        escape route (switch away) in one small menu. Unlink stays available: a broken link is
+        exactly when you want it.
+      </div>
+    </div>
+
+    <div>
+      <h3>Nothing left to link</h3>
+      <div class="stage tight">
+        <div class="pm">
+          <div class="pm-current">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+            <span class="pm-copy"><span class="pm-name">Local storage 1</span><span class="pm-sub">~/Desktop/project/myconfstorage</span></span>
+          </div>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg><span class="pm-copy"><span class="pm-name">Storage settings…</span></span></button>
+          <button class="pm-item danger" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link-off"/></svg><span class="pm-copy"><span class="pm-name">Unlink from HorrorGame…</span></span></button>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem" aria-disabled="true">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link"/></svg>
+            <span class="pm-copy"><span class="pm-name">Link storage…</span><span class="pm-sub phrase">Everything you've added is already linked</span></span>
+          </button>
+          <button class="pm-item" role="menuitem"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg><span class="pm-copy"><span class="pm-name">Add storage…</span></span></button>
+        </div>
+      </div>
+      <div class="spec-note">
+        The only sub-line any command row keeps: a <b>reason on a disabled row</b>. Explanations are
+        information, not decoration — they survive the cleanup. Today this row vanishes from the DOM
+        instead; a menu shouldn't change shape for an invisible reason.
+      </div>
+    </div>
+
+    <div>
+      <h3>Locked mid-sync</h3>
+      <div class="stage tight">
+        <div class="pm">
+          <div class="pm-banner">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-refresh"/></svg>
+            <span>Pushing — storage can't change until it finishes.</span>
+          </div>
+          <div class="pm-current">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+            <span class="pm-copy"><span class="pm-name">Local storage 1</span><span class="pm-sub">~/Desktop/project/myconfstorage</span></span>
+          </div>
+          <div class="pm-sep"></div>
+          <button class="pm-item" role="menuitem" aria-disabled="true"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg><span class="pm-copy"><span class="pm-name">Storage settings…</span></span></button>
+          <button class="pm-item danger" role="menuitem" aria-disabled="true"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link-off"/></svg><span class="pm-copy"><span class="pm-name">Unlink from HorrorGame…</span></span></button>
+          <div class="pm-sep"></div>
+          <div class="pm-label">Switch to</div>
+          <button class="pm-item" role="menuitem" aria-disabled="true"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-cloud"/></svg><span class="pm-copy"><span class="pm-name">Team bucket</span><span class="pm-sub phrase">Bucket · mallard-team</span></span></button>
+        </div>
+      </div>
+      <div class="spec-note">
+        One banner states the lock once, first — not six grey rows with six identical tooltips.
+        Rows use <code>aria-disabled</code>, so keyboard focus can still reach them and the reason.
+      </div>
+    </div>
+
+    <div>
+      <h3>Interaction states</h3>
+      <div class="stage tight">
+        <div class="pm">
+          <button class="pm-item" role="menuitem" style="background: var(--surface-row-hover); color: var(--text-0);">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg>
+            <span class="pm-copy"><span class="pm-name">pointer hover</span><span class="pm-sub">--surface-row-hover</span></span>
+          </button>
+          <button class="pm-item focused" role="menuitem">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-cloud"/></svg>
+            <span class="pm-copy"><span class="pm-name">keyboard focus</span><span class="pm-sub">2px --focus-ring, inset</span></span>
+          </button>
+          <button class="pm-item danger" role="menuitem" style="background: var(--danger-soft);">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-link-off"/></svg>
+            <span class="pm-copy"><span class="pm-name">danger · hover</span><span class="pm-sub phrase">--danger-soft fill, --danger-text ink</span></span>
+          </button>
+          <button class="pm-item" role="menuitem" aria-disabled="true">
+            <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-plus"/></svg>
+            <span class="pm-copy"><span class="pm-name">disabled</span><span class="pm-sub">opacity .45, still focusable</span></span>
+          </button>
+        </div>
+      </div>
+      <div class="spec-note">
+        Hover is a fill, focus is an outline — different properties, so they stay distinguishable
+        when both land on the same row.
+        <span class="flag-src">WCAG 2.4.13</span>
+      </div>
+    </div>
+
+    <div>
+      <h3>The confirm — where the reassurance went</h3>
+      <div class="stage tight">
+        <div style="width: 316px; padding: 14px; border: 1px solid var(--border-strong); border-radius: var(--r-sm); background: var(--surface-card); box-shadow: var(--shadow-overlay);">
+          <div style="display: flex; gap: 10px; align-items: flex-start;">
+            <svg width="16" height="16" viewBox="0 0 24 24" style="color: var(--danger-text); margin-top: 1px;"><use href="#i-link-off"/></svg>
+            <div>
+              <div style="color: var(--text-0); font-weight: 600; font-size: var(--type-md);">Unlink Local storage 1 from HorrorGame?</div>
+              <p style="margin-top: 7px; font-size: var(--type-sm); line-height: 1.5; color: var(--text-2);">
+                HorrorGame stops syncing here. Nothing is deleted — the files stay in
+                <code style="font-family: var(--font-mono); font-size: 11px;">~/Desktop/project/myconfstorage</code>
+                and you can link it again later.
+              </p>
+              <p style="margin-top: 8px; font-size: var(--type-xs); color: var(--text-3);">
+                31 changes have not been pushed yet.
+              </p>
+            </div>
+          </div>
+          <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;">
+            <button class="bar-btn" type="button">Cancel</button>
+            <button class="bar-btn" type="button" style="border-color: var(--danger-text); color: var(--danger-text);">Unlink</button>
+          </div>
+        </div>
+      </div>
+      <div class="spec-note">
+        Ledger item 7 lands here: the menu row is one line because this dialog — promised by the
+        <code>…</code> — names both objects, states that files survive, and adds the one fact worth
+        pausing for.
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ═════════════════════════════ 4 · REDLINES ════════════════════════════ -->
+<section class="spec-section" id="redlines">
+  <h2>4 · Redlines <em>the two-column grid</em></h2>
+
+  <div class="split2">
+    <div class="stage redline">
+      <div class="stage-caption">measure</div>
+      <div class="pm">
+        <div class="pm-current">
+          <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-drive"/></svg>
+          <span class="pm-copy"><span class="pm-name">Local storage 1</span><span class="pm-sub">~/Desktop/project/myconfstorage</span></span>
+        </div>
+        <div class="pm-sep"></div>
+        <button class="pm-item" role="menuitem">
+          <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-settings"/></svg>
+          <span class="pm-copy"><span class="pm-name">Storage settings…</span></span>
+        </button>
+        <div class="pm-label">Switch to</div>
+        <button class="pm-item" role="menuitem">
+          <svg width="14" height="14" viewBox="0 0 24 24"><use href="#i-cloud"/></svg>
+          <span class="pm-copy"><span class="pm-name">Team bucket</span><span class="pm-sub phrase">Bucket · mallard-team</span></span>
+        </button>
+      </div>
+    </div>
+
+    <div>
+      <div class="rl-note"><b>menu width</b> 288 px fixed · grows to 320 px only if the longest command needs it</div>
+      <div class="rl-note"><b>grid</b> 16 px icon gutter + copy · 9 px gap · nothing else</div>
+      <div class="rl-note"><b>header block</b> 8 px padding · name 13 px semibold <code>--text-0</code> · path mono 10 px <code>--text-2</code> · not interactive, no hover</div>
+      <div class="rl-note"><b>rows</b> 32 px one-line · 44 px with a data line · 3 px radius</div>
+      <div class="rl-note"><b>section label</b> “Switch to” — pixel 10 px 0.09em <code>--text-3</code>, the only label left in the menu</div>
+      <div class="rl-note"><b>separators</b> 1 px <code>--border</code> · 5 px block margin · the menu's only other chrome</div>
+      <div class="rl-note"><b>danger</b> <code>--danger-text</code> ink, <code>--danger-soft</code> hover, last in its band</div>
+      <div class="rl-note"><b>disabled</b> opacity .45 + reason line · <code>aria-disabled</code>, focusable</div>
+      <div class="rl-note"><b>focus</b> 2 px <code>--focus-ring</code> inset outline — never the hover fill</div>
+      <div class="rl-note"><b>paths</b> truncate from the front: <code>…/project/myconfstorage</code></div>
+
+      <div class="spec-note" style="margin-top: 16px;">
+        <b>Sub-lines are for data only.</b> A path, a bucket, a failure reason, a disabled reason,
+        the current agent profile. Never for persuasion or repetition — that rule is what emptied
+        the menu.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═════════════════════════════ 5 · CONTRACT ════════════════════════════ -->
+<section class="spec-section" id="contract">
+  <h2>5 · Contract <em>what the simplification changes for keyboard &amp; ARIA</em></h2>
+
+  <table>
+    <thead><tr><th style="width: 30%">Element</th><th style="width: 30%">Role</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Crumb button</td><td><code>aria-haspopup="menu"</code> + <code>aria-expanded</code></td><td>Name: “Local storage 1. Storage menu”.</td></tr>
+      <tr><td>Popup</td><td><code>role="menu"</code>, labelled “Storage”</td><td>Unchanged.</td></tr>
+      <tr><td>Header block</td><td>static content, <code>role="presentation"</code> wrapper</td><td>Announced via the menu's label + first-item context; it is context, not a command — no radio group anywhere anymore.</td></tr>
+      <tr><td>Switch rows</td><td>plain <code>role="menuitem"</code></td><td>Accessible name “Switch to Team bucket”. No <code>aria-checked</code> to maintain — the simplification deletes ARIA state, not just pixels.</td></tr>
+      <tr><td>Dark theme</td><td><code>role="menuitemcheckbox"</code></td><td>Stable label; trailing check mirrors <code>aria-checked</code>.</td></tr>
+      <tr><td>Disabled rows</td><td><code>aria-disabled="true"</code></td><td>Focusable, reason readable.</td></tr>
+      <tr><td>Banner</td><td><code>role="status"</code>, first child</td><td>Read before the rows it explains.</td></tr>
+      <tr><td>Keys</td><td colspan="2"><kbd>↓</kbd><kbd>↑</kbd><kbd>Home</kbd><kbd>End</kbd> roving · type-ahead · <kbd>Esc</kbd>/activate closes and returns focus to the crumb · <kbd>Tab</kbd> leaves the menu</td></tr>
+    </tbody>
+  </table>
+
+  <div class="spec-note">
+    <b>Against <code>SyncPathBar</code> as shipped:</b> the menus stay
+    <code>PathBarMenuGroup</code> data. New needs: a <b>header-block item kind</b>, a
+    <b>checkbox item kind</b> (trailing check), <code>aria-disabled</code> rows with reason lines,
+    type-ahead, roving tabindex, and focus-return. Gone from the earlier draft's needs: the tick
+    gutter, the split heading slot, and radio-state plumbing — the cleanup removes code, too.
+  </div>
+</section>
+
+<!-- ═════════════════════════════ 6 · SUMMARY ═════════════════════════════ -->
+<section class="spec-section" id="summary">
+  <h2>6 · Summary <em>as A1</em></h2>
+  <table style="max-width: 860px;">
+    <thead><tr><th style="width: 34%">Piece</th><th>Final form</th></tr></thead>
+    <tbody>
+      <tr><td>Storage crumb menu</td><td>Header (name + path) → Storage settings… · <b>Unlink from HorrorGame…</b> → Switch to → Link storage… · Add storage… <span style="color: var(--text-3);">(+ Manage links in Library… at 2+ links)</span></td></tr>
+      <tr><td>Project crumb menu</td><td>Header (name + path) → Reveal in Finder · Agent profile… · Rename project… · Reset local sync state… → Switch to → Add project…</td></tr>
+      <tr><td>⋯ overflow</td><td>Dark theme ✓ · Reload app data — app scope only, no header</td></tr>
+      <tr><td>Removed</td><td>Section header + tally, tick gutter + radio state, kind tags, “This storage ·” caption, storage Reveal row, availability count, unlink sub-line (→ confirm)</td></tr>
+      <tr><td>Kept from the options page</td><td>Row grid &amp; heights, danger/disabled/focus conventions, banner, states, confirm copy, <code>link-off</code> + <code>check</code> icons</td></tr>
+    </tbody>
+  </table>
+</section>
+
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var btn = document.getElementById("theme-toggle");
+  function sync() {
+    btn.textContent = root.getAttribute("data-theme") === "light" ? "Dark" : "Light";
+  }
+  btn.addEventListener("click", function () {
+    root.setAttribute("data-theme", root.getAttribute("data-theme") === "light" ? "dark" : "light");
+    sync();
+  });
+  sync();
+})();
+</script>
+
+</body>
+</html>

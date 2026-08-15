@@ -583,10 +583,14 @@ test("refreshing project activity spins in the path bar, and announces from the 
   assert.doesNotMatch(html, /icon-spin-frame/);
   assert.match(html, /role="status">Comparing threads with R2 storage 1/);
 
+  // One glyph, scoped to the view: it points at the open session when there is
+  // one, and at the activity comparison otherwise.
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  assert.match(workspace, /className=\{`sync-path-icon-action\$\{activityHeader\.refreshing \? " loading" : ""\}`\}/);
-  assert.match(workspace, /aria-busy=\{activityHeader\.refreshing\}/);
-  assert.match(workspace, /className=\{`icon-spin-frame\$\{activityHeader\.refreshing \? " spinning" : ""\}`\}/);
+  assert.match(workspace, /className=\{`sync-path-icon-action\$\{viewRefresh\.refreshing \? " loading" : ""\}`\}/);
+  assert.match(workspace, /aria-busy=\{viewRefresh\.refreshing\}/);
+  assert.match(workspace, /className=\{`icon-spin-frame\$\{viewRefresh\.refreshing \? " spinning" : ""\}`\}/);
+  assert.match(workspace, /"Refreshing session" : "Refresh session"/);
+  assert.match(workspace, /"Refreshing activity" : "Refresh activity"/);
 
   const css = readFileSync("src/App.css", "utf8");
   // Turning is work in progress, not a disabled control: the one place a
@@ -646,7 +650,6 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
     // Icon-only clickers elsewhere in the app, found by cross-checking every
     // \`.btn\` for a fixed square size or zero padding.
     "\\.sync-inline-action-close:active",
-    "\\.sync-storage-settings-icon:active",
     "\\.log-panel-actions \\.btn:active",
     "\\.sync-modal-header \\.btn:active",
   ]) {
@@ -1007,10 +1010,11 @@ test("session actions stay compact and trail the readouts", () => {
   assert.match(css, /\.sync-history-actions-divider\s*\{[^}]*width: 1px;[^}]*height: 14px;[^}]*flex: 0 0 auto;[^}]*background: var\(--border-mid\);/s);
   assert.match(css, /\.sync-history-row-clickables\s*\{[^}]*display: flex;[^}]*flex: 0 0 auto;/s);
   // The inert provider mark takes a launch button's box, so the cluster is the
-  // same width whether or not the row can be opened.
+  // same width whether or not the row can be opened — and the session header's
+  // launch pair shares the group, so both surfaces move together.
   assert.match(
     retro,
-    /\.sync-history-thread-actions \.sync-history-launch-action,\s*\n\.sync-history-thread-actions \.sync-history-provider-inert\s*\{[^}]*width:\s*22px;/s,
+    /\.sync-history-thread-actions \.sync-history-launch-action,\s*\n\.sync-history-thread-actions \.sync-history-provider-inert,\s*\n\.session-detail-launch\s*\{[^}]*width:\s*22px;/s,
   );
   assert.match(retro, /\.sync-history-session-summary > \.sync-history-thread-time-end\s*\{[^}]*margin-left: auto;/s);
   assert.doesNotMatch(retro, /\.sync-history-session-summary \.sync-history-thread-meta\s*\{[^}]*flex:\s*1/s, "the readouts must not stretch into the clickables");

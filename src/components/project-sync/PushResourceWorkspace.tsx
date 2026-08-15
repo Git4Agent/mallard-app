@@ -626,14 +626,22 @@ export default function PushResourceWorkspace({
               ) : (
                 <ResourceInventory resources={conversations} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectableConversationIds} disabled={busy} onToggle={toggleResource} />
               )}
+              {/* No disclosure wrapper here: `other` is exactly the `tools`
+                  category, so ResourceInventory renders one group whose own
+                  header is already the word Requirements, a count, Include all
+                  and a fold. Wrapping it printed that header twice — two
+                  chevrons and two disagreeing counts for one list. The pull
+                  side keeps its wrapper because ItemList has no header at all. */}
               {other.length > 0 && (
-                <details className="sync-sync-review-other">
-                  <summary>
-                    <span><Icon name="settings" size={15} /><strong>Requirements</strong></span>
-                    <span>{other.length} unavailable<Icon name="chevron-right" size={13} /></span>
-                  </summary>
-                  <ResourceInventory resources={other} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectableIds} disabled={busy} onToggle={toggleResource} />
-                </details>
+                <ResourceInventory
+                  resources={other}
+                  selected={effectiveSelected}
+                  statuses={EMPTY_STATUSES}
+                  selectableResourceIds={selectableIds}
+                  disabled={busy}
+                  defaultCollapsed
+                  onToggle={toggleResource}
+                />
               )}
             </>
           )}

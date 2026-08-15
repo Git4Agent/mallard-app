@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { SessionEventDetail, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
-import { readableToolPayload, toolCommandLabel } from "./sessionDetailModel";
+import { readableToolPayload, sessionToolDescriptor, toolCommandLabel } from "./sessionDetailModel";
 
 export interface SessionToolDetailState {
   loading: boolean;
@@ -14,13 +14,6 @@ interface Props {
   expanded: boolean;
   detailState?: SessionToolDetailState;
   onExpandedChange: (eventId: string, expanded: boolean) => void;
-}
-
-type PayloadTabId = "output" | "arguments" | "paths";
-
-interface PayloadTab {
-  id: PayloadTabId;
-  label: string;
 }
 
 async function copyText(value: string): Promise<void> {
@@ -48,9 +41,63 @@ async function copyText(value: string): Promise<void> {
 }
 
 /**
- * Arguments, output and paths share one bounded pane instead of stacking three
- * unbounded blocks. Stacked, a single call could insert several screens between
- * one turn and the next; tabbed and capped, the transcript stays put.
+ * One labelled, bounded box per payload. Each keeps its own raw toggle and copy
+ * key so what you copy is always what the box you are looking at shows.
+ */
+function PayloadSection({
+  label,
+  value,
+  truncated,
+}: {
+  label: string;
+  value: string;
+  truncated: boolean;
+}) {
+  const view = useMemo(() => readableToolPayload(value), [value]);
+  const [showRaw, setShowRaw] = useState(false);
+  const body = showRaw && view.transformed ? view.raw : view.text;
+
+  return (
+    <section className="session-detail-payload-section">
+      <div className="session-detail-payload-head">
+        <span className="session-detail-payload-label">{label}</span>
+        <span className="session-detail-payload-tools">
+          {/* Deliberately not `.btn`: that class carries the rounded ghost
+              treatment, and these sit in a squared-off panel. */}
+          {view.transformed && (
+            <button
+              type="button"
+              className={`session-detail-payload-action${showRaw ? " is-on" : ""}`}
+              aria-pressed={showRaw}
+              title={showRaw ? "Show readable text" : "Show the stored value"}
+              onClick={() => setShowRaw((raw) => !raw)}
+            >
+              <Icon name="code" size={12} />
+            </button>
+          )}
+          <button
+            type="button"
+            className="session-detail-payload-action"
+            aria-label={`Copy ${label.toLowerCase()} to clipboard`}
+            title="Copy to clipboard"
+            onClick={() => void copyText(body)}
+          >
+            <Icon name="copy" size={12} />
+          </button>
+        </span>
+      </div>
+      <pre className="session-detail-payload-body"><code>{body}</code></pre>
+      {truncated && (
+        <p className="session-detail-truncation">Bounded preview · additional content omitted</p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Stacked, not tabbed: arguments sit beside the result they produced, which is
+ * what the pane is opened to compare. Every box is bounded, so the stack still
+ * cannot push the rest of the conversation off the screen.
  */
 function ToolPayload({
   argumentsValue,
@@ -65,78 +112,27 @@ function ToolPayload({
   resultTruncated: boolean;
   affectedPaths: string[];
 }) {
-  const tabs: PayloadTab[] = [
-    ...(resultValue ? [{ id: "output" as const, label: "Output" }] : []),
-    ...(argumentsValue ? [{ id: "arguments" as const, label: "Arguments" }] : []),
-    ...(affectedPaths.length > 0 ? [{ id: "paths" as const, label: "Paths" }] : []),
-  ];
-  const [active, setActive] = useState<PayloadTabId | null>(null);
-  const [showRaw, setShowRaw] = useState(false);
-
-  const current = active && tabs.some((tab) => tab.id === active) ? active : tabs[0]?.id ?? null;
-  const source = current === "arguments" ? argumentsValue : current === "output" ? resultValue : null;
-  const view = useMemo(() => (source ? readableToolPayload(source) : null), [source]);
-  const truncated = current === "arguments" ? argumentsTruncated : current === "output" ? resultTruncated : false;
-
-  if (tabs.length === 0) {
+  if (!argumentsValue && !resultValue && affectedPaths.length === 0) {
     return <p className="session-detail-tool-empty">No text argument or result is available for this call.</p>;
   }
 
-  const body = view ? (showRaw && view.transformed ? view.raw : view.text) : "";
-
   return (
     <div className="session-detail-tool-payload">
-      <div className="session-detail-payload-tabs" role="tablist" aria-label="Tool call payload">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            className={`session-detail-payload-tab${tab.id === current ? " is-on" : ""}`}
-            aria-selected={tab.id === current}
-            onClick={() => { setActive(tab.id); setShowRaw(false); }}
-          >
-            {tab.label}
-          </button>
-        ))}
-        <span className="session-detail-payload-tools">
-          {/* Deliberately not `.btn`: that class carries the rounded ghost
-              treatment, and these sit in a squared-off panel. */}
-          {view?.transformed && (
-            <button
-              type="button"
-              className={`session-detail-payload-action${showRaw ? " is-on" : ""}`}
-              aria-pressed={showRaw}
-              title={showRaw ? "Show readable text" : "Show the stored value"}
-              onClick={() => setShowRaw((raw) => !raw)}
-            >
-              <Icon name="code" size={12} />
-            </button>
-          )}
-          {current !== "paths" && (
-            <button
-              type="button"
-              className="session-detail-payload-action"
-              aria-label="Copy to clipboard"
-              title="Copy to clipboard"
-              onClick={() => void copyText(body)}
-            >
-              <Icon name="copy" size={12} />
-            </button>
-          )}
-        </span>
-      </div>
-
-      {current === "paths" ? (
-        <ul className="session-detail-tool-paths">
-          {affectedPaths.map((path) => <li key={path}><code>{path}</code></li>)}
-        </ul>
-      ) : (
-        <pre className="session-detail-payload-body"><code>{body}</code></pre>
+      {argumentsValue && (
+        <PayloadSection label="Arguments" value={argumentsValue} truncated={argumentsTruncated} />
       )}
-
-      {truncated && current !== "paths" && (
-        <p className="session-detail-truncation">Bounded preview · additional content omitted</p>
+      {resultValue && (
+        <PayloadSection label="Result" value={resultValue} truncated={resultTruncated} />
+      )}
+      {affectedPaths.length > 0 && (
+        <section className="session-detail-payload-section">
+          <div className="session-detail-payload-head">
+            <span className="session-detail-payload-label">Paths</span>
+          </div>
+          <ul className="session-detail-tool-paths">
+            {affectedPaths.map((path) => <li key={path}><code>{path}</code></li>)}
+          </ul>
+        </section>
       )}
     </div>
   );
@@ -158,6 +154,7 @@ export default function SessionDetailToolCall({
     );
   }
 
+  const descriptor = sessionToolDescriptor(tool);
   const expandedDetail = detailState?.detail;
   const affectedPaths = expandedDetail?.affected_paths.length
     ? expandedDetail.affected_paths
@@ -174,22 +171,24 @@ export default function SessionDetailToolCall({
         if (open !== expanded) onExpandedChange(event.event_id, open);
       }}
     >
-      {/* Name, then the command. The category chip and the per-row timestamp are
-          gone: both were constant down the whole list, and the timestamp
-          repeated the minute already printed on the turn above. Status is
-          rendered only when it is not `completed` — an exception worth seeing,
-          not a label worth 24 repetitions. */}
+      {/* The action, then the command — `Bash`/`Read`/`Edit` derived from the
+          wrapped function or the recorded name, tinted by the category that
+          derivation carries. Status is rendered only when it is not
+          `completed` — an exception worth seeing, not a label worth 24
+          repetitions. The chevron closes the row at the far edge. */}
       <summary>
-        <span className="session-detail-tool-disclosure" aria-hidden="true">
-          <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
+        <span className={`session-detail-tool-name cat-${descriptor.category}`}>
+          {descriptor.label}
         </span>
-        <strong>{tool.native_name}</strong>
         <span className="session-detail-tool-summary" title={tool.summary}>
           {toolCommandLabel(tool.summary)}
         </span>
         {tool.status !== "completed" && (
           <span className={`session-detail-tool-status status-${tool.status}`}>{tool.status}</span>
         )}
+        <span className="session-detail-tool-chevron" aria-hidden="true">
+          <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
+        </span>
       </summary>
 
       <div className="session-detail-tool-body" aria-busy={detailState?.loading || undefined}>

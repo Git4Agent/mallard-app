@@ -5,6 +5,7 @@ import type {
   SessionEventCounts,
   SessionTimelineEvent,
   SessionTimelineEventKind,
+  SessionToolCallPreview,
   SessionToolCategory,
 } from "../../../types";
 
@@ -78,6 +79,11 @@ function sessionCountEmpty(count: SessionCount): boolean {
   return sessionCountSupported(count) && count.value === 0;
 }
 
+/**
+ * Tool calls default on: the punchcard rows are the transcript's account of the
+ * work, and the per-turn disclosure that used to reveal them lazily is gone.
+ * SHOW › Tool calls remains the way to hide them.
+ */
 export function createDefaultSessionDetailFilters(
   counts: SessionEventCounts,
 ): SessionDetailFilters {
@@ -86,7 +92,7 @@ export function createDefaultSessionDetailFilters(
     responses: sessionCountSupported(counts.responses),
     intermediateSteps: false,
     checkpoints: sessionCountSupported(counts.checkpoints),
-    toolCalls: false,
+    toolCalls: sessionCountSupported(counts.tool_calls),
   };
 }
 
@@ -299,6 +305,38 @@ export function formatSessionDuration(
   return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
 }
 
+export interface SessionTurnSpan {
+  started: number;
+  ended: number;
+}
+
+/**
+ * First and last loaded timestamps per turn, for the prompt card's duration
+ * readout. Spans grow as pages load; a turn whose only loaded event is the
+ * prompt has no extent yet and yields no duration — measured, never promised.
+ */
+export function sessionTurnSpans(
+  events: SessionTimelineEvent[],
+): Map<string, SessionTurnSpan> {
+  const spans = new Map<string, SessionTurnSpan>();
+  for (const event of events) {
+    if (event.turn_id == null || event.timestamp == null) continue;
+    const span = spans.get(event.turn_id);
+    if (!span) {
+      spans.set(event.turn_id, { started: event.timestamp, ended: event.timestamp });
+      continue;
+    }
+    span.started = Math.min(span.started, event.timestamp);
+    span.ended = Math.max(span.ended, event.timestamp);
+  }
+  return spans;
+}
+
+export function sessionTurnDurationLabel(span: SessionTurnSpan | undefined): string | null {
+  if (!span || span.ended <= span.started) return null;
+  return formatSessionDuration(span.started, span.ended);
+}
+
 /**
  * One field instead of two. `Started` and `Ended` spelled the same date twice
  * and still left the reader to subtract; the range states the day once and the
@@ -372,24 +410,17 @@ export function groupSessionEventsByDay(
 }
 
 /**
- * `completed` on every row said nothing 24 times over. Only the exceptions are
- * worth counting, and only rows actually loaded can be counted at all.
- */
-export function countSessionToolFailures(events: SessionTimelineEvent[]): number {
-  return events.filter((event) => (
-    event.tool != null && event.tool.status !== "completed"
-  )).length;
-}
-
-/**
  * Providers hand us the call as the agent wrote it, which for Codex means the
  * whole JS wrapper: `const r = await tools.exec_command({cmd:"…","workdir":…})`.
  * Printed verbatim, all 24 rows open with the same 34 characters and the part
- * that tells them apart is exactly what the truncation eats. This lifts the
- * command out; anything it does not recognise is returned untouched, and the
- * full original stays one click away in the Arguments tab.
+ * that tells them apart is exactly what the truncation eats.
+ *
+ * The wrapper is parsed once and read twice: the *function* names what the call
+ * is (`exec_command` → Bash, `read_file` → Read), and the primary *argument* is
+ * the command line the row shows. Anything unrecognised is returned untouched,
+ * and the full original stays in the row's tooltip and the Arguments pane.
  */
-const WRAPPED_COMMAND = /\b(?:exec_command|run_command|shell|run)\s*\(\s*\{\s*["']?cmd["']?\s*:\s*"((?:[^"\\]|\\.)*)"/;
+const WRAPPER_CALL = /^(?:const\s+[\w$]+\s*=\s*)?(?:await\s+)?(?:tools\s*\.\s*)?([A-Za-z_$][\w$]*)\s*\(\s*(\{[\s\S]*)/;
 
 /** Checked in order: the first one present is what the call is *about*. */
 const PRIMARY_ARGUMENT_KEYS = [
@@ -411,12 +442,56 @@ function decodeJsonFragment(value: string): string {
   }
 }
 
+/** The wrapper's arguments are JS, not JSON: keys may be bare and strings may
+ *  be single-quoted or template literals, so this reads all three quote forms.
+ *  (Backticks are why some rows used to show nothing but `exec_command({`.) */
+function wrapperArgumentValue(argsLiteral: string, key: string): string | null {
+  const pattern = new RegExp(`["']?${key}["']?\\s*:\\s*(?:"((?:[^"\\\\]|\\\\.)*)"|'((?:[^'\\\\]|\\\\.)*)'|\`((?:[^\`\\\\]|\\\\.)*)\`)`);
+  const match = pattern.exec(argsLiteral);
+  if (!match) return null;
+  if (match[1] != null) return decodeJsonFragment(match[1]);
+  const value = match[2] ?? match[3];
+  return value.replace(/\\(['"`\\nt])/g, (_, escaped: string) => (
+    escaped === "n" ? "\n" : escaped === "t" ? "\t" : escaped
+  ));
+}
+
+/**
+ * Rows end early rather than running to the chevron: a hard cap, like the
+ * reference viewer's, keeps the right side of the list quiet so the eye scans
+ * the aligned left edge. The full text stays in the row's tooltip and the
+ * Arguments pane. Counted in code points so a CJK or emoji command cannot be
+ * split mid-character.
+ */
+const TOOL_COMMAND_MAX_LENGTH = 64;
+
+function capToolCommand(value: string): string {
+  // One line only — a template-literal command can span several, and nowrap
+  // would smear them into one with the breaks swallowed.
+  const newline = value.indexOf("\n");
+  const line = newline < 0 ? value : value.slice(0, newline).trimEnd();
+  const truncated = newline >= 0;
+  const points = [...line];
+  if (points.length <= TOOL_COMMAND_MAX_LENGTH) return truncated ? `${line}…` : line;
+  return points.slice(0, TOOL_COMMAND_MAX_LENGTH).join("").trimEnd() + "…";
+}
+
 export function toolCommandLabel(summary: string): string {
   const trimmed = summary.trim();
   if (!trimmed) return trimmed;
 
-  const wrapped = WRAPPED_COMMAND.exec(trimmed);
-  if (wrapped) return decodeJsonFragment(wrapped[1]).trim();
+  const wrapper = WRAPPER_CALL.exec(trimmed);
+  if (wrapper) {
+    for (const key of PRIMARY_ARGUMENT_KEYS) {
+      const value = wrapperArgumentValue(wrapper[2], key);
+      if (value?.trim()) return capToolCommand(value.trim());
+    }
+    // A wrapper with no primary argument still sheds the harness noise: show
+    // the call, not the `const r = await tools.` boilerplate around it.
+    return capToolCommand(trimmed
+      .replace(/^(?:const\s+[\w$]+\s*=\s*)?(?:await\s+)?(?:tools\s*\.\s*)?/, "")
+      .trim());
+  }
 
   if (trimmed.startsWith("{")) {
     try {
@@ -425,7 +500,7 @@ export function toolCommandLabel(summary: string): string {
         const fields = parsed as Record<string, unknown>;
         for (const key of PRIMARY_ARGUMENT_KEYS) {
           const value = fields[key];
-          if (typeof value === "string" && value.trim()) return value.trim();
+          if (typeof value === "string" && value.trim()) return capToolCommand(value.trim());
         }
       }
     } catch {
@@ -433,8 +508,52 @@ export function toolCommandLabel(summary: string): string {
     }
   }
 
-  // A multi-line body would break the row's single line either way.
-  return trimmed.split("\n")[0].trim();
+  return capToolCommand(trimmed);
+}
+
+export interface SessionToolDescriptor {
+  label: string;
+  category: SessionToolCategory;
+}
+
+/**
+ * What the row calls the tool. Providers that already record readable names
+ * (`Bash`, `Grep`) pass straight through; machine names — the recorded `exec`,
+ * or the function inside the JS wrapper — normalise to the action they perform,
+ * and carry their category with them so the tint always matches the label.
+ * Codex projects nearly everything as category `other`, which is exactly why
+ * the wrapper is the better witness when it is present.
+ */
+const TOOL_NAME_LABELS: Record<string, SessionToolDescriptor> = {
+  exec: { label: "Bash", category: "shell" },
+  exec_command: { label: "Bash", category: "shell" },
+  run_command: { label: "Bash", category: "shell" },
+  run_terminal_cmd: { label: "Bash", category: "shell" },
+  local_shell: { label: "Bash", category: "shell" },
+  shell: { label: "Bash", category: "shell" },
+  bash: { label: "Bash", category: "shell" },
+  read: { label: "Read", category: "read" },
+  read_file: { label: "Read", category: "read" },
+  open_file: { label: "Read", category: "read" },
+  cat: { label: "Read", category: "read" },
+  view: { label: "Read", category: "read" },
+  edit: { label: "Edit", category: "file_edit" },
+  edit_file: { label: "Edit", category: "file_edit" },
+  apply_patch: { label: "Edit", category: "file_edit" },
+  write_file: { label: "Edit", category: "file_edit" },
+  create_file: { label: "Edit", category: "file_edit" },
+  update_file: { label: "Edit", category: "file_edit" },
+  str_replace_editor: { label: "Edit", category: "file_edit" },
+};
+
+export function sessionToolDescriptor(
+  tool: Pick<SessionToolCallPreview, "native_name" | "summary" | "category">,
+): SessionToolDescriptor {
+  const wrapper = WRAPPER_CALL.exec(tool.summary.trim());
+  const name = wrapper?.[1] ?? tool.native_name;
+  const hit = TOOL_NAME_LABELS[name.toLowerCase()];
+  if (hit) return hit;
+  return { label: name, category: tool.category };
 }
 
 export interface SessionPayloadView {

@@ -1,6 +1,7 @@
 import type { ReactNode, RefObject } from "react";
 import type { ProjectSessionDetail, SessionActionDescriptor } from "../../../types";
 import Icon, { type IconName } from "../../Icons";
+import ProviderMark from "../ProviderMark";
 import {
   formatCompactCount,
   formatSessionCount,
@@ -8,31 +9,15 @@ import {
   formatSessionRange,
 } from "./sessionDetailModel";
 
-const ACTION_ICONS: Record<SessionActionDescriptor["kind"], IconName> = {
-  open_in_app: "play",
+// The activity rows' vocabulary, reused verbatim: opening the provider wears
+// the provider's own mark, everything else its action glyph. open_in_app is
+// excluded because it renders <ProviderMark>, not an Icon.
+const ACTION_ICONS: Record<Exclude<SessionActionDescriptor["kind"], "open_in_app">, IconName> = {
   open_in_terminal: "terminal",
 };
 
-interface Props {
-  detail: ProjectSessionDetail;
-  headingRef: RefObject<HTMLHeadingElement | null>;
-  actionBusyId: string | null;
-  actionError: string | null;
-  onRefresh: () => void;
-  onAction: (action: SessionActionDescriptor) => void;
-}
-
-function MetaItem({ label, children, title }: {
-  label: string;
-  children: ReactNode;
-  title?: string;
-}) {
-  return (
-    <span className="session-detail-meta-item">
-      <span className="session-detail-meta-label">{label}</span>
-      <span className="session-detail-meta-value" title={title}>{children}</span>
-    </span>
-  );
+function FactChip({ children, title }: { children: ReactNode; title?: string }) {
+  return <span className="session-detail-chip" title={title}>{children}</span>;
 }
 
 export default function SessionDetailHeader({
@@ -40,11 +25,18 @@ export default function SessionDetailHeader({
   headingRef,
   actionBusyId,
   actionError,
-  onRefresh,
   onAction,
-}: Props) {
-  // No breadcrumb and no back button: the workspace path bar above carries the
-  // trail, and its section crumb is the way back.
+}: {
+  detail: ProjectSessionDetail;
+  headingRef: RefObject<HTMLHeadingElement | null>;
+  actionBusyId: string | null;
+  actionError: string | null;
+  onAction: (action: SessionActionDescriptor) => void;
+}) {
+  // The page's visible title is the path bar's leaf crumb — stated once, and
+  // sticky, so it survives scrolling in a way an in-page poster never did. The
+  // h1 keeps the page's structure: it is what the section labels itself by and
+  // where focus lands on open, so it stays in the DOM, visually hidden.
   const title = detail.title || "Untitled session";
   // For most providers the summary is derived from the opening prompt, which is
   // also the title — printing both put the same sentence on screen twice before
@@ -54,17 +46,44 @@ export default function SessionDetailHeader({
     : null;
   const range = formatSessionRange(detail.started_at, detail.ended_at);
   const duration = formatSessionDuration(detail.started_at, detail.ended_at);
+  const tokensKnown = detail.tokens.quality !== "unsupported" && detail.tokens.value != null;
 
   return (
     <header className="session-detail-header">
-      <div className="session-detail-heading-row">
-        <div className="session-detail-heading-copy">
-          <div className="session-detail-provider-line">
-            <span className="session-detail-provider-badge">{detail.provider_display_name}</span>
-            {detail.is_active && <span className="session-detail-active-badge">Active</span>}
-          </div>
-          <h1 id="session-detail-heading" ref={headingRef} tabIndex={-1}>{title}</h1>
-          {summary && <p>{summary}</p>}
+      <h1
+        id="session-detail-heading"
+        className="sync-visually-hidden"
+        ref={headingRef}
+        tabIndex={-1}
+      >{title}</h1>
+
+      <div className="session-detail-strip">
+        {/* Facts state themselves: a branch after the branch glyph and a
+            7-char sha need no caption. Only the token count keeps a word. */}
+        <div className="session-detail-chips" aria-label="Session facts">
+          {detail.branch && (
+            <FactChip title={`Branch ${detail.branch}`}>
+              <Icon name="git-branch" size={12} />
+              <code>{detail.branch}</code>
+            </FactChip>
+          )}
+          {detail.recorded_sha && (
+            <FactChip title={detail.recorded_sha}>
+              <Icon name="git-commit" size={12} />
+              <code>{detail.recorded_sha.slice(0, 7)}</code>
+            </FactChip>
+          )}
+          {range && (
+            <FactChip>
+              <time dateTime={detail.started_at != null ? String(detail.started_at) : undefined}>{range}</time>
+              {duration && <b>{duration}</b>}
+            </FactChip>
+          )}
+          <FactChip title={detail.tokens.explanation ?? formatSessionCount(detail.tokens)}>
+            {tokensKnown
+              ? <><code className={`quality-${detail.tokens.quality}`}>{formatCompactCount(detail.tokens)}</code> tokens</>
+              : "Tokens unavailable"}
+          </FactChip>
         </div>
 
         <div className="session-detail-header-actions" aria-label="Session actions">
@@ -74,56 +93,26 @@ export default function SessionDetailHeader({
               <button
                 key={action.action_id}
                 type="button"
-                className="btn btn-ghost"
+                className="btn btn-ghost session-detail-launch"
                 disabled={!action.enabled || actionBusyId !== null}
-                title={!action.enabled ? action.disabled_reason ?? action.label : action.label}
+                title={!action.enabled
+                  ? action.disabled_reason ?? action.label
+                  : pending ? `${action.label}…` : action.label}
+                aria-label={action.label}
                 onClick={() => onAction(action)}
               >
-                <Icon
-                  name={pending ? "refresh" : ACTION_ICONS[action.kind]}
-                  size={12}
-                  className={pending ? "icon-spin" : undefined}
-                />
-                {action.label}
+                {pending
+                  ? <Icon name="refresh" size={12} className="icon-spin" />
+                  : action.kind === "open_in_app"
+                    ? <ProviderMark provider={detail.provider} displayName={detail.provider_display_name} size={12} />
+                    : <Icon name={ACTION_ICONS[action.kind]} size={12} />}
               </button>
             );
           })}
-          {/* Refresh is maintenance, not one of the two things you came to do,
-              so it keeps the column without competing for the same reading. */}
-          <button
-            type="button"
-            className="btn btn-ghost session-detail-refresh"
-            aria-label="Refresh session detail"
-            title="Refresh session detail"
-            onClick={onRefresh}
-          >
-            <Icon name="refresh" size={12} />
-          </button>
         </div>
       </div>
 
-      <div className="session-detail-metadata" aria-label="Session metadata">
-        {detail.branch && (
-          <MetaItem label="Branch"><code>{detail.branch}</code></MetaItem>
-        )}
-        {detail.recorded_sha && (
-          <MetaItem label="Commit" title={detail.recorded_sha}>
-            <code>#{detail.recorded_sha.slice(0, 7)}</code>
-          </MetaItem>
-        )}
-        {range && (
-          <MetaItem label="Ran">
-            <time dateTime={detail.started_at != null ? String(detail.started_at) : undefined}>{range}</time>
-            {duration && <b className="session-detail-meta-duration">{duration}</b>}
-          </MetaItem>
-        )}
-        <MetaItem
-          label="Tokens"
-          title={detail.tokens.explanation ?? formatSessionCount(detail.tokens)}
-        >
-          <code className={`quality-${detail.tokens.quality}`}>{formatCompactCount(detail.tokens)}</code>
-        </MetaItem>
-      </div>
+      {summary && <p className="session-detail-summary">{summary}</p>}
 
       {actionError && (
         <div className="sync-callout error session-detail-action-error" role="alert">

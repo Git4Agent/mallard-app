@@ -3707,7 +3707,23 @@ summary:focus-visible {
 .sync-resource-group-copy { min-width: 0; display: flex; flex-direction: column; }
 .sync-resource-group-copy strong { font-size: 15px; font-weight: 600; line-height: 1.15; }
 .sync-resource-group-copy span { display: none; }
+/* The blocked tally rides in front of the selected/total pair and takes the
+   auto margin off it, so a group with nothing blocked keeps the old layout
+   exactly. It is the one fact a folded group cannot otherwise show. */
+.sync-resource-group-unavailable {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--yellow);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.sync-resource-group-unavailable svg { flex: 0 0 auto; }
+
 .sync-resource-group-count { margin-left: auto; color: var(--text-2); font-size: 11px; }
+.sync-resource-group-unavailable + .sync-resource-group-count { margin-left: 12px; }
 .sync-resource-group-actions { display: inline-flex; align-items: center; }
 .sync-resource-group-all {
   min-height: 28px;
@@ -3801,7 +3817,6 @@ summary:focus-visible {
 .sync-resource-copy { min-width: 0; display: flex; flex-direction: column; }
 .sync-resource-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); font-size: 13.5px; font-weight: 500; }
 .sync-resource-row.selected .sync-resource-copy strong { color: var(--text-0); }
-.sync-resource-copy > span { display: none; }
 .sync-resource-meta { margin-left: auto; display: flex; align-items: center; gap: 7px; color: var(--text-3); }
 .sync-resource-install { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--purple); font-size: 9.5px; }
 .sync-resource-status { color: var(--text-2); font-size: 9.5px; text-transform: capitalize; }
@@ -5245,13 +5260,17 @@ summary:focus-visible {
 }
 
 .project-profile-group-footer {
-  padding: 8px 10px;
+  padding: 10px 12px 12px;
   border-top: 1px solid var(--border);
   background: var(--surface-subtle);
 }
 
-.project-profile-group-footer .storage-link-picker {
-  margin: 0;
+/* On a settled project the group holds nothing but this footer, and its rule
+   would land 1px under the group frame as a doubled hairline. It parts the
+   footer from what precedes it, so with nothing above it there is nothing to
+   part. (ProjectLinksWorkspace drops the empty storage list so this matches.) */
+.project-profile-group-footer:first-child {
+  border-top: 0;
 }
 
 /* The combined project page uses the same flat rail for storage and threads. */
@@ -5292,10 +5311,6 @@ summary:focus-visible {
   border-top: 0;
   background: var(--surface-subtle);
   box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 72%, transparent);
-}
-
-.sync-project-combined-page .project-profile-storage-list .storage-link-block.selected.storage-picker-open {
-  background: var(--surface-row-active);
 }
 
 .sync-project-combined-page .project-profile-storage-list .storage-link-block:last-child {
@@ -5397,9 +5412,12 @@ summary:focus-visible {
    past its ellipsis to zero — at 700px the section name simply vanished —
    which reads as a missing crumb rather than a shortened one. 5ch keeps two
    characters and the ellipsis. The branch chip beside it never shrinks: it is
-   the part of the trail you cannot infer from anywhere else on screen. */
-.sync-path-crumb.leaf > span,
-.sync-path-crumb.section > span {
+   the part of the trail you cannot infer from anywhere else on screen.
+   `:last-child` because the label is the crumb's final span — the provider
+   mark ahead of it is also a direct-child span, and a text floor would inflate
+   a 14px icon to 5ch. */
+.sync-path-crumb.leaf > span:last-child,
+.sync-path-crumb.section > span:last-child {
   min-width: 5ch;
 }
 
@@ -5659,6 +5677,27 @@ span.sync-path-crumb {
   background: var(--chip-bg);
 }
 
+/* The provider's mark on the session leaf: identity as an icon, presence as a
+   dot — the words stay in the crumb's tooltip and in hidden reader text. */
+.sync-path-leaf-mark {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--text-1);
+}
+
+.sync-path-leaf-mark.active::after {
+  content: "";
+  position: absolute;
+  right: -3px;
+  bottom: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--green);
+}
+
 /* Everything neither verb can clear, in one chip instead of four tallies: a
    review, a hold, a conflict and an unsyncable thread all mean "look at this",
    and only the last two mean it loudly. */
@@ -5762,11 +5801,12 @@ span.sync-path-crumb {
     padding: 0 8px;
   }
 
-  /* The storage keeps its icon, which opens the same switcher and is the mark
-     people aim at anyway. Ancestor names go before the section's, and the
+  /* An ancestor root keeps its icon, which opens the same switcher and is the
+     mark people aim at anyway. Ancestor names go before the section's, and the
      section's before the branch's — outermost first, because the outer scopes
-     are the ones the icons and the page itself still say. */
-  .sync-path-crumb.root > span {
+     are the ones the icons and the page itself still say. On the Storages
+     index the root IS the leaf — the page's only name — so it never yields. */
+  .sync-path-crumb.root:not(.leaf) > span {
     display: none;
   }
 
@@ -5774,8 +5814,8 @@ span.sync-path-crumb {
     max-width: 7ch;
   }
 
-  .sync-path-crumb.leaf > span,
-  .sync-path-crumb.section > span {
+  .sync-path-crumb.leaf > span:last-child,
+  .sync-path-crumb.section > span:last-child {
     max-width: 9ch;
   }
 }
@@ -5789,8 +5829,8 @@ span.sync-path-crumb {
     display: none;
   }
 
-  .sync-path-crumb.leaf > span,
-  .sync-path-crumb.section > span {
+  .sync-path-crumb.leaf > span:last-child,
+  .sync-path-crumb.section > span:last-child {
     max-width: 6ch;
   }
 }
@@ -5844,12 +5884,14 @@ span.sync-path-crumb {
   cursor: pointer;
 }
 
-.sync-path-menu-item:hover:not(:disabled) {
+.sync-path-menu-item:hover:not([aria-disabled="true"]) {
   color: var(--text-0);
   background: var(--surface-row-hover);
 }
 
-.sync-path-menu-item:disabled {
+/* Inert, not gone: `aria-disabled` keeps the row focusable so its reason line
+   is reachable by keyboard, and the menu holds its shape while locked. */
+.sync-path-menu-item[aria-disabled="true"] {
   opacity: 0.5;
   cursor: default;
 }
@@ -5859,9 +5901,12 @@ span.sync-path-crumb {
   color: var(--text-3);
 }
 
-.sync-path-menu-item[aria-checked="true"] {
+/* The checked state of a menuitemcheckbox is its trailing tick alone — a
+   background wash was a second, weaker telling that hover overrode anyway. */
+.sync-path-menu-check {
+  flex: 0 0 auto;
+  margin-left: auto;
   color: var(--text-0);
-  background: var(--chip-bg);
 }
 
 .sync-path-menu-item.danger,
@@ -5869,8 +5914,46 @@ span.sync-path-crumb {
   color: var(--danger-text);
 }
 
-.sync-path-menu-item.danger:hover:not(:disabled) {
+.sync-path-menu-item.danger:hover:not([aria-disabled="true"]) {
   background: var(--danger-soft);
+}
+
+/* The object the menu acts on: context at the top, not a command. No hover,
+   no cursor — the verbs beneath it inherit its scope by proximity. */
+.sync-path-menu-current {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px;
+}
+
+.sync-path-menu-current > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--text-3);
+}
+
+.sync-path-menu-current .sync-path-menu-copy > span {
+  color: var(--text-0);
+  font-weight: 600;
+}
+
+/* Why the whole menu is inert, said once at the top — instead of a tooltip
+   repeated across every greyed row. */
+.sync-path-menu-banner {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 5px;
+  padding: 8px;
+  border-radius: 3px;
+  background: var(--warning-soft);
+  color: var(--text-1);
+}
+
+.sync-path-menu-banner > svg {
+  flex: 0 0 auto;
+  color: var(--yellow);
 }
 
 .sync-path-menu-copy {
@@ -5932,130 +6015,15 @@ span.sync-path-crumb {
   color: var(--red);
 }
 
-/* The storage root gives up its name before anything else does. */
+/* The root gives up its name before anything else does — unless it is also
+   the leaf, as on the Storages index, where it is the page's only name. */
 @media (max-width: 900px) {
   .sync-path-crumb {
     max-width: 34vw;
   }
-  .sync-path-item:first-child .sync-path-crumb.root > span {
+  .sync-path-item:first-child .sync-path-crumb.root:not(.leaf) > span {
     display: none;
   }
-}
-
-.sync-project-heading-identity {
-  width: min(760px, calc(100vw - 420px));
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-}
-
-.sync-project-heading-name,
-.sync-project-heading-rename {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.sync-project-heading-name h1 {
-  margin: 0;
-  overflow: hidden;
-  color: var(--text-0);
-  font-size: 22px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sync-project-heading-name .btn,
-.sync-project-heading-rename .btn {
-  min-height: 29px;
-  padding: 0 8px;
-}
-
-.sync-project-heading-name .btn {
-  color: var(--text-2);
-  font-size: 10.5px;
-}
-
-.sync-project-heading-meta {
-  min-width: 0;
-  max-width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 0;
-  color: var(--text-2);
-  font-size: 11px;
-}
-
-.sync-project-heading-meta-item {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  max-width: min(360px, 34vw);
-}
-
-.sync-project-heading-meta-item + .sync-project-heading-meta-item {
-  margin-left: 10px;
-}
-
-.sync-project-heading-meta-item + .sync-project-heading-meta-item::before {
-  content: "";
-  width: 1px;
-  height: 11px;
-  flex: 0 0 auto;
-  margin-right: 5px;
-  background: var(--border-mid);
-}
-
-.sync-project-heading-meta-item svg {
-  flex: 0 0 auto;
-  color: var(--text-3);
-}
-
-.sync-project-heading-meta-item.warning,
-.sync-project-heading-meta-item.warning svg {
-  color: var(--yellow);
-}
-
-.sync-project-heading-meta-item > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sync-project-heading-rename {
-  width: min(680px, 70vw);
-  animation: storage-link-reveal 140ms ease-out both;
-}
-
-.sync-project-heading-rename input {
-  min-width: 180px;
-  height: 36px;
-  flex: 1;
-  padding: 0 9px;
-  border: 1px solid var(--focus-ring);
-  border-radius: 7px;
-  color: var(--text-0);
-  background: var(--surface-row);
-  font: inherit;
-  font-size: 15px;
-  outline: 2px solid color-mix(in srgb, var(--focus-ring) 24%, transparent);
-  outline-offset: 0;
-}
-
-.sync-project-heading-error {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--red);
-  font-size: 10.5px;
 }
 
 .sync-project-link-card .storage-link-block.sync-details-open {
@@ -7112,28 +7080,6 @@ span.sync-path-crumb {
   font-size: 14px;
 }
 
-.sync-storage-settings-meta {
-  min-width: 0;
-  margin-top: 6px;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--text-2);
-  font-size: 11px;
-}
-
-.sync-storage-settings-meta svg {
-  flex: 0 0 auto;
-  color: var(--text-3);
-}
-
-.sync-storage-settings-meta span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .profile-links-heading-actions {
   display: flex;
   flex-direction: column;
@@ -7309,11 +7255,6 @@ span.sync-path-crumb {
 }
 
 .storage-link-block.sync-review-open {
-  border-color: var(--border-strong);
-  background: var(--surface-row-active);
-}
-
-.storage-link-block.storage-picker-open {
   border-color: var(--border-strong);
   background: var(--surface-row-active);
 }
@@ -7677,19 +7618,6 @@ span.sync-path-crumb {
   margin-top: 26px;
 }
 
-.sync-storage-settings-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.sync-storage-settings-icon {
-  width: 32px;
-  min-width: 32px;
-  padding: 0;
-}
-
 .sync-storage-details-panel {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -7729,13 +7657,6 @@ span.sync-path-crumb {
   color: var(--text-0);
   font-size: 13px;
   font-weight: 600;
-}
-
-.sync-storage-repositories-heading .btn {
-  width: 32px;
-  min-height: 32px;
-  padding: 0;
-  margin-left: auto;
 }
 
 /* Items own the divider: the details fold renders inside the item, under the
@@ -7860,6 +7781,89 @@ span.sync-path-crumb {
   margin: 0;
 }
 
+/* ---------------------------------------------------------------------------
+   Storages index
+   ---------------------------------------------------------------------------
+   The page the storage trail is rooted at. One row per configured storage,
+   the whole row a button that opens its page — the repository rows' anatomy,
+   with the chevron promising a page instead of a fold. */
+.sync-storage-index-list {
+  width: 100%;
+  max-width: 1180px;
+  margin: 26px auto 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-card);
+  overflow: hidden;
+}
+
+.sync-storage-index-row {
+  width: 100%;
+  min-height: 52px;
+  padding: 8px 14px;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto auto 26px;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: var(--text-0);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sync-storage-index-row:last-child {
+  border-bottom: 0;
+}
+
+.sync-storage-index-row:hover:not(:disabled) {
+  background: var(--surface-subtle);
+}
+
+.sync-storage-index-row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.sync-storage-index-row:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.sync-storage-index-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sync-storage-index-copy strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-storage-index-copy small {
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-storage-index-warning {
+  color: var(--yellow);
+}
+
+.sync-storage-index-open {
+  justify-self: center;
+  color: var(--text-3);
+}
+
 @keyframes storage-link-reveal {
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: translateY(0); }
@@ -7955,15 +7959,14 @@ span.sync-path-crumb {
   cursor: default;
 }
 
+/* The picker is the storage group's footer content, not a card of its own.
+   It used to carry a popover skin from when it opened loose inside the project
+   card; inside the framed group that skin drew a second border 11px in from the
+   first, in the same colour and at a larger radius. The group frames it now. */
 .storage-link-picker {
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
-  margin: 9px 0 3px;
-  padding: 11px;
-  border: 1px solid var(--border-mid);
-  border-radius: 9px;
-  background: var(--surface-popover);
   animation: storage-link-reveal 160ms ease-out both;
 }
 
@@ -8140,10 +8143,6 @@ span.sync-path-crumb {
   .profile-link-card {
     grid-template-columns: 1fr;
   }
-
-  .sync-project-heading-identity { width: 100%; min-width: 0; }
-  .sync-project-heading-rename { width: 100%; max-width: 680px; flex-wrap: wrap; }
-  .sync-project-heading-rename input { flex-basis: 100%; }
 
   .profile-link-profile {
     padding-top: 0;
@@ -11114,6 +11113,7 @@ button.sync-project-file-expand { cursor: pointer; }
      borders keep the pure hue, where 3:1 is the bar. */
   --session-detail-amber: color-mix(in srgb, var(--yellow) 60%, var(--text-0));
   --session-detail-link: color-mix(in srgb, var(--blue) 85%, var(--text-0));
+  --session-detail-you: color-mix(in srgb, var(--red) 85%, var(--text-0));
 }
 
 /* The page used to reset `font: inherit` on its own controls. The global
@@ -11129,140 +11129,95 @@ button.sync-project-file-expand { cursor: pointer; }
   flex: 0 0 auto;
 }
 
+/* The page's visible title lives in the path bar's leaf crumb — sticky, so it
+   survives scrolling — and the h1 stays screen-reader-only as the section's
+   name and the focus landing. What remains here is one slim row: the facts on
+   the left, the two verbs on the right. */
 .session-detail-header {
   display: grid;
-  gap: 14px;
-  margin-bottom: 24px;
-  padding-bottom: 22px;
-  border-bottom: 1px solid var(--border-mid);
+  gap: 10px;
+  margin-bottom: 18px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
 }
 
-.session-detail-heading-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-}
-
-.session-detail-heading-copy {
-  min-width: 0;
-  display: grid;
-  gap: 7px;
-}
-
-.session-detail-heading-copy h1 {
-  max-width: 840px;
-  font-size: clamp(22px, 3vw, 34px);
-  font-weight: 650;
-  line-height: 1.15;
-  letter-spacing: -0.025em;
-  overflow-wrap: anywhere;
-}
-
-.session-detail-heading-copy h1:focus-visible {
-  border-radius: var(--r-sm);
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 5px;
-}
-
-.session-detail-heading-copy > p {
-  max-width: 780px;
-  color: var(--text-1);
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.session-detail-provider-line,
-.session-detail-header-actions,
-.session-detail-metadata,
-.session-detail-meta-item {
+.session-detail-strip {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 14px;
 }
 
-.session-detail-provider-line {
-  gap: 7px;
+/* Facts state themselves — a branch after the branch glyph, a bare sha — so
+   the chips carry no captions; the full value stays in the tooltip. */
+.session-detail-chips {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
-.session-detail-provider-badge,
-.session-detail-active-badge {
+.session-detail-chip {
+  height: 22px;
   display: inline-flex;
   align-items: center;
-  min-height: 21px;
-  padding: 2px 7px;
-  border: 1px solid var(--border-mid);
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
   border-radius: var(--r-sm);
   color: var(--text-1);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1;
+  white-space: nowrap;
 }
 
-.session-detail-active-badge {
-  border-color: color-mix(in srgb, var(--green) 55%, var(--border));
-  color: var(--green);
+.session-detail-chip > svg {
+  color: var(--text-3);
+}
+
+.session-detail-chip code,
+.session-detail-chip time {
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The duration: the one number the row states in the body colour. */
+.session-detail-chip b {
+  color: var(--text-0);
+  font-weight: 600;
 }
 
 .session-detail-header-actions {
+  display: flex;
+  align-items: center;
   flex: 0 0 auto;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 6px;
 }
 
-.session-detail-header-actions .btn {
-  min-height: 31px;
-  gap: 6px;
-  padding: 5px 9px;
-  font-size: 11px;
-}
-
-/* Refresh is icon-only, so it takes a square rather than a label's padding. */
-.session-detail-header-actions .btn.session-detail-refresh {
-  width: 31px;
-  justify-content: center;
+/* The activity rows' launch cluster, re-cut for the header strip: the same
+   28px icon-only squares, provider mark and all — the label lives in the
+   tooltip and the accessible name. */
+.session-detail-launch {
+  width: 28px;
+  min-width: 28px;
+  min-height: 28px;
   padding: 0;
+  border: 0;
 }
 
-.session-detail-metadata {
-  flex-wrap: wrap;
-  gap: 7px 14px;
-  color: var(--text-2);
-  font-size: 11px;
-}
-
-.session-detail-meta-item {
-  min-width: 0;
-  gap: 6px;
-}
-
-/* --text-3 measures 3.36:1 on this paper, short of the 4.5:1 a 9px label
-   needs. The label carries information, so it takes --text-2 (5.76:1). */
-.session-detail-meta-label {
-  color: var(--text-2);
-  font-size: 9px;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-}
-
-.session-detail-meta-value {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
+/* A summary a provider records beyond the title: a lede over the transcript,
+   not another header row. */
+.session-detail-summary {
+  max-width: 780px;
   color: var(--text-1);
-  font-variant-numeric: tabular-nums;
-}
-
-.session-detail-meta-value code,
-.session-detail-meta-value time {
-  color: inherit;
-  font-family: inherit;
-  font-size: inherit;
-}
-
-/* The one number the header never used to state. */
-.session-detail-meta-duration {
-  color: var(--text-0);
-  font-weight: 400;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 /* One column. The rail this replaces held four controls behind a permanent
@@ -11384,7 +11339,7 @@ button.sync-project-file-expand { cursor: pointer; }
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: 16px 0 0;
+  margin: 18px 0 14px;
 }
 
 .session-detail-day:first-child .session-detail-day-divider {
@@ -11406,32 +11361,77 @@ button.sync-project-file-expand { cursor: pointer; }
   background: var(--border);
 }
 
+/* ---- the rail ---------------------------------------------------------- */
+
+/* One hairline down each day, drawn behind the tiles. Left 11px sits it under
+   the 24px node column's own border (a 1px line has no true center on an even
+   column). Scoped to the list, so day dividers break it naturally and empty or
+   error states never draw a rail with nothing on it. */
 .session-detail-event-list {
+  position: relative;
   min-width: 0;
   display: grid;
   gap: 0;
   list-style: none;
 }
 
+.session-detail-event-list::before {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 11px;
+  width: 1px;
+  background: var(--border);
+}
+
 .session-detail-event-list > li {
+  position: relative;
   min-width: 0;
 }
 
 .session-detail-event-list > li + li {
-  border-top: 1px solid var(--border);
+  margin-top: 12px;
 }
 
-/* ---- one turn ---------------------------------------------------------- */
+/* Consecutive punches sit close, so a run of work reads as one block. */
+.session-detail-event-list > li.session-detail-row-tool + li.session-detail-row-tool {
+  margin-top: 4px;
+}
 
-/* Three columns: the clock, the kind rail, the turn. The date is stated once
-   by the divider above, so the row carries `11:10` where it used to spell
-   `Aug 13, 2026 at 11:10 AM` on every single event. */
+/* The wait before this turn, sitting on the rail between the two events it
+   separates. Four idle minutes while an agent retried are part of what
+   happened. Ticks never carry one: a wait before a call reads as the call's
+   own runtime. */
+.session-detail-event-gap {
+  display: grid;
+  grid-template-columns: 24px;
+  justify-items: center;
+  margin: 2px 0 14px;
+}
+
+.session-detail-event-gap > span {
+  position: relative;
+  z-index: 1;
+  padding: 1px 5px;
+  border: 1px solid var(--border-mid);
+  background: var(--bg-0);
+  color: var(--text-2);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- one event --------------------------------------------------------- */
+
+/* Two columns: the rail's node, then the body. The speaker headings are gone —
+   the tile is the speaker, with name · clock on its label — and the date is
+   stated once by the divider above. */
 .session-detail-event {
   min-width: 0;
   display: grid;
-  grid-template-columns: 58px 3px minmax(0, 1fr);
+  grid-template-columns: 24px minmax(0, 1fr);
   gap: 0 14px;
-  padding: 11px 0 13px;
+  align-items: start;
   scroll-margin: 80px 0;
 }
 
@@ -11441,42 +11441,46 @@ button.sync-project-file-expand { cursor: pointer; }
   outline-offset: 3px;
 }
 
-.session-detail-event-gutter {
+/* A 24px tile: a whole cell for the 12px glyph inside, and wide enough to
+   cover the rail behind it. */
+.session-detail-event-node {
+  position: relative;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
   display: grid;
-  align-content: start;
-  justify-items: end;
-  gap: 3px;
-  padding-top: 1px;
-  text-align: right;
+  place-items: center;
+  border: 1px solid var(--border-mid);
+  background: var(--bg-1);
+  color: var(--text-1);
 }
 
-.session-detail-event-gutter time,
-.session-detail-event-undated {
-  color: var(--text-2);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
+.event-prompt .session-detail-event-node { color: var(--session-detail-you); }
+.event-checkpoint .session-detail-event-node { color: var(--session-detail-amber); }
 
-/* The wait before this turn. Four idle minutes while an agent retried are part
-   of what happened, and nothing on the page used to show them. */
-.session-detail-event-gap {
-  color: var(--text-2);
-  font-family: var(--font-mono);
+/* Providers without shipped art fall back to the monogram; inside a tile it
+   needs no second border. */
+.session-detail-event-node .sync-provider-monogram {
+  width: auto;
+  height: auto;
+  border: 0;
   font-size: 10px;
-  font-variant-numeric: tabular-nums;
 }
 
-.session-detail-event-rail {
-  border-radius: 1px;
+/* One punch per call. Failures punch in the failure colour, so a bad call is
+   findable from the rail alone before any row is read. */
+.session-detail-event-tick {
+  position: relative;
+  z-index: 1;
+  width: 7px;
+  height: 7px;
+  /* Centered on the 32px row's first line. */
+  margin: 13px auto 0;
   background: var(--border-mid);
 }
 
-.event-prompt .session-detail-event-rail { background: var(--red); }
-.event-response .session-detail-event-rail { background: var(--blue); }
-.event-intermediate-step .session-detail-event-rail { background: var(--purple); }
-.event-tool-call .session-detail-event-rail { background: var(--purple); }
-.event-checkpoint .session-detail-event-rail { background: var(--green); }
+.event-tool-call.tool-failed .session-detail-event-tick { background: var(--danger-text); }
+.event-tool-call.tool-incomplete .session-detail-event-tick { background: var(--session-detail-amber); }
 
 .session-detail-event-body {
   min-width: 0;
@@ -11484,40 +11488,8 @@ button.sync-project-file-expand { cursor: pointer; }
   gap: 8px;
 }
 
-.session-detail-event-heading {
-  min-height: 13px;
+.session-detail-event-flags {
   display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* The rail beside this label already carries the hue at full strength, where
-   3:1 is the bar it has to clear. A 10px label needs 4.5:1, which the pure
-   accents miss on light paper — mixing in 15% of the body colour clears it
-   without leaving the family. */
-.session-detail-event-heading h3 {
-  color: var(--text-1);
-  font-size: 10px;
-  font-weight: 400;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-}
-
-.event-prompt .session-detail-event-heading h3 {
-  color: color-mix(in srgb, var(--red) 85%, var(--text-0));
-}
-
-.event-response .session-detail-event-heading h3 {
-  color: color-mix(in srgb, var(--blue) 85%, var(--text-0));
-}
-
-.event-intermediate-step .session-detail-event-heading h3,
-.event-tool-call .session-detail-event-heading h3 {
-  color: color-mix(in srgb, var(--purple) 85%, var(--text-0));
-}
-
-.event-checkpoint .session-detail-event-heading h3 {
-  color: color-mix(in srgb, var(--green) 85%, var(--text-0));
 }
 
 .session-detail-quality {
@@ -11548,15 +11520,37 @@ button.sync-project-file-expand { cursor: pointer; }
   overflow-wrap: anywhere;
 }
 
+/* You ask in a card, the agent answers in prose — the shape is the speaker,
+   the way the reference viewer reads once its avatars are removed. */
 .session-detail-prompt-card {
-  padding: 12px 14px;
+  max-width: 68ch;
   border: 1px solid var(--border-mid);
   border-radius: var(--r);
   background: var(--surface-card);
 }
 
+.session-detail-prompt-card > .session-detail-event-copy {
+  max-width: none;
+  padding: 10px 12px 9px;
+}
+
+/* clock · duration · calls. Absolute clock, because the divider owns the date;
+   the duration appears once a later event of the turn has loaded — measured,
+   never promised. */
+.session-detail-card-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 5px 12px 6px;
+  border-top: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
 .session-detail-response-prose {
-  padding: 0;
+  padding: 2px 0 0;
   border: 0;
   background: transparent;
 }
@@ -11661,127 +11655,88 @@ button.sync-project-file-expand { cursor: pointer; }
 
 /* ---- checkpoints ------------------------------------------------------- */
 
-.session-detail-checkpoint-body {
+/* sha · subject · branch · clock — the fields the provider records. No diff
+   stats: they are not in the data, and evidence is never faked. */
+.session-detail-checkpoint-card {
   max-width: 68ch;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--green) 38%, var(--border));
-  border-radius: var(--r-sm);
-  background: var(--surface-subtle);
-}
-
-.session-detail-checkpoint-icon {
-  display: inline-flex;
-  color: var(--green);
-}
-
-.session-detail-checkpoint-body > div {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-}
-
-.session-detail-checkpoint-body strong {
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
-.session-detail-checkpoint-body > div > span {
+  min-height: 36px;
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  color: var(--text-2);
-  font-size: 10px;
+  gap: 10px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--r);
+  background: var(--surface-card);
 }
 
-.session-detail-checkpoint-body code,
-.session-detail-checkpoint-body time {
-  font-family: var(--font-mono);
-  font-size: inherit;
+.session-detail-checkpoint-sha {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--border-mid);
+  background: var(--surface-subtle);
+  color: var(--session-detail-amber);
+  font-size: 11px;
+}
+
+.session-detail-checkpoint-subject {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-0);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-detail-checkpoint-end {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.session-detail-checkpoint-branch {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 1px 6px;
+  border: 1px solid var(--border-mid);
+  border-radius: 3px;
+  color: var(--text-1);
+  font-size: 9px;
+  letter-spacing: 0.5px;
+}
+
+.session-detail-checkpoint-end time {
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---- tool calls -------------------------------------------------------- */
 
-/* One block per turn instead of a nested rail: the payload already sits three
-   levels in, and every level of indent came out of the column that holds the
-   widest content on the page. */
-.session-detail-turn-tools {
+.session-detail-tool-call {
   min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface-subtle);
-  color: var(--text-1);
 }
 
-.session-detail-turn-tools > summary,
+/* A flat row, flush with the prose around it: action, command, chevron at the
+   far edge where every disclosure on the page points. The negative margin
+   keeps the hover tile from indenting the text. */
 .session-detail-tool-call > summary {
   list-style: none;
   cursor: pointer;
-}
-
-.session-detail-turn-tools > summary::-webkit-details-marker,
-.session-detail-tool-call > summary::-webkit-details-marker {
-  display: none;
-}
-
-.session-detail-turn-tools > summary {
-  min-height: 28px;
+  min-height: 32px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 9px;
-  color: var(--text-2);
-  font-size: 10.5px;
-}
-
-.session-detail-turn-tools > summary:hover {
-  background: var(--bg-hover);
-  color: var(--text-0);
-}
-
-/* Assembled in TS from a figure and two words, so it takes the machine face
-   whole rather than splitting one label across two voices. */
-.session-detail-turn-tools > summary strong {
+  gap: 10px;
+  margin: 0 -8px;
+  padding: 4px 8px;
+  border-radius: 3px;
   color: var(--text-1);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 600;
 }
 
-/* `completed` was rendered on all 24 rows and said nothing. The exception is
-   worth a word; the norm is worth none. */
-.session-detail-turn-failures {
-  margin-left: auto;
-  color: var(--danger-text);
-  font-family: var(--font-mono);
-  font-size: 10px;
-}
-
-.session-detail-turn-tool-list {
-  display: grid;
-}
-
-.session-detail-tool-call {
-  min-width: 0;
-  border-top: 1px solid var(--border);
-}
-
-.session-detail-event-body > .session-detail-tool-call {
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-}
-
-.session-detail-tool-call > summary {
-  min-height: 28px;
-  display: grid;
-  grid-template-columns: 14px auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 9px;
-  padding: 4px 9px;
-  color: var(--text-1);
+.session-detail-tool-call > summary::-webkit-details-marker {
+  display: none;
 }
 
 .session-detail-tool-call > summary:hover {
@@ -11792,36 +11747,50 @@ button.sync-project-file-expand { cursor: pointer; }
   background: var(--surface-row-active);
 }
 
-.session-detail-tool-call > summary:focus-visible,
-.session-detail-turn-tools > summary:focus-visible {
-  border-radius: var(--r-sm);
+.session-detail-tool-call > summary:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
 
-.session-detail-tool-disclosure {
-  display: inline-flex;
-  color: var(--text-2);
-}
-
-.session-detail-tool-call > summary strong {
-  color: var(--text-2);
-  font-size: 10px;
-  font-weight: 400;
-}
-
-/* The command, not the wrapper that invoked it. */
-.session-detail-tool-summary {
-  min-width: 0;
+/* The action wears its category — the reference viewer's Edit-orange and
+   Skill-purple convention, run through the page's AA mixes. Shell keeps the
+   plain body colour: it is the common case, and colour spent on the norm is
+   colour unavailable for the exceptions. A fixed column, so every command
+   down the list starts at the same edge — wide enough for the common
+   passthrough names (`send_message`, `exec_command`: 12ch ≈ 83px at this
+   size); a rare longer one ellipsizes rather than shoving that edge around. */
+.session-detail-tool-name {
+  flex: 0 0 104px;
   overflow: hidden;
   color: var(--text-0);
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 11.5px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.session-detail-tool-name.cat-file_edit { color: var(--session-detail-amber); }
+.session-detail-tool-name.cat-read { color: var(--session-detail-link); }
+.session-detail-tool-name.cat-other { color: color-mix(in srgb, var(--purple) 85%, var(--text-0)); }
+
+/* The command, not the wrapper that invoked it. */
+.session-detail-tool-summary {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-detail-tool-call > summary:hover .session-detail-tool-summary,
+.session-detail-tool-call[open] > summary .session-detail-tool-summary {
+  color: var(--text-1);
+}
+
 .session-detail-tool-status {
+  flex: 0 0 auto;
   padding: 1px 5px;
   border: 1px solid var(--danger-text);
   border-radius: 3px;
@@ -11835,63 +11804,56 @@ button.sync-project-file-expand { cursor: pointer; }
   color: var(--session-detail-amber);
 }
 
-/* Symmetric, and aligned with the row above rather than indented under it: the
-   open row is already tinted, and the panel draws its own border, so a deep
-   left inset only made the block look ragged against the flush rows below. */
+.session-detail-tool-chevron {
+  margin-left: auto;
+  display: inline-flex;
+  color: var(--text-3);
+}
+
+/* The pane aligns with the rows around it; its own frame does the indenting. */
 .session-detail-tool-body {
   display: grid;
   gap: 8px;
-  padding: 7px 9px 9px;
+  padding: 6px 0 4px;
 }
 
 /* ---- payload pane ------------------------------------------------------ */
 
-/* No gap: the selected tab has to sit directly on the panel for the seam
-   between them to disappear. The truncation note carries its own margin. */
+/* Stacked, not tabbed: arguments sit beside the result they produced, which is
+   what the pane is opened to compare. One frame holds the stack; every box
+   inside stays bounded, so a long result cannot push the conversation off the
+   screen. */
 .session-detail-tool-payload {
   min-width: 0;
   display: grid;
-  gap: 0;
+  gap: 9px;
+  padding: 8px 9px 9px;
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
 }
 
-/* Real tabs, not a Material underline: the selected one is a tile that joins
-   the panel below it, drawn with the same hard 1px edge the rest of the app
-   uses. Nothing here is a rounded control or a coloured indicator bar. */
-.session-detail-payload-tabs {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  margin-bottom: -1px;
+.session-detail-payload-section {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
 }
 
-.session-detail-payload-tab {
+/* Tall enough to seat the 24px keycaps without the label row jumping between
+   sections that have them and sections that do not. */
+.session-detail-payload-head {
   min-height: 24px;
-  padding: 4px 9px;
-  border: 1px solid transparent;
-  border-bottom: 0;
-  border-radius: 0;
-  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.session-detail-payload-label {
   color: var(--text-2);
-  cursor: pointer;
-  font-size: 10px;
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
 }
 
-.session-detail-payload-tab:hover {
-  background: var(--bg-hover);
-  color: var(--text-0);
-}
-
-/* Border on three sides and the panel's own fill, so the seam between tab and
-   panel simply is not drawn — the tab reads as the front of the panel. */
-.session-detail-payload-tab.is-on {
-  border-color: var(--border-mid);
-  background: var(--bg-4);
-  color: var(--text-0);
-}
-
-.session-detail-payload-tab:focus-visible,
 .session-detail-payload-action:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
@@ -11901,8 +11863,7 @@ button.sync-project-file-expand { cursor: pointer; }
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 3px;
-  padding-bottom: 2px;
+  gap: 4px;
 }
 
 /* Square keycaps rather than ghost buttons: same border and press-shift as
@@ -11940,18 +11901,15 @@ button.sync-project-file-expand { cursor: pointer; }
   color: var(--text-0);
 }
 
-/* The panel the tabs front. Bounded, always: one unbounded result used to push
-   the rest of the conversation off the screen. */
 .session-detail-payload-body {
   max-width: 100%;
-  max-height: 240px;
+  max-height: 200px;
   overflow: auto;
-  padding: 9px 10px;
-  border: 1px solid var(--border-mid);
+  padding: 7px 9px;
+  border: 1px solid var(--border);
   border-radius: 0;
   background: var(--bg-4);
   color: var(--text-1);
-  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.55;
   white-space: pre-wrap;
@@ -11959,27 +11917,23 @@ button.sync-project-file-expand { cursor: pointer; }
 }
 
 .session-detail-truncation {
-  margin-top: 6px;
   color: var(--session-detail-amber);
   font-size: 9.5px;
 }
 
-/* The Paths tab fronts the same panel the other two do. */
+/* Bare chips: the pane's frame already encloses them. */
 .session-detail-tool-paths {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
-  padding: 8px 9px;
-  border: 1px solid var(--border-mid);
-  background: var(--bg-4);
   list-style: none;
 }
 
 .session-detail-tool-paths code {
   display: inline-flex;
-  padding: 2px 5px;
+  padding: 2px 6px;
   border: 1px solid var(--border);
-  border-radius: var(--r-sm);
+  background: var(--bg-4);
   color: var(--text-1);
   font-family: var(--font-mono);
   font-size: 9.5px;
@@ -12000,17 +11954,13 @@ button.sync-project-file-expand { cursor: pointer; }
   color: var(--danger-text);
 }
 
+/* Centered under the day it extends, the way the rail's own ground runs. */
 .session-detail-load-more {
   min-height: 34px;
-  gap: 7px;
-  margin: 10px 0 0 72px;
-}
-
-.session-detail-turn-load-more {
+  display: flex;
   width: fit-content;
-  min-height: 28px;
-  margin: 6px 9px 8px;
-  font-size: 10px;
+  gap: 7px;
+  margin: 14px auto 0;
 }
 
 /* ---- page states ------------------------------------------------------- */
@@ -12066,84 +12016,29 @@ button.sync-project-file-expand { cursor: pointer; }
 }
 
 @container session-detail-layout (max-width: 720px) {
-  .session-detail-heading-row {
-    flex-direction: column;
-  }
-
+  /* When the verbs wrap under the chips they anchor left, reading as the
+     strip's second line rather than a stray right-hugging cluster. */
   .session-detail-header-actions {
     justify-content: flex-start;
   }
 
-  .session-detail-heading-copy h1 {
-    font-size: 22px;
-  }
-
   .session-detail-event {
-    grid-template-columns: 46px 3px minmax(0, 1fr);
     gap: 0 10px;
   }
 
-  .session-detail-event-copy {
+  .session-detail-event-copy,
+  .session-detail-prompt-card,
+  .session-detail-checkpoint-card {
     max-width: none;
-  }
-
-  .session-detail-load-more {
-    margin-left: 56px;
   }
 }
 
-/* Below this the gutter costs more than the alignment buys, so the clock joins
-   the speaker line and the turn takes the full width. */
+/* The 24px node column stays at every width — it is the page's cheapest
+   38px — so only the fact chips have anything left to reflow. */
 @container session-detail-layout (max-width: 500px) {
-  .session-detail-event {
-    grid-template-columns: 3px minmax(0, 1fr);
-    gap: 0 10px;
-    padding-top: 13px;
-  }
-
-  .session-detail-event-gutter {
-    grid-row: 1;
-    grid-column: 2;
-    display: flex;
-    align-items: baseline;
-    justify-content: flex-start;
-    gap: 8px;
-    padding: 0;
-  }
-
-  .session-detail-event-rail {
-    grid-row: 1 / -1;
-    grid-column: 1;
-  }
-
-  .session-detail-event-body {
-    grid-column: 2;
-  }
-
-  .session-detail-tool-call > summary {
-    grid-template-columns: 14px minmax(0, 1fr) auto;
-    gap: 7px;
-  }
-
-  .session-detail-tool-call > summary strong {
-    grid-column: 2;
-  }
-
-  .session-detail-tool-summary {
-    grid-column: 2 / -1;
-  }
-
-  .session-detail-tool-body {
-    padding-left: 12px;
-  }
-
-  .session-detail-load-more {
-    margin-left: 13px;
-  }
-
-  .session-detail-metadata {
+  .session-detail-chips {
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, max-content);
   }
 }
 

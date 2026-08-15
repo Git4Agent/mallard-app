@@ -30,6 +30,8 @@ import ConversationPathRepairNotice, {
   shouldShowConversationPathRepairNotice,
 } from "./ConversationPathRepairNotice";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "./SyncPathBar";
+import ProviderMark from "./ProviderMark";
+import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
 import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
 import { syncOutcomeView } from "./syncOutcome";
@@ -117,7 +119,13 @@ interface Props {
    * find a command opening both. These join the end of that one menu.
    */
   appActions: PathBarMenuGroup[];
-  onOpenStorageSettings: (storageId?: string) => void;
+  onAddStorage: () => void;
+  /** Open a storage's page; `settingsExpanded` lands with the editor open. */
+  onOpenStorage: (storageId: string, settingsExpanded: boolean) => void;
+  /** The Storages crumb every storage page is rooted at. */
+  onOpenStorageIndex: () => void;
+  onClearStorage: (storageId: string) => void;
+  onRemoveStorage: (storageId: string) => void;
   onSaveStorage: (
     storage: StorageConfig,
     expectedBaseline: StorageConfig | null,
@@ -136,15 +144,15 @@ interface Props {
 
 const SessionDetailPage = lazy(() => import("./session-detail/SessionDetailPage"));
 
-function storageSubtitle(storage: StorageConfig): string {
+export function storageSubtitle(storage: StorageConfig): string {
   if (storage.kind === "local") return compactProjectPath(storage.local_dir || "Folder not configured");
   if (storage.bucket) return `Bucket · ${storage.bucket}`;
   return storage.s3_endpoint ? "S3 endpoint configured" : "S3 storage not configured";
 }
 
-// Only the local subtitle is a path; the rest are phrases. The component says
-// which one it handed over so the stylesheet reads a class instead of guessing.
-function storageSubtitleIsPath(storage: StorageConfig): boolean {
+// Only the local subtitle is a path; the rest are phrases. The menu says which
+// one it is handing over so the stylesheet reads a class instead of guessing.
+export function storageSubtitleIsPath(storage: StorageConfig): boolean {
   return storage.kind === "local";
 }
 
@@ -402,24 +410,6 @@ export function StorageRepositoryRow({ bundle }: { bundle: RemoteBundleSummary }
   );
 }
 
-export function StorageSettingsMeta({
-  storage,
-  creating = false,
-}: {
-  storage: StorageConfig;
-  creating?: boolean;
-}) {
-  const kindLabel = storage.kind === "local" ? "Local folder" : "Cloudflare R2";
-  const label = creating ? kindLabel : storage.name || "Unnamed storage";
-
-  return (
-    <div className="sync-storage-settings-meta" title={`${kindLabel}: ${label}`}>
-      <Icon name={storage.kind === "local" ? "drive" : "cloud"} size={12} />
-      <span>{label}</span>
-    </div>
-  );
-}
-
 export function conversationPathsBlockSync(
   hasBinding: boolean,
   audit: CodexConversationPathAudit | undefined,
@@ -496,7 +486,11 @@ export default function ProjectLinksWorkspace({
   onAddProject,
   onSelectProject,
   appActions,
-  onOpenStorageSettings,
+  onAddStorage,
+  onOpenStorage,
+  onOpenStorageIndex,
+  onClearStorage,
+  onRemoveStorage,
   onSaveStorage,
   storageEditorRequest,
   onStorageEditorRequestHandled,
@@ -927,9 +921,9 @@ export default function ProjectLinksWorkspace({
   // git repo and Sessions otherwise; the crumb reads the same fact off the
   // project so the trail is right before the page has finished loading.
   const workspaceSectionLabel = workspaceProject?.is_git_repository ? "Git history" : "Sessions";
-  const [sessionDetailTitle, setSessionDetailTitle] = useState<string | null>(null);
-  const handleSessionTitleChange = useCallback((title: string | null) => {
-    setSessionDetailTitle(title);
+  const [sessionHeader, setSessionHeader] = useState<SessionHeaderModel | null>(null);
+  const handleSessionHeaderChange = useCallback((header: SessionHeaderModel | null) => {
+    setSessionHeader(header);
   }, []);
 
   const saveProjectName = async () => {
@@ -964,121 +958,234 @@ export default function ProjectLinksWorkspace({
     const showStorageDetails = creatingStorage || storageDetailsExpanded;
     const storageDetailsId = `storage-${storageDraft.id}-settings`;
     const storageNameChanged = !!storageNameDraft.trim() && storageNameDraft.trim() !== storageDraft.name;
-    const storageKindLabel = storageDraft.kind === "local" ? "Local folder" : "Cloudflare R2";
-    const storageLocation = storageSubtitle(storageDraft);
+    const storageName = storageDraft.name || "(unnamed)";
+    const storageLinkCount = links.filter((link) => link.storage_id === editedStorageConfig.id).length;
+    const renamingStorage = renamingStorageId === storageDraft.id;
+    const saveEditedStorage = () => run(`storage:${editedStorageConfig.id}`, async () => {
+      const wasCreatingR2 = creatingStorage && storageDraft.kind === "s3";
+      agentSetupMarkerRef.current = null;
+      setAgentCopyStatus(null);
+      const saved = await onSaveStorage(storageDraft, storageBaseline);
+      if (saved === false) return;
+      setStorageConflict(null);
+      if (wasCreatingR2) {
+        setStorageDetailsExpanded(false);
+        setEditingStorage(null);
+        setStorageDraft(null);
+        setStorageBaseline(null);
+        return;
+      }
+      setStorageDetailsExpanded(false);
+      await loadStorageBundles(storageDraft);
+    });
+
+    // The trail starts at the Storages index the crumb leads back to; the
+    // storage itself carries the switcher; the section names the page. A
+    // draft being created has no section yet and nothing to switch to, so
+    // its trail is just the root and the leaf that says what it will be.
+    const storagePathCrumbs: PathBarCrumb[] = [
+      {
+        id: "storages",
+        label: "Storages",
+        icon: "drive",
+        tone: "root",
+        title: "All storages",
+        ariaLabel: "All storages",
+        onActivate: onOpenStorageIndex,
+        disabled: busy,
+      },
+      creatingStorage
+        ? { id: "storage", label: "New storage" }
+        : {
+            id: "storage",
+            label: storageName,
+            title: `${storageName} · ${storageSubtitle(editedStorageConfig)}`,
+            ariaLabel: `${storageName}. Storage menu`,
+            // The page below is this storage, so its verbs stay in the page's
+            // overflow; the crumb menu is the header naming where you are and
+            // the ways to be somewhere else.
+            menuHeader: {
+              label: storageName,
+              detail: storageSubtitle(editedStorageConfig),
+              detailIsPath: storageSubtitleIsPath(editedStorageConfig),
+              icon: editedStorageConfig.kind === "local" ? "drive" : "cloud",
+            },
+            menu: [
+              ...(storages.some((candidate) => candidate.id !== editedStorageConfig.id) ? [{
+                label: "Switch to",
+                items: storages
+                  .filter((candidate) => candidate.id !== editedStorageConfig.id)
+                  .map((candidate) => ({
+                    id: candidate.id,
+                    label: candidate.name || "(unnamed)",
+                    detail: storageSubtitle(candidate),
+                    detailIsPath: storageSubtitleIsPath(candidate),
+                    icon: candidate.kind === "local" ? ("drive" as const) : ("cloud" as const),
+                    disabled: busy,
+                    onSelect: () => onOpenStorage(candidate.id, false),
+                  })),
+              }] : []),
+              {
+                items: [{
+                  id: "add-storage",
+                  label: "Add storage…",
+                  icon: "plus" as const,
+                  disabled: busy,
+                  onSelect: () => onAddStorage(),
+                }],
+              },
+            ],
+            menuLabel: "Storage",
+            disabled: busy,
+          },
+      ...(creatingStorage ? [] : [{
+        id: "section",
+        label: "Repositories",
+        tone: "section" as const,
+      }]),
+    ];
+
+    // Everything the old header held as its own button — the gear, the
+    // pencil, the ✕ — plus the storage verbs the sidebar keeps as shortcuts.
+    // A draft has none of these; it gets the app scope alone.
+    const storagePathOverflow: PathBarMenuGroup[] = creatingStorage ? appActions : [
+      {
+        label: "Storage",
+        items: [
+          ...(editedStorageConfig.kind === "local" && editedStorageConfig.local_dir ? [{
+            id: "reveal",
+            label: "Reveal in Finder",
+            detail: compactProjectPath(editedStorageConfig.local_dir),
+            icon: "folder" as const,
+            onSelect: () => { void openPath(editedStorageConfig.local_dir as string); },
+          }] : []),
+          {
+            id: "storage-settings",
+            label: storageDetailsExpanded ? "Hide storage settings" : "Storage settings",
+            icon: "settings" as const,
+            disabled: busy,
+            onSelect: () => setStorageDetailsExpanded((current) => !current),
+          },
+          {
+            id: "rename",
+            label: "Rename storage…",
+            icon: "edit" as const,
+            disabled: busy,
+            onSelect: () => {
+              setStorageNameDraft(storageDraft.name);
+              setRenamingStorageId(storageDraft.id);
+            },
+          },
+          {
+            id: "clear",
+            label: "Clear storage data…",
+            icon: "trash" as const,
+            danger: true,
+            disabled: busy,
+            onSelect: () => onClearStorage(editedStorageConfig.id),
+          },
+          {
+            id: "remove",
+            label: "Remove storage…",
+            icon: "x" as const,
+            danger: true,
+            disabled: busy || storageLinkCount > 0,
+            disabledReason: storageLinkCount > 0
+              ? `Linked to ${storageLinkCount} project${storageLinkCount === 1 ? "" : "s"} — unlink first`
+              : undefined,
+            title: storageLinkCount > 0
+              ? `${storageName} is linked to ${storageLinkCount} project${storageLinkCount === 1 ? "" : "s"}; unlink it before removing`
+              : `Remove ${storageName}; synced files stay in storage`,
+            onSelect: () => onRemoveStorage(editedStorageConfig.id),
+          },
+        ],
+      },
+      ...appActions,
+    ];
+
+    // Creating, the page's one verb is the save; settled, it is the refresh
+    // that the repositories card no longer duplicates.
+    const storagePathActions = creatingStorage ? (
+      <button
+        type="button"
+        className="sync-path-sync"
+        disabled={busy || !!storageConflict || !storageReady}
+        onClick={() => void saveEditedStorage()}
+      >
+        <Icon name="check-circle" size={14} />
+        <span className="sync-path-sync-label">
+          {runningAction === `storage:${editedStorageConfig.id}` ? "Creating…" : "Create storage"}
+        </span>
+      </button>
+    ) : (
+      <button
+        type="button"
+        className="sync-path-sync"
+        disabled={busy || bundleLoading}
+        title={`Refresh repositories in ${storageName}`}
+        aria-label={`Refresh repositories in ${storageName}`}
+        onClick={() => void loadStorageBundles(editedStorageConfig)}
+      >
+        <Icon name="refresh" size={14} className={bundleLoading ? "icon-spin" : undefined} />
+        <span className="sync-path-sync-label">Refresh</span>
+      </button>
+    );
+
     return (
+      <>
+      <SyncPathBar
+        crumbs={storagePathCrumbs}
+        overflow={storagePathOverflow}
+        overflowLabel={creatingStorage ? "App actions" : "Storage and app actions"}
+        overflowDisabled={busy}
+        actions={storagePathActions}
+        ariaLabel={`${creatingStorage ? "New storage" : storageName} path`}
+      />
       <main className="sync-main sync-project-links-page sync-storage-settings-page">
         <section
           className="profile-links-section"
-          aria-label={creatingStorage ? "New storage" : storageDraft.name || "Storage settings"}
+          aria-label={creatingStorage ? "New storage" : storageName}
         >
-          <div className="profile-links-heading">
-            <div className="profile-links-copy">
-              {creatingStorage ? (
-                <>
-                  <h1 className="settings-section-title">New storage</h1>
-                  <StorageSettingsMeta storage={storageDraft} creating />
-                </>
-              ) : (
-                <div className="sync-project-heading-identity sync-storage-heading-identity">
-                  {renamingStorageId === storageDraft.id ? (
-                    <form
-                      className="sync-project-heading-rename"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        void saveStorageName();
-                      }}
-                    >
-                      <input
-                        value={storageNameDraft}
-                        onChange={(event) => setStorageNameDraft(event.target.value)}
-                        aria-label="Storage name"
-                        disabled={busy}
-                        autoFocus
-                      />
-                      <button type="submit" className="btn btn-primary" disabled={busy || !storageNameChanged || !!storageConflict}>
-                        {runningAction === `rename-storage:${storageDraft.id}` ? "Saving…" : "Save"}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        disabled={busy}
-                        onClick={() => {
-                          setStorageNameDraft(storageDraft.name);
-                          setRenamingStorageId(null);
-                        }}
-                      >
-                        Cancel
-                      </button>
-                    </form>
-                  ) : (
-                    <div className="sync-project-heading-name">
-                      <h1>{storageDraft.name || "Unnamed storage"}</h1>
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        aria-label="Rename storage"
-                        title="Rename storage"
-                        disabled={busy}
-                        onClick={() => {
-                          setStorageNameDraft(storageDraft.name);
-                          setRenamingStorageId(storageDraft.id);
-                        }}
-                      >
-                        <Icon name="edit" size={13} />
-                      </button>
-                    </div>
-                  )}
-                  <div className="sync-project-heading-meta">
-                    <span className="sync-project-heading-meta-item" title={storageKindLabel}>
-                      <Icon name={storageDraft.kind === "local" ? "drive" : "cloud"} size={12} />
-                      <span>{storageKindLabel}</span>
-                    </span>
-                    <span className="sync-project-heading-meta-item" title={storageLocation}>
-                      <Icon name="folder" size={12} />
-                      <span className={storageSubtitleIsPath(storageDraft) ? "is-path" : undefined}>{storageLocation}</span>
-                    </span>
-                  </div>
-                  {renamingStorageId === storageDraft.id && error && (
-                    <div className="sync-project-heading-error" role="alert"><Icon name="alert-triangle" size={13} /> {error}</div>
-                  )}
-                </div>
-              )}
-            </div>
-            <div className="sync-storage-settings-actions">
-              {!creatingStorage && (
-                <button
-                  type="button"
-                  className={`btn btn-ghost sync-storage-settings-icon${storageDetailsExpanded ? " active" : ""}`}
-                  onClick={() => setStorageDetailsExpanded((current) => !current)}
-                  disabled={busy}
-                  aria-controls={storageDetailsId}
-                  aria-expanded={storageDetailsExpanded}
-                  title={storageDetailsExpanded ? "Hide storage settings" : "Edit storage settings"}
-                  aria-label={storageDetailsExpanded ? "Hide storage settings" : "Edit storage settings"}
-                >
-                  <Icon name="settings" size={15} />
-                </button>
-              )}
+          {/* Renaming opens from the ⋯ as a row under the trail, the same
+              once-in-a-while surface the project rename uses. */}
+          {renamingStorage && (
+            <form
+              className="sync-path-rename"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveStorageName();
+              }}
+            >
+              <label htmlFor="sync-storage-rename-input">Storage name</label>
+              <input
+                id="sync-storage-rename-input"
+                value={storageNameDraft}
+                onChange={(event) => setStorageNameDraft(event.target.value)}
+                aria-label="Storage name"
+                disabled={busy}
+                autoFocus
+              />
+              <button type="submit" className="btn btn-primary" disabled={busy || !storageNameChanged || !!storageConflict}>
+                {runningAction === `rename-storage:${storageDraft.id}` ? "Saving…" : "Save"}
+              </button>
               <button
                 type="button"
-                className="btn btn-ghost sync-storage-settings-icon"
+                className="btn btn-ghost"
+                disabled={busy}
                 onClick={() => {
-                  agentSetupMarkerRef.current = null;
-                  setEditingStorage(null);
-                  setStorageDraft(null);
-                  setStorageBaseline(null);
-                  setStorageConflict(null);
-                  setAgentCopyStatus(null);
-                  setStorageDetailsExpanded(false);
+                  setStorageNameDraft(storageDraft.name);
+                  setRenamingStorageId(null);
                 }}
-                title="Close storage settings"
-                aria-label="Close storage settings"
               >
-                <Icon name="x" size={14} />
+                Cancel
               </button>
-            </div>
-          </div>
+              {error && (
+                <div className="sync-path-rename-error" role="alert">
+                  <Icon name="alert-triangle" size={13} /> {error}
+                </div>
+              )}
+            </form>
+          )}
 
           <div
             ref={storageSettingsRef}
@@ -1131,30 +1238,17 @@ export default function ProjectLinksWorkspace({
                       setStorageDraft(nextDraft);
                     }}
                     showNameField={creatingStorage}
-                    primaryAction={(
+                    // A draft's save is the page's verb and lives in the path
+                    // bar; a settled storage's save belongs to the drawer it
+                    // commits.
+                    primaryAction={creatingStorage ? undefined : (
                       <button
                         type="button"
                         className="btn btn-primary"
-                        disabled={busy || !!storageConflict || !storageReady || (!creatingStorage && !!storageBaseline && sameStorage(storageDraft, storageBaseline))}
-                        onClick={() => void run(`storage:${editedStorageConfig.id}`, async () => {
-                          const wasCreatingR2 = creatingStorage && storageDraft.kind === "s3";
-                          agentSetupMarkerRef.current = null;
-                          setAgentCopyStatus(null);
-                          const saved = await onSaveStorage(storageDraft, storageBaseline);
-                          if (saved === false) return;
-                          setStorageConflict(null);
-                          if (wasCreatingR2) {
-                            setStorageDetailsExpanded(false);
-                            setEditingStorage(null);
-                            setStorageDraft(null);
-                            setStorageBaseline(null);
-                            return;
-                          }
-                          setStorageDetailsExpanded(false);
-                          await loadStorageBundles(storageDraft);
-                        })}
+                        disabled={busy || !!storageConflict || !storageReady || (!!storageBaseline && sameStorage(storageDraft, storageBaseline))}
+                        onClick={() => void saveEditedStorage()}
                       >
-                        {runningAction === `storage:${editedStorageConfig.id}` ? "Saving…" : creatingStorage ? "Create storage" : "Save storage"}
+                        {runningAction === `storage:${editedStorageConfig.id}` ? "Saving…" : "Save storage"}
                       </button>
                     )}
                   />
@@ -1164,18 +1258,10 @@ export default function ProjectLinksWorkspace({
 
             {!creatingStorage && (
               <section className="sync-storage-repositories" aria-labelledby="storage-repositories-heading">
+                {/* Refresh is the page's verb and lives in the path bar; the
+                    card heading only names what it frames. */}
                 <div className="sync-storage-repositories-heading">
                   <h2 id="storage-repositories-heading">Repositories</h2>
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => void loadStorageBundles(editedStorageConfig)}
-                    disabled={busy || bundleLoading}
-                    title="Refresh repositories"
-                    aria-label={`Refresh repositories in ${editedStorageConfig.name || "storage"}`}
-                  >
-                    <Icon name="refresh" size={14} className={bundleLoading ? "icon-spin" : undefined} />
-                  </button>
                 </div>
 
                 {bundleLoading ? (
@@ -1197,12 +1283,13 @@ export default function ProjectLinksWorkspace({
               </section>
             )}
 
-            {error && renamingStorageId !== storageDraft.id && (
+            {error && !renamingStorage && (
               <div className="sync-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>
             )}
           </div>
         </section>
       </main>
+      </>
     );
   }
 
@@ -1234,57 +1321,117 @@ export default function ProjectLinksWorkspace({
   const pathCrumbs: PathBarCrumb[] = [];
   if (workspaceProject) {
     if (workspaceStorage) {
-      const storageMenu: PathBarMenuGroup[] = [{
-        label: `Storage · ${workspaceLinks.length} linked`,
-        items: workspaceLinkedStorages.map((storage) => ({
-          id: storage.id,
-          label: storage.name || "(unnamed)",
-          detail: storageSubtitle(storage),
-          icon: storage.kind === "local" ? ("drive" as const) : ("cloud" as const),
-          checked: storage.id === workspaceStorage.id,
-          disabled: workspaceControlsLocked,
-          onSelect: () => {
-            if (storage.id === workspaceStorage.id) return;
-            if (workspaceReviewOpen) inlineStorageReview?.onClose();
-            void onSelectStorage(workspaceProject.local_project_id, storage.id);
-          },
-        })),
-      }];
-      const storageLinkItems = [
-        ...(workspaceAvailableStorages.length > 0 ? [{
-          id: "link-storage",
-          label: "Link storage",
-          icon: "link" as const,
-          disabled: workspaceControlsLocked,
-          onSelect: () => {
-            setLinkingProjectId(workspaceProject.local_project_id);
-          },
+      // The menu speaks for the current storage: a header naming it, its two
+      // verbs right beneath — settings and the unlink that used to hide at the
+      // far end of the bar — then the other storages as plain switch commands,
+      // then the ways to get more. No radio state: the header is the "which
+      // one am I on", so switching rows carry no checkmark.
+      //
+      // While the workspace is locked the menu still opens; one banner says
+      // why every row is inert, instead of a tooltip per greyed row.
+      const storageMenuBanner = workspaceControlsLocked
+        ? workspacePushProgress || workspacePushReviewOpen
+          ? "Push in progress — storage can't change until it finishes."
+          : workspacePullProgress || workspacePullReviewOpen
+            ? "Pull in progress — storage can't change until it finishes."
+            : "Working — storage can't change right now."
+        : undefined;
+      const otherStorages = workspaceLinkedStorages.filter((storage) => (
+        storage.id !== workspaceStorage.id
+      ));
+      const storageMenu: PathBarMenuGroup[] = [
+        {
+          items: [
+            {
+              id: "storage-settings",
+              label: "Storage settings…",
+              icon: "settings" as const,
+              disabled: workspaceControlsLocked,
+              onSelect: () => { void openStorageEditorWithSettings(workspaceStorage); },
+            },
+            {
+              id: "unlink",
+              label: `Unlink from ${projectLabel(workspaceProject)}…`,
+              icon: "link-off" as const,
+              danger: true,
+              disabled: workspaceControlsLocked,
+              title: "Stop syncing this pairing; files already in storage are kept",
+              onSelect: () => void run(
+                `unlink:${workspaceActionPrefix}`,
+                () => onUnlinkStorage(workspaceProject.local_project_id, workspaceStorage.id),
+              ),
+            },
+          ],
+        },
+        ...(otherStorages.length > 0 ? [{
+          label: "Switch to",
+          items: otherStorages.map((storage) => ({
+            id: storage.id,
+            label: storage.name || "(unnamed)",
+            detail: storageSubtitle(storage),
+            detailIsPath: storageSubtitleIsPath(storage),
+            icon: storage.kind === "local" ? ("drive" as const) : ("cloud" as const),
+            disabled: workspaceControlsLocked,
+            onSelect: () => {
+              if (workspaceReviewOpen) inlineStorageReview?.onClose();
+              void onSelectStorage(workspaceProject.local_project_id, storage.id);
+            },
+          })),
         }] : []),
         {
-          id: "add-storage",
-          label: "Add storage",
-          icon: "plus" as const,
-          disabled: workspaceControlsLocked,
-          onSelect: () => {
-            setLinkingProjectId(null);
-            onOpenStorageSettings();
-          },
+          items: [
+            // Stays put at zero candidates and says why, instead of vanishing
+            // from the DOM for a reason the user cannot see.
+            {
+              id: "link-storage",
+              label: "Link storage…",
+              icon: "link" as const,
+              disabled: workspaceControlsLocked || workspaceAvailableStorages.length === 0,
+              disabledReason: workspaceAvailableStorages.length === 0
+                ? "Everything you've added is already linked"
+                : undefined,
+              onSelect: () => {
+                setLinkingProjectId(workspaceProject.local_project_id);
+              },
+            },
+            {
+              id: "add-storage",
+              label: "Add storage…",
+              icon: "plus" as const,
+              disabled: workspaceControlsLocked,
+              onSelect: () => {
+                setLinkingProjectId(null);
+                onAddStorage();
+              },
+            },
+          ],
         },
       ];
-      storageMenu.push({ items: storageLinkItems });
       pathCrumbs.push({
         id: "storage",
         label: workspaceStorage.name || "(unnamed)",
         icon: workspaceStorage.kind === "local" ? "drive" : "cloud",
         tone: "root",
         title: `${workspaceStorage.name || "Storage"} · ${storageSubtitle(workspaceStorage)}`,
-        ariaLabel: `Storage ${workspaceStorage.name || "unnamed"}. Choose another storage`,
+        ariaLabel: `${workspaceStorage.name || "Unnamed storage"}. Storage menu`,
+        menuHeader: {
+          label: workspaceStorage.name || "(unnamed)",
+          detail: storageSubtitle(workspaceStorage),
+          detailIsPath: storageSubtitleIsPath(workspaceStorage),
+          icon: workspaceStorage.kind === "local" ? "drive" : "cloud",
+        },
+        menuBanner: storageMenuBanner,
         menu: storageMenu,
-        menuLabel: "Switch storage",
-        disabled: workspaceControlsLocked,
+        menuLabel: "Storage",
       });
     }
 
+    // Same grammar as the storage crumb: header, this project's verbs — the
+    // four that used to live at the other end of the bar — then the other
+    // projects as switch commands, then Add.
+    const otherProjects = projects.filter((candidate) => (
+      candidate.local_project_id !== workspaceProject.local_project_id
+    ));
     pathCrumbs.push({
       id: "project",
       label: projectLabel(workspaceProject),
@@ -1296,34 +1443,80 @@ export default function ProjectLinksWorkspace({
       ].filter(Boolean).join("\n"),
       ariaLabel: sessionDetailSubview
         ? `Back to ${workspaceSectionLabel} for ${projectLabel(workspaceProject)}`
-        : `Project ${projectLabel(workspaceProject)}. Choose another project`,
+        : `${projectLabel(workspaceProject)}. Project menu`,
       // Inside a session the repo is the ancestor you came from, so its label
-      // walks back out to the project's page; the switcher stays on its chevron.
+      // walks back out to the project's page; the menu stays on its chevron.
       onActivate: sessionDetailSubview ? closeSessionDetail : undefined,
-      menu: [{
-        label: "Switch project",
-        items: projects.map((candidate) => ({
-          id: candidate.local_project_id,
-          label: projectLabel(candidate),
-          detail: compactProjectPath(candidate.project_root),
-          icon: candidate.is_git_repository ? ("git-folder" as const) : ("folder" as const),
-          checked: candidate.local_project_id === workspaceProject.local_project_id,
-          disabled: busy || !!inlineStorageReview,
-          onSelect: () => {
-            if (candidate.local_project_id === workspaceProject.local_project_id) return;
-            onSelectProject(candidate.local_project_id);
-          },
-        })),
-      }, {
-        items: [{
-          id: "add-project",
-          label: "Add project",
-          icon: "plus" as const,
-          disabled: busy,
-          onSelect: () => onAddProject(),
-        }],
-      }],
-      menuLabel: "Switch project",
+      menuHeader: {
+        label: projectLabel(workspaceProject),
+        detail: workspaceProject.project_root
+          ? compactProjectPath(workspaceProject.project_root)
+          : "Folder not configured",
+        detailIsPath: !!workspaceProject.project_root,
+        icon: workspaceProject.is_git_repository ? "git-folder" : "folder",
+      },
+      menu: [
+        {
+          items: [
+            ...(workspaceProject.project_root ? [{
+              id: "reveal",
+              label: "Reveal in Finder",
+              icon: "folder" as const,
+              onSelect: () => { void openPath(workspaceProject.project_root as string); },
+            }] : []),
+            {
+              id: "agent",
+              label: "Agent profile…",
+              detail: workspaceProfileLabel,
+              detailIsPath: false,
+              icon: "terminal" as const,
+              title: workspaceProfileTitle,
+              onSelect: () => void onConfigureBinding(workspaceProject.local_project_id),
+            },
+            {
+              id: "rename",
+              label: "Rename project…",
+              icon: "edit" as const,
+              disabled: busy,
+              onSelect: () => {
+                setProjectAliasDraft(workspaceProject.local_alias ?? workspaceProject.display_name);
+                setRenamingProjectId(workspaceProject.local_project_id);
+              },
+            },
+            {
+              id: "reset-sync-metadata",
+              label: "Reset local sync state…",
+              icon: "trash" as const,
+              danger: true,
+              disabled: busy,
+              title: "Forget local sync bases, conversation mappings, recovery records, and saved plans; files and cloud data are kept",
+              onSelect: () => void onResetProjectMetadata(workspaceProject.local_project_id),
+            },
+          ],
+        },
+        ...(otherProjects.length > 0 ? [{
+          label: "Switch to",
+          items: otherProjects.map((candidate) => ({
+            id: candidate.local_project_id,
+            label: projectLabel(candidate),
+            detail: compactProjectPath(candidate.project_root),
+            detailIsPath: true,
+            icon: candidate.is_git_repository ? ("git-folder" as const) : ("folder" as const),
+            disabled: busy || !!inlineStorageReview,
+            onSelect: () => onSelectProject(candidate.local_project_id),
+          })),
+        }] : []),
+        {
+          items: [{
+            id: "add-project",
+            label: "Add project…",
+            icon: "plus" as const,
+            disabled: busy,
+            onSelect: () => onAddProject(),
+          }],
+        },
+      ],
+      menuLabel: "Project",
       disabled: busy || !!inlineStorageReview,
     });
 
@@ -1331,10 +1524,25 @@ export default function ProjectLinksWorkspace({
     // So the section crumb names the page you are on and steps aside once you
     // open a session, giving the title the width it needs.
     if (sessionDetailSubview) {
+      // The leaf is the page's one visible title, so it also carries the
+      // page's identity: the provider's mark, and a dot when the session is
+      // live. The words stay in the tooltip and in hidden text for readers.
       pathCrumbs.push({
         id: "session",
-        label: sessionDetailTitle ?? "Opening session…",
-        title: sessionDetailTitle ?? undefined,
+        label: sessionHeader?.title ?? "Opening session…",
+        title: sessionHeader
+          ? [sessionHeader.title, sessionHeader.providerDisplayName, sessionHeader.active ? "Active" : null]
+            .filter(Boolean).join(" · ")
+          : undefined,
+        leading: sessionHeader ? (
+          <span className={`sync-path-leaf-mark${sessionHeader.active ? " active" : ""}`}>
+            <ProviderMark
+              provider={sessionHeader.provider}
+              displayName={sessionHeader.providerDisplayName}
+            />
+            {sessionHeader.active && <span className="sync-visually-hidden">Active</span>}
+          </span>
+        ) : undefined,
       });
     } else {
       pathCrumbs.push({
@@ -1357,73 +1565,10 @@ export default function ProjectLinksWorkspace({
     }
   }
 
-  const pathOverflow: PathBarMenuGroup[] = workspaceProject ? [
-    {
-      label: "Project",
-      items: [
-        ...(workspaceProject.project_root ? [{
-          id: "reveal",
-          label: "Reveal in Finder",
-          detail: compactProjectPath(workspaceProject.project_root),
-          icon: "folder" as const,
-          onSelect: () => { void openPath(workspaceProject.project_root as string); },
-        }] : []),
-        {
-          id: "agent",
-          label: "Agent profile",
-          detail: workspaceProfileLabel,
-          icon: "terminal" as const,
-          title: workspaceProfileTitle,
-          onSelect: () => void onConfigureBinding(workspaceProject.local_project_id),
-        },
-        {
-          id: "rename",
-          label: "Rename project",
-          icon: "edit" as const,
-          disabled: busy,
-          onSelect: () => {
-            setProjectAliasDraft(workspaceProject.local_alias ?? workspaceProject.display_name);
-            setRenamingProjectId(workspaceProject.local_project_id);
-          },
-        },
-        {
-          id: "reset-sync-metadata",
-          label: "Reset local sync state",
-          icon: "trash" as const,
-          danger: true,
-          disabled: busy,
-          title: "Forget local sync bases, conversation mappings, recovery records, and saved plans; files and cloud data are kept",
-          onSelect: () => void onResetProjectMetadata(workspaceProject.local_project_id),
-        },
-      ],
-    },
-    ...(workspaceStorage ? [{
-      label: "Storage",
-      items: [
-        {
-          id: "storage-settings",
-          label: "Storage settings",
-          icon: "settings" as const,
-          disabled: workspaceControlsLocked,
-          onSelect: () => { void openStorageEditorWithSettings(workspaceStorage); },
-        },
-        {
-          id: "unlink",
-          label: "Unlink storage",
-          icon: "x" as const,
-          danger: true,
-          disabled: workspaceControlsLocked,
-          onSelect: () => void run(
-            `unlink:${workspaceActionPrefix}`,
-            () => onUnlinkStorage(workspaceProject.local_project_id, workspaceStorage.id),
-          ),
-        },
-      ],
-    }] : []),
-    // App scope last, behind its own rule: everything above acts on this
-    // project or its storage, everything here acts on Mallard.
-    ...appActions,
-  ] : [];
+  // One home per scope: the storage crumb holds the storage verbs, the project
+  // crumb holds the project verbs, and the ⋯ is left with exactly what has no
+  // crumb of its own — Mallard itself.
+  const pathOverflow: PathBarMenuGroup[] = workspaceProject ? appActions : [];
 
   // A badge on the button that clears it, rather than a tally beside it: "3 to
   // push" is what Push does, said once. The counts stand down while that
@@ -1433,6 +1578,21 @@ export default function ProjectLinksWorkspace({
   const showPullCount = pullCount > 0 && !workspacePullReviewOpen && !workspacePullProgress;
   const showPushCount = pushCount > 0 && !workspacePushReviewOpen && !workspacePushProgress;
   const attention = activityHeader?.counts.attention ?? 0;
+
+  // One unlabelled refresh, scoped to the view: the open session when there is
+  // one, the activity comparison otherwise. Pull and Push keep their names and
+  // their project scope — only the bare glyph follows what you are looking at.
+  const viewRefresh = sessionDetailSubview
+    ? sessionHeader && {
+      refreshing: sessionHeader.refreshing,
+      onRefresh: sessionHeader.onRefresh,
+      label: sessionHeader.refreshing ? "Refreshing session" : "Refresh session",
+    }
+    : activityHeader && {
+      refreshing: activityHeader.refreshing,
+      onRefresh: activityHeader.onRefresh,
+      label: activityHeader.refreshing ? "Refreshing activity" : "Refresh activity",
+    };
 
   const pathActions = workspaceProject && workspaceStorage ? (
     <>
@@ -1451,19 +1611,19 @@ export default function ProjectLinksWorkspace({
           <b>{attention}</b>
         </span>
       )}
-      {activityHeader && (
+      {viewRefresh && (
         <button
           type="button"
-          className={`sync-path-icon-action${activityHeader.refreshing ? " loading" : ""}`}
-          onClick={activityHeader.onRefresh}
-          disabled={activityHeader.refreshing}
-          aria-busy={activityHeader.refreshing}
-          title={activityHeader.refreshing ? "Refreshing activity" : "Refresh activity"}
-          aria-label={activityHeader.refreshing ? "Refreshing activity" : "Refresh activity"}
+          className={`sync-path-icon-action${viewRefresh.refreshing ? " loading" : ""}`}
+          onClick={viewRefresh.onRefresh}
+          disabled={viewRefresh.refreshing}
+          aria-busy={viewRefresh.refreshing}
+          title={viewRefresh.label}
+          aria-label={viewRefresh.label}
         >
           <span
             aria-hidden="true"
-            className={`icon-spin-frame${activityHeader.refreshing ? " spinning" : ""}`}
+            className={`icon-spin-frame${viewRefresh.refreshing ? " spinning" : ""}`}
           >
             <Icon name="refresh" size={16} />
           </span>
@@ -1575,8 +1735,7 @@ export default function ProjectLinksWorkspace({
       <SyncPathBar
         crumbs={pathCrumbs}
         overflow={pathOverflow}
-        overflowLabel="Project and storage actions"
-        overflowDisabled={workspaceControlsLocked}
+        overflowLabel="App actions"
         actions={pathActions}
         ariaLabel={`${projectLabel(workspaceProject)} path`}
       />
@@ -1767,8 +1926,8 @@ export default function ProjectLinksWorkspace({
                     title="Add storage"
                     aria-label="Add storage"
                     onClick={() => {
-                                setLinkingProjectId(null);
-                      onOpenStorageSettings();
+                      setLinkingProjectId(null);
+                      onAddStorage();
                     }}
                   >
                     <Icon name="plus" size={14} />
@@ -1836,6 +1995,12 @@ export default function ProjectLinksWorkspace({
                       {!selectedStorage && storageHeading}
                     {projectLinks.length === 0 && <div className="profile-link-no-storage">No storage linked yet.</div>}
 
+                    {/* The block below returns null unless it has a notice or an
+                        open review. Drop the wrapper with it: an empty list is
+                        still an element, and it would keep the group footer off
+                        `:first-child`, leaving the footer's rule stacked 1px
+                        under the group frame as a doubled hairline. */}
+                    {storageBlockShown && (
                     <div className="project-profile-storage-list">
                     {selectedStorage && (() => {
                       const storage = selectedStorage;
@@ -1903,7 +2068,7 @@ export default function ProjectLinksWorkspace({
                                   type="button"
                                   className="btn btn-ghost"
                                   disabled={noticeActionsDisabled}
-                                  onClick={() => onOpenStorageSettings(storage.id)}
+                                  onClick={() => onOpenStorage(storage.id, true)}
                                 >
                                   Storage settings
                                 </button>
@@ -1992,6 +2157,7 @@ export default function ProjectLinksWorkspace({
                       );
                     })()}
                     </div>
+                    )}
 
                     {linkingProjectId === project.local_project_id && (
                       <div
@@ -2064,7 +2230,7 @@ export default function ProjectLinksWorkspace({
             resourceId={sessionDetailSubview.resourceId}
             occurrenceKey={sessionDetailSubview.occurrenceKey}
             initialCheckpointId={sessionDetailSubview.initialCheckpointId}
-            onTitleChange={handleSessionTitleChange}
+            onHeaderChange={handleSessionHeaderChange}
           />
         </Suspense>
       )}

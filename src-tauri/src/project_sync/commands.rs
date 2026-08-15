@@ -3784,10 +3784,18 @@ fn build_resource_inventory(
                 metadata: BTreeMap::new(),
             },
             category: "tools".to_string(),
-            description: Some("Selected resource is unavailable on this machine".to_string()),
+            // One sentence, not two. This carried a `description` as well —
+            // "Selected resource is unavailable on this machine" — which the
+            // row printed above the blocker line that said the same thing in
+            // different words. The blocked reason is the one that also drives
+            // the row's state, so it is the one that speaks.
+            description: None,
             logical_paths: Vec::new(),
             default_selected: true,
-            blocked_reason: Some("Resource is unavailable at the mapped paths".to_string()),
+            blocked_reason: Some(
+                "Selected for sync, but unavailable at the mapped paths on this machine"
+                    .to_string(),
+            ),
         });
     }
     inventory.resources.sort_by(|left, right| {

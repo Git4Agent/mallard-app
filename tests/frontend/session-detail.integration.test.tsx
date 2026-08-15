@@ -29,12 +29,15 @@ import {
   safeMarkdownUrl,
   sessionDetailFilterToggles,
   sessionEventCoverage,
+  sessionToolDescriptor,
+  sessionTurnDurationLabel,
+  sessionTurnSpans,
   toolCommandLabel,
 } from "../../src/components/project-sync/session-detail/sessionDetailModel";
 
 const exact = (value: number) => ({ value, quality: "exact" as const });
 
-// 2026-08-13T11:10:00Z and onward, so the day divider and the gutter clock have
+// 2026-08-13T11:10:00Z and onward, so the day divider and the card clock have
 // a real day boundary to work with.
 const START = 1_786_000_000;
 
@@ -81,12 +84,12 @@ const detail: ProjectSessionDetail = {
 
 const toolEvent: SessionTimelineEvent = {
   event_id: "tool-1",
-  ordinal: 3,
-  timestamp: START + 200,
+  ordinal: 2,
+  timestamp: START + 150,
   kind: "tool_call",
   quality: "exact",
   turn_id: "turn-1",
-  parent_event_id: "response-1",
+  parent_event_id: "prompt-1",
   tool: {
     provider_call_id: "call-1",
     native_name: "exec",
@@ -102,10 +105,13 @@ const toolEvent: SessionTimelineEvent = {
 const failedToolEvent: SessionTimelineEvent = {
   ...toolEvent,
   event_id: "tool-2",
-  ordinal: 4,
+  ordinal: 3,
+  timestamp: START + 200,
   tool: { ...toolEvent.tool!, provider_call_id: "call-2", status: "failed", summary: "python3 render.py" },
 };
 
+// Chronological, the way the feed now renders: the call sits between the
+// prompt that caused it and the response that follows it.
 const events: SessionTimelineEvent[] = [
   {
     event_id: "prompt-1",
@@ -117,20 +123,20 @@ const events: SessionTimelineEvent[] = [
     text: "Please **inspect** the current flow.",
     turn_tool_summary: { turn_id: "turn-1", tool_calls: exact(2) },
   },
+  toolEvent,
   {
     event_id: "response-1",
-    ordinal: 2,
+    ordinal: 4,
     timestamp: START + 300,
     kind: "response",
     quality: "exact",
     turn_id: "turn-1",
     text: "I found the relevant boundary and kept the change scoped.",
   },
-  toolEvent,
   {
     event_id: "intermediate-1",
     ordinal: 5,
-    timestamp: START + 400,
+    timestamp: START + 330,
     kind: "intermediate_step",
     quality: "inferred",
     turn_id: "turn-1",
@@ -138,20 +144,62 @@ const events: SessionTimelineEvent[] = [
   },
 ];
 
-test("filters carry event kinds only — tool categories left with the inspector", () => {
+const checkpointEvent: SessionTimelineEvent = {
+  event_id: "checkpoint-1",
+  ordinal: 6,
+  timestamp: START + 400,
+  kind: "checkpoint",
+  quality: "exact",
+  turn_id: "turn-1",
+  checkpoint: {
+    sha: "7350274" + "b".repeat(33),
+    short_sha: "7350274",
+    subject: "Add pelican GIF render pipeline",
+    committed_at: START + 400,
+    branch: "main",
+  },
+};
+
+function renderTimeline(
+  timelineEvents: SessionTimelineEvent[],
+  overrides?: { provider?: string; providerDisplayName?: string },
+): string {
+  return renderToStaticMarkup(
+    <SessionDetailTimeline
+      events={timelineEvents}
+      provider={overrides?.provider ?? "codex"}
+      providerDisplayName={overrides?.providerDisplayName ?? "Codex"}
+      loading={false}
+      loadingMore={false}
+      nextCursor={null}
+      error={null}
+      expandedToolIds={new Set()}
+      toolDetails={{}}
+      onRetry={() => undefined}
+      onLoadMore={() => undefined}
+      onToolExpandedChange={() => undefined}
+    />,
+  );
+}
+
+test("filters carry event kinds only, and tool calls are on by default", () => {
   const filters = createDefaultSessionDetailFilters(detail.event_counts);
-  assert.deepEqual(includedSessionEventKinds(filters), ["prompt", "response", "checkpoint"]);
-  assert.equal(filters.toolCalls, false);
+  // The punchcard rows are the transcript's account of the work; the per-turn
+  // disclosure that used to reveal them lazily is gone.
+  assert.deepEqual(includedSessionEventKinds(filters), ["prompt", "response", "checkpoint", "tool_call"]);
+  assert.equal(filters.toolCalls, true);
   assert.equal("toolCategories" in filters, false);
 
   // The query still names every category, because sorting by category is gone
-  // from the UI, not from the command.
+  // from the UI, not from the command — and nothing on the page asks for a
+  // single turn's calls any more.
   const pageSource = readFileSync(
     "src/components/project-sync/session-detail/SessionDetailPage.tsx",
     "utf8",
   );
   assert.match(pageSource, /included_tool_categories: \[\.\.\.ALL_SESSION_TOOL_CATEGORIES\]/);
   assert.doesNotMatch(pageSource, /SessionDetailInspector|selectedCheckpointId|toggleAllLoadedTools/);
+  assert.doesNotMatch(pageSource, /turnToolStates|loadTurnTools|SessionTurnToolState/);
 });
 
 test("a toggle appears only for a kind this session actually holds", () => {
@@ -197,30 +245,46 @@ test("the toolbar states one count, with the denominator the page never had", ()
   assert.doesNotMatch(html, /Checkpoints|No checkpoints|Expand loaded tool calls|<fieldset|<select/);
 });
 
-test("the header prints the title once, states duration, and marks the sha as a commit", () => {
+test("the header is one strip: hidden h1, facts as chips, verbs on the right", () => {
   const html = renderToStaticMarkup(
     <SessionDetailHeader
       detail={{ ...detail, summary: detail.title }}
       headingRef={{ current: null }}
       actionBusyId={null}
       actionError={null}
-      onRefresh={() => undefined}
       onAction={() => undefined}
     />,
   );
 
   assert.doesNotMatch(html, /Back to Activity|session-detail-breadcrumbs/);
-  assert.match(html, /<h1 id="session-detail-heading" tabindex="-1">Build provider-neutral session detail<\/h1>/);
-  // The summary repeated the title, so it is not printed a second time.
+  // The visible title is the path bar's leaf crumb; the h1 stays for structure
+  // and as the focus landing, screen-reader-only. With the repeated summary
+  // dropped, the sentence appears exactly once in this DOM.
+  assert.match(html, /<h1 id="session-detail-heading" class="sync-visually-hidden" tabindex="-1">Build provider-neutral session detail<\/h1>/);
   const titleCount = html.split("Build provider-neutral session detail").length - 1;
   assert.equal(titleCount, 1);
-  assert.match(html, /Open in Codex/);
-  assert.match(html, /aria-label="Refresh session detail"/);
-  assert.match(html, /#aaaaaaa/);
+
+  // Facts state themselves: glyph chips, no caption row, full values in
+  // tooltips — the sha bare and 7 chars, the way git prints it.
+  assert.match(html, /class="session-detail-chip" title="Branch main"/);
+  assert.match(html, /data-icon="git-branch"/);
+  assert.match(html, /data-icon="git-commit"/);
+  assert.match(html, new RegExp(`title="${"a".repeat(40)}"`));
+  assert.match(html, />aaaaaaa</);
   assert.match(html, />11m</);
-  assert.match(html, />1\.06M\+</);
-  // `Started` and `Ended` spelled the same date twice; one range replaces both.
-  assert.doesNotMatch(html, />Started<|>Ended</);
+  assert.match(html, />1\.06M\+<\/code> tokens/);
+  assert.doesNotMatch(html, />Started<|>Ended<|>Branch<|>Commit<|>Ran<|>Tokens</);
+
+  // Provider identity is the mark on the leaf crumb and on the launch button
+  // itself; the text chip, the Active chip and the second refresh glyph are
+  // gone. The launch pair speaks the activity rows' icon vocabulary — the
+  // provider's own mark for open-in-app, the label demoted to tooltip and
+  // accessible name, no button text.
+  assert.match(html, /session-detail-launch[^>]*title="Open in Codex"[^>]*aria-label="Open in Codex"/);
+  assert.match(html, /session-detail-launch[^>]*>.*data-icon="openai"/);
+  assert.doesNotMatch(html, />Open in Codex</);
+  assert.doesNotMatch(html, /data-icon="play"/);
+  assert.doesNotMatch(html, /session-detail-provider-badge|session-detail-active-badge|session-detail-refresh|Refresh session detail/);
 
   const distinct = renderToStaticMarkup(
     <SessionDetailHeader
@@ -228,71 +292,60 @@ test("the header prints the title once, states duration, and marks the sha as a 
       headingRef={{ current: null }}
       actionBusyId={null}
       actionError={null}
-      onRefresh={() => undefined}
       onAction={() => undefined}
     />,
   );
-  assert.match(distinct, /Expose the durable conversation/);
+  // A summary that differs from the title is a lede, not a header row.
+  assert.match(distinct, /class="session-detail-summary">Expose the durable conversation/);
 });
 
-test("the timeline states the day once and gives every turn a clock and a rail", () => {
-  const html = renderToStaticMarkup(
-    <SessionDetailTimeline
-      events={events}
-      providerDisplayName="Codex"
-      loading={false}
-      loadingMore={false}
-      nextCursor={null}
-      error={null}
-      expandedToolIds={new Set()}
-      toolDetails={{}}
-      turnToolStates={{}}
-      onRetry={() => undefined}
-      onLoadMore={() => undefined}
-      onToolExpandedChange={() => undefined}
-      onTurnToolExpandedChange={() => undefined}
-      onLoadMoreTurnTools={() => undefined}
-    />,
-  );
+test("the timeline is a rail: tiles for turns, punches for calls, no speaker headings", () => {
+  const html = renderTimeline(events);
 
   // One divider for four same-day events, where each row used to carry a date.
   assert.equal(html.split("session-detail-day-divider").length - 1, 1);
-  assert.equal(html.split("session-detail-event-gutter").length - 1, 4);
-  assert.equal(html.split("session-detail-event-rail").length - 1, 4);
-  assert.match(html, /class="session-detail-event-copy session-detail-prompt-card"/);
-  assert.match(html, /class="session-detail-event-copy session-detail-response-prose"/);
-  assert.match(html, /2 tool calls/);
+  // Three tiles (prompt, response, step) and one punch (the call).
+  assert.equal(html.split("session-detail-event-node\"").length - 1, 3);
+  assert.equal(html.split("session-detail-event-tick").length - 1, 1);
+  assert.match(html, /class="session-detail-row-tool"/);
   assert.match(html, new RegExp(`id="${eventAnchorId("tool-1")}"`));
 
-  // Who spoke, not what the schema calls the row.
-  assert.match(html, /<h3>You<\/h3>/);
-  assert.match(html, /<h3>Codex<\/h3>/);
-  assert.doesNotMatch(html, /<h3>Prompt<\/h3>|<h3>Response<\/h3>/);
+  // The tile is the speaker: name · clock on its label, no headings anywhere.
+  assert.match(html, /aria-label="You · \d{2}:\d{2}"/);
+  assert.match(html, /aria-label="Codex · \d{2}:\d{2}"/);
+  assert.match(html, /data-icon="openai"/);
+  assert.match(html, /sync-provider-mark codex/);
+  assert.doesNotMatch(html, /session-detail-event-heading|<h3>You<\/h3>|<h3>Codex<\/h3>/);
+
+  // The clock gutter and its per-event rail left with the headings.
+  assert.doesNotMatch(html, /session-detail-event-gutter|session-detail-event-rail/);
+
+  // You ask in a card: markdown body plus a clock · duration · calls meta line.
+  assert.match(html, /class="session-detail-prompt-card"/);
+  assert.match(html, /class="session-detail-card-meta"><time[^>]*>\d{2}:\d{2}<\/time><span>6m<\/span><span>2 calls<\/span>/);
+  assert.match(html, /class="session-detail-event-copy session-detail-response-prose"/);
 
   // The eyebrow that restated the heading, and the count that contradicted the
   // filter panel, are both gone.
   assert.doesNotMatch(html, /Chronological record|session-detail-section-heading|loaded<\/code>/);
 });
 
-test("the gap between turns is shown, and only when it is worth showing", () => {
+test("the wait between turns is a chip on the rail, and ticks never carry one", () => {
   assert.equal(formatSessionGap(START, START + 30), null);
   assert.equal(formatSessionGap(START, START + 300), "+5m");
   assert.equal(formatSessionGap(START, START + 7_200), "+2h");
   assert.equal(formatSessionGap(null, START), null);
 
-  const html = renderToStaticMarkup(
-    <SessionDetailEvent
-      event={events[1]}
-      providerDisplayName="Codex"
-      previousTimestamp={START}
-      expandedToolIds={new Set()}
-      toolDetails={{}}
-      onToolExpandedChange={() => undefined}
-      onTurnToolExpandedChange={() => undefined}
-      onLoadMoreTurnTools={() => undefined}
-    />,
-  );
-  assert.match(html, /<span class="session-detail-event-gap">\+5m<\/span>/);
+  // response-1 follows tool-1 by 150s; the step follows by 30s and stays quiet.
+  const html = renderTimeline(events);
+  assert.equal(html.split("session-detail-event-gap").length - 1, 1);
+  assert.match(html, /class="session-detail-event-gap"><span>\+3m<\/span><\/div>/);
+
+  // A slow tool call shows no chip — the wait reads as the call's own runtime.
+  const slowTool: SessionTimelineEvent = { ...toolEvent, timestamp: START + 600 };
+  const toolOnly = renderTimeline([events[0], slowTool]);
+  assert.doesNotMatch(toolOnly, /session-detail-event-gap/);
+
   assert.equal(formatSessionDuration(START, START + 660), "11m");
   assert.equal(formatSessionDuration(START, START + 45), "45s");
   assert.equal(formatSessionDuration(START, START + 3_900), "1h 5m");
@@ -300,23 +353,77 @@ test("the gap between turns is shown, and only when it is worth showing", () => 
   assert.match(formatSessionRange(START, START + 660) ?? "", /·.*→/);
 });
 
+test("a turn's duration is measured from its loaded extent, never promised", () => {
+  // Only the prompt has loaded: the turn has no extent yet.
+  const partial = sessionTurnSpans([events[0]]);
+  assert.equal(sessionTurnDurationLabel(partial.get("turn-1")), null);
+
+  // The span grows as later pages land.
+  const spans = sessionTurnSpans(events);
+  assert.deepEqual(spans.get("turn-1"), { started: START, ended: START + 330 });
+  assert.equal(sessionTurnDurationLabel(spans.get("turn-1")), "6m");
+  assert.equal(sessionTurnDurationLabel(undefined), null);
+
+  // Undated events and events outside any turn contribute nothing.
+  const sparse = sessionTurnSpans([
+    { ...events[0], timestamp: null },
+    { ...events[2], turn_id: null },
+  ]);
+  assert.equal(sparse.size, 0);
+
+  // A single loaded call still pluralises honestly.
+  const single = renderTimeline([{
+    ...events[0],
+    turn_tool_summary: { turn_id: "turn-1", tool_calls: exact(1) },
+  }]);
+  assert.match(single, /<span>1 call<\/span>/);
+});
+
+test("providers wear their own mark on the tile, with a monogram fallback", () => {
+  const known = renderTimeline([events[2]]);
+  assert.match(known, /data-icon="openai"/);
+
+  // An unknown provider still renders a speaker, not an empty slot.
+  const unknown = renderTimeline([events[2]], { provider: "gemini", providerDisplayName: "Gemini" });
+  assert.doesNotMatch(unknown, /data-icon="openai"/);
+  assert.match(unknown, /sync-provider-monogram/);
+  assert.match(unknown, />G</);
+  assert.match(unknown, /aria-label="Gemini · \d{2}:\d{2}"/);
+});
+
+test("a checkpoint is a card of recorded fields — sha, subject, branch, clock", () => {
+  const html = renderTimeline([checkpointEvent]);
+  assert.match(html, /class="session-detail-checkpoint-card"/);
+  // The full sha stays reachable as the chip's tooltip.
+  assert.match(html, /class="session-detail-checkpoint-sha" title="7350274b+">7350274</);
+  assert.match(html, /class="session-detail-checkpoint-subject"[^>]*>Add pelican GIF render pipeline</);
+  assert.match(html, /class="session-detail-checkpoint-branch">main</);
+  assert.match(html, /class="session-detail-checkpoint-end">.*<time[^>]*>\d{2}:\d{2}<\/time>/);
+  assert.match(html, /aria-label="Checkpoint · \d{2}:\d{2}"/);
+  // No fabricated diff stats: the provider does not record them.
+  assert.doesNotMatch(html, /\+\d+ \/ -\d+/);
+});
+
 test("events split into day groups, carrying undated rows with the group they arrive in", () => {
   const nextDay: SessionTimelineEvent = { ...events[0], event_id: "prompt-2", ordinal: 9, timestamp: START + 90_000 };
-  const undated: SessionTimelineEvent = { ...events[1], event_id: "response-2", ordinal: 10, timestamp: null };
+  const undated: SessionTimelineEvent = { ...events[2], event_id: "response-2", ordinal: 10, timestamp: null };
   const groups = groupSessionEventsByDay([...events, nextDay, undated]);
   assert.equal(groups.length, 2);
   assert.deepEqual(groups[0].events.map((event) => event.event_id), [
-    "prompt-1", "response-1", "tool-1", "intermediate-1",
+    "prompt-1", "tool-1", "response-1", "intermediate-1",
   ]);
   assert.deepEqual(groups[1].events.map((event) => event.event_id), ["prompt-2", "response-2"]);
 });
 
-test("a tool row leads with the command and shows status only when it is not ok", () => {
+test("a tool row leads with its tinted action, and shows status only when it is not ok", () => {
   const ok = renderToStaticMarkup(
     <SessionDetailToolCall event={toolEvent} expanded={false} onExpandedChange={() => undefined} />,
   );
-  assert.match(ok, /<strong>exec<\/strong>/);
+  // `exec` is not a name anyone reads; the action it performs is.
+  assert.match(ok, /<span class="session-detail-tool-name cat-shell">Bash<\/span>/);
   assert.match(ok, /sed -n &#x27;241,520p&#x27; skills\/imagegen\/SKILL\.md/);
+  // The chevron closes the row at the far edge, where every disclosure points.
+  assert.match(ok, /session-detail-tool-summary[\s\S]*session-detail-tool-chevron/);
   // `completed` on every row said nothing 24 times over, and the category chip
   // said `Other` just as often.
   assert.doesNotMatch(ok, /session-detail-tool-status|session-detail-tool-kind|>Read</);
@@ -328,6 +435,41 @@ test("a tool row leads with the command and shows status only when it is not ok"
     <SessionDetailToolCall event={failedToolEvent} expanded={false} onExpandedChange={() => undefined} />,
   );
   assert.match(failed, /<span class="session-detail-tool-status status-failed">failed<\/span>/);
+
+  // The failure is visible from the rail: the punch takes the failure colour.
+  const timeline = renderTimeline([events[0], failedToolEvent]);
+  assert.match(timeline, /event-tool-call tool-failed/);
+});
+
+test("the action label derives from the wrapped function first, then the recorded name", () => {
+  // Codex records `exec` and buckets nearly everything as `other`; the JS
+  // wrapper inside the summary is the better witness when it is present.
+  assert.deepEqual(
+    sessionToolDescriptor({ native_name: "exec", category: "other", summary: "sed -n '1,4p' a.md" }),
+    { label: "Bash", category: "shell" },
+  );
+  assert.deepEqual(
+    sessionToolDescriptor({ native_name: "exec", category: "other", summary: "const r = await tools.read_file({path:'src/a.rs'});" }),
+    { label: "Read", category: "read" },
+  );
+  assert.deepEqual(
+    sessionToolDescriptor({ native_name: "exec", category: "other", summary: 'await tools.apply_patch({file_path:"src/a.rs"})' }),
+    { label: "Edit", category: "file_edit" },
+  );
+  // A name with no mapping passes through with its recorded category.
+  assert.deepEqual(
+    sessionToolDescriptor({ native_name: "image_gen", category: "other", summary: '{"prompt":"frame 03"}' }),
+    { label: "image_gen", category: "other" },
+  );
+  // Providers that already record readable names keep them, tint included.
+  assert.deepEqual(
+    sessionToolDescriptor({ native_name: "Grep", category: "read", summary: "-rn needle src/" }),
+    { label: "Grep", category: "read" },
+  );
+  assert.deepEqual(
+    sessionToolDescriptor({ native_name: "Bash", category: "shell", summary: "npm run build" }),
+    { label: "Bash", category: "shell" },
+  );
 });
 
 test("a row shows the command, not the wrapper the agent wrote around it", () => {
@@ -342,17 +484,46 @@ test("a row shows the command, not the wrapper the agent wrote around it", () =>
     toolCommandLabel(`await tools.exec_command({cmd:"grep -n \\"needle\\" src/app.ts"})`),
     'grep -n "needle" src/app.ts',
   );
+  // Wrapper arguments are JS, not JSON: single-quoted values lift too — these
+  // were the rows that still opened with `const r = await tools.…`.
+  assert.equal(
+    toolCommandLabel("const r = await tools.read_file({path:'src/a.rs'});"),
+    "src/a.rs",
+  );
+  // A wrapper with no primary argument still sheds the harness noise.
+  assert.equal(toolCommandLabel("const r = await tools.list_dir({});"), "list_dir({});");
+  // Rows end early rather than running to the chevron: a hard 64-point cap,
+  // counted in code points so CJK cannot be split mid-character. The full
+  // command survives as the row's tooltip and in Arguments.
+  const long = `git -C /Users/peytonmontei/Documents/entire/devenv/entireio/ log --oneline --graph --all`;
+  const capped = toolCommandLabel(`const r = await tools.exec_command({cmd:${JSON.stringify(long)}});`);
+  assert.equal([...capped].length, 65);
+  assert.equal(capped, [...long].slice(0, 64).join("").trimEnd() + "…");
+  const cjk = "鹈".repeat(80);
+  assert.equal([...toolCommandLabel(cjk)].length, 65);
+  assert.match(toolCommandLabel(cjk), /…$/);
   // A bare JSON argument object yields whatever the call is about.
   assert.equal(
     toolCommandLabel('{"prompt":"frame 03 · pelican side view","size":"1024x1024"}'),
     "frame 03 · pelican side view",
   );
   assert.equal(toolCommandLabel('{"file_path":"src/main.tsx","limit":40}'), "src/main.tsx");
-  // Anything unrecognised is left exactly as it is, minus trailing lines.
+  // Anything unrecognised is left exactly as it is; a body that goes on —
+  // more lines, or past the cap — says so with an ellipsis.
   assert.equal(toolCommandLabel("npm run build"), "npm run build");
-  assert.equal(toolCommandLabel("first line\nsecond line"), "first line");
+  assert.equal(toolCommandLabel("first line\nsecond line"), "first line…");
   assert.equal(toolCommandLabel('{"unknown_key":"value"}'), '{"unknown_key":"value"}');
   assert.equal(toolCommandLabel(""), "");
+  // Template-literal commands lift too — these rows used to show nothing but
+  // `exec_command({`.
+  assert.equal(
+    toolCommandLabel("const r = await tools.exec_command({cmd:`python3 -c 'print(1)'`});"),
+    "python3 -c 'print(1)'",
+  );
+  assert.equal(
+    toolCommandLabel("await tools.exec_command({cmd:`make build\nmake test`})"),
+    "make build…",
+  );
 
   const html = renderToStaticMarkup(
     <SessionDetailToolCall
@@ -372,7 +543,7 @@ test("a row shows the command, not the wrapper the agent wrote around it", () =>
   assert.doesNotMatch(html, />const r = await/);
 });
 
-test("payloads share one bounded tabbed pane and stay escaped", () => {
+test("payloads stack labelled bounded sections, arguments beside their result", () => {
   const expanded = renderToStaticMarkup(
     <SessionDetailToolCall
       event={toolEvent}
@@ -393,16 +564,21 @@ test("payloads share one bounded tabbed pane and stay escaped", () => {
     />,
   );
   assert.match(expanded, /<details[^>]* open=""/);
-  assert.match(expanded, /role="tablist"/);
-  // Output leads, because the result is what you opened the row to read.
-  assert.match(expanded, /is-on" aria-selected="true">Output</);
-  assert.match(expanded, />Arguments</);
-  assert.match(expanded, />Paths</);
+  // No tabs: three sections in reading order, arguments before the result they
+  // produced, paths last.
+  assert.doesNotMatch(expanded, /role="tablist"|session-detail-payload-tab/);
+  assert.equal(expanded.split("session-detail-payload-section").length - 1, 3);
+  assert.match(expanded, /Arguments<[\s\S]*Result<[\s\S]*Paths</);
+  // Each section keeps its own copy key, so what you copy is what you see.
+  assert.match(expanded, /aria-label="Copy arguments to clipboard"/);
+  assert.match(expanded, /aria-label="Copy result to clipboard"/);
   assert.match(expanded, /class="session-detail-payload-body"><code>Read 42 lines<\/code>/);
   assert.doesNotMatch(expanded, /<script>/);
-  assert.match(expanded, /aria-label="Copy to clipboard"/);
-  // The notice belongs to the pane on screen: Output is the truncated one here.
-  assert.match(expanded, /Bounded preview · additional content omitted/);
+  // The notice sits inside the section it bounds: the result is the truncated
+  // one here, and it renders exactly once.
+  assert.equal(expanded.split("Bounded preview · additional content omitted").length - 1, 1);
+  // Neither payload here differs from its stored form, so no raw toggle.
+  assert.doesNotMatch(expanded, /title="Show the stored value"/);
 
   const whole = renderToStaticMarkup(
     <SessionDetailToolCall
@@ -424,10 +600,33 @@ test("payloads share one bounded tabbed pane and stay escaped", () => {
     />,
   );
   assert.doesNotMatch(whole, /Bounded preview/);
-  // No arguments, so no Arguments tab. Paths survives: an empty list on the
-  // detail falls back to the preview's own paths.
+  // No arguments, so no Arguments section. Paths survives: an empty list on
+  // the detail falls back to the preview's own paths.
   assert.doesNotMatch(whole, />Arguments</);
   assert.match(whole, />Paths</);
+
+  // A stored transport envelope earns the raw toggle on its own section.
+  const envelope = renderToStaticMarkup(
+    <SessionDetailToolCall
+      event={toolEvent}
+      expanded
+      detailState={{
+        loading: false,
+        error: null,
+        detail: {
+          event_id: toolEvent.event_id,
+          arguments: null,
+          arguments_truncated: false,
+          result: JSON.stringify([{ type: "input_text", text: "Script completed" }]),
+          result_truncated: false,
+          affected_paths: [],
+        },
+      }}
+      onExpandedChange={() => undefined}
+    />,
+  );
+  assert.match(envelope, /title="Show the stored value"/);
+  assert.match(envelope, /<code>Script completed<\/code>/);
 });
 
 test("a stored transport payload is unwrapped, with the raw value one click away", () => {
@@ -472,13 +671,13 @@ test("timeline page merging is chronological, de-duplicated, and counts keep the
   const first: ProjectSessionTimelinePage = {
     resource_id: detail.resource_id,
     snapshot_id: detail.snapshot_id,
-    events: [events[1], events[0]],
+    events: [events[2], events[0]],
     next_cursor: "next",
     warnings: [],
   };
   const second: ProjectSessionTimelinePage = {
     ...first,
-    events: [events[1], events[3]],
+    events: [events[2], events[3]],
     next_cursor: null,
   };
   const merged = mergeSessionTimelinePages(mergeSessionTimelinePages([], first), second);
@@ -534,6 +733,9 @@ test("every icon on the page sits on a size the 24-unit grid divides evenly", ()
       if (!CLEAN.has(Number(match[1]))) offGrid.push(`${file}: size={${match[1]}}`);
     }
   }
+  // The provider tile goes through ProviderMark, so its size is set there.
+  const providerMark = readFileSync("src/components/project-sync/session-detail/SessionDetailEvent.tsx", "utf8");
+  assert.match(providerMark, /<ProviderMark provider=\{provider\} displayName=\{providerDisplayName\} size=\{12\} \/>/);
   assert.deepEqual(offGrid, []);
 
   const icons = readFileSync("src/components/Icons.tsx", "utf8");
@@ -553,56 +755,87 @@ test("every icon on the page sits on a size the 24-unit grid divides evenly", ()
   assert.deepEqual(nonPixel, ["claude"]);
 });
 
-test("the stylesheets encode one column, a measured turn grid, and a bounded pane", () => {
+test("the stylesheets encode the rail, the punchcard, and the stacked bounded pane", () => {
   const baseCss = readFileSync("src/App.css", "utf8");
   const retroCss = readFileSync("src/RetroTheme.css", "utf8");
 
-  // The two-column grid and every inspector rule left with the rail.
-  assert.doesNotMatch(baseCss, /grid-template-columns: minmax\(0, 1fr\) minmax\(240px, 284px\)/);
-  assert.doesNotMatch(baseCss, /session-detail-inspector|session-detail-filter-row|session-detail-checkpoint-jump/);
-  assert.doesNotMatch(retroCss, /session-detail-inspector|session-detail-filter-row/);
+  // The clock gutter, the per-event rail, the speaker headings, the per-turn
+  // disclosure and the tab strip all left with the cutover.
+  assert.doesNotMatch(baseCss, /session-detail-event-gutter|session-detail-event-rail|session-detail-event-heading/);
+  assert.doesNotMatch(baseCss, /session-detail-turn-tools|session-detail-turn-failures|session-detail-turn-load-more/);
+  assert.doesNotMatch(baseCss, /session-detail-payload-tabs|session-detail-payload-tab\b|session-detail-checkpoint-body/);
+  assert.doesNotMatch(baseCss, /grid-template-columns: 58px 3px minmax\(0, 1fr\)/);
+  assert.doesNotMatch(retroCss, /session-detail-event-heading|session-detail-turn-tools|session-detail-payload-tab\b|session-detail-checkpoint-body/);
 
-  assert.match(baseCss, /\.session-detail-event \{[^}]*grid-template-columns: 58px 3px minmax\(0, 1fr\)/s);
+  // The poster header left with the bar-owns-the-title cutover: no heading
+  // rows, no provider or Active chips, no labelled metadata, no second refresh.
+  assert.doesNotMatch(baseCss, /session-detail-heading-row|session-detail-heading-copy|session-detail-provider-|session-detail-active-badge|session-detail-metadata|session-detail-meta-|session-detail-refresh/);
+  assert.doesNotMatch(retroCss, /session-detail-heading-copy|session-detail-provider-|session-detail-active-badge|session-detail-meta-/);
+
+  // What replaced it: one wrapping strip of 22px fact chips, and the provider
+  // mark on the leaf crumb with its presence dot.
+  assert.match(baseCss, /\.session-detail-strip \{[^}]*flex-wrap: wrap/s);
+  assert.match(baseCss, /\.session-detail-chip \{[^}]*height: 22px/s);
+  assert.match(baseCss, /\.sync-path-leaf-mark\.active::after \{[^}]*background: var\(--green\)/s);
+  assert.match(retroCss, /\.session-detail-chip,[\s\S]{0,400}?font-family: var\(--font-mono\)/);
+  assert.match(retroCss, /\.session-detail-chip \{[\s\S]{0,200}?border-radius: var\(--r-pill\)/);
+
+  // Two columns: the 24px node column, then the body; one hairline rail per
+  // day, scoped to the list so empty states never draw it.
+  assert.match(baseCss, /\.session-detail-event \{[^}]*grid-template-columns: 24px minmax\(0, 1fr\)/s);
+  assert.match(baseCss, /\.session-detail-event-list::before \{[^}]*left: 11px;\s*width: 1px/s);
+  assert.match(baseCss, /\.session-detail-event-node \{[^}]*width: 24px;\s*height: 24px/s);
+  assert.match(baseCss, /\.event-prompt \.session-detail-event-node \{ color: var\(--session-detail-you\); \}/);
+  assert.match(baseCss, /\.session-detail-event-tick \{[^}]*width: 7px;\s*height: 7px/s);
+  assert.match(baseCss, /\.event-tool-call\.tool-failed \.session-detail-event-tick \{ background: var\(--danger-text\); \}/);
+  assert.match(baseCss, /\.session-detail-event-gap > span \{[^}]*border: 1px solid var\(--border-mid\)/s);
+
+  // The card asks, the prose answers; the meta line is fenced off by the same
+  // hairline the day divider draws.
+  assert.match(baseCss, /\.session-detail-prompt-card \{[^}]*max-width: 68ch/s);
+  assert.match(baseCss, /\.session-detail-prompt-card[\s\S]*background: var\(--surface-card\)/);
+  assert.match(baseCss, /\.session-detail-card-meta \{[^}]*border-top: 1px solid var\(--border\)/s);
+  assert.match(baseCss, /\.session-detail-response-prose[\s\S]*background: transparent/);
   assert.match(baseCss, /\.session-detail-event-copy \{[^}]*max-width: 68ch/s);
-  assert.match(baseCss, /\.session-detail-payload-body \{[^}]*max-height: 240px/s);
 
-  // The payload block speaks the app's own vocabulary: a tab is a tile joined
-  // to the panel, not an underline indicator, and its buttons are square
-  // keycaps rather than rounded ghosts.
-  assert.match(baseCss, /\.session-detail-payload-tabs \{[^}]*margin-bottom: -1px/s);
-  assert.match(baseCss, /\.session-detail-payload-tab \{[^}]*border-bottom: 0;[^}]*border-radius: 0/s);
-  assert.match(baseCss, /\.session-detail-payload-tab\.is-on \{[^}]*border-color: var\(--border-mid\)/s);
-  // 24px is the minimum target size (WCAG 2.2 AA 2.5.8) and a whole multiple
-  // of the 24-unit icon grid; --border was too faint to read as an edge.
+  // The stacked pane: one frame, bounded boxes, keycap controls. 24px is the
+  // minimum target size (WCAG 2.2 AA 2.5.8) and a whole multiple of the icon
+  // grid; --border was too faint to read as an edge on the keycaps.
+  assert.match(baseCss, /\.session-detail-tool-payload \{[^}]*gap: 9px;[^}]*border: 1px solid var\(--border\)/s);
+  assert.match(baseCss, /\.session-detail-payload-body \{[^}]*max-height: 200px/s);
   assert.match(baseCss, /\.session-detail-payload-action \{[^}]*width: 24px;\s*height: 24px;/s);
   assert.match(baseCss, /\.session-detail-payload-action \{[^}]*border: 1px solid var\(--button-border\)/s);
   assert.match(baseCss, /\.session-detail-payload-action \{[^}]*border-radius: 0/s);
-  assert.match(baseCss, /\.session-detail-payload-tab \{[^}]*min-height: 24px/s);
-  // Symmetric: the panel lines up with the rows instead of hanging inside them.
-  assert.match(baseCss, /\.session-detail-tool-body \{[^}]*padding: 7px 9px 9px;/s);
   assert.match(baseCss, /\.session-detail-payload-action:active \{\s*transform: translate\(1px, 1px\);/);
-  assert.doesNotMatch(baseCss, /\.session-detail-payload-tab\.is-on \{[^}]*border-bottom-color/s);
-  // The gap has to be zero or the tab cannot sit on the panel it fronts.
-  assert.match(baseCss, /\.session-detail-tool-payload \{[^}]*gap: 0;/s);
+  assert.match(baseCss, /\.session-detail-payload-head \{[^}]*min-height: 24px/s);
 
-  // The page-scoped `font: inherit` reset outranked the pixel-face rule on
-  // specificity, so a tab label came out in the system sans. The global reset
-  // already covers these controls.
+  // The reference layout: a fixed action column so every command starts at
+  // one aligned edge — wide enough for `send_message`-length names — and rows
+  // tall enough to breathe.
+  assert.match(baseCss, /\.session-detail-tool-name \{[^}]*flex: 0 0 104px/s);
+  assert.match(baseCss, /\.session-detail-tool-call > summary \{[^}]*min-height: 32px/s);
+
+  // Category tints follow the page's AA recipe; the rail keeps pure hues for
+  // non-text marks only.
+  assert.match(baseCss, /\.session-detail-tool-name\.cat-file_edit \{ color: var\(--session-detail-amber\); \}/);
+  assert.match(baseCss, /\.session-detail-tool-name\.cat-read \{ color: var\(--session-detail-link\); \}/);
+  assert.match(baseCss, /\.session-detail-tool-name\.cat-other \{ color: color-mix\(in srgb, var\(--purple\) 85%, var\(--text-0\)\); \}/);
+  assert.match(baseCss, /--session-detail-you: color-mix\(in srgb, var\(--red\) 85%, var\(--text-0\)\);/);
+  assert.match(baseCss, /\.session-detail-checkpoint-sha \{[^}]*color: var\(--session-detail-amber\)/s);
+
+  // The page-scoped `font: inherit` reset stays dead; the global element reset
+  // is what a class always outranks.
   assert.doesNotMatch(baseCss, /\.session-detail-page button,\s*\.session-detail-page select/);
-  // The surviving reset is an element selector, so a class always outranks it.
   assert.match(retroCss, /\nbutton,\ninput,\nselect,\ntextarea,\nsummary \{\n  font-family: inherit;/);
-  assert.match(retroCss, /\.session-detail-payload-tab \{[\s\S]{0,200}?font-family: var\(--font-pixel\)/);
+
   assert.match(baseCss, /@container session-detail-layout \(max-width: 720px\)/);
   assert.match(baseCss, /@container session-detail-layout \(max-width: 500px\)/);
-  assert.match(baseCss, /\.session-detail-prompt-card[\s\S]*background: var\(--surface-card\)/);
-  assert.match(baseCss, /\.session-detail-response-prose[\s\S]*background: transparent/);
-
-  // The speaker label mixes the body colour into the accent so a 10px label
-  // clears 4.5:1 on light paper; the rail beside it keeps the pure hue.
-  assert.match(baseCss, /\.event-prompt \.session-detail-event-heading h3 \{\s*color: color-mix\(in srgb, var\(--red\) 85%, var\(--text-0\)\);/);
-  assert.match(baseCss, /\.event-prompt \.session-detail-event-rail \{ background: var\(--red\); \}/);
 
   // Pixel chrome, mono evidence.
+  assert.match(retroCss, /\.session-detail-payload-label \{[\s\S]{0,400}?font-family: var\(--font-pixel\)/);
+  assert.match(retroCss, /\.session-detail-checkpoint-branch,/);
   assert.match(retroCss, /\.session-detail-day-divider > span,[\s\S]*?font-family: var\(--font-pixel\)/);
-  assert.match(retroCss, /\.session-detail-payload-body,[\s\S]*?font-family: var\(--font-mono\)/);
+  assert.match(retroCss, /\.session-detail-card-meta,[\s\S]*?font-family: var\(--font-mono\)/);
+  assert.match(retroCss, /\.session-detail-tool-name,[\s\S]*?font-family: var\(--font-mono\)/);
+  assert.match(retroCss, /\.session-detail-prompt-card,\n\.session-detail-checkpoint-card \{[\s\S]{0,200}?box-shadow: var\(--shadow-card\)/);
 });

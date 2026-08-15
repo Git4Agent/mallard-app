@@ -322,14 +322,11 @@ body {
 .sync-r2-guide-warning,
 .sync-r2-guide > .btn-link,
 .sync-secret-reveal,
-.session-detail-provider-badge,
-.session-detail-active-badge,
-.session-detail-event-heading h3,
 .session-detail-day-divider > span,
-.session-detail-meta-label,
 .session-detail-toolbar-label,
 .session-detail-filter-name,
-.session-detail-payload-tab {
+.session-detail-checkpoint-branch,
+.session-detail-payload-label {
   font-family: var(--font-pixel);
   /* One weight exists, and synthesis is off, so asking for anything heavier
      here would be a declaration that quietly does nothing. Pixel hierarchy is
@@ -1092,108 +1089,6 @@ summary {
   padding-bottom: 0;
 }
 
-.sync-project-heading-name h1 {
-  font-family: var(--font-sans);
-  font-size: var(--type-2xl);
-  font-weight: var(--weight-semibold);
-  letter-spacing: 0;
-}
-
-.sync-project-heading-name .btn {
-  border: 0;
-  box-shadow: none;
-  color: var(--accent);
-}
-
-/* Longhands rather than the font: shorthand. The shorthand resets six other
-   font properties to initial — which is why the grid-fitting trio has to be
-   re-stated under each one — and with var() a single bad token invalidates
-   family, size, and weight together instead of one at a time. */
-.sync-project-heading-meta {
-  gap: 0;
-  color: var(--text-2);
-  font-family: var(--font-sans);
-  font-size: var(--type-md);
-  font-weight: var(--weight-regular);
-  line-height: 18px;
-  font-kerning: none;
-  font-synthesis: none;
-  font-variant-ligatures: none;
-  letter-spacing: 0;
-  overflow: hidden;
-}
-
-.sync-project-heading-meta-item {
-  position: relative;
-  color: inherit;
-  font-family: var(--font-sans);
-  font-size: var(--type-md);
-  font-weight: var(--weight-regular);
-  line-height: 18px;
-  font-kerning: none;
-  font-synthesis: none;
-  font-variant-ligatures: none;
-  letter-spacing: 0;
-}
-
-.sync-project-heading-repository {
-  max-width: min(220px, 22vw);
-  color: inherit;
-}
-
-.sync-project-heading-path {
-  max-width: min(520px, 48vw);
-  flex: 1 1 auto;
-  color: inherit;
-}
-
-.sync-project-heading-agent {
-  max-width: min(210px, 22vw);
-  flex: 0 1 auto;
-  color: inherit;
-}
-
-.sync-project-heading-meta-item > span {
-  display: block;
-  color: inherit;
-  font-family: var(--font-sans);
-  font-size: var(--type-md);
-  font-weight: var(--weight-regular);
-  line-height: 18px;
-  font-kerning: none;
-  font-synthesis: none;
-  font-variant-ligatures: none;
-  letter-spacing: 0;
-}
-
-/* The repository and agent names are display names; the root is a path you
-   would copy. Same strip, two categories. Ordered after the rule above because
-   both are (0,2,0) and source order is what decides. */
-.sync-project-heading-path > span {
-  font-family: var(--font-mono);
-  font-size: var(--type-sm);
-}
-
-.sync-project-heading-meta-item + .sync-project-heading-meta-item {
-  margin-left: 22px;
-}
-
-.sync-project-heading-meta-item + .sync-project-heading-meta-item::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: -12px;
-  width: 1px;
-  height: 14px;
-  margin: 0;
-  transform: translateY(-50%);
-  background: var(--border-mid);
-}
-
-.sync-project-heading-meta-item svg {
-  color: var(--text-2);
-}
-
 .sync-project-combined-page .project-storage-group {
   margin-bottom: 6px;
   border: 1px solid var(--border-mid);
@@ -1260,6 +1155,26 @@ summary {
 .sync-path-menu-copy > small {
   font-family: var(--font-mono);
   font-size: var(--type-2xs);
+}
+
+/* Paths keep the mono face above; a phrase — a bucket qualifier, an agent
+   profile, a disabled reason — is prose, so it takes the clean face. */
+.sync-path-menu-copy > small.phrase {
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+}
+
+/* The header block naming the menu's object, and the banner explaining a
+   locked menu, speak alongside the items: the same clean face. */
+.sync-path-menu-current {
+  font-family: var(--font-sans);
+  font-size: var(--type-sm);
+}
+
+.sync-path-menu-banner {
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+  line-height: var(--leading-snug);
 }
 
 .sync-path-rename label {
@@ -1390,8 +1305,14 @@ summary {
 /* `--r-pill` is 4px here: the skin squares everything off, and a stadium badge
    among 4px controls would be the only rounded thing on the row. */
 .sync-path-attention,
-.sync-path-count {
+.sync-path-count,
+.session-detail-chip {
   border-radius: var(--r-pill);
+}
+
+/* The presence dot squares off with the rest of the skin. */
+.sync-path-leaf-mark.active::after {
+  border-radius: 1px;
 }
 
 .sync-path-attention {
@@ -2194,7 +2115,8 @@ summary {
    cluster keeps one width whether or not the row can be opened — the right edge
    of every row is a column, not a ragged margin. */
 .sync-history-thread-actions .sync-history-launch-action,
-.sync-history-thread-actions .sync-history-provider-inert {
+.sync-history-thread-actions .sync-history-provider-inert,
+.session-detail-launch {
   width: 22px;
   min-width: 22px;
   min-height: 24px;
@@ -2207,8 +2129,10 @@ summary {
 
 /* The launch trio is the row's way out — hovering one reads as a pressed
    pixel button, not a faint tint: engaged surface, full-strength glyph, and a
-   1px inset ring standing in for a border. */
-.sync-history-thread-actions .sync-history-launch-action:hover:not(:disabled) {
+   1px inset ring standing in for a border. The session header's launch pair
+   is the same cluster one level up, so it presses the same way. */
+.sync-history-thread-actions .sync-history-launch-action:hover:not(:disabled),
+.session-detail-launch:hover:not(:disabled) {
   background: var(--surface-row-active);
   color: var(--text-0);
   box-shadow: inset 0 0 0 1px var(--border-mid);
@@ -2260,6 +2184,7 @@ summary {
    it. Every icon-only clicker keeps the colour feedback and drops the
    displacement; labelled buttons keep the press. */
 .sync-history-thread-actions .sync-history-launch-action:active:not(:disabled),
+.session-detail-launch:active:not(:disabled),
 .sync-history-debug-trigger:active:not(:disabled),
 .sync-history-commit-toggle:active:not(:disabled),
 .sync-history-spine-fold:active:not(:disabled),
@@ -2268,7 +2193,6 @@ summary {
 .sidebar-profile-actions button:active:not(:disabled),
 .sidebar-section-action:active:not(:disabled),
 .sync-inline-action-close:active:not(:disabled),
-.sync-storage-settings-icon:active:not(:disabled),
 .log-panel-actions .btn:active:not(:disabled),
 .sync-modal-header .btn:active:not(:disabled),
 .sync-inline-action-header .btn:active:not(:disabled) {
@@ -2387,6 +2311,7 @@ summary {
 .sync-resource-group,
 .sync-storage-details-panel,
 .sync-storage-repositories,
+.sync-storage-index-list,
 .sync-project-files-panel {
   border-color: var(--border-mid);
   border-radius: 5px;
@@ -2405,7 +2330,8 @@ summary {
 .sync-resource-row,
 .sync-pull-item,
 .sync-project-file-row,
-.sync-storage-repository-row {
+.sync-storage-repository-row,
+.sync-storage-index-row {
   border-color: var(--border);
   background: var(--surface-row);
 }
@@ -2413,7 +2339,8 @@ summary {
 .sync-resource-row:hover,
 .sync-pull-item:hover,
 .sync-project-file-row:hover,
-.sync-storage-repository-row:hover {
+.sync-storage-repository-row:hover,
+.sync-storage-index-row:hover:not(:disabled) {
   background: var(--surface-row-hover);
 }
 
@@ -3075,10 +3002,6 @@ summary {
 }
 
 @media (max-width: 1100px) {
-  .sync-project-heading-identity {
-    width: min(680px, calc(100vw - 370px));
-  }
-
   .sync-history-thread-meta {
     column-gap: 8px;
   }
@@ -3096,10 +3019,6 @@ summary {
     padding-right: 18px;
     padding-left: 18px;
   }
-
-  .sync-project-heading-identity {
-    width: min(600px, calc(100vw - 330px));
-  }
 }
 
 @media (max-width: 720px) {
@@ -3111,10 +3030,6 @@ summary {
   .sync-titlebar-context {
     min-width: 0;
     max-width: 58vw;
-  }
-
-  .sync-project-heading-identity {
-    width: 100%;
   }
 
   .sync-history-commit-meta {
@@ -3184,27 +3099,23 @@ summary {
   font-family: var(--font-sans);
 }
 
-.session-detail-heading-copy h1,
-.session-detail-heading-copy > p,
+.session-detail-summary,
 .session-detail-event-copy,
-.session-detail-checkpoint-body strong,
+.session-detail-checkpoint-subject,
 .sync-history-session-title-button {
   font-family: var(--font-sans);
 }
 
-.session-detail-meta-value,
-.session-detail-event-gutter time,
-.session-detail-event-gap,
-.session-detail-event-undated,
+.session-detail-chip,
+.session-detail-card-meta,
+.session-detail-event-gap > span,
 .session-detail-toolbar-readout,
 .session-detail-filter-count,
-.session-detail-turn-tools > summary strong,
-.session-detail-turn-failures,
-.session-detail-tool-call > summary strong,
+.session-detail-tool-name,
 .session-detail-tool-summary,
 .session-detail-payload-body,
-.session-detail-checkpoint-body code,
-.session-detail-checkpoint-body time {
+.session-detail-checkpoint-sha,
+.session-detail-checkpoint-end time {
   font-family: var(--font-mono);
 }
 
@@ -3240,7 +3151,8 @@ summary {
   color: var(--text-1);
 }
 
-.session-detail-prompt-card {
+.session-detail-prompt-card,
+.session-detail-checkpoint-card {
   border-radius: var(--r-sm);
   background: var(--surface-card);
   box-shadow: var(--shadow-card);
@@ -3252,9 +3164,7 @@ summary {
   box-shadow: none;
 }
 
-.session-detail-tool-call,
-.session-detail-turn-tools,
-.session-detail-checkpoint-body {
+.session-detail-tool-call {
   box-shadow: none;
 }
 
@@ -3266,7 +3176,6 @@ summary {
 }
 
 .session-detail-tool-call > summary:active,
-.session-detail-turn-tools > summary:active,
 .sync-history-session-detail-action:active:not(:disabled) {
   transform: none;
 }

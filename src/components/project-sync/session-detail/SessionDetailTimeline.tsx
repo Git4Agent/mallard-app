@@ -1,11 +1,17 @@
 import type { SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
-import SessionDetailEvent, { type SessionTurnToolState } from "./SessionDetailEvent";
+import SessionDetailEvent from "./SessionDetailEvent";
 import type { SessionToolDetailState } from "./SessionDetailToolCall";
-import { groupSessionEventsByDay } from "./sessionDetailModel";
+import {
+  formatSessionGap,
+  groupSessionEventsByDay,
+  sessionTurnDurationLabel,
+  sessionTurnSpans,
+} from "./sessionDetailModel";
 
 interface Props {
   events: SessionTimelineEvent[];
+  provider: string;
   providerDisplayName: string;
   loading: boolean;
   loadingMore: boolean;
@@ -13,16 +19,14 @@ interface Props {
   error: string | null;
   expandedToolIds: ReadonlySet<string>;
   toolDetails: Readonly<Record<string, SessionToolDetailState>>;
-  turnToolStates: Readonly<Record<string, SessionTurnToolState>>;
   onRetry: () => void;
   onLoadMore: () => void;
   onToolExpandedChange: (eventId: string, expanded: boolean) => void;
-  onTurnToolExpandedChange: (turnId: string, expanded: boolean) => void;
-  onLoadMoreTurnTools: (turnId: string) => void;
 }
 
 export default function SessionDetailTimeline({
   events,
+  provider,
   providerDisplayName,
   loading,
   loadingMore,
@@ -30,16 +34,14 @@ export default function SessionDetailTimeline({
   error,
   expandedToolIds,
   toolDetails,
-  turnToolStates,
   onRetry,
   onLoadMore,
   onToolExpandedChange,
-  onTurnToolExpandedChange,
-  onLoadMoreTurnTools,
 }: Props) {
   // The record is the page; it needs no eyebrow announcing that it is a record,
   // and no count of its own now that the toolbar states one.
   const days = groupSessionEventsByDay(events);
+  const spans = sessionTurnSpans(events);
 
   return (
     <section className="session-detail-timeline" aria-label="Session timeline">
@@ -74,22 +76,35 @@ export default function SessionDetailTimeline({
           <ol className="session-detail-event-list">
             {day.events.map((event, index) => {
               const previousDay = days[dayIndex - 1]?.events;
+              const previousTimestamp = index === 0
+                ? previousDay?.[previousDay.length - 1]?.timestamp
+                : day.events[index - 1].timestamp;
+              // The wait sits on the rail between the events it separates.
+              // Ticks stay quiet: a wait before a call reads as the call's own
+              // runtime, not the transcript stalling.
+              const gap = event.kind !== "tool_call"
+                ? formatSessionGap(previousTimestamp, event.timestamp)
+                : null;
               return (
-              <li key={event.event_id}>
-                <SessionDetailEvent
-                  event={event}
-                  providerDisplayName={providerDisplayName}
-                  previousTimestamp={index === 0
-                    ? previousDay?.[previousDay.length - 1]?.timestamp
-                    : day.events[index - 1].timestamp}
-                  expandedToolIds={expandedToolIds}
-                  toolDetails={toolDetails}
-                  turnToolState={event.turn_id ? turnToolStates[event.turn_id] : undefined}
-                  onToolExpandedChange={onToolExpandedChange}
-                  onTurnToolExpandedChange={onTurnToolExpandedChange}
-                  onLoadMoreTurnTools={onLoadMoreTurnTools}
-                />
-              </li>
+                <li
+                  key={event.event_id}
+                  className={event.kind === "tool_call" ? "session-detail-row-tool" : undefined}
+                >
+                  {gap && (
+                    <div className="session-detail-event-gap"><span>{gap}</span></div>
+                  )}
+                  <SessionDetailEvent
+                    event={event}
+                    provider={provider}
+                    providerDisplayName={providerDisplayName}
+                    turnDuration={event.kind === "prompt" && event.turn_id
+                      ? sessionTurnDurationLabel(spans.get(event.turn_id))
+                      : null}
+                    expandedToolIds={expandedToolIds}
+                    toolDetails={toolDetails}
+                    onToolExpandedChange={onToolExpandedChange}
+                  />
+                </li>
               );
             })}
           </ol>

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { ProjectResourceCategory, ProjectResourceDescriptor } from "../../types";
 import Icon from "../Icons";
-import { RESOURCE_GROUPS, categoryFor, providerLabel } from "./model";
+import { RESOURCE_GROUPS, categoryFor } from "./model";
 
 interface Props {
   resources: ProjectResourceDescriptor[];
@@ -9,6 +9,12 @@ interface Props {
   statuses: Map<string, string>;
   selectableResourceIds?: ReadonlySet<string>;
   disabled?: boolean;
+  /**
+   * Start every group folded. For a group that is entirely secondary — the
+   * requirements list under a push review — the header is the whole point and
+   * the rows are detail you open on purpose.
+   */
+  defaultCollapsed?: boolean;
   onToggle: (resourceId: string) => void;
 }
 
@@ -72,11 +78,11 @@ function ResourceRow({
         <span className="sync-resource-kind-icon">
           <Icon name={resourceIcon(resource)} size={14} />
         </span>
+        {/* The name alone. A second line held `provider · kind` behind an
+            unconditional `display: none` — never painted, never in the a11y
+            tree, and the kind is stated again in the fold below. */}
         <span className="sync-resource-copy">
           <strong>{resource.display_name}</strong>
-          <span>
-            {providerLabel(resource.provider)} · {(resource.provider_resource_type ?? resource.kind).replace(/_/g, " ")}
-          </span>
         </span>
         <span className="sync-resource-meta">
           {status && <span className={`sync-resource-status status-${status}`}>{statusLabel(status)}</span>}
@@ -92,7 +98,12 @@ function ResourceRow({
             </div>
           )}
           <div className="sync-resource-detail-grid">
-            <span>Resource ID</span><code>{resource.resource_id}</code>
+            {/* A resource the backend could not name is titled by its own id
+                — a recipe entry that no longer resolves locally is the case.
+                Printing the id again under a caption said it twice. */}
+            {resource.resource_id !== resource.display_name && (
+              <><span>Resource ID</span><code>{resource.resource_id}</code></>
+            )}
             <span>Kind</span><code>{resource.kind}</code>
             {resource.apply_policy && <><span>Apply</span><code>{resource.apply_policy}</code></>}
           </div>
@@ -112,6 +123,7 @@ function ResourceGroup({
   statuses,
   selectableResourceIds,
   disabled,
+  defaultCollapsed,
   onToggle,
 }: {
   group: (typeof RESOURCE_GROUPS)[number];
@@ -120,9 +132,10 @@ function ResourceGroup({
   statuses: Map<string, string>;
   selectableResourceIds?: ReadonlySet<string>;
   disabled: boolean;
+  defaultCollapsed: boolean;
   onToggle: (resourceId: string) => void;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const selectableItems = items.filter((item) => (
     !item.blocked_reason
     && item.apply_policy !== "never"
@@ -131,6 +144,9 @@ function ResourceGroup({
   const selectableIds = new Set(selectableItems.map((item) => item.resource_id));
   const selectedCount = selectableItems.filter((item) => selected.has(item.resource_id)).length;
   const allSelected = selectableItems.length > 0 && selectedCount === selectableItems.length;
+  // Counted, not assumed: a group can hold both blocked and available rows,
+  // and the header is the only place that says so while it is folded.
+  const unavailableCount = items.filter((item) => !!item.blocked_reason).length;
 
   const toggleCollapsed = () => setCollapsed((current) => !current);
 
@@ -154,6 +170,15 @@ function ResourceGroup({
           <strong>{group.label}</strong>
           <span>{group.description}</span>
         </span>
+        {unavailableCount > 0 && (
+          <span
+            className="sync-resource-group-unavailable"
+            title={`${unavailableCount} of ${items.length} unavailable on this machine`}
+          >
+            <Icon name="alert-triangle" size={12} />
+            {unavailableCount} unavailable
+          </span>
+        )}
         <span className="sync-resource-group-count">{selectedCount}/{items.length}</span>
         <span className="sync-resource-group-actions" onClick={(event) => event.stopPropagation()}>
           <button
@@ -196,6 +221,7 @@ export default function ResourceInventory({
   statuses,
   selectableResourceIds,
   disabled = false,
+  defaultCollapsed = false,
   onToggle,
 }: Props) {
   const grouped = useMemo(() => {
@@ -229,6 +255,7 @@ export default function ResourceInventory({
             statuses={statuses}
             selectableResourceIds={selectableResourceIds}
             disabled={disabled}
+            defaultCollapsed={defaultCollapsed}
             onToggle={onToggle}
           />
         );

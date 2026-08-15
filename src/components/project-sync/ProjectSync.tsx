@@ -45,6 +45,7 @@ import BundleConnectionDialog from "./BundleConnectionDialog";
 import LogManagerDialog from "./LogManagerDialog";
 import ProjectBindingEditor, { type ProjectBindingDraft } from "./ProjectBindingEditor";
 import ProjectLinksWorkspace, { type StorageNotice } from "./ProjectLinksWorkspace";
+import StorageIndexPage from "./StorageIndexPage";
 import type { PathBarMenuGroup } from "./SyncPathBar";
 import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
@@ -329,6 +330,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [readiness, setReadiness] = useState<BundleReadiness | null>(null);
   const [activeStorageByProject, setActiveStorageByProject] = useState<Record<string, string>>(storedActiveStorages);
   const [activeStorageSettingsId, setActiveStorageSettingsId] = useState<string | null>(null);
+  // The page the storage trail is rooted at: every storage page starts its
+  // path with a Storages crumb, and this is where that crumb goes.
+  const [storageIndexOpen, setStorageIndexOpen] = useState(false);
   // The Catalog menu starts empty and grows one row per (provider profile ×
   // resource kind) the user adds. Each registered resource owns its own
   // storage links; there is no storage-wide Catalog selection.
@@ -805,12 +809,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       : activeCatalogScope
         ? catalogKindMeta(activeCatalogScope.scope.resource_kind).icon
         : "folder";
-  // The project workspace renders a path bar that doubles as the titlebar.
+  // The project workspace renders a path bar that doubles as the titlebar —
+  // and so do the storage screens: the Storages index owns its state here,
+  // while the storage page reports through activeStorageSettingsId, which the
+  // editor confirms an effect late. That one-frame seam only shows when no
+  // project is active; with one active the bar was already up.
   const showsPathBar = !activeDraftSummary
     && !addingCatalogScope
     && !activeCatalogScope
-    && !!activeSummary
-    && !setupDraftId;
+    && !setupDraftId
+    && (!!activeSummary || storageIndexOpen || activeStorageSettingsId != null);
   const restoreProfileLabel = restoreBinding
     ? [...new Set(Object.values(restoreBinding.profile_ids)
       .map((profileId) => profiles.find((profile) => profile.profile_id === profileId)?.display_name)
@@ -1373,10 +1381,37 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     // project or draft leaves it the same way it leaves storage settings.
     setCatalogScopeId(null);
     setAddingCatalogScope(false);
+    setStorageIndexOpen(false);
     setStorageEditorRequest((current) => ({
       mode: "close",
       requestId: (current?.requestId ?? 0) + 1,
     }));
+  };
+
+  /** One route into a storage page, shared by the sidebar, the Storages
+      index, and the banners that deep-link a specific storage's settings. */
+  const openStorageWorkspace = (storageId: string, settingsExpanded: boolean) => {
+    closeProjectSubview();
+    setSetupDraftId(null);
+    setAddingCatalogScope(false);
+    setCatalogScopeId(null);
+    setStorageIndexOpen(false);
+    setPendingPush(null);
+    setPushError(null);
+    if (restorePlan) closePullReview();
+    setStorageEditorRequest((current) => ({
+      mode: "open",
+      storageId,
+      settingsExpanded,
+      requestId: (current?.requestId ?? 0) + 1,
+    }));
+  };
+
+  const openStorageIndex = () => {
+    setError(null);
+    closeWorkspaceSettings();
+    setSetupDraftId(null);
+    setStorageIndexOpen(true);
   };
 
   const beginAddProject = async () => {
@@ -2525,10 +2560,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const appActions: PathBarMenuGroup[] = [{
     label: "Mallard",
     items: [
+      // A checked item with a stable label, not a verb that rewrites itself
+      // after every use — menu state lives in the tick, per the menu pattern.
       {
         id: "theme",
-        label: `Switch to ${theme === "dark" ? "light" : "dark"} theme`,
-        icon: theme === "dark" ? ("sun" as const) : ("moon" as const),
+        label: "Dark theme",
+        icon: "moon" as const,
+        checked: theme === "dark",
         onSelect: () => onThemeChange(theme === "dark" ? "light" : "dark"),
       },
       {
@@ -2994,6 +3032,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         mode: "close",
         requestId: (current?.requestId ?? 0) + 1,
       }));
+      // Removing the storage whose page you are on leaves nothing to stand
+      // on; the trail's root is the natural place to land.
+      if (activeStorageSettingsId === storageId) setStorageIndexOpen(true);
     }
   };
 
@@ -3002,6 +3043,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setSetupDraftId(null);
     setAddingCatalogScope(false);
     setCatalogScopeId(null);
+    setStorageIndexOpen(false);
     setPendingPush(null);
     setPushError(null);
     if (restorePlan) closePullReview();
@@ -3260,21 +3302,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           setActivityOpen(next);
         }}
         onAddProject={() => void beginAddProject()}
-        onOpenStorage={(storageId, settingsExpanded) => {
-          closeProjectSubview();
-          setSetupDraftId(null);
-          setAddingCatalogScope(false);
-          setCatalogScopeId(null);
-          setPendingPush(null);
-          setPushError(null);
-          if (restorePlan) closePullReview();
-          setStorageEditorRequest((current) => ({
-            mode: "open",
-            storageId,
-            settingsExpanded,
-            requestId: (current?.requestId ?? 0) + 1,
-          }));
-        }}
+        onOpenStorage={openStorageWorkspace}
         onClearStorage={(storageId) => void clearStorageData(storageId)}
         onRemoveStorage={(storageId) => void removeStorage(storageId)}
         onAddStorage={openNewStorageConfiguration}
@@ -3360,6 +3388,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
               void refreshCatalogScopes();
             }}
           />
+        ) : storageIndexOpen ? (
+          <StorageIndexPage
+            storages={config.storages}
+            links={config.links}
+            storageIssues={storageIssues}
+            busy={busy}
+            appActions={appActions}
+            onOpenStorage={(storageId) => openStorageWorkspace(storageId, false)}
+            onAddStorage={openNewStorageConfiguration}
+          />
         ) : (
         <ProjectLinksWorkspace
             projects={projects}
@@ -3392,7 +3430,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onAddProject={() => void beginAddProject()}
             onSelectProject={openProject}
             appActions={appActions}
-            onOpenStorageSettings={openNewStorageConfiguration}
+            onAddStorage={openNewStorageConfiguration}
+            onOpenStorage={openStorageWorkspace}
+            onOpenStorageIndex={openStorageIndex}
+            onClearStorage={(storageId) => void clearStorageData(storageId)}
+            onRemoveStorage={(storageId) => void removeStorage(storageId)}
             onSaveStorage={saveInlineStorage}
             storageEditorRequest={storageEditorRequest}
             onStorageEditorRequestHandled={() => setStorageEditorRequest(null)}
