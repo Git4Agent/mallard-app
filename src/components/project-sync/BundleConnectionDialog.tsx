@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { BundleSnapshotSummary, StorageConfig } from "../../types";
 import Icon from "../Icons";
 import { formatRelativeTime } from "./model";
@@ -34,6 +34,13 @@ export default function BundleConnectionDialog({
 
   useEffect(() => setSelectedId(""), [matches]);
 
+  // Native <dialog> + showModal() supplies focus trap, Escape, inert
+  // background, and focus restoration.
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    dialogRef.current?.showModal();
+  }, []);
+
   const selected = matches.find((match) => match.bundle_id === selectedId) ?? null;
   const missing = reason === "missing";
   const selectedFingerprintDiffers = !!projectFingerprint
@@ -44,13 +51,13 @@ export default function BundleConnectionDialog({
     && !selected.repository_fingerprint;
 
   return (
-    <div className="sync-modal-backdrop" role="presentation">
-      <section
-        className="sync-modal sync-bundle-connection-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="sync-bundle-connection-title"
-      >
+    <dialog
+      ref={dialogRef}
+      className="sync-modal sync-bundle-connection-dialog"
+      aria-labelledby="sync-bundle-connection-title"
+      onCancel={(event) => { if (busy) event.preventDefault(); }}
+      onClose={onCancel}
+    >
         <header className="sync-modal-header">
           <div>
             <span className="sync-eyebrow">Repo identity</span>
@@ -140,7 +147,6 @@ export default function BundleConnectionDialog({
             </button>
           </div>
         </footer>
-      </section>
-    </div>
+    </dialog>
   );
 }

@@ -138,7 +138,9 @@ test("the desktop shell supports a persistent sidebar toggle and keyboard shortc
   assert.match(css, /\.sync-sidebar-toggle \{[^}]*top: 14px;[^}]*left: 86px;/);
   assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar \{[^}]*padding-left: 140px;/);
   assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar::before \{[^}]*left: 123px;/);
-  assert.match(css, /\.sync-titlebar \{[^}]*height: 52px;[^}]*min-height: 52px;[^}]*flex: 0 0 52px;/);
+  // The bar holds a 3.25rem floor (52px at the default root) and grows with
+  // its text instead of clipping it — height stays unpinned deliberately.
+  assert.match(css, /\.sync-titlebar \{[^}]*min-height: 3\.25rem;[^}]*flex: 0 0 auto;/);
   assert.match(css, /\.sync-sidebar-drag \{[^}]*height: 38px;/);
   assert.match(css, /\.sync-sidebar-brand \{[^}]*height: 52px;/);
   assert.deepEqual(tauriConfig.app.windows[0].trafficLightPosition, { x: 20, y: 29 });
@@ -233,9 +235,12 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /--font-mono: "SFMono-Regular", "SF Mono"/);
   assert.match(retroCss, /--font-pixel: "Departure Mono", var\(--font-mono\)/);
   assert.match(retroCss, /--font: var\(--font-sans\);/);
-  // Whole-pixel scale: a fractional advance walks the pixel blocks off the grid.
-  assert.match(retroCss, /--type-3xs: 9px;[\s\S]*--type-3xl: 26px;/);
+  // Root-relative scale (WCAG 1.4.4): every step resolves to the whole pixel
+  // it was designed at when the root sits at the 16px default — 0.5625rem is
+  // 9px, 1.625rem is 26px — and follows the user's text-size preference.
+  assert.match(retroCss, /--type-3xs: 0\.5625rem;[\s\S]*--type-3xl: 1\.625rem;/);
   assert.match(retroCss, /--weight-regular: 400;[\s\S]*--weight-bold: 700;/);
+  assert.match(retroCss, /html \{\s*font-size: 100%;\s*\}/);
   assert.match(retroCss, /:root\[data-theme="dark"\] \.sync-brand-logo,[\s\S]*:root\[data-theme="dark"\] \.sync-sidebar-product-mark img,[\s\S]*:root\[data-theme="dark"\] \.sync-startup-mark img\s*\{[^}]*filter: brightness\(0\) invert\(1\);/s);
   // A vector mark rasterises itself, so image-rendering governs nothing here.
   assert.doesNotMatch(retroCss, /image-rendering:/);
@@ -400,7 +405,10 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.doesNotMatch(retroCss, /sync-history-commit-node|--sync-history-node-size|--sync-history-node-half|--retro-pixel-ring|sync-history-group-toggle/);
   // Storage-only rows live outside the timeline and need the same row tokens;
   // they are not inherited, so leaving the scope out would lose the rail inset.
-  assert.match(retroCss, /\.sync-history-timeline,\s*\.sync-history-storage-only\s*\{[^}]*--sync-history-row-actions-column: 148px;[^}]*--sync-history-commit-actions-column: 26px;[^}]*--sync-history-commit-date-column: 26ch;[^}]*--sync-history-row-icon-size: 18px;[^}]*--sync-history-row-anchor-y: 15px;[^}]*--sync-history-rail-x: 8px;[^}]*--sync-history-card-offset: 26px;/s);
+  // The actions column shrink-wraps (auto): a fixed 148px four-slot
+  // reservation left ~97px of blank between the ellipsized title and the
+  // first of the two buttons the markup settled on.
+  assert.match(retroCss, /\.sync-history-timeline,\s*\.sync-history-storage-only\s*\{[^}]*--sync-history-row-actions-column: auto;[^}]*--sync-history-commit-actions-column: 26px;[^}]*--sync-history-commit-date-column: 26ch;[^}]*--sync-history-row-icon-size: 18px;[^}]*--sync-history-row-anchor-y: 15px;[^}]*--sync-history-rail-x: 8px;[^}]*--sync-history-card-offset: 26px;/s);
   // The storage-only card takes the timeline's inset so its rail mark lands in
   // the same column.
   assert.match(retroCss, /\.sync-history-storage-only\s*\{[^}]*margin: 12px 0 12px var\(--sync-history-card-offset\);/s);
@@ -522,7 +530,7 @@ test("the titlebar stays silent for a project and names the screens without a tr
   // only repeat it. Every other screen still has to say what it is.
   assert.match(
     workspace,
-    /const workspaceTitle = activeDraftSummary\?\.display_name\s*\?\? \(addingCatalogScope \? "Add Catalog row" : null\)\s*\?\? \(activeCatalogScope \? catalogScopeLabel\([^)]*\) : null\)\s*\?\? \(activeSummary \? null : "Projects"\);/,
+    /const workspaceTitle = activeDraftSummary\?\.display_name\s*\?\? \(addingCatalogScope \? "Add Catalog resource" : null\)\s*\?\? \(activeCatalogScope \? catalogScopeLabel\([^)]*\) : null\)\s*\?\? \(activeSummary \? null : "Projects"\);/,
   );
   assert.match(workspace, /\{workspaceTitle && \(/);
   assert.match(workspace, /<Icon name=\{workspaceIcon\} size=\{16\} \/>/);

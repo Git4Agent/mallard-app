@@ -441,6 +441,7 @@ export default function ProjectSetupWorkspace({
             disabled={working}
             aria-label={`${label} profile`}
             aria-invalid={profileBlocked || rowIncomplete || undefined}
+            aria-describedby={(profileBlocked || rowIncomplete) && profileErrorMessage ? "sync-setup-error-agent" : undefined}
             onChange={(event) => {
               const next = event.target.value;
               if (next === "__pending") {
@@ -481,6 +482,7 @@ export default function ProjectSetupWorkspace({
             disabled={working}
             aria-label={`${label} custom profile path`}
             aria-invalid={profileBlocked || rowIncomplete || undefined}
+            aria-describedby={(profileBlocked || rowIncomplete) && profileErrorMessage ? "sync-setup-error-agent" : undefined}
             placeholder={`${label} profile path`}
             spellCheck={false}
             autoFocus
@@ -502,6 +504,12 @@ export default function ProjectSetupWorkspace({
       </div>
     );
   };
+
+  // Field errors are described-by their controls (WCAG 3.3.1): aria-invalid
+  // alone says a field is wrong without ever saying why.
+  const projectErrorId = projectSection?.message && projectSection.state === "blocked" ? "sync-setup-error-project" : undefined;
+  const storageErrorId = storageSection?.message && storageSection.state === "blocked" ? "sync-setup-error-storage" : undefined;
+  const repositoryErrorId = repositorySection?.message && repositorySection.state === "blocked" ? "sync-setup-error-repository" : undefined;
 
   return (
     <section className="sync-inline-new-project sync-setup-workspace" role="region" aria-labelledby="sync-setup-title">
@@ -534,19 +542,20 @@ export default function ProjectSetupWorkspace({
               <input
                 value={draft.display_name}
                 disabled={working || usesExistingRepo}
+                aria-describedby={projectErrorId}
                 onChange={(event) => edit((current) => ({ ...current, display_name: event.target.value }))}
               />
             </label>
             <label>
               <span>Folder</span>
               <div className="sync-profile-select-row">
-                <input value={compactProjectPath(draft.project_root)} readOnly title={draft.project_root} />
+                <input value={compactProjectPath(draft.project_root)} readOnly title={draft.project_root} aria-describedby={projectErrorId} />
                 <button type="button" className="btn" onClick={() => void changeProjectFolder()} disabled={working}>Change…</button>
               </div>
             </label>
           </div>
           {projectSection?.message && projectSection.state === "blocked" && (
-            <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {projectSection.message}</div>
+            <div id={projectErrorId} className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {projectSection.message}</div>
           )}
           {usesExistingRepo && (
             <small className="sync-setup-hint">The project name follows the connected remote repo.</small>
@@ -587,7 +596,7 @@ export default function ProjectSetupWorkspace({
             })}
           </div>
           {profileErrorMessage && (
-            <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {profileErrorMessage}</div>
+            <div id="sync-setup-error-agent" className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {profileErrorMessage}</div>
           )}
         </section>
 
@@ -603,6 +612,7 @@ export default function ProjectSetupWorkspace({
                 value={draft.storage?.kind === "existing" ? draft.storage.storage_id : draft.storage?.kind === "pending" ? "__pending" : ""}
                 disabled={working}
                 aria-label="Storage"
+                aria-describedby={storageErrorId}
                 onChange={(event) => {
                   const next = event.target.value;
                   edit((current) => ({
@@ -636,7 +646,7 @@ export default function ProjectSetupWorkspace({
             </button>
           </div>
           {storageSection?.message && storageSection.state === "blocked" && (
-            <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {storageSection.message}</div>
+            <div id={storageErrorId} className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {storageSection.message}</div>
           )}
           {storageIsPending && selectedStorage && (
             <small className="sync-setup-hint">{selectedStorage.local_dir}</small>
@@ -654,12 +664,14 @@ export default function ProjectSetupWorkspace({
               {sectionBadge(repositorySection)}
             </div>
             {repositorySection?.message && repositorySection.state === "blocked" && (
-              <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {repositorySection.message}</div>
+              <div id={repositoryErrorId} className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {repositorySection.message}</div>
             )}
             {bundlesError ? (
-              <div className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {bundlesError}</div>
+              /* No radiogroup renders alongside this failure, so there is no
+                 field to describe — announce it instead. */
+              <div className="sync-setup-field-error" role="alert"><Icon name="alert-triangle" size={13} /> {bundlesError}</div>
             ) : !listableStorageId ? null : (
-              <div className="sync-bundle-match-options" role="radiogroup" aria-label="Repo identity for this project">
+              <div className="sync-bundle-match-options" role="radiogroup" aria-label="Repo identity for this project" aria-describedby={repositoryErrorId}>
                 <button
                   type="button"
                   role="radio"

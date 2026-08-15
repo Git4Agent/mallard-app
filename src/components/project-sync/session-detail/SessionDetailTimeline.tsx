@@ -72,7 +72,9 @@ export default function SessionDetailTimeline({
 
       {days.map((day, dayIndex) => (
         <div className="session-detail-day" key={`${day.key}:${dayIndex}`}>
-          <h3 className="session-detail-day-divider"><span>{day.label}</span></h3>
+          {/* h2, directly under the page's h1: an h3 here implied a section
+              level that does not exist (WCAG 1.3.1). */}
+          <h2 className="session-detail-day-divider"><span>{day.label}</span></h2>
           <ol className="session-detail-event-list">
             {day.events.map((event, index) => {
               const previousDay = days[dayIndex - 1]?.events;

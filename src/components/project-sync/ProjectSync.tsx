@@ -566,6 +566,17 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     return () => window.removeEventListener("resize", fitSidebarToWindow);
   }, []);
 
+  useEffect(() => {
+    // The drag handler clamps logHeight against the window, but only while
+    // dragging — shrinking the window afterwards could hold a drawer taller
+    // than the space above it and starve the main pane to nothing.
+    const fitLogToWindow = () => {
+      setLogHeight((current) => Math.min(current, Math.max(140, window.innerHeight - 120)));
+    };
+    window.addEventListener("resize", fitLogToWindow);
+    return () => window.removeEventListener("resize", fitLogToWindow);
+  }, []);
+
   const loadActivityLogs = useCallback(async (cursor: string | null = null) => {
     const requestId = ++logRequestRef.current;
     const startedAt = Date.now();
@@ -799,7 +810,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // The project workspace names itself in its path bar, so the titlebar stays
   // silent there and speaks only for the screens that carry no trail.
   const workspaceTitle = activeDraftSummary?.display_name
-    ?? (addingCatalogScope ? "Add Catalog row" : null)
+    ?? (addingCatalogScope ? "Add Catalog resource" : null)
     ?? (activeCatalogScope ? catalogScopeLabel(activeCatalogScope.scope, activeCatalogScope.profile) : null)
     ?? (activeSummary ? null : "Projects");
   const workspaceIcon = activeDraftSummary
@@ -2275,12 +2286,19 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       }
       return;
     }
+    // The backend refuses to restart unless the caller vouches that active
+    // chats are complete — so actually ask, instead of vouching unasked.
+    const chatsComplete = await confirm(
+      `${action.label} now?\n\nAny chats it is still running are interrupted mid-turn. Continue only once active chats are complete.`,
+      { title: action.label },
+    );
+    if (!chatsComplete) return;
     setBusy(true);
     try {
       const result = await projectSyncApi.restartCodexAppAfterPull(
         action.operationId,
         action.appKind,
-        true,
+        chatsComplete,
       );
       setHistoryRefreshEpoch((epoch) => epoch + 1);
       if (result.success) {
@@ -3349,7 +3367,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         )}
 
         {backendError && (
-          <div className="sync-backend-banner">
+          /* role="alert", like the success notice below it: a failure that
+             screen readers never announce is a silent failure (WCAG 4.1.3). */
+          <div className="sync-backend-banner" role="alert">
             <Icon name="alert-triangle" size={15} />
             <span><strong>Project-sync backend unavailable.</strong> {backendError}</span>
             <button type="button" className="btn" onClick={() => void refresh()}>Retry</button>

@@ -15,7 +15,7 @@ import Icon, { type IconName } from "../Icons";
 import { projectSyncApi } from "./api";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
 import ProviderMark from "./ProviderMark";
-import type { OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
+import { formatCompactNumber, formatSessionDetailTimestamp, type OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "./ThreadStatusIcon";
 
 /**
@@ -79,6 +79,10 @@ interface ContentProps {
   loading: boolean;
   loadingMore: boolean;
   actionError: string | null;
+  /** Page-level load failure — kept apart from actionError so a failed row
+      action is never mistaken for an empty page and vice versa. */
+  loadError: string | null;
+  onRetryLoad: () => void;
   actionBusyResourceId: string | null;
   actionBusyActionId?: string | null;
   onLoadMore: () => void;
@@ -270,9 +274,9 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
 
 function formatDate(value?: number | null): string {
   if (!value) return "Not recorded";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
-  }).format(new Date(value * 1_000));
+  // Shared with the session detail page, so a row and the page it opens
+  // stamp the same moment the same way.
+  return formatSessionDetailTimestamp(value);
 }
 
 function formatCalendarDate(value: number): string {
@@ -312,7 +316,7 @@ function formatDuration(startedAt: number, endedAt: number): string | null {
 
 function formatCount(value?: number | null): string {
   if (value == null) return "Not reported";
-  return new Intl.NumberFormat(undefined, { notation: value >= 1_000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value);
+  return formatCompactNumber(value);
 }
 
 export function compactThreadTitle(value: string): string {
@@ -429,7 +433,7 @@ export function sessionSyncPresentation(
       className: "pending",
       label: syncHoldDetail(pending.mode, entry)
         ?? entry.status_detail
-        ?? "Sync is waiting for this conversation to become ready.",
+        ?? "Sync is waiting for this session to become ready.",
     };
   }
   const conflict = decisionWithReason([
@@ -445,7 +449,7 @@ export function sessionSyncPresentation(
       className: "conflict",
       label: syncHoldDetail(conflict.mode, entry)
         ?? entry.status_detail
-        ?? "Mallard could not safely match the local and stored conversation.",
+        ?? "Mallard could not safely match the local and stored session.",
     };
   }
   const blocked = (mode: "push" | "pull"): ComparisonPresentation => ({
@@ -1041,9 +1045,9 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
           ? `Can't sync — Mallard can't safely capture this ${providerName} session. It still opens on this computer.`
           : "Can't sync — this stored copy can't be restored safely on this computer.";
       case "ambiguous_binding":
-        return "Can't sync — more than one stored thread could match this session.";
+        return "Can't sync — more than one stored session could match this one.";
       case "missing_binding":
-        return "Can't sync — this session isn't linked to a stored thread yet.";
+        return "Can't sync — this session isn't linked to a stored copy yet.";
       case "provider_not_quiescent":
         return `Can't sync right now — ${providerName} may still be writing this session.`;
       case "stale_plan":
@@ -1051,22 +1055,22 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
       case "busy":
         return `Another ${providerName} sync operation is still finishing. Wait for recovery, then refresh.`;
       case "detached_requires_pull":
-        return "This task's local mapping changed. Pull to establish the current mapping.";
+        return "This session's local mapping changed. Pull to establish the current mapping.";
       case "corruption_blocked":
-        return "Can't sync — this task failed local verification and needs repair.";
+        return "Can't sync — this session failed local verification and needs repair.";
       case "unknown_evidence":
-        return "Can't sync — Mallard could not prove the local and stored task state safely.";
+        return "Can't sync — Mallard could not prove the local and stored session state safely.";
       default:
         return "Can't sync — this session can't be changed safely right now.";
     }
   }
   if (mode === "push" && decision.action === "require_pull_metadata") {
-    return "The task content matches, but storage has newer sync metadata. Pull once before pushing.";
+    return "The session content matches, but storage has newer sync metadata. Pull once before pushing.";
   }
   if (mode === "push" && decision.action === "require_pull") {
     return entry.state === "diverged"
-      ? "Local and stored history have diverged. Pull will keep both histories as independent tasks."
-      : "The stored thread has newer messages. Pull them before pushing.";
+      ? "Local and stored history have diverged. Pull will keep both histories as independent sessions."
+      : "The stored session has newer messages. Pull them before pushing.";
   }
   return null;
 }
@@ -1424,7 +1428,7 @@ function providerNoticeCopy(state: ProviderActivityState): string {
 }
 
 export function ProjectChatHistoryContent({
-  project, binding, activity, loading, loadingMore, actionError, actionBusyResourceId, actionBusyActionId = null,
+  project, binding, activity, loading, loadingMore, actionError, loadError, onRetryLoad, actionBusyResourceId, actionBusyActionId = null,
   onLoadMore,
   onSessionAction, onOpenSessionDetail, embedded = false, comparison = null,
   comparisonLoading = false, comparisonError = null, activeStorageName = null,
@@ -1558,6 +1562,17 @@ export function ProjectChatHistoryContent({
         {refreshStatus && <span className="sync-visually-hidden" role="status">{refreshStatus}</span>}
 
         {actionError && <div className="sync-callout error sync-history-error" role="alert"><Icon name="alert-triangle" size={15} /><span>{actionError}</span></div>}
+        {loadError && activity != null && (
+          /* A refresh that failed on top of an already-loaded page: the stale
+             page stays useful, the callout owns the retry. */
+          <div className="sync-callout error sync-history-error" role="alert">
+            <Icon name="alert-triangle" size={15} />
+            <span>{`Couldn't refresh activity: ${loadError}`}</span>
+            <button type="button" className="btn btn-ghost" onClick={onRetryLoad} disabled={loading}>
+              Try again
+            </button>
+          </div>
+        )}
         {comparison?.remote_continuity?.state === "replaced" && (
           <div className="sync-callout warning sync-history-continuity" role="status">
             <Icon name="alert-triangle" size={15} />
@@ -1615,19 +1630,35 @@ export function ProjectChatHistoryContent({
         ))}
         {!hasBoundProvider ? (
           <div className="sync-history-state sync-history-profile-state"><Icon name="alert-triangle" size={18} /><div><strong>No agent profile is connected.</strong><span>Remove and add the project again to choose a provider profile.</span></div></div>
-        ) : loading && !activity ? <div className="sync-history-state" role="status" aria-live="polite"><span className="status-loader" /> Loading project activity…</div> : !activity ? null : (
+        ) : loading && !activity ? <div className="sync-history-state" role="status" aria-live="polite"><span className="status-loader" /> Loading project activity…</div> : !activity ? (
+          /* A failed first load is a page of its own, never a blank one: it
+             names what failed and carries its own retry, because the trail's
+             refresh control is not rendered for every project shape. */
+          loadError ? (
+            <div className="sync-history-state sync-history-profile-state" role="alert">
+              <Icon name="alert-triangle" size={18} />
+              <div>
+                <strong>{`Couldn't load activity for ${label}.`}</strong>
+                <span>{loadError}</span>
+              </div>
+              <button type="button" className="btn" onClick={onRetryLoad} disabled={loading}>
+                <Icon name="refresh" size={13} /> Try again
+              </button>
+            </div>
+          ) : null
+        ) : (
           <>
             {!embedded && (
               <section className="sync-history-project-context" aria-label="Project information">
-                <span className="sync-history-context-item" title={`Project directory: ${binding?.canonical_project_root ?? binding?.project_root ?? project.project_root ?? "Not configured"}`}>
+                <span className="sync-history-context-item" data-tooltip={`Project directory: ${binding?.canonical_project_root ?? binding?.project_root ?? project.project_root ?? "Not configured"}`} aria-label={`Project directory: ${binding?.canonical_project_root ?? binding?.project_root ?? project.project_root ?? "Not configured"}`} tabIndex={0}>
                   <Icon name="folder" size={14} /><span>{compactProjectPath(binding?.canonical_project_root ?? binding?.project_root ?? project.project_root ?? "Not configured")}</span>
                 </span>
                 {aliased && <span className="sync-history-context-item" title={`Repository: ${project.display_name}`}><Icon name="git-branch" size={14} /><span className="sync-history-context-name">{project.display_name}</span></span>}
                 {activity.storage_sync.length ? activity.storage_sync.map((storage) => (
                   <span key={storage.storage_id} className="sync-history-context-item sync-history-storage-item" title={`Storage: ${storage.storage_name}`}>
                     <Icon name="cloud" size={14} /><strong>{storage.storage_name}</strong>
-                    <span className={storage.last_pull_at ? "recorded" : undefined} title={`Last pull: ${formatDate(storage.last_pull_at)}`} aria-label={`Last pull: ${formatDate(storage.last_pull_at)}`}><Icon name="download" size={13} /></span>
-                    <span className={storage.last_push_at ? "recorded" : undefined} title={`Last push: ${formatDate(storage.last_push_at)}`} aria-label={`Last push: ${formatDate(storage.last_push_at)}`}><Icon name="upload" size={13} /></span>
+                    <span className={storage.last_pull_at ? "recorded" : undefined} data-tooltip={`Last pull: ${formatDate(storage.last_pull_at)}`} aria-label={`Last pull: ${formatDate(storage.last_pull_at)}`} tabIndex={0}><Icon name="download" size={13} /></span>
+                    <span className={storage.last_push_at ? "recorded" : undefined} data-tooltip={`Last push: ${formatDate(storage.last_push_at)}`} aria-label={`Last push: ${formatDate(storage.last_push_at)}`} tabIndex={0}><Icon name="upload" size={13} /></span>
                   </span>
                 )) : <span className="sync-history-context-item muted" title="No storage linked"><Icon name="cloud" size={14} /><span>No storage</span></span>}
               </section>
@@ -1821,6 +1852,7 @@ export default function ProjectActivityPage({
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [actionBusyResourceId, setActionBusyResourceId] = useState<string | null>(null);
   const [actionBusyActionId, setActionBusyActionId] = useState<string | null>(null);
   const requestRef = useRef(0);
@@ -1832,6 +1864,7 @@ export default function ProjectActivityPage({
     const requestId = ++requestRef.current;
     if (beforeTime) setLoadingMore(true); else setLoading(true);
     setActionError(null);
+    setLoadError(null);
     try {
       const next = await projectSyncApi.getProjectActivity(
         project.local_project_id,
@@ -1845,7 +1878,9 @@ export default function ProjectActivityPage({
       setActivity((current) => beforeTime ? mergePages(current, next) : next);
       setBranch(next.git?.selected_branch ?? null);
     } catch (reason) {
-      if (requestId === requestRef.current) setActionError(errorMessage(reason));
+      // Page-level failures and row-action failures are different facts;
+      // keeping them in one state made them indistinguishable on screen.
+      if (requestId === requestRef.current) setLoadError(errorMessage(reason));
     } finally {
       if (requestId === requestRef.current) { setLoading(false); setLoadingMore(false); }
     }
@@ -1966,5 +2001,5 @@ export default function ProjectActivityPage({
       setActionBusyActionId(null);
     }
   };
-  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.next_before ?? null, branch)} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
+  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void load(null, branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.next_before ?? null, branch)} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
 }

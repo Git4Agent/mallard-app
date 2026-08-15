@@ -231,7 +231,7 @@ test("Push selection folds the new decisions into existing task cards", () => {
   assert.match(html, /data-thread-status="unavailable"/);
   assert.match(html, /Mallard can&#x27;t safely capture this Codex session\. It still opens on this computer\./);
   assert.match(html, /Pull required/);
-  assert.match(html, /Pull will keep both histories as independent tasks/);
+  assert.match(html, /Pull will keep both histories as independent sessions/);
   assert.equal((html.match(/aria-label="Open in Codex"/g) ?? []).length, 3);
 });
 
@@ -294,7 +294,7 @@ test("out-of-window tasks remain discoverable in Older activity", () => {
 test("hold details explain metadata pulls, divergence, and unsupported codecs", () => {
   assert.match(syncHoldDetail("push", blockedEntry) ?? "", /can't safely capture this Codex session/i);
   assert.equal(syncHoldDetail("push", healthyEntry), null);
-  assert.match(syncHoldDetail("push", divergedEntry) ?? "", /keep both histories as independent tasks/);
+  assert.match(syncHoldDetail("push", divergedEntry) ?? "", /keep both histories as independent sessions/);
   assert.match(
     syncHoldDetail("push", entry({
       thread_id: HEALTHY_ID,

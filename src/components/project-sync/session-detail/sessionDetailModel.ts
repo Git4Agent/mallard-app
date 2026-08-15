@@ -184,17 +184,27 @@ export function formatSessionCount(count: SessionCount): string {
 }
 
 /**
+ * The one compaction rule for counts of tokens and turns, everywhere they
+ * appear: exact below 10K, whole K to 1M, hundredths of M above. The activity
+ * row a session is launched from and the page it opens must agree on the
+ * number — two thresholds made 9,432 read "9.4K" in one and "9,432" in the
+ * other.
+ */
+export function formatCompactNumber(value: number): string {
+  return value >= 1_000_000
+    ? `${(value / 1_000_000).toFixed(2)}M`
+    : value >= 10_000
+      ? `${Math.round(value / 1_000)}K`
+      : new Intl.NumberFormat().format(value);
+}
+
+/**
  * Header figures are read at a glance and sit in a row that must not reflow, so
  * they are abbreviated; the exact value stays in the element's title.
  */
 export function formatCompactCount(count: SessionCount): string {
   if (count.quality === "unsupported" || count.value == null) return "Unavailable";
-  const value = count.value;
-  const compact = value >= 1_000_000
-    ? `${(value / 1_000_000).toFixed(2)}M`
-    : value >= 10_000
-      ? `${Math.round(value / 1_000)}K`
-      : new Intl.NumberFormat().format(value);
+  const compact = formatCompactNumber(count.value);
   return count.quality === "lower_bound" ? `${compact}+` : compact;
 }
 

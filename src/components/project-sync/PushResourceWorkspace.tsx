@@ -702,6 +702,12 @@ export default function PushResourceWorkspace({
         {localBlockerSentence && (
           <span role="status"><small>{localBlockerSentence}</small></span>
         )}
+        {busy && (
+          /* Every exit is sealed while the transfer runs, on purpose: the
+             backend has no safe mid-write abort. Saying so beats leaving the
+             user hunting for a cancel that does not exist. */
+          <span role="status"><small>A running push finishes or fails whole — it can’t be cancelled midway.</small></span>
+        )}
         <button
           type="button"
           className="btn btn-primary sync-pull-apply-button"

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   ProviderDescriptor,
@@ -53,6 +53,13 @@ export default function ProjectBindingEditor({
   const [profileIds, setProfileIds] = useState<Record<ProviderKey, string>>(() => ({
     ...(binding.profile_ids ?? {}),
   }));
+
+  // Native <dialog> + showModal() supplies focus trap, Escape, inert
+  // background, and focus restoration.
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    dialogRef.current?.showModal();
+  }, []);
 
   const chooseFolder = async () => {
     const picked = await open({ directory: true, multiple: false });
@@ -140,8 +147,13 @@ export default function ProjectBindingEditor({
   };
 
   return (
-    <div className="sync-modal-backdrop" role="presentation">
-      <section className="sync-modal sync-binding-dialog" role="dialog" aria-modal="true" aria-labelledby="sync-binding-title">
+    <dialog
+      ref={dialogRef}
+      className="sync-modal sync-binding-dialog"
+      aria-labelledby="sync-binding-title"
+      onCancel={(event) => { if (busy) event.preventDefault(); }}
+      onClose={onCancel}
+    >
         <header className="sync-modal-header">
           <div>
             <span className="sync-eyebrow">Machine-local binding</span>
@@ -183,7 +195,6 @@ export default function ProjectBindingEditor({
             </button>
           </div>
         </footer>
-      </section>
-    </div>
+    </dialog>
   );
 }

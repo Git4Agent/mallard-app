@@ -184,14 +184,14 @@ export default function AddCatalogScopeWorkspace({
         >
           <header className="sync-modal-header">
             <div>
-              <h1 id="catalog-add-scope-title">Add Catalog row</h1>
+              <h1 id="catalog-add-scope-title">Add Catalog resource</h1>
             </div>
             <button
               type="button"
               className="btn btn-ghost"
               onClick={onClose}
               disabled={submitting}
-              aria-label="Close without adding a row"
+              aria-label="Close without adding a resource"
             >
               <Icon name="x" size={17} />
             </button>
@@ -231,7 +231,7 @@ export default function AddCatalogScopeWorkspace({
             {/* Provider home */}
             <section className="sync-setup-section">
               <div className="sync-card-heading">
-                <div><strong>Provider home</strong></div>
+                <div><strong>Agent profile</strong></div>
                 {attentionBadge(kind !== null && (provider === null || profileId === null))}
               </div>
               <div className="sync-profile-select-row">
@@ -255,12 +255,12 @@ export default function AddCatalogScopeWorkspace({
                 <div className="sync-profile-select-row">
                   <span className="sync-select-shell">
                     <select
-                      aria-label="Provider home"
+                      aria-label="Agent profile"
                       value={profileId ?? ""}
                       disabled={working}
                       onChange={(event) => setProfileId(event.target.value || null)}
                     >
-                      <option value="">Choose home</option>
+                      <option value="">Choose profile</option>
                       {compatibleProfiles.map((profile) => (
                         <option key={profile.profile_id} value={profile.profile_id}>
                           {profile.display_name}
@@ -275,7 +275,7 @@ export default function AddCatalogScopeWorkspace({
                       disabled={working}
                       onClick={() => setProfileEditor({ provider, displayName: "", path: "" })}
                     >
-                      <Icon name="plus" size={13} /> Add provider home
+                      <Icon name="plus" size={13} /> Add profile
                     </button>
                   )}
                 </div>
@@ -289,14 +289,14 @@ export default function AddCatalogScopeWorkspace({
                   }}
                 >
                   <input
-                    aria-label="Provider home name"
-                    placeholder="Home name"
+                    aria-label="Profile name"
+                    placeholder="Profile name"
                     value={profileEditor.displayName}
                     onChange={(event) =>
                       setProfileEditor({ ...profileEditor, displayName: event.target.value })}
                   />
                   <input
-                    aria-label="Provider home path"
+                    aria-label="Profile path"
                     placeholder="Absolute provider home path"
                     value={profileEditor.path}
                     onChange={(event) =>
@@ -337,7 +337,7 @@ export default function AddCatalogScopeWorkspace({
               )}
               {kind !== null && provider === null && (
                 <small className="sync-setup-hint">
-                  Each row shows one kind from one provider home.
+                  Each Catalog resource tracks one kind from one agent profile.
                 </small>
               )}
             </section>
@@ -366,7 +366,7 @@ export default function AddCatalogScopeWorkspace({
                 onClick={() => void submit()}
               >
                 <Icon name="plus" size={13} />
-                {submitting ? "Adding…" : "Add row"}
+                {submitting ? "Adding…" : "Add resource"}
               </button>
             </div>
           </footer>

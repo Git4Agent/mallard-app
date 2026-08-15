@@ -352,7 +352,6 @@ test("session indicators use the quiet desktop sync vocabulary", () => {
   assert.match(css, /\.sync-thread-sync-indicator\.pending \{ color: var\(--thread-status-pending\); \}/);
   assert.match(css, /\.sync-thread-sync-indicator\.conflict \{ color: var\(--thread-status-conflict\); \}/);
   assert.match(css, /\.sync-thread-sync-indicator\.unavailable \{ color: var\(--thread-status-unavailable\); \}/);
-  assert.match(css, /\.sync-thread-sync-error \{ color: var\(--thread-status-conflict\); \}/);
 });
 
 test("thread status badges use the outlined Default 24px pixel family", () => {
@@ -429,8 +428,10 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
   for (const status of statuses) {
     assert.match(css, new RegExp(`\\.thread-status-icon\\[data-thread-status="${status}"\\]`));
   }
+  // The status hues live with the rest of the palette in RetroTheme.css.
+  const palette = readFileSync("src/RetroTheme.css", "utf8");
   for (const { color } of Object.values(expected)) {
-    assert.ok(css.includes(color));
+    assert.ok(palette.includes(color));
   }
   assert.match(css, /\.thread-status-icon-dots > path \{[^}]*animation: thread-status-dot/s);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.thread-status-icon-dots > path \{ animation: none;/s);
@@ -612,7 +613,8 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   // them and reads as the row — and the panel — twitching on hover.
   // Guarded on [data-tooltip]: a metric without one (the outcome list's
   // stamp) must not paint an empty tooltip box or invite a help cursor.
-  const metricTooltipRule = css.match(/\.sync-history-thread-metric\[data-tooltip\]::after\s*\{[^}]+\}/s)?.[0] ?? "";
+  // The selector list also carries the context items, which share the pattern.
+  const metricTooltipRule = css.match(/\.sync-history-thread-metric\[data-tooltip\]::after[^{]*\{[^}]+\}/s)?.[0] ?? "";
   const metricHoverRule = css.match(/\.sync-history-thread-metric\[data-tooltip\]:hover::after,[\s\S]+?\n\}/)?.[0] ?? "";
   assert.doesNotMatch(css, /\.sync-history-thread-metric::after\s*\{/, "the unguarded tooltip selector must not come back");
   assert.match(metricTooltipRule, /position:\s*absolute/);
@@ -815,7 +817,7 @@ test("activity content uses the local alias and renders commit and session rows"
   // Both endpoints are announced together on the single visible stamp.
   assert.match(html, /aria-label="Started [^"]+\. Ended [^"]+"/);
   assert.match(html, /aria-label="User turns: 3"/);
-  assert.match(html, /data-tooltip="Total tokens · 24\.8K"/);
+  assert.match(html, /data-tooltip="Total tokens · 25K"/);
   assert.match(html, /aria-label="1 session linked to commits"/);
   assert.match(html, /class="sync-history-session-title-button"/);
   assert.match(html, /aria-label="View session details"/);
@@ -944,7 +946,7 @@ test("permanent session summaries label every metric icon", () => {
   // Only one stamp, and none of the old paired-range markup.
   assert.doesNotMatch(html, /sync-history-thread-time-start|sync-history-range-arrow/);
   assert.match(html, /data-tooltip="User turns · 3"/);
-  assert.match(html, /data-tooltip="Total tokens · 24\.8K"/);
+  assert.match(html, /data-tooltip="Total tokens · 25K"/);
   assert.match(html, /data-tooltip="Agent messages · 5"/);
   assert.match(html, /data-tooltip="Tool calls · 8"/);
 });
@@ -2133,8 +2135,8 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
   // Fresh state: no permanent Skills/Plugins/Pets rows, just the Add prompt.
   const emptyHtml = render([], null);
   const emptyPane = emptyHtml.slice(emptyHtml.indexOf('aria-label="Catalog"'));
-  assert.match(emptyPane, /aria-label="Add Catalog row"/);
-  assert.match(emptyPane, /Add your first row/);
+  assert.match(emptyPane, /aria-label="Add Catalog resource"/);
+  assert.match(emptyPane, /Add your first resource/);
   assert.doesNotMatch(emptyPane, /<span>Skills<\/span>|<span>Plugins<\/span>|<span>Pets<\/span>/);
 
   // Two Codex configs give the same kind two distinct rows, labelled by
@@ -2152,7 +2154,7 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
   assert.match(pane, /<span>Pets v2 · Codex home<\/span>/);
   assert.match(pane, /sidebar-profile-item active[^]*?Skills · conf2/);
   assert.match(pane, /aria-label="Remove the Skills · conf2 row"/);
-  assert.doesNotMatch(pane, /Add your first row/);
+  assert.doesNotMatch(pane, /Add your first resource/);
 });
 
 test("the sidebar locks project and storage navigation during a sync workflow", () => {

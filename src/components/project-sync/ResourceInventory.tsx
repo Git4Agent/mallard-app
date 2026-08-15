@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { ProjectResourceCategory, ProjectResourceDescriptor } from "../../types";
 import Icon from "../Icons";
-import { RESOURCE_GROUPS, categoryFor } from "./model";
+import { RESOURCE_GROUPS, applyPolicyLabel, categoryFor, kindLabel } from "./model";
 
 interface Props {
   resources: ProjectResourceDescriptor[];
@@ -104,8 +104,8 @@ function ResourceRow({
             {resource.resource_id !== resource.display_name && (
               <><span>Resource ID</span><code>{resource.resource_id}</code></>
             )}
-            <span>Kind</span><code>{resource.kind}</code>
-            {resource.apply_policy && <><span>Apply</span><code>{resource.apply_policy}</code></>}
+            <span>Kind</span><span>{kindLabel(resource.kind)}</span>
+            {resource.apply_policy && <><span>Apply</span><span>{applyPolicyLabel(resource.apply_policy)}</span></>}
           </div>
           {resource.blocked_reason && (
             <div className="sync-resource-blocker"><Icon name="alert-triangle" size={14} /> {resource.blocked_reason}</div>

@@ -247,7 +247,7 @@ export function StorageEditor({
           </button>
         </div>
         {onRemove && (
-          <button type="button" className="btn btn-ghost danger" onClick={onRemove} disabled={disabled} title="Remove storage"><Icon name="trash" size={14} /></button>
+          <button type="button" className="btn btn-ghost danger" onClick={onRemove} disabled={disabled} title="Remove storage" aria-label="Remove storage"><Icon name="trash" size={14} /></button>
         )}
       </header>
       {storage.kind === "local" ? (

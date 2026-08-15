@@ -27,10 +27,44 @@ export const RESOURCE_GROUPS: Array<{
   label: string;
   description: string;
 }> = [
-  { id: "conversations", label: "Conversations", description: "Project-scoped tasks and sessions" },
+  { id: "conversations", label: "Conversations", description: "Project-scoped agent sessions" },
   { id: "project_files", label: "Project files", description: "Exact files and folders selected from a non-Git project" },
   { id: "tools", label: "Requirements", description: "Environment requirements this backup expects on each machine" },
 ];
+
+/* Wire enums never reach the screen raw: a resource's kind and apply policy
+   are backend vocabulary ("manual_only", "explicit_review"), and the field
+   that tells a user what will happen to their file must say so in words.
+   Runtime kinds are wider than the ProjectResourceKind union (provider-
+   prefixed variants arrive from older recipes), so lookups fall back to the
+   raw value rather than lying. */
+export const KIND_LABELS: Record<string, string> = {
+  conversation: "Session",
+  codex_conversation: "Session",
+  claude_conversation: "Session",
+  codex_task: "Session",
+  claude_session: "Session",
+  provider_state: "Provider state",
+  project_content_file: "Project file",
+  project_content_directory: "Project folder",
+  requirement: "Requirement",
+};
+
+export const APPLY_POLICY_LABELS: Record<string, string> = {
+  safe_file: "Applied when safe",
+  merge: "Merged on Pull",
+  explicit_review: "Applied after review",
+  manual_only: "Manual apply only",
+  never: "Never applied",
+};
+
+export function kindLabel(kind: string): string {
+  return KIND_LABELS[kind] ?? kind;
+}
+
+export function applyPolicyLabel(policy: string): string {
+  return APPLY_POLICY_LABELS[policy] ?? policy;
+}
 
 const CATEGORY_BY_KIND: Record<string, ProjectResourceCategory> = {
   codex_conversation: "conversations",

@@ -87,9 +87,11 @@ test("fork completion log levels render green for success and red for failure", 
   assert.match(html, /log-line log-error/);
   assert.match(html, /Mallard did not acknowledge the Codex fork/);
 
+  // Log messages are prose, so they take the 4.5:1 text variants of the
+  // signal hues rather than the raw glyph inks.
   const css = readFileSync("src/App.css", "utf8");
-  assert.match(css, /\.log-success \.log-msg \{ color: var\(--green\); \}/);
-  assert.match(css, /\.log-error \.log-msg \{ color: var\(--red\); \}/);
+  assert.match(css, /\.log-success \.log-msg \{ color: var\(--success-text\); \}/);
+  assert.match(css, /\.log-error \.log-msg \{ color: var\(--danger-text\); \}/);
 });
 
 test("Push and Pull open the activity log at its live tail", () => {

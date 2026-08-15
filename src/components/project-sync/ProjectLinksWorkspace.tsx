@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type {
   BundleFetchProgress,
@@ -765,8 +766,18 @@ export default function ProjectLinksWorkspace({
     }
   }, [editingStorage?.storageId, storageBaseline, storageDraft, storages]);
 
-  const reloadExternalStorage = () => {
+  const reloadExternalStorage = async () => {
     if (!editingStorage) return;
+    // The draft can hold values shown exactly once (an R2 secret key), so it
+    // is never dropped silently: loading the current configuration is the
+    // only action offered, and it asks first when it would lose edits.
+    if (storageDraft && (!storageBaseline || !sameStorage(storageDraft, storageBaseline))) {
+      const approved = await confirm(
+        "Discard your unsaved draft and load the current configuration?\n\nAnything typed here that was never saved — including a secret access key — cannot be recovered.",
+        { title: "Discard draft" },
+      );
+      if (!approved) return;
+    }
     const incoming = storages.find((candidate) => candidate.id === editingStorage.storageId) ?? null;
     if (!incoming) {
       setEditingStorage(null);
@@ -1202,10 +1213,10 @@ export default function ProjectLinksWorkspace({
                     <div className="sync-callout warning" role="alert">
                       <Icon name="alert-triangle" size={14} />
                       <span>
-                        This storage was {storageConflict === "removed" ? "removed" : "changed"} outside this editor. Your draft was kept, but it cannot be saved until you reload the current configuration.
+                        This storage was {storageConflict === "removed" ? "removed" : "changed"} outside this editor, so this draft can no longer be saved. Loading the current configuration discards the draft.
                       </span>
-                      <button type="button" className="btn btn-ghost" onClick={reloadExternalStorage}>
-                        Reload
+                      <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void reloadExternalStorage()}>
+                        Load current
                       </button>
                     </div>
                   )}
@@ -1529,12 +1540,16 @@ export default function ProjectLinksWorkspace({
       // live. The words stay in the tooltip and in hidden text for readers.
       pathCrumbs.push({
         id: "session",
-        label: sessionHeader?.title ?? "Opening session…",
-        title: sessionHeader
+        label: sessionHeader?.state === "ready"
+          ? sessionHeader.title
+          : sessionHeader?.state === "failed"
+            ? "Session unavailable"
+            : "Opening session…",
+        title: sessionHeader?.state === "ready"
           ? [sessionHeader.title, sessionHeader.providerDisplayName, sessionHeader.active ? "Active" : null]
             .filter(Boolean).join(" · ")
           : undefined,
-        leading: sessionHeader ? (
+        leading: sessionHeader?.state === "ready" ? (
           <span className={`sync-path-leaf-mark${sessionHeader.active ? " active" : ""}`}>
             <ProviderMark
               provider={sessionHeader.provider}
@@ -1583,7 +1598,7 @@ export default function ProjectLinksWorkspace({
   // one, the activity comparison otherwise. Pull and Push keep their names and
   // their project scope — only the bare glyph follows what you are looking at.
   const viewRefresh = sessionDetailSubview
-    ? sessionHeader && {
+    ? sessionHeader?.state === "ready" && {
       refreshing: sessionHeader.refreshing,
       onRefresh: sessionHeader.onRefresh,
       label: sessionHeader.refreshing ? "Refreshing session" : "Refresh session",

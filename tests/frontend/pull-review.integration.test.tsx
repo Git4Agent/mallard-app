@@ -258,7 +258,7 @@ test("blocked conversation evidence is visible but cannot be selected", () => {
   assert.doesNotMatch(html, /Select Conversation/);
 });
 
-test("keep-both completion reports the independent task and optional Codex refresh", () => {
+test("keep-both completion reports the independent session and optional Codex refresh", () => {
   const action = keepBothAction();
   const plan = { ...restorePlan, actions: [], conversation_actions: [action] };
   const completed = result({
@@ -291,14 +291,14 @@ test("keep-both completion reports the independent task and optional Codex refre
   assert.deepEqual(outcome.action, {
     kind: "restart_codex",
     label: "Restart Codex",
-    title: "Shows restored tasks — active Codex chats are interrupted",
+    title: "Shows restored sessions — active Codex chats are interrupted",
     operationId: "operation-materialize",
     appKind: "codex",
   });
 
   const html = renderOutcome(outcome);
   assert.match(html, /Kept independently/);
-  assert.match(html, /previous local history was kept as an independent task/);
+  assert.match(html, /previous local history was kept as an independent session/);
   assert.doesNotMatch(html, /native fork|Retry fork/i);
 });
 

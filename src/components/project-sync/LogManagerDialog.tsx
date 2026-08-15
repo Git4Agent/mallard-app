@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type { ActivityLogPolicy, ActivityLogStats } from "../../types";
@@ -32,18 +32,21 @@ function formatOldest(timestamp?: number | null): string {
 export default function LogManagerDialog({ onClose, onLogsChanged }: Props) {
   const [stats, setStats] = useState<ActivityLogStats | null>(null);
   const [policy, setPolicy] = useState<ActivityLogPolicy | null>(null);
+  const policyDirty = policy != null && stats != null
+    && (policy.retention_days !== stats.policy.retention_days
+      || policy.max_total_bytes !== stats.policy.max_total_bytes);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // Native <dialog> + showModal() supplies the focus trap, Escape (the
+  // cancel event), the inert background, and focus restoration — the bespoke
+  // keydown listener this dialog used to carry is gone with the overlay div.
+  const dialogRef = useRef<HTMLDialogElement>(null);
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [busy, onClose]);
+    dialogRef.current?.showModal();
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -80,12 +83,21 @@ export default function LogManagerDialog({ onClose, onLogsChanged }: Props) {
     }
   };
 
+  // Cleanup runs under the saved policy only. It used to save the drafted
+  // selects first, so exploring "Keep logs for" and clicking Clean up now
+  // silently committed the draft and deleted by it — the button is disabled
+  // while the selects are dirty instead.
   const handleCleanup = async () => {
+    if (!stats) return;
+    const approved = await confirm(
+      `Remove retained logs older than ${stats.policy.retention_days} days?\n\n${stats.file_count} log file${stats.file_count === 1 ? "" : "s"} (${formatBytes(stats.total_bytes)}) ${stats.file_count === 1 ? "is" : "are"} currently retained. Removed logs cannot be recovered.`,
+      { title: "Clean up logs", kind: "warning", okLabel: "Clean up", cancelLabel: "Cancel" },
+    );
+    if (!approved) return;
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      await savePolicy();
       const result = await projectSyncApi.cleanupActivityLogs({});
       setStats(result.stats);
       setPolicy(result.stats.policy);
@@ -134,19 +146,22 @@ export default function LogManagerDialog({ onClose, onLogsChanged }: Props) {
   };
 
   return (
-    <div
-      className="sync-modal-backdrop"
-      role="presentation"
+    <dialog
+      ref={dialogRef}
+      className="sync-modal sync-log-manager-dialog"
+      aria-labelledby="sync-log-manager-title"
+      onCancel={(event) => { if (busy) event.preventDefault(); }}
+      onClose={onClose}
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) onClose();
+        // A click on ::backdrop targets the dialog itself but lands outside
+        // its box — that, and only that, is a light dismiss.
+        if (busy || event.target !== event.currentTarget) return;
+        const rect = event.currentTarget.getBoundingClientRect();
+        const outside = event.clientX < rect.left || event.clientX > rect.right
+          || event.clientY < rect.top || event.clientY > rect.bottom;
+        if (outside) event.currentTarget.close();
       }}
     >
-      <section
-        className="sync-modal sync-log-manager-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="sync-log-manager-title"
-      >
         <header className="sync-modal-header">
           <div>
             <span className="sync-eyebrow">Local activity</span>
@@ -207,13 +222,18 @@ export default function LogManagerDialog({ onClose, onLogsChanged }: Props) {
                 <button type="button" className="btn" onClick={() => void handleOpenFolder()} disabled={busy}>
                   <Icon name="folder" size={14} /> Open logs folder
                 </button>
-                <button type="button" className="btn" onClick={() => void handleCleanup()} disabled={busy}>
+                <button type="button" className="btn" onClick={() => void handleCleanup()} disabled={busy || policyDirty}>
                   <Icon name="trash" size={14} /> Clean up now
                 </button>
                 <button type="button" className="btn btn-ghost danger" onClick={() => void handleDeleteAll()} disabled={busy || stats.file_count === 0}>
                   Delete all logs
                 </button>
               </div>
+              {policyDirty && (
+                <div className="sync-log-manager-notice" role="status">
+                  <Icon name="alert-triangle" size={14} /> Cleanup uses the saved settings — save your changes first.
+                </div>
+              )}
 
               {error && <div className="sync-callout error" role="alert"><Icon name="alert-triangle" size={15} /> {error}</div>}
               {notice && <div className="sync-log-manager-notice" role="status"><Icon name="check-circle" size={14} /> {notice}</div>}
@@ -232,7 +252,6 @@ export default function LogManagerDialog({ onClose, onLogsChanged }: Props) {
             </button>
           </div>
         </footer>
-      </section>
-    </div>
+    </dialog>
   );
 }

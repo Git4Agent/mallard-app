@@ -36,14 +36,20 @@ const TIMELINE_PAGE_SIZE = 50;
  * session is live), and the bar's single refresh points here instead of at the
  * activity comparison the page is covering.
  */
-export interface SessionHeaderModel {
-  title: string;
-  provider: string;
-  providerDisplayName: string;
-  active: boolean;
-  refreshing: boolean;
-  onRefresh: () => void;
-}
+export type SessionHeaderModel =
+  | {
+    state: "ready";
+    title: string;
+    provider: string;
+    providerDisplayName: string;
+    active: boolean;
+    refreshing: boolean;
+    onRefresh: () => void;
+  }
+  /* A failed load is reported, not left as null: null means "still opening",
+     and a crumb reading "Opening session…" forever beside a body that says
+     the detail is unavailable contradicts itself. */
+  | { state: "failed" };
 
 interface Props {
   localProjectId: string;
@@ -176,14 +182,15 @@ export default function SessionDetailPage({
 
   useEffect(() => {
     onHeaderChange(detail ? {
+      state: "ready",
       title: detail.title || "Untitled session",
       provider: detail.provider,
       providerDisplayName: detail.provider_display_name,
       active: detail.is_active,
       refreshing: detailLoading,
       onRefresh: refreshSession,
-    } : null);
-  }, [detail, detailLoading, onHeaderChange, refreshSession]);
+    } : detailError && !detailLoading ? { state: "failed" } : null);
+  }, [detail, detailError, detailLoading, onHeaderChange, refreshSession]);
 
   useEffect(() => () => onHeaderChange(null), [onHeaderChange]);
 

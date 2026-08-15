@@ -128,9 +128,9 @@ test("the scope page opens on its derived label and loads that row only", () => 
   assert.doesNotMatch(page, /CatalogCategory|CATALOG_CATEGORIES|family/);
 });
 
-test("Add is Kind then provider home, and never picks a storage or resource", () => {
+test("Add is Kind then agent profile, and never picks a storage or resource", () => {
   const add = readFileSync("src/components/storage-catalog/AddCatalogScopeWorkspace.tsx", "utf8");
-  const order = ["Kind", "Provider home"]
+  const order = ["Kind", "Agent profile"]
     .map((label) => add.indexOf(`<strong>${label}</strong>`));
   assert.ok(order.every((index) => index >= 0), "both Add bands render");
   assert.deepEqual(order, [...order].sort((left, right) => left - right));

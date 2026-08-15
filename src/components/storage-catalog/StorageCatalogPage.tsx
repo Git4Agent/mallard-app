@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import Icon from "../Icons";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import { storageCatalogApi, type StorageCatalogApi } from "./api";
@@ -222,6 +223,15 @@ export default function StorageCatalogPage({
   };
 
   const unlink = async (resource: CatalogResourceView, linkId: string, revision: number) => {
+    // Unlink sits two button-widths from Push, so a misclick must not tear
+    // down the pairing unannounced — same contract as the project-scoped
+    // unlink in ProjectSync.
+    const storageName = resource.links.find((candidate) => candidate.link.link_id === linkId)?.storage_name ?? "this storage";
+    const approved = await confirm(
+      `Unlink “${storageName}” from “${resource.registration.display_name}”?\n\nPush and Pull will stop for this pairing. Content already stored there and local content will not be deleted, and you can link the storage again later.`,
+      { title: "Unlink storage" },
+    );
+    if (!approved) return;
     setBusy(true);
     setError(null);
     try {
@@ -236,6 +246,11 @@ export default function StorageCatalogPage({
   };
 
   const removeResource = async (resource: CatalogResourceView) => {
+    const approved = await confirm(
+      `Remove the registration for “${resource.registration.display_name}”?\n\nThe Library stops tracking this resource. Provider content on disk is left untouched, and you can register it again later.`,
+      { title: "Remove registration" },
+    );
+    if (!approved) return;
     setBusy(true);
     setError(null);
     try {

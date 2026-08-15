@@ -587,6 +587,11 @@ export default function RestorePlanView({
       </div>
 
       <footer className={embedded ? "sync-pull-apply-bar sync-inline-action-footer sync-sync-review-footer" : "sync-pull-apply-bar sync-sync-review-footer"}>
+        {busy && (
+          /* Same contract as Push: no safe mid-write abort exists, so the
+             sealed exits are named instead of leaving a cancel to hunt for. */
+          <span role="status"><small>A running pull finishes or fails whole — it can’t be cancelled midway.</small></span>
+        )}
         <button
           type="button"
           className="btn btn-primary sync-pull-apply-button"

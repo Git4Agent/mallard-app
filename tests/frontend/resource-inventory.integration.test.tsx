@@ -347,7 +347,7 @@ test("a resource named by its own id states that id once, and says why once", ()
     inventory,
     /\{resource\.resource_id !== resource\.display_name && \(\s*<><span>Resource ID<\/span><code>\{resource\.resource_id\}<\/code><\/>\s*\)\}/,
   );
-  assert.match(inventory, /<span>Kind<\/span><code>\{resource\.kind\}<\/code>/);
+  assert.match(inventory, /<span>Kind<\/span><span>\{kindLabel\(resource\.kind\)\}<\/span>/);
   assert.doesNotMatch(inventory, /providerLabel/);
 });
 

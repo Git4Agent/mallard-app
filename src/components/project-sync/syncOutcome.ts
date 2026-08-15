@@ -67,7 +67,7 @@ function plural(count: number, one: string, many = `${one}s`): string {
 }
 
 function displayThreadTitle(value: string): string {
-  return compactThreadTitle(value).trim() || "Untitled task";
+  return compactThreadTitle(value).trim() || "Untitled session";
 }
 
 export function buildPushOutcome({
@@ -113,7 +113,7 @@ export function buildPushOutcome({
     {
       icon: "upload",
       value: String(pushedCount),
-      label: held.length > 0 ? "pushed" : plural(pushedCount, "task"),
+      label: held.length > 0 ? "pushed" : plural(pushedCount, "session"),
     },
     ...(held.length > 0
       ? [{ icon: "git-compare-arrows" as const, value: String(held.length), label: "held for Pull" }]
@@ -128,7 +128,7 @@ export function buildPushOutcome({
     storageId,
     tone: held.length > 0 ? "warning" : "success",
     title: held.length > 0
-      ? `Pushed ${pushedCount} of ${pushedCount + held.length} tasks`
+      ? `Pushed ${pushedCount} of ${pushedCount + held.length} sessions`
       : "Push complete",
     stats,
     rows,
@@ -197,7 +197,7 @@ export function buildPullOutcome({
         key: thread.action_id,
         title: displayThreadTitle(nameFor(resourceId)),
         status: "preserved" as const,
-        reason: "Storage history was restored and the previous local history was kept as an independent task.",
+        reason: "Storage history was restored and the previous local history was kept as an independent session.",
         threadId: thread.preserved_thread_id,
       };
     }),
@@ -231,7 +231,7 @@ export function buildPullOutcome({
       key: `${result.plan_id ?? "plan"}:recovery`,
       title: "Sync recovery is required",
       status: "failed",
-      reason: "Mallard preserved the operation journal. Open Pull again to recover before syncing this task.",
+      reason: "Mallard preserved the operation journal. Open Pull again to recover before syncing this session.",
     });
   }
 
@@ -268,7 +268,7 @@ export function buildPullOutcome({
     ? {
       kind: "restart_codex",
       label: `Restart ${appRefresh.app_name}`,
-      title: `Shows restored tasks — active ${appRefresh.app_name} chats are interrupted`,
+      title: `Shows restored sessions — active ${appRefresh.app_name} chats are interrupted`,
       operationId: appRefresh.operation_id,
       appKind: appRefresh.app_kind,
     }

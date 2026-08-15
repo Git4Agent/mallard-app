@@ -521,6 +521,9 @@ export default function ProjectSidebar({
                   title={draft.last_error
                     ? `${draft.project_root} — last attempt failed: ${draft.last_error}`
                     : `${draft.project_root} — resumable setup draft`}
+                  aria-label={draft.last_error
+                    ? `${draft.display_name} draft — last attempt failed: ${draft.last_error}`
+                    : `${draft.display_name} — resumable setup draft`}
                 >
                   <Icon name="folder" size={15} />
                   <span>{draft.display_name}</span>
@@ -752,8 +755,8 @@ export default function ProjectSidebar({
               className="sidebar-section-action sidebar-add-action"
               onClick={onAddCatalogScope}
               disabled={busy}
-              title="Add a row: one resource kind from one provider home"
-              aria-label="Add Catalog row"
+              title="Add a resource: one kind from one agent profile"
+              aria-label="Add Catalog resource"
             >
               <Icon name="plus" size={16} />
             </button>
@@ -766,7 +769,7 @@ export default function ProjectSidebar({
                 onClick={onAddCatalogScope}
                 disabled={busy}
               >
-                <Icon name="plus" size={15} /> Add your first row
+                <Icon name="plus" size={15} /> Add your first resource
               </button>
             ) : catalogScopes.map((scope) => {
               const label = catalogScopeLabel(scope.scope, scope.profile);

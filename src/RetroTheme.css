@@ -47,17 +47,21 @@
      Pointing it at the sans restores that reading; no new rule should use it. */
   --font: var(--font-sans);
 
-  /* Whole pixels only. The pixel face is bitmap-derived, and any fractional
-     advance walks its blocks off the device grid. */
-  --type-3xs: 9px;
-  --type-2xs: 10px;
-  --type-xs: 11px;
-  --type-sm: 12px;
-  --type-md: 13px;
-  --type-lg: 14px;
-  --type-xl: 17px;
-  --type-2xl: 22px;
-  --type-3xl: 26px;
+  /* Root-relative so the OS/webview text-size preference actually lands
+     (WCAG 1.4.4): at the default 16px root every step resolves to the whole
+     pixel it was designed at (9/10/11/12/13/14/17/22/26) — whole pixels
+     matter because the pixel face is bitmap-derived, and any fractional
+     advance walks its blocks off the device grid. A user-raised root trades
+     that grid fit for legibility, which is the right trade. */
+  --type-3xs: 0.5625rem;
+  --type-2xs: 0.625rem;
+  --type-xs: 0.6875rem;
+  --type-sm: 0.75rem;
+  --type-md: 0.8125rem;
+  --type-lg: 0.875rem;
+  --type-xl: 1.0625rem;
+  --type-2xl: 1.375rem;
+  --type-3xl: 1.625rem;
 
   /* Four steps. The pixel face declares a 400-700 axis above and body sets
      font-synthesis: none, so the 540/610/650/760/800 this theme used to carry
@@ -70,6 +74,24 @@
   --leading-flat: 1;
   --leading-snug: 1.35;
   --leading-prose: 1.5;
+
+  /* The boundary of anything the user operates — inputs, selects, drawn
+     checkboxes — must clear 3:1 (WCAG 1.4.11). Only --border-strong does;
+     --border and --border-mid stay for dividers, where quietness is the
+     point. Resolves per-theme through --border-strong. */
+  --control-border: var(--border-strong);
+
+  /* Theme-invariant tokens migrated from App.css when its :root palette was
+     retired — this file is the palette's single source of truth. */
+  --button-disabled-opacity: 0.38;
+  --z-log: 20;
+  --thread-status-synced: #31ae6b;
+  --thread-status-cloud: #397dcc;
+  --thread-status-local: #16a7c9;
+  --thread-status-divergent: #7655d6;
+  --thread-status-pending: #e59b1b;
+  --thread-status-conflict: #e44649;
+  --thread-status-unavailable: #85878e;
 }
 
 /* Both palettes ride one warm axis. Light is cream paper over sepia browns;
@@ -95,15 +117,18 @@
   --button-bg-hover: #27221d;
   --button-bg-active: #362f28;
   --button-border: #6f6459;
-  /* Same construction as the light theme: the fill sits with the surrounding
-     surfaces rather than inverting against them, the strong border is what
-     makes it read as a button, and the label takes the body text colour.
-     Its own token rather than --primary-text — App.css also uses that one as a
-     background in three places, so it cannot follow the button's label. */
-  --button-primary-bg: #362f28;
-  --button-primary-hover: #423a31;
-  --button-primary-border: #7a7065;
-  --button-primary-text: #f6f1e6;
+  /* The default action wears the app's inverted-ink pairing — the fill that
+     already marks a checked checkbox and the text selection — so "Push" can
+     never be mistaken for the "Cancel" beside it. The quiet border-only
+     treatment measured 1.38:1 of background separation from a plain button:
+     at the threshold of visibility, and the pixel face is single-weight with
+     font-synthesis: none, so weight could not carry the difference either. */
+  --button-primary-bg: var(--primary);
+  --button-primary-hover: #e0d4ba;
+  --button-primary-border: var(--primary);
+  /* Its own token rather than --primary-text — App.css also uses that one as
+     a background, so the button's label cannot follow it. */
+  --button-primary-text: #161210;
   --button-radius: 4px;
   --app-shell: #0b0908;
   --surface-card: #171412;
@@ -141,6 +166,14 @@
   --amber: var(--yellow);
   --blue: #69c6f4;
   --purple: #bfa0f2;
+  /* Prose variants of the signal hues: error sentences and status copy must
+     clear 4.5:1 where a 3:1 glyph can ride the brighter raw signal. This dark
+     palette's hues clear the prose bar on their own, so the variants alias
+     them; the light palette overrides each with a darker ink. */
+  --danger-text: var(--red);
+  --success-text: var(--green);
+  --warning-text: var(--yellow);
+  --info-text: var(--blue);
   --focus-ring: var(--accent);
   --r-lg: 9px;
   --r: 6px;
@@ -190,14 +223,14 @@
   --button-bg-hover: #f5eadf;
   --button-bg-active: #eee0d3;
   --button-border: #9d8b7f;
-  /* A warm beige fill rather than a dark block, so the primary control sits in
-     the same family as the cream surfaces. With so little contrast against the
-     card behind it, the strong border — not the fill — is what makes it read as
-     a button, and the label goes dark to stay legible. */
-  --button-primary-bg: #eee0d3;
-  --button-primary-hover: #e6d5c5;
-  --button-primary-border: #66574f;
-  --button-primary-text: #1e1817;
+  /* Same construction as the dark theme: the primary action takes the
+     inverted-ink fill (the checked-checkbox and selection pairing). The old
+     warm-beige fill sat 1.22:1 from a plain button — indistinguishable at a
+     glance from the Cancel beside it. */
+  --button-primary-bg: var(--primary);
+  --button-primary-hover: #3b3029;
+  --button-primary-border: var(--primary);
+  --button-primary-text: #fffaf4;
   --app-shell: #f6eee5;
   --surface-card: #fcf7f0;
   --surface-row: #fdf9f3;
@@ -239,6 +272,13 @@
   --amber: var(--yellow);
   --blue: #2f88b4;
   --purple: #765ba7;
+  /* Same treatment for the other three signal hues: the raw inks measure
+     3.4:1 (green), 2.4:1 (amber), and 3.7:1 (blue) against this paper — fine
+     for glyphs, failing for prose. Each variant holds ≥4.5:1 on every paper
+     surface down to --surface-row-active (#f0e3d5). */
+  --success-text: #397149;
+  --warning-text: #885e06;
+  --info-text: #256c90;
   --focus-ring: var(--accent);
   --shadow-card: 2px 2px 0 rgba(82, 58, 43, 0.07);
   --shadow-overlay: 4px 4px 0 rgba(82, 58, 43, 0.11);
@@ -261,10 +301,16 @@
 /* Pixel type only stays square if glyphs land on whole pixels: fractional
    tracking pushes every advance off the grid, and geometricPrecision asks the
    rasteriser to skip grid-fitting entirely. Both are dropped. */
+/* The root stays at the user's preferred size — never a px override — so the
+   rem-based type scale follows the OS/webview text-size setting. */
+html {
+  font-size: 100%;
+}
+
 body {
   font-family: var(--font-sans);
-  font-size: 13px;
-  font-weight: 400;
+  font-size: var(--type-md);
+  font-weight: var(--weight-regular);
   line-height: 1.35;
   font-variant-ligatures: none;
   letter-spacing: 0;
@@ -970,9 +1016,10 @@ summary {
 }
 
 .sync-titlebar {
-  height: 52px;
-  min-height: 52px;
-  flex-basis: 52px;
+  /* min-height, not height: the bar holds 3.25rem (52px at the default root)
+     and grows with its text instead of clipping it. */
+  min-height: 3.25rem;
+  flex-basis: auto;
   margin-bottom: var(--retro-gutter);
   padding-right: 10px;
   background: var(--bg-2);
@@ -1347,10 +1394,12 @@ summary {
 .sync-history-thread-list,
 .sync-history-timeline,
 .sync-history-storage-only {
-  /* Four slots: the provider-marked open button, terminal, the debug panel,
-     and the transcript chevron. The last two moved up from line 2, where
-     they sat stranded between readouts that can only be hovered. */
-  --sync-history-row-actions-column: 148px;
+  /* The action cluster shrink-wraps its contents: the markup settled at two
+     slots (debug panel and transcript chevron ride the second line now), and
+     a fixed four-slot reservation left ~97px of permanent blank between the
+     ellipsized session title and the first button. justify-self: end still
+     holds the right edge as a column. */
+  --sync-history-row-actions-column: auto;
   --sync-history-commit-actions-column: 26px;
   --sync-history-commit-date-column: 26ch;
   --sync-history-row-column-gap: 12px;
@@ -1770,7 +1819,6 @@ summary {
 }
 
 .sync-history-thread-actions {
-  width: var(--sync-history-row-actions-column);
   display: flex;
   grid-area: actions;
   align-items: center;
@@ -2757,7 +2805,7 @@ summary {
   font-size: var(--type-2xs);
 }
 
-.sync-modal-backdrop {
+.sync-modal::backdrop {
   background:
     repeating-linear-gradient(
       0deg,
@@ -3019,27 +3067,6 @@ summary {
     padding-right: 18px;
     padding-left: 18px;
   }
-}
-
-@media (max-width: 720px) {
-  .sync-sidebar-brand {
-    height: 60px;
-    flex-basis: 60px;
-  }
-
-  .sync-titlebar-context {
-    min-width: 0;
-    max-width: 58vw;
-  }
-
-  .sync-history-commit-meta {
-    flex-wrap: wrap;
-  }
-
-  .sync-history-commit-meta > time {
-    display: inline;
-  }
-
 }
 
 @media (prefers-reduced-motion: reduce) {
