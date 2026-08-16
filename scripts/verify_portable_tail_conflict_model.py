@@ -55,14 +55,37 @@ class TailValue:
     state: History
 
 
-def tail_value(history: History, layout: Layout) -> TailValue:
+class Form(str, Enum):
+    """The two byte forms of one conversation under the canonical wire
+    encoding: cloud artifacts store token-form bytes, machines store their
+    own root's expansion.  Record fingerprints are content hashes, so the
+    two forms of the same history fold to different states; the distinct
+    codec labels make any cross-form comparison fail structurally."""
+
+    WIRE = "wire"
+    LOCAL = "local"
+
+
+FORM_CODEC = {
+    Form.WIRE: "mallard-codex-portable-tail-wire-v1",
+    Form.LOCAL: "mallard-codex-portable-tail-v1",
+}
+
+
+def tail_value(history: History, layout: Layout, form: Form = Form.LOCAL) -> TailValue:
     assert 0 <= layout.start <= len(history)
+    # The per-form rendering is a deterministic pure function of the record
+    # and the form (mirroring the canonicalizing encoder: patterns derive
+    # from the binding root alone, so re-encoding old records always
+    # reproduces the accepted wire prefix).  Rendering every record
+    # differently per form is the worst case for the resolver: no wire
+    # state ever collides with a local state.
     return TailValue(
-        "mallard-codex-portable-tail-v1",
+        FORM_CODEC[form],
         layout.kind,
         layout.start,
         len(history),
-        history[layout.start :],
+        tuple((form.value, message) for message in history[layout.start :]),
     )
 
 
@@ -84,6 +107,7 @@ class Accepted:
     manifest: str
     artifact: str
     tail: TailValue
+    local_tail: TailValue
 
 
 @dataclass(frozen=True)
@@ -119,11 +143,16 @@ def make_task(
 
 
 def accepted_from(cloud: Cloud) -> Accepted:
+    # The dual pins are recorded atomically at one acceptance event: the
+    # wire tail the artifact folded plus the local-form twin of the same
+    # history (a push pins its seeded local value; a pull pins the decode
+    # build's fold of the materialized bytes).
     return Accepted(
         cloud.commit,
         f"manifest-{cloud.commit}",
         cloud.artifact,
-        tail_value(cloud.history, cloud.layout),
+        tail_value(cloud.history, cloud.layout, Form.WIRE),
+        tail_value(cloud.history, cloud.layout, Form.LOCAL),
     )
 
 
@@ -135,12 +164,30 @@ class Relation(str, Enum):
     DIVERGENT = "Divergent"
 
 
-def classify(pin: TailValue, local: TailValue, cloud: TailValue) -> Relation:
+def classify(
+    pin_wire: TailValue,
+    pin_local: TailValue,
+    local: TailValue,
+    cloud: TailValue,
+) -> Relation:
+    """The pin-relative reading: the cloud side compares only to the
+    accepted wire pin and the local side only to the accepted local twin.
+    Field-wise equality includes the codec label, so a cross-form
+    comparison can never accidentally succeed."""
+    assert pin_wire.kind == pin_local.kind
+    assert pin_wire.start == pin_local.start
+    assert pin_wire.end == pin_local.end
+    local_current = local == pin_local
+    cloud_current = cloud == pin_wire
+    if local_current and cloud_current:
+        return Relation.SYNC_CURRENT
+    # Same-form agreement on a newer value (single-form providers only;
+    # unreachable across the dual-form codex columns).
     if local == cloud:
-        return Relation.SYNC_CURRENT if pin == cloud else Relation.SYNC_ADVANCED
-    if cloud == pin:
+        return Relation.SYNC_ADVANCED
+    if cloud_current and local.end > pin_local.end:
         return Relation.LOCAL_OUTSTANDING
-    if local == pin:
+    if local_current and cloud.end > pin_wire.end:
         return Relation.CLOUD_OUTSTANDING
     return Relation.DIVERGENT
 
@@ -150,12 +197,25 @@ def is_prefix(prefix: History, value: History) -> bool:
 
 
 def task_valid(task: Task) -> bool:
-    if task.observed != tail_value(task.history, task.binding.layout):
+    if task.observed != tail_value(task.history, task.binding.layout, Form.LOCAL):
         return False
     if task.accepted is not None:
         if task.accepted.tail.start != task.binding.layout.start:
             return False
         if task.accepted.tail.kind != task.binding.layout.kind:
+            return False
+        # The wire pin and its local twin agree on the form-independent
+        # partition and coordinates, and the twin shares the observed
+        # column's codec.
+        if task.accepted.tail.kind != task.accepted.local_tail.kind:
+            return False
+        if task.accepted.tail.start != task.accepted.local_tail.start:
+            return False
+        if task.accepted.tail.end != task.accepted.local_tail.end:
+            return False
+        if task.accepted.local_tail.codec != FORM_CODEC[Form.LOCAL]:
+            return False
+        if task.accepted.tail.codec != FORM_CODEC[Form.WIRE]:
             return False
     return True
 
@@ -655,27 +715,77 @@ def pull_initial(
 
 
 def classifier_checks() -> int:
-    p = tail_value(("m0", "m1"), WHOLE)
-    local = tail_value(("m0", "m1", "l"), WHOLE)
-    cloud = tail_value(("m0", "m1", "c"), WHOLE)
-    both_same = tail_value(("m0", "m1", "x"), WHOLE)
+    def wire(history: History, layout: Layout = WHOLE) -> TailValue:
+        return tail_value(history, layout, Form.WIRE)
+
+    def local_form(history: History, layout: Layout = WHOLE) -> TailValue:
+        return tail_value(history, layout, Form.LOCAL)
+
+    base = ("m0", "m1")
+    local_longer = ("m0", "m1", "l")
+    cloud_longer = ("m0", "m1", "c")
+    rewrite_same_end = ("m0", "x")
 
     checks = [
-        (p, p, p, Relation.SYNC_CURRENT),
-        (p, both_same, both_same, Relation.SYNC_ADVANCED),
-        (p, local, p, Relation.LOCAL_OUTSTANDING),
-        (p, p, cloud, Relation.CLOUD_OUTSTANDING),
-        (p, local, cloud, Relation.DIVERGENT),
+        # The four-row pinned table under dual forms.
+        (wire(base), local_form(base), local_form(base), wire(base), Relation.SYNC_CURRENT),
+        (
+            wire(base),
+            local_form(base),
+            local_form(local_longer),
+            wire(base),
+            Relation.LOCAL_OUTSTANDING,
+        ),
+        (
+            wire(base),
+            local_form(base),
+            local_form(base),
+            wire(cloud_longer),
+            Relation.CLOUD_OUTSTANDING,
+        ),
+        (
+            wire(base),
+            local_form(base),
+            local_form(local_longer),
+            wire(cloud_longer),
+            Relation.DIVERGENT,
+        ),
+        # Same-form Advanced row: reachable only when local and cloud share
+        # one codec (single-form providers).
+        (
+            local_form(base),
+            local_form(base),
+            local_form(local_longer),
+            local_form(local_longer),
+            Relation.SYNC_ADVANCED,
+        ),
+        # Equal-or-shorter ends under an unequal value are rewrites, never
+        # outstanding work.
+        (
+            wire(base),
+            local_form(base),
+            local_form(rewrite_same_end),
+            wire(base),
+            Relation.DIVERGENT,
+        ),
+        (
+            wire(base),
+            local_form(base),
+            local_form(base),
+            wire(rewrite_same_end),
+            Relation.DIVERGENT,
+        ),
         # Deliberate false conflict: final-value equality only, no containment.
         (
-            tail_value(("m0",), WHOLE),
-            tail_value(("m0", "m1"), WHOLE),
-            tail_value(("m0", "m1", "m2"), WHOLE),
+            wire(("m0",)),
+            local_form(("m0",)),
+            local_form(("m0", "m1")),
+            wire(("m0", "m1", "m2")),
             Relation.DIVERGENT,
         ),
     ]
-    for pin, local_value, cloud_value, expected in checks:
-        assert classify(pin, local_value, cloud_value) == expected
+    for pin_wire, pin_local, local_value, cloud_value, expected in checks:
+        assert classify(pin_wire, pin_local, local_value, cloud_value) == expected
     return len(checks)
 
 
@@ -711,7 +821,8 @@ def zero_target_pull_checks() -> int:
 
 
 def subagent_exclusion_checks() -> int:
-    tail = tail_value(("m0", "m1"), WHOLE)
+    wire_tail = tail_value(("m0", "m1"), WHOLE, Form.WIRE)
+    local_tail = tail_value(("m0", "m1"), WHOLE, Form.LOCAL)
     snapshots: tuple[Subagents, ...] = (
         (),
         ("s1",),
@@ -727,7 +838,10 @@ def subagent_exclusion_checks() -> int:
                     local_subagents,
                     cloud_subagents,
                 )
-                assert classify(tail, tail, tail) == Relation.SYNC_CURRENT
+                assert (
+                    classify(wire_tail, local_tail, local_tail, wire_tail)
+                    == Relation.SYNC_CURRENT
+                )
                 count += 1
     return count
 
@@ -797,6 +911,13 @@ def negative_controls() -> int:
     if tail_value(("m0", "m1"), WHOLE).state != ():
         found.append("tail-reset")
 
+    # 2b. Comparing the local observation to the wire pin (a cross-form
+    # comparison) reads every synced dual-form thread as divergent.
+    cross_form_pin = tail_value(("m0", "m1"), WHOLE, Form.WIRE)
+    cross_form_local = tail_value(("m0", "m1"), WHOLE, Form.LOCAL)
+    if cross_form_pin != cross_form_local:
+        found.append("cross-form-comparison")
+
     # 3. Reusing remote layout for preserved C loses C's fixed start.
     if FIXED != REMOTE_FIXED:
         found.append("preserved-layout-replacement")
@@ -818,6 +939,7 @@ def negative_controls() -> int:
     expected = {
         "unguarded-stale-overwrite",
         "tail-reset",
+        "cross-form-comparison",
         "preserved-layout-replacement",
         "recovery-remint",
         "subagent-enters-conflict",

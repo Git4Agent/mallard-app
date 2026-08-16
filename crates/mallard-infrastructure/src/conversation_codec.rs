@@ -11,8 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use crate::codex_rollout::{
-    analyze_codex_rollout_structure, check_rollout_bounds, session_meta_id, structural_record_type,
-    CodexStructureAccumulator, CodexStructureErrorKind,
+    check_rollout_bounds, CodexStructureAccumulator, CodexStructureErrorKind,
 };
 use mallard_domain::{
     conversation_chain_digests, validate_conversation_chain, CanonicalConversationMessage,
@@ -529,77 +528,9 @@ fn canonical_json(value: &Value) -> String {
     }
 }
 
-/// Rewrite only the authoritative Codex session ID and declared cwd fields,
-/// then prove the result has identical lineage and semantic digests.
-pub fn rewrite_codex_transcript(
-    bytes: &[u8],
-    expected_source_thread_id: &str,
-    destination_thread_id: &str,
-    expected_source_cwd: &str,
-    destination_cwd: &str,
-) -> Result<Vec<u8>, String> {
-    validate_rewrite_value("source thread id", expected_source_thread_id, 128)?;
-    validate_rewrite_value("destination thread id", destination_thread_id, 128)?;
-    validate_rewrite_value("source cwd", expected_source_cwd, 4096)?;
-    validate_rewrite_value("destination cwd", destination_cwd, 4096)?;
-    let before = analyze_codex_transcript(bytes);
-    if !before.is_resumable()
-        || before.source_thread_id.as_deref() != Some(expected_source_thread_id)
-        || before.source_cwd.as_deref() != Some(expected_source_cwd)
-    {
-        return Err("Codex transcript does not match the reviewed source identity".to_string());
-    }
-
-    let final_newline = bytes.ends_with(b"\n");
-    let mut lines = Vec::new();
-    for raw in bytes.split(|byte| *byte == b'\n') {
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        if raw.is_empty() {
-            continue;
-        }
-        let mut value: Value = serde_json::from_slice(raw)
-            .map_err(|_| "Codex transcript contains malformed JSON".to_string())?;
-        rewrite_codex_value(
-            &mut value,
-            expected_source_thread_id,
-            destination_thread_id,
-            expected_source_cwd,
-            destination_cwd,
-        )?;
-        lines.push(
-            serde_json::to_vec(&value)
-                .map_err(|error| format!("serialize rewritten Codex record: {error}"))?,
-        );
-    }
-    let mut rewritten = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        if index > 0 {
-            rewritten.push(b'\n');
-        }
-        rewritten.extend_from_slice(line);
-    }
-    if final_newline {
-        rewritten.push(b'\n');
-    }
-
-    let after = analyze_codex_transcript(&rewritten);
-    let before_structure = analyze_codex_rollout_structure(bytes, Some(expected_source_thread_id))
-        .map_err(|error| error.to_string())?;
-    let after_structure = analyze_codex_rollout_structure(&rewritten, Some(destination_thread_id))
-        .map_err(|error| error.to_string())?;
-    if !after.is_resumable()
-        || after.source_thread_id.as_deref() != Some(destination_thread_id)
-        || after.source_cwd.as_deref() != Some(destination_cwd)
-        || lineage_digests(&before) != lineage_digests(&after)
-        || before_structure.fork_ancestry != after_structure.fork_ancestry
-        || after_structure.structural_cwds
-            != std::collections::BTreeSet::from([destination_cwd.to_string()])
-    {
-        return Err("rewritten Codex transcript failed semantic round-trip validation".to_string());
-    }
-    Ok(rewritten)
-}
-
+/// The whole-chain digest pair of a complete analysis, `None` when lineage
+/// is unknown.
+#[cfg(test)]
 fn lineage_digests(analysis: &CodexTranscriptAnalysis) -> Option<(&str, &str)> {
     match &analysis.lineage {
         CodecLineage::Complete {
@@ -611,67 +542,6 @@ fn lineage_digests(analysis: &CodexTranscriptAnalysis) -> Option<(&str, &str)> {
     }
 }
 
-fn rewrite_codex_value(
-    value: &mut Value,
-    source_thread_id: &str,
-    destination_thread_id: &str,
-    _source_cwd: &str,
-    destination_cwd: &str,
-) -> Result<(), String> {
-    let record_type = structural_record_type(value);
-    let is_session = record_type == Some("session_meta");
-    let is_turn = record_type == Some("turn_context");
-    let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
-        return Ok(());
-    };
-    if is_session && session_meta_id(payload) == Some(source_thread_id) {
-        for key in ["id", "thread_id", "threadId", "session_id", "sessionId"] {
-            rewrite_matching_string(payload, key, source_thread_id, destination_thread_id)?;
-        }
-    }
-    if is_session || is_turn {
-        for key in ["cwd", "working_directory", "workingDirectory"] {
-            rewrite_structural_cwd(payload, key, destination_cwd)?;
-        }
-    }
-    Ok(())
-}
-
-fn rewrite_structural_cwd(
-    object: &mut Map<String, Value>,
-    key: &str,
-    destination_cwd: &str,
-) -> Result<(), String> {
-    let Some(value) = object.get_mut(key) else {
-        return Ok(());
-    };
-    if !value.is_string() {
-        return Err(format!("Codex structural field '{key}' is not a string"));
-    }
-    *value = Value::String(destination_cwd.to_string());
-    Ok(())
-}
-
-fn rewrite_matching_string(
-    object: &mut Map<String, Value>,
-    key: &str,
-    expected: &str,
-    replacement: &str,
-) -> Result<(), String> {
-    let Some(value) = object.get_mut(key) else {
-        return Ok(());
-    };
-    let observed = value
-        .as_str()
-        .ok_or_else(|| format!("Codex structural field '{key}' is not a string"))?;
-    // A session_meta `session_id` can identify a parent for subagents. Only
-    // rewrite it when it is the reviewed transcript's own ID.
-    if observed == expected {
-        *value = Value::String(replacement.to_string());
-    }
-    Ok(())
-}
-
 pub(crate) fn payload_object(value: &Value) -> Option<&Map<String, Value>> {
     value.get("payload").and_then(Value::as_object)
 }
@@ -679,14 +549,6 @@ pub(crate) fn payload_object(value: &Value) -> Option<&Map<String, Value>> {
 fn string_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| object.get(*key).and_then(Value::as_str))
-}
-
-fn validate_rewrite_value(label: &str, value: &str, max: usize) -> Result<(), String> {
-    if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
-        Err(format!("invalid Codex {label}"))
-    } else {
-        Ok(())
-    }
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -871,21 +733,7 @@ mod tests {
         );
         assert_eq!(&continued_chain[..base_chain.len()], base_chain.as_slice());
         assert!(continued_chain.len() > base_chain.len());
-
-        let rewritten = rewrite_codex_transcript(
-            &continued,
-            "thread-a",
-            "thread-b",
-            "/tmp/project-a",
-            "/tmp/project-b",
-        )
-        .unwrap();
-        let rewritten_analysis = analyze_codex_transcript(&rewritten);
-        assert!(rewritten_analysis.is_resumable());
-        assert_eq!(
-            lineage_digests(&continued_analysis),
-            lineage_digests(&rewritten_analysis)
-        );
+        assert!(lineage_digests(&continued_analysis).is_some());
     }
 
     #[test]
@@ -969,44 +817,6 @@ mod tests {
             analysis.source_thread_id.as_deref(),
             Some("thread-large-record")
         );
-
-        let rewritten = rewrite_codex_transcript(
-            &bytes,
-            "thread-large-record",
-            "thread-large-record-copy",
-            "/tmp/project-large",
-            "/tmp/project-large-copy",
-        )
-        .unwrap();
-        let rewritten_analysis = analyze_codex_transcript(&rewritten);
-        assert!(rewritten_analysis.is_resumable());
-        assert_eq!(
-            rewritten_analysis.source_thread_id.as_deref(),
-            Some("thread-large-record-copy")
-        );
-    }
-
-    #[test]
-    fn structural_rewrite_preserves_lineage_and_semantics() {
-        let bytes = transcript(
-            "thread-a",
-            "/tmp/project-a",
-            &[("m-a", None, "one"), ("m-b", Some("m-a"), "two")],
-        );
-        let before = analyze_codex_transcript(&bytes);
-        let rewritten = rewrite_codex_transcript(
-            &bytes,
-            "thread-a",
-            "thread-b",
-            "/tmp/project-a",
-            "/tmp/project-b",
-        )
-        .unwrap();
-        let after = analyze_codex_transcript(&rewritten);
-        assert_eq!(lineage_digests(&before), lineage_digests(&after));
-        assert_eq!(after.source_thread_id.as_deref(), Some("thread-b"));
-        assert_eq!(after.source_cwd.as_deref(), Some("/tmp/project-b"));
-        assert_ne!(hex_sha256(&bytes), hex_sha256(&rewritten));
     }
 
     #[test]

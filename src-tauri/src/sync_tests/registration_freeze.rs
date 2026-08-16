@@ -6,7 +6,7 @@
 //! removing, or renaming a command must fail this test until the frozen
 //! contract itself is deliberately changed outside that plan.
 
-/// The 94 registered commands, sorted: the provider-neutral project-sync
+/// The 95 registered commands, sorted: the provider-neutral project-sync
 /// surface plus the 20 scope-rowed Library resource commands.
 const EXPECTED: &[&str] = &[
     "apply_bundle_restore",
@@ -67,6 +67,7 @@ const EXPECTED: &[&str] = &[
     "list_remote_bundle_snapshots",
     "list_remote_bundles",
     "list_setup_drafts",
+    "open_project_markdown_path",
     "plan_bundle_restore",
     "prepare_catalog_resource_fork",
     "prepare_catalog_resource_pull",

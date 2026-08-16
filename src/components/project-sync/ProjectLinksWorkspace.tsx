@@ -2242,6 +2242,10 @@ export default function ProjectLinksWorkspace({
         )}>
           <SessionDetailPage
             localProjectId={sessionDetailSubview.localProjectId}
+            projectRoot={activeBindingByProject.get(sessionDetailSubview.localProjectId)?.canonical_project_root
+              ?? workspaceProject.canonical_project_root
+              ?? workspaceProject.project_root
+              ?? ""}
             resourceId={sessionDetailSubview.resourceId}
             occurrenceKey={sessionDetailSubview.occurrenceKey}
             initialCheckpointId={sessionDetailSubview.initialCheckpointId}

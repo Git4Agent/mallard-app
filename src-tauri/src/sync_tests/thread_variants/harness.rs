@@ -257,7 +257,12 @@ pub fn publish_request(
             lineage_digest,
             semantic_digest,
             portable_tail: Some(
-                mallard_domain::compute_portable_conversation_tail(
+                // Cloud thread docs carry the wire-form codec. Harness
+                // fixtures publish their transcripts verbatim (no in-cwd
+                // content paths), so the folded state is form-identical and
+                // only the label distinguishes the columns.
+                mallard_domain::compute_portable_conversation_tail_with_codec(
+                    mallard_domain::PORTABLE_TAIL_CODEC_WIRE_V1,
                     mallard_domain::TailPartitionKind::WholeThread,
                     0,
                     &chain,
@@ -416,6 +421,70 @@ impl TranscriptBuilder {
         }
         output
     }
+}
+
+/// Test-fixture identity retarget: rewrite the authoritative session id and
+/// the structural cwd fields of a fabricated transcript. This reproduces
+/// the retired structural rewrite for fixture setup only — production pulls
+/// materialize exclusively through the standalone Decode build, and these
+/// fixtures carry no in-cwd content paths, so their canonical digests are
+/// unchanged by the retarget.
+pub fn rewrite_transcript_identity(
+    bytes: &[u8],
+    source_thread_id: &str,
+    destination_thread_id: &str,
+    _source_cwd: &str,
+    destination_cwd: &str,
+) -> Result<Vec<u8>, String> {
+    let mut output = Vec::with_capacity(bytes.len());
+    for raw in bytes.split(|byte| *byte == b'\n') {
+        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+        if raw.is_empty() {
+            continue;
+        }
+        let mut value: serde_json::Value = serde_json::from_slice(raw)
+            .map_err(|_| "fixture transcript contains malformed JSON".to_string())?;
+        let record_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        if let Some(payload) = value
+            .get_mut("payload")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            if record_type.as_deref() == Some("session_meta") {
+                for key in ["id", "thread_id", "threadId", "session_id", "sessionId"] {
+                    if payload.get(key).and_then(serde_json::Value::as_str)
+                        == Some(source_thread_id)
+                    {
+                        payload.insert(
+                            key.to_string(),
+                            serde_json::Value::String(destination_thread_id.to_string()),
+                        );
+                    }
+                }
+            }
+            if matches!(
+                record_type.as_deref(),
+                Some("session_meta") | Some("turn_context")
+            ) {
+                for key in ["cwd", "working_directory", "workingDirectory"] {
+                    if payload.contains_key(key) {
+                        payload.insert(
+                            key.to_string(),
+                            serde_json::Value::String(destination_cwd.to_string()),
+                        );
+                    }
+                }
+            }
+        }
+        output.extend_from_slice(
+            &serde_json::to_vec(&value)
+                .map_err(|error| format!("serialize fixture record: {error}"))?,
+        );
+        output.push(b'\n');
+    }
+    Ok(output)
 }
 
 pub fn chain(thread_id: &str, suffix: &[(&str, &str)]) -> Vec<u8> {

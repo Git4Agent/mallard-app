@@ -3056,6 +3056,7 @@ dependencies = [
 name = "mallard-infrastructure"
 version = "0.1.2"
 dependencies = [
+ "aho-corasick",
  "aws-sdk-s3",
  "aws-smithy-http-client",
  "aws-smithy-types",

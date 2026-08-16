@@ -1,11 +1,10 @@
 use super::harness::{
-    assert_manifest_consistent, chain, codex, codex_scope, ThreadSpec, VariantWorld,
+    assert_manifest_consistent, chain, codex, codex_scope, rewrite_transcript_identity,
+    ThreadSpec, VariantWorld,
 };
 use super::recovery::install_scope;
 use crate::project_sync::commands::ThreadSyncState;
-use crate::project_sync::conversation_codec::{
-    analyze_codex_transcript, rewrite_codex_transcript, CODEX_LINEAGE_CODEC_KEY,
-};
+use crate::project_sync::conversation_codec::{analyze_codex_transcript, CODEX_LINEAGE_CODEC_KEY};
 use crate::project_sync::domain::{
     ConversationMaterializationState, ConversationPlanActionType, LocalConversationBinding,
     SessionPresentation, TailClassification, ThreadId,
@@ -168,7 +167,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     let initial = world.publish(&[t1.clone(), t2.clone()], origin_a.clone(), 10);
     assert_eq!(initial.snapshot.head.revision, 1);
 
-    let a_active = rewrite_codex_transcript(
+    let a_active = rewrite_transcript_identity(
         &t1.transcript,
         "shared-source-thread",
         "a-active-thread",
@@ -176,7 +175,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         scope_a.project_root.to_str().unwrap(),
     )
     .unwrap();
-    let b_active = rewrite_codex_transcript(
+    let b_active = rewrite_transcript_identity(
         &t2.transcript,
         "shared-source-thread",
         "b-active-thread",
@@ -205,7 +204,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
 
     let a_after_first_append = append_message(&a_active, "m-d1", "continued on A");
     fs::write(&a_active_path, &a_after_first_append).unwrap();
-    t1.transcript = rewrite_codex_transcript(
+    t1.transcript = rewrite_transcript_identity(
         &a_after_first_append,
         "a-active-thread",
         "shared-source-thread",
@@ -257,7 +256,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
 
     let b_after_append = append_message(&b_active_before_pull, "m-d2", "continued on B");
     fs::write(&b_active_path, &b_after_append).unwrap();
-    t2.transcript = rewrite_codex_transcript(
+    t2.transcript = rewrite_transcript_identity(
         &b_after_append,
         "b-active-thread",
         "shared-source-thread",
@@ -310,7 +309,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     let a_after_second_append =
         append_message(&a_active_before_pull, "m-e1", "continued again on A");
     fs::write(&a_active_path, &a_after_second_append).unwrap();
-    t1.transcript = rewrite_codex_transcript(
+    t1.transcript = rewrite_transcript_identity(
         &a_after_second_append,
         "a-active-thread",
         "shared-source-thread",
@@ -475,7 +474,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
 
     // The bound local copy lives in a real rollout under its own alias and
     // has advanced past the published branch.
-    let rebound = rewrite_codex_transcript(
+    let rebound = rewrite_transcript_identity(
         &t2.transcript,
         "shared-source-thread",
         "local-v2",
@@ -492,7 +491,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     fs::write(&local_path, &local_transcript).unwrap();
     // The third thread's bound local copy diverges from its published chain
     // at the branch tip: it carries m-c2 where the cloud recorded m-c3.
-    let diverged_rebound = rewrite_codex_transcript(
+    let diverged_rebound = rewrite_transcript_identity(
         &t2.transcript,
         "shared-source-thread",
         "local-v3",
@@ -746,11 +745,20 @@ fn whole_thread_layout() -> RootTailLayout {
     }
 }
 
+/// The wire-form tail of a fixture publication: harness worlds publish
+/// transcripts verbatim, so the folded state is form-identical and the wire
+/// codec label matches the manifest column the journaled operation joins.
 fn transcript_tail(transcript: &[u8]) -> PortableConversationTail {
     let analysis = analyze_codex_transcript(transcript);
     match analysis.lineage {
         CodecLineage::Complete { chain, .. } => {
-            compute_portable_conversation_tail(TailPartitionKind::WholeThread, 0, &chain).unwrap()
+            mallard_domain::compute_portable_conversation_tail_with_codec(
+                mallard_domain::PORTABLE_TAIL_CODEC_WIRE_V1,
+                TailPartitionKind::WholeThread,
+                0,
+                &chain,
+            )
+            .unwrap()
         }
         other => panic!("fixture transcript is not resumable: {other:?}"),
     }
@@ -925,7 +933,7 @@ fn materialize_thread(
     updated_at: u64,
 ) -> PathBuf {
     let snapshot = world.engine().inspect(&world.bundle_id).unwrap();
-    let rewritten = rewrite_codex_transcript(
+    let rewritten = rewrite_transcript_identity(
         source_transcript,
         source_thread_id,
         destination_thread_id,

@@ -53,6 +53,7 @@ export type SessionHeaderModel =
 
 interface Props {
   localProjectId: string;
+  projectRoot: string;
   resourceId: string;
   occurrenceKey: string;
   initialCheckpointId?: string;
@@ -93,6 +94,7 @@ function SessionDetailEntryState({
 
 export default function SessionDetailPage({
   localProjectId,
+  projectRoot,
   resourceId,
   occurrenceKey,
   initialCheckpointId,
@@ -330,6 +332,15 @@ export default function SessionDetailPage({
     if (expanded) void requestToolDetail(eventId);
   };
 
+  const openProjectPath = useCallback(async (relativePath: string) => {
+    setActionError(null);
+    try {
+      await projectSyncApi.openProjectMarkdownPath(localProjectId, relativePath);
+    } catch (reason) {
+      setActionError(normalizeSessionDetailFailure(reason).message);
+    }
+  }, [localProjectId]);
+
   const runAction = async (action: SessionActionDescriptor) => {
     if (!action.enabled || actionBusyId) return;
     setActionBusyId(action.action_id);
@@ -415,6 +426,8 @@ export default function SessionDetailPage({
               append: true,
             })}
             onToolExpandedChange={handleToolExpandedChange}
+            onOpenProjectPath={(relativePath) => void openProjectPath(relativePath)}
+            projectRoot={projectRoot}
           />
         </div>
       )}

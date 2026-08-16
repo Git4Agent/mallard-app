@@ -63,6 +63,7 @@ pub fn run() {
             project_sync::commands::get_project_session_detail,
             project_sync::commands::get_project_session_timeline_page,
             project_sync::commands::get_project_session_event_detail,
+            project_sync::commands::open_project_markdown_path,
             project_sync::commands::execute_project_session_action,
             project_sync::commands::register_local_project,
             project_sync::commands::remove_local_project,

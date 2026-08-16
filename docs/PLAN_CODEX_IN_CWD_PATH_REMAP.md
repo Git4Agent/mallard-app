@@ -1,6 +1,10 @@
 # PLAN: In-cwd path remap across machines — canonical wire + dual-pin identity
 
-Status: proposed (2026-08-14).
+Status: implemented (2026-08-15). One deliberate deltas from the §6.1
+sketch: `StandaloneBuildMode::Decode` also carries
+`canonical_target_root`, so the pull gate re-encodes under exactly the
+patterns a future push from the pulling machine will use (target-alias
+collisions surface at pull, not at that later push).
 
 One plan for the whole problem: after Pull, every path that lives under the
 **project working directory** — structural fields, sandbox/permission

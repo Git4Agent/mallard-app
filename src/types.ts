@@ -863,8 +863,10 @@ export interface ConversationPlanAction {
   pinned_scope_revision: number;
   pinned_scope_sha256: string;
   pinned_accepted_tail?: PortableConversationTail | null;
+  pinned_accepted_local_tail?: PortableConversationTail | null;
   pinned_local_tail?: PortableConversationTail | null;
   pinned_cloud_tail?: PortableConversationTail | null;
+  pinned_checkpoint_generation?: number | null;
   pinned_lineage_digest?: string | null;
   pinned_semantic_digest?: string | null;
   pinned_raw_range?: ConversationRawRangePin | null;

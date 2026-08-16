@@ -22,6 +22,8 @@ interface Props {
   onRetry: () => void;
   onLoadMore: () => void;
   onToolExpandedChange: (eventId: string, expanded: boolean) => void;
+  onOpenProjectPath: (relativePath: string) => void;
+  projectRoot: string;
 }
 
 export default function SessionDetailTimeline({
@@ -37,6 +39,8 @@ export default function SessionDetailTimeline({
   onRetry,
   onLoadMore,
   onToolExpandedChange,
+  onOpenProjectPath,
+  projectRoot,
 }: Props) {
   // The record is the page; it needs no eyebrow announcing that it is a record,
   // and no count of its own now that the toolbar states one.
@@ -105,6 +109,8 @@ export default function SessionDetailTimeline({
                     expandedToolIds={expandedToolIds}
                     toolDetails={toolDetails}
                     onToolExpandedChange={onToolExpandedChange}
+                    onOpenProjectPath={onOpenProjectPath}
+                    projectRoot={projectRoot}
                   />
                 </li>
               );

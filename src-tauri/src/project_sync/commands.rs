@@ -15,7 +15,8 @@ use super::codex_app_refresh::{
 };
 use super::codex_history_graph;
 use super::codex_history_graph::CodexSeededRoot;
-use super::codex_rollout::{analyze_codex_rollout_structure, structural_record_type};
+use super::codex_path_map::{validate_pathmap_root, CodexPathMapper};
+use super::codex_rollout::analyze_codex_rollout_structure;
 use super::codex_standalone_builder::{
     build_standalone_codex_root, StandaloneBuildMode, StandaloneConversationArtifact,
 };
@@ -1368,6 +1369,32 @@ pub async fn get_project_session_event_detail(
             &snapshot_id,
             &event_id,
         )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn open_project_markdown_path(
+    app: tauri::AppHandle,
+    local_project_id: LocalProjectId,
+    relative_path: String,
+) -> Result<(), SessionDetailError> {
+    let repository = repository(&app).map_err(|_| SessionDetailError {
+        code: SessionDetailErrorCode::ProviderError,
+        message: "Mallard could not open its local state repository.".to_string(),
+        current_snapshot_id: None,
+    })?;
+    run_session_detail_blocking(move || {
+        let path = session_detail::resolve_project_markdown_path(
+            &repository,
+            &local_project_id,
+            &relative_path,
+        )?;
+        tauri_plugin_opener::open_path(path, None::<&str>).map_err(|_| SessionDetailError {
+            code: SessionDetailErrorCode::ProviderError,
+            message: "Mallard could not open the linked project path.".to_string(),
+            current_snapshot_id: None,
+        })
     })
     .await
 }
@@ -4379,23 +4406,107 @@ pub(crate) struct LocalTailObservation {
     evidence: TailSideEvidence,
     /// The checkpoint-format raw range pin for a publishing plan.
     raw_range_pin: Option<RawRangePin>,
-    /// A reviewed cloud tail proven to be an exact fold-prefix of this local
-    /// chain. Set only on the full-resolve path when an unpinned thread's
-    /// cloud value refolds at its recorded end; it never comes from a cursor
-    /// ride or any non-verifying branch.
-    verified_prefix_tail: Option<PortableConversationTail>,
+    /// Acceptance evidence re-established by first-contact adoption: the
+    /// reviewed cloud wire pin plus its local-form twin at the same end,
+    /// proven by encoding this local chain under the binding root and
+    /// folding the wire state at the cloud pin's recorded end. Set only on
+    /// the full-resolve path; it never comes from a cursor ride or any
+    /// non-verifying branch.
+    verified_acceptance: Option<VerifiedAdoption>,
+}
+
+/// The §6.4 encode-compare adoption outcome: dual pins for this review only;
+/// the durable pins are written by the Push or Pull the adoption enables.
+#[derive(Clone)]
+pub(crate) struct VerifiedAdoption {
+    wire_tail: PortableConversationTail,
+    local_tail: PortableConversationTail,
+}
+
+/// The §6.4 encode-compare: build the wire form of the resolved local thread
+/// under its own binding root, fold the wire state at the cloud pin's end,
+/// and compare. Equal ⇒ dual pins re-established (cloud wire pin + the
+/// local-form twin at the same end). Every failure path returns `None` —
+/// unproven, never an error — matching the old probe's fail-closed posture.
+fn adopt_codex_acceptance(
+    resolved: &codex_history_graph::ResolvedCodexRoot,
+    probe: &PortableConversationTail,
+    effective_kind: TailPartitionKind,
+    effective_start: u64,
+    layout: Option<&RootTailLayout>,
+    project_root: &str,
+    canonical_project_root: &str,
+) -> Option<VerifiedAdoption> {
+    if probe.codec != mallard_domain::PORTABLE_TAIL_CODEC_WIRE_V1
+        || probe.partition_kind != effective_kind
+        || probe.start_record_count != effective_start
+        || probe.accepted_end_record_count < effective_start
+        || probe.accepted_end_record_count > resolved.chain.len() as u64
+    {
+        return None;
+    }
+    let artifact = build_standalone_codex_root(
+        resolved,
+        &StandaloneBuildMode::Encode {
+            root: project_root.to_string(),
+            canonical_root: (canonical_project_root != project_root)
+                .then(|| canonical_project_root.to_string()),
+        },
+        layout,
+    )
+    .ok()?;
+    let wire_state_at_probe_end =
+        if probe.accepted_end_record_count == artifact.portable_tail.accepted_end_record_count {
+            artifact.portable_tail.accepted_tail_state.clone()
+        } else {
+            // The cloud pin is a strict prefix: fold the encoded wire chain
+            // at exactly its recorded end.
+            let analysis = analyze_codex_transcript(&artifact.root_bytes);
+            let wire_chain = analysis.lineage.chain()?;
+            mallard_domain::compute_conversation_tail_state(
+                effective_kind,
+                effective_start,
+                probe.accepted_end_record_count,
+                wire_chain,
+            )
+            .ok()?
+        };
+    if wire_state_at_probe_end != probe.accepted_tail_state {
+        return None;
+    }
+    let local_state = mallard_domain::compute_conversation_tail_state(
+        effective_kind,
+        effective_start,
+        probe.accepted_end_record_count,
+        &resolved.chain,
+    )
+    .ok()?;
+    let local_tail = PortableConversationTail {
+        codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
+        partition_kind: effective_kind,
+        start_record_count: effective_start,
+        accepted_end_record_count: probe.accepted_end_record_count,
+        accepted_tail_state: local_state,
+    };
+    local_tail.validate().ok()?;
+    Some(VerifiedAdoption {
+        wire_tail: probe.clone(),
+        local_tail,
+    })
 }
 
 /// Derive local Codex evidence: ride the checkpoint cursor when it is valid,
 /// fall back to a full re-resolve, and seed first-contact state. Returns the
 /// observation plus the refreshed checkpoint value to persist.
 ///
-/// `adoption_probe` carries the reviewed cloud tail when the thread has no
-/// accepted pin. It forces the full-resolve path so the cloud value can be
-/// refolded against the canonical chain: an exact refold proves the cloud
-/// version is a prefix of local and re-establishes acceptance evidence
+/// `adoption_probe` carries the reviewed cloud wire tail when the thread has
+/// no accepted pin. It forces the full-resolve path so the local thread can
+/// be **encoded** under its own binding root and the wire fold compared to
+/// the cloud pin at its recorded end: equality proves the cloud version is a
+/// prefix of local and re-establishes the dual acceptance pins
 /// (first-contact adoption, e.g. after a removed project is re-registered);
-/// a failed refold leaves the pair unproven and blocked.
+/// anything else leaves the pair unproven and blocked. Encoding is a pure
+/// function of (bytes, binding root) — there is no table to infer.
 #[allow(clippy::too_many_arguments)]
 fn observe_codex_local(
     local: Option<&LocalThreadReview>,
@@ -4403,13 +4514,15 @@ fn observe_codex_local(
     layout: Option<&RootTailLayout>,
     provider_home: &Path,
     adoption_probe: Option<&PortableConversationTail>,
+    project_root: &str,
+    canonical_project_root: &str,
 ) -> Result<CodexLocalObservation, String> {
     let Some(local) = local else {
         return Ok(CodexLocalObservation {
             observation: LocalTailObservation {
                 evidence: TailSideEvidence::ConfirmedAbsent,
                 raw_range_pin: None,
-                verified_prefix_tail: None,
+                verified_acceptance: None,
             },
             seeded: None,
             depends_on: Vec::new(),
@@ -4438,7 +4551,7 @@ fn observe_codex_local(
                                 observation: LocalTailObservation {
                                     evidence: TailSideEvidence::Invalid,
                                     raw_range_pin: None,
-                                    verified_prefix_tail: None,
+                                    verified_acceptance: None,
                                 },
                                 seeded: None,
                                 depends_on: Vec::new(),
@@ -4458,7 +4571,7 @@ fn observe_codex_local(
                                     checkpoint.observed_tail.clone(),
                                 ),
                                 raw_range_pin: Some(raw_range_pin.clone()),
-                                verified_prefix_tail: None,
+                                verified_acceptance: None,
                             },
                             seeded: None,
                             depends_on: vec![source.clone()],
@@ -4499,7 +4612,7 @@ fn observe_codex_local(
                                         observation: LocalTailObservation {
                                             evidence: TailSideEvidence::Invalid,
                                             raw_range_pin: None,
-                                            verified_prefix_tail: None,
+                                            verified_acceptance: None,
                                         },
                                         seeded: None,
                                         depends_on: Vec::new(),
@@ -4514,7 +4627,7 @@ fn observe_codex_local(
                                     observation: LocalTailObservation {
                                         evidence: TailSideEvidence::Invalid,
                                         raw_range_pin: None,
-                                        verified_prefix_tail: None,
+                                        verified_acceptance: None,
                                     },
                                     seeded: None,
                                     depends_on: Vec::new(),
@@ -4532,7 +4645,7 @@ fn observe_codex_local(
                             observation: LocalTailObservation {
                                 evidence: TailSideEvidence::Present(observed_tail.clone()),
                                 raw_range_pin: Some(pin.clone()),
-                                verified_prefix_tail: None,
+                                verified_acceptance: None,
                             },
                             seeded: Some(CodexSeededRoot {
                                 layout: layout.clone(),
@@ -4550,7 +4663,7 @@ fn observe_codex_local(
                             observation: LocalTailObservation {
                                 evidence: TailSideEvidence::Invalid,
                                 raw_range_pin: None,
-                                verified_prefix_tail: None,
+                                verified_acceptance: None,
                             },
                             seeded: None,
                             depends_on: Vec::new(),
@@ -4569,7 +4682,7 @@ fn observe_codex_local(
                 observation: LocalTailObservation {
                     evidence: TailSideEvidence::Invalid,
                     raw_range_pin: None,
-                    verified_prefix_tail: None,
+                    verified_acceptance: None,
                 },
                 seeded: None,
                 depends_on: Vec::new(),
@@ -4586,33 +4699,28 @@ fn observe_codex_local(
             observation: LocalTailObservation {
                 evidence: TailSideEvidence::Invalid,
                 raw_range_pin: None,
-                verified_prefix_tail: None,
+                verified_acceptance: None,
             },
             seeded: None,
             depends_on: Vec::new(),
         });
     };
-    // First-contact adoption: an unpinned cloud tail that refolds exactly at
-    // its recorded end over this canonical chain is a proven prefix of the
-    // local conversation; anything that fails to refold stays unpinned.
-    let verified_prefix_tail = adoption_probe.and_then(|probe| {
-        (probe.codec == mallard_domain::PORTABLE_TAIL_CODEC_V1
-            && probe.partition_kind == effective_kind
-            && probe.start_record_count == effective_start
-            && probe.accepted_end_record_count >= effective_start
-            && probe.accepted_end_record_count <= resolved.chain.len() as u64)
-            .then(|| {
-                mallard_domain::compute_conversation_tail_state(
-                    effective_kind,
-                    effective_start,
-                    probe.accepted_end_record_count,
-                    &resolved.chain,
-                )
-                .ok()
-                .filter(|state| state == &probe.accepted_tail_state)
-                .map(|_| probe.clone())
-            })
-            .flatten()
+    // First-contact adoption (§6.4): encode the local thread under its own
+    // binding root and compare the wire fold at the cloud pin's recorded
+    // end. Equality proves the cloud version is a prefix of local and
+    // re-establishes the dual pins; any failure — including a root the
+    // encoder refuses (non-POSIX, reserved-token collision) — leaves the
+    // pair unproven and blocked.
+    let verified_acceptance = adoption_probe.and_then(|probe| {
+        adopt_codex_acceptance(
+            &resolved,
+            probe,
+            effective_kind,
+            effective_start,
+            layout,
+            project_root,
+            canonical_project_root,
+        )
     });
     let leaf_bytes = codex_history_graph::read_rollout_bounded(&source)?;
     let seeded = codex_history_graph::seed_codex_root(&resolved, &leaf_bytes, layout)?;
@@ -4639,7 +4747,7 @@ fn observe_codex_local(
         observation: LocalTailObservation {
             evidence: TailSideEvidence::Present(seeded.observed_tail.clone()),
             raw_range_pin: Some(pin),
-            verified_prefix_tail,
+            verified_acceptance,
         },
         seeded: Some(seeded),
         depends_on: resolved
@@ -4866,6 +4974,7 @@ fn provider_thread_review(
                 let checkpoint = ConversationCheckpoint {
                     generation: 0,
                     accepted: None,
+                    accepted_local_tail: None,
                     observed_tail: seeded.observed_tail.clone(),
                     physical: PhysicalMappingState::Ready {
                         root_mapping: seeded.mapping.clone(),
@@ -5108,6 +5217,8 @@ fn provider_thread_review(
                             *layout,
                             provider_home,
                             *probe,
+                            &binding.project_root,
+                            &binding.canonical_project_root,
                         );
                         if outcome.is_err() {
                             failed.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -5169,6 +5280,8 @@ fn provider_thread_review(
                     .map(|checkpoint| checkpoint.generation.saturating_add(1))
                     .unwrap_or(0),
                 accepted: stored.and_then(|checkpoint| checkpoint.accepted.clone()),
+                accepted_local_tail: stored
+                    .and_then(|checkpoint| checkpoint.accepted_local_tail.clone()),
                 observed_tail: seeded.observed_tail.clone(),
                 physical: PhysicalMappingState::Ready {
                     root_mapping: seeded.mapping.clone(),
@@ -5287,12 +5400,18 @@ fn provider_thread_review(
             .and_then(|local| local.descriptor.as_ref())
             .or(cloud_descriptor);
 
-        // Accepted pin.
+        // Accepted dual pins: the wire pin and its local-form twin are
+        // recorded atomically; evidence mirrors both columns.
         let accepted_evidence = match checkpoint.and_then(|checkpoint| checkpoint.accepted.as_ref())
         {
             Some(accepted) => TailSideEvidence::Present(accepted.portable_tail.clone()),
             None => TailSideEvidence::ConfirmedAbsent,
         };
+        let accepted_local_evidence =
+            match checkpoint.and_then(|checkpoint| checkpoint.accepted_local_tail.as_ref()) {
+                Some(tail) => TailSideEvidence::Present(tail.clone()),
+                None => TailSideEvidence::ConfirmedAbsent,
+            };
         // Cloud side.
         let cloud_evidence = match thread {
             Some(thread) => match (&thread.portable_tail, is_codex) {
@@ -5315,7 +5434,7 @@ fn provider_thread_review(
             LocalTailObservation {
                 evidence: TailSideEvidence::Invalid,
                 raw_range_pin: None,
-                verified_prefix_tail: None,
+                verified_acceptance: None,
             }
         } else if is_codex {
             codex_observations
@@ -5356,18 +5475,20 @@ fn provider_thread_review(
                     end_byte_offset: captured.transcript.bytes.len() as u64,
                     range_sha256: hex_digest(Sha256::digest(&captured.transcript.bytes).as_slice()),
                 }),
-                verified_prefix_tail: None,
+                verified_acceptance: None,
             }
         };
-        // A proven prefix re-establishes acceptance evidence for this review
-        // only; the durable pin is written by the Push or Pull it enables.
-        let accepted_evidence = match (&accepted_evidence, &local_observation.verified_prefix_tail)
-        {
-            (TailSideEvidence::ConfirmedAbsent, Some(tail)) => {
-                TailSideEvidence::Present(tail.clone())
-            }
-            _ => accepted_evidence,
-        };
+        // A proven adoption re-establishes both acceptance pins for this
+        // review only; the durable pins are written by the Push or Pull it
+        // enables.
+        let (accepted_evidence, accepted_local_evidence) =
+            match (&accepted_evidence, &local_observation.verified_acceptance) {
+                (TailSideEvidence::ConfirmedAbsent, Some(adoption)) => (
+                    TailSideEvidence::Present(adoption.wire_tail.clone()),
+                    TailSideEvidence::Present(adoption.local_tail.clone()),
+                ),
+                _ => (accepted_evidence, accepted_local_evidence),
+            };
         let physical_detached = matches!(
             checkpoint.map(|checkpoint| &checkpoint.physical),
             Some(PhysicalMappingState::Detached { .. })
@@ -5378,6 +5499,7 @@ fn provider_thread_review(
         } else {
             compare_conversation_tail(TailComparisonEvidence {
                 accepted: accepted_evidence.clone(),
+                accepted_local: accepted_local_evidence.clone(),
                 local: local_observation.evidence.clone(),
                 cloud: cloud_evidence.clone(),
                 local_provenance_verified: true,
@@ -5418,6 +5540,12 @@ fn provider_thread_review(
             provider_quiescent: true,
             resolution_pending: pending_resolution_threads.contains(&thread_id),
             physical_detached,
+            // The durable pin's presence, not the reviewed evidence: the
+            // adoption probe upgrades evidence for this review only, and the
+            // Pull it enables is what writes the pin.
+            acceptance_durably_pinned: checkpoint
+                .and_then(|checkpoint| checkpoint.accepted.as_ref())
+                .is_some(),
         };
         let push =
             default_conversation_decision(ConversationPlanDirection::Push, relation, capabilities);
@@ -5548,6 +5676,10 @@ fn provider_thread_review(
             TailSideEvidence::Present(tail) => Some(tail.clone()),
             _ => None,
         };
+        let accepted_local_tail_pin = match &accepted_local_evidence {
+            TailSideEvidence::Present(tail) => Some(tail.clone()),
+            _ => None,
+        };
         let local_tail_pin = match &local_observation.evidence {
             TailSideEvidence::Present(tail) => Some(tail.clone()),
             _ => None,
@@ -5556,6 +5688,12 @@ fn provider_thread_review(
             TailSideEvidence::Present(tail) => Some(tail.clone()),
             _ => None,
         };
+        // The post-maintenance checkpoint generation this review saw; apply
+        // requires the live checkpoint to still carry exactly this value.
+        let checkpoint_generation_pin = maintained
+            .get(&thread_id)
+            .copied()
+            .or_else(|| checkpoint.map(|checkpoint| checkpoint.generation));
 
         if build_push_actions {
             let publishes = matches!(
@@ -5583,8 +5721,10 @@ fn provider_thread_review(
                 pinned_scope_revision,
                 pinned_scope_sha256: pinned_scope_sha256.clone(),
                 pinned_accepted_tail: accepted_tail_pin.clone(),
+                pinned_accepted_local_tail: accepted_local_tail_pin.clone(),
                 pinned_local_tail: local_tail_pin.clone(),
                 pinned_cloud_tail: cloud_tail_pin.clone(),
+                pinned_checkpoint_generation: checkpoint_generation_pin,
                 pinned_lineage_digest: None,
                 pinned_semantic_digest: None,
                 pinned_raw_range: publishes
@@ -5602,7 +5742,11 @@ fn provider_thread_review(
             push_actions.push(push_action);
         }
 
-        if build_pull_actions {
+        // A durably pinned current thread produces no Pull row at all: the
+        // plan-level apply advances scope bases, so the review only carries
+        // rows that change something. `NoChanges` also stays a Push-only
+        // action inside validated plans.
+        if build_pull_actions && pull.action != ConversationPlanActionType::NoChanges {
             let mut proposed_provider_thread_id = None;
             let mut expected_provider_state = Vec::new();
             let mut keep_both = None;
@@ -5787,8 +5931,10 @@ fn provider_thread_review(
                 pinned_scope_revision,
                 pinned_scope_sha256: pinned_scope_sha256.clone(),
                 pinned_accepted_tail: accepted_tail_pin,
+                pinned_accepted_local_tail: accepted_local_tail_pin,
                 pinned_local_tail: local_tail_pin,
                 pinned_cloud_tail: cloud_tail_pin,
+                pinned_checkpoint_generation: checkpoint_generation_pin,
                 pinned_lineage_digest: materializing_digests
                     .then(|| thread.map(|thread| thread.lineage_digest.clone()))
                     .flatten(),
@@ -5877,7 +6023,7 @@ impl LocalTailObservation {
         Self {
             evidence,
             raw_range_pin: None,
-            verified_prefix_tail: None,
+            verified_acceptance: None,
         }
     }
 }
@@ -7877,6 +8023,9 @@ fn build_publish_request(
         // cumulative tail must equal the planned local value.
         let is_codex = action.provider.as_str() == "codex";
         let (artifact, seeded) = if is_codex {
+            // Operation-level Windows gate: the path-map root grammar is
+            // checked before any rollout bytes are parsed.
+            validate_pathmap_root("project root", &binding.project_root)?;
             let provider_home = homes.get(&action.provider).ok_or_else(|| {
                 format!(
                     "conversation Push action '{}' has no provider home",
@@ -7896,12 +8045,11 @@ fn build_publish_request(
                     result_thread_id
                 ));
             }
-            // The prefix witness is the append-only trust anchor for the
-            // fixed partition: the reviewed checkpoint's witness must
-            // survive this full reconstruction bit for bit, or content
-            // before the accepted start was mutated in place — invisible to
-            // cursor-riding review, and never publishable.
-            let stored_witness = reviewed_config
+            // The stale check is pin-vs-checkpoint equality: any checkpoint
+            // advance between review and apply is a typed stale error, so
+            // the witness read below never trusts state the review did not
+            // pin.
+            let stored_checkpoint = reviewed_config
                 .links
                 .iter()
                 .find(|link| {
@@ -7909,8 +8057,22 @@ fn build_publish_request(
                         && &link.storage_id == storage_id
                 })
                 .and_then(|link| link.conversation_checkpoints.get(&scope_key))
-                .and_then(|threads| threads.get(&action.thread_id))
-                .and_then(|checkpoint| checkpoint.prefix_witness.clone());
+                .and_then(|threads| threads.get(&action.thread_id));
+            if stored_checkpoint.map(|checkpoint| checkpoint.generation)
+                != action.pinned_checkpoint_generation
+            {
+                return Err(format!(
+                    "conversation '{}' checkpoint advanced after review; refresh and push again",
+                    result_thread_id
+                ));
+            }
+            // The prefix witness is the append-only trust anchor for the
+            // fixed partition: the reviewed checkpoint's local-form witness
+            // must survive this full local reconstruction bit for bit, or
+            // content before the accepted start was mutated in place —
+            // invisible to cursor-riding review, and never publishable.
+            let stored_witness =
+                stored_checkpoint.and_then(|checkpoint| checkpoint.prefix_witness.clone());
             if let Some(stored) = stored_witness {
                 if seeded.prefix_witness.as_ref() != Some(&stored) {
                     return Err(format!(
@@ -7922,7 +8084,11 @@ fn build_publish_request(
             }
             let artifact = build_standalone_codex_root(
                 &resolved_root,
-                &StandaloneBuildMode::PreserveIdentity,
+                &StandaloneBuildMode::Encode {
+                    root: binding.project_root.clone(),
+                    canonical_root: (binding.canonical_project_root != binding.project_root)
+                        .then(|| binding.canonical_project_root.clone()),
+                },
                 stored_layout,
             )?;
             (Some(artifact), Some(seeded))
@@ -8022,10 +8188,12 @@ fn build_publish_request(
             .source_thread_id
             .clone()
             .ok_or_else(|| "captured conversation lacks a provider session id".to_string())?;
-        // The after-state this publication commits: accepted = observed =
-        // the reconstructed tail. Candidate and accepted-at identifiers are
-        // placeholders until the engine patches them at HeadAdvanced from
-        // the fused publish result.
+        // The after-state this publication commits: the wire column accepts
+        // the artifact's wire tail, the local column pins the reconstructed
+        // local value the review verified. For providers without a
+        // standalone artifact the two columns carry one shared value.
+        // Candidate and accepted-at identifiers are placeholders until the
+        // engine patches them at HeadAdvanced from the fused publish result.
         let published_tail = artifact
             .as_ref()
             .map(|artifact| artifact.portable_tail.clone())
@@ -8033,6 +8201,16 @@ fn build_publish_request(
             .ok_or_else(|| {
                 format!(
                     "conversation Push action '{}' has no publishable tail",
+                    action.action_id
+                )
+            })?;
+        let accepted_local_tail = seeded
+            .as_ref()
+            .map(|seeded| seeded.observed_tail.clone())
+            .or_else(|| action.pinned_local_tail.clone())
+            .ok_or_else(|| {
+                format!(
+                    "conversation Push action '{}' has no local accepted tail",
                     action.action_id
                 )
             })?;
@@ -8049,7 +8227,8 @@ fn build_publish_request(
                 accepted_at_manifest_sha256: action.pinned_manifest_sha256.clone(),
                 portable_tail: published_tail.clone(),
             }),
-            observed_tail: published_tail.clone(),
+            accepted_local_tail: Some(accepted_local_tail.clone()),
+            observed_tail: accepted_local_tail.clone(),
             physical: match &seeded {
                 Some(seeded) => PhysicalMappingState::Ready {
                     root_mapping: seeded.mapping.clone(),
@@ -8277,24 +8456,25 @@ fn cloud_publication_from_snapshot(snapshot: &BundleSnapshot) -> ConversationClo
     }
 }
 
-fn snapshot_contains_actions(
+/// The push-recovery content witness: identify a published candidate by
+/// comparing each operation's journaled `tail_after` (the artifact's wire
+/// tail) against the manifest thread's wire tail — wire against wire, never
+/// a local value against the manifest.
+fn snapshot_contains_publications(
     snapshot: &BundleSnapshot,
-    actions: &[ConversationPlanAction],
+    expected: &[(ThreadId, PortableConversationTail)],
 ) -> bool {
-    actions.iter().all(|action| {
-        let Some(expected) = action.pinned_local_tail.as_ref() else {
-            return false;
-        };
+    expected.iter().all(|(thread_id, tail_after)| {
         snapshot
             .manifest
-            .find_conversation(&action.thread_id)
+            .find_conversation(thread_id)
             .is_some_and(|(_, thread)| match &thread.portable_tail {
-                Some(tail) => tail == expected,
+                Some(tail) => tail == tail_after,
                 // Providers without the portable codec are witnessed by the
                 // synthesized whole-thread equivalence.
                 None => {
-                    thread.message_count == expected.accepted_end_record_count
-                        && thread.semantic_digest == expected.accepted_tail_state
+                    thread.message_count == tail_after.accepted_end_record_count
+                        && thread.semantic_digest == tail_after.accepted_tail_state
                 }
             })
     })
@@ -8483,6 +8663,28 @@ fn publish_reviewed(
             }
             None => None,
         };
+        // The live checkpoint generation is the honest staleness read here;
+        // the tail fields mirror the action's own pins because the byte-level
+        // re-proofs (raw range here, full reconstruction in the build) carry
+        // the real content verification.
+        let live_checkpoint_generation = repository
+            .load_config()
+            .ok()
+            .and_then(|config| {
+                config
+                    .links
+                    .iter()
+                    .find(|link| {
+                        link.local_project_id == binding.local_project_id
+                            && &link.storage_id == storage_id
+                    })
+                    .and_then(|link| {
+                        link.conversation_checkpoints
+                            .get(&SyncScopeKey::Provider(action.provider.clone()))
+                    })
+                    .and_then(|threads| threads.get(&action.thread_id))
+                    .map(|checkpoint| checkpoint.generation)
+            });
         let context = ConversationApplyContext {
             now: updated_at,
             host_id: binding.host_id.clone(),
@@ -8496,8 +8698,10 @@ fn publish_reviewed(
             scope_revision,
             scope_sha256,
             accepted_tail: action.pinned_accepted_tail.clone(),
+            accepted_local_tail: action.pinned_accepted_local_tail.clone(),
             local_tail: action.pinned_local_tail.clone(),
             cloud_tail: action.pinned_cloud_tail.clone(),
+            checkpoint_generation: live_checkpoint_generation,
             lineage_digest: action.pinned_lineage_digest.clone(),
             semantic_digest: action.pinned_semantic_digest.clone(),
             raw_range,
@@ -8546,6 +8750,15 @@ fn publish_reviewed(
         updated_at,
     )?;
     validate_cloud_publication_binding_owners(&document.bindings, &operations)?;
+    let published_expectations: Vec<(ThreadId, PortableConversationTail)> = operations
+        .iter()
+        .filter_map(|operation| match &operation.operation {
+            ConversationSyncOperationKind::CloudPublication(payload) => {
+                Some((operation.thread_id.clone(), payload.tail_after.clone()))
+            }
+            _ => None,
+        })
+        .collect();
     on_phase("build publish request", phase_started.elapsed());
     let phase_started = Instant::now();
     if operations.is_empty() {
@@ -8572,7 +8785,7 @@ fn publish_reviewed(
         || {
             let snapshot = engine.inspect(&project.bundle_id)?;
             Ok(
-                snapshot_contains_actions(&snapshot, &selected_actions).then(|| {
+                snapshot_contains_publications(&snapshot, &published_expectations).then(|| {
                     published.set(previous.is_none_or(|previous| {
                         snapshot.head.revision != previous.head.revision
                             || snapshot.head.commit_id != previous.head.commit_id
@@ -8589,7 +8802,7 @@ fn publish_reviewed(
     );
     let phase_started = Instant::now();
     let snapshot = engine.inspect(&project.bundle_id)?;
-    if !snapshot_contains_actions(&snapshot, &selected_actions) {
+    if !snapshot_contains_publications(&snapshot, &published_expectations) {
         return Err(
             "published bundle head does not contain the reviewed conversations".to_string(),
         );
@@ -9389,6 +9602,7 @@ fn prepare_pull_conversation_actions(
     snapshot: &BundleSnapshot,
     bytes: &mut dyn BundleBytes,
     actions: &[SelectedPullConversation],
+    storage_id: &StorageId,
     now: u64,
 ) -> Result<
     (
@@ -9505,6 +9719,24 @@ fn prepare_pull_conversation_actions(
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
         let (scope_revision, scope_sha256) = provider_scope_pin(Some(snapshot), &action.provider);
+        let live_checkpoint_generation = repository
+            .load_config()
+            .ok()
+            .and_then(|config| {
+                config
+                    .links
+                    .iter()
+                    .find(|link| {
+                        link.local_project_id == binding.local_project_id
+                            && &link.storage_id == storage_id
+                    })
+                    .and_then(|link| {
+                        link.conversation_checkpoints
+                            .get(&SyncScopeKey::Provider(action.provider.clone()))
+                    })
+                    .and_then(|threads| threads.get(&action.thread_id))
+                    .map(|checkpoint| checkpoint.generation)
+            });
         let context = ConversationApplyContext {
             now,
             host_id: binding.host_id.clone(),
@@ -9518,8 +9750,10 @@ fn prepare_pull_conversation_actions(
             scope_revision,
             scope_sha256,
             accepted_tail: action.pinned_accepted_tail.clone(),
+            accepted_local_tail: action.pinned_accepted_local_tail.clone(),
             local_tail: action.pinned_local_tail.clone(),
             cloud_tail: action.pinned_cloud_tail.clone(),
+            checkpoint_generation: live_checkpoint_generation,
             // The downloaded transcript's own analysis digests: pin equality
             // here is the transcript-versus-manifest content verification.
             lineage_digest,
@@ -9677,11 +9911,19 @@ fn apply_prepared_pull_conversation(
         .ok_or_else(|| "conversation Pull action lacks a destination provider id".to_string())?;
 
     // Reconstruct and reidentify exactly once, verifying typed invariants
-    // before any journal or visible mutation: paginated null-base output,
-    // manifest digest equality (proven by the prepare-time pin check), a
-    // unique canonical position for the imported start, and a refolded tail
-    // equal to the accepted state.
+    // before any journal or visible mutation. Codex order per §6.2: staged
+    // wire bytes resolve as a normal rollout → the wire chain refolds to the
+    // accepted cloud pin → the Decode build runs the §4.4 paths gate on the
+    // staged body **before** its identity stage assigns the fresh provider
+    // id, folds the head, and strips the path-map marker. Everything the
+    // checkpoint and journal persist from this pull is sourced from the
+    // correct form: the wire pin from the manifest, and the local twin,
+    // prefix witness, and materialization digest pins from the decode
+    // build's re-analysis of the final materialized local bytes.
     let (installed_bytes, imported_layout, checkpoint_seed) = if is_codex {
+        // Operation-level Windows gate: the path-map root grammar is
+        // checked before any rollout bytes are parsed.
+        validate_pathmap_root("project root", &binding.project_root)?;
         let staging_dir = repository.root().join("staging").join("pull-conversations");
         fs::create_dir_all(&staging_dir)
             .map_err(|error| format!("create pull staging directory: {error}"))?;
@@ -9690,23 +9932,19 @@ fn apply_prepared_pull_conversation(
             .map_err(|error| format!("stage cloud transcript: {error}"))?;
         let no_bases = |_: &str| Ok(None);
         let resolved_root = codex_history_graph::resolve_codex_root(&staged_source, &no_bases)?;
+        // The imported layout is the binding's local-form partition: the
+        // coordinates come from the verified cloud value, the codec is the
+        // local fold's.
         let imported_layout = RootTailLayout {
-            codec: cloud_tail.codec.clone(),
+            codec: super::domain::PORTABLE_TAIL_CODEC_V1.to_string(),
             partition_kind: cloud_tail.partition_kind,
             start_record_count: cloud_tail.start_record_count,
         };
-        let artifact = build_standalone_codex_root(
-            &resolved_root,
-            &StandaloneBuildMode::Reidentify {
-                root_provider_thread_id: destination_provider_thread_id.clone(),
-                target_cwd: binding.project_root.clone(),
-            },
-            Some(&imported_layout),
-        )?;
-        let _ = fs::remove_file(&staged_source);
-        if cloud_tail.start_record_count > artifact.message_count {
+        if cloud_tail.start_record_count > resolved_root.chain.len() as u64 {
             return Err("cloud tail start is outside the reconstructed conversation".to_string());
         }
+        // Wire-form verification ends here: the staged wire chain must
+        // refold to the pinned cloud tail.
         let refolded = super::domain::compute_conversation_tail_state(
             cloud_tail.partition_kind,
             cloud_tail.start_record_count,
@@ -9714,20 +9952,42 @@ fn apply_prepared_pull_conversation(
             &resolved_root.chain,
         )?;
         if refolded != cloud_tail.accepted_tail_state
-            || cloud_tail.accepted_end_record_count != artifact.message_count
+            || cloud_tail.accepted_end_record_count != resolved_root.chain.len() as u64
         {
             return Err(
                 "reconstructed conversation does not refold to the accepted cloud tail".to_string(),
             );
         }
-        let witness = super::domain::conversation_prefix_witness(
-            &resolved_root.chain,
-            cloud_tail.start_record_count,
+        let artifact = build_standalone_codex_root(
+            &resolved_root,
+            &StandaloneBuildMode::Decode {
+                root_provider_thread_id: destination_provider_thread_id.clone(),
+                target_root: binding.project_root.clone(),
+                canonical_target_root: (binding.canonical_project_root != binding.project_root)
+                    .then(|| binding.canonical_project_root.clone()),
+            },
+            Some(&imported_layout),
         )?;
+        let _ = fs::remove_file(&staged_source);
+        if artifact.portable_tail.partition_kind != cloud_tail.partition_kind
+            || artifact.portable_tail.start_record_count != cloud_tail.start_record_count
+            || artifact.portable_tail.accepted_end_record_count
+                != cloud_tail.accepted_end_record_count
+        {
+            return Err(
+                "decoded conversation disagrees with the accepted cloud coordinates".to_string(),
+            );
+        }
         (
-            artifact.root_bytes,
+            artifact.root_bytes.clone(),
             imported_layout,
-            (witness, artifact.artifact_sha256),
+            (
+                artifact.prefix_witness.clone(),
+                artifact.artifact_sha256.clone(),
+                artifact.portable_tail.clone(),
+                artifact.lineage_digest.clone(),
+                artifact.semantic_digest.clone(),
+            ),
         )
     } else {
         let rewritten = adapter.rewrite(&super::providers::SessionRewriteRequest {
@@ -9743,9 +10003,20 @@ fn apply_prepared_pull_conversation(
             start_record_count: cloud_tail.start_record_count,
         };
         let sha = hex_digest(Sha256::digest(&rewritten).as_slice());
-        (rewritten, layout, (None, sha))
+        let lineage_digest = action.pinned_lineage_digest.clone().ok_or_else(|| {
+            "conversation Pull action lacks its pinned lineage digest".to_string()
+        })?;
+        let semantic_digest = action.pinned_semantic_digest.clone().ok_or_else(|| {
+            "conversation Pull action lacks its pinned semantic digest".to_string()
+        })?;
+        (
+            rewritten,
+            layout,
+            (None, sha, cloud_tail.clone(), lineage_digest, semantic_digest),
+        )
     };
-    let (prefix_witness, artifact_sha256) = checkpoint_seed;
+    let (prefix_witness, artifact_sha256, accepted_local_tail, staged_lineage_digest, staged_semantic_digest) =
+        checkpoint_seed;
     on_phase(
         "reconstruct and verify cloud graph",
         phase_started.elapsed(),
@@ -9842,7 +10113,8 @@ fn apply_prepared_pull_conversation(
             accepted_at_manifest_sha256: action.pinned_manifest_sha256.clone(),
             portable_tail: cloud_tail.clone(),
         }),
-        observed_tail: cloud_tail.clone(),
+        accepted_local_tail: Some(accepted_local_tail.clone()),
+        observed_tail: accepted_local_tail.clone(),
         physical: PhysicalMappingState::Ready {
             root_mapping: installed_mapping(&installed_bytes),
             raw_range_pin: RawRangePin {
@@ -9954,6 +10226,7 @@ fn apply_prepared_pull_conversation(
             // survive; the accepted pin and accepted physical end clear.
             if let Some(mut moved) = threads.remove(&action.thread_id) {
                 moved.accepted = None;
+                moved.accepted_local_tail = None;
                 moved.generation = moved.generation.saturating_add(1);
                 moved.binding_revision = moved.binding_revision.saturating_add(1);
                 threads.insert(keep_both.preserved_thread_id.clone(), moved);
@@ -10003,12 +10276,12 @@ fn apply_prepared_pull_conversation(
                 phase: PullJournalPhase::TargetStaged,
                 planned_relation: action.relation,
                 accepted_tail_after: cloud_tail,
-                pinned_lineage_digest: action.pinned_lineage_digest.clone().ok_or_else(|| {
-                    "conversation Pull action lacks its pinned lineage digest".to_string()
-                })?,
-                pinned_semantic_digest: action.pinned_semantic_digest.clone().ok_or_else(|| {
-                    "conversation Pull action lacks its pinned semantic digest".to_string()
-                })?,
+                // The engine's verify_provider_payload hashes the staged
+                // **local** target bytes, so these pins are the decode
+                // build's local digests (§3.2 form ledger); the manifest's
+                // wire digests were verified at prepare.
+                pinned_lineage_digest: staged_lineage_digest,
+                pinned_semantic_digest: staged_semantic_digest,
                 keep_both: keep_both_journal,
                 sync_config_before: config_before,
                 sync_config_after: config_after,
@@ -10144,6 +10417,7 @@ fn apply_bundle_restore_with_progress(
         &snapshot,
         &mut byte_source,
         &materializing_actions,
+        &plan.storage_id,
         applied_at,
     )?;
     on_phase("prepare conversations", phase_started.elapsed());
@@ -10449,6 +10723,13 @@ fn adopt_cloud_metadata_action(
         .pinned_cloud_tail
         .clone()
         .ok_or_else(|| "conversation adoption lacks its pinned cloud tail".to_string())?;
+    // The local column accepts the reviewed local observation: adoption runs
+    // only on Sync relations, where classification proved it equivalent to
+    // the accepted cloud value in its own form.
+    let accepted_local_tail = action
+        .pinned_local_tail
+        .clone()
+        .ok_or_else(|| "conversation adoption lacks its pinned local tail".to_string())?;
     let scope = SyncScopeKey::Provider(action.provider.clone());
     let mut config = repository.load_config()?;
     {
@@ -10469,6 +10750,12 @@ fn adopt_cloud_metadata_action(
         let checkpoint = threads.get_mut(&action.thread_id).ok_or_else(|| {
             "conversation adoption requires an existing destination checkpoint".to_string()
         })?;
+        if Some(checkpoint.generation) != action.pinned_checkpoint_generation {
+            return Err(
+                "conversation adoption checkpoint advanced after review; refresh and pull again"
+                    .to_string(),
+            );
+        }
         let accepted = mallard_domain::AcceptedConversationVersion {
             artifact_sha256: checkpoint
                 .accepted
@@ -10480,7 +10767,8 @@ fn adopt_cloud_metadata_action(
             portable_tail: cloud_tail.clone(),
         };
         checkpoint.accepted = Some(accepted);
-        checkpoint.observed_tail = cloud_tail;
+        checkpoint.accepted_local_tail = Some(accepted_local_tail.clone());
+        checkpoint.observed_tail = accepted_local_tail;
         checkpoint.generation = checkpoint.generation.saturating_add(1);
         link.scope_bases.entry(scope).and_modify(|base| {
             base.scope_revision = action.pinned_scope_revision.max(base.scope_revision);
@@ -13669,6 +13957,20 @@ fn audit_codex_conversation_paths_with_repository(
                     continue;
                 }
             };
+        // Repair moves exactly one old root to the current root (§6.5); a
+        // thread recording several distinct out-of-project roots is
+        // ambiguous — which one was the project? — and paths outside the
+        // project working directory are never remapped, so it needs manual
+        // review instead of a blanket rewrite.
+        if stale_cwds.len() > 1 {
+            audit.blockers.push(format!(
+                "Codex thread '{}' records {} distinct out-of-project roots; repair requires \
+                 manual review",
+                thread_id,
+                stale_cwds.len()
+            ));
+            continue;
+        }
         if let Some(recorded_cwd) = stale_cwds.into_iter().next() {
             let Some(transcript_path) = path.to_str() else {
                 audit.blockers.push(format!(
@@ -13740,6 +14042,59 @@ fn repair_codex_conversation_paths_with_repository(
         mode: u32,
     }
 
+    // Repair transforms the whole matcher scope (values and keys — the old
+    // structural-cwd-only rewrite missed sandbox/permission entries and all
+    // content mentions), so the current binding root must satisfy the
+    // path-map grammar before any file is touched.
+    validate_pathmap_root("project root", &binding.project_root)?;
+    let repair_home = std::env::var("HOME").ok();
+    let mapper_new = CodexPathMapper::new(
+        &binding.project_root,
+        (binding.canonical_project_root != binding.project_root)
+            .then_some(binding.canonical_project_root.as_str()),
+        repair_home.as_deref(),
+    )?;
+
+    // Which repaired threads are pinned (accepted on any storage link):
+    // pinned repairs must preserve the published wire form byte-exactly and
+    // rebase their checkpoints; unpinned repairs run the explicit new-root
+    // collision pre-scan instead.
+    let codex_profile_id = stored_binding.profile_ids.get(&codex_key()).cloned();
+    let bindings_document = repository.load_conversation_bindings()?;
+    let logical_by_provider: BTreeMap<String, (ThreadId, Option<RootTailLayout>)> =
+        bindings_document
+            .bindings
+            .iter()
+            .filter(|row| {
+                row.host_id == binding.host_id
+                    && row.replica_id == binding.replica_id
+                    && row.local_project_id == binding.local_project_id
+                    && Some(&row.provider_profile_id) == codex_profile_id.as_ref()
+            })
+            .filter_map(|row| {
+                row.provider_thread_id.as_ref().map(|provider_id| {
+                    (
+                        provider_id.clone(),
+                        (row.thread_id.clone(), row.root_tail_layout.clone()),
+                    )
+                })
+            })
+            .collect();
+    let repair_config = repository.load_config()?;
+    let codex_scope = SyncScopeKey::Provider(codex_key());
+    let thread_is_pinned = |provider_thread_id: &str| -> bool {
+        let Some((logical, _)) = logical_by_provider.get(provider_thread_id) else {
+            return false;
+        };
+        repair_config
+            .links
+            .iter()
+            .filter(|link| link.local_project_id == binding.local_project_id)
+            .filter_map(|link| link.conversation_checkpoints.get(&codex_scope))
+            .filter_map(|threads| threads.get(logical))
+            .any(|checkpoint| checkpoint.accepted.is_some())
+    };
+
     let mut pending = Vec::with_capacity(audit.issues.len());
     let mut staged_source_bytes = 0_u64;
     for issue in &audit.issues {
@@ -13780,8 +14135,52 @@ fn repair_codex_conversation_paths_with_repository(
                 issue.thread_id
             ));
         }
-        let repaired =
-            remap_codex_structural_cwds(&original, &issue.thread_id, &binding.project_root)?;
+        // §6.5: repair ≡ decode_new(encode_old(x)) — the pull pipeline
+        // applied locally. The old root is the recorded stale cwd; a value
+        // the path-map grammar rejects cannot be repaired mechanically.
+        validate_pathmap_root("stale Codex conversation root", &issue.recorded_cwd).map_err(
+            |error| format!("Codex conversation '{}': {}", issue.thread_id, error),
+        )?;
+        let mapper_old = CodexPathMapper::new(
+            &issue.recorded_cwd,
+            derive_canonical_alias(&issue.recorded_cwd).as_deref(),
+            repair_home.as_deref(),
+        )?;
+        let pinned = thread_is_pinned(&issue.thread_id);
+        if !pinned {
+            // Unpinned threads have no wire to gate against: run the
+            // explicit collision pre-scan so foreign content mentioning the
+            // new root can never be silently captured into remap scope.
+            let mut collision = None;
+            for raw in original.split(|byte| *byte == b'\n') {
+                let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+                if raw.is_empty() {
+                    continue;
+                }
+                let value: serde_json::Value = serde_json::from_slice(raw)
+                    .map_err(|_| "Codex conversation contains malformed JSON".to_string())?;
+                if let Some(found) = mapper_new.find_source_match(&value) {
+                    collision = Some(found);
+                    break;
+                }
+            }
+            if let Some(found) = collision {
+                return Err(format!(
+                    "Codex conversation '{}' already mentions the current project root \
+                     ('{}'); repair would capture pre-existing content into remap scope \
+                     and requires manual review",
+                    issue.thread_id, found
+                ));
+            }
+        }
+        let repaired = remap_codex_conversation_paths(
+            &original,
+            &issue.thread_id,
+            &mapper_old,
+            &mapper_new,
+            pinned,
+        )
+        .map_err(|error| format!("Codex conversation '{}': {}", issue.thread_id, error))?;
         #[cfg(unix)]
         let mode = {
             use std::os::unix::fs::PermissionsExt;
@@ -13895,6 +14294,152 @@ fn repair_codex_conversation_paths_with_repository(
             });
         }
         applied = applied.saturating_add(1);
+    }
+
+    // §6.5 checkpoint rebase, atomic across every storage link: the wire
+    // pin (`accepted`) is untouched — the gate proved the wire form is
+    // identical — while the local column (accepted-local twin, observed
+    // fold, prefix witness, physical mapping, raw-range pin) re-derives
+    // from the repaired bytes. With no unpushed suffix the thread lands in
+    // Sync with nothing to republish; a genuine local suffix rides through
+    // as LocalOutstanding. Unpinned checkpoints re-baseline the observed
+    // column the same way.
+    struct RebasedThread {
+        seeded: CodexSeededRoot,
+        chain: Vec<super::domain::CanonicalConversationMessage>,
+        consumed_prefix_sha256: String,
+    }
+    let mut rebased: BTreeMap<ThreadId, RebasedThread> = BTreeMap::new();
+    for repair in &pending {
+        let Some((logical, layout)) = logical_by_provider.get(&repair.thread_id) else {
+            continue;
+        };
+        let has_checkpoint = repair_config
+            .links
+            .iter()
+            .filter(|link| link.local_project_id == binding.local_project_id)
+            .filter_map(|link| link.conversation_checkpoints.get(&codex_scope))
+            .any(|threads| threads.contains_key(logical));
+        if !has_checkpoint {
+            continue;
+        }
+        let lookup = codex_rollout_lookup(&canonical_codex_home);
+        let derived = codex_history_graph::resolve_codex_root(&repair.path, &lookup).and_then(
+            |resolved_root| {
+                let leaf_bytes = codex_history_graph::read_rollout_bounded(&repair.path)?;
+                let seeded = codex_history_graph::seed_codex_root(
+                    &resolved_root,
+                    &leaf_bytes,
+                    layout.as_ref(),
+                )?;
+                let consumed = seeded.mapping.consumed_byte_offset as usize;
+                Ok(RebasedThread {
+                    consumed_prefix_sha256: hex_digest(
+                        Sha256::digest(&leaf_bytes[..consumed]).as_slice(),
+                    ),
+                    chain: resolved_root.chain,
+                    seeded,
+                })
+            },
+        );
+        match derived {
+            Ok(thread) => {
+                rebased.insert(logical.clone(), thread);
+            }
+            Err(error) => {
+                let rollback_errors = rollback(pending.len());
+                return Err(if rollback_errors.is_empty() {
+                    format!(
+                        "repaired Codex conversation '{}' failed re-observation: {}; changes \
+                         were rolled back",
+                        repair.thread_id, error
+                    )
+                } else {
+                    format!(
+                        "repaired Codex conversation '{}' failed re-observation: {} and \
+                         rollback failed for {}",
+                        repair.thread_id,
+                        error,
+                        rollback_errors.join("; ")
+                    )
+                });
+            }
+        }
+    }
+    if !rebased.is_empty() {
+        let rebase_outcome = repository.mutate_config(|config| {
+            for link in config
+                .links
+                .iter_mut()
+                .filter(|link| link.local_project_id == binding.local_project_id)
+            {
+                let Some(threads) = link.conversation_checkpoints.get_mut(&codex_scope) else {
+                    continue;
+                };
+                for (logical, thread) in &rebased {
+                    let Some(checkpoint) = threads.get_mut(logical) else {
+                        continue;
+                    };
+                    checkpoint.accepted_local_tail = match &checkpoint.accepted {
+                        Some(accepted) => {
+                            // The local twin refolds at this link's accepted
+                            // end over the repaired chain; positions are
+                            // form-independent.
+                            let end = accepted.portable_tail.accepted_end_record_count;
+                            if end > thread.chain.len() as u64 {
+                                return Err(
+                                    "repaired conversation is shorter than its accepted end"
+                                        .to_string(),
+                                );
+                            }
+                            let state = super::domain::compute_conversation_tail_state(
+                                thread.seeded.layout.partition_kind,
+                                thread.seeded.layout.start_record_count,
+                                end,
+                                &thread.chain,
+                            )?;
+                            let local_twin = PortableConversationTail {
+                                codec: super::domain::PORTABLE_TAIL_CODEC_V1.to_string(),
+                                partition_kind: thread.seeded.layout.partition_kind,
+                                start_record_count: thread.seeded.layout.start_record_count,
+                                accepted_end_record_count: end,
+                                accepted_tail_state: state,
+                            };
+                            local_twin.validate()?;
+                            Some(local_twin)
+                        }
+                        None => None,
+                    };
+                    checkpoint.observed_tail = thread.seeded.observed_tail.clone();
+                    checkpoint.physical = PhysicalMappingState::Ready {
+                        root_mapping: thread.seeded.mapping.clone(),
+                        raw_range_pin: RawRangePin {
+                            start_byte_offset: 0,
+                            end_byte_offset: thread.seeded.mapping.consumed_byte_offset,
+                            range_sha256: thread.consumed_prefix_sha256.clone(),
+                        },
+                    };
+                    checkpoint.prefix_witness = thread.seeded.prefix_witness.clone();
+                    checkpoint.generation = checkpoint.generation.saturating_add(1);
+                }
+            }
+            Ok(())
+        });
+        if let Err(error) = rebase_outcome {
+            let rollback_errors = rollback(pending.len());
+            return Err(if rollback_errors.is_empty() {
+                format!(
+                    "conversation checkpoint rebase failed: {}; changes were rolled back",
+                    error
+                )
+            } else {
+                format!(
+                    "conversation checkpoint rebase failed: {} and rollback failed for {}",
+                    error,
+                    rollback_errors.join("; ")
+                )
+            });
+        }
     }
 
     let repaired_thread_ids = pending
@@ -14071,16 +14616,27 @@ fn inspect_codex_structural_cwds(
         .collect())
 }
 
-fn remap_codex_structural_cwds(
+/// §6.5's shared-module rewrite: repair ≡ `decode_new(encode_old(x))` per
+/// record — the pull pipeline applied locally, covering the full matcher
+/// scope (string values and object keys; the retired structural-only
+/// rewrite missed sandbox/permission entries and every content mention).
+/// For pinned threads `gate_wire_equality` proves
+/// `encode_new(repaired) == encode_old(original)` per record: the published
+/// wire form is unchanged byte-exactly, and the gate doubles as the
+/// collision detector for content that would newly tokenize under the
+/// current root. Untouched records keep their original line bytes.
+fn remap_codex_conversation_paths(
     source: &[u8],
     expected_thread_id: &str,
-    target_cwd: &str,
+    mapper_old: &CodexPathMapper,
+    mapper_new: &CodexPathMapper,
+    gate_wire_equality: bool,
 ) -> Result<Vec<u8>, String> {
-    validate_absolute_clean_path("target Codex conversation cwd", target_cwd)?;
     let before = analyze_codex_rollout_structure(source, Some(expected_thread_id))
         .map_err(|error| error.to_string())?;
     let mut output = Vec::with_capacity(source.len());
     let mut changed = 0_usize;
+    let mut record_number = 0_usize;
     for line in source.split_inclusive(|byte| *byte == b'\n') {
         let (json, ending): (&[u8], &[u8]) = if let Some(json) = line.strip_suffix(b"\r\n") {
             (json, b"\r\n")
@@ -14093,62 +14649,80 @@ fn remap_codex_structural_cwds(
             output.extend_from_slice(line);
             continue;
         }
-        let mut value: serde_json::Value = serde_json::from_slice(json)
+        record_number += 1;
+        let value: serde_json::Value = serde_json::from_slice(json)
             .map_err(|_| "Codex conversation contains malformed JSON".to_string())?;
-        let record_type = structural_record_type(&value).map(str::to_string);
-        if !matches!(
-            record_type.as_deref(),
-            Some("session_meta" | "turn_context")
-        ) {
-            output.extend_from_slice(line);
-            continue;
-        }
-        let payload = value
-            .get_mut("payload")
-            .and_then(serde_json::Value::as_object_mut)
-            .ok_or_else(|| {
+        let encoded_old = mapper_old
+            .encode_record(&value)
+            .map_err(|error| format!("record {record_number}: {error}"))?;
+        let repaired = mapper_new.decode_record(&encoded_old.wire)?;
+        if gate_wire_equality {
+            let re_encoded = mapper_new.encode_record(&repaired).map_err(|error| {
                 format!(
-                    "{} row has no payload",
-                    record_type.as_deref().unwrap_or("structural")
+                    "record {record_number} collides with the current project root: {error}"
                 )
             })?;
-        let mut row_changed = false;
-        for key in ["cwd", "working_directory", "workingDirectory"] {
-            let Some(cwd) = payload.get_mut(key) else {
-                continue;
-            };
-            let observed = cwd
-                .as_str()
-                .ok_or_else(|| format!("Codex structural field '{key}' is not a string"))?;
-            if observed != target_cwd {
-                *cwd = serde_json::Value::String(target_cwd.to_string());
-                changed = changed.saturating_add(1);
-                row_changed = true;
+            if re_encoded.wire != encoded_old.wire {
+                return Err(format!(
+                    "record {record_number} contains content that collides with the current \
+                     project root; repair cannot preserve the published wire form and \
+                     requires manual review"
+                ));
             }
         }
-        if !row_changed {
+        if repaired == value {
             output.extend_from_slice(line);
             continue;
         }
+        changed = changed.saturating_add(1);
         output.extend_from_slice(
-            &serde_json::to_vec(&value)
+            &serde_json::to_vec(&repaired)
                 .map_err(|error| format!("serialize repaired Codex session row: {}", error))?,
         );
         output.extend_from_slice(ending);
     }
     if changed == 0 {
-        return Err("conversation no longer contains a stale structural cwd".to_string());
+        return Err("conversation no longer contains a stale project path".to_string());
     }
     let after = analyze_codex_rollout_structure(&output, Some(expected_thread_id))
         .map_err(|error| error.to_string())?;
+    let expected_cwds: BTreeSet<String> = before
+        .structural_cwds
+        .iter()
+        .map(|cwd| {
+            let encoded = mapper_old.encode_record(&serde_json::Value::String(cwd.clone()))?;
+            match mapper_new.decode_record(&encoded.wire)? {
+                serde_json::Value::String(decoded) => Ok(decoded),
+                _ => Err("structural cwd decode changed its type".to_string()),
+            }
+        })
+        .collect::<Result<_, String>>()?;
     if before.current.id != after.current.id
         || before.fork_ancestry != after.fork_ancestry
         || before.accepted_metadata_ids != after.accepted_metadata_ids
-        || after.structural_cwds != BTreeSet::from([target_cwd.to_string()])
+        || after.structural_cwds != expected_cwds
     {
         return Err("repaired Codex conversation changed structural identity".to_string());
     }
     Ok(output)
+}
+
+/// The macOS textual firmlink aliases the binding's canonical-root handling
+/// models, derivable without touching the filesystem (the old root may no
+/// longer exist): `/var`, `/tmp`, and `/etc` each alias `/private/...`.
+fn derive_canonical_alias(root: &str) -> Option<String> {
+    for prefix in ["/var/", "/tmp/", "/etc/"] {
+        if root.starts_with(prefix) {
+            return Some(format!("/private{root}"));
+        }
+    }
+    root.strip_prefix("/private")
+        .filter(|rest| {
+            ["/var/", "/tmp/", "/etc/"]
+                .iter()
+                .any(|prefix| rest.starts_with(prefix))
+        })
+        .map(str::to_string)
 }
 
 fn now_secs() -> u64 {
@@ -15983,7 +16557,7 @@ mod tests {
         let stale_root_json = serde_json::to_string(stale_root.to_str().unwrap()).unwrap();
         let project_root_json = serde_json::to_string(project_root.to_str().unwrap()).unwrap();
         let message_line = format!(
-            "{{\"type\":\"response_item\",\"payload\":{{\"text\":\"keep the literal {} unchanged\"}}}}\n",
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"id\":\"m-repair\",\"content\":\"keep the literal {} unchanged\"}}}}\n",
             stale_root.display()
         );
         let stale_source = format!(
@@ -16026,6 +16600,97 @@ mod tests {
         )
         .unwrap();
 
+        // Pin the stale thread on a storage link so repair must preserve the
+        // published wire form and rebase the checkpoint's local column.
+        let storage_id = StorageId::parse("repair-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("repair-store"));
+        let logical_thread = ThreadId::parse("thread-stale-logical").unwrap();
+        let profile_for_binding = binding.profile_ids.get(&codex_key()).cloned().unwrap();
+        repo.mutate_conversation_bindings(|document| {
+            document.bindings.push(LocalConversationBinding {
+                host_id: binding.host_id.clone(),
+                replica_id: binding.replica_id.clone(),
+                local_project_id: binding.local_project_id.clone(),
+                provider_profile_id: profile_for_binding.clone(),
+                thread_id: logical_thread.clone(),
+                forked_from: None,
+                root_tail_layout: Some(RootTailLayout {
+                    codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
+                    partition_kind: TailPartitionKind::WholeThread,
+                    start_record_count: 0,
+                }),
+                provider_thread_id: Some(stale_thread.to_string()),
+                materialization_state: ConversationMaterializationState::Resumable,
+                revision: 0,
+                created_at: 1,
+                updated_at: 1,
+            });
+            Ok(())
+        })
+        .unwrap();
+        let no_bases = |_: &str| Ok(None);
+        let resolved_stale =
+            codex_history_graph::resolve_codex_root(&stale_path, &no_bases).unwrap();
+        let stale_leaf_bytes = codex_history_graph::read_rollout_bounded(&stale_path).unwrap();
+        let seeded_stale =
+            codex_history_graph::seed_codex_root(&resolved_stale, &stale_leaf_bytes, None)
+                .unwrap();
+        let published = build_standalone_codex_root(
+            &resolved_stale,
+            &StandaloneBuildMode::Encode {
+                root: stale_root.to_str().unwrap().to_string(),
+                canonical_root: None,
+            },
+            None,
+        )
+        .unwrap();
+        let published_wire_tail = published.portable_tail.clone();
+        repo.mutate_config(|config| {
+            let link_checkpoint = ConversationCheckpoint {
+                generation: 3,
+                accepted: Some(mallard_domain::AcceptedConversationVersion {
+                    artifact_sha256: published.artifact_sha256.clone(),
+                    accepted_at_commit_id: "commit-repair".to_string(),
+                    accepted_at_manifest_sha256: "d".repeat(64),
+                    portable_tail: published_wire_tail.clone(),
+                }),
+                accepted_local_tail: Some(seeded_stale.observed_tail.clone()),
+                observed_tail: seeded_stale.observed_tail.clone(),
+                physical: PhysicalMappingState::Ready {
+                    root_mapping: seeded_stale.mapping.clone(),
+                    raw_range_pin: RawRangePin {
+                        start_byte_offset: 0,
+                        end_byte_offset: seeded_stale.mapping.consumed_byte_offset,
+                        range_sha256: hex_digest(
+                            Sha256::digest(
+                                &stale_leaf_bytes
+                                    [..seeded_stale.mapping.consumed_byte_offset as usize],
+                            )
+                            .as_slice(),
+                        ),
+                    },
+                },
+                prefix_witness: None,
+                binding_revision: 0,
+            };
+            config.links.push(ProjectStorageLink {
+                local_project_id: binding.local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                bundle_id: project.bundle_id.clone(),
+                recipe: None,
+                scope_bases: BTreeMap::new(),
+                project_content_preferences: Default::default(),
+                conversation_checkpoints: BTreeMap::from([(
+                    SyncScopeKey::Provider(codex_key()),
+                    BTreeMap::from([(logical_thread.clone(), link_checkpoint)]),
+                )]),
+                pinned: false,
+                created_at: 1,
+            });
+            Ok(())
+        })
+        .unwrap();
+
         let audit =
             audit_codex_conversation_paths_with_repository(&repo, &project.local_project_id)
                 .unwrap();
@@ -16043,7 +16708,13 @@ mod tests {
         assert!(repaired.audit.ready);
         assert_eq!(repaired.audit.matching_thread_count, 2);
         let repaired_source = std::fs::read_to_string(&stale_path).unwrap();
-        assert!(repaired_source.contains(&message_line));
+        // Content mentions under the old root remap with the structural
+        // fields — the widened matcher scope the old repair missed.
+        assert!(!repaired_source.contains(stale_root.to_str().unwrap()));
+        assert!(repaired_source.contains(&format!(
+            "keep the literal {} unchanged",
+            project_root.display()
+        )));
         for line in repaired_source.lines() {
             let value: serde_json::Value = serde_json::from_str(line).unwrap();
             if matches!(
@@ -16060,6 +16731,57 @@ mod tests {
             std::fs::read(&unrelated_path).unwrap(),
             unrelated_source.as_bytes()
         );
+
+        // §6.5 rebase: the wire pin is untouched, the local column refolds
+        // from the repaired bytes, the generation advanced, and with no
+        // unpushed suffix the thread sits in Sync — nothing to republish.
+        let rebased = repo
+            .load_config()
+            .unwrap()
+            .links
+            .iter()
+            .find(|link| link.storage_id == storage_id)
+            .and_then(|link| {
+                link.conversation_checkpoints
+                    .get(&SyncScopeKey::Provider(codex_key()))
+            })
+            .and_then(|threads| threads.get(&logical_thread))
+            .cloned()
+            .unwrap();
+        assert_eq!(rebased.generation, 4);
+        assert_eq!(
+            rebased.accepted.as_ref().unwrap().portable_tail,
+            published_wire_tail
+        );
+        let repaired_resolved =
+            codex_history_graph::resolve_codex_root(&stale_path, &no_bases).unwrap();
+        let repaired_local_tail = mallard_domain::compute_portable_conversation_tail(
+            TailPartitionKind::WholeThread,
+            0,
+            &repaired_resolved.chain,
+        )
+        .unwrap();
+        assert_eq!(rebased.accepted_local_tail, Some(repaired_local_tail.clone()));
+        assert_eq!(rebased.observed_tail, repaired_local_tail);
+        assert_ne!(
+            rebased.observed_tail.accepted_tail_state,
+            seeded_stale.observed_tail.accepted_tail_state,
+            "content remap must change the local fold"
+        );
+        rebased.validate().unwrap();
+        // Wire invariance end-to-end: re-encoding the repaired bytes under
+        // the *new* root reproduces the accepted wire tail exactly.
+        let republished = build_standalone_codex_root(
+            &repaired_resolved,
+            &StandaloneBuildMode::Encode {
+                root: binding.project_root.clone(),
+                canonical_root: (binding.canonical_project_root != binding.project_root)
+                    .then(|| binding.canonical_project_root.clone()),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(republished.portable_tail, published_wire_tail);
         let backup_dir = PathBuf::from(repaired.backup_dir.unwrap());
         let backups = std::fs::read_dir(backup_dir)
             .unwrap()
@@ -16140,18 +16862,21 @@ mod tests {
     }
 
     #[test]
-    fn nested_fork_path_repair_accepts_ancestor_metadata_and_rewrites_its_cwds() {
+    fn nested_fork_path_repair_remaps_matcher_scope_under_one_old_root() {
         let active = "019f7500-0000-7000-8000-000000000111";
         let parent = "019f7500-0000-7000-8000-000000000011";
-        let grandparent = "019f7500-0000-7000-8000-000000000001";
-        let root = "019f7500-0000-7000-8000-000000000000";
+        let old_root = "/tmp/old-project";
+        // A realistic moved project: every segment recorded the same old
+        // root; sandbox entries and content mentions carry it too, and
+        // out-of-root paths must survive byte-identical.
         let source = [
-            serde_json::json!({"type":"session_meta","payload":{"id":active,"forked_from_id":parent,"cwd":"/tmp/old-active"}}),
-            serde_json::json!({"type":"session_meta","payload":{"id":parent,"forked_from_id":grandparent,"cwd":"/tmp/old-parent"}}),
-            serde_json::json!({"type":"session_meta","payload":{"id":grandparent,"forked_from_id":root,"cwd":"/tmp/old-grandparent"}}),
-            serde_json::json!({"type":"session_meta","payload":{"id":root,"cwd":"/tmp/old-root"}}),
-            serde_json::json!({"type":"turn_context","payload":{"cwd":"/tmp/old-turn"}}),
-            serde_json::json!({"type":"response_item","payload":{"type":"message","id":"m-a","role":"user","content":[{"type":"input_text","text":"unchanged"}]}}),
+            serde_json::json!({"type":"session_meta","payload":{"id":active,"forked_from_id":parent,"cwd":old_root}}),
+            serde_json::json!({"type":"session_meta","payload":{"id":parent,"cwd":old_root}}),
+            serde_json::json!({"type":"turn_context","payload":{
+                "cwd":"/tmp/old-project/frontend",
+                "sandbox_policy": {"writable_roots": [old_root, "/tmp"]},
+            }}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","id":"m-a","role":"user","content":[{"type":"input_text","text":"edit /tmp/old-project/src/main.rs and keep /tmp/other/x"}]}}),
         ]
         .into_iter()
         .map(|record| serde_json::to_string(&record).unwrap())
@@ -16161,22 +16886,67 @@ mod tests {
 
         let stale =
             inspect_codex_structural_cwds(&source, active, Path::new("/tmp/new-project")).unwrap();
-        assert_eq!(stale.len(), 5);
-        let repaired = remap_codex_structural_cwds(&source, active, "/tmp/new-project").unwrap();
+        assert_eq!(stale.len(), 2);
+        let mapper_old = CodexPathMapper::new(old_root, None, None).unwrap();
+        let mapper_new = CodexPathMapper::new("/tmp/new-project", None, None).unwrap();
+        let repaired =
+            remap_codex_conversation_paths(&source, active, &mapper_old, &mapper_new, false)
+                .unwrap();
         let structure = analyze_codex_rollout_structure(&repaired, Some(active)).unwrap();
-        assert_eq!(
-            structure.fork_ancestry,
-            vec![
-                parent.to_string(),
-                grandparent.to_string(),
-                root.to_string()
-            ]
-        );
+        assert_eq!(structure.fork_ancestry, vec![parent.to_string()]);
         assert_eq!(
             structure.structural_cwds,
-            BTreeSet::from(["/tmp/new-project".to_string()])
+            BTreeSet::from([
+                "/tmp/new-project".to_string(),
+                "/tmp/new-project/frontend".to_string()
+            ])
         );
-        assert!(String::from_utf8(repaired).unwrap().contains("unchanged"));
+        let text = String::from_utf8(repaired.clone()).unwrap();
+        assert!(text.contains("edit /tmp/new-project/src/main.rs"));
+        assert!(text.contains("keep /tmp/other/x"));
+        assert!(text.contains("\"/tmp/new-project\",\"/tmp\"")
+            || text.contains("\"writable_roots\":[\"/tmp/new-project\",\"/tmp\"]"));
+
+        // Pinned-thread gate: the repair transform preserves the wire form
+        // byte-exactly, so the gated variant succeeds on the same input …
+        remap_codex_conversation_paths(&source, active, &mapper_old, &mapper_new, true).unwrap();
+        // … and blocks when content already names the new root (collision).
+        let mut colliding = source.clone();
+        colliding.push(b'\n');
+        colliding.extend_from_slice(
+            serde_json::to_string(&serde_json::json!({
+                "type":"response_item",
+                "payload":{"type":"message","id":"m-b","role":"user",
+                            "content":[{"type":"input_text","text":"see /tmp/new-project/readme"}]}
+            }))
+            .unwrap()
+            .as_bytes(),
+        );
+        let error = remap_codex_conversation_paths(
+            &colliding,
+            active,
+            &mapper_old,
+            &mapper_new,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("collides with the current project root"), "{error}");
+
+        // Distinct out-of-project roots are an audit blocker, not a blanket
+        // rewrite: the multi-root fixture from the retired flow now reports
+        // ambiguity instead of flattening foreign cwds.
+        let multi_root = [
+            serde_json::json!({"type":"session_meta","payload":{"id":active,"forked_from_id":parent,"cwd":"/tmp/old-active"}}),
+            serde_json::json!({"type":"session_meta","payload":{"id":parent,"cwd":"/tmp/old-parent"}}),
+        ]
+        .into_iter()
+        .map(|record| serde_json::to_string(&record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes();
+        let stale = inspect_codex_structural_cwds(&multi_root, active, Path::new("/tmp/new-project"))
+            .unwrap();
+        assert_eq!(stale.len(), 2);
     }
 
     #[test]
@@ -17920,13 +18690,17 @@ mod tests {
         assert_eq!(delta.full_graph_resolves, 0);
         assert_eq!(delta.transcript_bytes_read, 0, "no content read at all");
 
-        // Pull review: the synced row adopts metadata without local bytes
-        // and the local-only row is not a pull candidate — zero captures.
+        // Pull review: the durably pinned synced row plans no action at all,
+        // so only the local-only informational row remains — zero captures.
         let before = metrics.snapshot();
         let restore =
             plan_bundle_restore_with_repository(&repo, &storage_id, &project.bundle_id, &binding)
                 .unwrap();
-        assert_eq!(restore.conversation_actions.len(), 2);
+        assert_eq!(restore.conversation_actions.len(), 1);
+        assert_eq!(
+            restore.conversation_actions[0].action,
+            ConversationPlanActionType::ReportLocalOnly
+        );
         let delta = metrics.snapshot().delta_since(&before);
         assert_eq!(delta.selected_captures, 0, "pull review captures nothing");
         assert_eq!(delta.transcript_bytes_read, 0);

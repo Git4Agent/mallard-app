@@ -3030,15 +3030,25 @@ pub struct ConversationPlanAction {
     /// against. Zero revision with an all-zero digest pins an absent scope.
     pub pinned_scope_revision: u64,
     pub pinned_scope_sha256: String,
-    /// The exact classifier evidence: accepted `P`, local `L`, cloud `C`.
-    /// Presence follows the pinned relation; apply re-runs the shared
-    /// classifier over these exact values and requires the planned relation.
+    /// The exact classifier evidence: accepted wire pin `P_wire`, its
+    /// local-form twin `P_local`, local `L`, cloud `C`.  Presence follows
+    /// the pinned relation; apply re-runs the shared classifier over these
+    /// exact values and requires the planned relation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_accepted_tail: Option<PortableConversationTail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_accepted_local_tail: Option<PortableConversationTail>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_local_tail: Option<PortableConversationTail>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_cloud_tail: Option<PortableConversationTail>,
+    /// The reviewed checkpoint generation.  Apply requires the live
+    /// checkpoint to still carry exactly this generation — any checkpoint
+    /// advance between review and apply is a typed stale error, so apply
+    /// never trusts a live-state read the review did not pin.  `None` pins
+    /// the checkpoint's confirmed absence at review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_checkpoint_generation: Option<u64>,
     /// Cloud manifest whole-chain digests, pinned for materializing installs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_lineage_digest: Option<String>,
@@ -3078,6 +3088,7 @@ impl ConversationPlanAction {
         validate_display_text("conversation plan codec", &self.required_codec, false)?;
         for tail in [
             self.pinned_accepted_tail.as_ref(),
+            self.pinned_accepted_local_tail.as_ref(),
             self.pinned_local_tail.as_ref(),
             self.pinned_cloud_tail.as_ref(),
         ]
@@ -3085,6 +3096,12 @@ impl ConversationPlanAction {
         .flatten()
         {
             tail.validate()?;
+        }
+        if self.pinned_accepted_tail.is_some() != self.pinned_accepted_local_tail.is_some() {
+            return Err(
+                "conversation plan must pin the wire and local accepted tails together"
+                    .to_string(),
+            );
         }
         for (label, digest) in [
             (
@@ -4987,10 +5004,11 @@ mod conversation_tail_relation;
 
 pub use conversation_tail::{
     compute_conversation_tail_state, compute_portable_conversation_tail,
-    conversation_prefix_witness, AcceptedConversationVersion, ConversationCheckpoint,
-    ConversationPrefixWitness, PhysicalMappingState, PortableConversationTail, RawRangePin,
-    RootPhysicalMapping, RootTailLayout, TailAccumulator, TailPartitionKind,
-    PORTABLE_TAIL_CODEC_V1,
+    compute_portable_conversation_tail_with_codec, conversation_prefix_witness,
+    AcceptedConversationVersion, ConversationCheckpoint, ConversationPrefixWitness,
+    PhysicalMappingState, PortableConversationTail, RawRangePin, RootPhysicalMapping,
+    RootTailLayout, TailAccumulator, TailPartitionKind, PORTABLE_TAIL_CODEC_V1,
+    PORTABLE_TAIL_CODEC_WIRE_V1,
 };
 pub use conversation_tail_relation::{
     compare_conversation_tail, SyncCurrency, TailClassification, TailComparisonEvidence,

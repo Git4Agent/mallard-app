@@ -630,7 +630,15 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
         lineage_digest,
         semantic_digest,
         portable_tail: (provider_key == "codex").then(|| {
-            compute_portable_conversation_tail(TailPartitionKind::WholeThread, 0, &chain).unwrap()
+            // Cloud thread docs carry the wire-form tail: token-form bytes
+            // fold under the wire codec label.
+            compute_portable_conversation_tail_with_codec(
+                PORTABLE_TAIL_CODEC_WIRE_V1,
+                TailPartitionKind::WholeThread,
+                0,
+                &chain,
+            )
+            .unwrap()
         }),
         forked_from: None,
         source_thread_id: Some("provider-native-thread".to_string()),
@@ -1290,6 +1298,7 @@ fn push_action(
         pinned_scope_revision: scope_revision,
         pinned_scope_sha256: scope_sha256,
         pinned_accepted_tail: None,
+        pinned_accepted_local_tail: None,
         pinned_local_tail: Some(portable_tail(
             TailPartitionKind::WholeThread,
             0,
@@ -1297,6 +1306,7 @@ fn push_action(
             TAIL_VECTOR_WHOLE_AT_0_M1_M5,
         )),
         pinned_cloud_tail: None,
+        pinned_checkpoint_generation: None,
         pinned_lineage_digest: None,
         pinned_semantic_digest: None,
         pinned_raw_range: Some(RawRangePin {
@@ -1584,12 +1594,16 @@ fn portable_tail_validation_fails_closed() {
     .unwrap();
 
     // Structural validation accepts a foreign provider codec string; the
-    // codex wire pin does not.
+    // codex wire pin accepts only the wire-form codec — the local codec is
+    // itself foreign to the wire column.
     let mut foreign_codec = valid.clone();
     foreign_codec.codec = "claude.lineage.v1".to_string();
     foreign_codec.validate().unwrap();
     assert!(foreign_codec.validate_codex_wire().is_err());
-    valid.validate_codex_wire().unwrap();
+    assert!(valid.validate_codex_wire().is_err());
+    let mut wire = valid.clone();
+    wire.codec = PORTABLE_TAIL_CODEC_WIRE_V1.to_string();
+    wire.validate_codex_wire().unwrap();
 
     let mut malformed_codec = valid.clone();
     malformed_codec.codec = "not a codec".to_string();
@@ -1679,13 +1693,25 @@ fn whole_tail_over(chain: &[CanonicalConversationMessage]) -> PortableConversati
     compute_portable_conversation_tail(TailPartitionKind::WholeThread, 0, chain).unwrap()
 }
 
+/// Single-form evidence (non-codex providers): the accepted wire pin and
+/// its local twin carry the same value.
 fn tail_evidence(
     accepted: TailSideEvidence,
     local: TailSideEvidence,
     cloud: TailSideEvidence,
 ) -> TailComparisonEvidence {
+    dual_tail_evidence(accepted.clone(), accepted, local, cloud)
+}
+
+fn dual_tail_evidence(
+    accepted: TailSideEvidence,
+    accepted_local: TailSideEvidence,
+    local: TailSideEvidence,
+    cloud: TailSideEvidence,
+) -> TailComparisonEvidence {
     TailComparisonEvidence {
         accepted,
+        accepted_local,
         local,
         cloud,
         local_provenance_verified: true,
@@ -1875,8 +1901,106 @@ fn compare_conversation_tail_covers_every_relation_row() {
     // CloudOutstanding: its pin still matches its local value while the
     // cloud carries the newly accepted tail.
     assert_eq!(
-        compare_conversation_tail(tail_evidence(Present(t4.clone()), Present(t4), Present(t5))),
+        compare_conversation_tail(tail_evidence(
+            Present(t4.clone()),
+            Present(t4.clone()),
+            Present(t5.clone())
+        )),
         TailClassification::CloudOutstanding
+    );
+
+    // Equal-or-shorter ends under an unequal value are rewrites, never
+    // outstanding work: local at-or-below its pinned end is Divergent, and
+    // a cloud rewrite at the pinned end is Divergent.
+    assert_eq!(
+        compare_conversation_tail(tail_evidence(
+            Present(t4.clone()),
+            Present(t3.clone()),
+            Present(t4.clone())
+        )),
+        TailClassification::Divergent
+    );
+    let mut cloud_rewrite = t4.clone();
+    cloud_rewrite.accepted_tail_state = "e".repeat(64);
+    assert_eq!(
+        compare_conversation_tail(tail_evidence(
+            Present(t4.clone()),
+            Present(t4.clone()),
+            Present(cloud_rewrite)
+        )),
+        TailClassification::Divergent
+    );
+
+    // Dual-form pins (codex): the wire column and local column never
+    // cross-compare, so the same relations hold with distinct codecs and
+    // states per column.
+    let wire = |tail: &PortableConversationTail| {
+        let mut wire = tail.clone();
+        wire.codec = PORTABLE_TAIL_CODEC_WIRE_V1.to_string();
+        wire.accepted_tail_state = "f".repeat(64);
+        wire
+    };
+    let w4 = wire(&t4);
+    let w5 = wire(&t5);
+    assert_eq!(
+        compare_conversation_tail(dual_tail_evidence(
+            Present(w4.clone()),
+            Present(t4.clone()),
+            Present(t4.clone()),
+            Present(w4.clone())
+        )),
+        TailClassification::Sync(SyncCurrency::Current)
+    );
+    assert_eq!(
+        compare_conversation_tail(dual_tail_evidence(
+            Present(w4.clone()),
+            Present(t4.clone()),
+            Present(t5.clone()),
+            Present(w4.clone())
+        )),
+        TailClassification::LocalOutstanding
+    );
+    assert_eq!(
+        compare_conversation_tail(dual_tail_evidence(
+            Present(w4.clone()),
+            Present(t4.clone()),
+            Present(t4.clone()),
+            Present(w5.clone())
+        )),
+        TailClassification::CloudOutstanding
+    );
+    // Both columns moved: Divergent — the same-form Advanced row is
+    // unreachable across forms because the codec labels differ.
+    assert_eq!(
+        compare_conversation_tail(dual_tail_evidence(
+            Present(w4.clone()),
+            Present(t4.clone()),
+            Present(t5.clone()),
+            Present(w5.clone())
+        )),
+        TailClassification::Divergent
+    );
+    // A half-present pin pair is corrupted acceptance evidence.
+    assert_eq!(
+        compare_conversation_tail(dual_tail_evidence(
+            Present(w4.clone()),
+            ConfirmedAbsent,
+            Present(t5.clone()),
+            Present(w4.clone())
+        )),
+        TailClassification::Unknown
+    );
+    // Wire and local pins disagreeing on coordinates is Unknown.
+    let mut torn_local = t3.clone();
+    torn_local.accepted_end_record_count = 3;
+    assert_eq!(
+        compare_conversation_tail(dual_tail_evidence(
+            Present(w4.clone()),
+            Present(t3.clone()),
+            Present(t3.clone()),
+            Present(w4.clone())
+        )),
+        TailClassification::Unknown
     );
 }
 
@@ -1916,6 +2040,7 @@ fn fixed_checkpoint(chain: &[CanonicalConversationMessage]) -> ConversationCheck
             accepted_at_manifest_sha256: "d".repeat(64),
             portable_tail: observed.clone(),
         }),
+        accepted_local_tail: Some(observed.clone()),
         observed_tail: observed,
         physical: ready_mapping(2_000),
         prefix_witness: conversation_prefix_witness(chain, 3).unwrap(),
@@ -1945,9 +2070,30 @@ fn conversation_checkpoints_validate_layout_witness_and_mapping() {
     let mut whole = checkpoint.clone();
     whole.observed_tail = whole_tail_over(&chain);
     whole.accepted = None;
+    whole.accepted_local_tail = None;
     assert!(whole.validate().is_err());
     whole.prefix_witness = None;
     whole.validate().unwrap();
+
+    // The dual pins are recorded together; a half-present pair or torn
+    // coordinates fail validation.
+    let mut half_pinned = checkpoint.clone();
+    half_pinned.accepted_local_tail = None;
+    assert!(half_pinned.validate().unwrap_err().contains("together"));
+    let mut torn = checkpoint.clone();
+    if let Some(accepted) = &mut torn.accepted {
+        accepted.portable_tail.accepted_end_record_count += 1;
+        accepted.portable_tail.accepted_tail_state = "e".repeat(64);
+    }
+    assert!(torn.validate().unwrap_err().contains("partition or coordinates"));
+    // The wire pin may carry a different codec label; only the local twin
+    // must share the observed layout.
+    let mut dual_form = checkpoint.clone();
+    if let Some(accepted) = &mut dual_form.accepted {
+        accepted.portable_tail.codec = PORTABLE_TAIL_CODEC_WIRE_V1.to_string();
+        accepted.portable_tail.accepted_tail_state = "f".repeat(64);
+    }
+    dual_form.validate().unwrap();
 
     // Accepted and observed layouts must agree.
     let mut split_layout = checkpoint.clone();
@@ -2248,6 +2394,7 @@ fn plan_actions_validate_relation_action_and_pins() {
     let mut wrong_relation = push_action("action-1", "codex", "profile-codex", "1");
     wrong_relation.relation = TailClassification::LocalOutstanding;
     wrong_relation.pinned_accepted_tail = Some(t4.clone());
+    wrong_relation.pinned_accepted_local_tail = Some(t4.clone());
     wrong_relation.pinned_cloud_tail = Some(t4.clone());
     assert!(wrong_relation
         .validate()
@@ -2272,6 +2419,7 @@ fn plan_actions_validate_relation_action_and_pins() {
     publish.reason_code = ConversationReasonCode::LocalOutstanding;
     publish.relation = TailClassification::LocalOutstanding;
     publish.pinned_accepted_tail = Some(t4.clone());
+    publish.pinned_accepted_local_tail = Some(t4.clone());
     publish.pinned_cloud_tail = Some(t4.clone());
     publish.validate().unwrap();
 
@@ -2280,6 +2428,7 @@ fn plan_actions_validate_relation_action_and_pins() {
     informational.reason_code = ConversationReasonCode::SyncCurrent;
     informational.relation = TailClassification::Sync(SyncCurrency::Current);
     informational.pinned_accepted_tail = Some(t5.clone());
+    informational.pinned_accepted_local_tail = Some(t5.clone());
     informational.pinned_cloud_tail = Some(t5.clone());
     informational.pinned_raw_range = None;
     informational.validate().unwrap();
@@ -2291,6 +2440,7 @@ fn plan_actions_validate_relation_action_and_pins() {
     keep_both.reason_code = ConversationReasonCode::Divergent;
     keep_both.relation = TailClassification::Divergent;
     keep_both.pinned_accepted_tail = Some(t4.clone());
+    keep_both.pinned_accepted_local_tail = Some(t4.clone());
     keep_both.pinned_cloud_tail = Some(t5.clone());
     keep_both.pinned_raw_range = None;
     keep_both.pinned_lineage_digest = Some("a".repeat(64));
@@ -2318,6 +2468,7 @@ fn plan_actions_validate_relation_action_and_pins() {
     materialize.reason_code = ConversationReasonCode::CloudOutstanding;
     materialize.relation = TailClassification::CloudOutstanding;
     materialize.pinned_accepted_tail = Some(t4.clone());
+    materialize.pinned_accepted_local_tail = Some(t4.clone());
     materialize.pinned_cloud_tail = Some(t5.clone());
     materialize.pinned_raw_range = None;
     materialize.pinned_lineage_digest = Some("a".repeat(64));
@@ -2392,7 +2543,7 @@ fn codex_threads_require_an_end_aligned_portable_tail() {
     assert!(manifest
         .validate()
         .unwrap_err()
-        .contains("unknown codex portable tail codec"));
+        .contains("unknown codex portable tail wire codec"));
 }
 
 #[test]

@@ -36,6 +36,7 @@ const MAX_IDENTIFIER_BYTES: usize = 512;
 const MAX_WARNING_BYTES: usize = 2 * 1024;
 const MAX_CHECKPOINT_COMMITS: usize = 10_000;
 const MAX_CHECKPOINT_BRANCHES: usize = 10_000;
+const MAX_PROJECT_MARKDOWN_PATH_BYTES: usize = 4 * 1024;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -277,6 +278,94 @@ fn safe_relative_path(path: &str) -> bool {
         && path
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn canonical_project_markdown_path(
+    project_root: &Path,
+    relative_path: &str,
+) -> SessionDetailResult<PathBuf> {
+    if relative_path.is_empty()
+        || relative_path.len() > MAX_PROJECT_MARKDOWN_PATH_BYTES
+        || relative_path.contains('\0')
+        || !safe_relative_path(relative_path)
+    {
+        return Err(invalid_request(
+            "Only a clean relative path inside the project can be opened.",
+        ));
+    }
+    let canonical_root = fs::canonicalize(project_root).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::OwnershipChanged,
+            "The registered project folder is no longer readable.",
+        )
+    })?;
+    let components = Path::new(relative_path).components().collect::<Vec<_>>();
+    let mut target = canonical_root.clone();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(segment) = component else {
+            return Err(invalid_request(
+                "Only a clean relative path inside the project can be opened.",
+            ));
+        };
+        target.push(segment);
+        let metadata = fs::symlink_metadata(&target).map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::NotFound,
+                "The linked project path no longer exists.",
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(invalid_request(
+                "Linked project paths cannot traverse symbolic links.",
+            ));
+        }
+        if index + 1 < components.len() && !metadata.is_dir() {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::NotFound,
+                "The linked project path no longer exists.",
+            ));
+        }
+    }
+    let canonical_target = fs::canonicalize(&target).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::NotFound,
+            "The linked project path no longer exists.",
+        )
+    })?;
+    if !canonical_target.starts_with(&canonical_root) || canonical_target == canonical_root {
+        return Err(invalid_request(
+            "Only paths inside the registered project can be opened.",
+        ));
+    }
+    let metadata = fs::symlink_metadata(&canonical_target).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::NotFound,
+            "The linked project path no longer exists.",
+        )
+    })?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err(invalid_request(
+            "Only project files and folders can be opened.",
+        ));
+    }
+    Ok(canonical_target)
+}
+
+/// Resolve one sanitized Markdown destination against the current active
+/// binding. The returned path is canonical, no-follow, and remains strictly
+/// below the registered project root.
+pub fn resolve_project_markdown_path(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    relative_path: &str,
+) -> SessionDetailResult<PathBuf> {
+    let resolved = resolve_activity_project(repository, local_project_id).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::OwnershipChanged,
+            "The project binding changed; open Project Settings.",
+        )
+    })?;
+    canonical_project_markdown_path(&resolved.project_root, relative_path)
 }
 
 fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetailResult<()> {
@@ -1681,6 +1770,54 @@ mod tests {
             .expect_err("absolute path must fail closed");
         assert_eq!(error.code, SessionDetailErrorCode::ProviderError);
         assert!(validate_index(&index_with_path("src/main.rs"), 4).is_ok());
+    }
+
+    #[test]
+    fn project_markdown_paths_are_existing_no_follow_descendants() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let project = sandbox.path().join("project");
+        let docs = project.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        let story = docs.join("story.md");
+        fs::write(&story, "story").unwrap();
+        let canonical_project = fs::canonicalize(&project).unwrap();
+
+        assert_eq!(
+            canonical_project_markdown_path(&canonical_project, "docs/story.md").unwrap(),
+            fs::canonicalize(&story).unwrap(),
+        );
+        assert_eq!(
+            canonical_project_markdown_path(&canonical_project, "docs").unwrap(),
+            fs::canonicalize(&docs).unwrap(),
+        );
+        assert_eq!(
+            canonical_project_markdown_path(&canonical_project, "../outside.md")
+                .unwrap_err()
+                .code,
+            SessionDetailErrorCode::InvalidRequest,
+        );
+        assert_eq!(
+            canonical_project_markdown_path(&canonical_project, "docs/missing.md")
+                .unwrap_err()
+                .code,
+            SessionDetailErrorCode::NotFound,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_markdown_paths_reject_symlinks_even_when_the_target_is_inside() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let project = sandbox.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("story.md"), "story").unwrap();
+        symlink(project.join("story.md"), project.join("story-link.md")).unwrap();
+        let error =
+            canonical_project_markdown_path(&fs::canonicalize(&project).unwrap(), "story-link.md")
+                .unwrap_err();
+        assert_eq!(error.code, SessionDetailErrorCode::InvalidRequest);
     }
 
     #[test]

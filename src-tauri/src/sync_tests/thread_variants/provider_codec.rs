@@ -1,6 +1,10 @@
 use super::harness::TranscriptBuilder;
+use crate::project_sync::codex_history_graph::resolve_codex_root;
+use crate::project_sync::codex_standalone_builder::{
+    build_standalone_codex_root, StandaloneBuildMode,
+};
 use crate::project_sync::conversation_codec::{
-    analyze_codex_transcript, rewrite_codex_transcript, CodecLineage, CodecUnknownReason,
+    analyze_codex_transcript, CodecLineage, CodecUnknownReason,
 };
 use crate::project_sync::conversation_sync::{
     default_conversation_decision, ConversationCapabilities,
@@ -20,33 +24,80 @@ const SIDECAR: &[u8] =
     include_bytes!("../../../testdata/thread_variants/codex/v1/thread-sidecar.json");
 
 #[test]
-fn committed_codex_fixture_proves_structural_rewrite_and_semantic_continuation() {
+fn committed_codex_fixture_proves_wire_round_trip_and_semantic_continuation() {
     let before = analyze_codex_transcript(VALID_TRANSCRIPT);
     assert!(before.is_resumable());
     assert_eq!(before.source_thread_id.as_deref(), Some("thread-fixture"));
     assert_eq!(before.source_cwd.as_deref(), Some("/fixture/project"));
     assert_eq!(before.lineage.chain().unwrap().len(), 5);
 
-    let rewritten = rewrite_codex_transcript(
-        VALID_TRANSCRIPT,
-        "thread-fixture",
-        "thread-destination",
-        "/fixture/project",
-        "/fixture/destination",
+    // Push encode: token wire with no source paths, then pull decode onto a
+    // different root under a fresh identity — the canonical wire pipeline
+    // that replaced the structural-field rewrite. In-cwd content mentions
+    // (the fixture's `pwd` output) remap with everything else.
+    let directory = tempfile::tempdir().unwrap();
+    let source_path = directory.path().join("thread-fixture.jsonl");
+    std::fs::write(&source_path, VALID_TRANSCRIPT).unwrap();
+    let no_bases = |_: &str| Ok(None);
+    let resolved = resolve_codex_root(&source_path, &no_bases).unwrap();
+    let wire = build_standalone_codex_root(
+        &resolved,
+        &StandaloneBuildMode::Encode {
+            root: "/fixture/project".to_string(),
+            canonical_root: None,
+        },
+        None,
     )
     .unwrap();
-    let after = analyze_codex_transcript(&rewritten);
+    let wire_text = String::from_utf8(wire.root_bytes.clone()).unwrap();
+    assert!(!wire_text.contains("/fixture/project"));
+    assert!(wire_text.contains("/__mallard_root__"));
+
+    let staged_path = directory.path().join("staged.jsonl");
+    std::fs::write(&staged_path, &wire.root_bytes).unwrap();
+    let staged = resolve_codex_root(&staged_path, &no_bases).unwrap();
+    let decoded = build_standalone_codex_root(
+        &staged,
+        &StandaloneBuildMode::Decode {
+            root_provider_thread_id: "thread-destination".to_string(),
+            target_root: "/fixture/destination".to_string(),
+            canonical_target_root: None,
+        },
+        None,
+    )
+    .unwrap();
+    let after = analyze_codex_transcript(&decoded.root_bytes);
     assert!(after.is_resumable());
     assert_eq!(
         after.source_thread_id.as_deref(),
         Some("thread-destination")
     );
     assert_eq!(after.source_cwd.as_deref(), Some("/fixture/destination"));
-    assert_eq!(lineage_digests(&before), lineage_digests(&after));
+    // Message identities survive the hop one-to-one; content digests are
+    // per-form because in-cwd paths remap (the old structural rewrite left
+    // the `pwd` output stale — the canonical wire fixes exactly that).
+    let before_ids: Vec<_> = before
+        .lineage
+        .chain()
+        .unwrap()
+        .iter()
+        .map(|message| message.message_id.clone())
+        .collect();
+    let after_ids: Vec<_> = after
+        .lineage
+        .chain()
+        .unwrap()
+        .iter()
+        .map(|message| message.message_id.clone())
+        .collect();
+    assert_eq!(before_ids, after_ids);
+    let decoded_text = String::from_utf8(decoded.root_bytes.clone()).unwrap();
+    assert!(decoded_text.contains("Final output:\\n/fixture/destination"));
     assert_eq!(
-        normalized_records(VALID_TRANSCRIPT),
-        normalized_records(&rewritten)
+        normalized_records(VALID_TRANSCRIPT).len(),
+        normalized_records(&decoded.root_bytes).len()
     );
+    let rewritten = decoded.root_bytes.clone();
 
     let index: Value = serde_json::from_slice(INDEX_FRAGMENT).unwrap();
     let sidecar: Value = serde_json::from_slice(SIDECAR).unwrap();
@@ -133,6 +184,7 @@ fn canonical_digests_survive_envelope_restamps_and_context_reserialization() {
     assert_eq!(
         compare_conversation_tail(TailComparisonEvidence {
             accepted: TailSideEvidence::Present(before_tail.clone()),
+            accepted_local: TailSideEvidence::Present(before_tail.clone()),
             local: TailSideEvidence::Present(after_tail),
             cloud: TailSideEvidence::Present(before_tail),
             local_provenance_verified: true,

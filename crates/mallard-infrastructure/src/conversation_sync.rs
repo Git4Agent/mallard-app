@@ -36,6 +36,11 @@ pub struct ConversationCapabilities {
     /// was replaced by another operation, so Push has no derivable local
     /// value and the thread needs a Pull first.
     pub physical_detached: bool,
+    /// True when the destination checkpoint carried a durable accepted pin
+    /// at review time. False when acceptance was proven only by the
+    /// first-contact adoption probe, whose durable pin is not written until
+    /// a Pull adopts it.
+    pub acceptance_durably_pinned: bool,
 }
 
 impl Default for ConversationCapabilities {
@@ -48,6 +53,7 @@ impl Default for ConversationCapabilities {
             provider_quiescent: true,
             resolution_pending: false,
             physical_detached: false,
+            acceptance_durably_pinned: true,
         }
     }
 }
@@ -63,7 +69,10 @@ pub struct ConversationDecision {
 /// Map a classified relation to one typed default action. The map is fixed by
 /// the resolver contract: Push never runs Pull's path, publishes only
 /// `LocalOutstanding`/`MissingCloud`, and defers every conflict to Pull;
-/// Pull's only divergence resolution is keep-both.
+/// Pull's only divergence resolution is keep-both. A durably pinned
+/// `Sync(Current)` thread is `NoChanges` in both directions; Pull adopts
+/// metadata only when the durable pin is still missing (first contact) or
+/// when both sides agree on a value newer than the pins (`Advanced`).
 pub fn default_conversation_decision(
     direction: ConversationPlanDirection,
     relation: TailClassification,
@@ -119,6 +128,11 @@ pub fn default_conversation_decision(
             Relation::Unknown => decision(Action::Blocked, Reason::UnknownEvidence),
         },
         ConversationPlanDirection::Pull => match relation {
+            // A durably pinned current thread has nothing to record: the
+            // plan-level apply advances scope bases without per-thread rows.
+            Relation::Sync(SyncCurrency::Current) if capabilities.acceptance_durably_pinned => {
+                decision(Action::NoChanges, Reason::SyncCurrent)
+            }
             Relation::Sync(currency) => decision(
                 Action::AdoptCloudMetadata,
                 match currency {
@@ -255,8 +269,10 @@ pub struct ConversationPlanActionRequest {
     pub pinned_scope_revision: u64,
     pub pinned_scope_sha256: String,
     pub pinned_accepted_tail: Option<PortableConversationTail>,
+    pub pinned_accepted_local_tail: Option<PortableConversationTail>,
     pub pinned_local_tail: Option<PortableConversationTail>,
     pub pinned_cloud_tail: Option<PortableConversationTail>,
+    pub pinned_checkpoint_generation: Option<u64>,
     pub pinned_lineage_digest: Option<String>,
     pub pinned_semantic_digest: Option<String>,
     pub pinned_raw_range: Option<RawRangePin>,
@@ -300,8 +316,10 @@ pub fn build_conversation_plan_action(
         pinned_scope_revision: request.pinned_scope_revision,
         pinned_scope_sha256: request.pinned_scope_sha256,
         pinned_accepted_tail: request.pinned_accepted_tail,
+        pinned_accepted_local_tail: request.pinned_accepted_local_tail,
         pinned_local_tail: request.pinned_local_tail,
         pinned_cloud_tail: request.pinned_cloud_tail,
+        pinned_checkpoint_generation: request.pinned_checkpoint_generation,
         pinned_lineage_digest: request.pinned_lineage_digest,
         pinned_semantic_digest: request.pinned_semantic_digest,
         pinned_raw_range: request.pinned_raw_range,
@@ -332,8 +350,10 @@ pub enum ConversationStalePin {
     ScopeRevision,
     ScopeDigest,
     AcceptedTail,
+    AcceptedLocalTail,
     LocalTail,
     CloudTail,
+    CheckpointGeneration,
     LineageDigest,
     SemanticDigest,
     RawRange,
@@ -361,8 +381,11 @@ pub struct ConversationApplyContext {
     pub scope_revision: u64,
     pub scope_sha256: String,
     pub accepted_tail: Option<PortableConversationTail>,
+    pub accepted_local_tail: Option<PortableConversationTail>,
     pub local_tail: Option<PortableConversationTail>,
     pub cloud_tail: Option<PortableConversationTail>,
+    /// The live checkpoint's generation (`None` = confirmed absent).
+    pub checkpoint_generation: Option<u64>,
     pub lineage_digest: Option<String>,
     pub semantic_digest: Option<String>,
     pub raw_range: Option<RawRangePin>,
@@ -419,11 +442,17 @@ pub fn validate_conversation_action_pins(
     if current.accepted_tail != action.pinned_accepted_tail {
         return Err(ConversationStalePin::AcceptedTail);
     }
+    if current.accepted_local_tail != action.pinned_accepted_local_tail {
+        return Err(ConversationStalePin::AcceptedLocalTail);
+    }
     if current.local_tail != action.pinned_local_tail {
         return Err(ConversationStalePin::LocalTail);
     }
     if current.cloud_tail != action.pinned_cloud_tail {
         return Err(ConversationStalePin::CloudTail);
+    }
+    if current.checkpoint_generation != action.pinned_checkpoint_generation {
+        return Err(ConversationStalePin::CheckpointGeneration);
     }
     if current.lineage_digest != action.pinned_lineage_digest {
         return Err(ConversationStalePin::LineageDigest);
@@ -518,7 +547,7 @@ mod tests {
         let rows = [
             (
                 TailClassification::Sync(SyncCurrency::Current),
-                Action::AdoptCloudMetadata,
+                Action::NoChanges,
             ),
             (
                 TailClassification::Sync(SyncCurrency::Advanced),
@@ -548,6 +577,60 @@ mod tests {
                 .action,
                 expected,
                 "{relation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pull_splits_current_sync_on_acceptance_durability() {
+        use ConversationPlanActionType as Action;
+        // Durable pin: nothing to record, the row is not selectable.
+        let durable = default_conversation_decision(
+            ConversationPlanDirection::Pull,
+            TailClassification::Sync(SyncCurrency::Current),
+            ConversationCapabilities::default(),
+        );
+        assert_eq!(durable.action, Action::NoChanges);
+        assert_eq!(durable.reason_code, ConversationReasonCode::SyncCurrent);
+        assert!(!durable.selectable);
+
+        // Probe-proven acceptance: Pull is what writes the first durable pin.
+        let probe = ConversationCapabilities {
+            acceptance_durably_pinned: false,
+            ..ConversationCapabilities::default()
+        };
+        let first_contact = default_conversation_decision(
+            ConversationPlanDirection::Pull,
+            TailClassification::Sync(SyncCurrency::Current),
+            probe,
+        );
+        assert_eq!(first_contact.action, Action::AdoptCloudMetadata);
+        assert_eq!(
+            first_contact.reason_code,
+            ConversationReasonCode::SyncCurrent
+        );
+        assert!(first_contact.selectable);
+
+        // The same-form advanced agreement adopts regardless of durability,
+        // and Push's mapping ignores the flag entirely.
+        for capabilities in [ConversationCapabilities::default(), probe] {
+            assert_eq!(
+                default_conversation_decision(
+                    ConversationPlanDirection::Pull,
+                    TailClassification::Sync(SyncCurrency::Advanced),
+                    capabilities,
+                )
+                .action,
+                Action::AdoptCloudMetadata
+            );
+            assert_eq!(
+                default_conversation_decision(
+                    ConversationPlanDirection::Push,
+                    TailClassification::Sync(SyncCurrency::Current),
+                    capabilities,
+                )
+                .action,
+                Action::NoChanges
             );
         }
     }

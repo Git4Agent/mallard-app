@@ -20,6 +20,8 @@ aws-smithy-types = "1"
 bytes = "1"
 sha2 = "0.10"
 hmac = "0.12"
+# Leftmost-longest in-cwd path matcher (already in the tree transitively).
+aho-corasick = "1"
 libc = "0.2"
 tempfile = "3"
 getrandom = "0.3"

@@ -11,6 +11,7 @@ pub mod codex_app_refresh;
 pub mod codex_binary;
 pub mod codex_history_graph;
 pub mod codex_paginated_projection;
+pub mod codex_path_map;
 pub mod codex_rollout;
 pub mod codex_standalone_builder;
 pub mod codex_thread_allocator;

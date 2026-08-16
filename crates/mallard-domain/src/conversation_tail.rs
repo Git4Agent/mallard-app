@@ -18,6 +18,12 @@ use crate::{
 };
 
 pub const PORTABLE_TAIL_CODEC_V1: &str = "mallard-codex-portable-tail-v1";
+/// The wire-form twin of [`PORTABLE_TAIL_CODEC_V1`]: folds token-form
+/// artifact bytes (the canonical path-mapped wire encoding) instead of the
+/// machine's real rollout bytes. Fold mechanics are identical; the distinct
+/// label makes any accidental cross-form comparison fail structurally
+/// (codec inequality ⇒ Unknown ⇒ Blocked) instead of silently mis-comparing.
+pub const PORTABLE_TAIL_CODEC_WIRE_V1: &str = "mallard-codex-portable-tail-wire-v1";
 
 const TAIL_START_DOMAIN_V1: &[u8] = b"mallard-codex-tail-start-v1";
 const TAIL_RECORD_DOMAIN_V1: &[u8] = b"mallard-codex-tail-record-v1";
@@ -76,12 +82,13 @@ impl PortableConversationTail {
     }
 
     /// The codex wire pin: schema-1 `ConversationThread` values for
-    /// `provider == codex` must carry exactly the v1 codec.
+    /// `provider == codex` must carry exactly the wire-form codec — cloud
+    /// artifacts are token-form, and their tails fold token-form bytes.
     pub fn validate_codex_wire(&self) -> Result<(), String> {
         self.validate()?;
-        if self.codec != PORTABLE_TAIL_CODEC_V1 {
+        if self.codec != PORTABLE_TAIL_CODEC_WIRE_V1 {
             return Err(format!(
-                "unknown codex portable tail codec '{}'",
+                "unknown codex portable tail wire codec '{}'",
                 self.codec.escape_debug()
             ));
         }
@@ -234,6 +241,24 @@ pub fn compute_portable_conversation_tail(
     start_record_count: u64,
     chain: &[CanonicalConversationMessage],
 ) -> Result<PortableConversationTail, String> {
+    compute_portable_conversation_tail_with_codec(
+        PORTABLE_TAIL_CODEC_V1,
+        partition_kind,
+        start_record_count,
+        chain,
+    )
+}
+
+/// [`compute_portable_conversation_tail`] under an explicit codec label. The
+/// fold binds partition, start, and per-record fingerprints — never the
+/// label — so the wire-form and local-form tails of the same conversation
+/// share mechanics and differ exactly where their record bytes differ.
+pub fn compute_portable_conversation_tail_with_codec(
+    codec: &str,
+    partition_kind: TailPartitionKind,
+    start_record_count: u64,
+    chain: &[CanonicalConversationMessage],
+) -> Result<PortableConversationTail, String> {
     let end_record_count = chain.len() as u64;
     let accepted_tail_state = compute_conversation_tail_state(
         partition_kind,
@@ -242,7 +267,7 @@ pub fn compute_portable_conversation_tail(
         chain,
     )?;
     let tail = PortableConversationTail {
-        codec: PORTABLE_TAIL_CODEC_V1.to_string(),
+        codec: codec.to_string(),
         partition_kind,
         start_record_count,
         accepted_end_record_count: end_record_count,
@@ -496,9 +521,17 @@ pub struct ConversationCheckpoint {
     pub generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted: Option<AcceptedConversationVersion>,
+    /// The local-form twin of `accepted.portable_tail`, pinned atomically at
+    /// the same acceptance event: the fold of this machine's real bytes at
+    /// the accepted end.  Wire and local bytes differ under the path-mapped
+    /// wire encoding, so every comparison is pin-relative — local
+    /// observation compares here, never to the wire pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_local_tail: Option<PortableConversationTail>,
     /// Observed cumulative value under the same layout; replaceable Refresh
     /// cache, never approval.  Its `(end, state)` pair is the saved
-    /// accumulator resume point.
+    /// accumulator resume point, riding forward from `accepted_local_tail`'s
+    /// accumulator state.
     pub observed_tail: PortableConversationTail,
     pub physical: PhysicalMappingState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -509,11 +542,35 @@ pub struct ConversationCheckpoint {
 impl ConversationCheckpoint {
     pub fn validate(&self) -> Result<(), String> {
         self.observed_tail.validate()?;
-        if let Some(accepted) = &self.accepted {
+        if self.accepted.is_some() != self.accepted_local_tail.is_some() {
+            return Err(
+                "conversation checkpoint must pin the wire and local accepted tails together"
+                    .to_string(),
+            );
+        }
+        if let (Some(accepted), Some(accepted_local)) =
+            (&self.accepted, &self.accepted_local_tail)
+        {
             accepted.validate()?;
-            if !accepted.portable_tail.layout().matches(&self.observed_tail) {
+            accepted_local.validate()?;
+            // The local twin shares the observed fold's codec and layout;
+            // the wire pin shares the partition and coordinates (records map
+            // one-to-one across forms) under its own codec label.
+            if !accepted_local.layout().matches(&self.observed_tail) {
                 return Err(
-                    "conversation checkpoint accepted and observed layouts disagree".to_string(),
+                    "conversation checkpoint accepted-local and observed layouts disagree"
+                        .to_string(),
+                );
+            }
+            let wire = &accepted.portable_tail;
+            if wire.partition_kind != accepted_local.partition_kind
+                || wire.start_record_count != accepted_local.start_record_count
+                || wire.accepted_end_record_count != accepted_local.accepted_end_record_count
+            {
+                return Err(
+                    "conversation checkpoint wire and local accepted pins disagree on their \
+                     partition or coordinates"
+                        .to_string(),
                 );
             }
         }

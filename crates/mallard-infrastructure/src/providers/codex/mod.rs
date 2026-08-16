@@ -16,8 +16,7 @@ use super::traits::{
     SessionTimelineQuery,
 };
 use crate::conversation_codec::{
-    analyze_codex_transcript, rewrite_codex_transcript, CODEX_CODEC_VERSION,
-    CODEX_LINEAGE_CODEC_KEY,
+    analyze_codex_transcript, CODEX_CODEC_VERSION, CODEX_LINEAGE_CODEC_KEY,
 };
 use crate::provider_capture::{scan_session_metadata_with, MetadataScanSpec};
 use mallard_domain::ProviderKey;
@@ -112,20 +111,12 @@ impl SessionAdapter for CodexAdapter {
         }
     }
 
-    fn rewrite(&self, request: &SessionRewriteRequest<'_>) -> Result<Vec<u8>, String> {
-        let source_id = request
-            .expected_source_session_id
-            .ok_or_else(|| "Codex rewrite requires the reviewed source thread id".to_string())?;
-        let source_cwd = request
-            .expected_source_cwd
-            .ok_or_else(|| "Codex rewrite requires the reviewed source cwd".to_string())?;
-        rewrite_codex_transcript(
-            request.bytes,
-            source_id,
-            request.destination_session_id,
-            source_cwd,
-            request.destination_cwd,
-        )
+    fn rewrite(&self, _request: &SessionRewriteRequest<'_>) -> Result<Vec<u8>, String> {
+        // Codex conversations materialize exclusively through the standalone
+        // Decode build (wire-form gate + path decode + fresh identity); the
+        // generic structural rewrite has no correct meaning for token-form
+        // cloud objects and was removed with the canonical wire cutover.
+        Err("Codex conversations materialize through the standalone decode build".to_string())
     }
 
     fn verify_index_fragment(&self, bytes: &[u8], expected_session_id: &str) -> Result<(), String> {

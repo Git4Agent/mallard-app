@@ -10,7 +10,9 @@ import {
   formatSessionCount,
   formatSessionDetailClock,
   isSafeExternalMarkdownUrl,
+  projectMarkdownDisplayPath,
   safeMarkdownUrl,
+  safeProjectMarkdownPath,
   SESSION_EVENT_KIND_LABELS,
   sessionDetailDateTime,
 } from "./sessionDetailModel";
@@ -24,6 +26,8 @@ interface Props {
   expandedToolIds: ReadonlySet<string>;
   toolDetails: Readonly<Record<string, SessionToolDetailState>>;
   onToolExpandedChange: (eventId: string, expanded: boolean) => void;
+  onOpenProjectPath: (relativePath: string) => void;
+  projectRoot: string;
 }
 
 async function openMarkdownLink(url: string): Promise<void> {
@@ -31,7 +35,15 @@ async function openMarkdownLink(url: string): Promise<void> {
   await openUrl(url);
 }
 
-export function SessionDetailMarkdown({ text }: { text: string }) {
+export function SessionDetailMarkdown({
+  text,
+  onOpenProjectPath,
+  projectRoot = "",
+}: {
+  text: string;
+  onOpenProjectPath?: (relativePath: string) => void;
+  projectRoot?: string;
+}) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -42,15 +54,36 @@ export function SessionDetailMarkdown({ text }: { text: string }) {
           const safeHref = href ? safeMarkdownUrl(href) : "";
           if (!safeHref) return <span>{children}</span>;
           const external = isSafeExternalMarkdownUrl(safeHref);
+          const projectPath = safeProjectMarkdownPath(safeHref);
+          if (projectPath && !onOpenProjectPath) return <span>{children}</span>;
+          const displayPath = projectPath
+            ? projectMarkdownDisplayPath(projectRoot, projectPath)
+            : null;
+          const className = [
+            props.className,
+            projectPath ? "session-detail-project-link" : null,
+          ].filter(Boolean).join(" ") || undefined;
           return (
             <a
               {...props}
+              className={className}
               href={safeHref}
               rel={external ? "noopener noreferrer" : undefined}
-              onClick={external ? (clickEvent) => {
-                clickEvent.preventDefault();
-                void openMarkdownLink(safeHref);
-              } : undefined}
+              {...(displayPath ? {
+                "aria-label": `Open ${displayPath}`,
+                "data-tooltip": displayPath,
+              } : {})}
+              onClick={external
+                ? (clickEvent) => {
+                  clickEvent.preventDefault();
+                  void openMarkdownLink(safeHref);
+                }
+                : projectPath
+                  ? (clickEvent) => {
+                    clickEvent.preventDefault();
+                    onOpenProjectPath?.(projectPath);
+                  }
+                  : undefined}
             >
               {children}
             </a>
@@ -122,16 +155,26 @@ function speakableCount(count: SessionCount | undefined): SessionCount | null {
 function PromptCard({
   event,
   turnDuration,
+  onOpenProjectPath,
+  projectRoot,
 }: {
   event: SessionTimelineEvent;
   turnDuration?: string | null;
+  onOpenProjectPath: (relativePath: string) => void;
+  projectRoot: string;
 }) {
   const callCount = speakableCount(event.turn_tool_summary?.tool_calls);
   const clock = event.timestamp != null ? formatSessionDetailClock(event.timestamp) : null;
   return (
     <div className="session-detail-prompt-card">
       <div className="session-detail-event-copy">
-        {event.text ? <SessionDetailMarkdown text={event.text} /> : (
+        {event.text ? (
+          <SessionDetailMarkdown
+            text={event.text}
+            onOpenProjectPath={onOpenProjectPath}
+            projectRoot={projectRoot}
+          />
+        ) : (
           <p className="session-detail-event-empty">No visible text is available for this event.</p>
         )}
       </div>
@@ -179,6 +222,8 @@ export default function SessionDetailEvent({
   expandedToolIds,
   toolDetails,
   onToolExpandedChange,
+  onOpenProjectPath,
+  projectRoot,
 }: Props) {
   const classes = [
     "session-detail-event",
@@ -216,12 +261,23 @@ export default function SessionDetailEvent({
         ) : event.kind === "checkpoint" ? (
           <CheckpointBody event={event} />
         ) : event.kind === "prompt" ? (
-          <PromptCard event={event} turnDuration={turnDuration} />
+          <PromptCard
+            event={event}
+            turnDuration={turnDuration}
+            onOpenProjectPath={onOpenProjectPath}
+            projectRoot={projectRoot}
+          />
         ) : (
           <div className={`session-detail-event-copy ${event.kind === "response"
             ? "session-detail-response-prose"
             : "session-detail-intermediate-prose"}`}>
-            {event.text ? <SessionDetailMarkdown text={event.text} /> : (
+            {event.text ? (
+              <SessionDetailMarkdown
+                text={event.text}
+                onOpenProjectPath={onOpenProjectPath}
+                projectRoot={projectRoot}
+              />
+            ) : (
               <p className="session-detail-event-empty">No visible text is available for this event.</p>
             )}
           </div>

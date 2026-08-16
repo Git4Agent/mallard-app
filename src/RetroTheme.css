@@ -117,15 +117,20 @@
   --button-bg-hover: #27221d;
   --button-bg-active: #362f28;
   --button-border: #6f6459;
-  /* The default action wears the app's inverted-ink pairing — the fill that
-     already marks a checked checkbox and the text selection — so "Push" can
-     never be mistaken for the "Cancel" beside it. The quiet border-only
-     treatment measured 1.38:1 of background separation from a plain button:
-     at the threshold of visibility, and the pixel face is single-weight with
-     font-synthesis: none, so weight could not carry the difference either. */
-  --button-primary-bg: var(--primary);
-  --button-primary-hover: #e0d4ba;
-  --button-primary-border: var(--primary);
+  /* A caramel fill off the palette's own sepia axis — the light theme's brown
+     lifted to sit on dark paper, so the two themes stay mirror images at the
+     same 5.2:1 of background separation from a plain button. That is what
+     keeps "Push" from being mistaken for the "Cancel" beside it; the quiet
+     border-only treatment measured 1.38:1, at the threshold of visibility, and
+     the pixel face is single-weight with font-synthesis: none, so weight could
+     not carry the difference either. Hover moves AWAY from the paper in both
+     themes — the fill sits close enough to its label's contrast floor that
+     moving toward the paper would take the label under 4.5:1. Not
+     var(--primary): that ink still marks the checked checkbox and the text
+     selection, which stay at full contrast. */
+  --button-primary-bg: #ad805a;
+  --button-primary-hover: #c1966f;
+  --button-primary-border: #ad805a;
   /* Its own token rather than --primary-text — App.css also uses that one as
      a background, so the button's label cannot follow it. */
   --button-primary-text: #161210;
@@ -223,13 +228,19 @@
   --button-bg-hover: #f5eadf;
   --button-bg-active: #eee0d3;
   --button-border: #9d8b7f;
-  /* Same construction as the dark theme: the primary action takes the
-     inverted-ink fill (the checked-checkbox and selection pairing). The old
-     warm-beige fill sat 1.22:1 from a plain button — indistinguishable at a
-     glance from the Cancel beside it. */
-  --button-primary-bg: var(--primary);
-  --button-primary-hover: #3b3029;
-  --button-primary-border: var(--primary);
+  /* Same construction as the dark theme: a caramel fill off the palette's own
+     sepia axis, carrying 5.0:1 of background separation from a plain button.
+     The warm-beige fill this replaced sat 1.22:1 — indistinguishable at a
+     glance from the Cancel beside it — and the near-black that replaced *that*
+     cleared the bar but read as ink from another palette. This is as light as
+     the fill can go while the cream label holds 4.5:1 (5.11:1 here); anything
+     lighter has to flip the label to dark ink. Hover therefore DARKENS rather
+     than lifting — lifting would spend the last of that margin. Not
+     var(--primary): that ink still marks the checked checkbox and the text
+     selection, which stay at full contrast. */
+  --button-primary-bg: #8a6347;
+  --button-primary-hover: #7d5940;
+  --button-primary-border: #8a6347;
   --button-primary-text: #fffaf4;
   --app-shell: #f6eee5;
   --surface-card: #fcf7f0;

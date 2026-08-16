@@ -1038,28 +1038,36 @@ mod tests {
         }
     }
 
-    /// Plan section 13's cross-machine lifecycle over the real machinery:
-    /// A pushes a paginated root, B pulls the standalone file and maps the
-    /// same fixed start, divergence is pinned and resolved by keep-both, the
-    /// tracked thread republishes from the pulled machine with the imported
-    /// partition preserved, A pulls the extension as CloudOutstanding, and
-    /// the preserved branch publishes independently under its own layout.
+    /// The complete A→B→A lifecycle over the real machinery, with in-content
+    /// paths riding the canonical wire: A pushes a paginated root (Encode),
+    /// B pulls the token-form object and maps the same fixed start (Decode),
+    /// divergence is pinned and resolved by keep-both, the tracked thread
+    /// republishes from the pulled machine reproducing the accepted wire
+    /// prefix, A pulls the extension as CloudOutstanding and byte-restores
+    /// its own canonical content, and the preserved branch publishes
+    /// independently under its own layout.
     #[test]
-    fn cross_machine_paginated_tail_survives_pull_divergence_and_republish() {
+    fn a_to_b_to_a_round_trip_is_stable_after_canonicalization() {
         use crate::codex_standalone_builder::{build_standalone_codex_root, StandaloneBuildMode};
         use mallard_domain::{
-            compare_conversation_tail, PortableConversationTail, RootTailLayout, SyncCurrency,
-            TailAccumulator, TailClassification, TailComparisonEvidence, TailSideEvidence,
-            PORTABLE_TAIL_CODEC_V1,
+            compare_conversation_tail, compute_conversation_tail_state,
+            compute_portable_conversation_tail, PortableConversationTail, RootTailLayout,
+            SyncCurrency, TailAccumulator, TailClassification, TailComparisonEvidence,
+            TailSideEvidence, PORTABLE_TAIL_CODEC_V1, PORTABLE_TAIL_CODEC_WIRE_V1,
         };
+
+        const ROOT_A: &str = "/tmp/machine-a";
+        const ROOT_B: &str = "/tmp/machine-b";
 
         fn evidence(
             accepted: TailSideEvidence,
+            accepted_local: TailSideEvidence,
             local: TailSideEvidence,
             cloud: TailSideEvidence,
         ) -> TailComparisonEvidence {
             TailComparisonEvidence {
                 accepted,
+                accepted_local,
                 local,
                 cloud,
                 local_provenance_verified: true,
@@ -1074,6 +1082,15 @@ mod tests {
             partition_kind: TailPartitionKind::FixedPaginatedTail,
             start_record_count: start,
         };
+        let encode = |root: &str| StandaloneBuildMode::Encode {
+            root: root.to_string(),
+            canonical_root: None,
+        };
+        let decode = |id: &str, root: &str| StandaloneBuildMode::Decode {
+            root_provider_thread_id: id.to_string(),
+            target_root: root.to_string(),
+            canonical_target_root: None,
+        };
         let append = |path: &PathBuf, id: &str, body: &str| {
             let mut bytes = fs::read(path).unwrap();
             bytes.extend_from_slice(message_line(id, body).as_bytes());
@@ -1081,20 +1098,38 @@ mod tests {
             fs::write(path, &bytes).unwrap();
         };
 
-        // Machine A: base rollout b1..b5, leaf continuing at base@5 with
-        // m1,m2,m3.
+        // Machine A: base rollout b1..b5 with in-root and out-of-root
+        // content paths across the covered spellings, leaf continuing at
+        // base@6 with m1,m2,m3.
         let mut machine_a = graph();
-        let base_lines: Vec<String> = std::iter::once(meta_line("base", None))
-            .chain((1..=5).map(|index| message_line(&format!("b{index}"), "base")))
+        let a_meta = |id: &str, base: Option<(&str, u64, u64)>| {
+            let mut payload = json!({"id": id, "cwd": ROOT_A, "history_mode": "paginated"});
+            if let Some((thread, ordinal, byte)) = base {
+                payload["history_base"] = json!({
+                    "thread_id": thread,
+                    "end_ordinal_exclusive": ordinal,
+                    "end_byte_offset": byte,
+                });
+            }
+            serde_json::to_string(&json!({"type": "session_meta", "payload": payload})).unwrap()
+        };
+        let base_lines: Vec<String> = std::iter::once(a_meta("base", None))
+            .chain([
+                message_line("b1", "plain text"),
+                message_line("b2", "created /tmp/machine-a/readme"),
+                message_line("b3", "open file:///tmp/machine-a/read%20me"),
+                message_line("b4", "outside /tmp/other-proj/x stays"),
+                message_line("b5", "base done"),
+            ])
             .collect();
         let base = machine_a.write("base", &base_lines);
         let base_len = fs::metadata(&base).unwrap().len();
         let a_leaf = machine_a.write(
             "a-leaf",
             &[
-                meta_line("a-leaf", Some(("base", 6, base_len))),
+                a_meta("a-leaf", Some(("base", 6, base_len))),
                 message_line("m1", "one"),
-                message_line("m2", "two"),
+                message_line("m2", "edit /tmp/machine-a/src/main.rs"),
                 message_line("m3", "three"),
             ],
         );
@@ -1105,19 +1140,28 @@ mod tests {
         );
         assert_eq!(resolved_a.start_record_count, 5);
         assert_eq!(resolved_a.chain.len(), 8);
+        let a_local_v1 = compute_portable_conversation_tail(
+            TailPartitionKind::FixedPaginatedTail,
+            5,
+            &resolved_a.chain,
+        )
+        .unwrap();
 
-        // A pushes: the artifact folds the paginated tail it publishes.
-        let push_one =
-            build_standalone_codex_root(&resolved_a, &StandaloneBuildMode::PreserveIdentity, None)
-                .unwrap();
+        // A pushes: the artifact folds the wire-form tail it publishes; the
+        // local twin is a different value under a different codec because
+        // in-root content paths tokenized.
+        let push_one = build_standalone_codex_root(&resolved_a, &encode(ROOT_A), None).unwrap();
         let cloud_v1 = push_one.portable_tail.clone();
+        assert_eq!(cloud_v1.codec, PORTABLE_TAIL_CODEC_WIRE_V1);
         assert_eq!(cloud_v1.start_record_count, 5);
         assert_eq!(cloud_v1.accepted_end_record_count, 8);
+        assert_eq!(a_local_v1.codec, PORTABLE_TAIL_CODEC_V1);
+        assert_ne!(cloud_v1.accepted_tail_state, a_local_v1.accepted_tail_state);
 
-        // Machine B pulls: reidentify the staged standalone download, then
-        // map the same fixed start from the verified cloud value. The
-        // null-base file itself resolves as WholeThread at zero and is never
-        // used to re-derive the boundary.
+        // Machine B pulls: the staged token-form object parses as a normal
+        // rollout, its wire chain refolds to the accepted cloud value, and
+        // the decode build materializes B's local form under the imported
+        // fixed start.
         let mut machine_b = graph();
         let staged = machine_b.directory.path().join("staged.jsonl");
         fs::write(&staged, &push_one.root_bytes).unwrap();
@@ -1127,18 +1171,28 @@ mod tests {
             resolved_staged.partition_kind,
             TailPartitionKind::WholeThread
         );
-        assert_eq!(resolved_staged.chain, resolved_a.chain);
-        let imported = paginated_layout(cloud_v1.start_record_count);
+        let refolded = compute_conversation_tail_state(
+            TailPartitionKind::FixedPaginatedTail,
+            5,
+            8,
+            &resolved_staged.chain,
+        )
+        .unwrap();
+        assert_eq!(refolded, cloud_v1.accepted_tail_state);
+        let imported = paginated_layout(5);
         let pulled = build_standalone_codex_root(
             &resolved_staged,
-            &StandaloneBuildMode::Reidentify {
-                root_provider_thread_id: "b-local".to_string(),
-                target_cwd: "/tmp/machine-b".to_string(),
-            },
+            &decode("b-local", ROOT_B),
             Some(&imported),
         )
         .unwrap();
-        assert_eq!(pulled.portable_tail, cloud_v1);
+        let b_local_v1 = pulled.portable_tail.clone();
+        assert_eq!(b_local_v1.codec, PORTABLE_TAIL_CODEC_V1);
+        assert_eq!(b_local_v1.accepted_end_record_count, 8);
+        let text = String::from_utf8(pulled.root_bytes.clone()).unwrap();
+        assert!(text.contains("created /tmp/machine-b/readme"));
+        assert!(text.contains("file:///tmp/machine-b/read%20me"));
+        assert!(text.contains("/tmp/other-proj/x"));
         let b_local = machine_b.directory.path().join("b-local.jsonl");
         fs::write(&b_local, &pulled.root_bytes).unwrap();
         machine_b
@@ -1146,39 +1200,50 @@ mod tests {
             .insert("b-local".to_string(), b_local.clone());
 
         // B observes under the imported layout: the seeded value equals the
-        // verified cloud value exactly, and B is in sync under its pin.
+        // accepted local twin, and B is in sync under its dual pins.
         let resolved_b = resolve_codex_root(&b_local, &machine_b.lookup()).unwrap();
         let b_bytes = fs::read(&b_local).unwrap();
         let seeded_b = seed_codex_root(&resolved_b, &b_bytes, Some(&imported)).unwrap();
-        assert_eq!(seeded_b.observed_tail, cloud_v1);
+        assert_eq!(seeded_b.observed_tail, b_local_v1);
         assert_eq!(seeded_b.layout, imported);
         assert_eq!(
             compare_conversation_tail(evidence(
                 present(&cloud_v1),
+                present(&b_local_v1),
                 present(&seeded_b.observed_tail),
                 present(&cloud_v1),
             )),
             TailClassification::Sync(SyncCurrency::Current)
         );
 
-        // A appends m4: LocalOutstanding under its pin, then pushed.
-        append(&a_leaf, "m4", "four");
+        // A appends m4: LocalOutstanding under its dual pins, then pushed.
+        append(&a_leaf, "m4", "more /tmp/machine-a/src/lib.rs");
         let resolved_a2 = resolve_codex_root(&a_leaf, &machine_a.lookup()).unwrap();
-        let push_two =
-            build_standalone_codex_root(&resolved_a2, &StandaloneBuildMode::PreserveIdentity, None)
-                .unwrap();
-        let cloud_v2 = push_two.portable_tail.clone();
+        let a_local_v2 = compute_portable_conversation_tail(
+            TailPartitionKind::FixedPaginatedTail,
+            5,
+            &resolved_a2.chain,
+        )
+        .unwrap();
         assert_eq!(
             compare_conversation_tail(evidence(
                 present(&cloud_v1),
-                present(&cloud_v2),
+                present(&a_local_v1),
+                present(&a_local_v2),
                 present(&cloud_v1),
             )),
             TailClassification::LocalOutstanding
         );
+        let push_two = build_standalone_codex_root(&resolved_a2, &encode(ROOT_A), None).unwrap();
+        let cloud_v2 = push_two.portable_tail.clone();
+        assert_eq!(cloud_v2.accepted_end_record_count, 9);
 
-        // Map-and-extend identity across machines: resuming from the pulled
-        // accumulator state and folding m4 reproduces A's one-shot value.
+        // Map-and-extend identity across machines on the wire column:
+        // resuming from the pulled wire state and folding the appended wire
+        // record reproduces A's published value.
+        let staged_two = machine_b.directory.path().join("staged-two.jsonl");
+        fs::write(&staged_two, &push_two.root_bytes).unwrap();
+        let resolved_staged_two = resolve_codex_root(&staged_two, &no_bases).unwrap();
         let mut resumed = TailAccumulator::resume(
             TailPartitionKind::FixedPaginatedTail,
             5,
@@ -1186,7 +1251,9 @@ mod tests {
             &cloud_v1.accepted_tail_state,
         )
         .unwrap();
-        resumed.fold_message(&resolved_a2.chain[8]).unwrap();
+        resumed
+            .fold_message(&resolved_staged_two.chain[8])
+            .unwrap();
         assert_eq!(resumed.state_hex(), cloud_v2.accepted_tail_state);
 
         // B appends a conflicting m5 before seeing the new head: a pinned
@@ -1198,6 +1265,7 @@ mod tests {
         assert_eq!(
             compare_conversation_tail(evidence(
                 present(&cloud_v1),
+                present(&b_local_v1),
                 present(&diverged_b.observed_tail),
                 present(&cloud_v2),
             )),
@@ -1208,19 +1276,14 @@ mod tests {
         // unchanged local layout; the tracked thread re-materializes the
         // cloud graph under a fresh alias with the remote layout.
         let preserved_bytes = fs::read(&b_local).unwrap();
-        let staged_two = machine_b.directory.path().join("staged-two.jsonl");
-        fs::write(&staged_two, &push_two.root_bytes).unwrap();
-        let resolved_staged_two = resolve_codex_root(&staged_two, &no_bases).unwrap();
         let tracked = build_standalone_codex_root(
             &resolved_staged_two,
-            &StandaloneBuildMode::Reidentify {
-                root_provider_thread_id: "b-tracked".to_string(),
-                target_cwd: "/tmp/machine-b".to_string(),
-            },
+            &decode("b-tracked", ROOT_B),
             Some(&imported),
         )
         .unwrap();
-        assert_eq!(tracked.portable_tail, cloud_v2);
+        let b_tracked_v2 = tracked.portable_tail.clone();
+        assert_eq!(b_tracked_v2.accepted_end_record_count, 9);
         let b_tracked = machine_b.directory.path().join("b-tracked.jsonl");
         fs::write(&b_tracked, &tracked.root_bytes).unwrap();
         machine_b
@@ -1229,9 +1292,11 @@ mod tests {
         assert_eq!(fs::read(&b_local).unwrap(), preserved_bytes);
 
         // B appends m6 to the tracked thread and republishes from the pulled
-        // machine: the artifact preserves the imported partition instead of
-        // moving the start to the null native base.
-        append(&b_tracked, "m6", "six");
+        // machine: the artifact preserves the imported partition and
+        // reproduces the accepted wire prefix — the wire fold extends from
+        // cloud_v2's exact state even though the bytes were re-encoded from
+        // B's decoded local form.
+        append(&b_tracked, "m6", "six under /tmp/machine-b/src/main.rs");
         let resolved_tracked = resolve_codex_root(&b_tracked, &machine_b.lookup()).unwrap();
         let tracked_bytes = fs::read(&b_tracked).unwrap();
         let seeded_tracked =
@@ -1239,6 +1304,7 @@ mod tests {
         assert_eq!(
             compare_conversation_tail(evidence(
                 present(&cloud_v2),
+                present(&b_tracked_v2),
                 present(&seeded_tracked.observed_tail),
                 present(&cloud_v2),
             )),
@@ -1246,48 +1312,72 @@ mod tests {
         );
         let push_three = build_standalone_codex_root(
             &resolved_tracked,
-            &StandaloneBuildMode::PreserveIdentity,
+            &encode(ROOT_B),
             Some(&imported),
         )
         .unwrap();
         let cloud_v3 = push_three.portable_tail.clone();
-        assert_eq!(cloud_v3, seeded_tracked.observed_tail);
-        assert_eq!(
-            cloud_v3.partition_kind,
-            TailPartitionKind::FixedPaginatedTail
-        );
+        assert_eq!(cloud_v3.codec, PORTABLE_TAIL_CODEC_WIRE_V1);
         assert_eq!(cloud_v3.start_record_count, 5);
         assert_eq!(cloud_v3.accepted_end_record_count, 10);
+        let staged_three = machine_a.directory.path().join("staged-three.jsonl");
+        fs::write(&staged_three, &push_three.root_bytes).unwrap();
+        let resolved_staged_three = resolve_codex_root(&staged_three, &no_bases).unwrap();
+        let mut resumed = TailAccumulator::resume(
+            TailPartitionKind::FixedPaginatedTail,
+            5,
+            9,
+            &cloud_v2.accepted_tail_state,
+        )
+        .unwrap();
+        resumed
+            .fold_message(&resolved_staged_three.chain[9])
+            .unwrap();
+        assert_eq!(resumed.state_hex(), cloud_v3.accepted_tail_state);
 
-        // A pulls the extension: CloudOutstanding with the partition
-        // preserved, and the materialized value refolds to the head.
+        // A pulls the extension: CloudOutstanding under A's dual pins, and
+        // the decoded materialization byte-restores A's already-canonical
+        // content — the fold state over the restored prefix equals A's own
+        // local value.
         assert_eq!(
             compare_conversation_tail(evidence(
                 present(&cloud_v2),
-                present(&cloud_v2),
+                present(&a_local_v2),
+                present(&a_local_v2),
                 present(&cloud_v3),
             )),
             TailClassification::CloudOutstanding
         );
-        let staged_three = machine_a.directory.path().join("staged-three.jsonl");
-        fs::write(&staged_three, &push_three.root_bytes).unwrap();
-        let resolved_staged_three = resolve_codex_root(&staged_three, &no_bases).unwrap();
         let a_adopted = build_standalone_codex_root(
             &resolved_staged_three,
-            &StandaloneBuildMode::Reidentify {
-                root_provider_thread_id: "a-tracked".to_string(),
-                target_cwd: "/tmp/machine-a".to_string(),
-            },
+            &decode("a-tracked", ROOT_A),
             Some(&imported),
         )
         .unwrap();
-        assert_eq!(a_adopted.portable_tail, cloud_v3);
+        assert_eq!(a_adopted.portable_tail.codec, PORTABLE_TAIL_CODEC_V1);
+        assert_eq!(a_adopted.portable_tail.accepted_end_record_count, 10);
+        let a_tracked = machine_a.directory.path().join("a-tracked.jsonl");
+        fs::write(&a_tracked, &a_adopted.root_bytes).unwrap();
+        machine_a
+            .files
+            .insert("a-tracked".to_string(), a_tracked.clone());
+        let resolved_a3 = resolve_codex_root(&a_tracked, &machine_a.lookup()).unwrap();
+        assert_eq!(&resolved_a3.chain[..9], &resolved_a2.chain[..]);
+        let restored_prefix_state = compute_conversation_tail_state(
+            TailPartitionKind::FixedPaginatedTail,
+            5,
+            9,
+            &resolved_a3.chain,
+        )
+        .unwrap();
+        assert_eq!(restored_prefix_state, a_local_v2.accepted_tail_state);
 
         // The preserved branch is its own thread: locally present, missing
         // from the cloud, and its first Push publishes the preserved layout
         // with no family metadata.
         assert_eq!(
             compare_conversation_tail(evidence(
+                TailSideEvidence::ConfirmedAbsent,
                 TailSideEvidence::ConfirmedAbsent,
                 present(&diverged_b.observed_tail),
                 TailSideEvidence::ConfirmedAbsent,
@@ -1296,12 +1386,13 @@ mod tests {
         );
         let preserved_push = build_standalone_codex_root(
             &resolved_b2,
-            &StandaloneBuildMode::PreserveIdentity,
+            &encode(ROOT_B),
             Some(&imported),
         )
         .unwrap();
-        assert_eq!(preserved_push.portable_tail, diverged_b.observed_tail);
+        assert_eq!(preserved_push.portable_tail.codec, PORTABLE_TAIL_CODEC_WIRE_V1);
         assert_eq!(preserved_push.portable_tail.start_record_count, 5);
+        assert_eq!(preserved_push.portable_tail.accepted_end_record_count, 9);
         assert!(preserved_push.subagents.is_empty());
         assert!(preserved_push.id_map.is_empty());
     }

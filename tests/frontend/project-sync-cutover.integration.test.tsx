@@ -11,6 +11,11 @@ import {
   shareHolding,
   shareHoldingStorages,
 } from "../../src/components/project-sync/ProjectSidebar";
+import {
+  expandHomePath,
+  profilePathHint,
+  type ProfilePathProbeState,
+} from "../../src/components/project-sync/ProjectSetupWorkspace";
 
 test("ProjectSync is the only application interface", () => {
   const app = readFileSync("src/App.tsx", "utf8");
@@ -790,5 +795,123 @@ test("the Catalog pane floors at the same height as the panes above it", () => {
   assert.match(
     css,
     /\.sidebar-split-pane > \.sidebar-profile-list,\s*\.sidebar-split-pane > \.sidebar-links-list\s*\{[^}]*overflow-y: scroll;/s,
+  );
+});
+
+test("a custom profile path can be typed, and ~ resolves before the probe", () => {
+  // The backend takes absolute clean paths only, so the tilde has to be gone
+  // by the time a path is handed to it.
+  assert.equal(expandHomePath("~", "/Users/ada"), "/Users/ada");
+  assert.equal(expandHomePath("~/work/codex-home", "/Users/ada"), "/Users/ada/work/codex-home");
+  assert.equal(expandHomePath("~/work", "/Users/ada/"), "/Users/ada/work", "a trailing slash must not double up");
+  assert.equal(expandHomePath("  ~/work  ", "/Users/ada"), "/Users/ada/work");
+  assert.equal(expandHomePath("/opt/codex", "/Users/ada"), "/opt/codex", "absolute paths pass through");
+  assert.equal(expandHomePath("~other/work", "/Users/ada"), "~other/work", "only this user's home expands");
+  assert.equal(expandHomePath("~/work", null), "~/work", "unresolved home leaves the text alone");
+
+  // Choosing "Custom path…" must open the field rather than the folder
+  // dialog: a pasted path, or one on an unmounted volume, cannot come back
+  // from a picker. Browse stays as the other way in.
+  const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
+  const pendingBranch = setupWorkspace.slice(
+    setupWorkspace.indexOf('if (next === "__pending")'),
+    setupWorkspace.indexOf('<option value="">Choose profile'),
+  );
+  assert.ok(pendingBranch.length > 0, "the __pending branch must be found");
+  assert.match(pendingBranch, /kind: "pending", path: "", display_name: ""/);
+  assert.doesNotMatch(pendingBranch, /chooseProfileFolder/);
+  assert.match(setupWorkspace, /className="btn" onClick=\{\(\) => void chooseProfileFolder\(provider\)\}/);
+});
+
+test("the custom path field reports what the finish-time probe would say", () => {
+  const codex = { display_name: "Codex", default_profile_directory: ".codex" };
+  const profiles = [{ profile_id: "profile-1", display_name: "Default Codex" }];
+  const home = "/Users/ada";
+  const probe = (over: Record<string, unknown> = {}) => ({
+    status: "ok" as const,
+    probe: {
+      provider: "codex",
+      requested_path: "/Users/ada/work",
+      resolved_path: "/Users/ada/work/.codex",
+      canonical_path: "/Users/ada/work/.codex",
+      suggested_name: "work",
+      readable: true,
+      writable: true,
+      detected_child: false,
+      existing_profile_id: null,
+      ...over,
+    },
+  } as ProfilePathProbeState);
+
+  // Nothing typed yet: guidance, not a verdict.
+  const empty = profilePathHint(undefined, "", home, codex, profiles);
+  assert.equal(empty.tone, "mute");
+  assert.match(empty.message, /Type or paste a path, or Browse/);
+
+  // Mid-type relative text is not an error — it is not a path yet.
+  assert.equal(profilePathHint(undefined, "work/", home, codex, profiles).tone, "mute");
+  assert.equal(profilePathHint({ status: "checking" }, "~/work", home, codex, profiles).tone, "mute");
+
+  // A miss while typing reads as a sentence, never an errno.
+  const missing = profilePathHint(
+    { status: "error", message: "inspect provider profile '/Users/ada/wo': No such file or directory (os error 2)" },
+    "~/wo", home, codex, profiles,
+  );
+  assert.deepEqual({ tone: missing.tone, message: missing.message }, { tone: "bad", message: "No folder at this path yet." });
+
+  // Every other refusal is already written for people: keep the sentence,
+  // drop the internal call prefix.
+  const symlink = profilePathHint(
+    { status: "error", message: "provider profile '/Users/ada/link' cannot be a symlink; choose the resolved directory" },
+    "~/link", home, codex, profiles,
+  );
+  assert.equal(symlink.tone, "bad");
+  assert.match(symlink.message, /cannot be a symlink; choose the resolved directory/);
+  assert.doesNotMatch(symlink.message, /^inspect provider profile/);
+
+  // A path that is already a profile reuses it rather than making a twin.
+  const known = profilePathHint(probe({ existing_profile_id: "profile-1" }), "~/.codex", home, codex, profiles);
+  assert.equal(known.tone, "ok");
+  assert.match(known.message, /Already set up as “Default Codex”/);
+
+  // The probe descends into the provider's own directory; say so, since the
+  // resolved path is not what was typed.
+  const descended = profilePathHint(probe({ detected_child: true }), "~/work", home, codex, profiles);
+  assert.deepEqual(
+    { tone: descended.tone, path: descended.path },
+    { tone: "ok", path: "/Users/ada/work/.codex" },
+  );
+  assert.match(descended.message, /Found \.codex inside/);
+
+  // Unreadable is a warning with the path, not a hard refusal: the folder is
+  // real, its permissions are the problem.
+  const unreadable = profilePathHint(probe({ readable: false }), "~/work", home, codex, profiles);
+  assert.deepEqual(
+    { tone: unreadable.tone, path: unreadable.path },
+    { tone: "warn", path: "/Users/ada/work/.codex" },
+  );
+
+  const plain = profilePathHint(probe(), "~/work", home, codex, profiles);
+  assert.deepEqual({ tone: plain.tone, path: plain.path }, { tone: "ok", path: "/Users/ada/work/.codex" });
+
+  // The line is styled by tone and carries the path in the mono face.
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.sync-setup-path-hint \{[^}]*grid-column: 2 \/ -1;/s);
+  assert.match(css, /\.sync-setup-path-hint\.bad \{ color: var\(--danger-text\); \}/);
+  assert.match(css, /\.sync-setup-path-hint code \{[^}]*font-family: var\(--font-mono\);/s);
+});
+
+test("checkboxes and radios take the app's accent, not the OS default", () => {
+  // Unset, these fall through to the system accent — macOS blue on a sepia
+  // page. One rule covers every one of them.
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(
+    css,
+    /input\[type="checkbox"\],\s*input\[type="radio"\] \{\s*accent-color: var\(--accent\);\s*\}/,
+  );
+  assert.doesNotMatch(
+    css,
+    /\.log-type-filter-option input \{[^}]*accent-color/s,
+    "the global rule replaced the one-off",
   );
 });

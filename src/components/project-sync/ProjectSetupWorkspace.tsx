@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { homeDir } from "@tauri-apps/api/path";
 import type {
   BundleSnapshotSummary,
   DraftProfileSelection,
@@ -8,6 +9,7 @@ import type {
   ProjectSetupDraft,
   ProviderDescriptor,
   ProviderKey,
+  ProviderProfileProbe,
   ProviderProfileSummary,
   SetupDraftInspection,
   SetupSectionStatus,
@@ -44,6 +46,87 @@ interface Props {
 type SaveState = "idle" | "saving" | "saved" | "error";
 
 const AUTOSAVE_DELAY_MS = 700;
+/* Shorter than the autosave: the path field is judged while you type, and a
+   probe only reads the filesystem. */
+const PATH_PROBE_DELAY_MS = 350;
+
+export type ProfilePathProbeState =
+  | { status: "checking" }
+  | { status: "ok"; probe: ProviderProfileProbe }
+  | { status: "error"; message: string };
+
+export interface ProfilePathHint {
+  tone: "mute" | "ok" | "warn" | "bad";
+  message: string;
+  /** Rendered in the mono face when present — it is a machine identifier. */
+  path?: string;
+}
+
+/**
+ * The backend takes absolute clean paths only, so a typed `~` has to be
+ * resolved here before it can be probed at all.
+ */
+export function expandHomePath(value: string, home: string | null): string {
+  const trimmed = value.trim();
+  if (!home || !trimmed.startsWith("~")) return trimmed;
+  if (trimmed === "~") return home;
+  if (trimmed.startsWith("~/")) return `${home.replace(/\/+$/, "")}${trimmed.slice(1)}`;
+  return trimmed;
+}
+
+/**
+ * Probe refusals are written for people ("cannot be a symlink; choose the
+ * resolved directory"), so they are shown as they arrive — minus the internal
+ * call prefix. The one exception is the miss that happens on every keystroke
+ * of a path being typed, which deserves a sentence rather than an errno.
+ */
+function readableProbeError(message: string): string {
+  if (/no such file or directory|cannot find the path|os error 2/i.test(message)) {
+    return "No folder at this path yet.";
+  }
+  return message.replace(/^inspect provider profile '[^']*':\s*/, "");
+}
+
+/** What the line under a custom path field says, for every state it has. */
+export function profilePathHint(
+  state: ProfilePathProbeState | undefined,
+  rawPath: string,
+  home: string | null,
+  descriptor: Pick<ProviderDescriptor, "display_name" | "default_profile_directory">,
+  profiles: Array<Pick<ProviderProfileSummary, "profile_id" | "display_name">>,
+): ProfilePathHint {
+  const expanded = expandHomePath(rawPath, home);
+  if (!expanded) {
+    return { tone: "mute", message: "Type or paste a path, or Browse. ~ means your home folder." };
+  }
+  if (!expanded.startsWith("/")) {
+    return { tone: "mute", message: "Paths must be absolute — start with / or ~/." };
+  }
+  if (!state || state.status === "checking") {
+    return { tone: "mute", message: "Checking", path: expanded };
+  }
+  if (state.status === "error") {
+    return { tone: "bad", message: readableProbeError(state.message) };
+  }
+  const { probe } = state;
+  const registered = probe.existing_profile_id
+    ? profiles.find((profile) => profile.profile_id === probe.existing_profile_id) ?? null
+    : null;
+  if (registered) {
+    return { tone: "ok", message: `Already set up as “${registered.display_name}” — setup will reuse it.` };
+  }
+  if (!probe.readable) {
+    return { tone: "warn", message: "This folder can’t be read. Check its permissions.", path: probe.canonical_path };
+  }
+  if (probe.detected_child && descriptor.default_profile_directory) {
+    return {
+      tone: "ok",
+      message: `Found ${descriptor.default_profile_directory} inside — using`,
+      path: probe.canonical_path,
+    };
+  }
+  return { tone: "ok", message: `${descriptor.display_name} profile ·`, path: probe.canonical_path };
+}
 
 function sectionState(sections: SetupSectionStatus[], id: string): SetupSectionStatus | null {
   return sections.find((section) => section.section === id) ?? null;
@@ -93,6 +176,10 @@ export default function ProjectSetupWorkspace({
   // chosen profile are persisted on the draft itself; an enabled provider
   // without a selection blocks finalization locally.
   const [enabledProviders, setEnabledProviders] = useState<ReadonlySet<ProviderKey> | null>(null);
+  // A typed custom path is judged as it is typed: the finish-time probe is the
+  // same call, so the row can say now what finalization would say later.
+  const [pathProbes, setPathProbes] = useState<Record<string, ProfilePathProbeState>>({});
+  const [homePath, setHomePath] = useState<string | null>(null);
 
   // Autosave bookkeeping: edits mark the draft dirty; one debounced save
   // persists the latest state and refreshes inspection afterwards.
@@ -100,6 +187,7 @@ export default function ProjectSetupWorkspace({
   const savingRef = useRef(false);
   const inspectRequest = useRef(0);
   const repoAutoSelected = useRef(false);
+  const probeRequest = useRef(0);
   const mountedRef = useRef(true);
   const workflowIsActive = () => (
     mountedRef.current && isWorkflowCurrent(workflowEpoch)
@@ -274,6 +362,60 @@ export default function ProjectSetupWorkspace({
     repositoryFingerprint,
   ]);
 
+  // Resolved once: the field accepts `~`, the backend does not.
+  useEffect(() => {
+    let cancelled = false;
+    void homeDir()
+      .then((resolved) => { if (!cancelled) setHomePath(resolved.replace(/\/+$/, "")); })
+      .catch(() => { if (!cancelled) setHomePath(null); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const probeTargets = useMemo(() => (
+    providers.flatMap((descriptor) => {
+      const selection = draft?.profiles[descriptor.key];
+      if (selection?.kind !== "pending") return [];
+      const path = expandHomePath(selection.path, homePath);
+      return path.startsWith("/") ? [{ provider: descriptor.key, path }] : [];
+    })
+  ), [draft?.profiles, homePath, providers]);
+  const probeFingerprint = probeTargets
+    .map((target) => `${target.provider}=${target.path}`)
+    .join(" ");
+  const probeTargetsRef = useRef(probeTargets);
+  probeTargetsRef.current = probeTargets;
+
+  useEffect(() => {
+    const targets = probeTargetsRef.current;
+    if (targets.length === 0) {
+      setPathProbes((current) => (Object.keys(current).length === 0 ? current : {}));
+      return;
+    }
+    const requestId = ++probeRequest.current;
+    setPathProbes((current) => {
+      const next = { ...current };
+      for (const target of targets) next[target.provider] = { status: "checking" };
+      return next;
+    });
+    const timer = window.setTimeout(() => {
+      void Promise.all(targets.map(async (target) => {
+        try {
+          const probe = await projectSyncApi.probeProviderProfile(target.provider, target.path);
+          return [target.provider, { status: "ok", probe } as ProfilePathProbeState] as const;
+        } catch (reason) {
+          return [
+            target.provider,
+            { status: "error", message: errorMessage(reason) } as ProfilePathProbeState,
+          ] as const;
+        }
+      })).then((results) => {
+        if (probeRequest.current !== requestId || !workflowIsActive()) return;
+        setPathProbes(Object.fromEntries(results));
+      });
+    }, PATH_PROBE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [probeFingerprint]);
+
   const sections = inspection?.sections ?? [];
   const usesExistingRepo = draft?.repository.kind === "existing";
   const exactMatches = useMemo(() => (
@@ -427,6 +569,10 @@ export default function ProjectSetupWorkspace({
       : selection?.kind === "pending" ? "__pending" : "";
     const path = selection?.kind === "pending" ? selection.path : "";
     const rowIncomplete = incompleteProviders.some((candidate) => candidate.key === provider);
+    const hint = selection?.kind === "pending"
+      ? profilePathHint(pathProbes[provider], path, homePath, descriptor, profiles)
+      : null;
+    const hintId = `sync-setup-path-hint-${provider}`;
     return (
       <div
         className={`sync-agent-profile-row${selection?.kind === "pending" ? " has-custom-path" : ""}${profileBlocked || rowIncomplete ? " has-error" : ""}`}
@@ -445,7 +591,16 @@ export default function ProjectSetupWorkspace({
             onChange={(event) => {
               const next = event.target.value;
               if (next === "__pending") {
-                void chooseProfileFolder(provider);
+                // Open the field, not the folder dialog. A pasted path, or one
+                // on a volume that is not mounted yet, has no way through a
+                // picker — Browse is still right there for everyone else.
+                edit((current) => ({
+                  ...current,
+                  profiles: {
+                    ...current.profiles,
+                    [provider]: { kind: "pending", path: "", display_name: "" } satisfies DraftProfileSelection,
+                  },
+                }));
                 return;
               }
               edit((current) => {
@@ -477,12 +632,17 @@ export default function ProjectSetupWorkspace({
           </select>
         </span>
         {selection?.kind === "pending" && (
+          /* The field is invalid when what it holds is wrong, not when it is
+             merely still empty — the select carries incompleteness. */
           <input
             value={path}
             disabled={working}
             aria-label={`${label} custom profile path`}
-            aria-invalid={profileBlocked || rowIncomplete || undefined}
-            aria-describedby={(profileBlocked || rowIncomplete) && profileErrorMessage ? "sync-setup-error-agent" : undefined}
+            aria-invalid={hint?.tone === "bad" || undefined}
+            aria-describedby={[
+              (profileBlocked || rowIncomplete) && profileErrorMessage ? "sync-setup-error-agent" : null,
+              hintId,
+            ].filter(Boolean).join(" ") || undefined}
             placeholder={`${label} profile path`}
             spellCheck={false}
             autoFocus
@@ -501,6 +661,15 @@ export default function ProjectSetupWorkspace({
         <button type="button" className="btn" onClick={() => void chooseProfileFolder(provider)} disabled={working}>
           <Icon name="folder" size={13} /> Browse
         </button>
+        {hint && (
+          /* Polite, not an alert: this changes on a debounce while the field
+             still holds focus, where a described-by change alone would go
+             unannounced. */
+          <p id={hintId} className={`sync-setup-path-hint ${hint.tone}`} aria-live="polite">
+            {hint.message}
+            {hint.path && <code>{hint.path}</code>}
+          </p>
+        )}
       </div>
     );
   };

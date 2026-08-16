@@ -25,8 +25,10 @@ import {
   groupSessionEventsByDay,
   includedSessionEventKinds,
   mergeSessionTimelinePages,
+  projectMarkdownDisplayPath,
   readableToolPayload,
   safeMarkdownUrl,
+  safeProjectMarkdownPath,
   sessionDetailFilterToggles,
   sessionEventCoverage,
   sessionToolDescriptor,
@@ -178,6 +180,8 @@ function renderTimeline(
       onRetry={() => undefined}
       onLoadMore={() => undefined}
       onToolExpandedChange={() => undefined}
+      onOpenProjectPath={() => undefined}
+      projectRoot="/Users/example/HorrorGame"
     />,
   );
 }
@@ -667,6 +671,33 @@ test("Markdown drops raw HTML and unsafe link protocols", () => {
   assert.equal(safeMarkdownUrl("https://example.com/docs"), "https://example.com/docs");
 });
 
+test("Markdown links clean project-relative paths and rejects every escape form", () => {
+  const html = renderToStaticMarkup(
+    <SessionDetailMarkdown
+      text={"Created [story.md](./story.md). [Outside](/tmp/story.md) [Parent](../secret.md)"}
+      onOpenProjectPath={() => undefined}
+      projectRoot="/Users/example/HorrorGame"
+    />,
+  );
+  assert.match(html, /href="story\.md"[^>]*>story\.md<\/a>/);
+  assert.match(html, /data-tooltip="\/Users\/example\/HorrorGame\/story\.md"/);
+  assert.match(html, /aria-label="Open \/Users\/example\/HorrorGame\/story\.md"/);
+  assert.match(html, />Outside<\/span>/);
+  assert.match(html, />Parent<\/span>/);
+  assert.equal(safeProjectMarkdownPath("./docs/story%20one.md"), "docs/story one.md");
+  assert.equal(safeProjectMarkdownPath("../secret.md"), null);
+  assert.equal(safeProjectMarkdownPath("%2e%2e/secret.md"), null);
+  assert.equal(safeProjectMarkdownPath("/tmp/story.md"), null);
+  assert.equal(safeProjectMarkdownPath("%2ftmp/story.md"), null);
+  assert.equal(safeProjectMarkdownPath("file:///tmp/story.md"), null);
+  assert.equal(safeProjectMarkdownPath("file%3a///tmp/story.md"), null);
+  assert.equal(safeMarkdownUrl("docs/story.md"), "docs/story.md");
+  assert.equal(
+    projectMarkdownDisplayPath("C:\\project\\HorrorGame\\", "docs/story.md"),
+    "C:\\project\\HorrorGame\\docs\\story.md",
+  );
+});
+
 test("timeline page merging is chronological, de-duplicated, and counts keep their quality", () => {
   const first: ProjectSessionTimelinePage = {
     resource_id: detail.resource_id,
@@ -710,6 +741,7 @@ test("workspace navigation lazy-loads detail and preserves the mounted Activity 
   assert.match(apiSource, /"get_project_session_detail"/);
   assert.match(apiSource, /"get_project_session_timeline_page"/);
   assert.match(apiSource, /"get_project_session_event_detail"/);
+  assert.match(apiSource, /"open_project_markdown_path"/);
   assert.doesNotMatch(apiSource, /"get_project_session_details"/);
 });
 
@@ -797,6 +829,8 @@ test("the stylesheets encode the rail, the punchcard, and the stacked bounded pa
   assert.match(baseCss, /\.session-detail-card-meta \{[^}]*border-top: 1px solid var\(--border\)/s);
   assert.match(baseCss, /\.session-detail-response-prose[\s\S]*background: transparent/);
   assert.match(baseCss, /\.session-detail-event-copy \{[^}]*max-width: 68ch/s);
+  assert.match(baseCss, /\.session-detail-project-link\[data-tooltip\]::after \{[^}]*content: attr\(data-tooltip\)/s);
+  assert.match(baseCss, /\.session-detail-project-link\[data-tooltip\]:hover::after,[\s\S]*:focus-visible::after \{\s*visibility: visible;/);
 
   // The stacked pane: one frame, bounded boxes, keycap controls. 24px is the
   // minimum target size (WCAG 2.2 AA 2.5.8) and a whole multiple of the icon

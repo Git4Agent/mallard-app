@@ -1,7 +1,7 @@
-use super::harness::{codex, sha256, TranscriptBuilder, VariantWorld};
+use super::harness::{codex, rewrite_transcript_identity, sha256, TranscriptBuilder, VariantWorld};
 use super::relation_matrix::reviewed_action;
 use crate::project_sync::conversation_codec::{
-    analyze_codex_transcript, rewrite_codex_transcript, CodecLineage,
+    analyze_codex_transcript, CodecLineage,
 };
 use crate::project_sync::conversation_materialization::{
     apply_conversation_cloud_publication, apply_conversation_materialization,
@@ -99,6 +99,14 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
         (
             ConversationStalePin::ScopeDigest,
             Box::new(|value| value.scope_sha256 = "e".repeat(64)),
+        ),
+        (
+            ConversationStalePin::AcceptedLocalTail,
+            Box::new(|value| value.accepted_local_tail = None),
+        ),
+        (
+            ConversationStalePin::CheckpointGeneration,
+            Box::new(|value| value.checkpoint_generation = Some(41)),
         ),
         (
             ConversationStalePin::LineageDigest,
@@ -815,7 +823,7 @@ fn committed_codex_provider_files_materialize_resume_and_rebind_one_variant() {
         .find(|profile| profile.profile_id == fixture.operation.provider_profile_id)
         .unwrap();
     let provider_root = PathBuf::from(&profile.canonical_path);
-    let rewritten = rewrite_codex_transcript(
+    let rewritten = rewrite_transcript_identity(
         TRANSCRIPT,
         "thread-fixture",
         "destination-thread",

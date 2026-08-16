@@ -14,12 +14,15 @@ fn whole_tail(chain: &[mallard_domain::CanonicalConversationMessage]) -> TailSid
     )
 }
 
+/// Single-form evidence: the accepted wire pin and its local twin carry the
+/// same value, as for providers whose wire bytes equal their local bytes.
 fn evidence(
     accepted: TailSideEvidence,
     local: TailSideEvidence,
     cloud: TailSideEvidence,
 ) -> TailComparisonEvidence {
     TailComparisonEvidence {
+        accepted_local: accepted.clone(),
         accepted,
         local,
         cloud,
@@ -119,6 +122,6 @@ fn a_resolved_original_branch_reaches_a_noop_fixed_point() {
         relation,
         ConversationCapabilities::default(),
     );
-    assert_eq!(pull.action, ConversationPlanActionType::AdoptCloudMetadata);
-    assert!(pull.selectable);
+    assert_eq!(pull.action, ConversationPlanActionType::NoChanges);
+    assert!(!pull.selectable);
 }

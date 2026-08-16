@@ -34,6 +34,14 @@ summary {
   touch-action: manipulation;
 }
 
+/* Every checkbox and radio, not just the few that named it: unset, these fall
+   through to the OS accent, which paints system blue — the only cool colour on
+   a sepia page. */
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}
+
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
@@ -663,7 +671,6 @@ summary:focus-visible {
   width: 13px;
   height: 13px;
   margin: 0;
-  accent-color: var(--accent);
 }
 
 .log-filter-control {
@@ -4887,10 +4894,17 @@ span.sync-path-crumb {
   border-radius: 0;
   background: transparent;
 }
+/* Inset onto the column the same way the footer is, so the close button and
+   the rule under the title close on the edge every field and divider below
+   them closes on. Padded only on the left, the rule overran the column and the
+   button hung outside it. */
 .sync-setup-workspace .sync-modal-header {
   min-height: 0;
+  width: calc(100% - var(--sync-setup-gutter) * 2);
+  max-width: var(--sync-setup-column);
+  margin-left: var(--sync-setup-gutter);
   flex: 0 0 auto;
-  padding: 8px 14px 10px var(--sync-setup-gutter);
+  padding: 8px 0 10px;
   background: transparent;
 }
 .sync-setup-workspace .sync-modal-header h1 { font-size: var(--type-xl); }
@@ -4969,6 +4983,26 @@ span.sync-path-crumb {
   font-family: var(--font-mono);
 }
 .sync-agent-profile-row .btn { min-height: 32px; padding: 0 10px; }
+
+/* The verdict on a typed path, on its own row under the field it judges.
+   Column 2 is where the path field starts, so the line sits with it rather
+   than under the profile select. */
+.sync-setup-path-hint {
+  grid-column: 2 / -1;
+  padding-top: 1px;
+  color: var(--text-3);
+  font-size: var(--type-2xs);
+  line-height: 1.5;
+}
+.sync-setup-path-hint.ok { color: var(--success-text); }
+.sync-setup-path-hint.warn { color: var(--warning-text); }
+.sync-setup-path-hint.bad { color: var(--danger-text); }
+.sync-setup-path-hint code {
+  margin-left: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  overflow-wrap: anywhere;
+}
 .sync-setup-workspace .sync-agent-choice {
   width: min(100%, 232px);
 }
@@ -5058,8 +5092,13 @@ span.sync-path-crumb {
   bottom: auto;
   min-height: 0;
   /* Inset by the gutter rather than padded by it, so the rule starts and ends
-     on the section dividers above instead of running out to the page edge. */
-  width: 100%;
+     on the section dividers above instead of running out to the page edge.
+     Both gutters have to come out of the width: the footer is a sibling of the
+     body, not a child, so its 100% is the whole workspace while the sections
+     measure against the body's already-inset content box. Taking only the left
+     one off pushed the actions a gutter past the column, and the column cap hid
+     it until the window got narrow enough for the cap to stop applying. */
+  width: calc(100% - var(--sync-setup-gutter) * 2);
   max-width: var(--sync-setup-column);
   margin-left: var(--sync-setup-gutter);
   flex: 0 0 auto;
@@ -7854,6 +7893,45 @@ button.sync-project-file-expand { cursor: pointer; }
 .session-detail-event-copy a {
   color: var(--session-detail-link);
   text-underline-offset: 2px;
+}
+
+/* Local file links reveal the exact resolved display path on hover, matching
+   the compact path card used by conversation viewers. The card is paint-only:
+   it does not reflow prose or animate WebKit's pixel-rendered text. */
+.session-detail-project-link[data-tooltip] {
+  position: relative;
+  z-index: 1;
+}
+
+.session-detail-project-link[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  z-index: 60;
+  bottom: calc(100% + 8px);
+  left: -10px;
+  width: max-content;
+  max-width: min(520px, calc(100vw - 48px));
+  padding: 9px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r);
+  background: var(--surface-popover);
+  box-shadow: var(--shadow-popover);
+  color: var(--text-0);
+  font-family: var(--font-sans);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-regular);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  text-align: left;
+  text-decoration: none;
+  visibility: hidden;
+  white-space: normal;
+}
+
+.session-detail-project-link[data-tooltip]:hover::after,
+.session-detail-project-link[data-tooltip]:focus-visible::after {
+  visibility: visible;
 }
 
 .session-detail-event-copy table {

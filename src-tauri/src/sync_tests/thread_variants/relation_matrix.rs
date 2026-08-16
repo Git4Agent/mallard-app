@@ -1,5 +1,4 @@
-use super::harness::{analyzed_chain, chain, codex, TranscriptBuilder};
-use crate::project_sync::conversation_codec::rewrite_codex_transcript;
+use super::harness::{analyzed_chain, chain, codex, rewrite_transcript_identity, TranscriptBuilder};
 use crate::project_sync::conversation_sync::{
     build_conversation_plan_action, default_conversation_decision,
     validate_conversation_action_pins, ConversationApplyContext, ConversationCapabilities,
@@ -35,6 +34,7 @@ fn evidence_of(
     };
     TailComparisonEvidence {
         accepted: side(accepted),
+        accepted_local: side(accepted),
         local: side(local),
         cloud: side(cloud),
         local_provenance_verified: true,
@@ -78,7 +78,7 @@ fn complete_push_pull_relation_matrix_plans_and_revalidates() {
             cloud: Some(base.clone()),
             relation: TailClassification::Sync(SyncCurrency::Current),
             push: ConversationPlanActionType::NoChanges,
-            pull: ConversationPlanActionType::AdoptCloudMetadata,
+            pull: ConversationPlanActionType::NoChanges,
         },
         MatrixCase {
             name: "sync_advanced",
@@ -183,6 +183,15 @@ fn complete_push_pull_relation_matrix_plans_and_revalidates() {
                 ConversationCapabilities::default(),
             );
             assert_eq!(decision.action, expected, "{} {direction:?}", case.name);
+            // A durably pinned current thread plans no Pull row at all:
+            // provider_thread_review skips building one, and `NoChanges`
+            // stays a Push-only action inside validated plans.
+            if direction == ConversationPlanDirection::Pull
+                && decision.action == ConversationPlanActionType::NoChanges
+            {
+                assert!(!decision.selectable, "{} pull no-op", case.name);
+                continue;
+            }
             let (template, current) = reviewed_action_with_tails(
                 direction,
                 decision.action,
@@ -213,8 +222,10 @@ fn complete_push_pull_relation_matrix_plans_and_revalidates() {
                 pinned_scope_revision: template.pinned_scope_revision,
                 pinned_scope_sha256: template.pinned_scope_sha256,
                 pinned_accepted_tail: template.pinned_accepted_tail,
+                pinned_accepted_local_tail: template.pinned_accepted_local_tail,
                 pinned_local_tail: template.pinned_local_tail,
                 pinned_cloud_tail: template.pinned_cloud_tail,
+                pinned_checkpoint_generation: template.pinned_checkpoint_generation,
                 pinned_lineage_digest: template.pinned_lineage_digest,
                 pinned_semantic_digest: template.pinned_semantic_digest,
                 pinned_raw_range: template.pinned_raw_range,
@@ -237,6 +248,23 @@ fn complete_push_pull_relation_matrix_plans_and_revalidates() {
             validate_conversation_action_pins(&action, &current).unwrap();
         }
     }
+
+    // The same current evidence without a durable accepted pin still adopts
+    // on Pull: first-contact adoption is what writes the pin.
+    let probe = ConversationCapabilities {
+        acceptance_durably_pinned: false,
+        ..ConversationCapabilities::default()
+    };
+    let first_contact = default_conversation_decision(
+        ConversationPlanDirection::Pull,
+        TailClassification::Sync(SyncCurrency::Current),
+        probe,
+    );
+    assert_eq!(
+        first_contact.action,
+        ConversationPlanActionType::AdoptCloudMetadata
+    );
+    assert!(first_contact.selectable);
 }
 
 /// A faithful provider rewrite (thread ID and cwd restamp) leaves every
@@ -248,7 +276,7 @@ fn verified_structural_rewrite_is_in_sync() {
         .message("m-a", "user", "same")
         .message("m-b", "assistant", "same answer")
         .build();
-    let rewritten = rewrite_codex_transcript(
+    let rewritten = rewrite_transcript_identity(
         &source,
         "thread-a",
         "thread-b",
@@ -415,8 +443,10 @@ pub(super) fn reviewed_action_with_tails(
         pinned_scope_revision: 6,
         pinned_scope_sha256: "f".repeat(64),
         pinned_accepted_tail: accepted.clone(),
+        pinned_accepted_local_tail: accepted.clone(),
         pinned_local_tail: local.clone(),
         pinned_cloud_tail: cloud.clone(),
+        pinned_checkpoint_generation: None,
         pinned_lineage_digest: digests.as_ref().map(|(lineage, _)| lineage.clone()),
         pinned_semantic_digest: digests.as_ref().map(|(_, semantic)| semantic.clone()),
         pinned_raw_range: raw_range.clone(),
@@ -441,9 +471,11 @@ pub(super) fn reviewed_action_with_tails(
         manifest_sha256: "a".repeat(64),
         scope_revision: 6,
         scope_sha256: "f".repeat(64),
-        accepted_tail: accepted,
+        accepted_tail: accepted.clone(),
+        accepted_local_tail: accepted,
         local_tail: local,
         cloud_tail: cloud,
+        checkpoint_generation: None,
         lineage_digest: digests.as_ref().map(|(lineage, _)| lineage.clone()),
         semantic_digest: digests.as_ref().map(|(_, semantic)| semantic.clone()),
         raw_range,

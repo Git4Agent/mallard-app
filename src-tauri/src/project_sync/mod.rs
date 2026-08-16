@@ -17,6 +17,7 @@ pub use mallard_domain as domain;
 pub use mallard_infrastructure::bundle_engine;
 pub use mallard_infrastructure::codex_app_refresh;
 pub use mallard_infrastructure::codex_history_graph;
+pub use mallard_infrastructure::codex_path_map;
 pub use mallard_infrastructure::codex_rollout;
 pub use mallard_infrastructure::codex_standalone_builder;
 pub use mallard_infrastructure::codex_thread_allocator;

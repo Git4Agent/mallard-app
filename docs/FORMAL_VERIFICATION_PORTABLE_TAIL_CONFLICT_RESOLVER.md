@@ -1,9 +1,10 @@
 # Bounded verification: Minimal portable-tail conflict resolver
 
-- Status: Executable bounded model
-- Date: August 10, 2026
+- Status: Executable bounded model (dual-pin canonical-wire revision)
+- Date: August 15, 2026
 - Model: [verify_portable_tail_conflict_model.py](../scripts/verify_portable_tail_conflict_model.py)
-- Plan: [PLAN_MINIMAL_CONVERSATION_CONFLICT_RESOLVER_BACKEND.md](PLAN_MINIMAL_CONVERSATION_CONFLICT_RESOLVER_BACKEND.md)
+- Plans: [PLAN_MINIMAL_CONVERSATION_CONFLICT_RESOLVER_BACKEND.md](PLAN_MINIMAL_CONVERSATION_CONFLICT_RESOLVER_BACKEND.md),
+  [PLAN_CODEX_IN_CWD_PATH_REMAP.md](PLAN_CODEX_IN_CWD_PATH_REMAP.md) §5
 - Compatibility: current numeric schema `1` only; no migration or legacy state
 
 ## 1. What is modeled
@@ -18,11 +19,23 @@ portable tail = codec
               + cumulative tail state
 ```
 
+Under the canonical path-mapped wire encoding, one conversation exists in
+two byte forms — the token-form **wire** the cloud stores and each
+machine's **local** expansion — and the model renders every record
+differently per form (the resolver's worst case: no wire state ever
+collides with a local state).  Acceptance is a **dual pin** recorded
+atomically: the wire tail (`P_wire`) plus its local-form twin
+(`P_local`).  The classification is pin-relative: cloud compares only to
+`P_wire`, local observation only to `P_local`, field-wise including the
+per-form codec label, so a cross-form comparison can never accidentally
+succeed.
+
 It models:
 
-- one already-flattened canonical root history;
+- one already-flattened canonical root history in both byte forms;
 - `WholeThread` and `FixedPaginatedTail` layouts;
-- direct equality of validated P/L/C tail values;
+- pin-relative equality of validated `P_wire`/`P_local`/`L`/`C` values,
+  with the end-count side conditions on the outstanding rows;
 - `Sync(Current)`, `Sync(Advanced)`, `LocalOutstanding`,
   `CloudOutstanding`, and `Divergent`;
 - Push CAS win, loss, ambiguous win, ambiguous loss, and candidate-descendant
@@ -87,20 +100,29 @@ not SHA collision resistance.
 
 ### 3.1 Shared classifier
 
-The executable cases assert:
+The executable cases assert the pin-relative table (`P_wire` and
+`P_local` always agree on partition and coordinates; comparisons never
+cross the wire/local columns):
 
-| P/L/C condition | Result |
+| Evidence | Result |
 | --- | --- |
-| `P == L == C` | `Sync(Current)` |
-| `L == C != P` | `Sync(Advanced)` |
-| `C == P != L` | `LocalOutstanding` |
-| `L == P != C` | `CloudOutstanding` |
-| all unequal | `Divergent` |
+| `L == P_local` ∧ `C == P_wire` | `Sync(Current)` |
+| `L == C` (same-form providers only) | `Sync(Advanced)` |
+| `C == P_wire` ∧ `L.end > P_local.end` | `LocalOutstanding` |
+| `L == P_local` ∧ `C.end > P_wire.end` | `CloudOutstanding` |
+| everything else | `Divergent` |
+
+The `Sync(Advanced)` row is field-wise equality including the codec, so
+it is structurally unreachable across the dual-form codex columns and
+survives only for single-form providers.  Two rewrite rows are pinned:
+an unequal local value at or below its pinned end, and an unequal cloud
+value at its pinned end, both classify `Divergent`, never outstanding
+work.
 
 It also checks the accepted conservative false conflict:
 
 ```text
-P = m0
+P_wire/P_local = m0
 L = m0,m1
 C = m0,m1,m2
 => Divergent
@@ -160,14 +182,14 @@ The current run reports:
 
 ```text
 codec golden vectors: 3
-classifier cases: 6
+classifier cases: 8
 zero-target atomic Pull cases: 6
 root-only subagent exclusion cases: 27
 push: 10 scenarios, 102 states, 96 transitions, 80 recovery states
 pull: 14 scenarios, 180 states, 216 transitions, 102 recovery states
 total: 282 states, 312 transitions
 terminal outcomes: complete=20, safe_abort=32, corruption_block=18
-expected unsafe negative controls: 6
+expected unsafe negative controls: 7
 ```
 
 Every non-corrupt explored recovery path reaches `Complete` or a safe terminal
@@ -175,14 +197,16 @@ abort. Only an explicit third-value document corruption remains operator-blocked
 
 ## 5. Negative controls
 
-The model deliberately demonstrates six unsafe alternatives:
+The model deliberately demonstrates seven unsafe alternatives:
 
 1. overwriting cloud without CAS loses remote history;
 2. resetting accepted state loses cumulative tail history;
-3. assigning the remote layout to preserved C loses C's fixed boundary;
-4. reminting during recovery changes reviewed identity;
-5. including subagent snapshot state creates a false root conflict; and
-6. deleting the old source can lose a still-needed local/history input.
+3. comparing the local observation to the wire pin (a cross-form
+   comparison) reads every synced dual-form thread as divergent;
+4. assigning the remote layout to preserved C loses C's fixed boundary;
+5. reminting during recovery changes reviewed identity;
+6. including subagent snapshot state creates a false root conflict; and
+7. deleting the old source can lose a still-needed local/history input.
 
 These controls must remain observable; a model that stops finding one has
 probably stopped checking the corresponding invariant.
@@ -198,7 +222,12 @@ does not model:
 - exact JSON serialization, fsync implementation, or cross-process lock code;
 - the complete standalone root/subagent encoder and reidentifier;
 - strict schema-1 raw JSON decoding;
-- directional missing/Unknown evidence gathering;
+- directional missing/Unknown evidence gathering, the dual-pin
+  half-present corruption row, and the layout-agreement Unknown rows
+  (covered by the Rust classifier's unit suite);
+- the path-map encoder/decoder, its round-trip gates, and the
+  reserved-token/collision blocks (covered by `codex_path_map` and
+  standalone-builder suites);
 - checkpoint `Ready`/`Detached` remapping;
 - mixed-resource batch publication;
 - actual bounded mutation serialization size; or
