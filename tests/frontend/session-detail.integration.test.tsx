@@ -671,6 +671,80 @@ test("Markdown drops raw HTML and unsafe link protocols", () => {
   assert.equal(safeMarkdownUrl("https://example.com/docs"), "https://example.com/docs");
 });
 
+test("Markdown project images embed through the validated loader only", () => {
+  // A loaded cache entry renders the bounded data: URI; a failed entry and
+  // a still-loading entry render the quiet chip, never a broken <img>.
+  const loaded = renderToStaticMarkup(
+    <SessionDetailMarkdown
+      text={"![GIF](./animation.gif)"}
+      onLoadProjectImage={() => undefined}
+      projectImages={{
+        "animation.gif": { status: "loaded", src: "data:image/gif;base64,R0lGODlh" },
+      }}
+    />,
+  );
+  assert.match(
+    loaded,
+    /<img[^>]*class="session-detail-markdown-image"[^>]*src="data:image\/gif;base64,R0lGODlh"[^>]*alt="GIF"/,
+  );
+
+  const failed = renderToStaticMarkup(
+    <SessionDetailMarkdown
+      text={"![GIF](./animation.gif)"}
+      onLoadProjectImage={() => undefined}
+      projectImages={{
+        "animation.gif": { status: "failed", message: "too large" },
+      }}
+    />,
+  );
+  assert.doesNotMatch(failed, /<img/);
+  assert.match(failed, /session-detail-image-placeholder/);
+  assert.match(failed, /title="too large"/);
+
+  const pending = renderToStaticMarkup(
+    <SessionDetailMarkdown
+      text={"![GIF](./animation.gif)"}
+      onLoadProjectImage={() => undefined}
+      projectImages={{}}
+    />,
+  );
+  assert.doesNotMatch(pending, /<img/);
+  assert.match(pending, /session-detail-image-placeholder is-loading/);
+});
+
+test("Markdown images outside the project never reach the webview as requests", () => {
+  // Absolute paths, traversal, and foreign schemes fall to the chip: no
+  // <img> element exists for them, so the webview issues no request and the
+  // validated command is the only local read path. External https images
+  // keep loading exactly as before.
+  const html = renderToStaticMarkup(
+    <SessionDetailMarkdown
+      text={[
+        "![Escape](/tmp/animation.gif)",
+        "![Parent](../animation.gif)",
+        "![Scheme](file:///tmp/animation.gif)",
+        "![Remote](https://example.com/chart.png)",
+      ].join(" ")}
+      onLoadProjectImage={() => undefined}
+      projectImages={{}}
+    />,
+  );
+  const images = html.match(/<img[^>]*>/g) ?? [];
+  assert.equal(images.length, 1);
+  assert.match(images[0], /src="https:\/\/example\.com\/chart\.png"/);
+  assert.match(images[0], /alt="Remote"/);
+  for (const alt of ["Escape", "Parent", "Scheme"]) {
+    assert.match(html, new RegExp(`session-detail-image-placeholder[^>]*aria-label="${alt}"`));
+  }
+  // Without a loader wired (plain markdown contexts), project images also
+  // stay chips instead of firing requests.
+  const unwired = renderToStaticMarkup(
+    <SessionDetailMarkdown text={"![GIF](./animation.gif)"} />,
+  );
+  assert.doesNotMatch(unwired, /<img/);
+  assert.match(unwired, /session-detail-image-placeholder/);
+});
+
 test("Markdown links clean project-relative paths and rejects every escape form", () => {
   const html = renderToStaticMarkup(
     <SessionDetailMarkdown

@@ -7934,6 +7934,43 @@ button.sync-project-file-expand { cursor: pointer; }
   visibility: visible;
 }
 
+/* Markdown images embed as bounded data: URIs read through the validated
+   project command; anything that cannot be embedded renders as a quiet chip
+   with the alt text instead of the webview's broken-image glyph. */
+.session-detail-markdown-image {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  width: auto;
+  height: auto;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.session-detail-image-placeholder {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 4px;
+  color: var(--text-2);
+  font-size: var(--type-sm);
+  vertical-align: middle;
+}
+
+.session-detail-image-placeholder.is-loading {
+  opacity: 0.7;
+}
+
+.session-detail-image-placeholder-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .session-detail-event-copy table {
   width: 100%;
   border-collapse: collapse;

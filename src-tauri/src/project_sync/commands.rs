@@ -1399,6 +1399,27 @@ pub async fn open_project_markdown_path(
     .await
 }
 
+/// Bounded inline embedding for Markdown-referenced project images: the same
+/// canonical/no-symlink descendant validation `open_project_markdown_path`
+/// uses, plus a regular-file check, size cap, and magic-byte format sniff.
+/// Only paths inside the registered project are ever served.
+#[tauri::command]
+pub async fn read_project_markdown_image(
+    app: tauri::AppHandle,
+    local_project_id: LocalProjectId,
+    relative_path: String,
+) -> Result<session_detail::ProjectMarkdownImage, SessionDetailError> {
+    let repository = repository(&app).map_err(|_| SessionDetailError {
+        code: SessionDetailErrorCode::ProviderError,
+        message: "Mallard could not open its local state repository.".to_string(),
+        current_snapshot_id: None,
+    })?;
+    run_session_detail_blocking(move || {
+        session_detail::read_project_markdown_image(&repository, &local_project_id, &relative_path)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn execute_project_session_action(
     app: tauri::AppHandle,

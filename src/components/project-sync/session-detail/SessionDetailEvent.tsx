@@ -1,4 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { SessionCount, SessionTimelineEvent } from "../../../types";
@@ -11,6 +12,7 @@ import {
   formatSessionDetailClock,
   isSafeExternalMarkdownUrl,
   projectMarkdownDisplayPath,
+  type ProjectMarkdownImageState,
   safeMarkdownUrl,
   safeProjectMarkdownPath,
   SESSION_EVENT_KIND_LABELS,
@@ -27,6 +29,8 @@ interface Props {
   toolDetails: Readonly<Record<string, SessionToolDetailState>>;
   onToolExpandedChange: (eventId: string, expanded: boolean) => void;
   onOpenProjectPath: (relativePath: string) => void;
+  projectImages?: Readonly<Record<string, ProjectMarkdownImageState>>;
+  onLoadProjectImage?: (relativePath: string) => void;
   projectRoot: string;
 }
 
@@ -35,13 +39,68 @@ async function openMarkdownLink(url: string): Promise<void> {
   await openUrl(url);
 }
 
+/** Alt text (or the path) inside a bordered chip: the still-loading and
+ * cannot-embed states share one calm shape instead of the webview's
+ * broken-image glyph. */
+function MarkdownImagePlaceholder({
+  label,
+  detail,
+  loading,
+}: {
+  label: string;
+  detail?: string;
+  loading?: boolean;
+}) {
+  return (
+    <span
+      className={`session-detail-image-placeholder${loading ? " is-loading" : ""}`}
+      role="img"
+      aria-label={label}
+      {...(detail ? { title: detail } : {})}
+    >
+      <Icon name="file" size={12} />
+      <span className="session-detail-image-placeholder-label">{label}</span>
+    </span>
+  );
+}
+
+/** Requests one validated in-project image on mount, rendering the loading
+ * chip until the page-level cache resolves it. */
+function ProjectMarkdownImage({
+  relativePath,
+  alt,
+  state,
+  onLoadProjectImage,
+}: {
+  relativePath: string;
+  alt: string;
+  state: ProjectMarkdownImageState | undefined;
+  onLoadProjectImage: (relativePath: string) => void;
+}) {
+  const settled = state != null;
+  useEffect(() => {
+    if (!settled) onLoadProjectImage(relativePath);
+  }, [settled, relativePath, onLoadProjectImage]);
+  if (state?.status === "loaded") {
+    return <img className="session-detail-markdown-image" src={state.src} alt={alt} />;
+  }
+  if (state?.status === "failed") {
+    return <MarkdownImagePlaceholder label={alt || relativePath} detail={state.message} />;
+  }
+  return <MarkdownImagePlaceholder label={alt || relativePath} loading />;
+}
+
 export function SessionDetailMarkdown({
   text,
   onOpenProjectPath,
+  projectImages,
+  onLoadProjectImage,
   projectRoot = "",
 }: {
   text: string;
   onOpenProjectPath?: (relativePath: string) => void;
+  projectImages?: Readonly<Record<string, ProjectMarkdownImageState>>;
+  onLoadProjectImage?: (relativePath: string) => void;
   projectRoot?: string;
 }) {
   return (
@@ -50,6 +109,45 @@ export function SessionDetailMarkdown({
       skipHtml
       urlTransform={safeMarkdownUrl}
       components={{
+        img: ({ src, alt }) => {
+          const url = typeof src === "string" ? src : "";
+          const label = alt ?? "";
+          // External https images render as-is, exactly as before this
+          // renderer existed; the webview loads them directly.
+          if (isSafeExternalMarkdownUrl(url)) {
+            return (
+              <img
+                className="session-detail-markdown-image"
+                src={url}
+                alt={label}
+                loading="lazy"
+              />
+            );
+          }
+          // Everything else must be a clean relative descendant of the
+          // project root, served through the bounded validated command.
+          // Absolute paths, traversal, and foreign schemes arrive here as
+          // "" from the shared urlTransform and fall to the plain chip.
+          const projectPath = url ? safeProjectMarkdownPath(url) : null;
+          if (!projectPath || !onLoadProjectImage) {
+            return (
+              <MarkdownImagePlaceholder
+                label={label || "image"}
+                detail={projectPath
+                  ? undefined
+                  : "Only images inside the project can be embedded."}
+              />
+            );
+          }
+          return (
+            <ProjectMarkdownImage
+              relativePath={projectPath}
+              alt={label}
+              state={projectImages?.[projectPath]}
+              onLoadProjectImage={onLoadProjectImage}
+            />
+          );
+        },
         a: ({ href, children, ...props }) => {
           const safeHref = href ? safeMarkdownUrl(href) : "";
           if (!safeHref) return <span>{children}</span>;
@@ -156,11 +254,15 @@ function PromptCard({
   event,
   turnDuration,
   onOpenProjectPath,
+  projectImages,
+  onLoadProjectImage,
   projectRoot,
 }: {
   event: SessionTimelineEvent;
   turnDuration?: string | null;
   onOpenProjectPath: (relativePath: string) => void;
+  projectImages?: Readonly<Record<string, ProjectMarkdownImageState>>;
+  onLoadProjectImage?: (relativePath: string) => void;
   projectRoot: string;
 }) {
   const callCount = speakableCount(event.turn_tool_summary?.tool_calls);
@@ -172,6 +274,8 @@ function PromptCard({
           <SessionDetailMarkdown
             text={event.text}
             onOpenProjectPath={onOpenProjectPath}
+            projectImages={projectImages}
+            onLoadProjectImage={onLoadProjectImage}
             projectRoot={projectRoot}
           />
         ) : (
@@ -223,6 +327,8 @@ export default function SessionDetailEvent({
   toolDetails,
   onToolExpandedChange,
   onOpenProjectPath,
+  projectImages,
+  onLoadProjectImage,
   projectRoot,
 }: Props) {
   const classes = [
@@ -265,6 +371,8 @@ export default function SessionDetailEvent({
             event={event}
             turnDuration={turnDuration}
             onOpenProjectPath={onOpenProjectPath}
+            projectImages={projectImages}
+            onLoadProjectImage={onLoadProjectImage}
             projectRoot={projectRoot}
           />
         ) : (
@@ -275,6 +383,8 @@ export default function SessionDetailEvent({
               <SessionDetailMarkdown
                 text={event.text}
                 onOpenProjectPath={onOpenProjectPath}
+                projectImages={projectImages}
+                onLoadProjectImage={onLoadProjectImage}
                 projectRoot={projectRoot}
               />
             ) : (

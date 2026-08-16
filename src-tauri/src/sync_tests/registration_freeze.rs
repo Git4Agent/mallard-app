@@ -77,6 +77,7 @@ const EXPECTED: &[&str] = &[
     "publish_catalog_resource",
     "push_bundle",
     "query_activity_logs",
+    "read_project_markdown_image",
     "recover_startup_state",
     "register_local_project",
     "remove_catalog_resource",

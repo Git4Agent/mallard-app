@@ -27,6 +27,7 @@ import type {
   ProjectContentInventory,
   ProjectOperationResult,
   ProjectOriginTokens,
+  ProjectMarkdownImage,
   ProjectSessionDetail,
   ProjectSessionTimelinePage,
   ProjectSessionTimelineQuery,
@@ -366,6 +367,9 @@ export const projectSyncApi = {
 
   openProjectMarkdownPath: (localProjectId: string, relativePath: string) =>
     invoke<void>("open_project_markdown_path", { localProjectId, relativePath }),
+
+  readProjectMarkdownImage: (localProjectId: string, relativePath: string) =>
+    invoke<ProjectMarkdownImage>("read_project_markdown_image", { localProjectId, relativePath }),
 
   executeProjectSessionAction: (localProjectId: string, resourceId: string, actionId: string) =>
     invoke<void>("execute_project_session_action", { localProjectId, resourceId, actionId }),

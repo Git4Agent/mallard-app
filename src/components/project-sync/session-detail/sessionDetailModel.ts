@@ -681,6 +681,15 @@ export function isSafeExternalMarkdownUrl(url: string): boolean {
   }
 }
 
+/**
+ * One project image's settled embed outcome in the page-level cache: a
+ * ready `data:` URI, or a terminal failure (rejected format, size cap,
+ * missing file). An absent entry means the load has not settled yet.
+ */
+export type ProjectMarkdownImageState =
+  | { status: "loaded"; src: string }
+  | { status: "failed"; message: string };
+
 export interface SessionDetailFailure {
   code: string | null;
   message: string;

@@ -5,6 +5,7 @@ import type { SessionToolDetailState } from "./SessionDetailToolCall";
 import {
   formatSessionGap,
   groupSessionEventsByDay,
+  type ProjectMarkdownImageState,
   sessionTurnDurationLabel,
   sessionTurnSpans,
 } from "./sessionDetailModel";
@@ -23,6 +24,8 @@ interface Props {
   onLoadMore: () => void;
   onToolExpandedChange: (eventId: string, expanded: boolean) => void;
   onOpenProjectPath: (relativePath: string) => void;
+  projectImages: Readonly<Record<string, ProjectMarkdownImageState>>;
+  onLoadProjectImage: (relativePath: string) => void;
   projectRoot: string;
 }
 
@@ -40,6 +43,8 @@ export default function SessionDetailTimeline({
   onLoadMore,
   onToolExpandedChange,
   onOpenProjectPath,
+  projectImages,
+  onLoadProjectImage,
   projectRoot,
 }: Props) {
   // The record is the page; it needs no eyebrow announcing that it is a record,
@@ -110,6 +115,8 @@ export default function SessionDetailTimeline({
                     toolDetails={toolDetails}
                     onToolExpandedChange={onToolExpandedChange}
                     onOpenProjectPath={onOpenProjectPath}
+                    projectImages={projectImages}
+                    onLoadProjectImage={onLoadProjectImage}
                     projectRoot={projectRoot}
                   />
                 </li>

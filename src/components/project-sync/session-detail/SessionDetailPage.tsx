@@ -24,6 +24,7 @@ import {
   includedSessionEventKinds,
   mergeSessionTimelinePages,
   normalizeSessionDetailFailure,
+  type ProjectMarkdownImageState,
   sessionDetailFilterFingerprint,
   type SessionDetailFilters,
 } from "./sessionDetailModel";
@@ -341,6 +342,33 @@ export default function SessionDetailPage({
     }
   }, [localProjectId]);
 
+  // Markdown-referenced project images, embedded as bounded data: URIs.
+  // The cache is settled outcomes only; the ref dedupes in-flight loads so
+  // one path is read at most once per page, whatever re-renders happen.
+  const [projectImages, setProjectImages] = useState<
+    Readonly<Record<string, ProjectMarkdownImageState>>
+  >({});
+  const requestedProjectImages = useRef(new Set<string>());
+  useEffect(() => {
+    requestedProjectImages.current = new Set();
+    setProjectImages({});
+  }, [localProjectId]);
+  const loadProjectImage = useCallback(async (relativePath: string) => {
+    if (requestedProjectImages.current.has(relativePath)) return;
+    requestedProjectImages.current.add(relativePath);
+    let state: ProjectMarkdownImageState;
+    try {
+      const image = await projectSyncApi.readProjectMarkdownImage(localProjectId, relativePath);
+      state = {
+        status: "loaded",
+        src: `data:${image.mime_type};base64,${image.base64_data}`,
+      };
+    } catch (reason) {
+      state = { status: "failed", message: normalizeSessionDetailFailure(reason).message };
+    }
+    setProjectImages((previous) => ({ ...previous, [relativePath]: state }));
+  }, [localProjectId]);
+
   const runAction = async (action: SessionActionDescriptor) => {
     if (!action.enabled || actionBusyId) return;
     setActionBusyId(action.action_id);
@@ -427,6 +455,8 @@ export default function SessionDetailPage({
             })}
             onToolExpandedChange={handleToolExpandedChange}
             onOpenProjectPath={(relativePath) => void openProjectPath(relativePath)}
+            projectImages={projectImages}
+            onLoadProjectImage={(relativePath) => void loadProjectImage(relativePath)}
             projectRoot={projectRoot}
           />
         </div>

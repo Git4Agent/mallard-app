@@ -37,6 +37,9 @@ const MAX_WARNING_BYTES: usize = 2 * 1024;
 const MAX_CHECKPOINT_COMMITS: usize = 10_000;
 const MAX_CHECKPOINT_BRANCHES: usize = 10_000;
 const MAX_PROJECT_MARKDOWN_PATH_BYTES: usize = 4 * 1024;
+/// Raw-byte cap for inline Markdown image embedding. Base64 inflates the IPC
+/// payload by 4/3, so the transported response stays under ~11 MiB.
+const MAX_PROJECT_MARKDOWN_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -366,6 +369,89 @@ pub fn resolve_project_markdown_path(
         )
     })?;
     canonical_project_markdown_path(&resolved.project_root, relative_path)
+}
+
+/// One embeddable project image crossing the Tauri boundary as a bounded
+/// base64 payload. Only clean relative descendants of the registered project
+/// root are ever served; the webview renders the result as a `data:` URI, so
+/// no filesystem protocol is exposed to Markdown content.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProjectMarkdownImage {
+    pub mime_type: String,
+    pub base64_data: String,
+}
+
+/// Read one Markdown-referenced project image for inline embedding: the same
+/// canonical/no-follow descendant validation links use, then a regular-file
+/// check, a size cap read before the bytes, and a magic-byte sniff — the
+/// declared extension is never trusted.
+pub fn read_project_markdown_image(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    relative_path: &str,
+) -> SessionDetailResult<ProjectMarkdownImage> {
+    let path = resolve_project_markdown_path(repository, local_project_id, relative_path)?;
+    bounded_project_markdown_image(&path)
+}
+
+/// The bounded read half of [`read_project_markdown_image`], over an
+/// already-validated canonical project path.
+fn bounded_project_markdown_image(path: &Path) -> SessionDetailResult<ProjectMarkdownImage> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::NotFound,
+            "The linked project image no longer exists.",
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(invalid_request("Only project image files can be embedded."));
+    }
+    if metadata.len() > MAX_PROJECT_MARKDOWN_IMAGE_BYTES {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ResponseTooLarge,
+            "The linked project image exceeds Mallard's embedding limit.",
+        ));
+    }
+    let bytes = fs::read(path).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::NotFound,
+            "The linked project image no longer exists.",
+        )
+    })?;
+    // Re-check after the read: the metadata cap must hold for the bytes that
+    // were actually handed to the webview, not a racing earlier version.
+    if bytes.len() as u64 > MAX_PROJECT_MARKDOWN_IMAGE_BYTES {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ResponseTooLarge,
+            "The linked project image exceeds Mallard's embedding limit.",
+        ));
+    }
+    let mime_type = sniff_markdown_image_mime(&bytes).ok_or_else(|| {
+        invalid_request("Only GIF, PNG, JPEG, and WebP project images can be embedded.")
+    })?;
+    Ok(ProjectMarkdownImage {
+        mime_type: mime_type.to_string(),
+        base64_data: aws_smithy_types::base64::encode(&bytes),
+    })
+}
+
+/// The supported embeddable formats by magic bytes. SVG is deliberately
+/// excluded: it is the one candidate whose bytes are an active document
+/// rather than pixels.
+fn sniff_markdown_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(b"\xFF\xD8\xFF") {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
 fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetailResult<()> {
@@ -1818,6 +1904,73 @@ mod tests {
             canonical_project_markdown_path(&fs::canonicalize(&project).unwrap(), "story-link.md")
                 .unwrap_err();
         assert_eq!(error.code, SessionDetailErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn project_markdown_images_are_sniffed_bounded_regular_files() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let project = sandbox.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+
+        // Supported formats are recognized by magic bytes and returned as
+        // base64 with the sniffed MIME type.
+        let gif = project.join("animation.gif");
+        fs::write(&gif, b"GIF89a\x01\x00\x01\x00\x00\x00\x00;").unwrap();
+        let image = bounded_project_markdown_image(&gif).unwrap();
+        assert_eq!(image.mime_type, "image/gif");
+        assert_eq!(
+            aws_smithy_types::base64::decode(&image.base64_data).unwrap(),
+            fs::read(&gif).unwrap(),
+        );
+        let png = project.join("shot.png");
+        fs::write(&png, b"\x89PNG\r\n\x1a\n0000").unwrap();
+        assert_eq!(
+            bounded_project_markdown_image(&png).unwrap().mime_type,
+            "image/png"
+        );
+        let jpeg = project.join("photo.jpg");
+        fs::write(&jpeg, b"\xFF\xD8\xFF\xE0rest").unwrap();
+        assert_eq!(
+            bounded_project_markdown_image(&jpeg).unwrap().mime_type,
+            "image/jpeg"
+        );
+        let webp = project.join("frame.webp");
+        fs::write(&webp, b"RIFF\x04\x00\x00\x00WEBPVP8 ").unwrap();
+        assert_eq!(
+            bounded_project_markdown_image(&webp).unwrap().mime_type,
+            "image/webp"
+        );
+
+        // The declared extension is never trusted: non-image bytes are
+        // rejected whatever the file is called.
+        let fake = project.join("fake.gif");
+        fs::write(&fake, b"#!/bin/sh\necho pwned\n").unwrap();
+        assert_eq!(
+            bounded_project_markdown_image(&fake).unwrap_err().code,
+            SessionDetailErrorCode::InvalidRequest,
+        );
+
+        // Directories and missing files are typed, not embedded.
+        assert_eq!(
+            bounded_project_markdown_image(&project).unwrap_err().code,
+            SessionDetailErrorCode::InvalidRequest,
+        );
+        assert_eq!(
+            bounded_project_markdown_image(&project.join("missing.gif"))
+                .unwrap_err()
+                .code,
+            SessionDetailErrorCode::NotFound,
+        );
+
+        // The size cap rejects before reading the bytes.
+        let oversized = project.join("huge.gif");
+        let file = fs::File::create(&oversized).unwrap();
+        file.set_len(MAX_PROJECT_MARKDOWN_IMAGE_BYTES + 1).unwrap();
+        drop(file);
+        assert_eq!(
+            bounded_project_markdown_image(&oversized).unwrap_err().code,
+            SessionDetailErrorCode::ResponseTooLarge,
+        );
     }
 
     #[test]

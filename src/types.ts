@@ -1134,6 +1134,12 @@ export interface SessionEventDetail {
   affected_paths: string[];
 }
 
+/** One embeddable in-project Markdown image, served as bounded base64. */
+export interface ProjectMarkdownImage {
+  mime_type: string;
+  base64_data: string;
+}
+
 export interface ProjectSessionTimelineQuery {
   snapshot_id: string;
   cursor?: string | null;
