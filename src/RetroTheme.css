@@ -85,13 +85,31 @@
      retired — this file is the palette's single source of truth. */
   --button-disabled-opacity: 0.38;
   --z-log: 20;
-  --thread-status-synced: #31ae6b;
-  --thread-status-cloud: #397dcc;
-  --thread-status-local: #16a7c9;
-  --thread-status-divergent: #7655d6;
-  --thread-status-pending: #e59b1b;
-  --thread-status-conflict: #e44649;
-  --thread-status-unavailable: #85878e;
+
+  /* Sync status badges. These were seven fixed hexes serving both palettes,
+     which is a contradiction: a colour picked to read on near-black cannot
+     also read on cream, and three of them didn't — amber `pending` measured
+     2.22:1 on a light row, on a 1px hairline. They resolve per theme now.
+     Five of the seven need no value of their own because the token they point
+     at already splits; only `synced` and `local` carry literals, below.
+
+     The mapping follows what shipped tools do, checked against two of them on
+     this machine rather than from memory: OneDrive's own status assets
+     (synced green, syncing blue, warning amber, error red, offline greyscale)
+     and VS Code's git defaults, where `gitDecoration.modified` is amber
+     #895503 for a file in a list. That last one is a judgement, not a law —
+     VS Code's *gutter* paints modified blue instead — but a session row is a
+     list entry, and blue is spent on the storage side, where OneDrive puts it
+     too. Bars held: every signal ≥4.5:1 against the hovered row (the 3:1
+     WCAG 2.2 floor for non-text is not enough for a hairline), and no two
+     badges closer than ΔE 14 under deuteranopia or protanopia. */
+  --thread-status-cloud: var(--info-text);
+  --thread-status-divergent: var(--purple);
+  --thread-status-conflict: var(--danger-text);
+  /* Waiting and unsyncable are not signals — neither is something the user can
+     act on, so they recede to ink and are told apart by glyph, clock vs bar. */
+  --thread-status-pending: var(--text-2);
+  --thread-status-unavailable: var(--text-2);
 }
 
 /* Both palettes ride one warm axis. Light is cream paper over sepia browns;
@@ -179,6 +197,14 @@
   --success-text: var(--green);
   --warning-text: var(--yellow);
   --info-text: var(--blue);
+  /* The two status badges with no token of their own. `synced` keeps the exact
+     green it has always worn: it clears 5.96:1 on a hovered dark row, so the
+     dark theme needs no change at all. It is also cooler and more saturated
+     than --green, which is what keeps it 16.9 ΔE from the neutral ink for a
+     protanope — --green measured 5.8 there, close enough to be one colour.
+     `local` is VS Code's shipped gitDecoration.modified dark value, as-is. */
+  --thread-status-synced: #31ae6b;
+  --thread-status-local: #e2c08d;
   --focus-ring: var(--accent);
   --r-lg: 9px;
   --r: 6px;
@@ -290,6 +316,14 @@
   --success-text: #397149;
   --warning-text: #885e06;
   --info-text: #256c90;
+  /* Light counterparts. The dark green cannot follow it here: #31ae6b measures
+     2.56:1 on this paper, which on a 1px badge rim is not a dim icon but an
+     absent one. It keeps its hue (148°) and spends saturation instead of
+     lightness — on cream "bright" has to mean saturated, because lightness is
+     exactly what contrast is paying for. VS Code's shipped
+     gitDecoration.modified light value below, unaltered. */
+  --thread-status-synced: #006b32;
+  --thread-status-local: #895503;
   --focus-ring: var(--accent);
   --shadow-card: 2px 2px 0 rgba(82, 58, 43, 0.07);
   --shadow-overlay: 4px 4px 0 rgba(82, 58, 43, 0.11);

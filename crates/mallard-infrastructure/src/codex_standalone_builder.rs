@@ -99,6 +99,11 @@ pub struct StandaloneConversationArtifact {
     /// exactly when the effective partition has a nonzero fixed start).
     pub prefix_witness: Option<ConversationPrefixWitness>,
     pub message_count: u64,
+    /// Canonical projection cursors for append-only refresh of these exact
+    /// output bytes after Pull installs them.
+    pub last_canonical_message_id: Option<String>,
+    pub last_synthetic_turn_id: Option<String>,
+    pub next_synthetic_turn_ordinal: u64,
     pub lineage_digest: String,
     pub semantic_digest: String,
     pub artifact_sha256: String,
@@ -209,6 +214,9 @@ pub fn build_standalone_codex_root(
     if analysis.is_internal_subagent {
         return Err("standalone output claims to be an internal subagent".to_string());
     }
+    let last_canonical_message_id = analysis.last_canonical_message_id.clone();
+    let last_synthetic_turn_id = analysis.last_synthetic_turn_id.clone();
+    let next_synthetic_turn_ordinal = analysis.next_synthetic_turn_ordinal;
     let (chain, lineage_digest, semantic_digest) = match analysis.lineage {
         CodecLineage::Complete {
             chain,
@@ -265,6 +273,9 @@ pub fn build_standalone_codex_root(
         id_map,
         portable_tail,
         prefix_witness,
+        last_canonical_message_id,
+        last_synthetic_turn_id,
+        next_synthetic_turn_ordinal,
         lineage_digest,
         semantic_digest,
         artifact_sha256,
@@ -724,6 +735,7 @@ mod tests {
         assert_eq!(local.portable_tail.codec, PORTABLE_TAIL_CODEC_V1);
         assert_eq!(local.portable_tail.start_record_count, 2);
         assert_eq!(local.portable_tail.accepted_end_record_count, 3);
+        assert_eq!(local.last_canonical_message_id.as_deref(), Some("m3"));
         assert_eq!(local.id_map.len(), 1);
         // The artifact witness is local-form: it folds the *decoded* chain's
         // prefix, not the staged wire chain's — the two differ exactly

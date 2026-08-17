@@ -81,6 +81,10 @@ pub enum CodexTailRefresh {
         observed_tail: PortableConversationTail,
         mapping: RootPhysicalMapping,
     },
+    /// Appended structural metadata needs the bounded whole-root validator.
+    /// It may be a legitimate repeated active identity or evidence that the
+    /// rollout was replaced; the cursor alone cannot distinguish them.
+    NeedsFullResolve,
     /// The source no longer matches the checkpoint's identity contract.
     Invalid {
         reason: CodexTailInvalidReason,
@@ -598,12 +602,13 @@ pub fn refresh_codex_tail(
                 reason: CodexTailInvalidReason::MalformedAppend,
             });
         };
-        // A structural identity record appearing after the consumed cursor
-        // means the file is no longer the same append-only segment.
+        // Codex can repeat the active session metadata when a task resumes.
+        // The cursor does not retain the full ancestry/cwd structure needed
+        // to validate it, so defer to the bounded whole-root parser. That
+        // parser accepts a consistent repetition and rejects replacement or
+        // unrelated identities.
         if structural_record_type(&value) == Some("session_meta") {
-            return Ok(CodexTailRefresh::Invalid {
-                reason: CodexTailInvalidReason::Replaced,
-            });
+            return Ok(CodexTailRefresh::NeedsFullResolve);
         }
         match builder.feed(value) {
             Ok(ChainFeedOutcome::Appended) => {
@@ -938,7 +943,7 @@ mod tests {
         .then_some(())
         .unwrap();
 
-        // A structural identity record after the cursor is a replacement.
+        // Structural metadata cannot be decided from the cursor alone.
         let mut meta_appended = leaf_bytes.clone();
         meta_appended.extend_from_slice(meta_line("p2-reborn", None).as_bytes());
         meta_appended.push(b'\n');
@@ -950,12 +955,62 @@ mod tests {
                 &tail_window_from(&seeded.mapping, &meta_appended),
             )
             .unwrap(),
-            CodexTailRefresh::Invalid {
-                reason: CodexTailInvalidReason::Replaced
-            }
+            CodexTailRefresh::NeedsFullResolve
         )
         .then_some(())
         .unwrap();
+    }
+
+    #[test]
+    fn repeated_active_metadata_revalidates_while_unrelated_metadata_stays_blocked() {
+        let mut graph = graph();
+        let leaf = nested_graph(&mut graph);
+        let leaf_bytes = fs::read(&leaf).unwrap();
+        let resolved = resolve_codex_root(&leaf, &graph.lookup()).unwrap();
+        let seeded = seed_codex_root(&resolved, &leaf_bytes, None).unwrap();
+        let first_record_end = leaf_bytes.iter().position(|byte| *byte == b'\n').unwrap() + 1;
+
+        // Resuming can append the same active session_meta before new work.
+        // The cursor requests a full resolve, whose structural validator
+        // accepts the repeated identity and derives the advanced tail.
+        let mut resumed = leaf_bytes.clone();
+        resumed.extend_from_slice(&leaf_bytes[..first_record_end]);
+        resumed.extend_from_slice(message_line("m6", "six").as_bytes());
+        resumed.push(b'\n');
+        assert!(matches!(
+            refresh_codex_tail(
+                &seeded.layout,
+                &seeded.observed_tail,
+                &seeded.mapping,
+                &tail_window_from(&seeded.mapping, &resumed),
+            )
+            .unwrap(),
+            CodexTailRefresh::NeedsFullResolve
+        ));
+        fs::write(&leaf, &resumed).unwrap();
+        let resumed_root = resolve_codex_root(&leaf, &graph.lookup()).unwrap();
+        let resumed_seed = seed_codex_root(&resumed_root, &resumed, Some(&seeded.layout)).unwrap();
+        assert_eq!(resumed_root.chain.len(), 6);
+        assert_eq!(resumed_seed.observed_tail.accepted_end_record_count, 6);
+
+        // A different identity takes the same full-resolve path but fails
+        // structural validation instead of being accepted as continuation.
+        let mut replaced = leaf_bytes.clone();
+        replaced.extend_from_slice(meta_line("unrelated", None).as_bytes());
+        replaced.push(b'\n');
+        assert!(matches!(
+            refresh_codex_tail(
+                &seeded.layout,
+                &seeded.observed_tail,
+                &seeded.mapping,
+                &tail_window_from(&seeded.mapping, &replaced),
+            )
+            .unwrap(),
+            CodexTailRefresh::NeedsFullResolve
+        ));
+        fs::write(&leaf, &replaced).unwrap();
+        let error = resolve_codex_root(&leaf, &graph.lookup()).unwrap_err();
+        assert!(error.contains("unrelated session_meta"), "{error}");
     }
 
     /// The bounded reader hands `refresh_codex_tail` exactly the probe

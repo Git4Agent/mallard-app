@@ -121,3 +121,82 @@ test("cross-file selector collisions can only fall", () => {
     `${shared.length} selector/property pairs are declared in both stylesheets (ratchet: 435)`,
   );
 });
+
+/* The seven status badges were one hex apiece serving both palettes, and three
+   of them failed outright on cream — a colour picked against near-black cannot
+   also read against paper. They resolve per theme now, and this gate is what
+   stops the next edit reintroducing a value that only works on one of them.
+   It measures the resolved colour, not the source text: the badges reach their
+   hue through two or three var() hops, so a gate that read declarations would
+   pass a token whose target had drifted. */
+
+/** Every custom property declared in a block whose selector matches. */
+function tokensFor(theme: "light" | "dark"): Map<string, string> {
+  const css = stripComments(retroCss);
+  const tokens = new Map<string, string>();
+  // Blocks apply in source order; a later block overrides an earlier one, and
+  // the dark palette rides the bare :root that also carries the shared tokens.
+  for (const block of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const selector = block[1].trim();
+    const applies =
+      /(^|,)\s*:root\s*(,|$)/.test(selector) ||
+      selector.includes(`:root[data-theme="${theme}"]`);
+    if (!applies) continue;
+    for (const decl of block[2].matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)) {
+      tokens.set(decl[1], decl[2].trim());
+    }
+  }
+  return tokens;
+}
+
+function resolve(name: string, tokens: Map<string, string>, seen = new Set<string>()): string {
+  assert.ok(!seen.has(name), `${name} resolves in a cycle`);
+  seen.add(name);
+  const value = tokens.get(name);
+  assert.ok(value, `${name} is not declared in this theme`);
+  const ref = value.match(/^var\(\s*(--[a-z0-9-]+)\s*\)$/);
+  return ref ? resolve(ref[1], tokens, seen) : value;
+}
+
+function contrast(a: string, b: string): number {
+  const channel = (v: number) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+  const luminance = (hex: string) => {
+    const m = hex.trim().match(/^#([0-9a-f]{6})$/i);
+    assert.ok(m, `${hex} is not a plain 6-digit hex; the gate cannot measure it`);
+    const [r, g, b] = [0, 2, 4].map((i) => channel(parseInt(m![1].slice(i, i + 2), 16) / 255));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const [x, y] = [luminance(a), luminance(b)];
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+}
+
+test("every status badge reads on the paper of its own theme", () => {
+  // The seven that carry a verdict. Measured against the *hovered* row, the
+  // harder of the two surfaces a badge sits on.
+  const signals = [
+    "synced", "cloud", "local", "divergent", "pending", "conflict", "unavailable",
+  ].map((name) => `--thread-status-${name}`);
+
+  for (const theme of ["light", "dark"] as const) {
+    const tokens = tokensFor(theme);
+    const surface = resolve("--surface-row-hover", tokens);
+    for (const token of signals) {
+      const colour = resolve(token, tokens);
+      const measured = contrast(colour, surface);
+      // 4.5, not the 3:1 WCAG 2.2 sets for non-text: the badge rim is a 1px
+      // hairline at the 18px the activity list draws, and the floor assumes a
+      // solid shape. Amber `pending` once measured 2.22 here.
+      assert.ok(
+        measured >= 4.5,
+        `${token} is ${colour} on ${theme}, ${measured.toFixed(2)}:1 against ${surface} — needs 4.5`,
+      );
+    }
+    // The three no-verdict badges stay quiet on purpose, but still have to
+    // clear the bar that actually governs non-text graphics.
+    const neutral = resolve("--text-3", tokens);
+    assert.ok(
+      contrast(neutral, surface) >= 3,
+      `--text-3 is ${contrast(neutral, surface).toFixed(2)}:1 on ${theme}`,
+    );
+  }
+});

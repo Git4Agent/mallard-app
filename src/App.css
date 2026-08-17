@@ -7199,6 +7199,43 @@ button.sync-project-file-expand { cursor: pointer; }
   flex-wrap: wrap;
 }
 
+/* Profile selection mirrors project setup; naming and committing a new home
+   stays a separate, compact action row so it never competes with the path. */
+.catalog-profile-save-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) auto;
+  align-items: end;
+  justify-content: start;
+  gap: 8px;
+}
+
+.catalog-profile-save-row label {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--text-1);
+  font-size: var(--type-xs);
+}
+
+.catalog-profile-save-row input {
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--control-border);
+  border-radius: 7px;
+  color: var(--text-0);
+  background: var(--surface-row);
+  font: inherit;
+  font-size: var(--type-sm);
+}
+
+.catalog-profile-save-row > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
 .catalog-resource-row {
   display: flex;
   align-items: center;

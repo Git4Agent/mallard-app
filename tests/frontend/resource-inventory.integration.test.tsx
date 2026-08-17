@@ -511,10 +511,12 @@ test("destination gates never render inside the push review", () => {
 test("the pull-required sentence counts the conversations a Pull would bring", () => {
   // storage (2) + diverged (1); the sentence names conversations because that
   // is all the comparison counted. ProjectSync feeds this straight into the
-  // storage-card notice.
+  // storage-card notice. It must not threaten overwrites: a push carries
+  // newer cloud threads forward and holds them per thread, so the sentence
+  // points at the review and what it unlocks instead.
   assert.match(
     pullRequiredCopy("remote_advanced", "R2 storage 1", 4, 3, 3).body,
-    /^3 conversations are newer in R2 storage 1\. Pushing could overwrite them\.$/,
+    /^3 conversations are newer in R2 storage 1\. Review them in Pull — they stay held afterwards while your other sessions push\.$/,
   );
 });
 
@@ -528,10 +530,11 @@ test("an unreviewed storage and a changed binding each get their own plain sente
   assert.equal(rebound.title, "Project changed since last sync");
   assert.match(rebound.body, /Review this storage first\./);
 
-  // One conversation reads as one, not as "1 conversations are".
+  // One conversation reads as one, not as "1 conversations are" — and the
+  // pronouns follow it through the whole sentence.
   assert.match(
     pullRequiredCopy("remote_advanced", "R2 storage 1", 4, 3, 1).body,
-    /^1 conversation is newer in R2 storage 1\./,
+    /^1 conversation is newer in R2 storage 1\. Review it in Pull — it stays held afterwards/,
   );
 });
 

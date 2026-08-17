@@ -356,48 +356,73 @@ test("session indicators use the quiet desktop sync vocabulary", () => {
 
 test("thread status badges use the outlined Default 24px pixel family", () => {
   const badge = "M9 1h6v1h3v1h1v1h1v1h1v1h1v3h1v6h-1v3h-1v1h-1v1h-1v1h-1v1h-3v1h-6v-1h-3v-1h-1v-1h-1v-1h-1v-1h-1v-3h-1v-6h1v-3h1v-1h1v-1h1v-1h1v-1h3ZM11 2v1h-3v1h-2v1h-1v1h-1v2h-1v3h-1v2h1v3h1v2h1v1h1v1h2v1h3v1h2v-1h3v-1h2v-1h1v-1h1v-2h1v-3h1v-2h-1v-3h-1v-2h-1v-1h-1v-1h-2v-1h-3v-1Z";
-  const expected: Record<ThreadStatusIconName, { color: string; glyph: string }> = {
+  // The disc the filled variant paints: the ring's outer boundary alone, which
+  // is everything before its second subpath.
+  const disc = badge.slice(0, badge.indexOf("ZM") + 1);
+  // Colours resolve per theme now. One hex could not serve both papers, and
+  // three of the old seven failed outright on cream — amber `pending` measured
+  // 2.22:1, on a 1px hairline.
+  const expected: Record<
+    ThreadStatusIconName,
+    { light: string; dark: string; glyph: string; filled?: true }
+  > = {
+    // Dark keeps the green it has always worn; only cream forces a change,
+    // where the same hue goes to full saturation instead of lightness.
     synced: {
-      color: "#31ae6b",
+      light: "#006b32",
+      dark: "#31ae6b",
       glyph: "M16 9h2v2h-1v1h-1v2h-1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h-1v-2h2v1h1v1h2v-1h1v-2h1v-1h1Z",
     },
     "cloud-outstanding": {
-      color: "#397dcc",
+      light: "#256c90",
+      dark: "#69c6f4",
       glyph: "M9 7h5v1h-5ZM9 8v2h-1v-2ZM14 8h1v2h-1ZM8 10v1h-2v-1ZM15 10h2v1h-2ZM6 11v3h-1v-3ZM17 11h1v5h-12v-2h1v1h10Z",
     },
+    // VS Code's shipped gitDecoration.modified, both themes, unaltered: amber
+    // is what a file list means by "local work not sent anywhere yet".
     "local-outstanding": {
-      color: "#16a7c9",
+      light: "#895503",
+      dark: "#e2c08d",
       glyph: "M11 8h3v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v7h-2v-6h-1v1h-2v-2h1v-1h1v-1h1Z",
     },
     divergent: {
-      color: "#7655d6",
-      glyph: "M6 6h4v5h1v1h1v2h1v-1h1v-2h1v-1h-1v-4h4v4h-1v2h-1v2h-1v1h-1v1h-1v2h-2v-3h-1v-2h-1v-1h-1v-2h-2ZM7 7v2h2v-2ZM15 7v2h2v-2Z",
+      light: "#765ba7",
+      dark: "#bfa0f2",
+      glyph: "M6 7h3v1h-3ZM7 8h3v1h-3ZM8 9h3v1h-3ZM9 10h3v1h-3ZM15 7h3v1h-3ZM14 8h3v1h-3ZM13 9h3v1h-3ZM12 10h3v1h-3ZM10 11h4v1h-4ZM10 12h4v6h-4Z",
+      filled: true,
     },
     pending: {
-      color: "#e59b1b",
+      light: "#6f6159",
+      dark: "#a59d8f",
       glyph: "M11 7h2v5h4v2h-6Z",
     },
     conflict: {
-      color: "#e44649",
+      light: "#c73d28",
+      dark: "#fb7361",
       glyph: "M11 6h3v9h-3ZM11 16h3v3h-3Z",
+      filled: true,
     },
     unavailable: {
-      color: "#85878e",
+      light: "#6f6159",
+      dark: "#a59d8f",
       glyph: "M7 11h10v3h-10Z",
     },
     // The three neutrals say "no verdict yet", so they take --text-3 rather
     // than a signal hue: a colour here would claim an answer the comparison has
     // not given, and on an unlinked project one of these is on every row.
     untracked: {
-      color: "var(--text-3)",
+      light: "var(--text-3)",
+      dark: "var(--text-3)",
       glyph: "M8 8h8v8H8ZM10 14h4v-4h-4Z",
     },
     checking: {
-      color: "var(--text-3)",
+      light: "var(--text-3)",
+      dark: "var(--text-3)",
       glyph: "M6 11h3v3H6Z",
     },
     unknown: {
-      color: "var(--text-3)",
+      light: "var(--text-3)",
+      dark: "var(--text-3)",
       glyph: "M9 6h6v2H9ZM13 8h2v3h-2ZM11 11h4v2h-4ZM11 13h2v2h-2ZM11 16h2v2h-2Z",
     },
   };
@@ -407,15 +432,42 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
     const html = renderToStaticMarkup(<ThreadStatusIcon status={status} />);
     assert.match(html, new RegExp(`data-thread-status="${status}"`));
     assert.match(html, /thread-status-icon-badge/);
-    assert.ok(html.includes(badge), `${status} must use the shared ring badge`);
     assert.ok(html.includes(expected[status].glyph), `${status} glyph geometry`);
     assert.match(html, /width="24"/);
     assert.match(html, /height="24"/);
-    assert.match(html, /thread-status-icon-badge" fill="currentColor"/);
     assert.match(html, /shape-rendering="crispEdges"/);
-    // ring and glyph both inherit the status colour, so nothing is knocked out
+    // No gradient, filter or stroke anywhere: the mark is flat fill on the
+    // pixel grid, and a stroke would land on half-pixels at 18px.
     assert.doesNotMatch(html, /(?:linearGradient|filter|drop-shadow|stroke=)/);
     assert.doesNotMatch(html, /--thread-status-glyph/);
+
+    if (expected[status].filled) {
+      // Solid disc with the glyph punched out by fill-rule, so the two states a
+      // button cannot resolve are found pre-attentively — and found in
+      // greyscale, where hue tells the reader nothing (WCAG 1.4.1). No mask,
+      // so no generated id has to survive server rendering.
+      assert.ok(html.includes(disc), `${status} must paint the solid disc`);
+      assert.match(html, /fill-rule="evenodd"/);
+      assert.doesNotMatch(html, /<mask|url\(#/);
+      // The knockout inverts stroke and gap, so overlapping subpaths would be
+      // crossed an even number of times and fill back in.
+      const rects = [...expected[status].glyph.matchAll(/M(\d+) (\d+)h(\d+)v(\d+)h-\d+Z/g)]
+        .map(([, x, y, w, h]) => [+x, +y, +w, +h] as const);
+      assert.equal(rects.length, expected[status].glyph.split("Z").length - 1,
+        `${status} glyph must be whole rectangles, or overlap cannot be checked`);
+      for (let i = 0; i < rects.length; i += 1) {
+        for (let j = i + 1; j < rects.length; j += 1) {
+          const [ax, ay, aw, ah] = rects[i];
+          const [bx, by, bw, bh] = rects[j];
+          const overlaps = ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
+          assert.ok(!overlaps, `${status} rects ${i} and ${j} overlap; evenodd would refill the gap`);
+        }
+      }
+    } else {
+      assert.ok(html.includes(badge), `${status} must use the shared ring badge`);
+      assert.match(html, /thread-status-icon-badge" fill="currentColor"/);
+      assert.doesNotMatch(html, /fill-rule/);
+    }
   }
 
   // Three dots, animated in turn: one glyph pulsing as a whole reads as an
@@ -428,11 +480,17 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
   for (const status of statuses) {
     assert.match(css, new RegExp(`\\.thread-status-icon\\[data-thread-status="${status}"\\]`));
   }
-  // The status hues live with the rest of the palette in RetroTheme.css.
+  // The status hues live with the rest of the palette in RetroTheme.css, and
+  // both halves of every pair have to be in there — the whole point of the
+  // change is that one value can no longer serve both papers.
   const palette = readFileSync("src/RetroTheme.css", "utf8");
-  for (const { color } of Object.values(expected)) {
-    assert.ok(palette.includes(color));
+  for (const { light, dark } of Object.values(expected)) {
+    assert.ok(palette.includes(light), `light value ${light} missing from the palette`);
+    assert.ok(palette.includes(dark), `dark value ${dark} missing from the palette`);
   }
+  // None of the seven may be declared outside a theme block again.
+  const invariant = palette.slice(0, palette.indexOf('data-theme="dark"'));
+  assert.doesNotMatch(invariant, /--thread-status-(synced|local):/);
   assert.match(css, /\.thread-status-icon-dots > path \{[^}]*animation: thread-status-dot/s);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.thread-status-icon-dots > path \{ animation: none;/s);
 });

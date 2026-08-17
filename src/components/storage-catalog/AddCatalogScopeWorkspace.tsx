@@ -1,3 +1,5 @@
+import { homeDir } from "@tauri-apps/api/path";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icons";
 import { storageCatalogApi, type StorageCatalogApi } from "./api";
@@ -21,6 +23,14 @@ interface Props {
 
 function providerLabel(provider: CatalogProviderKey): string {
   return provider === "codex" ? "Codex" : "Claude";
+}
+
+function expandHomePath(value: string, home: string | null): string {
+  const trimmed = value.trim();
+  if (!home || !trimmed.startsWith("~")) return trimmed;
+  if (trimmed === "~") return home;
+  if (trimmed.startsWith("~/")) return `${home.replace(/\/+$/, "")}${trimmed.slice(1)}`;
+  return trimmed;
 }
 
 // Deliberately duplicated rather than imported from project-sync: this module
@@ -56,6 +66,7 @@ export default function AddCatalogScopeWorkspace({
     displayName: string;
     path: string;
   } | null>(null);
+  const [homePath, setHomePath] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -88,12 +99,24 @@ export default function AddCatalogScopeWorkspace({
     };
   }, [api]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void homeDir()
+      .then((resolved) => {
+        if (!cancelled) setHomePath(resolved.replace(/\/+$/, ""));
+      })
+      .catch(() => {
+        if (!cancelled) setHomePath(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const supportedProviders = useMemo(
-    () => (kind
-      ? capabilities
-        .filter((capability) => capability.kinds.includes(kind))
-        .map((capability) => capability.provider)
-      : []),
+    () => capabilities
+      .filter((capability) => kind === null || capability.kinds.includes(kind))
+      .map((capability) => capability.provider),
     [capabilities, kind],
   );
   const compatibleProfiles = useMemo(
@@ -125,6 +148,22 @@ export default function AddCatalogScopeWorkspace({
     );
   };
 
+  const chooseProfileFolder = async () => {
+    if (!provider) return;
+    try {
+      const picked = await open({ directory: true, multiple: false });
+      if (!workflowIsActive() || typeof picked !== "string" || !picked) return;
+      setProfileId(null);
+      setProfileEditor({
+        provider,
+        displayName: profileEditor?.provider === provider ? profileEditor.displayName : "",
+        path: picked,
+      });
+    } catch (reason) {
+      if (workflowIsActive()) setError(errorMessage(reason));
+    }
+  };
+
   const saveProfile = async () => {
     if (!profileEditor) return;
     setError(null);
@@ -132,24 +171,12 @@ export default function AddCatalogScopeWorkspace({
       const saved = await api.saveProfile(
         profileEditor.provider,
         profileEditor.displayName,
-        profileEditor.path,
+        expandHomePath(profileEditor.path, homePath),
       );
       if (!workflowIsActive()) return;
       setProfiles((current) => [...current, saved]);
       setProfileEditor(null);
       setProfileId(saved.profile_id);
-    } catch (reason) {
-      if (workflowIsActive()) setError(errorMessage(reason));
-    }
-  };
-
-  const removeProfile = async (profile: LocalCatalogProfile) => {
-    setError(null);
-    try {
-      await api.deleteProfile(profile.profile_id, profile.revision);
-      if (!workflowIsActive()) return;
-      setProfiles((current) => current.filter((item) => item.profile_id !== profile.profile_id));
-      if (profileId === profile.profile_id) setProfileId(null);
     } catch (reason) {
       if (workflowIsActive()) setError(errorMessage(reason));
     }
@@ -172,7 +199,20 @@ export default function AddCatalogScopeWorkspace({
   };
 
   const working = busy || submitting;
+  const expandedProfilePath = expandHomePath(profileEditor?.path ?? "", homePath);
+  const customPathReady = profileEditor !== null && expandedProfilePath.startsWith("/");
+  const canSaveProfile = profileEditor !== null
+    && profileEditor.displayName.trim().length > 0
+    && customPathReady
+    && !working;
   const canAdd = kind !== null && provider !== null && profileId !== null && !working;
+  const customPathHint = profileEditor
+    ? !expandedProfilePath
+      ? "Type or paste a path, or Browse. ~ means your home folder."
+      : !expandedProfilePath.startsWith("/")
+        ? "Paths must be absolute — start with / or ~/."
+        : `${provider ? providerLabel(provider) : "Agent"} profile ·`
+    : null;
 
   return (
     <main className="sync-main sync-project-links-page sync-project-setup-page">
@@ -239,7 +279,7 @@ export default function AddCatalogScopeWorkspace({
                   <select
                     aria-label="Provider"
                     value={provider ?? ""}
-                    disabled={working || !kind}
+                    disabled={working}
                     onChange={(event) => chooseProvider(
                       (event.target.value || null) as CatalogProviderKey | null,
                     )}
@@ -252,13 +292,23 @@ export default function AddCatalogScopeWorkspace({
                 </span>
               </div>
               {provider && (
-                <div className="sync-profile-select-row">
+                <div className={`sync-agent-profile-row${profileEditor ? " has-custom-path" : ""}`}>
                   <span className="sync-select-shell">
                     <select
-                      aria-label="Agent profile"
-                      value={profileId ?? ""}
+                      aria-label={`${providerLabel(provider)} profile`}
+                      value={profileEditor ? "__pending" : profileId ?? ""}
                       disabled={working}
-                      onChange={(event) => setProfileId(event.target.value || null)}
+                      aria-describedby={profileEditor ? `catalog-profile-path-hint-${provider}` : undefined}
+                      onChange={(event) => {
+                        const next = event.target.value;
+                        if (next === "__pending") {
+                          setProfileId(null);
+                          setProfileEditor({ provider, displayName: "", path: "" });
+                          return;
+                        }
+                        setProfileEditor(null);
+                        setProfileId(next || null);
+                      }}
                     >
                       <option value="">Choose profile</option>
                       {compatibleProfiles.map((profile) => (
@@ -266,74 +316,76 @@ export default function AddCatalogScopeWorkspace({
                           {profile.display_name}
                         </option>
                       ))}
+                      <option value="__pending">Custom path…</option>
                     </select>
                   </span>
-                  {!profileEditor && (
-                    <button
-                      type="button"
-                      className="btn"
+                  {profileEditor && (
+                    <input
+                      value={profileEditor.path}
                       disabled={working}
-                      onClick={() => setProfileEditor({ provider, displayName: "", path: "" })}
+                      aria-label={`${providerLabel(provider)} custom profile path`}
+                      aria-describedby={`catalog-profile-path-hint-${provider}`}
+                      placeholder={`${providerLabel(provider)} profile path`}
+                      spellCheck={false}
+                      autoFocus
+                      onChange={(event) => setProfileEditor({
+                        ...profileEditor,
+                        path: event.target.value,
+                      })}
+                    />
+                  )}
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={working}
+                    onClick={() => void chooseProfileFolder()}
+                  >
+                    <Icon name="folder" size={13} /> Browse
+                  </button>
+                  {profileEditor && customPathHint && (
+                    <p
+                      id={`catalog-profile-path-hint-${provider}`}
+                      className="sync-setup-path-hint mute"
                     >
-                      <Icon name="plus" size={13} /> Add profile
-                    </button>
+                      {customPathHint}
+                      {customPathReady && <code>{expandedProfilePath}</code>}
+                    </p>
                   )}
                 </div>
               )}
               {profileEditor && (
-                <form
-                  className="catalog-inline-form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void saveProfile();
-                  }}
-                >
-                  <input
-                    aria-label="Profile name"
-                    placeholder="Profile name"
-                    value={profileEditor.displayName}
-                    onChange={(event) =>
-                      setProfileEditor({ ...profileEditor, displayName: event.target.value })}
-                  />
-                  <input
-                    aria-label="Profile path"
-                    placeholder="Absolute provider home path"
-                    value={profileEditor.path}
-                    onChange={(event) =>
-                      setProfileEditor({ ...profileEditor, path: event.target.value })}
-                  />
+                <div className="catalog-profile-save-row">
+                  <label>
+                    <span>Profile name</span>
+                    <input
+                      value={profileEditor.displayName}
+                      disabled={working}
+                      placeholder={`${providerLabel(profileEditor.provider)} profile name`}
+                      onChange={(event) => setProfileEditor({
+                        ...profileEditor,
+                        displayName: event.target.value,
+                      })}
+                    />
+                  </label>
                   <div>
-                    <button type="submit" className="btn btn-primary" disabled={working}>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={!canSaveProfile}
+                      onClick={() => void saveProfile()}
+                    >
                       Save home
                     </button>
-                    <button type="button" className="btn btn-ghost" onClick={() => setProfileEditor(null)}>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={working}
+                      onClick={() => setProfileEditor(null)}
+                    >
                       Cancel
                     </button>
                   </div>
-                </form>
-              )}
-              {provider && compatibleProfiles.length > 0 && (
-                <details>
-                  <summary>Manage saved homes</summary>
-                  <div className="catalog-resource-list">
-                    {compatibleProfiles.map((profile) => (
-                      <div key={profile.profile_id} className="catalog-resource-row">
-                        <div>
-                          <strong>{profile.display_name}</strong>
-                          <small>{profile.configured_home}</small>
-                        </div>
-                        <button
-                          type="button"
-                          className="btn btn-ghost danger"
-                          disabled={working || profileId === profile.profile_id}
-                          onClick={() => void removeProfile(profile)}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </details>
+                </div>
               )}
               {kind !== null && provider === null && (
                 <small className="sync-setup-hint">

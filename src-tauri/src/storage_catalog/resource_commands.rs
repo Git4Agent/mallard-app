@@ -35,7 +35,10 @@ use super::inventory::{
     inventory_local, CatalogInventoryFilter, CatalogLocalInventory, LocalResourceRecord,
 };
 use super::persistence::CatalogStateRepository;
-use super::profiles::{resolve_profile_context, validate_new_profile_home, ResolvedCatalogContext};
+use super::profiles::{
+    default_profile_home, resolve_profile_context, validate_new_profile_home,
+    ResolvedCatalogContext,
+};
 use super::resource_engine::{
     head_coordinate, storage_identity_for_config, verify_library_continuity, LibraryResourceEngine,
     ObservedLibraryHead, PublishLibraryResourceRequest, RemoteLibraryResource,
@@ -355,7 +358,73 @@ pub async fn list_catalog_capabilities(
 pub async fn list_catalog_resource_profiles(
     _app: tauri::AppHandle,
 ) -> Result<Vec<LocalCatalogProfile>, String> {
-    run_blocking(move || Ok(catalog_repository()?.load_profiles()?.profiles)).await
+    run_blocking(move || {
+        list_catalog_resource_profiles_with_repository(
+            &catalog_repository()?,
+            &os_user_home()?,
+            now_secs(),
+        )
+    })
+    .await
+}
+
+fn list_catalog_resource_profiles_with_repository(
+    catalog: &CatalogStateRepository,
+    user_home: &Path,
+    now: u64,
+) -> Result<Vec<LocalCatalogProfile>, String> {
+    let candidates = capability_matrix()
+        .into_iter()
+        .map(|(provider, _)| provider)
+        .filter_map(|provider| {
+            let home = default_profile_home(provider, user_home)?;
+            home.is_dir().then_some((provider, home))
+        })
+        .map(|(provider, home)| {
+            let canonical = validate_new_profile_home(catalog.root(), &home.to_string_lossy())?;
+            Ok((provider, canonical))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    if !candidates.is_empty() {
+        let current = catalog.load_profiles()?;
+        let has_missing = candidates.iter().any(|(provider, canonical)| {
+            !current.profiles.iter().any(|profile| {
+                profile.provider_key == *provider
+                    && Path::new(&profile.configured_home) == canonical
+            })
+        });
+        if has_missing {
+            catalog.mutate_profiles(|document| {
+                for (provider, canonical) in candidates {
+                    if document.profiles.iter().any(|profile| {
+                        profile.provider_key == provider
+                            && Path::new(&profile.configured_home) == canonical
+                    }) {
+                        continue;
+                    }
+                    document.profiles.push(LocalCatalogProfile {
+                        profile_id: LocalCatalogProfileId::generate()?,
+                        provider_key: provider,
+                        display_name: format!("Default {}", provider.display_label()),
+                        configured_home: canonical.to_string_lossy().to_string(),
+                        revision: 1,
+                        created_at: now,
+                        updated_at: now,
+                    });
+                }
+                Ok(())
+            })?;
+        }
+    }
+
+    let mut profiles = catalog.load_profiles()?.profiles;
+    profiles.sort_by(|left, right| {
+        left.provider_key
+            .cmp(&right.provider_key)
+            .then_with(|| left.display_name.cmp(&right.display_name))
+    });
+    Ok(profiles)
 }
 
 pub fn save_catalog_resource_profile_with_repository(
@@ -2147,6 +2216,33 @@ mod tests {
             profile,
             storage,
         }
+    }
+
+    #[test]
+    fn listing_profiles_registers_the_existing_default_codex_and_claude_homes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let user_home = temporary.path().join("user");
+        fs::create_dir_all(user_home.join(".codex")).unwrap();
+        fs::create_dir_all(user_home.join(".claude")).unwrap();
+        let codex_home = fs::canonicalize(user_home.join(".codex")).unwrap();
+        let claude_home = fs::canonicalize(user_home.join(".claude")).unwrap();
+        let catalog = CatalogStateRepository::from_home_dir(&user_home).unwrap();
+
+        let first =
+            list_catalog_resource_profiles_with_repository(&catalog, &user_home, 7).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].provider_key, ProviderKey::Codex);
+        assert_eq!(first[0].display_name, "Default Codex");
+        assert_eq!(first[0].configured_home, codex_home.to_string_lossy());
+        assert_eq!(first[1].provider_key, ProviderKey::Claude);
+        assert_eq!(first[1].display_name, "Default Claude");
+        assert_eq!(first[1].configured_home, claude_home.to_string_lossy());
+
+        let revision = catalog.load_profiles().unwrap().revision;
+        let second =
+            list_catalog_resource_profiles_with_repository(&catalog, &user_home, 9).unwrap();
+        assert_eq!(second, first);
+        assert_eq!(catalog.load_profiles().unwrap().revision, revision);
     }
 
     fn review_resource_id() -> CatalogResourceId {

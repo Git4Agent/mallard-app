@@ -51,7 +51,7 @@ test("the Catalog API exposes only the scope-rowed per-resource command surface"
     /storage_catalog_binding|prepare_storage_catalog|publish_storage_catalog|apply_storage_catalog|catalog_profiles|setup_draft/,
   );
   for (const method of [
-    "listCapabilities", "listProfiles", "saveProfile", "deleteProfile",
+    "listCapabilities", "listProfiles", "saveProfile",
     "createScope", "listScopeResources", "linkScopeResource",
     "unlink", "remove", "inspectLink", "preparePush",
     "publish", "preparePull", "applyPull", "prepareFork", "applyFork", "getStatus",
@@ -148,6 +148,19 @@ test("Add is Kind then agent profile, and never picks a storage or resource", ()
   assert.match(add, /sync-inline-new-project sync-setup-workspace/);
   assert.match(add, /sync-setup-section/);
   assert.match(add, /sync-setup-footer/);
+  // Profile selection uses the same row as project setup: saved homes and a
+  // Custom path… choice in one select, an inline path, and Browse.
+  assert.match(add, /sync-agent-profile-row/);
+  assert.match(add, /<option value="__pending">Custom path…<\/option>/);
+  assert.match(add, /<Icon name="folder" size=\{13\} \/> Browse/);
+  // Choosing a profile is an independent setup step. It remains usable before
+  // Kind is chosen; picking an incompatible Kind later clears the provider.
+  assert.match(add, /kind === null \|\| capability\.kinds\.includes\(kind\)/);
+  assert.match(add, /aria-label="Provider"[\s\S]*?disabled=\{working\}/);
+  assert.doesNotMatch(add, /disabled=\{working \|\| !kind\}/);
+  assert.doesNotMatch(add, /Add profile|className="catalog-inline-form"/);
+  assert.doesNotMatch(add, /Manage saved homes|removeProfile|api\.deleteProfile/);
+  assert.doesNotMatch(add, /probe_catalog_resource_profile|probeProviderProfile/);
   assert.doesNotMatch(readFileSync("src/App.css", "utf8"), /catalog-setup-(grid|card|step)/);
 });
 

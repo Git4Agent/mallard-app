@@ -1077,6 +1077,27 @@ pub fn parse_conversation_resource_id(
     ))
 }
 
+/// Match a discovered provider session to one portable thread. Once a local
+/// binding names the provider session, that mapping is authoritative. The
+/// deterministic initial identity is only a fallback for sessions that have
+/// never been bound; after keep-both, it still derives the original thread
+/// from the preserved session ID and must not steal the pulled branch.
+fn session_matches_thread(
+    bundle_id: &mallard_domain::BundleId,
+    provider: &ProviderKey,
+    thread_id: &mallard_domain::ThreadId,
+    bound_provider_session_id: Option<&str>,
+    candidate_provider_session_id: &str,
+) -> bool {
+    bound_provider_session_id
+        .map(|expected| expected == candidate_provider_session_id)
+        .unwrap_or_else(|| {
+            initial_conversation_thread_id(bundle_id, provider, candidate_provider_session_id)
+                .map(|derived| &derived == thread_id)
+                .unwrap_or(false)
+        })
+}
+
 /// Execute one safe provider session action. The backend re-resolves the
 /// registered adapter and validates project ownership before anything runs;
 /// the opaque action id never carries executable text.
@@ -1115,14 +1136,13 @@ pub fn execute_project_session_action(
         .sessions
         .into_iter()
         .find(|session| {
-            Some(&session.session_id) == session_for_thread.as_ref()
-                || initial_conversation_thread_id(
-                    &resolved.bundle_id,
-                    &provider,
-                    &session.session_id,
-                )
-                .map(|derived| derived == thread_id)
-                .unwrap_or(false)
+            session_matches_thread(
+                &resolved.bundle_id,
+                &provider,
+                &thread_id,
+                session_for_thread.as_deref(),
+                &session.session_id,
+            )
         })
         .ok_or_else(|| "session does not belong to the selected project".to_string())?;
     let mut request = SessionActionRequest {
@@ -1169,14 +1189,13 @@ pub fn validate_session_ownership(
         .sessions
         .into_iter()
         .find(|session| {
-            Some(&session.session_id) == session_for_thread.as_ref()
-                || initial_conversation_thread_id(
-                    &resolved.bundle_id,
-                    &provider,
-                    &session.session_id,
-                )
-                .map(|derived| derived == thread_id)
-                .unwrap_or(false)
+            session_matches_thread(
+                &resolved.bundle_id,
+                &provider,
+                &thread_id,
+                session_for_thread.as_deref(),
+                &session.session_id,
+            )
         })
         .map(|_| ())
         .ok_or_else(|| "session does not belong to the selected project".to_string())
@@ -1724,6 +1743,39 @@ mod activity_only_tests {
         ) -> Result<SessionActionOutcome, String> {
             Err("instrumented adapter has no actions".to_string())
         }
+    }
+
+    #[test]
+    fn bound_provider_session_overrides_the_initial_thread_derivation() {
+        let bundle_id = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let provider = ProviderKey::parse("codex").unwrap();
+        let preserved_provider_session = "01a00e98-6cb6-7633-82c9-fb4b929b4a57";
+        let pulled_provider_session = "01a00f06-5e68-7100-a460-7b54cf3413aa";
+        let original_thread =
+            initial_conversation_thread_id(&bundle_id, &provider, preserved_provider_session)
+                .unwrap();
+
+        assert!(session_matches_thread(
+            &bundle_id,
+            &provider,
+            &original_thread,
+            Some(pulled_provider_session),
+            pulled_provider_session,
+        ));
+        assert!(!session_matches_thread(
+            &bundle_id,
+            &provider,
+            &original_thread,
+            Some(pulled_provider_session),
+            preserved_provider_session,
+        ));
+        assert!(session_matches_thread(
+            &bundle_id,
+            &provider,
+            &original_thread,
+            None,
+            preserved_provider_session,
+        ));
     }
 
     #[test]

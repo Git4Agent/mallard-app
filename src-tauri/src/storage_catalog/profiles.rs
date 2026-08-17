@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use mallard_infrastructure::providers::{codex, ProviderRegistry};
+use mallard_infrastructure::providers::{claude, codex, ProviderRegistry};
 
 use super::domain::{
     AgentSkillScope, CatalogBlocker, CatalogProfilePin, CatalogProfilesDocument,
@@ -198,18 +198,28 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
+/// The provider registry is the source of truth for the default home names.
+/// Catalog profiles remain catalog-owned; this only resolves the same local
+/// directories that project setup presents by default.
+pub(super) fn default_profile_home(provider: ProviderKey, os_user_home: &Path) -> Option<PathBuf> {
+    let infrastructure_key = match provider {
+        ProviderKey::Codex => codex::provider_key(),
+        ProviderKey::Claude => claude::provider_key(),
+    };
+    ProviderRegistry::production()
+        .get(&infrastructure_key)
+        .and_then(|adapter| adapter.descriptor().default_profile_directory)
+        .map(|directory| os_user_home.join(directory))
+}
+
 /// True when this profile's canonical home is the provider's default
 /// `$HOME/.codex`. The directory name comes from the provider descriptor, so
 /// this cannot drift from what the Codex adapter actually calls home.
 fn is_default_codex_home(canonical_home: &Path, os_user_home: &Path) -> bool {
-    let Some(directory) = ProviderRegistry::production()
-        .get(&codex::provider_key())
-        .and_then(|adapter| adapter.descriptor().default_profile_directory)
-    else {
+    let Some(default_home) = default_profile_home(ProviderKey::Codex, os_user_home) else {
         return false;
     };
-    prospective_canonical(&os_user_home.join(directory))
-        .is_ok_and(|default_home| default_home == canonical_home)
+    prospective_canonical(&default_home).is_ok_and(|default_home| default_home == canonical_home)
 }
 
 /// Resolve exactly one provider profile for a scope or registration. Codex

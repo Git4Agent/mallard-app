@@ -103,9 +103,11 @@ export interface PullRequiredCopy {
  * Customer-facing copy for a destination that has to be pulled before it can
  * accept a push. The reason codes are lineage vocabulary — revisions, bases,
  * replicas — and none of it means anything to the person holding a blocked
- * Push. The callout says which storage moved, what a Pull would show, and why
- * pushing first is unsafe; the numbers stay on the detail line so support can
- * still read them off a screenshot.
+ * Push. The callout says which storage moved, what a Pull would show, and
+ * what the review unlocks: newer conversations are never overwritten by a
+ * push (they are carried forward and held per thread), so the sentence
+ * points at the review instead of threatening data loss. The numbers stay on
+ * the detail line so support can still read them off a screenshot.
  */
 export function pullRequiredCopy(
   reason: "remote_without_base" | "binding_changed" | "remote_advanced",
@@ -118,14 +120,15 @@ export function pullRequiredCopy(
   // The three fields stack as one banner: title, one sentence, and the lineage
   // figures abbreviated to what support actually reads off a screenshot. The
   // footer button says what to do, so the sentence only has to say what is
-  // there and what pushing past it would cost.
+  // there and what the review unlocks.
   const detail = `Revision ${remoteRevision} · ${baseRevision != null ? `reviewed ${baseRevision}` : "never reviewed"}`;
   if (reason === "remote_advanced") {
+    const one = changedConversationCount === 1;
     return {
       title: "Storage has newer changes",
       body: changedConversationCount > 0
-        ? `${changedConversationCount} conversation${changedConversationCount === 1 ? " is" : "s are"} newer in ${storage}. Pushing could overwrite them.`
-        : `${storage} changed after this computer last synced. Pushing could overwrite it.`,
+        ? `${changedConversationCount} conversation${one ? " is" : "s are"} newer in ${storage}. Review ${one ? "it" : "them"} in Pull — ${one ? "it stays" : "they stay"} held afterwards while your other sessions push.`
+        : `${storage} changed after this computer last synced. Review it in Pull before pushing.`,
       detail,
     };
   }

@@ -71,6 +71,10 @@ pub struct CodexTranscriptAnalysis {
     pub source_cwd: Option<String>,
     pub is_internal_subagent: bool,
     pub record_count: usize,
+    /// Resume state for an append-only projection over these exact bytes.
+    pub last_canonical_message_id: Option<String>,
+    pub last_synthetic_turn_id: Option<String>,
+    pub next_synthetic_turn_ordinal: u64,
     pub lineage: CodecLineage,
 }
 
@@ -113,6 +117,10 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
             return unknown_from(&structure, reason);
         }
     }
+    let last_canonical_message_id = builder
+        .last_message_id()
+        .map(|message_id| message_id.as_str().to_string());
+    let synthetic_turn_resume = builder.synthetic_turn_resume();
     let chain = builder.finish();
 
     // Whole-file structural verdict first, preserving the pre-fusion
@@ -169,6 +177,13 @@ pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
         source_cwd,
         is_internal_subagent,
         record_count,
+        last_canonical_message_id,
+        last_synthetic_turn_id: synthetic_turn_resume
+            .as_ref()
+            .map(|(turn_id, _)| turn_id.clone()),
+        next_synthetic_turn_ordinal: synthetic_turn_resume
+            .map(|(_, next_ordinal)| next_ordinal as u64)
+            .unwrap_or(0),
         lineage: CodecLineage::Complete {
             chain,
             lineage_digest,
@@ -210,6 +225,9 @@ fn unknown(
         source_cwd,
         is_internal_subagent,
         record_count,
+        last_canonical_message_id: None,
+        last_synthetic_turn_id: None,
+        next_synthetic_turn_ordinal: 0,
         lineage: CodecLineage::Unknown { reason },
     }
 }
@@ -607,6 +625,7 @@ mod tests {
         assert!(!analysis.is_internal_subagent);
         assert_eq!(analysis.source_thread_id.as_deref(), Some("thread-a"));
         assert_eq!(analysis.lineage.chain().unwrap().len(), 2);
+        assert_eq!(analysis.last_canonical_message_id.as_deref(), Some("m-b"));
     }
 
     #[test]
@@ -734,6 +753,11 @@ mod tests {
         assert_eq!(&continued_chain[..base_chain.len()], base_chain.as_slice());
         assert!(continued_chain.len() > base_chain.len());
         assert!(lineage_digests(&continued_analysis).is_some());
+        assert_eq!(
+            continued_analysis.last_synthetic_turn_id.as_deref(),
+            Some("turn-continued")
+        );
+        assert_eq!(continued_analysis.next_synthetic_turn_ordinal, 2);
     }
 
     #[test]

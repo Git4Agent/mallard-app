@@ -3782,6 +3782,24 @@ fn get_bundle_inventory_with_repository(
     build_resource_inventory(repository, local_project_id, binding, &discovery)
 }
 
+/// Project/link recipes are machine-local selection state. A remote manifest's
+/// generic resources can seed that state, but its conversation entries remain
+/// cloud identities and are reviewed through `ThreadSyncComparison` instead.
+fn local_recipe_from_manifest(manifest: &BundleManifest) -> BundleRecipe {
+    let mut recipe = BundleRecipe::default();
+    for scope in manifest.scopes.values() {
+        for (resource_id, entry) in &scope.recipe.entries {
+            let is_conversation = manifest
+                .find_resource(resource_id)
+                .is_some_and(|(_, descriptor)| descriptor.kind == ResourceKind::Conversation);
+            if !is_conversation {
+                recipe.entries.insert(resource_id.clone(), entry.clone());
+            }
+        }
+    }
+    recipe
+}
+
 /// Inventory section over a shared discovery. Inventory is read-only: a
 /// reviewed Push is the only flow that changes a destination recipe.
 fn build_resource_inventory(
@@ -4602,15 +4620,9 @@ fn observe_codex_local(
                         observed_tail,
                         mapping,
                     } => {
-                        let accepted_end = checkpoint
-                            .accepted
-                            .as_ref()
-                            .and_then(|accepted| {
-                                (accepted.portable_tail.layout().matches(&observed_tail))
-                                    .then_some(raw_range_pin.start_byte_offset)
-                            })
-                            .unwrap_or(raw_range_pin.start_byte_offset);
-                        let range_start = accepted_end.min(mapping.consumed_byte_offset);
+                        let range_start = raw_range_pin
+                            .start_byte_offset
+                            .min(mapping.consumed_byte_offset);
                         // Re-prove the accepted-to-current interval. Bytes at
                         // or past the tail window are already trusted from
                         // the fold; an earlier range start needs one bounded
@@ -4679,6 +4691,7 @@ fn observe_codex_local(
                             depends_on: vec![source.clone()],
                         });
                     }
+                    codex_history_graph::CodexTailRefresh::NeedsFullResolve => {}
                     codex_history_graph::CodexTailRefresh::Invalid { .. } => {
                         return Ok(CodexLocalObservation {
                             observation: LocalTailObservation {
@@ -4745,6 +4758,20 @@ fn observe_codex_local(
     });
     let leaf_bytes = codex_history_graph::read_rollout_bounded(&source)?;
     let seeded = codex_history_graph::seed_codex_root(&resolved, &leaf_bytes, layout)?;
+    if checkpoint
+        .and_then(|checkpoint| checkpoint.prefix_witness.as_ref())
+        .is_some_and(|stored| seeded.prefix_witness.as_ref() != Some(stored))
+    {
+        return Ok(CodexLocalObservation {
+            observation: LocalTailObservation {
+                evidence: TailSideEvidence::Invalid,
+                raw_range_pin: None,
+                verified_acceptance: None,
+            },
+            seeded: None,
+            depends_on: Vec::new(),
+        });
+    }
     let accepted_start = checkpoint
         .and_then(|checkpoint| match &checkpoint.physical {
             PhysicalMappingState::Ready { raw_range_pin, .. } => {
@@ -5779,19 +5806,21 @@ fn provider_thread_review(
             );
             match pull.action {
                 ConversationPlanActionType::MaterializeCloud => {
-                    // The verified cloud graph replaces this alias's mapping;
-                    // the current local rollout is pinned so a post-review
-                    // change stales the plan.
+                    // A cloud advance updates the existing provider session
+                    // in place. Fresh provider identities belong only to
+                    // CreateLocal and KeepBoth; minting one here would leave
+                    // the previous rollout discoverable under the same
+                    // deterministic logical thread.
                     let local = local.ok_or_else(|| {
                         "cloud materialization lacks a captured local state".to_string()
                     })?;
                     let target = local.source_path.clone();
-                    expected_provider_state.push(ProviderStateExpectation {
-                        target_path: target.to_string_lossy().into_owned(),
-                        expectation: bounded_file_expectation(&target)?,
-                    });
-                    let provider_id =
-                        mint_provider_thread_id(is_codex, &mut occupied_provider_ids)?;
+                    let provider_id = local.provider_thread_id.clone();
+                    if local.binding.is_none() {
+                        return Err(
+                            "cloud materialization requires a bound provider session".to_string()
+                        );
+                    }
                     let sidecars = thread
                         .map(|thread| conversation_sidecar_refs(provider, &thread_id, thread))
                         .transpose()?
@@ -5803,22 +5832,15 @@ fn provider_thread_review(
                             provider_session_id: &provider_id,
                             source_provider_session_id: thread
                                 .and_then(|thread| thread.source_thread_id.as_deref()),
-                            existing_transcript_path: None,
+                            existing_transcript_path: Some(&target),
                             sidecars: &sidecars,
                             planned_at: created_at,
                         },
                     )?;
                     for planned in &targets {
-                        if planned.target_path.exists() {
-                            return Err(format!(
-                                "reserved {} target '{}' is already occupied",
-                                provider_label,
-                                planned.target_path.display()
-                            ));
-                        }
                         expected_provider_state.push(ProviderStateExpectation {
                             target_path: planned.target_path.to_string_lossy().into_owned(),
-                            expectation: TargetExpectation::Absent,
+                            expectation: bounded_file_expectation(&planned.target_path)?,
                         });
                     }
                     proposed_provider_thread_id = Some(provider_id);
@@ -5983,10 +6005,10 @@ fn provider_thread_review(
     })
 }
 
-/// Mint one fresh provider thread ID for a planned materialization: the
-/// CLI-first UUIDv7 allocator for Codex, the adapter's UUID convention for
-/// other providers. Minted IDs join the occupied set so one review never
-/// proposes the same identity twice.
+/// Mint one provider thread ID for a new local copy (CreateLocal or the
+/// remote branch of KeepBoth): the CLI-first UUIDv7 allocator for Codex and
+/// the adapter's UUID convention for other providers. Minted IDs join the
+/// occupied set so one review never proposes the same identity twice.
 fn mint_provider_thread_id(
     is_codex: bool,
     occupied: &mut BTreeSet<String>,
@@ -9846,27 +9868,35 @@ fn failed_conversation_receipt(
     })
 }
 
-/// Read the local Codex session index, reject a colliding reserved thread
-/// ID, and build the appended index payload. Returns no payload without a
-/// title: every row the provider writes is `{id, thread_name, updated_at}`,
-/// so a titleless thread gets no row and stays invisible until Codex
-/// rebuilds its own index from the materialized rollout.
+/// Read the local Codex session index and build its reviewed replacement.
+/// Fresh identities reject collisions; MaterializeCloud replaces every old
+/// row for its existing identity with one current row. Returns no payload
+/// without a title: a titleless task leaves provider presentation metadata
+/// untouched.
 fn codex_index_payload(
     path: &Path,
     provider_thread_id: &str,
     thread_name: Option<&str>,
     updated_at: u64,
+    replace_existing: bool,
 ) -> Result<(TargetExpectation, Option<Vec<u8>>), String> {
     let expectation = bounded_file_expectation(path)?;
-    let mut bytes = match &expectation {
+    let bytes = match &expectation {
         TargetExpectation::Absent => Vec::new(),
         TargetExpectation::Sha256(_) => fs::read(path)
             .map_err(|error| format!("read Codex session index '{}': {error}", path.display()))?,
     };
-    for line in bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
+    let Some(thread_name) = thread_name else {
+        return Ok((expectation, None));
+    };
+    let mut output = Vec::with_capacity(bytes.len().saturating_add(256));
+    for raw in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let line = raw.strip_suffix(b"\n").unwrap_or(raw);
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            output.extend_from_slice(raw);
+            continue;
+        }
         let value: serde_json::Value = serde_json::from_slice(line)
             .map_err(|_| "Codex session index contains malformed JSON".to_string())?;
         let id = value
@@ -9874,20 +9904,21 @@ fn codex_index_payload(
             .or_else(|| value.get("session_id"))
             .and_then(serde_json::Value::as_str);
         if id == Some(provider_thread_id) {
-            return Err("reserved Codex provider ID is already indexed".to_string());
+            if !replace_existing {
+                return Err("reserved Codex provider ID is already indexed".to_string());
+            }
+            continue;
         }
+        output.extend_from_slice(raw);
     }
-    let Some(thread_name) = thread_name else {
-        return Ok((expectation, None));
-    };
     let updated_at = Utc
         .timestamp_opt(updated_at as i64, 0)
         .single()
         .ok_or_else(|| "cloud conversation timestamp is out of range".to_string())?
         .format("%Y-%m-%dT%H:%M:%S%.6fZ")
         .to_string();
-    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-        bytes.push(b'\n');
+    if !output.is_empty() && !output.ends_with(b"\n") {
+        output.push(b'\n');
     }
     let mut row = serde_json::to_vec(&serde_json::json!({
         "id": provider_thread_id,
@@ -9896,8 +9927,8 @@ fn codex_index_payload(
     }))
     .map_err(|error| format!("serialize Codex session index row: {error}"))?;
     row.push(b'\n');
-    bytes.extend(row);
-    Ok((expectation, Some(bytes)))
+    output.extend(row);
+    Ok((expectation, Some(output)))
 }
 
 // The receipt dwarfs the checkpoint by design; boxing it would ripple
@@ -9911,11 +9942,34 @@ fn apply_prepared_pull_conversation(
     plan: &RestorePlan,
     resolved: &ResolvedBinding,
     prepared: PreparedPullConversation,
+    expected_bindings_document_revision: u64,
     applied_at: u64,
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<ApplyReceipt, String> {
     let binding = &resolved.binding;
     let action = prepared.action;
+    let document_before = repository.load_conversation_bindings()?;
+    if document_before.revision != expected_bindings_document_revision {
+        return Err("conversation bindings changed during Pull apply".to_string());
+    }
+    let live_binding = document_before.bindings.iter().find(|candidate| {
+        candidate.host_id == binding.host_id
+            && candidate.replica_id == binding.replica_id
+            && candidate.local_project_id == binding.local_project_id
+            && candidate.provider_profile_id == action.provider_profile_id
+            && candidate.thread_id == action.thread_id
+    });
+    if live_binding.map(|binding| binding.revision) != action.expected_binding_revision {
+        return Err("conversation binding changed after review".to_string());
+    }
+    if action.action == ConversationPlanActionType::MaterializeCloud
+        && live_binding.and_then(|binding| binding.provider_thread_id.as_deref())
+            != action.proposed_provider_thread_id.as_deref()
+    {
+        return Err(
+            "conversation cloud update changed its provider identity after review".to_string(),
+        );
+    }
     let adapter = provider_registry().require_sessions(&action.provider)?;
     let is_codex = action.provider.as_str() == "codex";
     let phase_started = Instant::now();
@@ -9935,7 +9989,7 @@ fn apply_prepared_pull_conversation(
     // before any journal or visible mutation. Codex order per §6.2: staged
     // wire bytes resolve as a normal rollout → the wire chain refolds to the
     // accepted cloud pin → the Decode build runs the §4.4 paths gate on the
-    // staged body **before** its identity stage assigns the fresh provider
+    // staged body **before** its identity stage assigns the reviewed provider
     // id, folds the head, and strips the path-map marker. Everything the
     // checkpoint and journal persist from this pull is sourced from the
     // correct form: the wire pin from the manifest, and the local twin,
@@ -10008,6 +10062,9 @@ fn apply_prepared_pull_conversation(
                 artifact.portable_tail.clone(),
                 artifact.lineage_digest.clone(),
                 artifact.semantic_digest.clone(),
+                artifact.last_canonical_message_id.clone(),
+                artifact.last_synthetic_turn_id.clone(),
+                artifact.next_synthetic_turn_ordinal,
             ),
         )
     } else {
@@ -10033,11 +10090,28 @@ fn apply_prepared_pull_conversation(
         (
             rewritten,
             layout,
-            (None, sha, cloud_tail.clone(), lineage_digest, semantic_digest),
+            (
+                None,
+                sha,
+                cloud_tail.clone(),
+                lineage_digest,
+                semantic_digest,
+                None,
+                None,
+                0,
+            ),
         )
     };
-    let (prefix_witness, artifact_sha256, accepted_local_tail, staged_lineage_digest, staged_semantic_digest) =
-        checkpoint_seed;
+    let (
+        prefix_witness,
+        artifact_sha256,
+        accepted_local_tail,
+        staged_lineage_digest,
+        staged_semantic_digest,
+        last_canonical_message_id,
+        last_synthetic_turn_id,
+        next_synthetic_turn_ordinal,
+    ) = checkpoint_seed;
     on_phase(
         "reconstruct and verify cloud graph",
         phase_started.elapsed(),
@@ -10045,8 +10119,8 @@ fn apply_prepared_pull_conversation(
     let phase_started = Instant::now();
 
     // Role assignment for the reviewed targets comes from the adapter's
-    // declared index path; the remaining reviewed targets are the pinned
-    // local rollout (unchanged, keep-both) and the fresh transcript target.
+    // declared index path. MaterializeCloud replaces the first reviewed
+    // provider transcript; CreateLocal and KeepBoth consume an absent one.
     let index_path = (adapter.index_fragment_limit() > 0)
         .then(|| {
             resolved
@@ -10059,16 +10133,20 @@ fn apply_prepared_pull_conversation(
             .as_ref()
             .is_some_and(|path| Path::new(&target.target_path) == path.as_path())
     };
+    let replace_existing = action.action == ConversationPlanActionType::MaterializeCloud;
     let transcript_target = action
         .expected_provider_state
         .iter()
-        .find(|target| !is_index_target(target) && target.expectation == TargetExpectation::Absent)
+        .find(|target| {
+            !is_index_target(target)
+                && (replace_existing || target.expectation == TargetExpectation::Absent)
+        })
         .cloned()
         .ok_or_else(|| "conversation Pull action lacks a transcript target".to_string())?;
     let mut targets = vec![ConversationTargetPayload {
         target_path: PathBuf::from(&transcript_target.target_path),
         role: ConversationFileRole::Transcript,
-        expected: TargetExpectation::Absent,
+        expected: transcript_target.expectation.clone(),
         bytes: installed_bytes.clone(),
     }];
     if let Some(index_target) = action
@@ -10091,6 +10169,7 @@ fn apply_prepared_pull_conversation(
             &destination_provider_thread_id,
             cloud_title,
             prepared.cloud_updated_at,
+            replace_existing,
         )?;
         if let Some(bytes) = bytes {
             targets.push(ConversationTargetPayload {
@@ -10103,7 +10182,6 @@ fn apply_prepared_pull_conversation(
     }
 
     // The exact whole-document after-states this operation commits.
-    let document_before = repository.load_conversation_bindings()?;
     let mut document_after = document_before.clone();
     let config_before = repository.load_config()?;
     let mut config_after = config_before.clone();
@@ -10121,9 +10199,9 @@ fn apply_prepared_pull_conversation(
             probe_window_sha256: hex_digest(
                 Sha256::digest(&bytes[(consumed - window) as usize..]).as_slice(),
             ),
-            last_canonical_message_id: None,
-            last_synthetic_turn_id: None,
-            next_synthetic_turn_ordinal: 0,
+            last_canonical_message_id: last_canonical_message_id.clone(),
+            last_synthetic_turn_id: last_synthetic_turn_id.clone(),
+            next_synthetic_turn_ordinal,
         }
     };
     let accepted_checkpoint = ConversationCheckpoint {
@@ -10313,7 +10391,11 @@ fn apply_prepared_pull_conversation(
         provider_thread_id: Some(destination_provider_thread_id),
         materialization_state: ConversationMaterializationState::Resumable,
         expected_host_identity_revision: action.expected_host_identity_revision,
-        expected_bindings_document_revision: action.expected_bindings_document_revision,
+        // Every action was validated against the reviewed document before
+        // the batch began. Earlier approved actions in this same Pull may
+        // have advanced that shared document, so journal this action against
+        // the exact rolling revision it is about to replace.
+        expected_bindings_document_revision,
         expected_binding_revision: action.expected_binding_revision,
         expected_profile_revision: action.expected_profile_revision,
         expected_project_binding_revision: action.expected_project_binding_revision,
@@ -10449,8 +10531,12 @@ fn apply_bundle_restore_with_progress(
             applied_at,
         )?);
     }
-    // Threads settle independently: one failed materialization never blocks
-    // the remaining approved conversations or the file actions below.
+    // Threads settle independently. Successful actions advance the shared
+    // bindings document, so the next already-reviewed action chains from the
+    // revision this batch just committed instead of invalidating itself.
+    let mut expected_bindings_document_revision = prepared_conversations
+        .first()
+        .map(|prepared| prepared.action.expected_bindings_document_revision);
     for prepared in prepared_conversations {
         let action = prepared.action.clone();
         let resource = action
@@ -10461,11 +10547,21 @@ fn apply_bundle_restore_with_progress(
             .unwrap_or_else(|| action.thread_id.to_string());
         let phase_label = format!("apply conversation {resource}");
         let phase_started = Instant::now();
+        let expected_revision = expected_bindings_document_revision
+            .unwrap_or(action.expected_bindings_document_revision);
         match apply_prepared_pull_conversation(
-            repository, &plan, &resolved, prepared, applied_at, on_phase,
+            repository,
+            &plan,
+            &resolved,
+            prepared,
+            expected_revision,
+            applied_at,
+            on_phase,
         ) {
             Ok(receipt) => {
                 conversation_receipts.push(receipt);
+                expected_bindings_document_revision =
+                    Some(repository.load_conversation_bindings()?.revision);
             }
             Err(message) => {
                 conversation_receipts
@@ -10637,15 +10733,7 @@ fn apply_bundle_restore_with_progress(
                 .ok_or_else(|| {
                     "project storage link was removed while applying Pull".to_string()
                 })?;
-            let mut restored_recipe = BundleRecipe::default();
-            for scope in snapshot.manifest.scopes.values() {
-                for (resource_id, entry) in &scope.recipe.entries {
-                    restored_recipe
-                        .entries
-                        .insert(resource_id.clone(), entry.clone());
-                }
-            }
-            link.recipe = Some(restored_recipe);
+            link.recipe = Some(local_recipe_from_manifest(&snapshot.manifest));
             project.revision = project.revision.saturating_add(1);
             project.updated_at = applied_at;
             Ok(())
@@ -11948,14 +12036,7 @@ fn connect_project_to_remote_bundle_guarded(
         Ok(())
     })?;
 
-    let mut remote_recipe = BundleRecipe::default();
-    for scope in remote.manifest.scopes.values() {
-        for (resource_id, entry) in &scope.recipe.entries {
-            remote_recipe
-                .entries
-                .insert(resource_id.clone(), entry.clone());
-        }
-    }
+    let remote_recipe = local_recipe_from_manifest(&remote.manifest);
     let new_bundle_id = request.bundle_id.clone();
     let config_result = repository.mutate_config(|config| {
         let project = config
@@ -14832,12 +14913,18 @@ mod tests {
         let index_path = temp.path().join("session_index.jsonl");
 
         let (expectation, bytes) =
-            codex_index_payload(&index_path, "thread-new", None, 1_784_332_800).unwrap();
+            codex_index_payload(&index_path, "thread-new", None, 1_784_332_800, false).unwrap();
         assert_eq!(expectation, TargetExpectation::Absent);
         assert!(bytes.is_none(), "titleless threads write no index row");
 
-        let (_, bytes) =
-            codex_index_payload(&index_path, "thread-new", Some("Named"), 1_784_332_800).unwrap();
+        let (_, bytes) = codex_index_payload(
+            &index_path,
+            "thread-new",
+            Some("Named"),
+            1_784_332_800,
+            false,
+        )
+        .unwrap();
         let row: serde_json::Value =
             serde_json::from_slice(bytes.unwrap().trim_ascii_end()).unwrap();
         assert_eq!(
@@ -14854,14 +14941,31 @@ mod tests {
             "{\"id\":\"thread-new\",\"thread_name\":\"Old\",\"updated_at\":\"2026-01-01T00:00:00.000000Z\"}\n",
         )
         .unwrap();
-        for title in [None, Some("Named")] {
-            assert!(
-                codex_index_payload(&index_path, "thread-new", title, 1_784_332_800)
-                    .unwrap_err()
-                    .contains("already indexed"),
-                "the collision scan runs whether or not a row will be written"
-            );
-        }
+        assert!(codex_index_payload(
+            &index_path,
+            "thread-new",
+            Some("Named"),
+            1_784_332_800,
+            false,
+        )
+        .unwrap_err()
+        .contains("already indexed"));
+        let (_, replacement) = codex_index_payload(
+            &index_path,
+            "thread-new",
+            Some("Updated"),
+            1_784_332_800,
+            true,
+        )
+        .unwrap();
+        let rows = replacement
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["thread_name"], "Updated");
     }
 
     #[test]
@@ -17562,8 +17666,30 @@ mod tests {
         )
         .unwrap();
         let source_root = temp.path().join("project-a");
+        let source_codex = temp.path().join("codex-home");
         std::fs::create_dir_all(&source_root).unwrap();
-        let profile_id = add_profile(&repo, &codex_key(), &temp.path().join("codex-home"));
+        std::fs::create_dir_all(source_codex.join("sessions/2026/07/18")).unwrap();
+        let source_session_id = "019f742a-a206-7932-876c-9db8d8ce575a";
+        std::fs::write(
+            source_codex
+                .join("sessions/2026/07/18")
+                .join(format!("rollout-{source_session_id}.jsonl")),
+            command_test_transcript(
+                source_session_id,
+                &source_root,
+                &[("message-source", "user", "hello")],
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            source_codex.join("session_index.jsonl"),
+            format!(
+                "{{\"id\":\"{}\",\"thread_name\":\"Source conversation\"}}\n",
+                source_session_id
+            ),
+        )
+        .unwrap();
+        let profile_id = add_profile(&repo, &codex_key(), &source_codex);
         save_project_binding_with_repository(
             &repo,
             SaveProjectBindingRequest {
@@ -17584,6 +17710,21 @@ mod tests {
         )
         .unwrap();
         push_bundle_with_repository(&repo, &source.local_project_id, &storage_id).unwrap();
+        let (_, source_engine) = storage_engine(&repo, &storage_id).unwrap();
+        let source_snapshot = source_engine.inspect(&source_bundle).unwrap();
+        let portable_conversation_id = source_snapshot
+            .manifest
+            .all_conversations()
+            .next()
+            .map(|(_, _, conversation)| conversation.resource_id.clone())
+            .expect("source Push publishes its conversation");
+        assert!(source_snapshot
+            .manifest
+            .provider_scope(&codex_key())
+            .unwrap()
+            .recipe
+            .entries
+            .contains_key(&portable_conversation_id));
 
         let other_bundle = BundleId::parse("cccccccccccccccccccccccccccccccc").unwrap();
         let other = register_local_project_with_repository(
@@ -17682,6 +17823,11 @@ mod tests {
         assert_eq!(connected.project.bundle_id, source_bundle);
         assert_eq!(connected.links.len(), 1);
         assert_eq!(connected.links[0].bundle_id, connected.project.bundle_id);
+        assert!(!connected
+            .project
+            .recipe
+            .entries
+            .contains_key(&portable_conversation_id));
         let binding = connected.binding.unwrap();
         assert_eq!(binding.bundle_id, connected.project.bundle_id);
         assert_eq!(binding.project_root, replica_root.to_string_lossy());
@@ -17692,6 +17838,22 @@ mod tests {
                 .revision,
             Some(1)
         );
+        let inventory =
+            get_bundle_inventory_with_repository(&repo, &replica.local_project_id).unwrap();
+        assert!(inventory.resources.iter().all(|resource| {
+            resource.descriptor.resource_id != portable_conversation_id
+                || resource.descriptor.kind != ResourceKind::Requirement
+        }));
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &replica.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert!(comparison.entries.iter().any(|entry| {
+            entry.resource_id == portable_conversation_id
+                && entry.state == ThreadSyncState::StorageOnly
+        }));
 
         let override_local_bundle = BundleId::parse("dddddddddddddddddddddddddddddddd").unwrap();
         let override_replica = register_local_project_with_repository(
@@ -19622,23 +19784,36 @@ mod tests {
         std::fs::create_dir_all(&source_root).unwrap();
         std::fs::create_dir_all(&source_codex).unwrap();
         let session_id = "019f0fb9-b140-7af3-8b7c-5d75c974b230";
+        let second_session_id = "019f0fb9-b140-7af3-8b7c-5d75c974b231";
         let session_relative = format!(
             "sessions/2026/07/18/rollout-2026-07-18T00-00-00-{}.jsonl",
             session_id
+        );
+        let second_session_relative = format!(
+            "sessions/2026/07/18/rollout-2026-07-18T00-00-01-{}.jsonl",
+            second_session_id
         );
         let transcript = command_test_transcript(
             session_id,
             &source_root,
             &[("message-source", "user", "change the color")],
         );
+        let second_transcript = command_test_transcript(
+            second_session_id,
+            &source_root,
+            &[("message-source-2", "user", "change the camera")],
+        );
         let source_session = source_codex.join(&session_relative);
+        let second_source_session = source_codex.join(&second_session_relative);
         std::fs::create_dir_all(source_session.parent().unwrap()).unwrap();
         std::fs::write(&source_session, &transcript).unwrap();
+        std::fs::write(&second_source_session, &second_transcript).unwrap();
         std::fs::write(
             source_codex.join("session_index.jsonl"),
             format!(
-                "{{\"id\":\"{}\",\"thread_name\":\"Change glb color to yellow\"}}\n",
-                session_id
+                "{{\"id\":\"{}\",\"thread_name\":\"Change glb color to yellow\"}}\n\
+                 {{\"id\":\"{}\",\"thread_name\":\"Change camera angle\"}}\n",
+                session_id, second_session_id
             ),
         )
         .unwrap();
@@ -19739,8 +19914,13 @@ mod tests {
             restore.actions.is_empty(),
             "typed conversations do not use generic file actions"
         );
-        assert_eq!(restore.conversation_actions.len(), 1);
-        let conversation_action = restore.conversation_actions[0].clone();
+        assert_eq!(restore.conversation_actions.len(), 2);
+        let conversation_action = restore
+            .conversation_actions
+            .iter()
+            .find(|action| action.thread_id == cloud_thread_id)
+            .cloned()
+            .unwrap();
         assert_eq!(
             conversation_action.action,
             ConversationPlanActionType::CreateLocal
@@ -19753,7 +19933,11 @@ mod tests {
         let applied = apply_bundle_restore_with_repository(
             &repo,
             &restore.plan_id,
-            vec![conversation_action.action_id.clone()],
+            restore
+                .conversation_actions
+                .iter()
+                .map(|action| action.action_id.clone())
+                .collect(),
         )
         .unwrap();
         assert!(
@@ -19761,10 +19945,10 @@ mod tests {
             "{} — failed: {:?}",
             applied.message, applied.failed_actions
         );
-        assert_eq!(
-            applied.applied_action_ids,
-            vec![conversation_action.action_id.clone()]
-        );
+        assert_eq!(applied.applied_action_ids.len(), 2);
+        assert!(applied
+            .applied_action_ids
+            .contains(&conversation_action.action_id));
 
         let restored_session_path = conversation_action
             .expected_provider_state
@@ -19784,17 +19968,24 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(index_rows.len(), 1);
-        assert_eq!(index_rows[0]["thread_name"], "Change glb color to yellow");
+        assert_eq!(index_rows.len(), 2);
+        let restored_index_row = index_rows
+            .iter()
+            .find(|row| row["id"] == rows[0]["payload"]["id"])
+            .unwrap();
         assert_eq!(
-            index_rows[0]["id"], rows[0]["payload"]["id"],
+            restored_index_row["thread_name"],
+            "Change glb color to yellow"
+        );
+        assert_eq!(
+            restored_index_row["id"], rows[0]["payload"]["id"],
             "the index row must name the rewritten provider thread"
         );
         assert!(
-            index_rows[0].get("cwd").is_none(),
+            restored_index_row.get("cwd").is_none(),
             "index rows use the provider schema, not Mallard-invented fields"
         );
-        chrono::DateTime::parse_from_rfc3339(index_rows[0]["updated_at"].as_str().unwrap())
+        chrono::DateTime::parse_from_rfc3339(restored_index_row["updated_at"].as_str().unwrap())
             .expect("index row carries an RFC 3339 update time");
         let materializations = repo.load_materializations().unwrap();
         let target_materialization = materializations
@@ -19836,6 +20027,151 @@ mod tests {
             restored_thread.state,
             ThreadSyncState::Synced,
             "replica-specific cwd rewriting must not look like a local edit"
+        );
+
+        // Pull must install a complete resume cursor so one parentless Codex
+        // message can advance incrementally and still match Push's full
+        // reconstruction.
+        let config = repo.load_config().unwrap();
+        let target_link = config
+            .links
+            .iter()
+            .find(|link| {
+                link.local_project_id == target.local_project_id && link.storage_id == storage_id
+            })
+            .unwrap();
+        let cloud_resource_id = conversation_resource_id(&codex_key(), &cloud_thread_id).unwrap();
+        assert!(!target_link
+            .recipe
+            .as_ref()
+            .unwrap()
+            .entries
+            .contains_key(&cloud_resource_id));
+        let checkpoint = config
+            .links
+            .iter()
+            .find(|link| {
+                link.local_project_id == target.local_project_id && link.storage_id == storage_id
+            })
+            .and_then(|link| {
+                link.conversation_checkpoints
+                    .get(&SyncScopeKey::Provider(codex_key()))
+            })
+            .and_then(|threads| threads.get(&cloud_thread_id))
+            .unwrap();
+        let PhysicalMappingState::Ready { root_mapping, .. } = &checkpoint.physical else {
+            panic!("pulled conversation has no ready mapping");
+        };
+        assert!(root_mapping.last_canonical_message_id.is_some());
+
+        use std::io::Write as _;
+        let mut restored_session = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&restored_session_path)
+            .unwrap();
+        serde_json::to_writer(
+            &mut restored_session,
+            &serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "id": "message-after-pull",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "continue"}]
+                }
+            }),
+        )
+        .unwrap();
+        restored_session.write_all(b"\n").unwrap();
+        restored_session.sync_all().unwrap();
+
+        let pushed =
+            push_bundle_with_repository(&repo, &target.local_project_id, &storage_id).unwrap();
+        assert_eq!(pushed.revision, Some(2));
+
+        // The source replica is now one revision behind. MaterializeCloud
+        // must update its existing provider session in place: no fresh
+        // rollout identity and no duplicate index row.
+        let source_binding = repo
+            .load_bindings()
+            .unwrap()
+            .active_for(&source.local_project_id)
+            .cloned()
+            .unwrap();
+        let source_pull =
+            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &source_binding)
+                .unwrap();
+        let update = source_pull
+            .conversation_actions
+            .iter()
+            .find(|action| action.thread_id == cloud_thread_id)
+            .unwrap();
+        assert_eq!(update.action, ConversationPlanActionType::MaterializeCloud);
+        assert_eq!(
+            update.proposed_provider_thread_id.as_deref(),
+            Some(session_id)
+        );
+        let transcript_targets = update
+            .expected_provider_state
+            .iter()
+            .filter(|target| {
+                target.target_path.ends_with(".jsonl")
+                    && !target.target_path.ends_with("session_index.jsonl")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(transcript_targets.len(), 1);
+        assert_eq!(
+            Path::new(&transcript_targets[0].target_path),
+            std::fs::canonicalize(&source_session).unwrap()
+        );
+        assert!(matches!(
+            transcript_targets[0].expectation,
+            TargetExpectation::Sha256(_)
+        ));
+        let source_applied = apply_bundle_restore_with_repository(
+            &repo,
+            &source_pull.plan_id,
+            vec![update.action_id.clone()],
+        )
+        .unwrap();
+        assert!(
+            source_applied.success,
+            "{:?}",
+            source_applied.failed_actions
+        );
+        let source_row = repo
+            .load_conversation_bindings()
+            .unwrap()
+            .bindings
+            .into_iter()
+            .find(|binding| {
+                binding.local_project_id == source.local_project_id
+                    && binding.thread_id == cloud_thread_id
+            })
+            .unwrap();
+        assert_eq!(source_row.provider_thread_id.as_deref(), Some(session_id));
+        let source_index =
+            std::fs::read_to_string(source_codex.join("session_index.jsonl")).unwrap();
+        let source_index_rows = source_index
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| row["id"] == session_id)
+            .count();
+        assert_eq!(source_index_rows, 1);
+        let source_comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &source.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            source_comparison
+                .entries
+                .iter()
+                .find(|entry| entry.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
+                .unwrap()
+                .state,
+            ThreadSyncState::Synced
         );
     }
 
@@ -20484,6 +20820,50 @@ mod tests {
             "unexpected error: {error}"
         );
         assert_eq!(fixture.repo.load_config().unwrap().projects.len(), 1);
+    }
+
+    #[test]
+    fn repeated_session_metadata_after_a_checkpoint_is_revalidated_and_pushed() {
+        let fixture = setup_fixture();
+        let draft = draft_ready_to_finalize(&fixture);
+        let project =
+            finalize_project_setup_with_repository(&fixture.repo, &draft.draft_id, draft.revision)
+                .unwrap();
+        let project_id = project.project.local_project_id;
+        let storage_id = project.links[0].storage_id.clone();
+        let provider_thread_id = "019f7500-0000-7000-8000-00000000a901";
+        let rollout = fixture
+            .codex_home
+            .join("sessions/2026/08/08")
+            .join(format!("rollout-{provider_thread_id}.jsonl"));
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+
+        let initial = command_test_transcript(
+            provider_thread_id,
+            &fixture.project_dir,
+            &[("message-1", "user", "first")],
+        );
+        std::fs::write(&rollout, &initial).unwrap();
+        let first = push_bundle_with_repository(&fixture.repo, &project_id, &storage_id).unwrap();
+        assert_eq!(first.revision, Some(1));
+
+        let advanced = command_test_transcript(
+            provider_thread_id,
+            &fixture.project_dir,
+            &[
+                ("message-1", "user", "first"),
+                ("message-2", "assistant", "second"),
+            ],
+        );
+        assert!(advanced.starts_with(&initial));
+        let metadata_end = initial.iter().position(|byte| *byte == b'\n').unwrap() + 1;
+        let mut resumed = initial.clone();
+        resumed.extend_from_slice(&initial[..metadata_end]);
+        resumed.extend_from_slice(&advanced[initial.len()..]);
+        std::fs::write(&rollout, resumed).unwrap();
+
+        let second = push_bundle_with_repository(&fixture.repo, &project_id, &storage_id).unwrap();
+        assert_eq!(second.revision, Some(2));
     }
 
     #[test]
