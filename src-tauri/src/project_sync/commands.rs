@@ -28,43 +28,50 @@ use super::conversation_materialization::{
     ConversationMaterializationRequest, ConversationTargetPayload, NoConversationFailpoints,
 };
 use super::conversation_sync::{
-    build_conversation_plan_action, default_conversation_decision,
-    validate_conversation_action_pins, BindingResolution, ConversationApplyContext,
-    ConversationCapabilities, ConversationDecision, ConversationPlanActionRequest,
+    build_conversation_plan_action, validate_conversation_action_pins, ConversationApplyContext,
+    ConversationPlanActionRequest,
 };
 use super::domain::{
     absent_bundle_head_pin, classify_remote_continuity, classify_scope_continuity,
-    compare_conversation_tail, conversation_resource_id, conversation_transcript_path,
-    generated_named_id, generated_uuid_v4, initial_conversation_thread_id,
-    validate_absolute_clean_path, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt, BindingState,
-    BundleDirectoryEntry, BundleId, BundleIdentity, BundleKind, BundleManifest, BundleRecipe,
-    BundleSnapshot, CapturedWith, ConversationCheckpoint, ConversationCloudAnchor,
-    ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
-    ConversationMaterializationOperation, ConversationMaterializationState,
-    ConversationOperationId, ConversationPlanAction, ConversationPlanActionType,
-    ConversationPlanDirection, ConversationPublicationOperation, ConversationPushPlan,
-    ConversationReasonCode, ConversationSyncOperation, ConversationSyncOperationKind,
+    compare_conversation_tail, compose_preserved_title, conversation_resource_id,
+    conversation_transcript_path, fallback_origin_host_label, generated_named_id,
+    generated_uuid_v4, initial_conversation_thread_id, validate_absolute_clean_path, ActionId,
+    ActionStatus, ApplyPolicy, ApplyReceipt, BindingResolution, BindingState, BundleDirectoryEntry,
+    BundleId, BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleSnapshot,
+    CapturedWith, ClassifiedThread, ConversationActionPins, ConversationBlocker,
+    ConversationCapabilities, ConversationCheckpoint, ConversationCloudAnchor,
+    ConversationContextPins, ConversationDecision, ConversationFileRef, ConversationFileRole,
+    ConversationLineageStatus, ConversationMaterializationOperation,
+    ConversationMaterializationState, ConversationOperationId, ConversationOperationState,
+    ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
+    ConversationPublicationOperation, ConversationPushPlan, ConversationReviewAction,
+    ConversationReviewRow, ConversationRevisionPins, ConversationSyncOperation,
+    ConversationSyncOperationKind, ConversationTailPins, ConversationTargetPins,
     ConversationThread, DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection,
     HostId, KeepBothJournal, KeepBothPlan, LocalConversationBinding, LocalProjectId,
     LocalProjectRegistration, LocalProviderProfileId, LogicalPath, MachineProjectState,
     MaterializationId, MaterializationRecord, MaterializationStatus, OriginHostAlias,
     OriginHostToken, PhysicalMappingState, PlanId, PortableConversationTail, PortableOrigin,
-    ProjectBinding, ProjectFileSyncEligibility, ProjectFileSyncEligibilityState, ProjectSetupDraft,
-    ProjectStorageLink, Provenance, ProviderKey, ProviderProfile, ProviderStateExpectation,
-    PullJournalPhase, PushJournalPhase, RawRangePin, RecipeEntry, RemoteContinuity, ReplicaId,
-    RepositoryBase, ResourceDescriptor, ResourceId, ResourceKind, RestoreActionKind,
-    RestoreActionType, RestorePlan, RootTailLayout, ScopeBase, ScopeContinuity, SetupDraftId,
-    SetupTransaction, StorageConfig, StorageId, StorageKind, SyncConfig, SyncScopeKey,
-    TailClassification, TailComparisonEvidence, TailPartitionKind, TailSideEvidence,
-    TargetExpectation, ThreadId, TombstoneTarget, MAX_CONVERSATION_FILE_BYTES, PUSH_PLAN_SCHEMA,
-    SETUP_DRAFT_SCHEMA, SETUP_TRANSACTION_SCHEMA,
+    PreservedProvenance, ProjectBinding, ProjectFileSyncEligibility,
+    ProjectFileSyncEligibilityState, ProjectSetupDraft, ProjectStorageLink, Provenance,
+    ProviderKey, ProviderProfile, ProviderStateExpectation, PullJournalPhase, PushJournalPhase,
+    RawRangePin, RecipeEntry, RemoteContinuity, ReplicaId, RepositoryBase, ResourceDescriptor,
+    ResourceId, ResourceKind, RestoreActionKind, RestoreActionType, RestorePlan, ReviewPurpose,
+    RootTailLayout, ScopeBase, ScopeContinuity, SetupDraftId, SetupTransaction, StorageConfig,
+    StorageId, StorageKind, SyncConfig, SyncScopeKey, TailClassification, TailEvidenceBlocker,
+    TailPartitionKind, TailSideEvidence, TargetExpectation, ThreadId, TombstoneTarget,
+    VerifiedTailEvidence, MAX_CONVERSATION_FILE_BYTES, PUSH_PLAN_SCHEMA, SETUP_DRAFT_SCHEMA,
+    SETUP_TRANSACTION_SCHEMA,
 };
 use super::persistence::{
     LocalStateRepository, ProjectSyncMetadataResetResult, StorageSyncMetadataResetResult,
 };
-use super::project_activity::{self, ProjectActivity, ProviderAccessState};
+use super::project_activity::{
+    self, ProjectActivity, ProviderAccessState, ResolvedActivityProject,
+};
 use super::provider_capture::{
-    self, CaptureApplyPolicy, CaptureRequest, CaptureResourceKind, ResourceCandidate,
+    self, CaptureApplyPolicy, CaptureRequest, CaptureResourceKind, Discovery, LocalSessionView,
+    ResourceCandidate,
 };
 use super::providers::codex::first_codex_user_summary;
 use super::providers::{
@@ -459,8 +466,9 @@ pub enum ThreadSyncState {
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct ThreadSyncDecision {
-    pub action: ConversationPlanActionType,
-    pub reason_code: ConversationReasonCode,
+    pub action: ConversationReviewAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<ConversationBlocker>,
     pub selectable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
@@ -470,7 +478,7 @@ impl From<ConversationDecision> for ThreadSyncDecision {
     fn from(decision: ConversationDecision) -> Self {
         Self {
             action: decision.action,
-            reason_code: decision.reason_code,
+            blocker: decision.blocker,
             selectable: decision.selectable,
             blocked_reason: decision.blocked_reason,
         }
@@ -483,6 +491,9 @@ pub struct ThreadSyncEntry {
     pub provider_display_name: String,
     pub access: ProviderAccessState,
     pub thread_id: String,
+    /// Portable conversation identity shared with Activity rows. The capture
+    /// resource ID remains separate because reviewed Push/Pull actions use it.
+    pub conversation_resource_id: ResourceId,
     pub resource_id: ResourceId,
     pub display_name: String,
     pub state: ThreadSyncState,
@@ -500,8 +511,6 @@ pub struct ThreadSyncEntry {
     pub forked_from: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relation: Option<TailClassification>,
     pub push_decision: ThreadSyncDecision,
     pub pull_decision: ThreadSyncDecision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -543,6 +552,18 @@ pub struct ThreadSyncComparison {
     /// the observed head (DESIGN_REMOTE_HISTORY_CONTINUITY.md). Explains a
     /// wiped-and-recreated storage wherever the comparison is shown.
     pub remote_continuity: RemoteContinuity,
+}
+
+/// One backend read shared by the Activity and storage-comparison
+/// projections. A comparison failure remains local to that projection so a
+/// temporarily unavailable storage cannot hide local Activity.
+#[derive(Serialize, Clone, Debug)]
+pub struct ProjectActivityWorkspace {
+    pub activity: ProjectActivity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<ThreadSyncComparison>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison_error: Option<String>,
 }
 
 /// One sync scope's continuity as shown in Push/Pull review.
@@ -640,6 +661,8 @@ pub struct PreservedThreadResult {
     pub action_id: ActionId,
     pub original_thread_id: ThreadId,
     pub preserved_thread_id: ThreadId,
+    /// The plan-minted marker title the preserved copy was renamed to.
+    pub preserved_display_title: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1222,6 +1245,145 @@ pub async fn list_agent_providers(
     Ok(ProviderRegistry::production().descriptors())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_activity_from_local_read(
+    repository: &LocalStateRepository,
+    local: &ProjectLocalRead,
+    remote_snapshot: Option<&BundleSnapshot>,
+    branch: Option<&str>,
+    before_time: Option<u64>,
+    window_days: Option<u64>,
+    force_revalidate: bool,
+    mut warnings: Vec<String>,
+) -> Result<ProjectActivity, String> {
+    let local_sessions = project_activity::scan_local_session_views(
+        repository,
+        provider_registry(),
+        &local.activity_project,
+        &local.views,
+        force_revalidate,
+        &mut warnings,
+    )?;
+    let remote_sessions = remote_snapshot
+        .map(project_activity::remote_sessions_from_snapshot)
+        .unwrap_or_default();
+    project_activity::build_project_activity(
+        repository,
+        provider_registry(),
+        &local.activity_project,
+        local_sessions,
+        remote_sessions,
+        branch,
+        before_time,
+        window_days,
+        warnings,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn get_project_activity_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: Option<&StorageId>,
+    branch: Option<&str>,
+    before_time: Option<u64>,
+    window_days: Option<u64>,
+    force_revalidate: bool,
+) -> Result<ProjectActivity, String> {
+    let local = load_project_local_read(repository, local_project_id)?;
+    let mut warnings = Vec::new();
+    let remote = match storage_id {
+        Some(storage_id) => match project_activity::fetch_activity_snapshot(
+            repository,
+            storage_id,
+            &local.activity_project.bundle_id,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                warnings.push(format!(
+                    "remote sessions are unavailable from '{}': {}",
+                    storage_id, error
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+    build_activity_from_local_read(
+        repository,
+        &local,
+        remote.as_ref(),
+        branch,
+        before_time,
+        window_days,
+        force_revalidate,
+        warnings,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn get_project_activity_workspace_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: Option<&StorageId>,
+    branch: Option<&str>,
+    before_time: Option<u64>,
+    window_days: Option<u64>,
+    force_revalidate: bool,
+) -> Result<ProjectActivityWorkspace, String> {
+    let local = load_project_local_read(repository, local_project_id)?;
+    let mut warnings = Vec::new();
+    let mut remote_error = None;
+    let remote = match storage_id {
+        Some(storage_id) => {
+            match load_project_remote_read(repository, local_project_id, storage_id) {
+                Ok(remote) => Some(remote),
+                Err(error) => {
+                    warnings.push(format!(
+                        "remote sessions are unavailable from '{}': {}",
+                        storage_id, error
+                    ));
+                    remote_error = Some(error);
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let activity = build_activity_from_local_read(
+        repository,
+        &local,
+        remote.as_ref().and_then(|remote| remote.current.as_ref()),
+        branch,
+        before_time,
+        window_days,
+        force_revalidate,
+        warnings,
+    )?;
+    let (comparison, comparison_error) = match (storage_id, remote.as_ref()) {
+        (Some(storage_id), Some(remote)) => {
+            match build_comparison_from_reads(
+                repository,
+                local_project_id,
+                storage_id,
+                &local,
+                remote,
+                &mut |_, _| {},
+            ) {
+                Ok(comparison) => (Some(comparison), None),
+                Err(error) => (None, Some(error)),
+            }
+        }
+        (Some(_), None) => (None, remote_error),
+        (None, _) => (None, None),
+    };
+    Ok(ProjectActivityWorkspace {
+        activity,
+        comparison,
+        comparison_error,
+    })
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn get_project_activity(
@@ -1246,9 +1408,8 @@ pub async fn get_project_activity(
         );
     }
     let result = run_blocking(move || {
-        project_activity::get_project_activity(
+        get_project_activity_with_repository(
             &repository,
-            ProviderRegistry::production(),
             &local_project_id,
             storage_id.as_ref(),
             branch.as_deref(),
@@ -1287,6 +1448,158 @@ pub async fn get_project_activity(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn get_project_activity_workspace(
+    app: tauri::AppHandle,
+    local_project_id: LocalProjectId,
+    storage_id: Option<StorageId>,
+    branch: Option<String>,
+    before_time: Option<u64>,
+    window_days: Option<u64>,
+    force_revalidate: Option<bool>,
+) -> Result<ProjectActivityWorkspace, String> {
+    let repository = repository(&app)?;
+    let log = ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
+    let force_revalidate = force_revalidate.unwrap_or(false);
+    let log_routine_scan = should_log_history_scan(&local_project_id, force_revalidate);
+    if log_routine_scan {
+        log.emit(
+            &app,
+            "info",
+            "history.scan_started",
+            &format!("Scanning agent session activity for project {local_project_id}…"),
+        );
+    }
+    let result = run_blocking(move || {
+        get_project_activity_workspace_with_repository(
+            &repository,
+            &local_project_id,
+            storage_id.as_ref(),
+            branch.as_deref(),
+            before_time,
+            window_days,
+            force_revalidate,
+        )
+    })
+    .await;
+    match &result {
+        Ok(workspace) => {
+            for warning in &workspace.activity.warnings {
+                log.emit(&app, "warning", "history.scan_warning", warning);
+            }
+            if log_routine_scan {
+                log.emit(
+                    &app,
+                    "info",
+                    "history.scan_completed",
+                    &format!(
+                        "Session activity scan complete: {} sessions in this {}-day window",
+                        workspace.activity.sessions.len(),
+                        workspace
+                            .activity
+                            .window_end
+                            .saturating_sub(workspace.activity.window_start)
+                            / (24 * 60 * 60)
+                    ),
+                );
+            }
+        }
+        Err(error) => log.emit(
+            &app,
+            "error",
+            "history.scan_failed",
+            &format!("Session activity scan failed: {error}"),
+        ),
+    }
+    result
+}
+
+fn session_detail_error(
+    code: SessionDetailErrorCode,
+    message: impl Into<String>,
+) -> SessionDetailError {
+    SessionDetailError {
+        code,
+        message: message.into(),
+        current_snapshot_id: None,
+    }
+}
+
+fn load_project_session_views(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+) -> Result<Vec<LocalSessionView>, SessionDetailError> {
+    let (provider, thread_id) = project_activity::parse_conversation_resource_id(resource_id)
+        .map_err(|_| {
+            session_detail_error(
+                SessionDetailErrorCode::InvalidRequest,
+                "The session resource ID is invalid.",
+            )
+        })?;
+    let activity_project = project_activity::resolve_activity_project(repository, local_project_id)
+        .map_err(|_| {
+            session_detail_error(
+                SessionDetailErrorCode::OwnershipChanged,
+                "The project or its provider profile changed; open Project Settings.",
+            )
+        })?;
+    let home = activity_project.homes.get(&provider).ok_or_else(|| {
+        session_detail_error(
+            SessionDetailErrorCode::NotLocal,
+            "This session is not materialized in a readable local provider profile.",
+        )
+    })?;
+    let home_path = home.home.to_string_lossy().into_owned();
+    let bound_provider_session_id = repository
+        .load_conversation_bindings()
+        .map_err(|_| {
+            session_detail_error(
+                SessionDetailErrorCode::OwnershipChanged,
+                "Mallard could not revalidate this session's local ownership.",
+            )
+        })?
+        .bindings
+        .into_iter()
+        .find(|binding| {
+            binding.local_project_id == *local_project_id
+                && binding.thread_id == thread_id
+                && binding.provider_profile_id == home.profile_id
+        })
+        .and_then(|binding| binding.provider_thread_id);
+    let bundle_id = activity_project.bundle_id.clone();
+    let resolved = ResolvedBinding {
+        binding: activity_project.binding,
+        homes: [(provider, home_path)].into_iter().collect(),
+    };
+    let capture_request =
+        capture_request_for_resolved_binding(repository, &resolved).map_err(|_| {
+            session_detail_error(
+                SessionDetailErrorCode::OwnershipChanged,
+                "Mallard could not revalidate this session's local ownership.",
+            )
+        })?;
+    let (_, mut views) = super::codex_watch_service::session_watch_service()
+        .discovery_for(provider_registry(), local_project_id, &capture_request)
+        .map_err(|_| {
+            session_detail_error(
+                SessionDetailErrorCode::ProviderError,
+                "The provider could not safely discover local sessions.",
+            )
+        })?;
+    views.retain(|view| {
+        bound_provider_session_id
+            .as_ref()
+            .map(|expected| expected == &view.provider_thread_id)
+            .unwrap_or_else(|| {
+                initial_conversation_thread_id(&bundle_id, &view.provider, &view.provider_thread_id)
+                    .is_ok_and(|derived| derived == thread_id)
+            })
+    });
+    Ok(views)
+}
+
+#[tauri::command]
 pub async fn get_project_session_detail(
     app: tauri::AppHandle,
     local_project_id: LocalProjectId,
@@ -1298,11 +1611,13 @@ pub async fn get_project_session_detail(
         current_snapshot_id: None,
     })?;
     run_session_detail_blocking(move || {
+        let views = load_project_session_views(&repository, &local_project_id, &resource_id)?;
         session_detail::get_project_session_detail(
             &repository,
             ProviderRegistry::production(),
             &local_project_id,
             &resource_id,
+            &views,
         )
     })
     .await
@@ -1328,6 +1643,7 @@ pub async fn get_project_session_timeline_page(
         current_snapshot_id: None,
     })?;
     run_session_detail_blocking(move || {
+        let views = load_project_session_views(&repository, &local_project_id, &resource_id)?;
         session_detail::get_project_session_timeline_page(
             &repository,
             ProviderRegistry::production(),
@@ -1342,6 +1658,7 @@ pub async fn get_project_session_timeline_page(
                 included_tool_categories: included_tool_categories.into_iter().collect(),
                 turn_id,
             },
+            &views,
         )
     })
     .await
@@ -1361,6 +1678,7 @@ pub async fn get_project_session_event_detail(
         current_snapshot_id: None,
     })?;
     run_session_detail_blocking(move || {
+        let views = load_project_session_views(&repository, &local_project_id, &resource_id)?;
         session_detail::get_project_session_event_detail(
             &repository,
             ProviderRegistry::production(),
@@ -1368,6 +1686,7 @@ pub async fn get_project_session_event_detail(
             &resource_id,
             &snapshot_id,
             &event_id,
+            &views,
         )
     })
     .await
@@ -1951,61 +2270,6 @@ pub async fn get_bundle_status(
         get_bundle_status_with_repository(&repository, &local_project_id, &storage_id)
     })
     .await
-}
-
-#[tauri::command]
-pub async fn get_project_session_sync_comparison(
-    app: tauri::AppHandle,
-    local_project_id: LocalProjectId,
-    storage_id: StorageId,
-) -> Result<ThreadSyncComparison, String> {
-    let repository = repository(&app)?;
-    let (project, storage) =
-        project_storage_log_labels(&repository, &local_project_id, &storage_id);
-    let log = ActivityLogScope::new(ActivityLogType::History)
-        .project(&local_project_id, Some(&project))
-        .storage(&storage_id, Some(&storage));
-    let phase_app = app.clone();
-    let phase_log = log.clone();
-    let total_started = Instant::now();
-    let result = run_blocking(move || {
-        get_project_thread_sync_comparison_with_progress(
-            &repository,
-            &local_project_id,
-            &storage_id,
-            &mut |phase, elapsed| {
-                phase_log.emit(
-                    &phase_app,
-                    "info",
-                    "refresh.phase_timing",
-                    &format!(
-                        "   Thread refresh phase — {phase}: {:.3}s",
-                        elapsed.as_secs_f64()
-                    ),
-                );
-            },
-        )
-    })
-    .await;
-    match &result {
-        Ok(comparison) => log.emit(
-            &app,
-            "info",
-            "refresh.timing",
-            &format!(
-                "   Thread refresh total: {:.3}s ({} threads)",
-                total_started.elapsed().as_secs_f64(),
-                comparison.entries.len()
-            ),
-        ),
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "refresh.failed",
-            &format!("✗  Thread refresh failed: {}", error),
-        ),
-    }
-    result
 }
 
 /// Explicit durability audit: downloads and re-verifies every object the
@@ -4168,6 +4432,7 @@ struct ThreadReview {
     entries: Vec<ThreadSyncEntry>,
     push_actions: Vec<ConversationPlanAction>,
     pull_actions: Vec<ConversationPlanAction>,
+    pull_review: Vec<ConversationReviewRow>,
     /// Per-provider review failures. A failed provider's rows fail closed
     /// without blocking any other provider (D8).
     provider_errors: BTreeMap<ProviderKey, String>,
@@ -4287,13 +4552,13 @@ fn thread_review(
     storage_id: Option<&StorageId>,
     created_at: u64,
     expires_at: u64,
-    build_push_actions: bool,
-    build_pull_actions: bool,
+    purpose: ReviewPurpose,
 ) -> Result<ThreadReview, String> {
     let mut merged = ThreadReview {
         entries: Vec::new(),
         push_actions: Vec::new(),
         pull_actions: Vec::new(),
+        pull_review: Vec::new(),
         provider_errors: BTreeMap::new(),
     };
     let registry = provider_registry();
@@ -4319,8 +4584,7 @@ fn thread_review(
                 storage_id,
                 created_at,
                 expires_at,
-                build_push_actions,
-                build_pull_actions,
+                purpose,
             ),
             None => Err(format!(
                 "provider '{}' profile is unavailable on this machine",
@@ -4332,6 +4596,7 @@ fn thread_review(
                 merged.entries.extend(review.entries);
                 merged.push_actions.extend(review.push_actions);
                 merged.pull_actions.extend(review.pull_actions);
+                merged.pull_review.extend(review.pull_review);
             }
             Err(error) => {
                 merged.provider_errors.insert(provider.clone(), error);
@@ -4350,6 +4615,11 @@ fn thread_review(
     merged
         .pull_actions
         .sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+    merged.pull_review.sort_by(|left, right| {
+        left.provider
+            .cmp(&right.provider)
+            .then_with(|| left.thread_id.cmp(&right.thread_id))
+    });
     Ok(merged)
 }
 
@@ -4438,6 +4708,18 @@ pub(crate) struct CodexLocalObservation {
 
 /// A parallel observation worker's slot value.
 type ObservationOutcome = Result<CodexLocalObservation, String>;
+
+fn take_observation_outcome(
+    thread_id: &ThreadId,
+    slot: &mut std::sync::OnceLock<ObservationOutcome>,
+) -> ObservationOutcome {
+    slot.take().unwrap_or_else(|| {
+        Err(format!(
+            "thread observation worker produced no outcome for thread '{}'",
+            thread_id
+        ))
+    })
+}
 
 /// One reviewed thread's derived local state.
 #[derive(Clone)]
@@ -4820,8 +5102,7 @@ fn provider_thread_review(
     storage_id: Option<&StorageId>,
     created_at: u64,
     expires_at: u64,
-    build_push_actions: bool,
-    build_pull_actions: bool,
+    purpose: ReviewPurpose,
 ) -> Result<ThreadReview, String> {
     let binding = &resolved.binding;
     let adapter = provider_registry().require_sessions(provider)?;
@@ -5109,7 +5390,7 @@ fn provider_thread_review(
     // of threads it could offer to materialize locally in one batched
     // prefetch, to refuse stored internal-subagent rollouts before review.
     let mut offerable_cloud_transcripts = BTreeMap::new();
-    if build_pull_actions {
+    if purpose.builds_pull_plan() {
         for (thread_id, thread) in provider_scope
             .into_iter()
             .flat_map(|scope| scope.conversations.iter())
@@ -5138,7 +5419,7 @@ fn provider_thread_review(
     }
     let index_path =
         (adapter.index_fragment_limit() > 0).then(|| provider_home.join("session_index.jsonl"));
-    let index_expectation = match (build_pull_actions, &index_path) {
+    let index_expectation = match (purpose.builds_pull_plan(), &index_path) {
         (true, Some(path)) => Some(bounded_file_expectation(path)?),
         _ => None,
     };
@@ -5149,6 +5430,7 @@ fn provider_thread_review(
     let mut entries = Vec::new();
     let mut push_actions = Vec::new();
     let mut pull_actions = Vec::new();
+    let mut pull_review = Vec::new();
     let (pinned_revision, pinned_commit_id, pinned_manifest_sha256) = snapshot
         .map(|snapshot| {
             (
@@ -5224,7 +5506,7 @@ fn provider_thread_review(
                         }
                     })
                     .collect();
-                super::codex_watch_service::codex_watch_service().take_reusable_observations(
+                super::codex_watch_service::session_watch_service().take_reusable_observations(
                     provider_home,
                     &binding.local_project_id,
                     storage_id,
@@ -5276,14 +5558,14 @@ fn provider_thread_review(
                 }
             });
         }
+        // Ordered merge preserves the earliest real observation error. An
+        // unexpectedly unset slot is a controlled stage error, never a panic.
         for ((thread_id, ..), slot) in observation_tasks.iter().zip(slots.iter_mut()) {
             let CodexLocalObservation {
                 observation,
                 seeded,
                 depends_on,
-            } = slot
-                .take()
-                .expect("in-order dispatch settles every slot before the first failure")?;
+            } = take_observation_outcome(thread_id, slot)?;
             if let Some(seeded) = seeded {
                 codex_refreshed.insert((*thread_id).clone(), seeded);
             }
@@ -5424,7 +5706,7 @@ fn provider_thread_review(
                 })
                 .collect();
             if !stored.is_empty() {
-                super::codex_watch_service::codex_watch_service().store_observations(
+                super::codex_watch_service::session_watch_service().store_observations(
                     provider_home,
                     &binding.local_project_id,
                     storage_id,
@@ -5542,19 +5824,23 @@ fn provider_thread_review(
             Some(PhysicalMappingState::Detached { .. })
         );
 
-        let relation = if descriptor.is_none() && (local.is_some() || thread.is_some()) {
-            TailClassification::Unknown
+        let relation_result: Result<TailClassification, TailEvidenceBlocker> =
+            if descriptor.is_none() && (local.is_some() || thread.is_some()) {
+                Err(TailEvidenceBlocker::InvalidSide)
+            } else {
+                VerifiedTailEvidence::new(
+                    accepted_evidence.clone(),
+                    accepted_local_evidence.clone(),
+                    local_observation.evidence.clone(),
+                    cloud_evidence.clone(),
+                )
+                .map(|evidence| compare_conversation_tail(&evidence))
+            };
+        let evidence_blocker = relation_result.as_ref().err().copied();
+        let relation = if let Ok(relation) = relation_result {
+            relation
         } else {
-            compare_conversation_tail(TailComparisonEvidence {
-                accepted: accepted_evidence.clone(),
-                accepted_local: accepted_local_evidence.clone(),
-                local: local_observation.evidence.clone(),
-                cloud: cloud_evidence.clone(),
-                local_provenance_verified: true,
-                accepted_witness_verified: true,
-                cloud_ancestry_verified: true,
-                coordinates_verified: true,
-            })
+            TailClassification::Unknown
         };
         // Codex capturability is proven by the resolved logical root, not by
         // the append-bearing leaf in isolation. A valid paginated thread can
@@ -5583,11 +5869,14 @@ fn provider_thread_review(
                     .unwrap_or(BindingResolution::Missing)
             },
             local_safely_capturable: local_capturable && local_observation.raw_range_pin.is_some(),
-            cloud_safely_readable: cloud_readable,
-            destination_codec_resumable: cloud_readable,
-            provider_quiescent: true,
-            resolution_pending: pending_resolution_threads.contains(&thread_id),
-            physical_detached,
+            cloud_materializable: cloud_readable,
+            operation_state: if pending_resolution_threads.contains(&thread_id) {
+                ConversationOperationState::Pending
+            } else if physical_detached {
+                ConversationOperationState::Detached
+            } else {
+                ConversationOperationState::Ready
+            },
             // The durable pin's presence, not the reviewed evidence: the
             // adoption probe upgrades evidence for this review only, and the
             // Pull it enables is what writes the pin.
@@ -5595,13 +5884,12 @@ fn provider_thread_review(
                 .and_then(|checkpoint| checkpoint.accepted.as_ref())
                 .is_some(),
         };
-        let push =
-            default_conversation_decision(ConversationPlanDirection::Push, relation, capabilities);
-        let pull =
-            default_conversation_decision(ConversationPlanDirection::Pull, relation, capabilities);
+        let classified = ClassifiedThread::new(relation, capabilities);
+        let push = classified.decision(ConversationPlanDirection::Push);
+        let pull = classified.decision(ConversationPlanDirection::Pull);
 
         // Stored internal-subagent rollouts are never offered by Pull.
-        if build_pull_actions && pull.action == ConversationPlanActionType::CreateLocal {
+        if purpose.builds_pull_plan() && pull.action == ConversationReviewAction::CreateLocal {
             if let Some((logical_path, sha256, size)) = offerable_cloud_transcripts.get(&thread_id)
             {
                 if cached_transcript_analysis(sha256, *size, bytes, logical_path)?
@@ -5640,6 +5928,14 @@ fn provider_thread_review(
             .and_then(|thread| thread.display_title.clone())
             .or_else(|| descriptor.map(|descriptor| descriptor.display_name.clone()))
             .unwrap_or_else(|| thread_id.to_string());
+        let conversation_id = conversation_resource_id(provider, &thread_id)?;
+        let review_resource_id = match source_resource_id
+            .clone()
+            .or_else(|| descriptor.map(|descriptor| descriptor.resource_id.clone()))
+        {
+            Some(resource_id) => resource_id,
+            None => conversation_id.clone(),
+        };
 
         entries.push(ThreadSyncEntry {
             provider: provider.clone(),
@@ -5649,19 +5945,15 @@ fn provider_thread_review(
                 .clone()
                 .or_else(|| thread.and_then(|thread| thread.source_thread_id.clone()))
                 .unwrap_or_else(|| thread_id.to_string()),
-            resource_id: match source_resource_id
-                .clone()
-                .or_else(|| descriptor.map(|descriptor| descriptor.resource_id.clone()))
-            {
-                Some(resource_id) => resource_id,
-                None => conversation_resource_id(provider, &thread_id)?,
-            },
+            conversation_resource_id: conversation_id,
+            resource_id: review_resource_id.clone(),
             display_name,
             state: relation_sync_state(relation),
             local_present: local.is_some(),
             storage_present: thread.is_some(),
             status_detail: capabilities
-                .resolution_pending
+                .operation_state
+                .eq(&ConversationOperationState::Pending)
                 .then(|| {
                     format!(
                         "A {} sync operation is still pending for this conversation. \
@@ -5677,7 +5969,8 @@ fn provider_thread_review(
                     })
                 })
                 .or_else(|| {
-                    (relation == TailClassification::Unknown)
+                    evidence_blocker
+                        .is_some()
                         .then(|| "Conversation state could not be proven safely.".to_string())
                 }),
             local_updated_at: local.map(|local| local.source_mtime),
@@ -5687,13 +5980,12 @@ fn provider_thread_review(
                 .and_then(|thread| thread.forked_from.clone())
                 .or_else(|| local_binding.and_then(|binding| binding.forked_from.clone())),
             provider_thread_id: provider_thread_id.clone(),
-            relation: Some(relation),
             push_decision: push.clone().into(),
             pull_decision: pull.clone().into(),
             origin_label,
         });
 
-        if !build_push_actions && !build_pull_actions {
+        if purpose == ReviewPurpose::Observe {
             continue;
         }
         // Executable actions freeze the local target from captured bytes,
@@ -5743,50 +6035,64 @@ fn provider_thread_review(
             .copied()
             .or_else(|| checkpoint.map(|checkpoint| checkpoint.generation));
 
-        if build_push_actions {
+        if purpose.builds_push_plan()
+            && classified
+                .planned_action(ConversationPlanDirection::Push)
+                .is_some()
+        {
             let publishes = matches!(
                 push.action,
-                ConversationPlanActionType::Publish | ConversationPlanActionType::CreateCloud
+                ConversationReviewAction::Publish | ConversationReviewAction::CreateCloud
             );
             let push_action = build_conversation_plan_action(ConversationPlanActionRequest {
                 action_id: ActionId::parse(generated_named_id("action")?)?,
                 direction: ConversationPlanDirection::Push,
-                relation,
-                capabilities,
+                classified,
                 provider: provider.clone(),
-                host_id: binding.host_id.clone(),
-                replica_id: binding.replica_id.clone(),
-                local_project_id: binding.local_project_id.clone(),
-                provider_profile_id: profile_id.clone(),
                 thread_id: thread_id.clone(),
                 source_resource_id: source_resource_id.clone(),
                 proposed_provider_thread_id: None,
                 keep_both: None,
-                required_codec: required_codec.clone(),
-                pinned_revision,
-                pinned_commit_id: pinned_commit_id.clone(),
-                pinned_manifest_sha256: pinned_manifest_sha256.clone(),
-                pinned_scope_revision,
-                pinned_scope_sha256: pinned_scope_sha256.clone(),
-                pinned_accepted_tail: accepted_tail_pin.clone(),
-                pinned_accepted_local_tail: accepted_local_tail_pin.clone(),
-                pinned_local_tail: local_tail_pin.clone(),
-                pinned_cloud_tail: cloud_tail_pin.clone(),
-                pinned_checkpoint_generation: checkpoint_generation_pin,
-                pinned_lineage_digest: None,
-                pinned_semantic_digest: None,
-                pinned_raw_range: publishes
-                    .then(|| local_observation.raw_range_pin.clone())
-                    .flatten(),
-                expected_local_target: expected_local_target.clone(),
-                expected_provider_state: Vec::new(),
-                expected_profile_revision: profile.revision,
-                expected_project_binding_revision: binding.revision,
-                expected_host_identity_revision: host_identity.revision,
-                expected_bindings_document_revision: document.revision,
-                expected_binding_revision: local_binding.map(|binding| binding.revision),
-                expires_at,
-            })?;
+                pins: ConversationActionPins {
+                    context: ConversationContextPins {
+                        host_id: binding.host_id.clone(),
+                        replica_id: binding.replica_id.clone(),
+                        local_project_id: binding.local_project_id.clone(),
+                        provider_profile_id: profile_id.clone(),
+                        host_identity_revision: host_identity.revision,
+                        profile_revision: profile.revision,
+                        project_binding_revision: binding.revision,
+                        bindings_document_revision: document.revision,
+                        binding_revision: local_binding.map(|binding| binding.revision),
+                    },
+                    revision: ConversationRevisionPins {
+                        bundle_revision: pinned_revision,
+                        commit_id: pinned_commit_id.clone(),
+                        manifest_sha256: pinned_manifest_sha256.clone(),
+                        scope_revision: pinned_scope_revision,
+                        scope_sha256: pinned_scope_sha256.clone(),
+                    },
+                    tail: ConversationTailPins {
+                        accepted: accepted_tail_pin.clone(),
+                        accepted_local: accepted_local_tail_pin.clone(),
+                        local: local_tail_pin.clone(),
+                        cloud: cloud_tail_pin.clone(),
+                        checkpoint_generation: checkpoint_generation_pin,
+                        lineage_digest: None,
+                        semantic_digest: None,
+                        raw_range: publishes
+                            .then(|| local_observation.raw_range_pin.clone())
+                            .flatten(),
+                    },
+                    target: ConversationTargetPins {
+                        local: expected_local_target.clone(),
+                        provider_state: Vec::new(),
+                    },
+                    codec: required_codec.clone(),
+                    expires_at,
+                },
+            })?
+            .expect("selectable Push classification produces an action");
             push_actions.push(push_action);
         }
 
@@ -5794,18 +6100,18 @@ fn provider_thread_review(
         // plan-level apply advances scope bases, so the review only carries
         // rows that change something. `NoChanges` also stays a Push-only
         // action inside validated plans.
-        if build_pull_actions && pull.action != ConversationPlanActionType::NoChanges {
+        if purpose.builds_pull_plan() && pull.action != ConversationReviewAction::NoChanges {
             let mut proposed_provider_thread_id = None;
             let mut expected_provider_state = Vec::new();
             let mut keep_both = None;
             let materializing_digests = matches!(
                 pull.action,
-                ConversationPlanActionType::MaterializeCloud
-                    | ConversationPlanActionType::KeepBoth
-                    | ConversationPlanActionType::CreateLocal
+                ConversationReviewAction::MaterializeCloud
+                    | ConversationReviewAction::KeepBoth
+                    | ConversationReviewAction::CreateLocal
             );
             match pull.action {
-                ConversationPlanActionType::MaterializeCloud => {
+                ConversationReviewAction::MaterializeCloud => {
                     // A cloud advance updates the existing provider session
                     // in place. Fresh provider identities belong only to
                     // CreateLocal and KeepBoth; minting one here would leave
@@ -5853,7 +6159,7 @@ fn provider_thread_review(
                         });
                     }
                 }
-                ConversationPlanActionType::KeepBoth => {
+                ConversationReviewAction::KeepBoth => {
                     // The binding move: the local rollout is never edited,
                     // only pinned byte-identical; the remote branch
                     // materializes under fresh identities.
@@ -5904,12 +6210,70 @@ fn provider_thread_review(
                                 .unwrap_or(TargetExpectation::Absent),
                         });
                     }
+                    // The preservation ordinal is max+1 over every provenance
+                    // record naming this origin, across the pinned cloud
+                    // snapshot and the local bindings document. Both inputs
+                    // are re-validated at apply (scope sha + bindings
+                    // revision), so a same-device advance forces a replan;
+                    // concurrent keep-boths of the same origin on other
+                    // devices can still mint a duplicate ordinal, which is
+                    // accepted — the device label disambiguates the marker.
+                    let next_ordinal = provider_scope
+                        .into_iter()
+                        .flat_map(|scope| scope.conversations.values())
+                        .filter_map(|thread| thread.preserved.as_ref())
+                        .chain(
+                            bindings_by_thread
+                                .values()
+                                .filter_map(|binding| binding.preserved.as_ref()),
+                        )
+                        .filter(|preserved| preserved.preserved_from == thread_id)
+                        .map(|preserved| preserved.ordinal)
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    let device_label = match host_identity
+                        .local_display_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|label| !label.is_empty())
+                    {
+                        Some(label) => label.to_string(),
+                        None => {
+                            let (origin_host_token, _) = repository
+                                .derive_origin_tokens(&binding.bundle_id, &binding.replica_id)?;
+                            fallback_origin_host_label(&origin_host_token)
+                        }
+                    };
+                    let base_title = local
+                        .descriptor
+                        .as_ref()
+                        .map(|descriptor| descriptor.display_name.clone())
+                        .filter(|name| !name.trim().is_empty() && name != &local.provider_thread_id)
+                        .or_else(|| {
+                            thread.and_then(|thread| {
+                                thread.display_title.clone().filter(|title| {
+                                    !title.trim().is_empty()
+                                        && thread.source_thread_id.as_deref()
+                                            != Some(title.as_str())
+                                })
+                            })
+                        });
                     keep_both = Some(KeepBothPlan {
                         preserved_thread_id: ThreadId::parse(generated_named_id("thread")?)?,
                         remote_provider_thread_id,
+                        preserved: PreservedProvenance {
+                            preserved_from: thread_id.clone(),
+                            ordinal: next_ordinal,
+                        },
+                        preserved_display_title: compose_preserved_title(
+                            base_title.as_deref(),
+                            next_ordinal,
+                            &device_label,
+                        ),
                     });
                 }
-                ConversationPlanActionType::CreateLocal => {
+                ConversationReviewAction::CreateLocal => {
                     let provider_id =
                         mint_provider_thread_id(is_codex, &mut occupied_provider_ids)?;
                     let sidecars = thread
@@ -5953,54 +6317,80 @@ fn provider_thread_review(
                 }
                 _ => {}
             }
-            let pull_action = build_conversation_plan_action(ConversationPlanActionRequest {
-                action_id: ActionId::parse(generated_named_id("action")?)?,
-                direction: ConversationPlanDirection::Pull,
-                relation,
-                capabilities,
+            let action_id = classified
+                .planned_action(ConversationPlanDirection::Pull)
+                .map(|_| ActionId::parse(generated_named_id("action")?))
+                .transpose()?;
+            if let Some(action_id) = action_id.clone() {
+                let pull_action = build_conversation_plan_action(ConversationPlanActionRequest {
+                    action_id,
+                    direction: ConversationPlanDirection::Pull,
+                    classified,
+                    provider: provider.clone(),
+                    thread_id: thread_id.clone(),
+                    source_resource_id: source_resource_id.clone(),
+                    proposed_provider_thread_id,
+                    keep_both,
+                    pins: ConversationActionPins {
+                        context: ConversationContextPins {
+                            host_id: binding.host_id.clone(),
+                            replica_id: binding.replica_id.clone(),
+                            local_project_id: binding.local_project_id.clone(),
+                            provider_profile_id: profile_id.clone(),
+                            host_identity_revision: host_identity.revision,
+                            profile_revision: profile.revision,
+                            project_binding_revision: binding.revision,
+                            bindings_document_revision: document.revision,
+                            binding_revision: local_binding.map(|binding| binding.revision),
+                        },
+                        revision: ConversationRevisionPins {
+                            bundle_revision: pinned_revision,
+                            commit_id: pinned_commit_id.clone(),
+                            manifest_sha256: pinned_manifest_sha256.clone(),
+                            scope_revision: pinned_scope_revision,
+                            scope_sha256: pinned_scope_sha256.clone(),
+                        },
+                        tail: ConversationTailPins {
+                            accepted: accepted_tail_pin,
+                            accepted_local: accepted_local_tail_pin,
+                            local: local_tail_pin,
+                            cloud: cloud_tail_pin,
+                            checkpoint_generation: checkpoint_generation_pin,
+                            lineage_digest: materializing_digests
+                                .then(|| thread.map(|thread| thread.lineage_digest.clone()))
+                                .flatten(),
+                            semantic_digest: materializing_digests
+                                .then(|| thread.map(|thread| thread.semantic_digest.clone()))
+                                .flatten(),
+                            raw_range: None,
+                        },
+                        target: ConversationTargetPins {
+                            local: expected_local_target,
+                            provider_state: expected_provider_state,
+                        },
+                        codec: required_codec,
+                        expires_at,
+                    },
+                })?
+                .expect("selectable Pull classification produces an action");
+                pull_actions.push(pull_action);
+            }
+            pull_review.push(ConversationReviewRow {
                 provider: provider.clone(),
-                host_id: binding.host_id.clone(),
-                replica_id: binding.replica_id.clone(),
-                local_project_id: binding.local_project_id.clone(),
-                provider_profile_id: profile_id.clone(),
                 thread_id: thread_id.clone(),
-                source_resource_id,
-                proposed_provider_thread_id,
-                keep_both,
-                required_codec,
-                pinned_revision,
-                pinned_commit_id: pinned_commit_id.clone(),
-                pinned_manifest_sha256: pinned_manifest_sha256.clone(),
-                pinned_scope_revision,
-                pinned_scope_sha256: pinned_scope_sha256.clone(),
-                pinned_accepted_tail: accepted_tail_pin,
-                pinned_accepted_local_tail: accepted_local_tail_pin,
-                pinned_local_tail: local_tail_pin,
-                pinned_cloud_tail: cloud_tail_pin,
-                pinned_checkpoint_generation: checkpoint_generation_pin,
-                pinned_lineage_digest: materializing_digests
-                    .then(|| thread.map(|thread| thread.lineage_digest.clone()))
-                    .flatten(),
-                pinned_semantic_digest: materializing_digests
-                    .then(|| thread.map(|thread| thread.semantic_digest.clone()))
-                    .flatten(),
-                pinned_raw_range: None,
-                expected_local_target,
-                expected_provider_state,
-                expected_profile_revision: profile.revision,
-                expected_project_binding_revision: binding.revision,
-                expected_host_identity_revision: host_identity.revision,
-                expected_bindings_document_revision: document.revision,
-                expected_binding_revision: local_binding.map(|binding| binding.revision),
-                expires_at,
-            })?;
-            pull_actions.push(pull_action);
+                resource_id: review_resource_id,
+                action: pull.action,
+                blocker: pull.blocker,
+                blocked_reason: pull.blocked_reason.clone(),
+                action_id,
+            });
         }
     }
     Ok(ThreadReview {
         entries,
         push_actions,
         pull_actions,
+        pull_review,
         provider_errors: BTreeMap::new(),
     })
 }
@@ -6135,8 +6525,7 @@ pub(crate) fn thread_entries(
         Some(&snapshot.storage_id),
         created_at,
         created_at.saturating_add(PLAN_LIFETIME_SECS),
-        false,
-        false,
+        ReviewPurpose::Observe,
     )?;
     if let Some((provider, error)) = review.provider_errors.into_iter().next() {
         return Err(format!("{}: {}", provider, error));
@@ -6158,14 +6547,56 @@ fn get_project_thread_sync_comparison_with_repository(
     )
 }
 
-fn get_project_thread_sync_comparison_with_progress(
+struct ProjectLocalRead {
+    activity_project: ResolvedActivityProject,
+    resolved: ResolvedBinding,
+    capture_request: CaptureRequest,
+    discovery: Discovery,
+    views: Vec<LocalSessionView>,
+}
+
+fn load_project_local_read(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+) -> Result<ProjectLocalRead, String> {
+    let activity_project =
+        project_activity::resolve_activity_project(repository, local_project_id)?;
+    let resolved = ResolvedBinding {
+        binding: activity_project.binding.clone(),
+        homes: activity_project
+            .homes
+            .iter()
+            .map(|(provider, home)| (provider.clone(), home.home.to_string_lossy().into_owned()))
+            .collect(),
+    };
+    let capture_request = capture_request_for_resolved_binding(repository, &resolved)?;
+    let (discovery, views) = super::codex_watch_service::session_watch_service().discovery_for(
+        provider_registry(),
+        local_project_id,
+        &capture_request,
+    )?;
+    Ok(ProjectLocalRead {
+        activity_project,
+        resolved,
+        capture_request,
+        discovery,
+        views,
+    })
+}
+
+struct ProjectRemoteRead {
+    storage_name: String,
+    link: ProjectStorageLink,
+    engine: StorageEngine,
+    current: Option<BundleSnapshot>,
+    remote_continuity: RemoteContinuity,
+}
+
+fn load_project_remote_read(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
-    on_phase: &mut dyn FnMut(&str, Duration),
-) -> Result<ThreadSyncComparison, String> {
-    let metrics_before = super::sync_metrics::global_snapshot();
-    let phase_started = Instant::now();
+) -> Result<ProjectRemoteRead, String> {
     let config = repository.load_config()?;
     let project = config
         .project(local_project_id)
@@ -6178,56 +6609,78 @@ fn get_project_thread_sync_comparison_with_progress(
         .find(|storage| storage.id == *storage_id)
         .map(|storage| storage.name.clone())
         .ok_or_else(|| format!("unknown storage '{}'", storage_id))?;
-    let binding = repository
-        .load_bindings()?
-        .active_for(local_project_id)
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "project '{}' is not mapped on this machine",
-                local_project_id
-            )
-        })?;
-
-    on_phase("load config and binding", phase_started.elapsed());
-    let phase_started = Instant::now();
-    let resolved = resolve_project_binding(repository, &binding)?;
-    let capture_request = capture_request_for_binding(repository, &binding)?;
-    let (discovery, views) = super::codex_watch_service::codex_watch_service().discovery_for(
-        provider_registry(),
-        local_project_id,
-        &capture_request,
-    )?;
-    on_phase("discover local state", phase_started.elapsed());
-    let phase_started = Instant::now();
-    let (_, engine) = storage_engine(repository, storage_id)?;
-    let current = engine.inspect_optional(&project.bundle_id)?;
-    on_phase("inspect remote head", phase_started.elapsed());
     let link = project_link(&config, local_project_id, storage_id)
         .cloned()
         .ok_or_else(|| "project is not linked to this storage".to_string())?;
+    let (_, engine) = storage_engine(repository, storage_id)?;
+    let current = engine.inspect_optional(&project.bundle_id)?;
     let remote_continuity = classify_remote_continuity(
         current.as_ref().map(|snapshot| &snapshot.head),
         repository_base_from_link(&link).as_ref(),
         &mut continuity_probe(&engine, &project.bundle_id),
     );
+    Ok(ProjectRemoteRead {
+        storage_name,
+        link,
+        engine,
+        current,
+        remote_continuity,
+    })
+}
+
+fn build_comparison_from_reads(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    local: &ProjectLocalRead,
+    remote: &ProjectRemoteRead,
+    on_phase: &mut dyn FnMut(&str, Duration),
+) -> Result<ThreadSyncComparison, String> {
     let comparison = build_thread_sync_comparison(
         repository,
         local_project_id,
         storage_id,
-        storage_name,
-        &link,
-        &resolved,
-        &capture_request,
-        &discovery,
-        &views,
-        &engine,
-        current.as_ref(),
+        remote.storage_name.clone(),
+        &remote.link,
+        &local.resolved,
+        &local.capture_request,
+        &local.discovery,
+        &local.views,
+        &remote.engine,
+        remote.current.as_ref(),
         false,
-        remote_continuity,
+        remote.remote_continuity.clone(),
         on_phase,
     )?
     .comparison;
+    Ok(comparison)
+}
+
+#[cfg(test)]
+fn get_project_thread_sync_comparison_with_progress(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    on_phase: &mut dyn FnMut(&str, Duration),
+) -> Result<ThreadSyncComparison, String> {
+    let metrics_before = super::sync_metrics::global_snapshot();
+    let phase_started = Instant::now();
+    let local = load_project_local_read(repository, local_project_id)?;
+    on_phase(
+        "load binding and discover local state",
+        phase_started.elapsed(),
+    );
+    let phase_started = Instant::now();
+    let remote = load_project_remote_read(repository, local_project_id, storage_id)?;
+    on_phase("inspect remote head", phase_started.elapsed());
+    let comparison = build_comparison_from_reads(
+        repository,
+        local_project_id,
+        storage_id,
+        &local,
+        &remote,
+        on_phase,
+    )?;
     super::sync_metrics::log_operation_delta("refresh", &metrics_before);
     Ok(comparison)
 }
@@ -6259,7 +6712,7 @@ fn reuse_candidate_pins(
         })
         .cloned()
         .collect();
-    let served = super::codex_watch_service::codex_watch_service().take_reusable_candidate_pins(
+    let served = super::codex_watch_service::session_watch_service().take_reusable_candidate_pins(
         &home,
         local_project_id,
         &codex_candidates,
@@ -6305,7 +6758,7 @@ fn store_candidate_pins_from_capture(
         })
         .collect();
     if !stored.is_empty() {
-        super::codex_watch_service::codex_watch_service().store_candidate_pins(
+        super::codex_watch_service::session_watch_service().store_candidate_pins(
             &home,
             local_project_id,
             stored,
@@ -6387,8 +6840,11 @@ fn build_thread_sync_comparison(
                     Some(storage_id),
                     created_at,
                     created_at.saturating_add(PLAN_LIFETIME_SECS),
-                    push_actions,
-                    false,
+                    if push_actions {
+                        ReviewPurpose::PushPlan
+                    } else {
+                        ReviewPurpose::Observe
+                    },
                 )
             }
             None => {
@@ -6404,8 +6860,11 @@ fn build_thread_sync_comparison(
                     Some(storage_id),
                     created_at,
                     created_at.saturating_add(PLAN_LIFETIME_SECS),
-                    push_actions,
-                    false,
+                    if push_actions {
+                        ReviewPurpose::PushPlan
+                    } else {
+                        ReviewPurpose::Observe
+                    },
                 )
             }
         }
@@ -6479,6 +6938,7 @@ fn build_thread_sync_comparison(
                 .map(|provider_id| (entry.provider.clone(), provider_id))
         })
         .collect::<BTreeSet<_>>();
+    let conversation_bindings = repository.load_conversation_bindings()?;
     for candidate in discovered
         .resources
         .iter()
@@ -6495,8 +6955,8 @@ fn build_thread_sync_comparison(
         }
         let detail = thread_capture_unavailable_detail(candidate.blocked_reason.as_deref());
         let blocked = ThreadSyncDecision {
-            action: ConversationPlanActionType::Blocked,
-            reason_code: ConversationReasonCode::CodecUnsupported,
+            action: ConversationReviewAction::Blocked,
+            blocker: Some(ConversationBlocker::CodecUnsupported),
             selectable: false,
             blocked_reason: Some(detail.clone()),
         };
@@ -6504,11 +6964,30 @@ fn build_thread_sync_comparison(
             .get(&provider)
             .map(|adapter| adapter.descriptor().display_name)
             .unwrap_or_else(|| provider.to_string());
+        let thread_id = conversation_bindings
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.local_project_id == *local_project_id
+                    && binding.provider_thread_id.as_deref() == Some(&provider_thread_id)
+                    && resolved.binding.profile_ids.get(&provider)
+                        == Some(&binding.provider_profile_id)
+            })
+            .map(|binding| binding.thread_id.clone())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                initial_conversation_thread_id(
+                    &resolved.binding.bundle_id,
+                    &provider,
+                    &provider_thread_id,
+                )
+            })?;
         review.entries.push(ThreadSyncEntry {
             provider: provider.clone(),
             provider_display_name,
             access: ProviderAccessState::BoundReady,
             thread_id: provider_thread_id.clone(),
+            conversation_resource_id: conversation_resource_id(&provider, &thread_id)?,
             resource_id: ResourceId::parse(candidate.resource_id.clone())?,
             display_name: candidate.display_name.clone(),
             state: ThreadSyncState::Unavailable,
@@ -6520,7 +6999,6 @@ fn build_thread_sync_comparison(
             cloud_thread_id: None,
             forked_from: None,
             provider_thread_id: Some(provider_thread_id),
-            relation: Some(TailClassification::Unknown),
             push_decision: blocked.clone(),
             pull_decision: blocked,
             origin_label: None,
@@ -6546,8 +7024,8 @@ fn build_thread_sync_comparison(
                 ProviderAccessState::Unsupported
             };
             let view_only = ThreadSyncDecision {
-                action: ConversationPlanActionType::Blocked,
-                reason_code: ConversationReasonCode::MissingBinding,
+                action: ConversationReviewAction::Blocked,
+                blocker: Some(ConversationBlocker::MissingBinding),
                 selectable: false,
                 blocked_reason: Some(if registered {
                     format!(
@@ -6570,6 +7048,7 @@ fn build_thread_sync_comparison(
                         .source_thread_id
                         .clone()
                         .unwrap_or_else(|| thread_id.to_string()),
+                    conversation_resource_id: conversation_resource_id(provider, thread_id)?,
                     resource_id: thread.resource_id.clone(),
                     display_name: thread
                         .display_title
@@ -6584,7 +7063,6 @@ fn build_thread_sync_comparison(
                     cloud_thread_id: Some(thread_id.clone()),
                     forked_from: thread.forked_from.clone(),
                     provider_thread_id: thread.source_thread_id.clone(),
-                    relation: None,
                     push_decision: view_only.clone(),
                     pull_decision: view_only.clone(),
                     origin_label: None,
@@ -7125,7 +7603,7 @@ fn prepare_push_review_with_progress(
     // storage-side inventory below without any local content walk.
     let eligibility = project_file_sync_eligibility(&binding);
     let capture_request = capture_request_for_binding(repository, &binding)?;
-    let (discovery, views) = super::codex_watch_service::codex_watch_service().discovery_for(
+    let (discovery, views) = super::codex_watch_service::session_watch_service().discovery_for(
         provider_registry(),
         local_project_id,
         &capture_request,
@@ -7205,46 +7683,51 @@ fn prepare_push_review_with_progress(
                     &mut *on_phase,
                 ) {
                     Ok(build) => {
-                        thread_comparison = Some(build.comparison);
-                        if let Some(first) = build.push_actions.first() {
-                            let plan_id = PlanId::parse(generated_named_id("plan")?)?;
-                            let plan = ConversationPushPlan {
-                                schema_version: PUSH_PLAN_SCHEMA,
-                                plan_id: plan_id.clone(),
-                                storage_id: storage_id.clone(),
-                                bundle_id: project.bundle_id.clone(),
-                                host_id: binding.host_id.clone(),
-                                replica_id: binding.replica_id.clone(),
-                                local_project_id: binding.local_project_id.clone(),
-                                expected_host_identity_revision: first
-                                    .expected_host_identity_revision,
-                                expected_project_binding_revision: first
-                                    .expected_project_binding_revision,
-                                expected_bindings_document_revision: first
-                                    .expected_bindings_document_revision,
-                                revision: first.pinned_revision,
-                                commit_id: first.pinned_commit_id.clone(),
-                                manifest_sha256: first.pinned_manifest_sha256.clone(),
-                                created_at: thread_comparison
-                                    .as_ref()
-                                    .map(|comparison| comparison.compared_at)
-                                    .unwrap_or_else(now_secs),
-                                expires_at: first.expires_at,
-                                actions: build.push_actions,
-                            };
-                            plan.validate()?;
-                            conversation_action_ids = plan
-                                .actions
-                                .iter()
-                                .filter_map(|action| {
-                                    action.source_resource_id.as_ref().map(|resource_id| {
-                                        (resource_id.clone(), action.action_id.clone())
-                                    })
+                        let compared_at = build.comparison.compared_at;
+                        let identity = repository.load_or_create_host_identity()?;
+                        let bindings_document = repository.load_conversation_bindings()?;
+                        let (revision, commit_id, manifest_sha256) = current
+                            .as_ref()
+                            .map(|snapshot| {
+                                (
+                                    snapshot.head.revision,
+                                    snapshot.head.commit_id.clone(),
+                                    snapshot.head.manifest_sha256.clone(),
+                                )
+                            })
+                            .unwrap_or_else(absent_bundle_head_pin);
+                        let plan_id = PlanId::parse(generated_named_id("plan")?)?;
+                        let plan = ConversationPushPlan {
+                            schema_version: PUSH_PLAN_SCHEMA,
+                            plan_id: plan_id.clone(),
+                            storage_id: storage_id.clone(),
+                            bundle_id: project.bundle_id.clone(),
+                            host_id: binding.host_id.clone(),
+                            replica_id: binding.replica_id.clone(),
+                            local_project_id: binding.local_project_id.clone(),
+                            expected_host_identity_revision: identity.revision,
+                            expected_project_binding_revision: binding.revision,
+                            expected_bindings_document_revision: bindings_document.revision,
+                            revision,
+                            commit_id,
+                            manifest_sha256,
+                            created_at: compared_at,
+                            expires_at: compared_at.saturating_add(PLAN_LIFETIME_SECS),
+                            actions: build.push_actions,
+                        };
+                        plan.validate()?;
+                        conversation_action_ids = plan
+                            .actions
+                            .iter()
+                            .filter_map(|action| {
+                                action.source_resource_id.as_ref().map(|resource_id| {
+                                    (resource_id.clone(), action.action_id.clone())
                                 })
-                                .collect();
-                            repository.save_conversation_push_plan(&plan)?;
-                            conversation_push_plan_id = Some(plan_id);
-                        }
+                            })
+                            .collect();
+                        repository.save_conversation_push_plan(&plan)?;
+                        conversation_push_plan_id = Some(plan_id);
+                        thread_comparison = Some(build.comparison);
                     }
                     Err(error) => thread_comparison_error = Some(error),
                 }
@@ -7593,18 +8076,8 @@ fn selected_conversation_actions(
             ConversationPlanActionType::Publish | ConversationPlanActionType::CreateCloud
         )
     }) {
-        let instruction = match action.action {
-            ConversationPlanActionType::RequirePull
-            | ConversationPlanActionType::RequirePullMetadata => {
-                "; Pull and resolve the conversation before pushing"
-            }
-            ConversationPlanActionType::Blocked => {
-                "; resolve the blocked conversation before pushing"
-            }
-            _ => " and cannot be selected",
-        };
         return Err(format!(
-            "conversation Push action '{}' is not pushable{instruction}",
+            "conversation Push action '{}' is not pushable",
             action.action_id
         ));
     }
@@ -7717,6 +8190,15 @@ fn conversation_thread_from_capture(
         }
         _ => previous.and_then(|thread| thread.forked_from.clone()),
     };
+    // Preservation provenance travels exactly like fork provenance: a
+    // preserved copy's first push is CreateCloud (the local binding is the
+    // only source); later pushes carry the manifest record forward.
+    let preserved = match action.action {
+        ConversationPlanActionType::CreateCloud => {
+            local_binding.and_then(|binding| binding.preserved.clone())
+        }
+        _ => previous.and_then(|thread| thread.preserved.clone()),
+    };
     let sidecar_refs = conversation
         .sidecar_files
         .iter()
@@ -7764,6 +8246,7 @@ fn conversation_thread_from_capture(
         semantic_digest,
         portable_tail: artifact.map(|artifact| artifact.portable_tail.clone()),
         forked_from,
+        preserved,
         source_thread_id: conversation.source_thread_id.clone(),
         created_by_origin: previous
             .and_then(|thread| thread.created_by_origin.clone())
@@ -7865,7 +8348,13 @@ fn build_publish_request(
     let published_by = PortableOrigin {
         origin_host_token,
         origin_replica_token,
-        shared_label: None,
+        shared_label: repository
+            .load_or_create_host_identity()?
+            .local_display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(str::to_string),
     };
     let previous_manifest = previous.map(|snapshot| &snapshot.manifest);
     let captured_descriptors = provider_capture::domain_resources(captured)?;
@@ -8048,7 +8537,7 @@ fn build_publish_request(
             candidate.host_id == binding.host_id
                 && candidate.replica_id == binding.replica_id
                 && candidate.local_project_id == binding.local_project_id
-                && candidate.provider_profile_id == action.provider_profile_id
+                && candidate.provider_profile_id == action.pins.context.provider_profile_id
                 && candidate.thread_id == action.thread_id
         });
         let descriptor = action
@@ -8082,7 +8571,7 @@ fn build_publish_request(
             let stored_layout = local_binding.and_then(|binding| binding.root_tail_layout.as_ref());
             let seeded =
                 codex_history_graph::seed_codex_root(&resolved_root, &leaf_bytes, stored_layout)?;
-            if Some(&seeded.observed_tail) != action.pinned_local_tail.as_ref() {
+            if Some(&seeded.observed_tail) != action.pins.tail.local.as_ref() {
                 return Err(format!(
                     "conversation '{}' changed after review; refresh and push again",
                     result_thread_id
@@ -8102,7 +8591,7 @@ fn build_publish_request(
                 .and_then(|link| link.conversation_checkpoints.get(&scope_key))
                 .and_then(|threads| threads.get(&action.thread_id));
             if stored_checkpoint.map(|checkpoint| checkpoint.generation)
-                != action.pinned_checkpoint_generation
+                != action.pins.tail.checkpoint_generation
             {
                 return Err(format!(
                     "conversation '{}' checkpoint advanced after review; refresh and push again",
@@ -8240,7 +8729,7 @@ fn build_publish_request(
         let published_tail = artifact
             .as_ref()
             .map(|artifact| artifact.portable_tail.clone())
-            .or_else(|| action.pinned_local_tail.clone())
+            .or_else(|| action.pins.tail.local.clone())
             .ok_or_else(|| {
                 format!(
                     "conversation Push action '{}' has no publishable tail",
@@ -8250,7 +8739,7 @@ fn build_publish_request(
         let accepted_local_tail = seeded
             .as_ref()
             .map(|seeded| seeded.observed_tail.clone())
-            .or_else(|| action.pinned_local_tail.clone())
+            .or_else(|| action.pins.tail.local.clone())
             .ok_or_else(|| {
                 format!(
                     "conversation Push action '{}' has no local accepted tail",
@@ -8266,8 +8755,8 @@ fn build_publish_request(
             generation: 0,
             accepted: Some(mallard_domain::AcceptedConversationVersion {
                 artifact_sha256,
-                accepted_at_commit_id: action.pinned_commit_id.clone(),
-                accepted_at_manifest_sha256: action.pinned_manifest_sha256.clone(),
+                accepted_at_commit_id: action.pins.revision.commit_id.clone(),
+                accepted_at_manifest_sha256: action.pins.revision.manifest_sha256.clone(),
                 portable_tail: published_tail.clone(),
             }),
             accepted_local_tail: Some(accepted_local_tail.clone()),
@@ -8317,7 +8806,7 @@ fn build_publish_request(
             prefix_witness: seeded
                 .as_ref()
                 .and_then(|seeded| seeded.prefix_witness.clone()),
-            binding_revision: action.expected_binding_revision.unwrap_or(0),
+            binding_revision: action.pins.context.binding_revision.unwrap_or(0),
         };
         planned_checkpoints.insert(operation_id.clone(), checkpoint);
         operations.push(ConversationSyncOperation {
@@ -8327,28 +8816,28 @@ fn build_publish_request(
             cloud: ConversationCloudAnchor {
                 storage_id: storage_id.clone(),
                 bundle_id: project.bundle_id.clone(),
-                revision: action.pinned_revision,
-                commit_id: action.pinned_commit_id.clone(),
-                manifest_sha256: action.pinned_manifest_sha256.clone(),
+                revision: action.pins.revision.bundle_revision,
+                commit_id: action.pins.revision.commit_id.clone(),
+                manifest_sha256: action.pins.revision.manifest_sha256.clone(),
             },
             host_id: binding.host_id.clone(),
             replica_id: binding.replica_id.clone(),
             local_project_id: binding.local_project_id.clone(),
-            provider_profile_id: action.provider_profile_id.clone(),
+            provider_profile_id: action.pins.context.provider_profile_id.clone(),
             provider: action.provider.clone(),
             thread_id: action.thread_id.clone(),
             operation: ConversationSyncOperationKind::CloudPublication(
                 ConversationPublicationOperation {
                     phase: PushJournalPhase::CandidateUploaded,
-                    candidate_commit_id: action.pinned_commit_id.clone(),
-                    candidate_manifest_sha256: action.pinned_manifest_sha256.clone(),
+                    candidate_commit_id: action.pins.revision.commit_id.clone(),
+                    candidate_manifest_sha256: action.pins.revision.manifest_sha256.clone(),
                     artifact_sha256: artifact
                         .as_ref()
                         .map(|artifact| artifact.artifact_sha256.clone())
                         .unwrap_or_else(|| hex_digest(Sha256::digest(&published_bytes).as_slice())),
-                    tail_before: action.pinned_accepted_tail.clone(),
+                    tail_before: action.pins.tail.accepted.clone(),
                     tail_after: published_tail,
-                    planned_relation: action.relation,
+                    planned_relation: action.pins.tail.classification()?,
                     // Chained after the loop in operation-id order.
                     sync_config_before: SyncConfig::default(),
                     sync_config_after: SyncConfig::default(),
@@ -8358,11 +8847,11 @@ fn build_publish_request(
             ),
             provider_thread_id: Some(provider_thread_id),
             materialization_state: ConversationMaterializationState::Resumable,
-            expected_host_identity_revision: action.expected_host_identity_revision,
-            expected_bindings_document_revision: action.expected_bindings_document_revision,
-            expected_binding_revision: action.expected_binding_revision,
-            expected_profile_revision: action.expected_profile_revision,
-            expected_project_binding_revision: action.expected_project_binding_revision,
+            expected_host_identity_revision: action.pins.context.host_identity_revision,
+            expected_bindings_document_revision: action.pins.context.bindings_document_revision,
+            expected_binding_revision: action.pins.context.binding_revision,
+            expected_profile_revision: action.pins.context.profile_revision,
+            expected_project_binding_revision: action.pins.context.project_binding_revision,
             targets: Vec::new(),
             created_at: updated_at,
             updated_at,
@@ -8409,6 +8898,7 @@ fn build_publish_request(
                 provider_profile_id: operation.provider_profile_id.clone(),
                 thread_id: operation.thread_id.clone(),
                 forked_from: None,
+                preserved: None,
                 root_tail_layout: Some(layout),
                 provider_thread_id: operation.provider_thread_id.clone(),
                 materialization_state: ConversationMaterializationState::Resumable,
@@ -8668,13 +9158,13 @@ fn publish_reviewed(
             candidate.host_id == binding.host_id
                 && candidate.replica_id == binding.replica_id
                 && candidate.local_project_id == binding.local_project_id
-                && candidate.provider_profile_id == action.provider_profile_id
+                && candidate.provider_profile_id == action.pins.context.provider_profile_id
                 && candidate.thread_id == action.thread_id
         });
         let profile = machine
             .profiles
             .iter()
-            .find(|profile| profile.profile_id == action.provider_profile_id)
+            .find(|profile| profile.profile_id == action.pins.context.provider_profile_id)
             .ok_or_else(|| "reviewed provider profile disappeared".to_string())?;
         let _ = codec_digests(&conversation.lineage);
         let (scope_revision, scope_sha256) = previous
@@ -8683,7 +9173,7 @@ fn publish_reviewed(
             .unwrap_or_else(absent_scope_pin);
         // Re-prove the raw unaccepted interval byte-for-byte; the canonical
         // re-proof happens in build_publish_request's reconstruction.
-        let raw_range = match &action.pinned_raw_range {
+        let raw_range = match &action.pins.tail.raw_range {
             Some(pin) => {
                 let source = captured_transcript_source(conversation)?;
                 let bytes = codex_history_graph::read_rollout_bounded(&source)
@@ -8710,54 +9200,61 @@ fn publish_reviewed(
         // the tail fields mirror the action's own pins because the byte-level
         // re-proofs (raw range here, full reconstruction in the build) carry
         // the real content verification.
-        let live_checkpoint_generation = repository
-            .load_config()
-            .ok()
-            .and_then(|config| {
-                config
-                    .links
-                    .iter()
-                    .find(|link| {
-                        link.local_project_id == binding.local_project_id
-                            && &link.storage_id == storage_id
-                    })
-                    .and_then(|link| {
-                        link.conversation_checkpoints
-                            .get(&SyncScopeKey::Provider(action.provider.clone()))
-                    })
-                    .and_then(|threads| threads.get(&action.thread_id))
-                    .map(|checkpoint| checkpoint.generation)
-            });
+        let live_checkpoint_generation = repository.load_config().ok().and_then(|config| {
+            config
+                .links
+                .iter()
+                .find(|link| {
+                    link.local_project_id == binding.local_project_id
+                        && &link.storage_id == storage_id
+                })
+                .and_then(|link| {
+                    link.conversation_checkpoints
+                        .get(&SyncScopeKey::Provider(action.provider.clone()))
+                })
+                .and_then(|threads| threads.get(&action.thread_id))
+                .map(|checkpoint| checkpoint.generation)
+        });
         let context = ConversationApplyContext {
             now: updated_at,
-            host_id: binding.host_id.clone(),
-            replica_id: binding.replica_id.clone(),
-            local_project_id: binding.local_project_id.clone(),
-            provider_profile_id: action.provider_profile_id.clone(),
-            host_identity_revision: identity.revision,
-            revision,
-            commit_id: commit_id.clone(),
-            manifest_sha256: manifest_sha256.clone(),
-            scope_revision,
-            scope_sha256,
-            accepted_tail: action.pinned_accepted_tail.clone(),
-            accepted_local_tail: action.pinned_accepted_local_tail.clone(),
-            local_tail: action.pinned_local_tail.clone(),
-            cloud_tail: action.pinned_cloud_tail.clone(),
-            checkpoint_generation: live_checkpoint_generation,
-            lineage_digest: action.pinned_lineage_digest.clone(),
-            semantic_digest: action.pinned_semantic_digest.clone(),
-            raw_range,
-            local_target: TargetExpectation::Sha256(hex_digest(
-                Sha256::digest(&transcript.bytes).as_slice(),
-            )),
-            provider_state: BTreeMap::new(),
-            profile_revision: profile.revision,
-            project_binding_revision: binding.revision,
-            bindings_document_revision: document.revision,
-            binding_revision: local_binding.map(|binding| binding.revision),
-            codec: conversation.lineage_codec.clone(),
-            provider_quiescent: true,
+            pins: ConversationActionPins {
+                context: ConversationContextPins {
+                    host_id: binding.host_id.clone(),
+                    replica_id: binding.replica_id.clone(),
+                    local_project_id: binding.local_project_id.clone(),
+                    provider_profile_id: action.pins.context.provider_profile_id.clone(),
+                    host_identity_revision: identity.revision,
+                    profile_revision: profile.revision,
+                    project_binding_revision: binding.revision,
+                    bindings_document_revision: document.revision,
+                    binding_revision: local_binding.map(|binding| binding.revision),
+                },
+                revision: ConversationRevisionPins {
+                    bundle_revision: revision,
+                    commit_id: commit_id.clone(),
+                    manifest_sha256: manifest_sha256.clone(),
+                    scope_revision,
+                    scope_sha256,
+                },
+                tail: ConversationTailPins {
+                    accepted: action.pins.tail.accepted.clone(),
+                    accepted_local: action.pins.tail.accepted_local.clone(),
+                    local: action.pins.tail.local.clone(),
+                    cloud: action.pins.tail.cloud.clone(),
+                    checkpoint_generation: live_checkpoint_generation,
+                    lineage_digest: action.pins.tail.lineage_digest.clone(),
+                    semantic_digest: action.pins.tail.semantic_digest.clone(),
+                    raw_range,
+                },
+                target: ConversationTargetPins {
+                    local: TargetExpectation::Sha256(hex_digest(
+                        Sha256::digest(&transcript.bytes).as_slice(),
+                    )),
+                    provider_state: Vec::new(),
+                },
+                codec: conversation.lineage_codec.clone(),
+                expires_at: action.pins.expires_at,
+            },
         };
         validate_conversation_action_pins(action, &context).map_err(|pin| {
             format!(
@@ -9430,11 +9927,12 @@ fn plan_bundle_restore_with_progress(
         let mut byte_source =
             engine.byte_source(&snapshot, Some(object_cache()), Some(on_progress));
         let capture_request = capture_request_for_binding(repository, &binding)?;
-        let (discovery, views) = super::codex_watch_service::codex_watch_service().discovery_for(
-            provider_registry(),
-            &binding.local_project_id,
-            &capture_request,
-        )?;
+        let (discovery, views) = super::codex_watch_service::session_watch_service()
+            .discovery_for(
+                provider_registry(),
+                &binding.local_project_id,
+                &capture_request,
+            )?;
         // Providers without a cursor codec capture up front; Codex rows are
         // captured only when one classification pass (cache-served when
         // quiet) marks them byte-pinning Pull candidates. Adopting cloud
@@ -9471,14 +9969,13 @@ fn plan_bundle_restore_with_progress(
             Some(&plan.storage_id),
             plan.created_at,
             plan.expires_at,
-            false,
-            false,
+            ReviewPurpose::Observe,
         )?;
         let mut selection = base_selection.clone();
         for entry in preliminary.entries.iter().filter(|entry| {
             entry.pull_decision.selectable
                 && entry.local_present
-                && entry.pull_decision.action != ConversationPlanActionType::AdoptCloudMetadata
+                && entry.pull_decision.action != ConversationReviewAction::AdoptCloudMetadata
         }) {
             selection.insert(entry.resource_id.to_string());
         }
@@ -9522,10 +10019,10 @@ fn plan_bundle_restore_with_progress(
             Some(&plan.storage_id),
             plan.created_at,
             plan.expires_at,
-            false,
-            true,
+            ReviewPurpose::PullPlan,
         )?;
         plan.conversation_actions = review.pull_actions;
+        plan.conversation_review = review.pull_review;
         on_phase("classify and build pull actions", phase_started.elapsed());
     }
     let phase_started = Instant::now();
@@ -9558,6 +10055,7 @@ struct PreparedPullConversation {
     cloud_provider_thread_id: String,
     cloud_cwd: String,
     cloud_forked_from: Option<ThreadId>,
+    cloud_preserved: Option<PreservedProvenance>,
     cloud_display_title: Option<String>,
     cloud_updated_at: u64,
 }
@@ -9614,7 +10112,7 @@ fn local_target_expectation_for_action(
             candidate.host_id == binding.host_id
                 && candidate.replica_id == binding.replica_id
                 && candidate.local_project_id == binding.local_project_id
-                && candidate.provider_profile_id == action.provider_profile_id
+                && candidate.provider_profile_id == action.pins.context.provider_profile_id
                 && candidate.thread_id == action.thread_id
         })
         .and_then(|candidate| candidate.provider_thread_id.as_deref());
@@ -9745,73 +10243,85 @@ fn prepare_pull_conversation_actions(
             candidate.host_id == binding.host_id
                 && candidate.replica_id == binding.replica_id
                 && candidate.local_project_id == binding.local_project_id
-                && candidate.provider_profile_id == action.provider_profile_id
+                && candidate.provider_profile_id == action.pins.context.provider_profile_id
                 && candidate.thread_id == action.thread_id
         });
         let profile = machine
             .profiles
             .iter()
-            .find(|profile| profile.profile_id == action.provider_profile_id)
+            .find(|profile| profile.profile_id == action.pins.context.provider_profile_id)
             .ok_or_else(|| "reviewed provider profile disappeared".to_string())?;
         let provider_state = action
-            .expected_provider_state
+            .pins
+            .target
+            .provider_state
             .iter()
             .map(|target| {
                 let current = bounded_file_expectation(Path::new(&target.target_path))?;
-                Ok((target.target_path.clone(), current))
+                Ok(ProviderStateExpectation {
+                    target_path: target.target_path.clone(),
+                    expectation: current,
+                })
             })
-            .collect::<Result<BTreeMap<_, _>, String>>()?;
+            .collect::<Result<Vec<_>, String>>()?;
         let (scope_revision, scope_sha256) = provider_scope_pin(Some(snapshot), &action.provider);
-        let live_checkpoint_generation = repository
-            .load_config()
-            .ok()
-            .and_then(|config| {
-                config
-                    .links
-                    .iter()
-                    .find(|link| {
-                        link.local_project_id == binding.local_project_id
-                            && &link.storage_id == storage_id
-                    })
-                    .and_then(|link| {
-                        link.conversation_checkpoints
-                            .get(&SyncScopeKey::Provider(action.provider.clone()))
-                    })
-                    .and_then(|threads| threads.get(&action.thread_id))
-                    .map(|checkpoint| checkpoint.generation)
-            });
+        let live_checkpoint_generation = repository.load_config().ok().and_then(|config| {
+            config
+                .links
+                .iter()
+                .find(|link| {
+                    link.local_project_id == binding.local_project_id
+                        && &link.storage_id == storage_id
+                })
+                .and_then(|link| {
+                    link.conversation_checkpoints
+                        .get(&SyncScopeKey::Provider(action.provider.clone()))
+                })
+                .and_then(|threads| threads.get(&action.thread_id))
+                .map(|checkpoint| checkpoint.generation)
+        });
         let context = ConversationApplyContext {
             now,
-            host_id: binding.host_id.clone(),
-            replica_id: binding.replica_id.clone(),
-            local_project_id: binding.local_project_id.clone(),
-            provider_profile_id: action.provider_profile_id.clone(),
-            host_identity_revision: identity.revision,
-            revision: snapshot.head.revision,
-            commit_id: snapshot.head.commit_id.clone(),
-            manifest_sha256: snapshot.head.manifest_sha256.clone(),
-            scope_revision,
-            scope_sha256,
-            accepted_tail: action.pinned_accepted_tail.clone(),
-            accepted_local_tail: action.pinned_accepted_local_tail.clone(),
-            local_tail: action.pinned_local_tail.clone(),
-            cloud_tail: action.pinned_cloud_tail.clone(),
-            checkpoint_generation: live_checkpoint_generation,
-            // The downloaded transcript's own analysis digests: pin equality
-            // here is the transcript-versus-manifest content verification.
-            lineage_digest,
-            semantic_digest,
-            raw_range: action.pinned_raw_range.clone(),
-            local_target: local_target_expectation_for_action(
-                action, binding, &document, &captured,
-            ),
-            provider_state,
-            profile_revision: profile.revision,
-            project_binding_revision: binding.revision,
-            bindings_document_revision: document.revision,
-            binding_revision: local_binding.map(|binding| binding.revision),
-            codec: thread.lineage_codec.clone(),
-            provider_quiescent: true,
+            pins: ConversationActionPins {
+                context: ConversationContextPins {
+                    host_id: binding.host_id.clone(),
+                    replica_id: binding.replica_id.clone(),
+                    local_project_id: binding.local_project_id.clone(),
+                    provider_profile_id: action.pins.context.provider_profile_id.clone(),
+                    host_identity_revision: identity.revision,
+                    profile_revision: profile.revision,
+                    project_binding_revision: binding.revision,
+                    bindings_document_revision: document.revision,
+                    binding_revision: local_binding.map(|binding| binding.revision),
+                },
+                revision: ConversationRevisionPins {
+                    bundle_revision: snapshot.head.revision,
+                    commit_id: snapshot.head.commit_id.clone(),
+                    manifest_sha256: snapshot.head.manifest_sha256.clone(),
+                    scope_revision,
+                    scope_sha256,
+                },
+                tail: ConversationTailPins {
+                    accepted: action.pins.tail.accepted.clone(),
+                    accepted_local: action.pins.tail.accepted_local.clone(),
+                    local: action.pins.tail.local.clone(),
+                    cloud: action.pins.tail.cloud.clone(),
+                    checkpoint_generation: live_checkpoint_generation,
+                    // The downloaded transcript's own analysis digests: pin equality
+                    // here is the transcript-versus-manifest content verification.
+                    lineage_digest,
+                    semantic_digest,
+                    raw_range: action.pins.tail.raw_range.clone(),
+                },
+                target: ConversationTargetPins {
+                    local: local_target_expectation_for_action(
+                        action, binding, &document, &captured,
+                    ),
+                    provider_state,
+                },
+                codec: thread.lineage_codec.clone(),
+                expires_at: action.pins.expires_at,
+            },
         };
         validate_conversation_action_pins(action, &context).map_err(|pin| {
             format!(
@@ -9826,6 +10336,7 @@ fn prepare_pull_conversation_actions(
             cloud_provider_thread_id,
             cloud_cwd,
             cloud_forked_from: thread.forked_from.clone(),
+            cloud_preserved: thread.preserved.clone(),
             cloud_display_title: thread.display_title.clone(),
             cloud_updated_at: thread.updated_at,
         })
@@ -9868,28 +10379,34 @@ fn failed_conversation_receipt(
     })
 }
 
-/// Read the local Codex session index and build its reviewed replacement.
-/// Fresh identities reject collisions; MaterializeCloud replaces every old
-/// row for its existing identity with one current row. Returns no payload
-/// without a title: a titleless task leaves provider presentation metadata
-/// untouched.
-fn codex_index_payload(
-    path: &Path,
-    provider_thread_id: &str,
-    thread_name: Option<&str>,
+/// One reviewed Codex session-index row rewrite. `replace_existing` marks an
+/// identity that already owns index rows (MaterializeCloud's destination,
+/// keep-both's preserved rename): its old rows are dropped and one current
+/// row is appended. Fresh identities reject collisions instead.
+struct CodexIndexRowSpec {
+    provider_thread_id: String,
+    thread_name: String,
     updated_at: u64,
     replace_existing: bool,
+}
+
+/// Read the local Codex session index and build its reviewed replacement,
+/// rewriting one row per spec. Returns no payload for an empty spec list: a
+/// titleless task leaves provider presentation metadata untouched.
+fn codex_index_payload(
+    path: &Path,
+    rows: &[CodexIndexRowSpec],
 ) -> Result<(TargetExpectation, Option<Vec<u8>>), String> {
     let expectation = bounded_file_expectation(path)?;
+    if rows.is_empty() {
+        return Ok((expectation, None));
+    }
     let bytes = match &expectation {
         TargetExpectation::Absent => Vec::new(),
         TargetExpectation::Sha256(_) => fs::read(path)
             .map_err(|error| format!("read Codex session index '{}': {error}", path.display()))?,
     };
-    let Some(thread_name) = thread_name else {
-        return Ok((expectation, None));
-    };
-    let mut output = Vec::with_capacity(bytes.len().saturating_add(256));
+    let mut output = Vec::with_capacity(bytes.len().saturating_add(256 * rows.len()));
     for raw in bytes.split_inclusive(|byte| *byte == b'\n') {
         let line = raw.strip_suffix(b"\n").unwrap_or(raw);
         let line = line.strip_suffix(b"\r").unwrap_or(line);
@@ -9903,31 +10420,36 @@ fn codex_index_payload(
             .get("id")
             .or_else(|| value.get("session_id"))
             .and_then(serde_json::Value::as_str);
-        if id == Some(provider_thread_id) {
-            if !replace_existing {
+        if let Some(spec) = rows
+            .iter()
+            .find(|spec| id == Some(spec.provider_thread_id.as_str()))
+        {
+            if !spec.replace_existing {
                 return Err("reserved Codex provider ID is already indexed".to_string());
             }
             continue;
         }
         output.extend_from_slice(raw);
     }
-    let updated_at = Utc
-        .timestamp_opt(updated_at as i64, 0)
-        .single()
-        .ok_or_else(|| "cloud conversation timestamp is out of range".to_string())?
-        .format("%Y-%m-%dT%H:%M:%S%.6fZ")
-        .to_string();
     if !output.is_empty() && !output.ends_with(b"\n") {
         output.push(b'\n');
     }
-    let mut row = serde_json::to_vec(&serde_json::json!({
-        "id": provider_thread_id,
-        "thread_name": thread_name,
-        "updated_at": updated_at,
-    }))
-    .map_err(|error| format!("serialize Codex session index row: {error}"))?;
-    row.push(b'\n');
-    output.extend(row);
+    for spec in rows {
+        let updated_at = Utc
+            .timestamp_opt(spec.updated_at as i64, 0)
+            .single()
+            .ok_or_else(|| "cloud conversation timestamp is out of range".to_string())?
+            .format("%Y-%m-%dT%H:%M:%S%.6fZ")
+            .to_string();
+        let mut row = serde_json::to_vec(&serde_json::json!({
+            "id": spec.provider_thread_id,
+            "thread_name": spec.thread_name,
+            "updated_at": updated_at,
+        }))
+        .map_err(|error| format!("serialize Codex session index row: {error}"))?;
+        row.push(b'\n');
+        output.extend(row);
+    }
     Ok((expectation, Some(output)))
 }
 
@@ -9956,10 +10478,10 @@ fn apply_prepared_pull_conversation(
         candidate.host_id == binding.host_id
             && candidate.replica_id == binding.replica_id
             && candidate.local_project_id == binding.local_project_id
-            && candidate.provider_profile_id == action.provider_profile_id
+            && candidate.provider_profile_id == action.pins.context.provider_profile_id
             && candidate.thread_id == action.thread_id
     });
-    if live_binding.map(|binding| binding.revision) != action.expected_binding_revision {
+    if live_binding.map(|binding| binding.revision) != action.pins.context.binding_revision {
         return Err("conversation binding changed after review".to_string());
     }
     if action.action == ConversationPlanActionType::MaterializeCloud
@@ -9975,7 +10497,9 @@ fn apply_prepared_pull_conversation(
     let phase_started = Instant::now();
 
     let cloud_tail = action
-        .pinned_cloud_tail
+        .pins
+        .tail
+        .cloud
         .clone()
         .ok_or_else(|| "conversation Pull action lacks its pinned cloud tail".to_string())?;
     let destination_provider_thread_id = action
@@ -10081,10 +10605,10 @@ fn apply_prepared_pull_conversation(
             start_record_count: cloud_tail.start_record_count,
         };
         let sha = hex_digest(Sha256::digest(&rewritten).as_slice());
-        let lineage_digest = action.pinned_lineage_digest.clone().ok_or_else(|| {
+        let lineage_digest = action.pins.tail.lineage_digest.clone().ok_or_else(|| {
             "conversation Pull action lacks its pinned lineage digest".to_string()
         })?;
-        let semantic_digest = action.pinned_semantic_digest.clone().ok_or_else(|| {
+        let semantic_digest = action.pins.tail.semantic_digest.clone().ok_or_else(|| {
             "conversation Pull action lacks its pinned semantic digest".to_string()
         })?;
         (
@@ -10135,7 +10659,9 @@ fn apply_prepared_pull_conversation(
     };
     let replace_existing = action.action == ConversationPlanActionType::MaterializeCloud;
     let transcript_target = action
-        .expected_provider_state
+        .pins
+        .target
+        .provider_state
         .iter()
         .find(|target| {
             !is_index_target(target)
@@ -10147,14 +10673,45 @@ fn apply_prepared_pull_conversation(
         target_path: PathBuf::from(&transcript_target.target_path),
         role: ConversationFileRole::Transcript,
         expected: transcript_target.expectation.clone(),
+        index_rows: vec![],
         bytes: installed_bytes.clone(),
     }];
     if let Some(index_target) = action
-        .expected_provider_state
+        .pins
+        .target
+        .provider_state
         .iter()
         .find(|target| is_index_target(target))
     {
         let index_path = PathBuf::from(&index_target.target_path);
+        let mut index_specs = Vec::new();
+        if let Some(keep_both) = &action.keep_both {
+            // The preserved copy keeps the original provider session id; its
+            // reviewed rename carries the plan-minted marker title. The id
+            // comes from the revision-pinned bindings document, so a moved
+            // binding forces a stale replan instead of renaming the wrong
+            // session.
+            let preserved_provider_thread_id = document_before
+                .bindings
+                .iter()
+                .find(|row| {
+                    row.host_id == binding.host_id
+                        && row.replica_id == binding.replica_id
+                        && row.local_project_id == binding.local_project_id
+                        && row.provider_profile_id == action.pins.context.provider_profile_id
+                        && row.thread_id == action.thread_id
+                })
+                .and_then(|row| row.provider_thread_id.clone())
+                .ok_or_else(|| {
+                    "conversation keep-both requires a bound provider session".to_string()
+                })?;
+            index_specs.push(CodexIndexRowSpec {
+                provider_thread_id: preserved_provider_thread_id,
+                thread_name: keep_both.preserved_display_title.clone(),
+                updated_at: applied_at,
+                replace_existing: true,
+            });
+        }
         // A real title is one a user could have set: unnamed captures
         // publish the provider thread ID as their display title.
         let cloud_title = prepared
@@ -10164,18 +10721,25 @@ fn apply_prepared_pull_conversation(
             .filter(|title| {
                 !title.is_empty() && *title != prepared.cloud_provider_thread_id.as_str()
             });
-        let (expected, bytes) = codex_index_payload(
-            &index_path,
-            &destination_provider_thread_id,
-            cloud_title,
-            prepared.cloud_updated_at,
-            replace_existing,
-        )?;
+        if let Some(cloud_title) = cloud_title {
+            index_specs.push(CodexIndexRowSpec {
+                provider_thread_id: destination_provider_thread_id.clone(),
+                thread_name: cloud_title.to_string(),
+                updated_at: prepared.cloud_updated_at,
+                replace_existing,
+            });
+        }
+        let index_rows = index_specs
+            .iter()
+            .map(|spec| spec.provider_thread_id.clone())
+            .collect::<Vec<_>>();
+        let (expected, bytes) = codex_index_payload(&index_path, &index_specs)?;
         if let Some(bytes) = bytes {
             targets.push(ConversationTargetPayload {
                 target_path: index_path,
                 role: ConversationFileRole::ProviderIndexFragment,
                 expected,
+                index_rows,
                 bytes,
             });
         }
@@ -10208,8 +10772,8 @@ fn apply_prepared_pull_conversation(
         generation: 0,
         accepted: Some(mallard_domain::AcceptedConversationVersion {
             artifact_sha256: artifact_sha256.clone(),
-            accepted_at_commit_id: action.pinned_commit_id.clone(),
-            accepted_at_manifest_sha256: action.pinned_manifest_sha256.clone(),
+            accepted_at_commit_id: action.pins.revision.commit_id.clone(),
+            accepted_at_manifest_sha256: action.pins.revision.manifest_sha256.clone(),
             portable_tail: cloud_tail.clone(),
         }),
         accepted_local_tail: Some(accepted_local_tail.clone()),
@@ -10234,7 +10798,7 @@ fn apply_prepared_pull_conversation(
                 row.host_id == binding.host_id
                     && row.replica_id == binding.replica_id
                     && row.local_project_id == binding.local_project_id
-                    && row.provider_profile_id == action.provider_profile_id
+                    && row.provider_profile_id == action.pins.context.provider_profile_id
                     && &row.thread_id == thread_id
             })
         };
@@ -10250,15 +10814,20 @@ fn apply_prepared_pull_conversation(
                 let row = &mut document_after.bindings[index];
                 row.thread_id = keep_both.preserved_thread_id.clone();
                 row.forked_from = None;
+                row.preserved = Some(keep_both.preserved.clone());
                 row.revision = row.revision.saturating_add(1);
                 row.updated_at = applied_at;
+                // The re-created origin row restores the published cloud
+                // provenance: an origin that is itself a preserved copy
+                // keeps its marker on every device.
                 document_after.bindings.push(LocalConversationBinding {
                     host_id: binding.host_id.clone(),
                     replica_id: binding.replica_id.clone(),
                     local_project_id: binding.local_project_id.clone(),
-                    provider_profile_id: action.provider_profile_id.clone(),
+                    provider_profile_id: action.pins.context.provider_profile_id.clone(),
                     thread_id: action.thread_id.clone(),
                     forked_from: None,
+                    preserved: prepared.cloud_preserved.clone(),
                     root_tail_layout: Some(imported_layout.clone()),
                     provider_thread_id: Some(destination_provider_thread_id.clone()),
                     materialization_state: ConversationMaterializationState::Resumable,
@@ -10287,9 +10856,10 @@ fn apply_prepared_pull_conversation(
                     host_id: binding.host_id.clone(),
                     replica_id: binding.replica_id.clone(),
                     local_project_id: binding.local_project_id.clone(),
-                    provider_profile_id: action.provider_profile_id.clone(),
+                    provider_profile_id: action.pins.context.provider_profile_id.clone(),
                     thread_id: action.thread_id.clone(),
                     forked_from: prepared.cloud_forked_from.clone(),
+                    preserved: prepared.cloud_preserved.clone(),
                     root_tail_layout: Some(imported_layout.clone()),
                     provider_thread_id: Some(destination_provider_thread_id.clone()),
                     materialization_state: ConversationMaterializationState::Resumable,
@@ -10339,12 +10909,12 @@ fn apply_prepared_pull_conversation(
         checkpoint.generation = generation;
         threads.insert(action.thread_id.clone(), checkpoint);
         link.scope_bases.entry(scope.clone()).and_modify(|base| {
-            base.scope_revision = action.pinned_scope_revision.max(base.scope_revision);
-            base.scope_sha256 = action.pinned_scope_sha256.clone();
+            base.scope_revision = action.pins.revision.scope_revision.max(base.scope_revision);
+            base.scope_sha256 = action.pins.revision.scope_sha256.clone();
             base.reviewed_in = RepositoryBase {
-                revision: action.pinned_revision,
-                commit_id: action.pinned_commit_id.clone(),
-                manifest_sha256: action.pinned_manifest_sha256.clone(),
+                revision: action.pins.revision.bundle_revision,
+                commit_id: action.pins.revision.commit_id.clone(),
+                manifest_sha256: action.pins.revision.manifest_sha256.clone(),
                 manifest_size: base.reviewed_in.manifest_size.max(1),
             };
             base.last_pull_at = Some(applied_at);
@@ -10360,20 +10930,20 @@ fn apply_prepared_pull_conversation(
         cloud: ConversationCloudAnchor {
             storage_id: plan.storage_id.clone(),
             bundle_id: plan.bundle_id.clone(),
-            revision: action.pinned_revision,
-            commit_id: action.pinned_commit_id.clone(),
-            manifest_sha256: action.pinned_manifest_sha256.clone(),
+            revision: action.pins.revision.bundle_revision,
+            commit_id: action.pins.revision.commit_id.clone(),
+            manifest_sha256: action.pins.revision.manifest_sha256.clone(),
         },
         host_id: binding.host_id.clone(),
         replica_id: binding.replica_id.clone(),
         local_project_id: binding.local_project_id.clone(),
-        provider_profile_id: action.provider_profile_id.clone(),
+        provider_profile_id: action.pins.context.provider_profile_id.clone(),
         provider: action.provider.clone(),
         thread_id: action.thread_id.clone(),
         operation: ConversationSyncOperationKind::ProviderMaterialization(
             ConversationMaterializationOperation {
                 phase: PullJournalPhase::TargetStaged,
-                planned_relation: action.relation,
+                planned_relation: action.pins.tail.classification()?,
                 accepted_tail_after: cloud_tail,
                 // The engine's verify_provider_payload hashes the staged
                 // **local** target bytes, so these pins are the decode
@@ -10390,15 +10960,15 @@ fn apply_prepared_pull_conversation(
         ),
         provider_thread_id: Some(destination_provider_thread_id),
         materialization_state: ConversationMaterializationState::Resumable,
-        expected_host_identity_revision: action.expected_host_identity_revision,
+        expected_host_identity_revision: action.pins.context.host_identity_revision,
         // Every action was validated against the reviewed document before
         // the batch began. Earlier approved actions in this same Pull may
         // have advanced that shared document, so journal this action against
         // the exact rolling revision it is about to replace.
         expected_bindings_document_revision,
-        expected_binding_revision: action.expected_binding_revision,
-        expected_profile_revision: action.expected_profile_revision,
-        expected_project_binding_revision: action.expected_project_binding_revision,
+        expected_binding_revision: action.pins.context.binding_revision,
+        expected_profile_revision: action.pins.context.profile_revision,
+        expected_project_binding_revision: action.pins.context.project_binding_revision,
         targets: Vec::new(),
         created_at: applied_at,
         updated_at: applied_at,
@@ -10536,7 +11106,7 @@ fn apply_bundle_restore_with_progress(
     // revision this batch just committed instead of invalidating itself.
     let mut expected_bindings_document_revision = prepared_conversations
         .first()
-        .map(|prepared| prepared.action.expected_bindings_document_revision);
+        .map(|prepared| prepared.action.pins.context.bindings_document_revision);
     for prepared in prepared_conversations {
         let action = prepared.action.clone();
         let resource = action
@@ -10548,7 +11118,7 @@ fn apply_bundle_restore_with_progress(
         let phase_label = format!("apply conversation {resource}");
         let phase_started = Instant::now();
         let expected_revision = expected_bindings_document_revision
-            .unwrap_or(action.expected_bindings_document_revision);
+            .unwrap_or(action.pins.context.bindings_document_revision);
         match apply_prepared_pull_conversation(
             repository,
             &plan,
@@ -10763,17 +11333,29 @@ fn apply_bundle_restore_with_progress(
         .iter()
         .filter_map(|receipt| {
             receipt.conversation.as_ref().and_then(|conversation| {
-                conversation
-                    .preserved_thread_id
-                    .as_ref()
-                    .map(|preserved| PreservedThreadResult {
+                conversation.preserved_thread_id.as_ref().map(|preserved| {
+                    // The marker title lives only in the plan's keep-both
+                    // record; a receipt without its action is a
+                    // plan/receipt mismatch, not a displayable result.
+                    let preserved_display_title = plan
+                        .conversation_actions
+                        .iter()
+                        .find(|action| action.action_id == receipt.action_id)
+                        .and_then(|action| action.keep_both.as_ref())
+                        .map(|keep_both| keep_both.preserved_display_title.clone())
+                        .ok_or_else(|| {
+                            "applied keep-both receipt has no matching plan action".to_string()
+                        })?;
+                    Ok(PreservedThreadResult {
                         action_id: receipt.action_id.clone(),
                         original_thread_id: conversation.thread_id.clone(),
                         preserved_thread_id: preserved.clone(),
+                        preserved_display_title,
                     })
+                })
             })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, String>>()?;
     let success = overall_success;
     let message = if success {
         format!("Applied {} restore actions", applied_action_ids.len())
@@ -10829,14 +11411,18 @@ fn adopt_cloud_metadata_action(
     applied_at: u64,
 ) -> Result<ApplyReceipt, String> {
     let cloud_tail = action
-        .pinned_cloud_tail
+        .pins
+        .tail
+        .cloud
         .clone()
         .ok_or_else(|| "conversation adoption lacks its pinned cloud tail".to_string())?;
     // The local column accepts the reviewed local observation: adoption runs
     // only on Sync relations, where classification proved it equivalent to
     // the accepted cloud value in its own form.
     let accepted_local_tail = action
-        .pinned_local_tail
+        .pins
+        .tail
+        .local
         .clone()
         .ok_or_else(|| "conversation adoption lacks its pinned local tail".to_string())?;
     let scope = SyncScopeKey::Provider(action.provider.clone());
@@ -10846,7 +11432,7 @@ fn adopt_cloud_metadata_action(
             .links
             .iter_mut()
             .find(|link| {
-                link.local_project_id == action.local_project_id
+                link.local_project_id == action.pins.context.local_project_id
                     && link.storage_id == plan.storage_id
             })
             .ok_or_else(|| {
@@ -10859,7 +11445,7 @@ fn adopt_cloud_metadata_action(
         let checkpoint = threads.get_mut(&action.thread_id).ok_or_else(|| {
             "conversation adoption requires an existing destination checkpoint".to_string()
         })?;
-        if Some(checkpoint.generation) != action.pinned_checkpoint_generation {
+        if Some(checkpoint.generation) != action.pins.tail.checkpoint_generation {
             return Err(
                 "conversation adoption checkpoint advanced after review; refresh and pull again"
                     .to_string(),
@@ -10871,8 +11457,8 @@ fn adopt_cloud_metadata_action(
                 .as_ref()
                 .map(|accepted| accepted.artifact_sha256.clone())
                 .unwrap_or_else(|| hex_digest(Sha256::digest([]).as_slice())),
-            accepted_at_commit_id: action.pinned_commit_id.clone(),
-            accepted_at_manifest_sha256: action.pinned_manifest_sha256.clone(),
+            accepted_at_commit_id: action.pins.revision.commit_id.clone(),
+            accepted_at_manifest_sha256: action.pins.revision.manifest_sha256.clone(),
             portable_tail: cloud_tail.clone(),
         };
         checkpoint.accepted = Some(accepted);
@@ -10880,12 +11466,12 @@ fn adopt_cloud_metadata_action(
         checkpoint.observed_tail = accepted_local_tail;
         checkpoint.generation = checkpoint.generation.saturating_add(1);
         link.scope_bases.entry(scope).and_modify(|base| {
-            base.scope_revision = action.pinned_scope_revision.max(base.scope_revision);
-            base.scope_sha256 = action.pinned_scope_sha256.clone();
+            base.scope_revision = action.pins.revision.scope_revision.max(base.scope_revision);
+            base.scope_sha256 = action.pins.revision.scope_sha256.clone();
             base.reviewed_in = RepositoryBase {
-                revision: action.pinned_revision,
-                commit_id: action.pinned_commit_id.clone(),
-                manifest_sha256: action.pinned_manifest_sha256.clone(),
+                revision: action.pins.revision.bundle_revision,
+                commit_id: action.pins.revision.commit_id.clone(),
+                manifest_sha256: action.pins.revision.manifest_sha256.clone(),
                 manifest_size: base.reviewed_in.manifest_size.max(1),
             };
             base.last_pull_at = Some(applied_at);
@@ -11469,6 +12055,13 @@ fn capture_request_for_binding(
     binding: &ProjectBinding,
 ) -> Result<CaptureRequest, String> {
     let resolved = resolve_project_binding(repository, binding)?;
+    capture_request_for_resolved_binding(repository, &resolved)
+}
+
+fn capture_request_for_resolved_binding(
+    repository: &LocalStateRepository,
+    resolved: &ResolvedBinding,
+) -> Result<CaptureRequest, String> {
     let binding = &resolved.binding;
     let resolved_project = fs_canonicalize(Path::new(&binding.project_root))?;
     if resolved_project != binding.canonical_project_root {
@@ -14240,9 +14833,8 @@ fn repair_codex_conversation_paths_with_repository(
         // §6.5: repair ≡ decode_new(encode_old(x)) — the pull pipeline
         // applied locally. The old root is the recorded stale cwd; a value
         // the path-map grammar rejects cannot be repaired mechanically.
-        validate_pathmap_root("stale Codex conversation root", &issue.recorded_cwd).map_err(
-            |error| format!("Codex conversation '{}': {}", issue.thread_id, error),
-        )?;
+        validate_pathmap_root("stale Codex conversation root", &issue.recorded_cwd)
+            .map_err(|error| format!("Codex conversation '{}': {}", issue.thread_id, error))?;
         let mapper_old = CodexPathMapper::new(
             &issue.recorded_cwd,
             derive_canonical_alias(&issue.recorded_cwd).as_deref(),
@@ -14760,9 +15352,7 @@ fn remap_codex_conversation_paths(
         let repaired = mapper_new.decode_record(&encoded_old.wire)?;
         if gate_wire_equality {
             let re_encoded = mapper_new.encode_record(&repaired).map_err(|error| {
-                format!(
-                    "record {record_number} collides with the current project root: {error}"
-                )
+                format!("record {record_number} collides with the current project root: {error}")
             })?;
             if re_encoded.wire != encoded_old.wire {
                 return Err(format!(
@@ -14864,6 +15454,29 @@ mod tests {
     };
 
     #[test]
+    fn observation_worker_outcome_preserves_errors_and_rejects_missing_slots() {
+        let thread_id = ThreadId::parse("thread-worker-test").unwrap();
+        let mut failed = std::sync::OnceLock::new();
+        assert!(failed
+            .set(Err("sentinel observation error".to_string()))
+            .is_ok());
+        assert_eq!(
+            take_observation_outcome(&thread_id, &mut failed)
+                .err()
+                .as_deref(),
+            Some("sentinel observation error")
+        );
+
+        let mut missing = std::sync::OnceLock::new();
+        assert_eq!(
+            take_observation_outcome(&thread_id, &mut missing)
+                .err()
+                .as_deref(),
+            Some("thread observation worker produced no outcome for thread 'thread-worker-test'")
+        );
+    }
+
+    #[test]
     fn packaged_cli_is_resolved_beside_the_desktop_executable() {
         let temp = tempfile::tempdir().unwrap();
         let desktop = temp.path().join(if cfg!(windows) {
@@ -14912,19 +15525,17 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let index_path = temp.path().join("session_index.jsonl");
 
-        let (expectation, bytes) =
-            codex_index_payload(&index_path, "thread-new", None, 1_784_332_800, false).unwrap();
+        let (expectation, bytes) = codex_index_payload(&index_path, &[]).unwrap();
         assert_eq!(expectation, TargetExpectation::Absent);
         assert!(bytes.is_none(), "titleless threads write no index row");
 
-        let (_, bytes) = codex_index_payload(
-            &index_path,
-            "thread-new",
-            Some("Named"),
-            1_784_332_800,
-            false,
-        )
-        .unwrap();
+        let named = |name: &str, replace_existing: bool| CodexIndexRowSpec {
+            provider_thread_id: "thread-new".to_string(),
+            thread_name: name.to_string(),
+            updated_at: 1_784_332_800,
+            replace_existing,
+        };
+        let (_, bytes) = codex_index_payload(&index_path, &[named("Named", false)]).unwrap();
         let row: serde_json::Value =
             serde_json::from_slice(bytes.unwrap().trim_ascii_end()).unwrap();
         assert_eq!(
@@ -14941,21 +15552,23 @@ mod tests {
             "{\"id\":\"thread-new\",\"thread_name\":\"Old\",\"updated_at\":\"2026-01-01T00:00:00.000000Z\"}\n",
         )
         .unwrap();
-        assert!(codex_index_payload(
-            &index_path,
-            "thread-new",
-            Some("Named"),
-            1_784_332_800,
-            false,
-        )
-        .unwrap_err()
-        .contains("already indexed"));
+        assert!(codex_index_payload(&index_path, &[named("Named", false)])
+            .unwrap_err()
+            .contains("already indexed"));
+        // A keep-both rewrite carries two rows in one payload: the preserved
+        // rename replaces the existing row while the fresh destination row
+        // appends alongside it.
         let (_, replacement) = codex_index_payload(
             &index_path,
-            "thread-new",
-            Some("Updated"),
-            1_784_332_800,
-            true,
+            &[
+                named("Updated", true),
+                CodexIndexRowSpec {
+                    provider_thread_id: "thread-destination".to_string(),
+                    thread_name: "Cloud".to_string(),
+                    updated_at: 1_784_332_800,
+                    replace_existing: false,
+                },
+            ],
         )
         .unwrap();
         let rows = replacement
@@ -14964,8 +15577,11 @@ mod tests {
             .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["id"], "thread-new");
         assert_eq!(rows[0]["thread_name"], "Updated");
+        assert_eq!(rows[1]["id"], "thread-destination");
+        assert_eq!(rows[1]["thread_name"], "Cloud");
     }
 
     #[test]
@@ -15575,7 +16191,6 @@ mod tests {
             s3_endpoint: String::new(),
             region: String::new(),
             local_dir: storage_root.to_string_lossy().into_owned(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: None,
         });
         repo.save_config(config).unwrap();
@@ -15821,6 +16436,7 @@ mod tests {
                 provider_profile_id: profile_id,
                 thread_id: logical_thread_id.clone(),
                 forked_from: logical_parent,
+                preserved: None,
                 root_tail_layout: Some(RootTailLayout {
                     codec: crate::project_sync::domain::PORTABLE_TAIL_CODEC_V1.to_string(),
                     partition_kind: crate::project_sync::domain::TailPartitionKind::WholeThread,
@@ -15919,10 +16535,10 @@ mod tests {
             .iter()
             .find(|entry| entry.cloud_thread_id.as_ref() == Some(&t111))
             .unwrap();
-        assert_eq!(tip.relation, Some(TailClassification::Unknown));
+        assert_eq!(tip.push_decision.action, ConversationReviewAction::Blocked);
         assert_eq!(
-            tip.push_decision.action,
-            ConversationPlanActionType::Blocked
+            tip.push_decision.blocker,
+            Some(ConversationBlocker::UnknownEvidence)
         );
         assert!(!tip.push_decision.selectable);
         let fresh = comparison
@@ -15932,37 +16548,19 @@ mod tests {
             .unwrap();
         assert_eq!(
             fresh.push_decision.action,
-            ConversationPlanActionType::CreateCloud
+            ConversationReviewAction::CreateCloud
         );
         assert!(fresh.push_decision.selectable);
         let plan_id = review.conversation_push_plan_id.clone().unwrap();
-        let divergent_action_id = review.conversation_action_ids[&tip.resource_id].clone();
         let fresh_action_id = review.conversation_action_ids[&fresh.resource_id].clone();
         let plan = repo.load_conversation_push_plan(&plan_id).unwrap();
-        let action = plan
-            .actions
-            .iter()
-            .find(|action| action.action_id == divergent_action_id)
-            .unwrap()
-            .clone();
-        assert_eq!(action.action, ConversationPlanActionType::Blocked);
-
-        // Approving the held thread is the only hard error.
-        let selected_blocker = push_bundle_reviewed_with_repository(
-            &repo,
-            &project.local_project_id,
-            &storage_id,
-            recommended_review_recipe(&review, &storage_id),
-            empty_project_content_review(),
-            Some(plan_id.clone()),
-            vec![divergent_action_id],
-            &mut |_| {},
-        )
-        .unwrap_err();
         assert!(
-            selected_blocker.contains("resolve the blocked conversation"),
-            "{selected_blocker}"
+            !review
+                .conversation_action_ids
+                .contains_key(&tip.resource_id),
+            "blocked review rows must not enter executable plan state"
         );
+        assert_eq!(plan.actions.len(), 1);
 
         let omitted_plan = push_bundle_reviewed_with_repository(
             &repo,
@@ -16739,6 +17337,7 @@ mod tests {
                 provider_profile_id: profile_for_binding.clone(),
                 thread_id: logical_thread.clone(),
                 forked_from: None,
+                preserved: None,
                 root_tail_layout: Some(RootTailLayout {
                     codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
                     partition_kind: TailPartitionKind::WholeThread,
@@ -16758,8 +17357,7 @@ mod tests {
             codex_history_graph::resolve_codex_root(&stale_path, &no_bases).unwrap();
         let stale_leaf_bytes = codex_history_graph::read_rollout_bounded(&stale_path).unwrap();
         let seeded_stale =
-            codex_history_graph::seed_codex_root(&resolved_stale, &stale_leaf_bytes, None)
-                .unwrap();
+            codex_history_graph::seed_codex_root(&resolved_stale, &stale_leaf_bytes, None).unwrap();
         let published = build_standalone_codex_root(
             &resolved_stale,
             &StandaloneBuildMode::Encode {
@@ -16886,7 +17484,10 @@ mod tests {
             &repaired_resolved.chain,
         )
         .unwrap();
-        assert_eq!(rebased.accepted_local_tail, Some(repaired_local_tail.clone()));
+        assert_eq!(
+            rebased.accepted_local_tail,
+            Some(repaired_local_tail.clone())
+        );
         assert_eq!(rebased.observed_tail, repaired_local_tail);
         assert_ne!(
             rebased.observed_tail.accepted_tail_state,
@@ -17029,8 +17630,10 @@ mod tests {
         let text = String::from_utf8(repaired.clone()).unwrap();
         assert!(text.contains("edit /tmp/new-project/src/main.rs"));
         assert!(text.contains("keep /tmp/other/x"));
-        assert!(text.contains("\"/tmp/new-project\",\"/tmp\"")
-            || text.contains("\"writable_roots\":[\"/tmp/new-project\",\"/tmp\"]"));
+        assert!(
+            text.contains("\"/tmp/new-project\",\"/tmp\"")
+                || text.contains("\"writable_roots\":[\"/tmp/new-project\",\"/tmp\"]")
+        );
 
         // Pinned-thread gate: the repair transform preserves the wire form
         // byte-exactly, so the gated variant succeeds on the same input …
@@ -17047,15 +17650,13 @@ mod tests {
             .unwrap()
             .as_bytes(),
         );
-        let error = remap_codex_conversation_paths(
-            &colliding,
-            active,
-            &mapper_old,
-            &mapper_new,
-            true,
-        )
-        .unwrap_err();
-        assert!(error.contains("collides with the current project root"), "{error}");
+        let error =
+            remap_codex_conversation_paths(&colliding, active, &mapper_old, &mapper_new, true)
+                .unwrap_err();
+        assert!(
+            error.contains("collides with the current project root"),
+            "{error}"
+        );
 
         // Distinct out-of-project roots are an audit blocker, not a blanket
         // rewrite: the multi-root fixture from the retired flow now reports
@@ -17069,8 +17670,9 @@ mod tests {
         .collect::<Vec<_>>()
         .join("\n")
         .into_bytes();
-        let stale = inspect_codex_structural_cwds(&multi_root, active, Path::new("/tmp/new-project"))
-            .unwrap();
+        let stale =
+            inspect_codex_structural_cwds(&multi_root, active, Path::new("/tmp/new-project"))
+                .unwrap();
         assert_eq!(stale.len(), 2);
     }
 
@@ -17107,7 +17709,6 @@ mod tests {
             s3_endpoint: String::new(),
             region: String::new(),
             local_dir: temp.path().join("store").to_string_lossy().into_owned(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: None,
         });
         repo.save_config(config).unwrap();
@@ -17470,7 +18071,6 @@ mod tests {
             s3_endpoint: String::new(),
             region: String::new(),
             local_dir: temp.path().join("store").to_string_lossy().into_owned(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: None,
         });
         repo.save_config(config).unwrap();
@@ -17509,7 +18109,6 @@ mod tests {
             s3_endpoint: String::new(),
             region: String::new(),
             local_dir: storage_root.to_string_lossy().into_owned(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: None,
         });
         repo.save_config(config).unwrap();
@@ -17595,7 +18194,6 @@ mod tests {
             s3_endpoint: String::new(),
             region: String::new(),
             local_dir: storage_root.to_string_lossy().into_owned(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: None,
         });
         let saved = repo.save_config(config).unwrap();
@@ -17649,7 +18247,6 @@ mod tests {
             s3_endpoint: String::new(),
             region: String::new(),
             local_dir: temp.path().join("store").to_string_lossy().into_owned(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: None,
         });
         repo.save_config(config).unwrap();
@@ -17942,7 +18539,6 @@ mod tests {
                     .join("first-store")
                     .to_string_lossy()
                     .into_owned(),
-                included_default_exclusions: Vec::new(),
                 supports_conditional_writes: None,
             },
             StorageConfig {
@@ -17960,7 +18556,6 @@ mod tests {
                     .join("selected-store")
                     .to_string_lossy()
                     .into_owned(),
-                included_default_exclusions: Vec::new(),
                 supports_conditional_writes: None,
             },
         ]);
@@ -18566,6 +19161,39 @@ mod tests {
     }
 
     #[test]
+    fn activity_workspace_projects_one_local_and_remote_read_into_both_views() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("activity-workspace-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let session_id = "019f7500-0000-7000-8000-0000000000ab";
+        write_codex_session(&codex_home, session_id, &project_root);
+
+        let workspace = get_project_activity_workspace_with_repository(
+            &repo,
+            &project.local_project_id,
+            Some(&storage_id),
+            None,
+            None,
+            Some(30),
+            false,
+        )
+        .unwrap();
+        assert!(workspace.comparison_error.is_none());
+        let comparison = workspace.comparison.unwrap();
+        assert_eq!(workspace.activity.sessions.len(), 1);
+        assert_eq!(comparison.entries.len(), 1);
+        assert_eq!(
+            comparison.entries[0].conversation_resource_id.as_str(),
+            workspace.activity.sessions[0].resource_id
+        );
+    }
+
+    #[test]
     fn prepare_push_review_matches_standalone_commands() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
@@ -18763,7 +19391,7 @@ mod tests {
         )
         .unwrap();
         let canonical_home = std::fs::canonicalize(&codex_home).unwrap();
-        super::super::codex_watch_service::codex_watch_service()
+        super::super::codex_watch_service::session_watch_service()
             .force_rebaseline_for_tests(&canonical_home);
         let rediscovered = get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -18879,10 +19507,10 @@ mod tests {
         let restore =
             plan_bundle_restore_with_repository(&repo, &storage_id, &project.bundle_id, &binding)
                 .unwrap();
-        assert_eq!(restore.conversation_actions.len(), 1);
+        assert!(restore.conversation_actions.is_empty());
         assert_eq!(
-            restore.conversation_actions[0].action,
-            ConversationPlanActionType::ReportLocalOnly
+            restore.conversation_review[0].action,
+            ConversationReviewAction::ReportLocalOnly
         );
         let delta = metrics.snapshot().delta_since(&before);
         assert_eq!(delta.selected_captures, 0, "pull review captures nothing");
@@ -19184,7 +19812,7 @@ mod tests {
         // A forced rebaseline (the reliability-signal path) runs the
         // bounded pipeline and produces identical rows.
         let canonical = std::fs::canonicalize(&codex_home).unwrap();
-        super::super::codex_watch_service::codex_watch_service()
+        super::super::codex_watch_service::session_watch_service()
             .force_rebaseline_for_tests(&canonical);
         let before_cold = metrics.snapshot();
         let rebaselined = get_project_thread_sync_comparison_with_repository(
@@ -19395,7 +20023,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(offerable.len(), 2);
 
-        for (build_push, build_pull) in [(false, false), (true, false)] {
+        for purpose in [ReviewPurpose::Observe, ReviewPurpose::PushPlan] {
             let mut inner = engine.byte_source(&snapshot, None, None);
             let mut bytes = CountingBytes {
                 inner: &mut inner,
@@ -19413,13 +20041,12 @@ mod tests {
                 Some(&snapshot.storage_id),
                 now,
                 now.saturating_add(PLAN_LIFETIME_SECS),
-                build_push,
-                build_pull,
+                purpose,
             )
             .unwrap();
             assert!(
                 bytes.gets.is_empty() && bytes.prefetches.is_empty(),
-                "refresh and Push review read no cloud payloads (push={build_push}): \
+                "refresh and Push review read no cloud payloads ({purpose:?}): \
                  gets={:?} prefetches={:?}",
                 bytes.gets,
                 bytes.prefetches,
@@ -19443,11 +20070,11 @@ mod tests {
             Some(&snapshot.storage_id),
             now,
             now.saturating_add(PLAN_LIFETIME_SECS),
-            false,
-            true,
+            ReviewPurpose::PullPlan,
         )
         .unwrap();
-        assert_eq!(review.pull_actions.len(), 3);
+        assert_eq!(review.pull_actions.len(), 2);
+        assert_eq!(review.pull_review.len(), 3);
         assert_eq!(
             bytes.prefetches.len(),
             1,
@@ -19497,8 +20124,7 @@ mod tests {
             Some(&snapshot.storage_id),
             now,
             now.saturating_add(PLAN_LIFETIME_SECS),
-            false,
-            true,
+            ReviewPurpose::PullPlan,
         )
         .unwrap();
         let error = review
@@ -19702,6 +20328,7 @@ mod tests {
                 provider_profile_id: profile_id,
                 thread_id: ThreadId::parse("thread-phantom").unwrap(),
                 forked_from: None,
+                preserved: None,
                 root_tail_layout: Some(RootTailLayout {
                     codec: crate::project_sync::domain::PORTABLE_TAIL_CODEC_V1.to_string(),
                     partition_kind: crate::project_sync::domain::TailPartitionKind::WholeThread,
@@ -19731,7 +20358,10 @@ mod tests {
                 entry.cloud_thread_id.as_ref().map(ThreadId::as_str) == Some("thread-phantom")
             })
             .expect("phantom binding surfaces as its own row");
-        assert_eq!(phantom.relation, Some(TailClassification::Unknown));
+        assert_eq!(
+            phantom.push_decision.blocker,
+            Some(ConversationBlocker::UnknownEvidence)
+        );
         assert!(!phantom.push_decision.selectable);
         assert!(!phantom.pull_decision.selectable);
         let stored_entry = comparison
@@ -19742,8 +20372,8 @@ mod tests {
             })
             .expect("stored thread still classifies normally");
         assert_eq!(
-            stored_entry.relation,
-            Some(TailClassification::MissingLocal)
+            stored_entry.pull_decision.action,
+            ConversationReviewAction::CreateLocal
         );
     }
 
@@ -19765,7 +20395,6 @@ mod tests {
             s3_endpoint: String::new(),
             region: String::new(),
             local_dir: temp.path().join("store").to_string_lossy().into_owned(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: None,
         });
         repo.save_config(config).unwrap();
@@ -19951,7 +20580,9 @@ mod tests {
             .contains(&conversation_action.action_id));
 
         let restored_session_path = conversation_action
-            .expected_provider_state
+            .pins
+            .target
+            .provider_state
             .iter()
             .find(|target| !target.target_path.ends_with("session_index.jsonl"))
             .unwrap()
@@ -20112,7 +20743,9 @@ mod tests {
             Some(session_id)
         );
         let transcript_targets = update
-            .expected_provider_state
+            .pins
+            .target
+            .provider_state
             .iter()
             .filter(|target| {
                 target.target_path.ends_with(".jsonl")
@@ -20172,6 +20805,336 @@ mod tests {
                 .unwrap()
                 .state,
             ThreadSyncState::Synced
+        );
+
+        // Both replicas now branch from revision 2. The target publishes its
+        // branch; the source Pull must retain its local rollout under a new
+        // logical thread and mark only that moved binding as preserved.
+        let append_user_message = |path: &Path, id: &str, text: &str| {
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            serde_json::to_writer(
+                &mut file,
+                &serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "id": id,
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": text}]
+                    }
+                }),
+            )
+            .unwrap();
+            file.write_all(b"\n").unwrap();
+            file.sync_all().unwrap();
+        };
+        append_user_message(&source_session, "message-source-branch", "source branch");
+        append_user_message(
+            Path::new(&restored_session_path),
+            "message-target-branch",
+            "target branch",
+        );
+        let pushed =
+            push_bundle_with_repository(&repo, &target.local_project_id, &storage_id).unwrap();
+        assert_eq!(pushed.revision, Some(3));
+
+        // The keep-both marker names this device; provenance and the marker
+        // title are minted into the plan itself.
+        let identity = repo.load_or_create_host_identity().unwrap();
+        repo.update_host_display_name(
+            &identity.host_id,
+            identity.revision,
+            Some("Machine A".to_string()),
+        )
+        .unwrap();
+        let divergent_pull =
+            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &source_binding)
+                .unwrap();
+        let divergent_action = divergent_pull
+            .conversation_actions
+            .iter()
+            .find(|action| action.thread_id == cloud_thread_id)
+            .unwrap();
+        assert_eq!(
+            divergent_action.action,
+            ConversationPlanActionType::KeepBoth
+        );
+        let keep_both = divergent_action.keep_both.as_ref().unwrap();
+        let preserved_thread_id = keep_both.preserved_thread_id.clone();
+        let remote_provider_thread_id = keep_both.remote_provider_thread_id.clone();
+        let marker_title = "Change glb color to yellow (Preserved 1 · Machine A)";
+        assert_eq!(
+            keep_both.preserved,
+            PreservedProvenance {
+                preserved_from: cloud_thread_id.clone(),
+                ordinal: 1,
+            }
+        );
+        assert_eq!(keep_both.preserved_display_title, marker_title);
+        let divergent_result = apply_bundle_restore_with_repository(
+            &repo,
+            &divergent_pull.plan_id,
+            vec![divergent_action.action_id.clone()],
+        )
+        .unwrap();
+        assert!(
+            divergent_result.success,
+            "{:?}",
+            divergent_result.failed_actions
+        );
+        assert_eq!(divergent_result.preserved_threads.len(), 1);
+        assert_eq!(
+            divergent_result.preserved_threads[0].preserved_thread_id,
+            preserved_thread_id
+        );
+        assert_eq!(
+            divergent_result.preserved_threads[0].preserved_display_title,
+            marker_title
+        );
+
+        let source_bindings = repo
+            .load_conversation_bindings()
+            .unwrap()
+            .bindings
+            .into_iter()
+            .filter(|binding| binding.local_project_id == source.local_project_id)
+            .collect::<Vec<_>>();
+        let preserved = source_bindings
+            .iter()
+            .find(|binding| binding.thread_id == preserved_thread_id)
+            .unwrap();
+        let pulled = source_bindings
+            .iter()
+            .find(|binding| binding.thread_id == cloud_thread_id)
+            .unwrap();
+        assert_eq!(
+            preserved.preserved,
+            Some(PreservedProvenance {
+                preserved_from: cloud_thread_id.clone(),
+                ordinal: 1,
+            })
+        );
+        assert!(pulled.preserved.is_none());
+        assert_eq!(preserved.provider_thread_id.as_deref(), Some(session_id));
+        assert_eq!(
+            pulled.provider_thread_id.as_deref(),
+            Some(remote_provider_thread_id.as_str())
+        );
+        assert_ne!(preserved.thread_id, pulled.thread_id);
+
+        // One transaction renamed the preserved copy's existing index row to
+        // the marker title and appended the destination row.
+        let divergent_index =
+            std::fs::read_to_string(source_codex.join("session_index.jsonl")).unwrap();
+        let divergent_rows = divergent_index
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let marker_rows = divergent_rows
+            .iter()
+            .filter(|row| row["id"] == session_id)
+            .collect::<Vec<_>>();
+        assert_eq!(marker_rows.len(), 1);
+        assert_eq!(marker_rows[0]["thread_name"], marker_title);
+        let destination_rows = divergent_rows
+            .iter()
+            .filter(|row| row["id"] == remote_provider_thread_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(destination_rows.len(), 1);
+        assert_eq!(
+            destination_rows[0]["thread_name"],
+            "Change glb color to yellow"
+        );
+
+        // Session Detail leads with the index title, so the marker shows.
+        let preserved_resource_id =
+            conversation_resource_id(&codex_key(), &preserved_thread_id).unwrap();
+        let detail_views = load_project_session_views(
+            &repo,
+            &source.local_project_id,
+            preserved_resource_id.as_str(),
+        )
+        .unwrap();
+        let detail = session_detail::get_project_session_detail(
+            &repo,
+            provider_registry(),
+            &source.local_project_id,
+            preserved_resource_id.as_str(),
+            &detail_views,
+        )
+        .unwrap();
+        assert_eq!(detail.title, marker_title);
+
+        // The preserved copy's first Push is CreateCloud: the manifest
+        // record carries the provenance, the marker title, and this
+        // device's shared origin label.
+        let pushed_preserved =
+            push_bundle_with_repository(&repo, &source.local_project_id, &storage_id).unwrap();
+        assert_eq!(pushed_preserved.revision, Some(4));
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let published = engine.inspect(&bundle_id).unwrap();
+        let (_, preserved_record) = published
+            .manifest
+            .find_conversation(&preserved_thread_id)
+            .unwrap();
+        assert_eq!(
+            preserved_record.preserved,
+            Some(PreservedProvenance {
+                preserved_from: cloud_thread_id.clone(),
+                ordinal: 1,
+            })
+        );
+        assert_eq!(
+            preserved_record.display_title.as_deref(),
+            Some(marker_title)
+        );
+        assert_eq!(
+            preserved_record
+                .last_updated_by_origin
+                .as_ref()
+                .and_then(|origin| origin.shared_label.as_deref()),
+            Some("Machine A")
+        );
+
+        // Pulling the preserved thread elsewhere restores the provenance in
+        // the created binding and lands the marker title in that index.
+        let target_binding = repo
+            .load_bindings()
+            .unwrap()
+            .active_for(&target.local_project_id)
+            .cloned()
+            .unwrap();
+        let target_pull =
+            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &target_binding)
+                .unwrap();
+        let preserved_action = target_pull
+            .conversation_actions
+            .iter()
+            .find(|action| action.thread_id == preserved_thread_id)
+            .unwrap();
+        assert_eq!(
+            preserved_action.action,
+            ConversationPlanActionType::CreateLocal
+        );
+        let target_applied = apply_bundle_restore_with_repository(
+            &repo,
+            &target_pull.plan_id,
+            vec![preserved_action.action_id.clone()],
+        )
+        .unwrap();
+        assert!(
+            target_applied.success,
+            "{:?}",
+            target_applied.failed_actions
+        );
+        let target_preserved_row = repo
+            .load_conversation_bindings()
+            .unwrap()
+            .bindings
+            .into_iter()
+            .find(|binding| {
+                binding.local_project_id == target.local_project_id
+                    && binding.thread_id == preserved_thread_id
+            })
+            .unwrap();
+        assert_eq!(
+            target_preserved_row.preserved,
+            Some(PreservedProvenance {
+                preserved_from: cloud_thread_id.clone(),
+                ordinal: 1,
+            })
+        );
+        let target_index =
+            std::fs::read_to_string(target_codex.join("session_index.jsonl")).unwrap();
+        let target_marker_rows = target_index
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| row["thread_name"] == marker_title)
+            .count();
+        assert_eq!(target_marker_rows, 1);
+
+        // A second divergence of the same origin mints past the max visible
+        // ordinal — max+1 over cloud and binding provenance, not a count of
+        // preserved copies — and composes an un-nested marker.
+        fn find_rollout(root: &Path, provider_id: &str) -> Option<PathBuf> {
+            let mut stack = vec![root.to_path_buf()];
+            while let Some(directory) = stack.pop() {
+                for entry in std::fs::read_dir(&directory).ok()?.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.contains(provider_id))
+                    {
+                        return Some(path);
+                    }
+                }
+            }
+            None
+        }
+        append_user_message(
+            Path::new(&restored_session_path),
+            "message-target-branch-2",
+            "target branch again",
+        );
+        let pushed_again =
+            push_bundle_with_repository(&repo, &target.local_project_id, &storage_id).unwrap();
+        assert_eq!(pushed_again.revision, Some(5));
+        let source_pulled_rollout = find_rollout(
+            &source_codex.join("sessions"),
+            remote_provider_thread_id.as_str(),
+        )
+        .expect("keep-both materialized the pulled branch on the source");
+        append_user_message(
+            &source_pulled_rollout,
+            "message-source-branch-2",
+            "source branch again",
+        );
+        repo.mutate_conversation_bindings(|document| {
+            let row = document
+                .bindings
+                .iter_mut()
+                .find(|row| {
+                    row.local_project_id == source.local_project_id
+                        && row.thread_id == preserved_thread_id
+                })
+                .unwrap();
+            row.preserved = Some(PreservedProvenance {
+                preserved_from: cloud_thread_id.clone(),
+                ordinal: 5,
+            });
+            row.revision = row.revision.saturating_add(1);
+            Ok(())
+        })
+        .unwrap();
+        let source_binding = repo
+            .load_bindings()
+            .unwrap()
+            .active_for(&source.local_project_id)
+            .cloned()
+            .unwrap();
+        let second_divergent =
+            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &source_binding)
+                .unwrap();
+        let second_action = second_divergent
+            .conversation_actions
+            .iter()
+            .find(|action| action.thread_id == cloud_thread_id)
+            .unwrap();
+        assert_eq!(second_action.action, ConversationPlanActionType::KeepBoth);
+        let second_keep_both = second_action.keep_both.as_ref().unwrap();
+        assert_eq!(
+            second_keep_both.preserved,
+            PreservedProvenance {
+                preserved_from: cloud_thread_id.clone(),
+                ordinal: 6,
+            }
+        );
+        assert_eq!(
+            second_keep_both.preserved_display_title,
+            "Change glb color to yellow (Preserved 6 · Machine A)"
         );
     }
 
@@ -20463,7 +21426,6 @@ mod tests {
             s3_endpoint: String::new(),
             region: String::new(),
             local_dir: project_root.join("store").to_string_lossy().into_owned(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: None,
         });
         repo.save_config(config).unwrap();
@@ -20630,7 +21592,6 @@ mod tests {
                 .join("bundle-store")
                 .to_string_lossy()
                 .into_owned(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: None,
         });
         let error = save_project_sync_config_with_repository(&repo, config).unwrap_err();
@@ -20679,7 +21640,6 @@ mod tests {
             s3_endpoint: String::new(),
             region: String::new(),
             local_dir: fixture.storage_dir.to_string_lossy().into_owned(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: None,
         }
     }
@@ -21239,6 +22199,7 @@ mod tests {
             provider_profile_id: profile_id,
             thread_id,
             forked_from: None,
+            preserved: None,
             root_tail_layout: Some(RootTailLayout {
                 codec: crate::project_sync::domain::PORTABLE_TAIL_CODEC_V1.to_string(),
                 partition_kind: crate::project_sync::domain::TailPartitionKind::WholeThread,

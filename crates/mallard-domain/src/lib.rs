@@ -698,6 +698,7 @@ pub enum StorageKind {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct StorageConfig {
     pub id: StorageId,
     pub name: String,
@@ -716,8 +717,6 @@ pub struct StorageConfig {
     pub region: String,
     #[serde(default)]
     pub local_dir: String,
-    #[serde(default)]
-    pub included_default_exclusions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_conditional_writes: Option<bool>,
 }
@@ -737,9 +736,6 @@ impl StorageConfig {
                     return Err(format!("storage '{}' needs a bucket", self.id));
                 }
             }
-        }
-        if self.included_default_exclusions.len() > 1_024 {
-            return Err(format!("storage '{}' has too many exclusions", self.id));
         }
         Ok(())
     }
@@ -1736,6 +1732,117 @@ pub enum ConversationMaterializationState {
     StoredOnly,
 }
 
+/// Read-side character budget for provider index titles: composed preserved
+/// marker titles must fit it whole so the marker suffix survives truncating
+/// readers.
+pub const PRESERVED_TITLE_MAX_CHARS: usize = 180;
+
+const PRESERVED_MARKER_PREFIX: &str = "Preserved ";
+const PRESERVED_MARKER_SEPARATOR: &str = " · ";
+
+/// Portable provenance of a divergent keep-both preservation: the origin
+/// thread the preserved copy was split from, and the 1-based per-origin
+/// ordinal minted at plan time. Display-only — never consulted by the
+/// resolver, and the origin thread may have been tombstoned or pruned since.
+/// Ordinals are pinned per device; concurrent keep-boths of the same origin
+/// on different devices may mint the same ordinal (accepted — the device
+/// label in the marker title disambiguates).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PreservedProvenance {
+    pub preserved_from: ThreadId,
+    pub ordinal: u64,
+}
+
+impl PreservedProvenance {
+    pub fn validate(&self, carrier: &ThreadId) -> Result<(), String> {
+        if self.ordinal == 0 {
+            return Err(format!(
+                "conversation thread '{}' has a zero preservation ordinal",
+                carrier
+            ));
+        }
+        if &self.preserved_from == carrier {
+            return Err(format!(
+                "conversation thread '{}' cannot be preserved from itself",
+                carrier
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// True when `text` is exactly `Preserved <digits> · <label>` with a
+/// non-empty label.
+fn is_preserved_marker(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix(PRESERVED_MARKER_PREFIX) else {
+        return false;
+    };
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 {
+        return false;
+    }
+    rest[digits..]
+        .strip_prefix(PRESERVED_MARKER_SEPARATOR)
+        .is_some_and(|label| !label.is_empty())
+}
+
+/// Removes a trailing keep-both marker — `"{base} (Preserved {N} · {label})"`
+/// or the bare `"Preserved {N} · {label}"` — returning the base title (empty
+/// when the title was only a marker). Titles without a marker come back
+/// unchanged.
+pub fn strip_preserved_marker(title: &str) -> String {
+    let trimmed = title.trim_end();
+    if is_preserved_marker(trimmed) {
+        return String::new();
+    }
+    if let Some(without_paren) = trimmed.strip_suffix(')') {
+        if let Some(open) = without_paren.rfind('(') {
+            if is_preserved_marker(&without_paren[open + 1..]) {
+                return without_paren[..open].trim_end().to_string();
+            }
+        }
+    }
+    title.to_string()
+}
+
+/// Composes the display title of a preserved copy: `"{base} (Preserved {N} ·
+/// {label})"`, or the bare marker when there is no usable base. Any existing
+/// marker is stripped from the base first (a preserved copy that is itself
+/// preserved never nests markers), and the base is char-truncated so the
+/// whole title stays within [`PRESERVED_TITLE_MAX_CHARS`].
+pub fn compose_preserved_title(base: Option<&str>, ordinal: u64, device_label: &str) -> String {
+    let marker = format!(
+        "{}{}{}{}",
+        PRESERVED_MARKER_PREFIX, ordinal, PRESERVED_MARKER_SEPARATOR, device_label
+    );
+    let mut base = base.unwrap_or_default().trim().to_string();
+    loop {
+        let stripped = strip_preserved_marker(&base).trim().to_string();
+        if stripped == base {
+            break;
+        }
+        base = stripped;
+    }
+    // The suffix costs the marker plus " (" and ")".
+    let budget = PRESERVED_TITLE_MAX_CHARS.saturating_sub(marker.chars().count() + 3);
+    if base.is_empty() || budget == 0 {
+        return marker;
+    }
+    if base.chars().count() > budget {
+        base = base
+            .chars()
+            .take(budget)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        if base.is_empty() {
+            return marker;
+        }
+    }
+    format!("{} ({})", base, marker)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LocalConversationBinding {
@@ -1744,11 +1851,14 @@ pub struct LocalConversationBinding {
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
     pub thread_id: ThreadId,
-    /// Immediate portable parent for a locally preserved conflict branch.
-    /// Provenance only: the conflict resolver writes `None` and never reads
-    /// it.
+    /// Immediate portable parent for an imported conversation branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ThreadId>,
+    /// Present when this thread is the local side retained by a divergent
+    /// keep-both Pull. Portable: published with the thread on Push and
+    /// restored from the cloud record on other machines' pulls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved: Option<PreservedProvenance>,
     /// The immutable portable partition of the bound root task, seeded once
     /// at first full parse.  A bound Codex task without a layout is
     /// corruption: recover it from an exact journal/checkpoint/cloud witness
@@ -1770,6 +1880,9 @@ impl LocalConversationBinding {
                 "local conversation thread '{}' cannot fork from itself",
                 self.thread_id
             ));
+        }
+        if let Some(preserved) = &self.preserved {
+            preserved.validate(&self.thread_id)?;
         }
         if let Some(layout) = &self.root_tail_layout {
             layout.validate()?;
@@ -2155,6 +2268,11 @@ pub struct ConversationJournalTarget {
     pub backup_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged_sha256: Option<String>,
+    /// The provider index row ids this target rewrites — exactly the ids the
+    /// fragment verifier must find. Non-empty exactly for
+    /// `ProviderIndexFragment` targets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub index_rows: Vec<String>,
     #[serde(default)]
     pub commit_started: bool,
     #[serde(default)]
@@ -2181,6 +2299,23 @@ impl ConversationJournalTarget {
             return Err(
                 "conversation journal target cannot be committed before commit starts".to_string(),
             );
+        }
+        if (self.role == ConversationFileRole::ProviderIndexFragment) == self.index_rows.is_empty()
+        {
+            return Err(
+                "conversation journal index rows must pair with the index-fragment role"
+                    .to_string(),
+            );
+        }
+        if self.index_rows.len() > 8 {
+            return Err("conversation journal target has too many index rows".to_string());
+        }
+        let mut row_ids = BTreeSet::new();
+        for row_id in &self.index_rows {
+            validate_provider_thread_id("conversation journal index row", row_id)?;
+            if !row_ids.insert(row_id) {
+                return Err("conversation journal target repeats an index row".to_string());
+            }
         }
         self.role.validate()?;
         Ok(())
@@ -2722,6 +2857,11 @@ pub struct ConversationThread {
     /// referenced thread may have been tombstoned or pruned since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ThreadId>,
+    /// Keep-both preservation provenance. Like `forked_from`, display-only:
+    /// never consulted by the resolver, and the origin thread may have been
+    /// tombstoned or pruned since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved: Option<PreservedProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2853,6 +2993,9 @@ impl ConversationThread {
                 self.thread_id
             ));
         }
+        if let Some(preserved) = &self.preserved {
+            preserved.validate(&self.thread_id)?;
+        }
         if let Some(thread_id) = &self.source_thread_id {
             if thread_id.is_empty()
                 || thread_id.len() > 256
@@ -2904,14 +3047,12 @@ pub enum ConversationPlanDirection {
     Pull,
 }
 
-/// Typed reconciliation outcomes. Push and Pull intentionally share one enum
-/// so every relation can be represented in review DTOs without interpreting a
-/// localized message. The mapping from relation to action is fixed by the
-/// resolver contract: Push never runs Pull's path, divergence is Pull-only,
-/// and Pull's only divergence resolution is keep-both.
+/// Presentation outcomes for the compact conversation review row. These are
+/// never persisted as executable actions: they explain both mutations and
+/// informational/blocked states to the UI.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ConversationPlanActionType {
+pub enum ConversationReviewAction {
     // Push
     Publish,
     CreateCloud,
@@ -2931,25 +3072,30 @@ pub enum ConversationPlanActionType {
     Blocked,
 }
 
+/// The only conversation operations that an approved plan can execute.
+/// Informational review outcomes deliberately cannot inhabit this type.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ConversationReasonCode {
-    SyncCurrent,
-    SyncAdvanced,
-    LocalOutstanding,
-    CloudOutstanding,
-    Divergent,
-    MissingLocal,
-    MissingCloud,
-    MissingBoth,
+pub enum ConversationPlanActionType {
+    Publish,
+    CreateCloud,
+    AdoptCloudMetadata,
+    MaterializeCloud,
+    KeepBoth,
+    CreateLocal,
+}
+
+/// A capability or evidence failure that blocks a reviewed direction. Normal
+/// reason text is derived from the classified relation and review action;
+/// only genuine blockers need an independent value.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationBlocker {
     UnknownEvidence,
     DetachedRequiresPull,
-    CorruptionBlocked,
-    ProviderNotQuiescent,
     CodecUnsupported,
     AmbiguousBinding,
     MissingBinding,
-    StalePlan,
     Busy,
 }
 
@@ -2984,13 +3130,16 @@ impl ProviderStateExpectation {
 
 /// The planned identities of a divergent keep-both: the minted logical thread
 /// that preserves the local branch, and the fresh provider alias that will
-/// track the cloud thread. All IDs are minted during planning; apply and
-/// recovery never mint.
+/// track the cloud thread. All identities — the ids, the preservation
+/// provenance, and the marker display title — are minted during planning;
+/// apply and recovery never mint.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct KeepBothPlan {
     pub preserved_thread_id: ThreadId,
     pub remote_provider_thread_id: String,
+    pub preserved: PreservedProvenance,
+    pub preserved_display_title: String,
 }
 
 impl KeepBothPlan {
@@ -2998,7 +3147,156 @@ impl KeepBothPlan {
         validate_provider_thread_id(
             "conversation keep-both remote provider thread",
             &self.remote_provider_thread_id,
+        )?;
+        self.preserved.validate(&self.preserved_thread_id)?;
+        validate_display_text(
+            "conversation keep-both preserved title",
+            &self.preserved_display_title,
+            false,
         )
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationContextPins {
+    pub host_id: HostId,
+    pub replica_id: ReplicaId,
+    pub local_project_id: LocalProjectId,
+    pub provider_profile_id: LocalProviderProfileId,
+    pub host_identity_revision: u64,
+    pub profile_revision: u64,
+    pub project_binding_revision: u64,
+    pub bindings_document_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_revision: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationRevisionPins {
+    pub bundle_revision: u64,
+    pub commit_id: String,
+    pub manifest_sha256: String,
+    pub scope_revision: u64,
+    pub scope_sha256: String,
+}
+
+impl ConversationRevisionPins {
+    fn validate(&self) -> Result<(), String> {
+        validate_bundle_head_pin(self.bundle_revision, &self.commit_id, &self.manifest_sha256)?;
+        validate_sha256("conversation plan scope digest", &self.scope_sha256)?;
+        if (self.scope_revision == 0) != self.scope_sha256.bytes().all(|byte| byte == b'0') {
+            return Err(
+                "conversation plan scope pin has inconsistent absent coordinates".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationTailPins {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<PortableConversationTail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_local: Option<PortableConversationTail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<PortableConversationTail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<PortableConversationTail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_range: Option<RawRangePin>,
+}
+
+impl ConversationTailPins {
+    pub fn classification(&self) -> Result<TailClassification, String> {
+        let side = |tail: &Option<PortableConversationTail>| match tail {
+            Some(tail) => TailSideEvidence::Present(tail.clone()),
+            None => TailSideEvidence::ConfirmedAbsent,
+        };
+        let evidence = VerifiedTailEvidence::new(
+            side(&self.accepted),
+            side(&self.accepted_local),
+            side(&self.local),
+            side(&self.cloud),
+        )
+        .map_err(|blocker| format!("conversation plan tail evidence is invalid: {blocker:?}"))?;
+        Ok(compare_conversation_tail(&evidence))
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        self.classification()?;
+        for (label, digest) in [
+            ("conversation plan lineage", self.lineage_digest.as_deref()),
+            (
+                "conversation plan semantic",
+                self.semantic_digest.as_deref(),
+            ),
+        ] {
+            if let Some(digest) = digest {
+                validate_sha256(label, digest)?;
+            }
+        }
+        if self.lineage_digest.is_some() != self.semantic_digest.is_some() {
+            return Err("conversation plan must pin lineage and semantics together".to_string());
+        }
+        if let Some(pin) = &self.raw_range {
+            pin.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationTargetPins {
+    pub local: TargetExpectation,
+    #[serde(default)]
+    pub provider_state: Vec<ProviderStateExpectation>,
+}
+
+impl ConversationTargetPins {
+    fn validate(&self) -> Result<(), String> {
+        self.local.validate()?;
+        if self.provider_state.len() > 64 {
+            return Err("conversation plan has too many provider targets".to_string());
+        }
+        let mut paths = BTreeSet::new();
+        for target in &self.provider_state {
+            target.validate()?;
+            if !paths.insert(target.target_path.to_lowercase()) {
+                return Err("conversation plan repeats a provider target".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationActionPins {
+    pub context: ConversationContextPins,
+    pub revision: ConversationRevisionPins,
+    pub tail: ConversationTailPins,
+    pub target: ConversationTargetPins,
+    pub codec: String,
+    pub expires_at: u64,
+}
+
+impl ConversationActionPins {
+    fn validate(&self) -> Result<(), String> {
+        self.revision.validate()?;
+        self.tail.validate()?;
+        self.target.validate()?;
+        validate_display_text("conversation plan codec", &self.codec, false)
     }
 }
 
@@ -3006,15 +3304,8 @@ impl KeepBothPlan {
 #[serde(deny_unknown_fields)]
 pub struct ConversationPlanAction {
     pub action_id: ActionId,
-    pub direction: ConversationPlanDirection,
     pub action: ConversationPlanActionType,
-    pub reason_code: ConversationReasonCode,
-    pub relation: TailClassification,
     pub provider: ProviderKey,
-    pub host_id: HostId,
-    pub replica_id: ReplicaId,
-    pub local_project_id: LocalProjectId,
-    pub provider_profile_id: LocalProviderProfileId,
     pub thread_id: ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_resource_id: Option<ResourceId>,
@@ -3022,117 +3313,15 @@ pub struct ConversationPlanAction {
     pub proposed_provider_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_both: Option<KeepBothPlan>,
-    pub required_codec: String,
-    pub pinned_revision: u64,
-    pub pinned_commit_id: String,
-    pub pinned_manifest_sha256: String,
-    /// The reviewed provider-scope coordinates this action was planned
-    /// against. Zero revision with an all-zero digest pins an absent scope.
-    pub pinned_scope_revision: u64,
-    pub pinned_scope_sha256: String,
-    /// The exact classifier evidence: accepted wire pin `P_wire`, its
-    /// local-form twin `P_local`, local `L`, cloud `C`.  Presence follows
-    /// the pinned relation; apply re-runs the shared classifier over these
-    /// exact values and requires the planned relation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_accepted_tail: Option<PortableConversationTail>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_accepted_local_tail: Option<PortableConversationTail>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_local_tail: Option<PortableConversationTail>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_cloud_tail: Option<PortableConversationTail>,
-    /// The reviewed checkpoint generation.  Apply requires the live
-    /// checkpoint to still carry exactly this generation — any checkpoint
-    /// advance between review and apply is a typed stale error, so apply
-    /// never trusts a live-state read the review did not pin.  `None` pins
-    /// the checkpoint's confirmed absence at review.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_checkpoint_generation: Option<u64>,
-    /// Cloud manifest whole-chain digests, pinned for materializing installs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_lineage_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_semantic_digest: Option<String>,
-    /// The raw unaccepted physical interval a publishing apply must find
-    /// unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_raw_range: Option<RawRangePin>,
-    pub expected_local_target: TargetExpectation,
-    #[serde(default)]
-    pub expected_provider_state: Vec<ProviderStateExpectation>,
-    pub expected_profile_revision: u64,
-    pub expected_project_binding_revision: u64,
-    pub expected_host_identity_revision: u64,
-    pub expected_bindings_document_revision: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_binding_revision: Option<u64>,
-    pub expires_at: u64,
+    pub pins: ConversationActionPins,
 }
 
 impl ConversationPlanAction {
     pub fn validate(&self) -> Result<(), String> {
-        validate_bundle_head_pin(
-            self.pinned_revision,
-            &self.pinned_commit_id,
-            &self.pinned_manifest_sha256,
-        )?;
-        validate_sha256("conversation plan scope digest", &self.pinned_scope_sha256)?;
-        if (self.pinned_scope_revision == 0)
-            != self.pinned_scope_sha256.bytes().all(|byte| byte == b'0')
-        {
-            return Err(
-                "conversation plan scope pin has inconsistent absent coordinates".to_string(),
-            );
-        }
-        validate_display_text("conversation plan codec", &self.required_codec, false)?;
-        for tail in [
-            self.pinned_accepted_tail.as_ref(),
-            self.pinned_accepted_local_tail.as_ref(),
-            self.pinned_local_tail.as_ref(),
-            self.pinned_cloud_tail.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            tail.validate()?;
-        }
-        if self.pinned_accepted_tail.is_some() != self.pinned_accepted_local_tail.is_some() {
-            return Err(
-                "conversation plan must pin the wire and local accepted tails together"
-                    .to_string(),
-            );
-        }
-        for (label, digest) in [
-            (
-                "conversation plan lineage",
-                self.pinned_lineage_digest.as_deref(),
-            ),
-            (
-                "conversation plan semantic",
-                self.pinned_semantic_digest.as_deref(),
-            ),
-        ] {
-            if let Some(digest) = digest {
-                validate_sha256(label, digest)?;
-            }
-        }
-        if self.pinned_lineage_digest.is_some() != self.pinned_semantic_digest.is_some() {
-            return Err("conversation plan must pin lineage and semantics together".to_string());
-        }
-        if let Some(pin) = &self.pinned_raw_range {
-            pin.validate()?;
-        }
-        self.expected_local_target.validate()?;
-        if self.expected_provider_state.len() > 64 {
-            return Err("conversation plan has too many provider targets".to_string());
-        }
-        let mut paths = BTreeSet::new();
-        for target in &self.expected_provider_state {
-            target.validate()?;
-            if !paths.insert(target.target_path.to_lowercase()) {
-                return Err("conversation plan repeats a provider target".to_string());
-            }
+        self.pins.validate()?;
+        let relation = self.pins.tail.classification()?;
+        if !self.action.matches_relation(relation) {
+            return Err("conversation plan action disagrees with its tail evidence".to_string());
         }
         if self
             .proposed_provider_thread_id
@@ -3142,109 +3331,6 @@ impl ConversationPlanAction {
             })
         {
             return Err("conversation plan has an invalid provider thread id".to_string());
-        }
-
-        let push_action = matches!(
-            self.action,
-            ConversationPlanActionType::Publish
-                | ConversationPlanActionType::CreateCloud
-                | ConversationPlanActionType::NoChanges
-                | ConversationPlanActionType::RequirePullMetadata
-                | ConversationPlanActionType::RequirePull
-                | ConversationPlanActionType::NotPushable
-        );
-        let pull_action = matches!(
-            self.action,
-            ConversationPlanActionType::AdoptCloudMetadata
-                | ConversationPlanActionType::ReportPushEligible
-                | ConversationPlanActionType::MaterializeCloud
-                | ConversationPlanActionType::KeepBoth
-                | ConversationPlanActionType::CreateLocal
-                | ConversationPlanActionType::ReportLocalOnly
-                | ConversationPlanActionType::NotFound
-        );
-        match self.direction {
-            ConversationPlanDirection::Push if pull_action => {
-                return Err("conversation Push plan contains a Pull-only action".to_string());
-            }
-            ConversationPlanDirection::Pull if push_action => {
-                return Err("conversation Pull plan contains a Push-only action".to_string());
-            }
-            _ => {}
-        }
-
-        // The fixed relation-to-action map: the plan may only record the
-        // action its resolver table assigns to the pinned relation.
-        let action_matches_relation = match self.action {
-            ConversationPlanActionType::Publish => {
-                self.relation == TailClassification::LocalOutstanding
-            }
-            ConversationPlanActionType::CreateCloud => {
-                self.relation == TailClassification::MissingCloud
-            }
-            ConversationPlanActionType::NoChanges => {
-                self.relation == TailClassification::Sync(SyncCurrency::Current)
-            }
-            ConversationPlanActionType::RequirePullMetadata => {
-                self.relation == TailClassification::Sync(SyncCurrency::Advanced)
-            }
-            ConversationPlanActionType::RequirePull => matches!(
-                self.relation,
-                TailClassification::CloudOutstanding | TailClassification::Divergent
-            ),
-            ConversationPlanActionType::NotPushable => matches!(
-                self.relation,
-                TailClassification::MissingLocal | TailClassification::MissingBoth
-            ),
-            ConversationPlanActionType::AdoptCloudMetadata => {
-                matches!(self.relation, TailClassification::Sync(_))
-            }
-            ConversationPlanActionType::ReportPushEligible => {
-                self.relation == TailClassification::LocalOutstanding
-            }
-            ConversationPlanActionType::MaterializeCloud => {
-                self.relation == TailClassification::CloudOutstanding
-            }
-            ConversationPlanActionType::KeepBoth => self.relation == TailClassification::Divergent,
-            ConversationPlanActionType::CreateLocal => {
-                self.relation == TailClassification::MissingLocal
-            }
-            ConversationPlanActionType::ReportLocalOnly => {
-                self.relation == TailClassification::MissingCloud
-            }
-            ConversationPlanActionType::NotFound => {
-                self.relation == TailClassification::MissingBoth
-            }
-            // Capability gates block any relation; the reason code carries
-            // the specific hold.
-            ConversationPlanActionType::Blocked => true,
-        };
-        if !action_matches_relation {
-            return Err("conversation plan action disagrees with its pinned relation".to_string());
-        }
-
-        // Evidence presence follows the pinned relation.
-        let (want_accepted, want_local, want_cloud) = match self.relation {
-            TailClassification::Sync(_)
-            | TailClassification::LocalOutstanding
-            | TailClassification::CloudOutstanding
-            | TailClassification::Divergent => (true, true, true),
-            TailClassification::MissingCloud => (false, true, false),
-            TailClassification::MissingLocal => (false, false, true),
-            TailClassification::MissingBoth => (false, false, false),
-            TailClassification::Unknown => (
-                self.pinned_accepted_tail.is_some(),
-                self.pinned_local_tail.is_some(),
-                self.pinned_cloud_tail.is_some(),
-            ),
-        };
-        if self.pinned_accepted_tail.is_some() != want_accepted
-            || self.pinned_local_tail.is_some() != want_local
-            || self.pinned_cloud_tail.is_some() != want_cloud
-        {
-            return Err(
-                "conversation plan evidence pins disagree with the pinned relation".to_string(),
-            );
         }
 
         let publishes = matches!(
@@ -3257,10 +3343,10 @@ impl ConversationPlanAction {
                 | ConversationPlanActionType::KeepBoth
                 | ConversationPlanActionType::CreateLocal
         );
-        if publishes != self.pinned_raw_range.is_some() {
+        if publishes != self.pins.tail.raw_range.is_some() {
             return Err("conversation plan raw range pin disagrees with its action".to_string());
         }
-        if materializes && self.pinned_lineage_digest.is_none() {
+        if materializes && self.pins.tail.lineage_digest.is_none() {
             return Err("conversation materializing action lacks manifest digest pins".to_string());
         }
         if (self.action == ConversationPlanActionType::KeepBoth) != self.keep_both.is_some() {
@@ -3271,6 +3357,11 @@ impl ConversationPlanAction {
             if keep_both.preserved_thread_id == self.thread_id {
                 return Err(
                     "conversation keep-both cannot preserve into its own thread".to_string()
+                );
+            }
+            if keep_both.preserved.preserved_from != self.thread_id {
+                return Err(
+                    "conversation keep-both provenance must name the divergent thread".to_string(),
                 );
             }
             if self.proposed_provider_thread_id.is_some() {
@@ -3291,20 +3382,42 @@ impl ConversationPlanAction {
                 "conversation materialization action provider identity is inconsistent".to_string(),
             );
         }
-        let informational = matches!(
-            self.action,
-            ConversationPlanActionType::NoChanges
-                | ConversationPlanActionType::RequirePullMetadata
-                | ConversationPlanActionType::RequirePull
-                | ConversationPlanActionType::NotPushable
-                | ConversationPlanActionType::AdoptCloudMetadata
-                | ConversationPlanActionType::ReportPushEligible
-                | ConversationPlanActionType::ReportLocalOnly
-                | ConversationPlanActionType::NotFound
-                | ConversationPlanActionType::Blocked
-        );
-        if informational && !self.expected_provider_state.is_empty() {
-            return Err("informational conversation action reserves mutation targets".to_string());
+        if !materializes && !self.pins.target.provider_state.is_empty() {
+            return Err(
+                "non-materializing conversation action reserves provider targets".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Small immutable Pull-review row. `action_id` is present exactly when the
+/// row projects an executable action stored in `conversation_actions`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationReviewRow {
+    pub provider: ProviderKey,
+    pub thread_id: ThreadId,
+    pub resource_id: ResourceId,
+    pub action: ConversationReviewAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<ConversationBlocker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<ActionId>,
+}
+
+impl ConversationReviewRow {
+    fn validate(&self) -> Result<(), String> {
+        if (self.action == ConversationReviewAction::Blocked) != self.blocker.is_some() {
+            return Err("conversation review blocker disagrees with its action".to_string());
+        }
+        if self.action.planned_action().is_some() != self.action_id.is_some() {
+            return Err("conversation review action id disagrees with its action".to_string());
+        }
+        if let Some(reason) = &self.blocked_reason {
+            validate_display_text("conversation review blocker", reason, false)?;
         }
         Ok(())
     }
@@ -3350,31 +3463,34 @@ impl ConversationPushPlan {
         let mut provider_scope_pins: BTreeMap<ProviderKey, (u64, String)> = BTreeMap::new();
         for action in &self.actions {
             action.validate()?;
-            if action.direction != ConversationPlanDirection::Push
-                || action.host_id != self.host_id
-                || action.replica_id != self.replica_id
-                || action.local_project_id != self.local_project_id
-                || action.pinned_revision != self.revision
-                || action.pinned_commit_id != self.commit_id
-                || action.pinned_manifest_sha256 != self.manifest_sha256
-                || action.expected_host_identity_revision != self.expected_host_identity_revision
-                || action.expected_bindings_document_revision
+            if !matches!(
+                action.action,
+                ConversationPlanActionType::Publish | ConversationPlanActionType::CreateCloud
+            ) || action.pins.context.host_id != self.host_id
+                || action.pins.context.replica_id != self.replica_id
+                || action.pins.context.local_project_id != self.local_project_id
+                || action.pins.revision.bundle_revision != self.revision
+                || action.pins.revision.commit_id != self.commit_id
+                || action.pins.revision.manifest_sha256 != self.manifest_sha256
+                || action.pins.context.host_identity_revision
+                    != self.expected_host_identity_revision
+                || action.pins.context.bindings_document_revision
                     != self.expected_bindings_document_revision
-                || action.expected_project_binding_revision
+                || action.pins.context.project_binding_revision
                     != self.expected_project_binding_revision
-                || action.expires_at != self.expires_at
+                || action.pins.expires_at != self.expires_at
             {
                 return Err("conversation push-plan action pins disagree with the plan".to_string());
             }
             let scope_pin = (
-                action.pinned_scope_revision,
-                action.pinned_scope_sha256.clone(),
+                action.pins.revision.scope_revision,
+                action.pins.revision.scope_sha256.clone(),
             );
             if let Some(previous) = provider_scope_pins.insert(action.provider.clone(), scope_pin) {
                 if previous
                     != (
-                        action.pinned_scope_revision,
-                        action.pinned_scope_sha256.clone(),
+                        action.pins.revision.scope_revision,
+                        action.pins.revision.scope_sha256.clone(),
                     )
                 {
                     return Err(format!(
@@ -4672,6 +4788,8 @@ pub struct RestorePlan {
     pub actions: Vec<RestoreAction>,
     #[serde(default)]
     pub conversation_actions: Vec<ConversationPlanAction>,
+    #[serde(default)]
+    pub conversation_review: Vec<ConversationReviewRow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_content_eligibility: Option<ProjectFileSyncEligibility>,
     /// Advisory repository-level continuity computed at plan time, so the
@@ -4719,6 +4837,7 @@ impl RestorePlan {
         if self.created_at > self.expires_at
             || self.actions.len() > MAX_ACTIONS
             || self.conversation_actions.len() > MAX_ACTIONS
+            || self.conversation_review.len() > MAX_ACTIONS
             || self
                 .actions
                 .len()
@@ -4739,20 +4858,64 @@ impl RestorePlan {
         }
         for action in &self.conversation_actions {
             action.validate()?;
-            if action.direction != ConversationPlanDirection::Pull
-                || action.host_id != self.host_id
-                || action.replica_id != self.replica_id
-                || action.pinned_revision != self.revision
-                || action.pinned_commit_id != self.commit_id
-                || action.pinned_manifest_sha256 != self.manifest_sha256
-                || action.expected_host_identity_revision != self.expected_host_identity_revision
-                || action.expires_at != self.expires_at
+            if !matches!(
+                action.action,
+                ConversationPlanActionType::AdoptCloudMetadata
+                    | ConversationPlanActionType::MaterializeCloud
+                    | ConversationPlanActionType::KeepBoth
+                    | ConversationPlanActionType::CreateLocal
+            ) || action.pins.context.host_id != self.host_id
+                || action.pins.context.replica_id != self.replica_id
+                || action.pins.revision.bundle_revision != self.revision
+                || action.pins.revision.commit_id != self.commit_id
+                || action.pins.revision.manifest_sha256 != self.manifest_sha256
+                || action.pins.context.host_identity_revision
+                    != self.expected_host_identity_revision
+                || action.pins.expires_at != self.expires_at
             {
                 return Err("conversation Pull action pins disagree with the plan".to_string());
             }
             if !action_ids.insert(action.action_id.clone()) {
                 return Err(format!("duplicate restore action '{}'", action.action_id));
             }
+        }
+        let conversation_action_ids = self
+            .conversation_actions
+            .iter()
+            .map(|action| &action.action_id)
+            .collect::<BTreeSet<_>>();
+        let mut reviewed_action_ids = BTreeSet::new();
+        for row in &self.conversation_review {
+            row.validate()?;
+            if let Some(action_id) = &row.action_id {
+                let action = self
+                    .conversation_actions
+                    .iter()
+                    .find(|action| action.action_id == *action_id)
+                    .ok_or_else(|| {
+                        "conversation review row references an unknown action".to_string()
+                    })?;
+                if !reviewed_action_ids.insert(action_id) {
+                    return Err(
+                        "conversation review rows reference one action more than once".to_string(),
+                    );
+                }
+                if row.action.planned_action() != Some(action.action)
+                    || row.provider != action.provider
+                    || row.thread_id != action.thread_id
+                    || action
+                        .source_resource_id
+                        .as_ref()
+                        .is_some_and(|resource_id| resource_id != &row.resource_id)
+                {
+                    return Err(
+                        "conversation review row disagrees with its executable action".to_string(),
+                    );
+                }
+            }
+        }
+        if reviewed_action_ids != conversation_action_ids {
+            return Err("conversation Pull action is missing its review row".to_string());
         }
         Ok(())
     }
@@ -4999,9 +5162,14 @@ impl Materializations {
     }
 }
 
+mod conversation_reconciliation;
 mod conversation_tail;
 mod conversation_tail_relation;
 
+pub use conversation_reconciliation::{
+    default_conversation_decision, BindingResolution, ClassifiedThread, ConversationCapabilities,
+    ConversationDecision, ConversationOperationState, ReviewPurpose,
+};
 pub use conversation_tail::{
     compute_conversation_tail_state, compute_portable_conversation_tail,
     compute_portable_conversation_tail_with_codec, conversation_prefix_witness,
@@ -5011,8 +5179,8 @@ pub use conversation_tail::{
     PORTABLE_TAIL_CODEC_WIRE_V1,
 };
 pub use conversation_tail_relation::{
-    compare_conversation_tail, SyncCurrency, TailClassification, TailComparisonEvidence,
-    TailSideEvidence,
+    compare_conversation_tail, SyncCurrency, TailClassification, TailEvidenceBlocker,
+    TailSideEvidence, VerifiedTailEvidence,
 };
 
 #[cfg(test)]

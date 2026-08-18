@@ -136,7 +136,7 @@ on demand.
 | `host_identity.json` | Installation identity | Schema/revision, private 128-bit `host_id`, optional local display name, timestamps | No |
 | `sync_config.json` | User configuration and project/storage catalog | Storage definitions, S3 credentials, local projects, storage links, recipes, project-content preferences, per-storage reviewed bases, per-link conversation checkpoints (accepted portable tail + witness, observed tail, physical mapping cursor, prefix witness) | No |
 | `machine_projects.json` | Machine path and provider-profile catalog | Exact and canonical checkout paths, exact and canonical provider-home paths, host/replica IDs, project/profile bindings, binding revisions and state | No |
-| `conversation_bindings.json` | Local-to-portable conversation identity map | Mallard thread ID, provider thread ID, project/replica/profile scope, materialization state, immutable root tail layout (codec, partition kind, fixed start), `forked_from` provenance hint | No |
+| `conversation_bindings.json` | Local-to-portable conversation identity map | Mallard thread ID, provider thread ID, project/replica/profile scope, materialization state, immutable root tail layout (codec, partition kind, fixed start), `forked_from` provenance hint, keep-both `preserved` provenance (`preserved_from` origin + per-origin ordinal) | No |
 | `conversation_sync_journal.json` | Crash-recoverable conversation transactions | In-flight Push publications (CandidateUploaded, HeadAdvanced, LocalCommitted, terminal phases) and Pull materializations (TargetStaged, ProviderCommitted, LocalCommitted, terminal phases), each embedding the exact whole-document `SyncConfig` and `ConversationBindings` before/after states that recovery installs verbatim | No |
 | `materializations.json` | Durable Pull history | Plan and bundle coordinates, status, action receipts, absolute targets, backup paths, conversation receipts, errors | No |
 | `activity_cache.json` | Local session-history acceleration for every bound provider | File size/mtime keys, provider key, parsed ownership, cwd, Git/session metrics, and identities; cached title, summary, and chat text are deliberately omitted | No |
@@ -214,7 +214,11 @@ One provider thread ID may have only one owner for a given host/profile.
   count — seeded at first full parse or imported from the verified cloud
   value at Pull install; and
 - `forked_from` as a provenance hint that is surfaced but never used for
-  matching or classification.
+  matching or classification; and
+- `preserved` as the keep-both provenance hint (`preserved_from` origin
+  thread + per-origin ordinal), published with the thread on Push and
+  restored from the cloud record on other machines' pulls — display-only,
+  like `forked_from`.
 
 Acceptance state does not live on the binding. Each `ProjectStorageLink` in
 `sync_config.json` holds per-provider-scope conversation checkpoints: the
@@ -303,6 +307,10 @@ materialization action with:
 
 - a pre-minted preserved Mallard thread ID `t'` and a fresh provider thread
   ID for the re-materialized tracked thread, both persisted in the plan;
+- the minted preservation provenance `PreservedProvenance { preserved_from:
+  t, ordinal }` (ordinal = max+1 over every provenance record naming `t`
+  across the pinned cloud snapshot and the local bindings) and the composed
+  marker display title `"{base} (Preserved {N} · {device label})"`;
 - pinned accepted/local/cloud tails, raw-range hashes, and the immutable
   commit/manifest coordinates; and
 - exact target paths with expected before-states.
@@ -311,7 +319,10 @@ Apply never invokes Codex and never edits the preserved rollout: `t'` keeps
 the local bytes and the unchanged local layout under a re-keyed checkpoint
 with the accepted pin cleared, while `t` re-materializes the verified cloud
 graph under the fresh alias with the remote layout imported from the cloud
-value. The journal operation embeds the exact whole-document
+value. The same transaction rewrites the provider session index: the
+preserved copy's existing row is renamed to the plan-minted marker title,
+and the destination row lands beside it when cloud carries a real title.
+The journal operation embeds the exact whole-document
 `ConversationBindings` and `SyncConfig` before/after states; recovery rolls
 the remaining document forward or terminalizes (`aborted_precommit`,
 `aborted_provider_collision`) without ever clobbering a foreign target.
@@ -320,11 +331,13 @@ The completed local identity is:
 
 ```text
 t  -> cloud conversation, re-materialized under a fresh provider alias
-t' -> preserved local branch, forked_from = t as a provenance hint
+t' -> preserved local branch, preserved = { preserved_from: t, ordinal }
 ```
 
-Pull does not publish `t'`. Its first reviewed Push publishes the preserved
-layout as a new cloud thread with no family metadata; until then cloud still
+Pull does not publish `t'`. Its first reviewed Push is CreateCloud and
+carries the binding's `preserved` provenance and the marker title into the
+portable thread record; a later Pull of `t'` elsewhere restores the same
+provenance into the receiving binding. Until that Push, cloud still
 contains only `t`.
 
 ### 3.7 Locks, atomicity, permissions, and recovery
@@ -649,6 +662,7 @@ portable_tail                 # codec, partition_kind, start_record_count,
                               # accepted_end_record_count, accepted_tail_state;
                               # required for Codex entries, end == message_count
 optional forked_from
+optional preserved            # keep-both provenance: preserved_from + ordinal
 optional source_thread_id
 optional created_by_origin, last_updated_by_origin
 created_at, updated_at

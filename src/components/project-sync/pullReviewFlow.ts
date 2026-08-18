@@ -55,14 +55,8 @@ export interface PullReviewApplyResult {
  * review. Metadata adoption is a real local mutation and must be selected.
  */
 export function hasPendingRestoreMutations(plan: RestorePlan): boolean {
-  if (plan.actions.length > 0) return true;
-  return plan.conversation_actions.some((action) => (
-    action.action === "adopt_cloud_metadata"
-    || action.action === "materialize_cloud"
-    || action.action === "keep_both"
-    || action.action === "create_local"
-    || action.action === "blocked"
-  ));
+  if (plan.actions.length > 0 || plan.conversation_actions.length > 0) return true;
+  return plan.conversation_review.some((row) => row.action === "blocked");
 }
 
 /**

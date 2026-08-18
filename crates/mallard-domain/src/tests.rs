@@ -219,7 +219,6 @@ fn sample_storage() -> StorageConfig {
         s3_endpoint: String::new(),
         region: String::new(),
         local_dir: "/tmp/project-sync-store".to_string(),
-        included_default_exclusions: Vec::new(),
         supports_conditional_writes: None,
     }
 }
@@ -641,6 +640,7 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
             .unwrap()
         }),
         forked_from: None,
+        preserved: None,
         source_thread_id: Some("provider-native-thread".to_string()),
         created_by_origin: None,
         last_updated_by_origin: None,
@@ -836,6 +836,7 @@ fn duplicate_threads_across_scopes_are_rejected() {
         semantic_digest,
         portable_tail: None,
         forked_from: None,
+        preserved: None,
         source_thread_id: None,
         created_by_origin: None,
         last_updated_by_origin: None,
@@ -1278,50 +1279,57 @@ fn push_action(
     let (scope_revision, scope_sha256) = scope_pin_absent();
     ConversationPlanAction {
         action_id: ActionId::parse(action_id).unwrap(),
-        direction: ConversationPlanDirection::Push,
         action: ConversationPlanActionType::CreateCloud,
-        reason_code: ConversationReasonCode::MissingCloud,
-        relation: TailClassification::MissingCloud,
         provider: provider(provider_key),
-        host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
-        replica_id: ReplicaId::parse("replica-a").unwrap(),
-        local_project_id: LocalProjectId::parse("project-a").unwrap(),
-        provider_profile_id: LocalProviderProfileId::parse(profile).unwrap(),
         thread_id: ThreadId::parse(format!("thread-{}", thread_suffix)).unwrap(),
         source_resource_id: None,
         proposed_provider_thread_id: None,
         keep_both: None,
-        required_codec: format!("{}.lineage.v1", provider_key),
-        pinned_revision: 0,
-        pinned_commit_id: "absent".to_string(),
-        pinned_manifest_sha256: "0".repeat(64),
-        pinned_scope_revision: scope_revision,
-        pinned_scope_sha256: scope_sha256,
-        pinned_accepted_tail: None,
-        pinned_accepted_local_tail: None,
-        pinned_local_tail: Some(portable_tail(
-            TailPartitionKind::WholeThread,
-            0,
-            5,
-            TAIL_VECTOR_WHOLE_AT_0_M1_M5,
-        )),
-        pinned_cloud_tail: None,
-        pinned_checkpoint_generation: None,
-        pinned_lineage_digest: None,
-        pinned_semantic_digest: None,
-        pinned_raw_range: Some(RawRangePin {
-            start_byte_offset: 0,
-            end_byte_offset: 512,
-            range_sha256: "a".repeat(64),
-        }),
-        expected_local_target: TargetExpectation::Sha256("a".repeat(64)),
-        expected_provider_state: Vec::new(),
-        expected_profile_revision: 1,
-        expected_project_binding_revision: 2,
-        expected_host_identity_revision: 3,
-        expected_bindings_document_revision: 4,
-        expected_binding_revision: None,
-        expires_at: 10,
+        pins: ConversationActionPins {
+            context: ConversationContextPins {
+                host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+                replica_id: ReplicaId::parse("replica-a").unwrap(),
+                local_project_id: LocalProjectId::parse("project-a").unwrap(),
+                provider_profile_id: LocalProviderProfileId::parse(profile).unwrap(),
+                host_identity_revision: 3,
+                profile_revision: 1,
+                project_binding_revision: 2,
+                bindings_document_revision: 4,
+                binding_revision: None,
+            },
+            revision: ConversationRevisionPins {
+                bundle_revision: 0,
+                commit_id: "absent".to_string(),
+                manifest_sha256: "0".repeat(64),
+                scope_revision,
+                scope_sha256,
+            },
+            tail: ConversationTailPins {
+                accepted: None,
+                accepted_local: None,
+                local: Some(portable_tail(
+                    TailPartitionKind::WholeThread,
+                    0,
+                    5,
+                    TAIL_VECTOR_WHOLE_AT_0_M1_M5,
+                )),
+                cloud: None,
+                checkpoint_generation: None,
+                lineage_digest: None,
+                semantic_digest: None,
+                raw_range: Some(RawRangePin {
+                    start_byte_offset: 0,
+                    end_byte_offset: 512,
+                    range_sha256: "a".repeat(64),
+                }),
+            },
+            target: ConversationTargetPins {
+                local: TargetExpectation::Sha256("a".repeat(64)),
+                provider_state: Vec::new(),
+            },
+            codec: format!("{}.lineage.v1", provider_key),
+            expires_at: 10,
+        },
     }
 }
 
@@ -1353,8 +1361,8 @@ fn push_plans_carry_per_provider_pins() {
     // Two different scope pins for the same provider cannot coexist.
     let mut conflicting = plan.clone();
     conflicting.actions[1] = push_action("action-codex-2", "codex", "profile-codex", "3333");
-    conflicting.actions[1].pinned_scope_revision = 5;
-    conflicting.actions[1].pinned_scope_sha256 = "b".repeat(64);
+    conflicting.actions[1].pins.revision.scope_revision = 5;
+    conflicting.actions[1].pins.revision.scope_sha256 = "b".repeat(64);
     assert!(conflicting
         .validate()
         .unwrap_err()
@@ -1699,8 +1707,8 @@ fn tail_evidence(
     accepted: TailSideEvidence,
     local: TailSideEvidence,
     cloud: TailSideEvidence,
-) -> TailComparisonEvidence {
-    dual_tail_evidence(accepted.clone(), accepted, local, cloud)
+) -> VerifiedTailEvidence {
+    try_dual_tail_evidence(accepted.clone(), accepted, local, cloud).unwrap()
 }
 
 fn dual_tail_evidence(
@@ -1708,17 +1716,17 @@ fn dual_tail_evidence(
     accepted_local: TailSideEvidence,
     local: TailSideEvidence,
     cloud: TailSideEvidence,
-) -> TailComparisonEvidence {
-    TailComparisonEvidence {
-        accepted,
-        accepted_local,
-        local,
-        cloud,
-        local_provenance_verified: true,
-        accepted_witness_verified: true,
-        cloud_ancestry_verified: true,
-        coordinates_verified: true,
-    }
+) -> VerifiedTailEvidence {
+    try_dual_tail_evidence(accepted, accepted_local, local, cloud).unwrap()
+}
+
+fn try_dual_tail_evidence(
+    accepted: TailSideEvidence,
+    accepted_local: TailSideEvidence,
+    local: TailSideEvidence,
+    cloud: TailSideEvidence,
+) -> Result<VerifiedTailEvidence, TailEvidenceBlocker> {
+    VerifiedTailEvidence::new(accepted, accepted_local, local, cloud)
 }
 
 #[test]
@@ -1766,7 +1774,7 @@ fn compare_conversation_tail_covers_every_relation_row() {
     ];
     for (accepted, local, cloud, expected) in rows {
         assert_eq!(
-            compare_conversation_tail(tail_evidence(
+            compare_conversation_tail(&tail_evidence(
                 Present(accepted),
                 Present(local),
                 Present(cloud)
@@ -1795,72 +1803,33 @@ fn compare_conversation_tail_covers_every_relation_row() {
             ConfirmedAbsent,
             TailClassification::MissingBoth,
         ),
-        // Pull does not bootstrap by comparing graphs.
-        (
-            ConfirmedAbsent,
-            Present(t5.clone()),
-            Present(t5.clone()),
-            TailClassification::Unknown,
-        ),
-        // An expected side missing after a pin exists is Unknown.
-        (
-            Present(t4.clone()),
-            ConfirmedAbsent,
-            Present(t5.clone()),
-            TailClassification::Unknown,
-        ),
-        (
-            Present(t4.clone()),
-            Present(t5.clone()),
-            ConfirmedAbsent,
-            TailClassification::Unknown,
-        ),
-        (
-            Present(t4.clone()),
-            ConfirmedAbsent,
-            ConfirmedAbsent,
-            TailClassification::Unknown,
-        ),
     ];
     for (accepted, local, cloud, expected) in absence_rows {
         assert_eq!(
-            compare_conversation_tail(tail_evidence(accepted, local, cloud)),
+            compare_conversation_tail(&tail_evidence(accepted, local, cloud)),
             expected
         );
     }
 
-    // Any invalid side is Unknown, never a relation.
+    // Ambiguous absence and invalid sides never become classifier input.
     assert_eq!(
-        compare_conversation_tail(tail_evidence(
+        try_dual_tail_evidence(
+            ConfirmedAbsent,
+            ConfirmedAbsent,
+            Present(t5.clone()),
+            Present(t5.clone()),
+        ),
+        Err(TailEvidenceBlocker::UnacceptedOverlap)
+    );
+    assert_eq!(
+        try_dual_tail_evidence(
+            Present(t4.clone()),
             Present(t4.clone()),
             Invalid,
-            Present(t5.clone())
-        )),
-        TailClassification::Unknown
+            Present(t5.clone()),
+        ),
+        Err(TailEvidenceBlocker::InvalidSide)
     );
-    assert_eq!(
-        compare_conversation_tail(tail_evidence(Invalid, ConfirmedAbsent, ConfirmedAbsent)),
-        TailClassification::Unknown
-    );
-
-    // A value match can never override a failed gate.
-    for gate in 0..4 {
-        let mut evidence = tail_evidence(
-            Present(t5.clone()),
-            Present(t5.clone()),
-            Present(t5.clone()),
-        );
-        match gate {
-            0 => evidence.local_provenance_verified = false,
-            1 => evidence.accepted_witness_verified = false,
-            2 => evidence.cloud_ancestry_verified = false,
-            _ => evidence.coordinates_verified = false,
-        }
-        assert_eq!(
-            compare_conversation_tail(evidence),
-            TailClassification::Unknown
-        );
-    }
 
     // Tail equality is meaningful only under a compatible codec, partition,
     // and start: a moved start or foreign codec is Unknown, not Divergent.
@@ -1868,40 +1837,43 @@ fn compare_conversation_tail_covers_every_relation_row() {
         compute_portable_conversation_tail(TailPartitionKind::FixedPaginatedTail, 3, &chain)
             .unwrap();
     assert_eq!(
-        compare_conversation_tail(tail_evidence(
+        try_dual_tail_evidence(
             Present(t5.clone()),
             Present(t5.clone()),
-            Present(fixed.clone())
-        )),
-        TailClassification::Unknown
+            Present(t5.clone()),
+            Present(fixed.clone()),
+        ),
+        Err(TailEvidenceBlocker::LayoutMismatch)
     );
     let mut foreign = t5.clone();
     foreign.codec = "claude.lineage.v1".to_string();
     assert_eq!(
-        compare_conversation_tail(tail_evidence(
+        try_dual_tail_evidence(
             Present(t5.clone()),
             Present(t5.clone()),
-            Present(foreign)
-        )),
-        TailClassification::Unknown
+            Present(t5.clone()),
+            Present(foreign),
+        ),
+        Err(TailEvidenceBlocker::LayoutMismatch)
     );
     let mut moved = fixed.clone();
     moved.start_record_count = 2;
     moved.accepted_end_record_count = 4;
     assert_eq!(
-        compare_conversation_tail(tail_evidence(
+        try_dual_tail_evidence(
             Present(fixed.clone()),
             Present(fixed.clone()),
-            Present(moved)
-        )),
-        TailClassification::Unknown
+            Present(fixed.clone()),
+            Present(moved),
+        ),
+        Err(TailEvidenceBlocker::LayoutMismatch)
     );
 
     // A completed Push of the local turn flips the follow-up machine to
     // CloudOutstanding: its pin still matches its local value while the
     // cloud carries the newly accepted tail.
     assert_eq!(
-        compare_conversation_tail(tail_evidence(
+        compare_conversation_tail(&tail_evidence(
             Present(t4.clone()),
             Present(t4.clone()),
             Present(t5.clone())
@@ -1913,7 +1885,7 @@ fn compare_conversation_tail_covers_every_relation_row() {
     // outstanding work: local at-or-below its pinned end is Divergent, and
     // a cloud rewrite at the pinned end is Divergent.
     assert_eq!(
-        compare_conversation_tail(tail_evidence(
+        compare_conversation_tail(&tail_evidence(
             Present(t4.clone()),
             Present(t3.clone()),
             Present(t4.clone())
@@ -1923,7 +1895,7 @@ fn compare_conversation_tail_covers_every_relation_row() {
     let mut cloud_rewrite = t4.clone();
     cloud_rewrite.accepted_tail_state = "e".repeat(64);
     assert_eq!(
-        compare_conversation_tail(tail_evidence(
+        compare_conversation_tail(&tail_evidence(
             Present(t4.clone()),
             Present(t4.clone()),
             Present(cloud_rewrite)
@@ -1943,7 +1915,7 @@ fn compare_conversation_tail_covers_every_relation_row() {
     let w4 = wire(&t4);
     let w5 = wire(&t5);
     assert_eq!(
-        compare_conversation_tail(dual_tail_evidence(
+        compare_conversation_tail(&dual_tail_evidence(
             Present(w4.clone()),
             Present(t4.clone()),
             Present(t4.clone()),
@@ -1952,7 +1924,7 @@ fn compare_conversation_tail_covers_every_relation_row() {
         TailClassification::Sync(SyncCurrency::Current)
     );
     assert_eq!(
-        compare_conversation_tail(dual_tail_evidence(
+        compare_conversation_tail(&dual_tail_evidence(
             Present(w4.clone()),
             Present(t4.clone()),
             Present(t5.clone()),
@@ -1961,7 +1933,7 @@ fn compare_conversation_tail_covers_every_relation_row() {
         TailClassification::LocalOutstanding
     );
     assert_eq!(
-        compare_conversation_tail(dual_tail_evidence(
+        compare_conversation_tail(&dual_tail_evidence(
             Present(w4.clone()),
             Present(t4.clone()),
             Present(t4.clone()),
@@ -1972,7 +1944,7 @@ fn compare_conversation_tail_covers_every_relation_row() {
     // Both columns moved: Divergent — the same-form Advanced row is
     // unreachable across forms because the codec labels differ.
     assert_eq!(
-        compare_conversation_tail(dual_tail_evidence(
+        compare_conversation_tail(&dual_tail_evidence(
             Present(w4.clone()),
             Present(t4.clone()),
             Present(t5.clone()),
@@ -1982,25 +1954,25 @@ fn compare_conversation_tail_covers_every_relation_row() {
     );
     // A half-present pin pair is corrupted acceptance evidence.
     assert_eq!(
-        compare_conversation_tail(dual_tail_evidence(
+        try_dual_tail_evidence(
             Present(w4.clone()),
             ConfirmedAbsent,
             Present(t5.clone()),
-            Present(w4.clone())
-        )),
-        TailClassification::Unknown
+            Present(w4.clone()),
+        ),
+        Err(TailEvidenceBlocker::IncompleteAcceptance)
     );
     // Wire and local pins disagreeing on coordinates is Unknown.
     let mut torn_local = t3.clone();
     torn_local.accepted_end_record_count = 3;
     assert_eq!(
-        compare_conversation_tail(dual_tail_evidence(
+        try_dual_tail_evidence(
             Present(w4.clone()),
             Present(t3.clone()),
             Present(t3.clone()),
-            Present(w4.clone())
-        )),
-        TailClassification::Unknown
+            Present(w4.clone()),
+        ),
+        Err(TailEvidenceBlocker::AcceptanceCoordinateMismatch)
     );
 }
 
@@ -2085,7 +2057,10 @@ fn conversation_checkpoints_validate_layout_witness_and_mapping() {
         accepted.portable_tail.accepted_end_record_count += 1;
         accepted.portable_tail.accepted_tail_state = "e".repeat(64);
     }
-    assert!(torn.validate().unwrap_err().contains("partition or coordinates"));
+    assert!(torn
+        .validate()
+        .unwrap_err()
+        .contains("partition or coordinates"));
     // The wire pin may carry a different codec label; only the local twin
     // must share the observed layout.
     let mut dual_form = checkpoint.clone();
@@ -2173,6 +2148,7 @@ fn conversation_bindings_carry_validated_layouts() {
         provider_profile_id: LocalProviderProfileId::parse("profile-codex").unwrap(),
         thread_id: ThreadId::parse("thread-1").unwrap(),
         forked_from: None,
+        preserved: None,
         root_tail_layout: Some(RootTailLayout {
             codec: PORTABLE_TAIL_CODEC_V1.to_string(),
             partition_kind: TailPartitionKind::FixedPaginatedTail,
@@ -2201,6 +2177,199 @@ fn conversation_bindings_carry_validated_layouts() {
         start_record_count: 0,
     });
     assert!(malformed_codec.validate().is_err());
+}
+
+#[test]
+fn preserved_titles_compose_and_strip_deterministically() {
+    assert_eq!(
+        compose_preserved_title(Some("Fix parser"), 1, "Machine A"),
+        "Fix parser (Preserved 1 · Machine A)"
+    );
+    // Without a usable base the marker stands alone, and stripping it
+    // returns the empty base.
+    assert_eq!(
+        compose_preserved_title(None, 2, "Machine A"),
+        "Preserved 2 · Machine A"
+    );
+    assert_eq!(
+        compose_preserved_title(Some("   "), 2, "Machine A"),
+        "Preserved 2 · Machine A"
+    );
+    assert_eq!(strip_preserved_marker("Preserved 2 · Machine A"), "");
+    // Re-preserving a preserved copy replaces the marker; it never nests.
+    assert_eq!(
+        compose_preserved_title(Some("Fix parser (Preserved 1 · Machine A)"), 2, "Machine B"),
+        "Fix parser (Preserved 2 · Machine B)"
+    );
+    assert_eq!(
+        compose_preserved_title(Some("Preserved 1 · Machine A"), 2, "Machine B"),
+        "Preserved 2 · Machine B"
+    );
+    // Unicode device labels survive intact in both directions.
+    assert_eq!(
+        compose_preserved_title(Some("Fix parser"), 3, "机器 A"),
+        "Fix parser (Preserved 3 · 机器 A)"
+    );
+    assert_eq!(
+        strip_preserved_marker("Fix parser (Preserved 3 · 机器 A)"),
+        "Fix parser"
+    );
+    // Titles without a marker come back unchanged.
+    assert_eq!(
+        strip_preserved_marker("Fix parser (part 2)"),
+        "Fix parser (part 2)"
+    );
+    // The base char-truncates so the whole title fits the read-side budget
+    // and the marker always survives whole.
+    let long_base = "b".repeat(400);
+    let composed = compose_preserved_title(Some(&long_base), 12, "Machine A");
+    assert_eq!(composed.chars().count(), PRESERVED_TITLE_MAX_CHARS);
+    assert!(composed.ends_with("(Preserved 12 · Machine A)"));
+    let marker_cost = " (Preserved 12 · Machine A)".chars().count();
+    assert_eq!(
+        strip_preserved_marker(&composed),
+        "b".repeat(PRESERVED_TITLE_MAX_CHARS - marker_cost)
+    );
+}
+
+#[test]
+fn preserved_provenance_validates_on_every_carrier() {
+    let carrier = ThreadId::parse("thread-copy").unwrap();
+    let origin = ThreadId::parse("thread-origin").unwrap();
+    PreservedProvenance {
+        preserved_from: origin.clone(),
+        ordinal: 1,
+    }
+    .validate(&carrier)
+    .unwrap();
+    assert!(PreservedProvenance {
+        preserved_from: origin.clone(),
+        ordinal: 0,
+    }
+    .validate(&carrier)
+    .unwrap_err()
+    .contains("zero preservation ordinal"));
+    assert!(PreservedProvenance {
+        preserved_from: carrier.clone(),
+        ordinal: 1,
+    }
+    .validate(&carrier)
+    .unwrap_err()
+    .contains("preserved from itself"));
+
+    // Binding-level: the carrier is the binding's thread.
+    let binding = LocalConversationBinding {
+        host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+        replica_id: ReplicaId::parse("replica-a").unwrap(),
+        local_project_id: LocalProjectId::parse("project-a").unwrap(),
+        provider_profile_id: LocalProviderProfileId::parse("profile-codex").unwrap(),
+        thread_id: carrier.clone(),
+        forked_from: None,
+        preserved: Some(PreservedProvenance {
+            preserved_from: origin.clone(),
+            ordinal: 1,
+        }),
+        root_tail_layout: None,
+        provider_thread_id: None,
+        materialization_state: ConversationMaterializationState::StoredOnly,
+        revision: 1,
+        created_at: 1,
+        updated_at: 1,
+    };
+    binding.validate().unwrap();
+    let mut self_preserved = binding.clone();
+    self_preserved.preserved = Some(PreservedProvenance {
+        preserved_from: carrier.clone(),
+        ordinal: 1,
+    });
+    assert!(self_preserved.validate().is_err());
+    let mut zero_ordinal = binding;
+    zero_ordinal.preserved = Some(PreservedProvenance {
+        preserved_from: origin.clone(),
+        ordinal: 0,
+    });
+    assert!(zero_ordinal.validate().is_err());
+
+    // Thread-level: a portable conversation record enforces the same rules.
+    let parts = sealed_provider_scope("codex", "prov");
+    let mut thread = parts
+        .scope
+        .conversations
+        .get(&parts.thread_id)
+        .unwrap()
+        .clone();
+    thread.preserved = Some(PreservedProvenance {
+        preserved_from: origin.clone(),
+        ordinal: 1,
+    });
+    thread.validate().unwrap();
+    thread.preserved = Some(PreservedProvenance {
+        preserved_from: thread.thread_id.clone(),
+        ordinal: 1,
+    });
+    assert!(thread
+        .validate()
+        .unwrap_err()
+        .contains("preserved from itself"));
+    thread.preserved = Some(PreservedProvenance {
+        preserved_from: origin,
+        ordinal: 0,
+    });
+    assert!(thread
+        .validate()
+        .unwrap_err()
+        .contains("zero preservation ordinal"));
+}
+
+#[test]
+fn journal_index_rows_pair_with_the_index_fragment_role() {
+    let fragment = ConversationJournalTarget {
+        target_path: "/home/user/.codex/session_index.jsonl".to_string(),
+        role: ConversationFileRole::ProviderIndexFragment,
+        expected: TargetExpectation::Absent,
+        staged_path: None,
+        backup_path: None,
+        staged_sha256: None,
+        index_rows: vec![
+            "0199a1b2-0000-7000-8000-000000000001".to_string(),
+            "0199a1b2-0000-7000-8000-000000000002".to_string(),
+        ],
+        commit_started: false,
+        committed: false,
+    };
+    fragment.validate().unwrap();
+
+    // An index fragment must name its rows; other roles must not.
+    let mut rowless = fragment.clone();
+    rowless.index_rows = Vec::new();
+    assert!(rowless
+        .validate()
+        .unwrap_err()
+        .contains("index rows must pair"));
+    let mut transcript_with_rows = fragment.clone();
+    transcript_with_rows.role = ConversationFileRole::Transcript;
+    assert!(transcript_with_rows
+        .validate()
+        .unwrap_err()
+        .contains("index rows must pair"));
+
+    let mut repeated = fragment.clone();
+    repeated.index_rows = vec![
+        "0199a1b2-0000-7000-8000-000000000001".to_string(),
+        "0199a1b2-0000-7000-8000-000000000001".to_string(),
+    ];
+    assert!(repeated
+        .validate()
+        .unwrap_err()
+        .contains("repeats an index row"));
+    let mut oversized = fragment;
+    oversized.index_rows = (0..9)
+        .map(|index| format!("0199a1b2-0000-7000-8000-00000000000{index}"))
+        .collect();
+    assert!(oversized
+        .validate()
+        .unwrap_err()
+        .contains("too many index rows"));
 }
 
 // --- Journal payloads --------------------------------------------------------
@@ -2309,6 +2478,7 @@ fn journal_operations_validate_phase_payloads() {
         staged_path: None,
         backup_path: None,
         staged_sha256: None,
+        index_rows: vec![],
         commit_started: false,
         committed: false,
     });
@@ -2390,64 +2560,71 @@ fn plan_actions_validate_relation_action_and_pins() {
     let t4 = whole_tail_over(&chain[..4]);
     let t5 = whole_tail_over(&chain);
 
-    // The relation-to-action map is fixed.
+    // The action is checked against the relation recomputed from nested pins.
     let mut wrong_relation = push_action("action-1", "codex", "profile-codex", "1");
-    wrong_relation.relation = TailClassification::LocalOutstanding;
-    wrong_relation.pinned_accepted_tail = Some(t4.clone());
-    wrong_relation.pinned_accepted_local_tail = Some(t4.clone());
-    wrong_relation.pinned_cloud_tail = Some(t4.clone());
+    wrong_relation.pins.tail.accepted = Some(t4.clone());
+    wrong_relation.pins.tail.accepted_local = Some(t4.clone());
+    wrong_relation.pins.tail.local = Some(t5.clone());
+    wrong_relation.pins.tail.cloud = Some(t4.clone());
     assert!(wrong_relation
         .validate()
         .unwrap_err()
-        .contains("disagrees with its pinned relation"));
+        .contains("disagrees with its tail evidence"));
 
-    // Evidence presence follows the relation.
+    // Ambiguous unaccepted overlap cannot enter a plan.
     let mut extra_cloud_pin = push_action("action-2", "codex", "profile-codex", "2");
-    extra_cloud_pin.pinned_cloud_tail = Some(t5.clone());
+    extra_cloud_pin.pins.tail.cloud = Some(t5.clone());
     assert!(extra_cloud_pin
         .validate()
         .unwrap_err()
-        .contains("evidence pins disagree"));
+        .contains("tail evidence is invalid"));
 
-    // Publishing actions carry the raw range pin; informational ones do not.
+    // Publishing actions carry the raw range pin.
     let mut no_raw_range = push_action("action-3", "codex", "profile-codex", "3");
-    no_raw_range.pinned_raw_range = None;
+    no_raw_range.pins.tail.raw_range = None;
     assert!(no_raw_range.validate().is_err());
 
     let mut publish = push_action("action-4", "codex", "profile-codex", "4");
     publish.action = ConversationPlanActionType::Publish;
-    publish.reason_code = ConversationReasonCode::LocalOutstanding;
-    publish.relation = TailClassification::LocalOutstanding;
-    publish.pinned_accepted_tail = Some(t4.clone());
-    publish.pinned_accepted_local_tail = Some(t4.clone());
-    publish.pinned_cloud_tail = Some(t4.clone());
+    publish.pins.tail.accepted = Some(t4.clone());
+    publish.pins.tail.accepted_local = Some(t4.clone());
+    publish.pins.tail.local = Some(t5.clone());
+    publish.pins.tail.cloud = Some(t4.clone());
     publish.validate().unwrap();
 
-    let mut informational = push_action("action-5", "codex", "profile-codex", "5");
-    informational.action = ConversationPlanActionType::NoChanges;
-    informational.reason_code = ConversationReasonCode::SyncCurrent;
-    informational.relation = TailClassification::Sync(SyncCurrency::Current);
-    informational.pinned_accepted_tail = Some(t5.clone());
-    informational.pinned_accepted_local_tail = Some(t5.clone());
-    informational.pinned_cloud_tail = Some(t5.clone());
-    informational.pinned_raw_range = None;
+    // Informational outcomes use the small review row and cannot inhabit the
+    // executable action enum.
+    let informational = ConversationReviewRow {
+        provider: provider("codex"),
+        thread_id: ThreadId::parse("thread-info").unwrap(),
+        resource_id: ResourceId::parse("codex:conversation:thread-info").unwrap(),
+        action: ConversationReviewAction::NoChanges,
+        blocker: None,
+        blocked_reason: None,
+        action_id: None,
+    };
     informational.validate().unwrap();
 
-    // Keep-both is Pull-only, requires its plan, and never self-preserves.
+    // Keep-both requires its plan and never self-preserves.
     let mut keep_both = push_action("action-6", "codex", "profile-codex", "6");
-    keep_both.direction = ConversationPlanDirection::Pull;
     keep_both.action = ConversationPlanActionType::KeepBoth;
-    keep_both.reason_code = ConversationReasonCode::Divergent;
-    keep_both.relation = TailClassification::Divergent;
-    keep_both.pinned_accepted_tail = Some(t4.clone());
-    keep_both.pinned_accepted_local_tail = Some(t4.clone());
-    keep_both.pinned_cloud_tail = Some(t5.clone());
-    keep_both.pinned_raw_range = None;
-    keep_both.pinned_lineage_digest = Some("a".repeat(64));
-    keep_both.pinned_semantic_digest = Some("b".repeat(64));
+    keep_both.pins.tail.accepted = Some(t4.clone());
+    keep_both.pins.tail.accepted_local = Some(t4.clone());
+    keep_both.pins.tail.local = Some(t5.clone());
+    let mut cloud_divergence = t5.clone();
+    cloud_divergence.accepted_tail_state = "e".repeat(64);
+    keep_both.pins.tail.cloud = Some(cloud_divergence);
+    keep_both.pins.tail.raw_range = None;
+    keep_both.pins.tail.lineage_digest = Some("a".repeat(64));
+    keep_both.pins.tail.semantic_digest = Some("b".repeat(64));
     keep_both.keep_both = Some(KeepBothPlan {
         preserved_thread_id: ThreadId::parse("thread-preserved").unwrap(),
         remote_provider_thread_id: "0199a1b2-0000-7000-8000-000000000003".to_string(),
+        preserved: PreservedProvenance {
+            preserved_from: keep_both.thread_id.clone(),
+            ordinal: 1,
+        },
+        preserved_display_title: "Conversation (Preserved 1 · Machine A)".to_string(),
     });
     keep_both.validate().unwrap();
     let mut self_preserving = keep_both.clone();
@@ -2457,22 +2634,32 @@ fn plan_actions_validate_relation_action_and_pins() {
         .unwrap()
         .preserved_thread_id = self_preserving.thread_id.clone();
     assert!(self_preserving.validate().is_err());
+    // The minted provenance must name the divergent thread it splits from.
+    let mut mismatched_provenance = keep_both.clone();
+    mismatched_provenance
+        .keep_both
+        .as_mut()
+        .unwrap()
+        .preserved
+        .preserved_from = ThreadId::parse("thread-other").unwrap();
+    assert!(mismatched_provenance
+        .validate()
+        .unwrap_err()
+        .contains("must name the divergent thread"));
     let mut planless = keep_both.clone();
     planless.keep_both = None;
     assert!(planless.validate().is_err());
 
     // Materializing actions need provider identity and manifest digests.
     let mut materialize = push_action("action-7", "codex", "profile-codex", "7");
-    materialize.direction = ConversationPlanDirection::Pull;
     materialize.action = ConversationPlanActionType::MaterializeCloud;
-    materialize.reason_code = ConversationReasonCode::CloudOutstanding;
-    materialize.relation = TailClassification::CloudOutstanding;
-    materialize.pinned_accepted_tail = Some(t4.clone());
-    materialize.pinned_accepted_local_tail = Some(t4.clone());
-    materialize.pinned_cloud_tail = Some(t5.clone());
-    materialize.pinned_raw_range = None;
-    materialize.pinned_lineage_digest = Some("a".repeat(64));
-    materialize.pinned_semantic_digest = Some("b".repeat(64));
+    materialize.pins.tail.accepted = Some(t4.clone());
+    materialize.pins.tail.accepted_local = Some(t4.clone());
+    materialize.pins.tail.local = Some(t4);
+    materialize.pins.tail.cloud = Some(t5);
+    materialize.pins.tail.raw_range = None;
+    materialize.pins.tail.lineage_digest = Some("a".repeat(64));
+    materialize.pins.tail.semantic_digest = Some("b".repeat(64));
     materialize.proposed_provider_thread_id =
         Some("0199a1b2-0000-7000-8000-000000000004".to_string());
     materialize.validate().unwrap();
@@ -2480,17 +2667,17 @@ fn plan_actions_validate_relation_action_and_pins() {
     no_identity.proposed_provider_thread_id = None;
     assert!(no_identity.validate().is_err());
     let mut no_digests = materialize.clone();
-    no_digests.pinned_lineage_digest = None;
-    no_digests.pinned_semantic_digest = None;
+    no_digests.pins.tail.lineage_digest = None;
+    no_digests.pins.tail.semantic_digest = None;
     assert!(no_digests.validate().is_err());
 
-    // Directions exclude the other side's vocabulary.
+    // An action cannot be retagged without changing its tail evidence.
     let mut pull_publish = keep_both.clone();
     pull_publish.action = ConversationPlanActionType::Publish;
     assert!(pull_publish
         .validate()
         .unwrap_err()
-        .contains("Push-only action"));
+        .contains("disagrees with its tail evidence"));
 }
 
 // --- Codex wire rules --------------------------------------------------------
@@ -2548,6 +2735,13 @@ fn codex_threads_require_an_end_aligned_portable_tail() {
 
 #[test]
 fn reshaped_documents_reject_unknown_and_retired_keys() {
+    let mut storage = serde_json::to_value(sample_storage()).unwrap();
+    storage.as_object_mut().unwrap().insert(
+        "included_default_exclusions".to_string(),
+        serde_json::json!([]),
+    );
+    assert!(serde_json::from_value::<StorageConfig>(storage).is_err());
+
     let chain = tail_chain();
     let checkpoint = fixed_checkpoint(&chain);
     let mut value = serde_json::to_value(&checkpoint).unwrap();
@@ -2565,6 +2759,7 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
         provider_profile_id: LocalProviderProfileId::parse("profile-codex").unwrap(),
         thread_id: ThreadId::parse("thread-1").unwrap(),
         forked_from: None,
+        preserved: None,
         root_tail_layout: None,
         provider_thread_id: None,
         materialization_state: ConversationMaterializationState::StoredOnly,
@@ -2577,6 +2772,15 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
         .as_object_mut()
         .unwrap()
         .insert("fork_stamp".to_string(), serde_json::json!({}));
+    assert!(serde_json::from_value::<LocalConversationBinding>(value).is_err());
+
+    // Schema 1 is a clean cutover: documents still carrying the retired
+    // `preserved_local` bool fail closed instead of being silently accepted.
+    let mut value = serde_json::to_value(&binding).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("preserved_local".to_string(), serde_json::json!(false));
     assert!(serde_json::from_value::<LocalConversationBinding>(value).is_err());
 
     // A pre-cutover link without the checkpoint map is not silently upgraded.

@@ -139,7 +139,11 @@ pub fn build_standalone_codex_root(
             canonical_target_root,
         } => (
             root_provider_thread_id.clone(),
-            CodexPathMapper::new(target_root, canonical_target_root.as_deref(), home.as_deref())?,
+            CodexPathMapper::new(
+                target_root,
+                canonical_target_root.as_deref(),
+                home.as_deref(),
+            )?,
             false,
         ),
     };
@@ -162,9 +166,7 @@ pub fn build_standalone_codex_root(
         let mut head = folded_head;
         let marker = head_payload_mut(&mut head)?
             .remove(PATH_MAP_FIELD)
-            .ok_or_else(|| {
-                "conversation wire object lacks its path-map declaration".to_string()
-            })?;
+            .ok_or_else(|| "conversation wire object lacks its path-map declaration".to_string())?;
         validate_path_map_marker(&marker)?;
         mapper
             .verify_wire_record(&head)
@@ -706,7 +708,10 @@ mod tests {
         assert!(text.contains("__mallard_path_map__"));
         assert!(text.contains("mallard.pathmap.v1"));
         assert!(!text.contains("/tmp/project"), "source root leaked to wire");
-        assert!(text.contains("/tmp/other/readme"), "out-of-root bytes must ship verbatim");
+        assert!(
+            text.contains("/tmp/other/readme"),
+            "out-of-root bytes must ship verbatim"
+        );
         assert!(text.contains("file:///__mallard_root__/read%20me"));
         let head_cwd = output_records(&wire.root_bytes)[0]["payload"]["cwd"].clone();
         assert_eq!(head_cwd, json!(ROOT_TOKEN));
@@ -743,11 +748,9 @@ mod tests {
         // push's local recomputation must reproduce it bit for bit.
         let local_analysis = analyze_codex_transcript(&local.root_bytes);
         let local_chain = local_analysis.lineage.chain().unwrap();
-        let expected_witness =
-            mallard_domain::conversation_prefix_witness(local_chain, 2).unwrap();
+        let expected_witness = mallard_domain::conversation_prefix_witness(local_chain, 2).unwrap();
         assert_eq!(local.prefix_witness, expected_witness);
-        let wire_witness =
-            mallard_domain::conversation_prefix_witness(&restaged.chain, 2).unwrap();
+        let wire_witness = mallard_domain::conversation_prefix_witness(&restaged.chain, 2).unwrap();
         assert_ne!(local.prefix_witness, wire_witness);
         let text = String::from_utf8(local.root_bytes.clone()).unwrap();
         assert!(!text.contains("__mallard_path_map__"));
@@ -907,12 +910,9 @@ mod tests {
         // Target-root collision: the verbatim out-of-root path equals the
         // target root + suffix, so the pull gate blocks with the record
         // named; a non-colliding root pulls the same content cleanly.
-        let error = build_standalone_codex_root(
-            &restaged,
-            &decode_mode("fresh", "/b/project"),
-            None,
-        )
-        .unwrap_err();
+        let error =
+            build_standalone_codex_root(&restaged, &decode_mode("fresh", "/b/project"), None)
+                .unwrap_err();
         assert!(error.contains("round-trip gate"), "{error}");
         assert!(error.contains("record 3"), "{error}");
         build_standalone_codex_root(&restaged, &decode_mode("fresh", "/homeB/clean"), None)
@@ -933,12 +933,9 @@ mod tests {
         }
         std::fs::write(&stripped, &bytes).unwrap();
         let restaged = resolve_codex_root(&stripped, &no_bases).unwrap();
-        let error = build_standalone_codex_root(
-            &restaged,
-            &decode_mode("fresh", "/homeB/clean"),
-            None,
-        )
-        .unwrap_err();
+        let error =
+            build_standalone_codex_root(&restaged, &decode_mode("fresh", "/homeB/clean"), None)
+                .unwrap_err();
         assert!(error.contains("path-map declaration"), "{error}");
 
         let mut records = output_records(&wire.root_bytes);
@@ -951,12 +948,9 @@ mod tests {
         }
         std::fs::write(&unknown, &bytes).unwrap();
         let restaged = resolve_codex_root(&unknown, &no_bases).unwrap();
-        let error = build_standalone_codex_root(
-            &restaged,
-            &decode_mode("fresh", "/homeB/clean"),
-            None,
-        )
-        .unwrap_err();
+        let error =
+            build_standalone_codex_root(&restaged, &decode_mode("fresh", "/homeB/clean"), None)
+                .unwrap_err();
         assert!(error.contains("update Mallard"), "{error}");
     }
 

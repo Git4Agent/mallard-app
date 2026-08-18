@@ -243,8 +243,8 @@ struct ProjectedRecord {
     payload: Option<Box<ProjectedRecord>>,
 }
 
-pub(crate) fn recover_oversized_record(
-    reader: &mut BufReader<File>,
+pub(crate) fn recover_oversized_record<R: BufRead + Seek>(
+    reader: &mut R,
     record_start: u64,
     record_end: u64,
 ) -> Result<Value, String> {
@@ -473,24 +473,25 @@ impl RolloutParser {
     }
 }
 
-pub(crate) fn summarize_rollout_file(path: &Path) -> Result<SessionFileSummary, String> {
-    let file = File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
-    let mut reader = BufReader::new(file);
+fn summarize_rollout_reader<R: BufRead + Seek>(
+    reader: &mut R,
+    label: &str,
+) -> Result<SessionFileSummary, String> {
     let mut parser = RolloutParser::new();
     let mut bytes = Vec::new();
     loop {
         let record_start = reader
             .stream_position()
-            .map_err(|error| format!("read '{}': {error}", path.display()))?;
-        match read_bounded_line(&mut reader, &mut bytes, MAX_LINE_BYTES)
-            .map_err(|error| format!("read '{}': {error}", path.display()))?
+            .map_err(|error| format!("read {label}: {error}"))?;
+        match read_bounded_line(reader, &mut bytes, MAX_LINE_BYTES)
+            .map_err(|error| format!("read {label}: {error}"))?
         {
             BoundedLine::Eof => break,
             BoundedLine::Oversized => {
                 let record_end = reader
                     .stream_position()
-                    .map_err(|error| format!("read '{}': {error}", path.display()))?;
-                match recover_oversized_record(&mut reader, record_start, record_end) {
+                    .map_err(|error| format!("read {label}: {error}"))?;
+                match recover_oversized_record(reader, record_start, record_end) {
                     Ok(value) => parser.consume(&value),
                     Err(_) => parser.metrics_complete = false,
                 }
@@ -509,28 +510,43 @@ pub(crate) fn summarize_rollout_file(path: &Path) -> Result<SessionFileSummary, 
     parser.finish()
 }
 
+pub(crate) fn summarize_rollout_file(path: &Path) -> Result<SessionFileSummary, String> {
+    let file = File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
+    summarize_rollout_reader(&mut BufReader::new(file), &format!("'{}'", path.display()))
+}
+
+pub(crate) fn summarize_rollout_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String> {
+    summarize_rollout_reader(&mut std::io::Cursor::new(bytes), "captured transcript")
+}
+
+#[derive(Deserialize)]
+struct SessionIndexRow {
+    id: String,
+    #[serde(default)]
+    thread_name: Option<String>,
+    #[serde(default)]
+    updated_at: Option<Value>,
+}
+
 pub(crate) fn parse_session_index_lines<'a>(
     lines: impl IntoIterator<Item = &'a str>,
 ) -> BTreeMap<String, (Option<String>, Option<u64>)> {
     let mut result = BTreeMap::<String, (Option<String>, Option<u64>)>::new();
     for line in lines {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+        let Ok(row) = serde_json::from_str::<SessionIndexRow>(line) else {
             continue;
         };
-        let Some(id) = string_alias(&value, &["id", "thread_id", "session_id"]) else {
-            continue;
-        };
-        let entry = result.entry(id.to_string()).or_insert((None, None));
-        if let Some(title) = string_alias(&value, &["thread_name", "title", "name"])
+        let entry = result.entry(row.id).or_insert((None, None));
+        if let Some(title) = row
+            .thread_name
+            .as_deref()
             .map(normalize_summary)
             .map(|title| truncate_chars(&title, MAX_SUMMARY_CHARS))
             .filter(|title| !title.is_empty())
         {
             entry.0 = Some(title);
         }
-        if let Some(updated) = value_alias(&value, &["updated_at", "updatedAt", "last_updated_at"])
-            .and_then(parse_timestamp_value)
-        {
+        if let Some(updated) = row.updated_at.as_ref().and_then(parse_timestamp_value) {
             entry.1 = Some(updated);
         }
     }
@@ -2322,6 +2338,22 @@ mod tests {
 
     fn count_value(count: &SessionCount) -> u64 {
         count.value.expect("supported count")
+    }
+
+    #[test]
+    fn session_index_parser_accepts_only_current_field_names() {
+        let parsed = parse_session_index_lines([
+            r#"{"id":"current","thread_name":"Current title","updated_at":"2026-08-07T00:00:00Z"}"#,
+            r#"{"thread_id":"old-id","thread_name":"Old identity"}"#,
+            r#"{"id":"old-title","title":"Old title"}"#,
+            r#"{"id":"old-time","thread_name":"Current fields","updatedAt":"2026-08-07T00:00:00Z"}"#,
+        ]);
+
+        assert_eq!(parsed["current"].0.as_deref(), Some("Current title"));
+        assert!(parsed["current"].1.is_some());
+        assert!(!parsed.contains_key("old-id"));
+        assert_eq!(parsed["old-title"].0, None);
+        assert_eq!(parsed["old-time"].1, None);
     }
 
     #[test]

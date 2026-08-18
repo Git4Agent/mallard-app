@@ -16,9 +16,9 @@ use super::traits::{
     SessionRewriteRequest, SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice,
     SessionTimelineQuery,
 };
-use crate::provider_capture::{scan_session_metadata_with, MetadataScanSpec};
+use crate::provider_capture::{scan_session_metadata_with, ParsedSessionMetadata};
 use mallard_domain::ProviderKey;
-use serde_json::Value;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 pub use codec::{
@@ -31,16 +31,43 @@ pub fn provider_key() -> ProviderKey {
     ProviderKey::parse("claude").expect("static provider key")
 }
 
-const CLAUDE_SCAN_SPEC: MetadataScanSpec = MetadataScanSpec {
-    authoritative: |event_type, value| {
-        event_type.contains("system")
-            || event_type.contains("init")
-            || value.get("sessionId").is_some()
-    },
-    id_keys_authoritative: &["sessionId", "session_id", "threadId", "thread_id", "id"],
-    id_keys_fallback: &["sessionId", "session_id", "threadId", "thread_id", "id"],
-    detect_subagent: |_value: &Value| false,
-};
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ClaudeMetadataRecordType {
+    User,
+    Assistant,
+    System,
+}
+
+#[derive(Deserialize)]
+struct ClaudeSessionMetadataRecord {
+    #[serde(rename = "type")]
+    record_type: ClaudeMetadataRecordType,
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    cwd: String,
+    #[serde(default, rename = "isSidechain")]
+    is_sidechain: bool,
+    #[serde(default, rename = "isMeta")]
+    is_meta: bool,
+}
+
+fn parse_claude_session_metadata(line: &[u8]) -> Option<ParsedSessionMetadata> {
+    let record: ClaudeSessionMetadataRecord = serde_json::from_slice(line).ok()?;
+    match record.record_type {
+        ClaudeMetadataRecordType::User
+        | ClaudeMetadataRecordType::Assistant
+        | ClaudeMetadataRecordType::System => {}
+    }
+    if record.is_sidechain || record.is_meta {
+        return None;
+    }
+    Some(ParsedSessionMetadata {
+        session_id: record.session_id,
+        cwd: record.cwd,
+        is_internal_subagent: false,
+    })
+}
 
 pub struct ClaudeAdapter;
 
@@ -96,7 +123,7 @@ impl SessionAdapter for ClaudeAdapter {
     }
 
     fn scan_metadata(&self, path: &Path) -> Result<SessionFileMetadata, String> {
-        scan_session_metadata_with(path, &CLAUDE_SCAN_SPEC)
+        scan_session_metadata_with(path, parse_claude_session_metadata)
     }
 
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis {
@@ -140,6 +167,10 @@ impl SessionAdapter for ClaudeAdapter {
         history::summarize_file(path)
     }
 
+    fn summarize_bytes(&self, bytes: &[u8]) -> Result<SessionFileSummary, String> {
+        history::summarize_bytes(bytes)
+    }
+
     fn build_timeline_index(
         &self,
         path: &Path,
@@ -178,5 +209,77 @@ impl SessionAdapter for ClaudeAdapter {
         request: &mut SessionActionRequest<'_>,
     ) -> Result<SessionActionOutcome, String> {
         actions::execute_action(request)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use std::fs;
+
+    fn jsonl(records: impl IntoIterator<Item = Value>) -> String {
+        records
+            .into_iter()
+            .map(|record| record.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    #[test]
+    fn metadata_scan_rejects_near_match_nested_and_split_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        let cwd = temp.path().to_string_lossy().into_owned();
+        fs::write(
+            &path,
+            jsonl([
+                serde_json::json!({
+                    "type": "system-init",
+                    "sessionId": "near-match",
+                    "cwd": cwd
+                }),
+                serde_json::json!({
+                    "type": "tool_result",
+                    "payload": {"sessionId": "nested-tool-id"}
+                }),
+                serde_json::json!({"type": "diagnostic", "cwd": cwd}),
+                serde_json::json!({
+                    "type": "user",
+                    "sessionId": "sidechain",
+                    "cwd": cwd,
+                    "isSidechain": true
+                }),
+            ]),
+        )
+        .unwrap();
+
+        let error = scan_session_metadata_with(&path, parse_claude_session_metadata).unwrap_err();
+        assert!(error.contains("authoritative session metadata"));
+    }
+
+    #[test]
+    fn metadata_scan_reads_complete_durable_top_level_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        let cwd = temp.path().to_string_lossy().into_owned();
+        fs::write(
+            &path,
+            jsonl([serde_json::json!({
+                "type": "user",
+                "sessionId": "current-session",
+                "cwd": cwd,
+                "message": {
+                    "id": "unrelated",
+                    "input": {"cwd": "/unrelated"}
+                }
+            })]),
+        )
+        .unwrap();
+
+        let metadata = scan_session_metadata_with(&path, parse_claude_session_metadata).unwrap();
+        assert_eq!(metadata.session_id, "current-session");
+        assert_eq!(metadata.cwd, temp.path());
     }
 }

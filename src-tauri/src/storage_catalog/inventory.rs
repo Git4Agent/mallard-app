@@ -10,14 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::adapters::{
-    adapter_for, inventory_stamp_fields, PluginProcessRunner, ProviderInventory,
-};
+use super::adapters::{adapter_for, PluginProcessRunner, ProviderInventory};
 use super::codex_pet::{capture_pet, pet_resource_from_capture, CapturedPet};
 use super::domain::{
-    source_stamp, validate_skill_name, warning_digest, AgentSkillScope, CatalogBlocker,
-    CatalogResource, CatalogResourceId, CatalogResourceKindTag, CatalogResourceWarning,
-    CodexPetFormat, LocalCatalogTargetId, ProviderKey,
+    validate_skill_name, warning_digest, AgentSkillScope, CatalogBlocker, CatalogResource,
+    CatalogResourceId, CatalogResourceKindTag, CatalogResourceWarning, CodexPetFormat,
+    LocalCatalogTargetId, ProviderKey, MAX_SKILL_FILES,
 };
 use super::profiles::ResolvedCatalogContext;
 use super::skill_tree::{capture_skill_tree, skill_resource_from_tree, CapturedSkillTree};
@@ -28,6 +26,10 @@ pub struct LocalResourceRecord {
     pub resource: CatalogResource,
     pub target: LocalCatalogTargetId,
     pub target_path: Option<PathBuf>,
+    /// Newest modification time anywhere under `target_path`, in Unix
+    /// seconds. Reported so a row can say when the resource last changed on
+    /// this machine; never part of any identity or digest.
+    pub local_modified_at: Option<u64>,
     pub warnings: Vec<CatalogResourceWarning>,
     pub skill_tree: Option<CapturedSkillTree>,
     pub pet: Option<CapturedPet>,
@@ -54,16 +56,66 @@ pub struct CatalogLocalInventory {
     pub plugin_owned_skills: Vec<PluginOwnedSkill>,
     pub warnings: Vec<String>,
     pub plugin_inventories: BTreeMap<ProviderKey, ProviderInventory>,
-    pub source_stamp: String,
 }
 
 fn canonical_or_self(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The newest modification time at or under `path`, in Unix seconds.
+///
+/// A directory's own timestamp only moves when its direct entries change, so
+/// a skill whose SKILL.md was edited today would otherwise report the day its
+/// folder was created. Symlinks are never followed — capture already refuses
+/// them, and this walk must not leave the tree it was handed. Entries that
+/// cannot be inspected are skipped: a missing date is honest, a wrong one is
+/// not.
+fn latest_modified_secs(path: &Path) -> Option<u64> {
+    fn modified_secs(meta: &fs::Metadata) -> Option<u64> {
+        meta.modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|elapsed| elapsed.as_secs())
+    }
+
+    let root = path.symlink_metadata().ok()?;
+    let mut newest = modified_secs(&root);
+    if !root.is_dir() {
+        return newest;
+    }
+    let mut pending = vec![path.to_path_buf()];
+    // The same ceiling capture works under, so a pathological tree cannot turn
+    // a list refresh into an unbounded walk.
+    let mut visited = 0usize;
+    while let Some(current) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > MAX_SKILL_FILES {
+                return newest;
+            }
+            let Ok(meta) = entry.path().symlink_metadata() else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            newest = newest.max(modified_secs(&meta));
+            if meta.is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    newest
+}
+
 fn scan_skill_root(
     scope: AgentSkillScope,
     root: &Path,
+    only_install_directory: Option<&str>,
     ownership_roots: &[PathBuf],
     owner_labels: &BTreeMap<PathBuf, String>,
     inventory: &mut CatalogLocalInventory,
@@ -86,6 +138,9 @@ fn scan_skill_root(
     for entry in entries {
         let entry = entry.map_err(|error| format!("walk skill root: {}", error))?;
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            if only_install_directory.is_some() {
+                continue;
+            }
             inventory.blocked.push(BlockedCandidate {
                 display_name: entry.file_name().to_string_lossy().to_string(),
                 provider,
@@ -94,6 +149,9 @@ fn scan_skill_root(
             });
             continue;
         };
+        if only_install_directory.is_some_and(|wanted| name != wanted) {
+            continue;
+        }
         // Provider-managed hidden namespaces (`.system`, dot-prefixed
         // bundles) are excluded, not candidates.
         if name.starts_with('.') {
@@ -242,6 +300,7 @@ fn scan_skill_root(
                     canonical_root: root.to_string_lossy().to_string(),
                     install_directory: candidate.directory_name,
                 },
+                local_modified_at: latest_modified_secs(&candidate.path),
                 target_path: Some(candidate.path),
                 warnings,
                 skill_tree: Some(candidate.tree),
@@ -252,7 +311,11 @@ fn scan_skill_root(
     Ok(())
 }
 
-fn scan_pets(codex_home: &Path, inventory: &mut CatalogLocalInventory) -> Result<(), String> {
+fn scan_pets(
+    codex_home: &Path,
+    only_pet_id: Option<&str>,
+    inventory: &mut CatalogLocalInventory,
+) -> Result<(), String> {
     let pets_root = codex_home.join("pets");
     let entries = match fs::read_dir(&pets_root) {
         Ok(entries) => entries,
@@ -268,6 +331,9 @@ fn scan_pets(codex_home: &Path, inventory: &mut CatalogLocalInventory) -> Result
     for entry in entries {
         let entry = entry.map_err(|error| format!("walk pets root: {}", error))?;
         let name = entry.file_name().to_string_lossy().to_string();
+        if only_pet_id.is_some_and(|wanted| name != wanted) {
+            continue;
+        }
         if name.starts_with('.') {
             continue;
         }
@@ -317,6 +383,7 @@ fn scan_pets(codex_home: &Path, inventory: &mut CatalogLocalInventory) -> Result
                                     canonical_home: codex_home.to_string_lossy().to_string(),
                                     pet_id: captured.pet_id.clone(),
                                 },
+                                local_modified_at: latest_modified_secs(&entry.path()),
                                 target_path: Some(entry.path()),
                                 warnings: Vec::new(),
                                 skill_tree: None,
@@ -348,42 +415,68 @@ fn scan_pets(codex_home: &Path, inventory: &mut CatalogLocalInventory) -> Result
 /// out to the plugin CLIs, while a skills inventory still runs plugin
 /// discovery because plugin ownership classifies (excludes) plugin-owned
 /// skill directories — that exclusion is not optional.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatalogInventoryFilter {
+    #[cfg(test)]
     Everything,
     Kind(CatalogResourceKindTag),
+    /// Observe one registered target. A changed resource ID is retained when
+    /// it still occupies that target; pet v1/v2 occupants are both relevant
+    /// because the formats share a directory.
+    Resource {
+        kind: CatalogResourceKindTag,
+        target: LocalCatalogTargetId,
+    },
 }
 
 impl CatalogInventoryFilter {
-    fn wants_plugin_discovery(self) -> bool {
+    fn selected_kind(&self) -> Option<CatalogResourceKindTag> {
         match self {
-            CatalogInventoryFilter::Everything => true,
-            CatalogInventoryFilter::Kind(kind) => matches!(
-                kind,
-                CatalogResourceKindTag::AgentSkill | CatalogResourceKindTag::PluginInstallIntent
-            ),
+            #[cfg(test)]
+            CatalogInventoryFilter::Everything => None,
+            CatalogInventoryFilter::Kind(kind) | CatalogInventoryFilter::Resource { kind, .. } => {
+                Some(*kind)
+            }
         }
     }
 
-    fn wants_skill_roots(self) -> bool {
-        matches!(
-            self,
-            CatalogInventoryFilter::Everything
-                | CatalogInventoryFilter::Kind(CatalogResourceKindTag::AgentSkill)
-        )
-    }
-
-    fn wants_pets(self) -> bool {
+    fn wants_plugin_discovery(&self) -> bool {
         match self {
+            #[cfg(test)]
             CatalogInventoryFilter::Everything => true,
-            CatalogInventoryFilter::Kind(kind) => kind.pet_format().is_some(),
+            CatalogInventoryFilter::Kind(kind) | CatalogInventoryFilter::Resource { kind, .. } => {
+                matches!(
+                    kind,
+                    CatalogResourceKindTag::AgentSkill
+                        | CatalogResourceKindTag::PluginInstallIntent
+                )
+            }
         }
     }
 
-    fn keeps(self, kind: CatalogResourceKindTag) -> bool {
+    fn wants_skill_roots(&self) -> bool {
+        self.selected_kind()
+            .is_none_or(|kind| kind == CatalogResourceKindTag::AgentSkill)
+    }
+
+    fn wants_pets(&self) -> bool {
+        self.selected_kind()
+            .is_none_or(|kind| kind.pet_format().is_some())
+    }
+
+    fn keeps(&self, record: &LocalResourceRecord) -> bool {
         match self {
+            #[cfg(test)]
             CatalogInventoryFilter::Everything => true,
-            CatalogInventoryFilter::Kind(wanted) => wanted == kind,
+            CatalogInventoryFilter::Kind(wanted) => *wanted == record.resource.kind_tag(),
+            CatalogInventoryFilter::Resource { kind, target } => {
+                if &record.target != target {
+                    return false;
+                }
+                *kind == record.resource.kind_tag()
+                    || kind.pet_format().is_some()
+                        && record.resource.kind_tag().pet_format().is_some()
+            }
         }
     }
 }
@@ -401,7 +494,6 @@ pub fn inventory_local(
         plugin_owned_skills: Vec::new(),
         warnings: Vec::new(),
         plugin_inventories: BTreeMap::new(),
-        source_stamp: String::new(),
     };
 
     // 1-2. Plugins first, so plugin ownership exists before skill
@@ -465,6 +557,7 @@ pub fn inventory_local(
                         plugin_id: observation.plugin_id.clone(),
                     },
                     target_path: None,
+                    local_modified_at: None,
                     warnings: Vec::new(),
                     skill_tree: None,
                     pet: None,
@@ -479,9 +572,30 @@ pub fn inventory_local(
     // 3-6. Skills from the fixed roots, then pets.
     if filter.wants_skill_roots() {
         for root in &context.skill_roots {
+            let scan = match &filter {
+                CatalogInventoryFilter::Resource {
+                    target:
+                        LocalCatalogTargetId::SkillDirectory {
+                            scope,
+                            canonical_root,
+                            install_directory,
+                        },
+                    ..
+                } if *scope == root.scope
+                    && Path::new(canonical_root) == root.canonical_root.as_path() =>
+                {
+                    Some(Some(install_directory.as_str()))
+                }
+                CatalogInventoryFilter::Resource { .. } => None,
+                _ => Some(None),
+            };
+            let Some(only_install_directory) = scan else {
+                continue;
+            };
             scan_skill_root(
                 root.scope,
                 &root.canonical_root,
+                only_install_directory,
                 &ownership_roots,
                 &owner_labels,
                 &mut inventory,
@@ -491,17 +605,31 @@ pub fn inventory_local(
     }
     if filter.wants_pets() {
         if let Some(codex) = &context.codex {
-            scan_pets(&codex.canonical_home, &mut inventory)
-                .map_err(|detail| CatalogBlocker::InventoryFailed { detail })?;
+            let scan = match &filter {
+                CatalogInventoryFilter::Resource {
+                    target:
+                        LocalCatalogTargetId::PetDirectory {
+                            canonical_home,
+                            pet_id,
+                        },
+                    ..
+                } if Path::new(canonical_home) == codex.canonical_home.as_path() => {
+                    Some(Some(pet_id.as_str()))
+                }
+                CatalogInventoryFilter::Resource { .. } => None,
+                _ => Some(None),
+            };
+            if let Some(only_pet_id) = scan {
+                scan_pets(&codex.canonical_home, only_pet_id, &mut inventory)
+                    .map_err(|detail| CatalogBlocker::InventoryFailed { detail })?;
+            }
         }
     }
 
     // A narrowed inventory serves exactly one kind: pet scanning yields both
     // formats and plugin discovery yields intents during a skills pass, so
     // drop every record the filter did not ask for.
-    inventory
-        .resources
-        .retain(|_, record| filter.keeps(record.resource.kind_tag()));
+    inventory.resources.retain(|_, record| filter.keeps(record));
 
     // Equal names across the two Codex roots stay distinct resources; the
     // duplication is reported for review labels.
@@ -524,29 +652,6 @@ pub fn inventory_local(
             ));
         }
     }
-
-    // Deterministic source stamp over every observation input.
-    let mut stamp_fields: Vec<String> = inventory
-        .resources
-        .iter()
-        .map(|(resource_id, record)| {
-            format!("{}:{}", resource_id, record.resource.content_sha256())
-        })
-        .collect();
-    for blocked in &inventory.blocked {
-        stamp_fields.push(format!(
-            "blocked:{}:{}",
-            blocked.display_name, blocked.reason
-        ));
-    }
-    for (provider, provider_inventory) in &inventory.plugin_inventories {
-        for field in inventory_stamp_fields(provider_inventory) {
-            stamp_fields.push(format!("{}:{}", provider.as_str(), field));
-        }
-    }
-    stamp_fields.sort();
-    let borrowed: Vec<&str> = stamp_fields.iter().map(String::as_str).collect();
-    inventory.source_stamp = source_stamp(&borrowed);
 
     Ok(inventory)
 }
@@ -822,5 +927,47 @@ mod tests {
             "owned",
             "owned"
         )));
+    }
+
+    #[test]
+    fn a_resource_inventory_reads_only_the_registered_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = context_for(&temp);
+        let codex_home = context.codex.as_ref().unwrap().canonical_home.clone();
+        write(
+            &codex_home.join("skills/review/SKILL.md"),
+            b"---\nname: review\n---\n",
+        );
+        write(
+            &codex_home.join("skills/unrelated/SKILL.md"),
+            b"---\nname: unrelated\n---\n",
+        );
+        // This would be reported as a blocked candidate by a broad scan.
+        write(
+            &codex_home.join("skills/bad name/SKILL.md"),
+            b"---\nname: bad-name\n---\n",
+        );
+
+        let inventory = inventory_local(
+            &context,
+            CatalogInventoryFilter::Resource {
+                kind: CatalogResourceKindTag::AgentSkill,
+                target: LocalCatalogTargetId::SkillDirectory {
+                    scope: AgentSkillScope::CodexHome,
+                    canonical_root: codex_home.join("skills").to_string_lossy().to_string(),
+                    install_directory: "review".to_string(),
+                },
+            },
+            &EmptyRunner,
+        )
+        .unwrap();
+
+        assert_eq!(inventory.resources.len(), 1);
+        assert!(inventory.resources.contains_key(&skill_resource_id(
+            AgentSkillScope::CodexHome,
+            "review",
+            "review"
+        )));
+        assert!(inventory.blocked.is_empty());
     }
 }

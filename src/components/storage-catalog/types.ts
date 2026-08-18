@@ -111,39 +111,42 @@ export interface CatalogResourceView {
   links: CatalogResourceLinkView[];
 }
 
-export interface CatalogLocalCandidate {
-  resource_id: string;
-  kind: CatalogResourceKind;
-  provider: CatalogProviderKey;
+/** One row on a scope page: a resource of this kind compared against the one
+ * storage the page is scoped to. Registered, discovered-but-unlinked and
+ * stored-but-not-installed resources share this shape, because the page draws
+ * them the same way — which one a row is reads off `linked`, `local_present`
+ * and `remote_present`. */
+export interface CatalogScopeRow {
+  row_id: string;
   display_name: string;
+  resource_id?: string | null;
   scope_label?: string | null;
-  content_sha256: string;
-}
-
-export interface CatalogRemoteCandidate {
-  repository_id: string;
-  provider: CatalogProviderKey;
-  kind: CatalogResourceKind;
-  resource_id: string;
-  display_name: string;
-  scope_label?: string | null;
-  head_revision: number;
-  content_sha256: string;
-}
-
-/** One registered resource inside a scope, with its local presence reported
- * honestly rather than inferred. */
-export interface CatalogScopeResourceRow {
-  resource: CatalogResourceView;
+  /** Null only when no storage is chosen: nothing to compare against. */
+  state?: CatalogLinkState | null;
+  linked: boolean;
   local_present: boolean;
+  local_path?: string | null;
+  local_modified_at?: number | null;
+  remote_present: boolean;
+  remote_revision?: number | null;
+  remote_updated_at?: number | null;
+  registration_id?: string | null;
+  registration_revision?: number | null;
+  link_id?: string | null;
+  link_revision?: number | null;
+  repository_id?: string | null;
+  other_storage_names: string[];
+  warnings: CatalogResourceWarning[];
+  blocker?: string | null;
 }
 
 export interface CatalogScopeResources {
   scope: CatalogScope;
   profile: LocalCatalogProfile;
-  registered: CatalogScopeResourceRow[];
-  discovered: CatalogLocalCandidate[];
-  remote_candidates: CatalogRemoteCandidate[];
+  storage_id?: string | null;
+  storage_name?: string | null;
+  rows: CatalogScopeRow[];
+  warnings: string[];
 }
 
 /** Exactly one of `local_resource_id` and `repository_id` identifies the

@@ -9,29 +9,27 @@
 //! home.
 
 use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
+use crate::provider_capture::LocalSessionView;
 use crate::providers::{
     ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionActionRequest,
     SessionDiscoveryContext, SessionFileSummary,
 };
 use crate::storage_core::ConfiguredObjectStore;
 use mallard_domain::{
-    conversation_resource_id, initial_conversation_thread_id, ActionStatus, BindingState,
-    BundleSnapshot, LocalProjectId, MaterializationStatus, Materializations, ProviderKey,
+    conversation_resource_id, initial_conversation_thread_id, BindingState, BundleSnapshot,
+    LocalProjectId, MaterializationStatus, Materializations, PreservedProvenance, ProviderKey,
     StorageId, SyncScopeKey, ThreadId,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_HISTORY_WINDOW_DAYS: u64 = 7;
 const DAY_SECS: u64 = 24 * 60 * 60;
 const MAX_GIT_COMMITS: usize = 10_000;
-const MAX_COMMIT_LIMIT: usize = 500;
-const DEFAULT_COMMIT_LIMIT: usize = 100;
 const ACTIVE_WINDOW_SECS: u64 = 300;
 const ACTIVITY_CACHE_SCHEMA: u32 = 1;
 const MAX_ACTIVITY_CACHE_BYTES: u64 = 32 * 1024 * 1024;
@@ -83,9 +81,11 @@ pub struct ProjectSessionSummary {
     pub source: SessionSourceState,
     pub access: ProviderAccessState,
     pub title: String,
-    /// True only when a successful divergent Pull receipt identifies this
-    /// local logical thread as the preserved side of keep-both.
-    pub is_preserved_local: bool,
+    /// Present when this logical thread is the retained local side of a
+    /// divergent keep-both Pull — from the local binding for bound rows, or
+    /// from the published thread record for remote-only rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved: Option<PreservedProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     pub started_at: u64,
@@ -138,8 +138,6 @@ pub struct GitHistoryPage {
     pub commits: Vec<GitCommitSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_repository_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
     pub unique_session_count: usize,
 }
 
@@ -359,12 +357,14 @@ fn load_activity_cache(root: &Path, path: &Path, warnings: &mut Vec<String>) -> 
     }
 }
 
-/// Discover and summarize every project-owned local session for the bound
-/// providers, sharing one bounded on-disk cache across providers.
-pub fn scan_local_sessions(
+/// Summarize the session views from one already-completed provider discovery.
+/// Activity and sync comparison use this entry point so their projections
+/// share the exact same ownership witness and physical source selection.
+pub fn scan_local_session_views(
     repository: &LocalStateRepository,
     registry: &ProviderRegistry,
     resolved: &ResolvedActivityProject,
+    views: &[LocalSessionView],
     force_revalidate: bool,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<LocalSessionRecord>, String> {
@@ -373,6 +373,7 @@ pub fn scan_local_sessions(
     let now = now_secs();
     let mut records = Vec::new();
     let mut seen_cache_keys = BTreeSet::new();
+
     for (provider, home) in &resolved.homes {
         let Some(adapter) = registry.sessions(provider) else {
             warnings.push(format!(
@@ -381,27 +382,22 @@ pub fn scan_local_sessions(
             ));
             continue;
         };
-        let context = SessionDiscoveryContext {
-            provider_home: &home.home,
-            project_root: &resolved.project_root,
-            excluded_roots: &[],
-        };
-        let discovery = match adapter.discover(&context) {
-            Ok(discovery) => discovery,
-            Err(error) => {
-                warnings.push(format!("{} discovery failed: {}", provider, error));
+        let mut by_session: BTreeMap<String, LocalSessionRecord> = BTreeMap::new();
+        for view in views.iter().filter(|view| &view.provider == provider) {
+            if let Some(reason) = &view.descriptor.blocked_reason {
+                warnings.push(format!(
+                    "Skipped '{}': {}",
+                    view.source_path.display(),
+                    reason
+                ));
                 continue;
             }
-        };
-        warnings.extend(discovery.warnings);
-        let mut by_session: BTreeMap<String, LocalSessionRecord> = BTreeMap::new();
-        for session in discovery.sessions {
-            let metadata = match fs::metadata(&session.physical_path) {
+            let metadata = match fs::metadata(&view.source_path) {
                 Ok(metadata) => metadata,
                 Err(error) => {
                     warnings.push(format!(
                         "Cannot read '{}': {error}",
-                        session.physical_path.display()
+                        view.source_path.display()
                     ));
                     continue;
                 }
@@ -410,7 +406,7 @@ pub fn scan_local_sessions(
                 "{}\u{0}{}\u{0}{}",
                 provider,
                 home.home.display(),
-                session.physical_path.display()
+                view.source_path.display()
             );
             seen_cache_keys.insert(cache_key.clone());
             let file_nanos = modified_nanos(&metadata);
@@ -421,7 +417,7 @@ pub fn scan_local_sessions(
                 .map(|entry| entry.summary.clone());
             let summary = match cached {
                 Some(summary) => summary,
-                None => match adapter.summarize_file(&session.physical_path) {
+                None => match adapter.summarize_file(&view.source_path) {
                     Ok(summary) => {
                         cache.entries.insert(
                             cache_key,
@@ -434,23 +430,28 @@ pub fn scan_local_sessions(
                         summary
                     }
                     Err(error) => {
-                        warnings.push(format!(
-                            "Skipped '{}': {error}",
-                            session.physical_path.display()
-                        ));
+                        warnings.push(format!("Skipped '{}': {error}", view.source_path.display()));
                         continue;
                     }
                 },
             };
-            if summary.is_internal_subagent {
+            if summary.is_internal_subagent || summary.session_id != view.provider_thread_id {
+                warnings.push(format!(
+                    "Skipped '{}': the summarized session identity changed",
+                    view.source_path.display()
+                ));
                 continue;
             }
             let record = LocalSessionRecord {
                 provider: provider.clone(),
-                session_id: session.session_id.clone(),
-                relative_cwd: session.relative_cwd,
-                physical_path: session.physical_path,
-                display_name: session.display_name,
+                session_id: view.provider_thread_id.clone(),
+                relative_cwd: view
+                    .descriptor
+                    .relative_cwd
+                    .clone()
+                    .unwrap_or_else(|| ".".to_string()),
+                physical_path: view.source_path.clone(),
+                display_name: view.descriptor.display_name.clone(),
                 is_active: now.saturating_sub(modified_secs(&metadata)) < ACTIVE_WINDOW_SECS,
                 summary,
             };
@@ -463,6 +464,7 @@ pub fn scan_local_sessions(
         }
         records.extend(by_session.into_values());
     }
+
     cache
         .entries
         .retain(|key, _| seen_cache_keys.contains(key) || !key_belongs_to_project(key, resolved));
@@ -521,6 +523,7 @@ pub struct RemoteSessionRecord {
     pub thread_id: mallard_domain::ThreadId,
     pub source_thread_id: Option<String>,
     pub display_title: Option<String>,
+    pub preserved: Option<PreservedProvenance>,
     pub presentation: mallard_domain::SessionPresentation,
 }
 
@@ -534,6 +537,7 @@ pub fn remote_sessions_from_snapshot(snapshot: &BundleSnapshot) -> Vec<RemoteSes
                 thread_id: thread_id.clone(),
                 source_thread_id: thread.source_thread_id.clone(),
                 display_title: thread.display_title.clone(),
+                preserved: thread.preserved.clone(),
                 presentation: thread.presentation.clone(),
             }),
             SyncScopeKey::Project => None,
@@ -598,33 +602,38 @@ pub fn merge_activity_sessions(
     registry: &ProviderRegistry,
     repository: &LocalStateRepository,
     resolved: &ResolvedActivityProject,
-    materializations: &Materializations,
     local: Vec<LocalSessionRecord>,
     remote: Vec<RemoteSessionRecord>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<ProjectSessionSummary>, String> {
     let bindings = repository.load_conversation_bindings()?;
-    let preserved_local_threads = materializations
-        .records
+    let preserved_threads = bindings
+        .bindings
         .iter()
-        .filter(|record| {
-            record.host_id == resolved.binding.host_id
-                && record.replica_id == resolved.binding.replica_id
-                && record.local_project_id == resolved.project_id
+        .filter(|binding| {
+            binding.host_id == resolved.binding.host_id
+                && binding.replica_id == resolved.binding.replica_id
+                && binding.local_project_id == resolved.project_id
+                && resolved
+                    .binding
+                    .profile_ids
+                    .values()
+                    .any(|profile_id| profile_id == &binding.provider_profile_id)
         })
-        .flat_map(|record| &record.receipts)
-        .filter(|receipt| receipt.status == ActionStatus::Applied)
-        .filter_map(|receipt| receipt.conversation.as_ref())
-        .filter(|receipt| {
-            receipt.host_id == resolved.binding.host_id
-                && receipt.replica_id == resolved.binding.replica_id
+        .filter_map(|binding| {
+            binding
+                .preserved
+                .clone()
+                .map(|preserved| (binding.thread_id.clone(), preserved))
         })
-        .filter_map(|receipt| receipt.preserved_thread_id.clone())
-        .collect::<BTreeSet<ThreadId>>();
+        .collect::<BTreeMap<ThreadId, PreservedProvenance>>();
     let mut thread_by_session: BTreeMap<(ProviderKey, String), mallard_domain::ThreadId> =
         BTreeMap::new();
     for binding in &bindings.bindings {
-        if binding.local_project_id != resolved.project_id {
+        if binding.host_id != resolved.binding.host_id
+            || binding.replica_id != resolved.binding.replica_id
+            || binding.local_project_id != resolved.project_id
+        {
             continue;
         }
         let Some(provider_thread_id) = &binding.provider_thread_id else {
@@ -714,7 +723,7 @@ pub fn merge_activity_sessions(
                 source: SessionSourceState::LocalOnly,
                 access,
                 title,
-                is_preserved_local: preserved_local_threads.contains(&thread_id),
+                preserved: preserved_threads.get(&thread_id).cloned(),
                 summary: record.summary.summary.clone(),
                 started_at,
                 ended_at,
@@ -742,6 +751,9 @@ pub fn merge_activity_sessions(
                 if let Some(title) = &record.display_title {
                     existing.title = title.clone();
                 }
+            }
+            if existing.preserved.is_none() {
+                existing.preserved = record.preserved.clone();
             }
             continue;
         }
@@ -779,7 +791,7 @@ pub fn merge_activity_sessions(
                 source: SessionSourceState::RemoteOnly,
                 access,
                 title,
-                is_preserved_local: false,
+                preserved: record.preserved.clone(),
                 summary: None,
                 started_at,
                 ended_at,
@@ -813,45 +825,20 @@ pub fn merge_activity_sessions(
 // The complete Activity view
 // ---------------------------------------------------------------------------
 
-/// Recompute a project's Activity: local sessions for every bound provider,
-/// remote sessions for every provider scope when a storage is named, Git
-/// mapping over normalized evidence, and per-provider access states.
+/// Project the Activity response from one already-resolved project, one local
+/// discovery witness, and one verified remote snapshot projection.
 #[allow(clippy::too_many_arguments)]
-pub fn get_project_activity(
+pub fn build_project_activity(
     repository: &LocalStateRepository,
     registry: &ProviderRegistry,
-    local_project_id: &LocalProjectId,
-    storage_id: Option<&StorageId>,
+    resolved: &ResolvedActivityProject,
+    local: Vec<LocalSessionRecord>,
+    remote: Vec<RemoteSessionRecord>,
     branch: Option<&str>,
     before_time: Option<u64>,
     window_days: Option<u64>,
-    force_revalidate: bool,
+    mut warnings: Vec<String>,
 ) -> Result<ProjectActivity, String> {
-    let resolved = resolve_activity_project(repository, local_project_id)?;
-    let mut warnings = Vec::new();
-    let local = scan_local_sessions(
-        repository,
-        registry,
-        &resolved,
-        force_revalidate,
-        &mut warnings,
-    )?;
-    let remote = match storage_id {
-        Some(storage_id) => {
-            match fetch_activity_snapshot(repository, storage_id, &resolved.bundle_id) {
-                Ok(Some(snapshot)) => remote_sessions_from_snapshot(&snapshot),
-                Ok(None) => Vec::new(),
-                Err(error) => {
-                    warnings.push(format!(
-                        "remote sessions are unavailable from '{}': {}",
-                        storage_id, error
-                    ));
-                    Vec::new()
-                }
-            }
-        }
-        None => Vec::new(),
-    };
     let remote_providers = remote
         .iter()
         .map(|record| record.provider.clone())
@@ -861,7 +848,6 @@ pub fn get_project_activity(
         registry,
         repository,
         &resolved,
-        &materializations,
         local,
         remote,
         &mut warnings,
@@ -884,15 +870,13 @@ pub fn get_project_activity(
         .filter(|branch| !branch.trim().is_empty())
         .cloned()
         .collect::<BTreeSet<_>>();
-    let mut git = discover_git_history_with_recorded_branches(
+    let git = discover_git_branches_with_recorded_branches(
         &resolved.project_root,
         branch,
-        None,
-        DEFAULT_COMMIT_LIMIT,
         &recorded_branches,
     )?;
     let mut unmapped = Vec::new();
-    let git_page = if let Some(discovery) = git.as_mut() {
+    let git_page = if let Some(discovery) = git {
         let github_repository_url = discover_github_repository_url(&resolved.project_root);
         let all_commits = if discovery.selected_ref_available {
             load_first_parent_commits(
@@ -925,11 +909,10 @@ pub fn get_project_activity(
             .cloned()
             .collect::<Vec<_>>();
         Some(GitHistoryPage {
-            selected_branch: discovery.selected_branch.clone(),
-            branches: discovery.branches.clone(),
+            selected_branch: discovery.selected_branch,
+            branches: discovery.branches,
             commits: visible_commits,
             github_repository_url,
-            next_cursor: None,
             unique_session_count: mapping.unique_session_count,
         })
     } else {
@@ -968,7 +951,7 @@ pub fn get_project_activity(
         window_start,
         window_end,
         next_before: has_older_sessions.then_some(window_start),
-        storage_sync: project_storage_sync(repository, local_project_id, &materializations)?,
+        storage_sync: project_storage_sync(repository, &resolved.project_id, &materializations)?,
     })
 }
 
@@ -1210,23 +1193,17 @@ struct MappingResult {
     unique_session_count: usize,
 }
 
-struct GitDiscovery {
+struct GitBranchDiscovery {
     selected_branch: String,
     selected_ref_available: bool,
     branches: Vec<GitBranchSummary>,
-    #[allow(dead_code)]
-    commits: Vec<GitCommitSummary>,
-    #[allow(dead_code)]
-    next_cursor: Option<String>,
 }
 
-fn discover_git_history_with_recorded_branches(
+fn discover_git_branches_with_recorded_branches(
     project_root: &Path,
     requested_branch: Option<&str>,
-    before_commit: Option<&str>,
-    limit: usize,
     recorded_branches: &BTreeSet<String>,
-) -> Result<Option<GitDiscovery>, String> {
+) -> Result<Option<GitBranchDiscovery>, String> {
     let inside = git_output(project_root, &["rev-parse", "--is-inside-work-tree"])
         .ok()
         .filter(|output| {
@@ -1286,40 +1263,10 @@ fn discover_git_history_with_recorded_branches(
     // An unborn current branch has a symbolic HEAD but no refs/heads entry
     // until its first commit.
     let selected_ref_available = available_names.contains(&selected);
-    let all = if selected_ref_available {
-        load_first_parent_commits(project_root, &selected, MAX_GIT_COMMITS + 1)?
-    } else {
-        Vec::new()
-    };
-    let start = if let Some(cursor) = before_commit {
-        validate_sha(cursor)?;
-        all.iter()
-            .position(|commit| commit.sha.eq_ignore_ascii_case(cursor))
-            .map(|position| position + 1)
-            .ok_or_else(|| {
-                "commit cursor is not on the selected branch's first-parent history".to_string()
-            })?
-    } else {
-        0
-    };
-    let limit = limit.clamp(1, MAX_COMMIT_LIMIT);
-    let commits = all
-        .iter()
-        .skip(start)
-        .take(limit)
-        .cloned()
-        .collect::<Vec<_>>();
-    let next_cursor = if start + commits.len() < all.len() {
-        commits.last().map(|commit| commit.sha.clone())
-    } else {
-        None
-    };
-    Ok(Some(GitDiscovery {
+    Ok(Some(GitBranchDiscovery {
         selected_branch: selected,
         selected_ref_available,
         branches,
-        commits,
-        next_cursor,
     }))
 }
 
@@ -1358,7 +1305,7 @@ fn load_first_parent_commits(
             continue;
         };
         let subject = fields.next().unwrap_or_default().to_string();
-        if validate_sha(sha).is_err() {
+        if !is_valid_git_object_id(sha) {
             continue;
         }
         commits.push(GitCommitSummary {
@@ -1552,28 +1499,8 @@ fn valid_github_path_segment(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-fn validate_sha(value: &str) -> Result<(), String> {
-    ((value.len() == 40 || value.len() == 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then_some(())
-        .ok_or_else(|| "commit cursor must be a full hexadecimal Git object id".to_string())
-}
-
-#[allow(dead_code)]
-fn cwd_belongs_to_project(cwd: &Path, project_root: &Path) -> bool {
-    if !cwd.is_absolute()
-        || cwd
-            .components()
-            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-    {
-        return false;
-    }
-    let resolved = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    resolved == project_root || resolved.starts_with(project_root)
-}
-
-#[allow(dead_code)]
-fn value_alias<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
-    names.iter().find_map(|name| value.get(*name))
+fn is_valid_git_object_id(value: &str) -> bool {
+    (value.len() == 40 || value.len() == 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Result<Output, String> {
@@ -1599,7 +1526,11 @@ mod activity_only_tests {
         SessionEventDetail, SessionFileMetadata, SessionRewriteRequest, SessionTimelineContext,
         SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
     };
-    use mallard_domain::{BundleId, HostId, LocalProviderProfileId, ProjectBinding, ReplicaId};
+    use mallard_domain::{
+        BundleId, BundleRecipe, ConversationMaterializationState, LocalConversationBinding,
+        LocalProjectRegistration, LocalProviderProfileId, ProjectBinding, ProviderProfile,
+        ReplicaId,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -1701,6 +1632,10 @@ mod activity_only_tests {
             })
         }
 
+        fn summarize_bytes(&self, _bytes: &[u8]) -> Result<SessionFileSummary, String> {
+            panic!("Activity must not summarize captured transcript bytes")
+        }
+
         fn build_timeline_index(
             &self,
             _path: &Path,
@@ -1792,11 +1727,58 @@ mod activity_only_tests {
         let profile_id = LocalProviderProfileId::parse("profile-test").unwrap();
         let project_id = LocalProjectId::parse("project-test").unwrap();
         let bundle_id = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let identity = repository.load_or_create_host_identity().unwrap();
+        let canonical_project_root = fs::canonicalize(&project_root).unwrap();
+        let canonical_home = fs::canonicalize(&home).unwrap();
+        let project_binding = ProjectBinding {
+            host_id: identity.host_id.clone(),
+            replica_id: ReplicaId::parse("replica-test").unwrap(),
+            local_project_id: project_id.clone(),
+            bundle_id: bundle_id.clone(),
+            project_root: project_root.to_string_lossy().into_owned(),
+            canonical_project_root: canonical_project_root.to_string_lossy().into_owned(),
+            profile_ids: BTreeMap::from([(provider.clone(), profile_id.clone())]),
+            state: BindingState::Active,
+            revision: 0,
+            updated_at: 1,
+        };
+        repository
+            .mutate_config(|config| {
+                config.projects.push(LocalProjectRegistration {
+                    local_project_id: project_id.clone(),
+                    bundle_id: bundle_id.clone(),
+                    display_name: "Test project".to_string(),
+                    local_alias: None,
+                    repository_fingerprint: None,
+                    recipe: BundleRecipe::default(),
+                    revision: 0,
+                    created_at: 1,
+                    updated_at: 1,
+                });
+                Ok(())
+            })
+            .unwrap();
+        repository
+            .mutate_bindings(|_, machine| {
+                machine.profiles.push(ProviderProfile {
+                    profile_id: profile_id.clone(),
+                    provider: provider.clone(),
+                    display_name: "Instrumented".to_string(),
+                    path: home.to_string_lossy().into_owned(),
+                    canonical_path: canonical_home.to_string_lossy().into_owned(),
+                    revision: 0,
+                    created_at: 1,
+                    updated_at: 1,
+                });
+                machine.bindings.push(project_binding.clone());
+                Ok(())
+            })
+            .unwrap();
         let summary_calls = Arc::new(AtomicUsize::new(0));
         let timeline_calls = Arc::new(AtomicUsize::new(0));
         let registry = ProviderRegistry::from_adapters(vec![Arc::new(InstrumentedAdapter {
             provider: provider.clone(),
-            transcript,
+            transcript: transcript.clone(),
             project_root: project_root.clone(),
             summary_calls: summary_calls.clone(),
             timeline_calls: timeline_calls.clone(),
@@ -1805,40 +1787,79 @@ mod activity_only_tests {
             project_id: project_id.clone(),
             bundle_id: bundle_id.clone(),
             project_root: project_root.clone(),
-            binding: ProjectBinding {
-                host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
-                replica_id: ReplicaId::parse("replica-test").unwrap(),
-                local_project_id: project_id,
-                bundle_id,
-                project_root: project_root.to_string_lossy().into_owned(),
-                canonical_project_root: fs::canonicalize(&project_root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
-                profile_ids: BTreeMap::from([(provider.clone(), profile_id.clone())]),
-                state: BindingState::Active,
-                revision: 0,
-                updated_at: 1,
-            },
+            binding: project_binding,
             homes: BTreeMap::from([(
-                provider,
+                provider.clone(),
                 ResolvedProviderHome {
                     profile_id,
-                    home: fs::canonicalize(&home).unwrap(),
+                    home: canonical_home,
                 },
             )]),
             unavailable: BTreeMap::new(),
         };
         let mut warnings = Vec::new();
-        let rows =
-            scan_local_sessions(&repository, &registry, &resolved, false, &mut warnings).unwrap();
+        let transcript_metadata = fs::metadata(&transcript).unwrap();
+        let views = vec![LocalSessionView {
+            descriptor: crate::provider_capture::ResourceCandidate {
+                resource_id: "instrumented:session:session-1".to_string(),
+                kind: crate::provider_capture::CaptureResourceKind::Conversation,
+                provider: Some(provider.clone()),
+                provider_resource_type: Some("session".to_string()),
+                display_name: "Session one (3)".to_string(),
+                relative_cwd: Some(".".to_string()),
+                apply_policy: crate::provider_capture::CaptureApplyPolicy::SafeFile,
+                selected_by_default: true,
+                blocked_reason: None,
+                logical_paths: vec!["state/session.jsonl".to_string()],
+                metadata: BTreeMap::new(),
+            },
+            provider: provider.clone(),
+            provider_thread_id: "session-1".to_string(),
+            transcript_logical_path: "state/session.jsonl".to_string(),
+            source_path: transcript,
+            source_mtime: modified_secs(&transcript_metadata),
+            source_size: transcript_metadata.len(),
+        }];
+        let rows = scan_local_session_views(
+            &repository,
+            &registry,
+            &resolved,
+            &views,
+            false,
+            &mut warnings,
+        )
+        .unwrap();
         assert_eq!(rows.len(), 1);
-        let empty_materializations = repository.load_materializations().unwrap();
+        let preserved_thread_id = initial_conversation_thread_id(
+            &resolved.bundle_id,
+            &ProviderKey::parse("instrumented").unwrap(),
+            "session-1",
+        )
+        .unwrap();
+        repository
+            .mutate_conversation_bindings(|bindings| {
+                bindings.bindings.push(LocalConversationBinding {
+                    host_id: resolved.binding.host_id.clone(),
+                    replica_id: resolved.binding.replica_id.clone(),
+                    local_project_id: resolved.project_id.clone(),
+                    provider_profile_id: LocalProviderProfileId::parse("profile-test").unwrap(),
+                    thread_id: preserved_thread_id.clone(),
+                    forked_from: Some(ThreadId::parse("thread-parent").unwrap()),
+                    preserved: None,
+                    root_tail_layout: None,
+                    provider_thread_id: Some("session-1".to_string()),
+                    materialization_state: ConversationMaterializationState::Resumable,
+                    revision: 0,
+                    created_at: 1,
+                    updated_at: 1,
+                });
+                Ok(())
+            })
+            .unwrap();
         let sessions = merge_activity_sessions(
             &registry,
             &repository,
             &resolved,
-            &empty_materializations,
             rows.clone(),
             Vec::new(),
             &mut warnings,
@@ -1846,66 +1867,45 @@ mod activity_only_tests {
         .unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "Session one (3)");
-        assert!(!sessions[0].is_preserved_local);
+        assert!(sessions[0].preserved.is_none());
 
-        let preserved_thread_id = initial_conversation_thread_id(
-            &resolved.bundle_id,
-            &ProviderKey::parse("instrumented").unwrap(),
-            "session-1",
-        )
-        .unwrap();
-        let materializations: Materializations = serde_json::from_value(serde_json::json!({
-            "schema": 1,
-            "revision": 1,
-            "records": [{
-                "materialization_id": "materialization-test",
-                "plan_id": "plan-test",
-                "host_id": resolved.binding.host_id.to_string(),
-                "replica_id": resolved.binding.replica_id.to_string(),
-                "local_project_id": resolved.project_id.to_string(),
-                "storage_id": "storage-test",
-                "bundle_id": resolved.bundle_id.to_string(),
-                "revision": 1,
-                "commit_id": "commit-test",
-                "manifest_sha256": "a".repeat(64),
-                "binding_revision": resolved.binding.revision,
-                "status": "complete",
-                "applied_at": 2,
-                "receipts": [{
-                    "action_id": "action-test",
-                    "resource_id": "instrumented:conversation:thread-original",
-                    "action_type": "materialize_conversation",
-                    "status": "applied",
-                    "applied_at": 2,
-                    "conversation": {
-                        "host_id": resolved.binding.host_id.to_string(),
-                        "replica_id": resolved.binding.replica_id.to_string(),
-                        "thread_id": "thread-original",
-                        "provider_profile_id": "profile-test",
-                        "provider_thread_id": "provider-remote",
-                        "materialization_state": "resumable",
-                        "cloud_revision": 1,
-                        "cloud_commit_id": "commit-test",
-                        "cloud_manifest_sha256": "a".repeat(64),
-                        "journal_operation_id": "conversation-operation-test",
-                        "preserved_thread_id": preserved_thread_id.to_string(),
-                        "source_disposition": "retained"
-                    }
-                }]
-            }]
-        }))
-        .unwrap();
+        repository
+            .mutate_conversation_bindings(|bindings| {
+                let binding = bindings
+                    .bindings
+                    .iter_mut()
+                    .find(|binding| binding.thread_id == preserved_thread_id)
+                    .unwrap();
+                binding.preserved = Some(PreservedProvenance {
+                    preserved_from: ThreadId::parse("thread-parent").unwrap(),
+                    ordinal: 2,
+                });
+                binding.revision = binding.revision.saturating_add(1);
+                binding.updated_at = 2;
+                Ok(())
+            })
+            .unwrap();
+        assert!(repository
+            .load_materializations()
+            .unwrap()
+            .records
+            .is_empty());
         let preserved_sessions = merge_activity_sessions(
             &registry,
             &repository,
             &resolved,
-            &materializations,
             rows,
             Vec::new(),
             &mut warnings,
         )
         .unwrap();
-        assert!(preserved_sessions[0].is_preserved_local);
+        assert_eq!(
+            preserved_sessions[0].preserved,
+            Some(PreservedProvenance {
+                preserved_from: ThreadId::parse("thread-parent").unwrap(),
+                ordinal: 2,
+            })
+        );
         assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(timeline_calls.load(Ordering::SeqCst), 0);
     }

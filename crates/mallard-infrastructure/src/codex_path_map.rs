@@ -448,7 +448,9 @@ impl CodexPathMapper {
     pub fn find_source_match(&self, record: &Value) -> Option<String> {
         match record {
             Value::String(text) => self.first_match_in(text),
-            Value::Array(values) => values.iter().find_map(|value| self.find_source_match(value)),
+            Value::Array(values) => values
+                .iter()
+                .find_map(|value| self.find_source_match(value)),
             Value::Object(object) => object.iter().find_map(|(key, entry)| {
                 self.first_match_in(key)
                     .or_else(|| self.find_source_match(entry))
@@ -491,12 +493,7 @@ mod tests {
     use serde_json::json;
 
     fn mapper() -> CodexPathMapper {
-        CodexPathMapper::new(
-            "/homeA/projact_alpha",
-            None,
-            Some("/homeA"),
-        )
-        .unwrap()
+        CodexPathMapper::new("/homeA/projact_alpha", None, Some("/homeA")).unwrap()
     }
 
     fn target(root: &str) -> CodexPathMapper {
@@ -684,7 +681,9 @@ mod tests {
 
         // Tilde source onto a target outside the puller's home: canonical
         // expansion is raw absolute, never tilde.
-        let wire = mapper.encode_record_gated(&json!("~/projact_alpha/x")).unwrap();
+        let wire = mapper
+            .encode_record_gated(&json!("~/projact_alpha/x"))
+            .unwrap();
         let outside = CodexPathMapper::new("/srv/checkout", None, Some("/homeB")).unwrap();
         assert_eq!(
             outside.decode_record(&wire).unwrap(),
@@ -695,18 +694,12 @@ mod tests {
 
     #[test]
     fn canonical_alias_spellings_collapse_to_one_token() {
-        let mapper = CodexPathMapper::new(
-            "/var/folders/proj",
-            Some("/private/var/folders/proj"),
-            None,
-        )
-        .unwrap();
+        let mapper =
+            CodexPathMapper::new("/var/folders/proj", Some("/private/var/folders/proj"), None)
+                .unwrap();
         let record = json!(["/var/folders/proj/a", "/private/var/folders/proj/b"]);
         let wire = mapper.encode_record_gated(&record).unwrap();
-        assert_eq!(
-            wire,
-            json!(["/__mallard_root__/a", "/__mallard_root__/b"])
-        );
+        assert_eq!(wire, json!(["/__mallard_root__/a", "/__mallard_root__/b"]));
         // Same semantic path form ⇒ same canonical target spelling.
         let decoded = mapper.decode_record(&wire).unwrap();
         assert_eq!(
@@ -749,7 +742,9 @@ mod tests {
         let mapper = CodexPathMapper::new("/a/proj", None, None).unwrap();
         // The suffix repeats the root's own spelling; the boundary rule
         // (preceding byte 'j' is a word byte) keeps it a suffix.
-        let wire = mapper.encode_record_gated(&json!("/a/proj/a/proj")).unwrap();
+        let wire = mapper
+            .encode_record_gated(&json!("/a/proj/a/proj"))
+            .unwrap();
         assert_eq!(wire, json!("/__mallard_root__/a/proj"));
         let decoded = target("/homeB/projact_beta").decode_record(&wire).unwrap();
         assert_eq!(decoded, json!("/homeB/projact_beta/a/proj"));

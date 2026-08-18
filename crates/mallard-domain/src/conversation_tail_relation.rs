@@ -66,109 +66,115 @@ impl TailSideEvidence {
     }
 }
 
-/// Evidence for one classification: the accepted wire pin `P_wire`, its
-/// local-form twin `P_local`, local observation `L`, cloud `C`, and the
-/// caller-verified gates.  Each gate is `true` when its proof succeeded or
-/// is vacuous (for example the witness gates without a pin); any failed or
-/// ambiguous proof must be passed as `false`.
-#[derive(Clone, Debug)]
-pub struct TailComparisonEvidence {
-    /// The accepted cloud version's wire-form tail (`P_wire`).
-    pub accepted: TailSideEvidence,
-    /// The accepted version's local-form twin (`P_local`), pinned atomically
-    /// with `accepted` at the same acceptance event.
-    pub accepted_local: TailSideEvidence,
-    /// Local observation (local form).
-    pub local: TailSideEvidence,
-    /// Cloud manifest value (wire form).
-    pub cloud: TailSideEvidence,
-    /// The local value was derived from the bound root under its binding
-    /// layout — cursor continuity from `P_local`'s accumulator state plus
-    /// the probe window is the standing prefix proof.
-    pub local_provenance_verified: bool,
-    /// The accepted pin's immutable commit/manifest witness re-verified.
-    pub accepted_witness_verified: bool,
-    /// The current cloud head is the accepted witness or a verified
-    /// descendant with an unmoved start.
-    pub cloud_ancestry_verified: bool,
-    /// Exact ScopeBase/HEAD coordinates matched the reviewed snapshot.
-    pub coordinates_verified: bool,
+/// Why raw tail evidence could not be promoted into classifier input. Failed
+/// proofs are data, not caller-controlled Booleans: callers keep this blocker
+/// beside the resulting `Unknown` presentation instead of manufacturing a
+/// partially verified evidence value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TailEvidenceBlocker {
+    InvalidSide,
+    InvalidTail,
+    IncompleteAcceptance,
+    UnacceptedOverlap,
+    ExpectedSideMissing,
+    LayoutMismatch,
+    AcceptanceCoordinateMismatch,
 }
 
-/// Classify one thread from complete five-field values and validated gates.
-/// A value match can never override a failed gate.
-pub fn compare_conversation_tail(evidence: TailComparisonEvidence) -> TailClassification {
-    if !evidence.local_provenance_verified
-        || !evidence.accepted_witness_verified
-        || !evidence.cloud_ancestry_verified
-        || !evidence.coordinates_verified
-    {
-        return TailClassification::Unknown;
-    }
-    if evidence.accepted.is_invalid()
-        || evidence.accepted_local.is_invalid()
-        || evidence.local.is_invalid()
-        || evidence.cloud.is_invalid()
-    {
-        return TailClassification::Unknown;
-    }
-    for tail in [
-        &evidence.accepted,
-        &evidence.accepted_local,
-        &evidence.local,
-        &evidence.cloud,
-    ]
-    .into_iter()
-    .filter_map(TailSideEvidence::value)
-    {
-        if tail.validate().is_err() {
-            return TailClassification::Unknown;
-        }
-    }
+/// Evidence that has passed every prerequisite for semantic comparison.
+/// Construction is the proof boundary; `compare_conversation_tail` therefore
+/// accepts no independent proof flags and cannot combine values whose
+/// provenance was not verified together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedTailEvidence {
+    /// The accepted cloud version's wire-form tail (`P_wire`).
+    accepted: TailSideEvidence,
+    /// The accepted version's local-form twin (`P_local`), pinned atomically
+    /// with `accepted` at the same acceptance event.
+    accepted_local: TailSideEvidence,
+    /// Local observation (local form).
+    local: TailSideEvidence,
+    /// Cloud manifest value (wire form).
+    cloud: TailSideEvidence,
+}
 
-    // The dual pins are recorded atomically; a half-present pair is
-    // corrupted acceptance evidence, never a directional absence.
-    if evidence.accepted.value().is_some() != evidence.accepted_local.value().is_some() {
-        return TailClassification::Unknown;
+impl VerifiedTailEvidence {
+    pub fn new(
+        accepted: TailSideEvidence,
+        accepted_local: TailSideEvidence,
+        local: TailSideEvidence,
+        cloud: TailSideEvidence,
+    ) -> Result<Self, TailEvidenceBlocker> {
+        if accepted.is_invalid()
+            || accepted_local.is_invalid()
+            || local.is_invalid()
+            || cloud.is_invalid()
+        {
+            return Err(TailEvidenceBlocker::InvalidSide);
+        }
+        for tail in [&accepted, &accepted_local, &local, &cloud]
+            .into_iter()
+            .filter_map(TailSideEvidence::value)
+        {
+            tail.validate()
+                .map_err(|_| TailEvidenceBlocker::InvalidTail)?;
+        }
+        if accepted.value().is_some() != accepted_local.value().is_some() {
+            return Err(TailEvidenceBlocker::IncompleteAcceptance);
+        }
+        match (accepted.value(), local.value(), cloud.value()) {
+            (None, Some(_), Some(_)) => return Err(TailEvidenceBlocker::UnacceptedOverlap),
+            (Some(_), None, _) | (Some(_), _, None) => {
+                return Err(TailEvidenceBlocker::ExpectedSideMissing)
+            }
+            _ => {}
+        }
+        if let (Some(accepted), Some(accepted_local), Some(local), Some(cloud)) = (
+            accepted.value(),
+            accepted_local.value(),
+            local.value(),
+            cloud.value(),
+        ) {
+            if !accepted.layout().matches(cloud) || !accepted_local.layout().matches(local) {
+                return Err(TailEvidenceBlocker::LayoutMismatch);
+            }
+            if accepted.partition_kind != accepted_local.partition_kind
+                || accepted.start_record_count != accepted_local.start_record_count
+                || accepted.accepted_end_record_count != accepted_local.accepted_end_record_count
+            {
+                return Err(TailEvidenceBlocker::AcceptanceCoordinateMismatch);
+            }
+        }
+        Ok(Self {
+            accepted,
+            accepted_local,
+            local,
+            cloud,
+        })
     }
+}
+
+/// Classify one thread from evidence whose provenance and shape have already
+/// passed `VerifiedTailEvidence::new`.
+pub fn compare_conversation_tail(evidence: &VerifiedTailEvidence) -> TailClassification {
     let accepted = evidence.accepted.value();
     let accepted_local = evidence.accepted_local.value();
     let local = evidence.local.value();
     let cloud = evidence.cloud.value();
 
-    // Directional absence is decided first.  Pull does not bootstrap by
-    // comparing graphs: both sides present without a pin is Unknown (first
-    // contact re-establishes acceptance through the encode-compare adoption
-    // path before classification), and an expected side missing after a pin
-    // exists is Unknown.
     match (accepted, local, cloud) {
         (None, Some(_), None) => return TailClassification::MissingCloud,
         (None, None, Some(_)) => return TailClassification::MissingLocal,
         (None, None, None) => return TailClassification::MissingBoth,
-        (None, Some(_), Some(_)) => return TailClassification::Unknown,
-        (Some(_), None, _) | (Some(_), _, None) => return TailClassification::Unknown,
         (Some(_), Some(_), Some(_)) => {}
+        _ => unreachable!("verified evidence exhausts ambiguous absence shapes"),
     }
     let (accepted, accepted_local, local, cloud) = match (accepted, accepted_local, local, cloud) {
         (Some(accepted), Some(accepted_local), Some(local), Some(cloud)) => {
             (accepted, accepted_local, local, cloud)
         }
-        _ => unreachable!("absence and pairing handled above"),
+        _ => unreachable!("verified evidence pairs accepted tails"),
     };
-
-    // Column layout guards: the wire column shares one codec, partition,
-    // and start; the local column likewise; the two pins agree on the
-    // form-independent partition and coordinates.  A moved start makes
-    // ancestry Unknown.
-    if !accepted.layout().matches(cloud) || !accepted_local.layout().matches(local) {
-        return TailClassification::Unknown;
-    }
-    if accepted.partition_kind != accepted_local.partition_kind
-        || accepted.start_record_count != accepted_local.start_record_count
-        || accepted.accepted_end_record_count != accepted_local.accepted_end_record_count
-    {
-        return TailClassification::Unknown;
-    }
 
     let local_current = local == accepted_local;
     let cloud_current = cloud == accepted;
@@ -181,9 +187,7 @@ pub fn compare_conversation_tail(evidence: TailComparisonEvidence) -> TailClassi
     if local == cloud {
         return TailClassification::Sync(SyncCurrency::Advanced);
     }
-    if cloud_current
-        && local.accepted_end_record_count > accepted_local.accepted_end_record_count
-    {
+    if cloud_current && local.accepted_end_record_count > accepted_local.accepted_end_record_count {
         return TailClassification::LocalOutstanding;
     }
     if local_current && cloud.accepted_end_record_count > accepted.accepted_end_record_count {

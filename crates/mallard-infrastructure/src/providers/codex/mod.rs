@@ -18,8 +18,10 @@ use super::traits::{
 use crate::conversation_codec::{
     analyze_codex_transcript, CODEX_CODEC_VERSION, CODEX_LINEAGE_CODEC_KEY,
 };
-use crate::provider_capture::{scan_session_metadata_with, MetadataScanSpec};
+use crate::provider_capture::{scan_session_metadata_with, ParsedSessionMetadata};
 use mallard_domain::ProviderKey;
+use serde::Deserialize;
+use serde_json::Value;
 use std::path::Path;
 
 pub use actions::codex_app_project_open_command;
@@ -29,15 +31,48 @@ pub fn provider_key() -> ProviderKey {
     ProviderKey::parse("codex").expect("static provider key")
 }
 
-const CODEX_SCAN_SPEC: MetadataScanSpec = MetadataScanSpec {
-    authoritative: |event_type, _value| event_type.contains("session_meta"),
-    // Modern Codex subagent metadata carries both `id` (this transcript) and
-    // `session_id` (its parent). Prefer `id` on the authoritative
-    // session_meta record so parent and child sessions remain distinct.
-    id_keys_authoritative: &["id", "thread_id", "threadId", "session_id", "sessionId"],
-    id_keys_fallback: &["thread_id", "threadId", "session_id", "sessionId", "id"],
-    detect_subagent: |value| crate::codex_rollout::session_meta_is_internal_subagent(value),
-};
+#[derive(Deserialize)]
+enum CodexMetadataRecordType {
+    #[serde(rename = "session_meta")]
+    SessionMeta,
+}
+
+#[derive(Deserialize)]
+struct CodexSessionMetadataEnvelope {
+    #[serde(rename = "type")]
+    record_type: CodexMetadataRecordType,
+    payload: CodexSessionMetadataPayload,
+}
+
+#[derive(Deserialize)]
+struct CodexSessionMetadataPayload {
+    id: String,
+    cwd: String,
+    #[serde(default)]
+    thread_source: Option<String>,
+    #[serde(default)]
+    source: Option<Value>,
+}
+
+fn parse_codex_session_metadata(line: &[u8]) -> Option<ParsedSessionMetadata> {
+    let envelope: CodexSessionMetadataEnvelope = serde_json::from_slice(line).ok()?;
+    match envelope.record_type {
+        CodexMetadataRecordType::SessionMeta => {
+            let payload = envelope.payload;
+            let is_internal_subagent = payload.thread_source.as_deref() == Some("subagent")
+                || payload
+                    .source
+                    .as_ref()
+                    .and_then(Value::as_object)
+                    .is_some_and(|source| source.contains_key("subagent"));
+            Some(ParsedSessionMetadata {
+                session_id: payload.id,
+                cwd: payload.cwd,
+                is_internal_subagent,
+            })
+        }
+    }
+}
 
 pub struct CodexAdapter;
 
@@ -97,7 +132,7 @@ impl SessionAdapter for CodexAdapter {
     }
 
     fn scan_metadata(&self, path: &Path) -> Result<SessionFileMetadata, String> {
-        scan_session_metadata_with(path, &CODEX_SCAN_SPEC)
+        scan_session_metadata_with(path, parse_codex_session_metadata)
     }
 
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis {
@@ -132,6 +167,10 @@ impl SessionAdapter for CodexAdapter {
 
     fn summarize_file(&self, path: &Path) -> Result<SessionFileSummary, String> {
         history::summarize_rollout_file(path)
+    }
+
+    fn summarize_bytes(&self, bytes: &[u8]) -> Result<SessionFileSummary, String> {
+        history::summarize_rollout_bytes(bytes)
     }
 
     fn build_timeline_index(
@@ -172,5 +211,71 @@ impl SessionAdapter for CodexAdapter {
         request: &mut SessionActionRequest<'_>,
     ) -> Result<SessionActionOutcome, String> {
         actions::execute_action(request)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn jsonl(records: impl IntoIterator<Item = Value>) -> String {
+        records
+            .into_iter()
+            .map(|record| record.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    #[test]
+    fn metadata_scan_rejects_near_match_nested_and_split_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("rollout.jsonl");
+        let cwd = temp.path().to_string_lossy().into_owned();
+        fs::write(
+            &path,
+            jsonl([
+                serde_json::json!({
+                    "type": "session_metadata",
+                    "payload": {"id": "near-match", "cwd": cwd}
+                }),
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {"tool": {"id": "nested-tool-id"}}
+                }),
+                serde_json::json!({
+                    "type": "diagnostic",
+                    "payload": {"cwd": cwd}
+                }),
+            ]),
+        )
+        .unwrap();
+
+        let error = scan_session_metadata_with(&path, parse_codex_session_metadata).unwrap_err();
+        assert!(error.contains("authoritative session metadata"));
+    }
+
+    #[test]
+    fn metadata_scan_reads_only_exact_session_meta_payload_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("rollout.jsonl");
+        let cwd = temp.path().to_string_lossy().into_owned();
+        fs::write(
+            &path,
+            jsonl([serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": "current-session",
+                    "cwd": cwd,
+                    "tool": {"id": "unrelated", "cwd": "/unrelated"}
+                }
+            })]),
+        )
+        .unwrap();
+
+        let metadata = scan_session_metadata_with(&path, parse_codex_session_metadata).unwrap();
+        assert_eq!(metadata.session_id, "current-session");
+        assert_eq!(metadata.cwd, temp.path());
     }
 }

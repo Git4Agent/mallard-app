@@ -46,7 +46,7 @@ import LogManagerDialog from "./LogManagerDialog";
 import ProjectBindingEditor, { type ProjectBindingDraft } from "./ProjectBindingEditor";
 import ProjectLinksWorkspace, { type StorageNotice } from "./ProjectLinksWorkspace";
 import StorageIndexPage from "./StorageIndexPage";
-import type { PathBarMenuGroup } from "./SyncPathBar";
+import type { PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
   preserveSyncedPushRecipeEntries,
@@ -67,7 +67,7 @@ import StorageCatalogPage, {
 import AddCatalogScopeWorkspace from "../storage-catalog/AddCatalogScopeWorkspace";
 import { storageCatalogApi } from "../storage-catalog/api";
 import type { CatalogScopeView } from "../storage-catalog/types";
-import { catalogScopeLabel, catalogKindMeta, errorMessage as catalogErrorMessage } from "../storage-catalog/model";
+import { catalogScopeLabel, errorMessage as catalogErrorMessage } from "../storage-catalog/model";
 import RestorePlanView, { type PullReviewPrimary } from "./RestorePlanView";
 import StartupLoadingScreen, { type StartupStage } from "./StartupLoadingScreen";
 import { type SyncReviewStep } from "./reviewSteps";
@@ -115,11 +115,7 @@ function sameStorageConfig(left: SyncConfig["storages"][number], right: SyncConf
     && left.s3_endpoint === right.s3_endpoint
     && left.region === right.region
     && left.local_dir === right.local_dir
-    && left.supports_conditional_writes === right.supports_conditional_writes
-    && left.included_default_exclusions.length === right.included_default_exclusions.length
-    && left.included_default_exclusions.every((value, index) => (
-      value === right.included_default_exclusions[index]
-    ));
+    && left.supports_conditional_writes === right.supports_conditional_writes;
 }
 
 export function applyStorageDraft(
@@ -811,15 +807,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // silent there and speaks only for the screens that carry no trail.
   const workspaceTitle = activeDraftSummary?.display_name
     ?? (addingCatalogScope ? "Add Catalog resource" : null)
-    ?? (activeCatalogScope ? catalogScopeLabel(activeCatalogScope.scope, activeCatalogScope.profile) : null)
     ?? (activeSummary ? null : "Projects");
   const workspaceIcon = activeDraftSummary
     ? "folder"
     : addingCatalogScope
       ? "catalog"
-      : activeCatalogScope
-        ? catalogKindMeta(activeCatalogScope.scope.resource_kind).icon
-        : "folder";
+      : "folder";
   // The project workspace renders a path bar that doubles as the titlebar —
   // and so do the storage screens: the Storages index owns its state here,
   // while the storage page reports through activeStorageSettingsId, which the
@@ -827,9 +820,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // project is active; with one active the bar was already up.
   const showsPathBar = !activeDraftSummary
     && !addingCatalogScope
-    && !activeCatalogScope
     && !setupDraftId
-    && (!!activeSummary || storageIndexOpen || activeStorageSettingsId != null);
+    && (!!activeSummary
+      || !!activeCatalogScope
+      || storageIndexOpen
+      || activeStorageSettingsId != null);
   const restoreProfileLabel = restoreBinding
     ? [...new Set(Object.values(restoreBinding.profile_ids)
       .map((profileId) => profiles.find((profile) => profile.profile_id === profileId)?.display_name)
@@ -3402,7 +3397,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           <StorageCatalogPage
             key={activeCatalogScope.scope.scope_id}
             scope={activeCatalogScope}
+            scopes={catalogScopes}
             storages={catalogStorages}
+            appActions={appActions}
+            onOpenScope={openCatalogScope}
+            onOpenStorages={openStorageIndex}
+            onOpenStorageSettings={(storageId) => openStorageWorkspace(storageId, true)}
+            onRemoveScope={() => void removeCatalogScope(activeCatalogScope.scope.scope_id)}
             onScopeGone={() => {
               setCatalogScopeId(null);
               void refreshCatalogScopes();

@@ -37,9 +37,12 @@ resources portable across teammates and machines.
   Git-managed project content continues to travel through Git.
 - Manages user-global Agent Skills, provider-native plugin install intent, and
   Codex pets as independent Library resources. The Catalog menu starts empty
-  and grows one row per **(provider home × resource kind)** the user adds;
-  inside a row, each resource links to storages individually and then exposes
-  per-link Push, Pull, and Refresh plus local Fork for skills and pets.
+  and grows one row per **(provider home × resource kind)** the user adds. A
+  row's page works like a project's: one storage chosen in the path bar, one
+  list of resources each wearing the same status badge a thread wears, and
+  Push and Pull as page verbs with a review. Pairing a resource with a storage
+  is a side effect of those verbs, not a step the user takes; Refresh, Unlink,
+  and local Fork stay behind the individual resource.
 
 The first Library catalog supports Codex and Claude skills/plugins and Codex
 pet v1/v2. Pet formats are separate resources — and separate menu rows — and

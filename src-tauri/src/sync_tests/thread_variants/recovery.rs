@@ -1,8 +1,6 @@
 use super::harness::{codex, rewrite_transcript_identity, sha256, TranscriptBuilder, VariantWorld};
 use super::relation_matrix::reviewed_action;
-use crate::project_sync::conversation_codec::{
-    analyze_codex_transcript, CodecLineage,
-};
+use crate::project_sync::conversation_codec::{analyze_codex_transcript, CodecLineage};
 use crate::project_sync::conversation_materialization::{
     apply_conversation_cloud_publication, apply_conversation_materialization,
     recover_conversation_cloud_publications, recover_conversation_materializations,
@@ -10,20 +8,20 @@ use crate::project_sync::conversation_materialization::{
     ConversationMaterializationRequest, ConversationTargetPayload, NoConversationFailpoints,
 };
 use crate::project_sync::conversation_sync::{
-    validate_conversation_action_pins, ConversationStalePin,
+    validate_conversation_action_pins, ConversationContextPin, ConversationRevisionPin,
+    ConversationStalePin, ConversationTailPin, ConversationTargetPin,
 };
 use crate::project_sync::domain::{
     compute_portable_conversation_tail, BindingState, BundleId, BundleRecipe,
     ConversationCloudAnchor, ConversationFileRole, ConversationJournalTarget,
     ConversationMaterializationOperation, ConversationMaterializationState,
-    ConversationOperationId, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationPublicationOperation, ConversationPushPlan, ConversationReasonCode,
-    ConversationSyncOperation, ConversationSyncOperationKind, LocalConversationBinding,
-    LocalProjectId, LocalProjectRegistration, LocalProviderProfileId, PlanId,
-    PortableConversationTail, ProjectBinding, ProviderKey, ProviderProfile, PullJournalPhase,
-    PushJournalPhase, ReplicaId, RootTailLayout, StorageId, SyncConfig, SyncCurrency,
-    TailClassification, TailPartitionKind, TargetExpectation, ThreadId, PORTABLE_TAIL_CODEC_V1,
-    PUSH_PLAN_SCHEMA,
+    ConversationOperationId, ConversationPlanActionType, ConversationPublicationOperation,
+    ConversationPushPlan, ConversationSyncOperation, ConversationSyncOperationKind,
+    KeepBothJournal, LocalConversationBinding, LocalProjectId, LocalProjectRegistration,
+    LocalProviderProfileId, PlanId, PortableConversationTail, PreservedProvenance, ProjectBinding,
+    ProviderKey, ProviderProfile, PullJournalPhase, PushJournalPhase, ReplicaId, RootTailLayout,
+    StorageId, SyncConfig, SyncCurrency, TailClassification, TailPartitionKind, TargetExpectation,
+    ThreadId, PORTABLE_TAIL_CODEC_V1, PUSH_PLAN_SCHEMA,
 };
 use crate::project_sync::persistence::LocalStateRepository;
 use crate::project_sync::provider_capture::{capture_selected, discover_project, CaptureRequest};
@@ -35,9 +33,7 @@ use std::path::PathBuf;
 #[test]
 fn every_reviewed_pin_rejects_independently_before_mutation() {
     let (action, baseline) = reviewed_action(
-        ConversationPlanDirection::Pull,
         ConversationPlanActionType::MaterializeCloud,
-        ConversationReasonCode::CloudOutstanding,
         TailClassification::CloudOutstanding,
     );
     type StaleCase = (
@@ -50,108 +46,130 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
             Box::new(|value| value.now = 9_999),
         ),
         (
-            ConversationStalePin::Host,
+            ConversationStalePin::Context(ConversationContextPin::Host),
             Box::new(|value| {
-                value.host_id =
+                value.pins.context.host_id =
                     crate::project_sync::domain::HostId::parse("22222222222222222222222222222222")
                         .unwrap()
             }),
         ),
         (
-            ConversationStalePin::Replica,
+            ConversationStalePin::Context(ConversationContextPin::Replica),
             Box::new(|value| {
-                value.replica_id =
+                value.pins.context.replica_id =
                     crate::project_sync::domain::ReplicaId::parse("replica-other").unwrap()
             }),
         ),
         (
-            ConversationStalePin::LocalProject,
+            ConversationStalePin::Context(ConversationContextPin::LocalProject),
             Box::new(|value| {
-                value.local_project_id = LocalProjectId::parse("project-other").unwrap()
+                value.pins.context.local_project_id =
+                    LocalProjectId::parse("project-other").unwrap()
             }),
         ),
         (
-            ConversationStalePin::ProviderProfile,
+            ConversationStalePin::Context(ConversationContextPin::ProviderProfile),
             Box::new(|value| {
-                value.provider_profile_id = LocalProviderProfileId::parse("profile-other").unwrap()
+                value.pins.context.provider_profile_id =
+                    LocalProviderProfileId::parse("profile-other").unwrap()
             }),
         ),
         (
-            ConversationStalePin::HostIdentityRevision,
-            Box::new(|value| value.host_identity_revision += 1),
+            ConversationStalePin::Context(ConversationContextPin::HostIdentityRevision),
+            Box::new(|value| value.pins.context.host_identity_revision += 1),
         ),
         (
-            ConversationStalePin::Revision,
-            Box::new(|value| value.revision += 1),
+            ConversationStalePin::Context(ConversationContextPin::ProfileRevision),
+            Box::new(|value| value.pins.context.profile_revision += 1),
         ),
         (
-            ConversationStalePin::Commit,
-            Box::new(|value| value.commit_id = "commit-other".to_string()),
+            ConversationStalePin::Context(ConversationContextPin::ProjectBindingRevision),
+            Box::new(|value| value.pins.context.project_binding_revision += 1),
         ),
         (
-            ConversationStalePin::Manifest,
-            Box::new(|value| value.manifest_sha256 = "e".repeat(64)),
+            ConversationStalePin::Context(ConversationContextPin::BindingsDocumentRevision),
+            Box::new(|value| value.pins.context.bindings_document_revision += 1),
         ),
         (
-            ConversationStalePin::ScopeRevision,
-            Box::new(|value| value.scope_revision += 1),
+            ConversationStalePin::Context(ConversationContextPin::BindingRevision),
+            Box::new(|value| value.pins.context.binding_revision = Some(99)),
         ),
         (
-            ConversationStalePin::ScopeDigest,
-            Box::new(|value| value.scope_sha256 = "e".repeat(64)),
+            ConversationStalePin::Revision(ConversationRevisionPin::BundleRevision),
+            Box::new(|value| value.pins.revision.bundle_revision += 1),
         ),
         (
-            ConversationStalePin::AcceptedLocalTail,
-            Box::new(|value| value.accepted_local_tail = None),
+            ConversationStalePin::Revision(ConversationRevisionPin::Commit),
+            Box::new(|value| value.pins.revision.commit_id = "commit-other".to_string()),
         ),
         (
-            ConversationStalePin::CheckpointGeneration,
-            Box::new(|value| value.checkpoint_generation = Some(41)),
+            ConversationStalePin::Revision(ConversationRevisionPin::Manifest),
+            Box::new(|value| value.pins.revision.manifest_sha256 = "e".repeat(64)),
         ),
         (
-            ConversationStalePin::LineageDigest,
-            Box::new(|value| value.lineage_digest = Some("e".repeat(64))),
+            ConversationStalePin::Revision(ConversationRevisionPin::ScopeRevision),
+            Box::new(|value| value.pins.revision.scope_revision += 1),
         ),
         (
-            ConversationStalePin::SemanticDigest,
-            Box::new(|value| value.semantic_digest = Some("e".repeat(64))),
+            ConversationStalePin::Revision(ConversationRevisionPin::ScopeDigest),
+            Box::new(|value| value.pins.revision.scope_sha256 = "e".repeat(64)),
         ),
         (
-            ConversationStalePin::LocalTarget,
-            Box::new(|value| value.local_target = TargetExpectation::Sha256("e".repeat(64))),
+            ConversationStalePin::Tail(ConversationTailPin::AcceptedTail),
+            Box::new(|value| value.pins.tail.accepted = None),
         ),
         (
-            ConversationStalePin::ProviderState,
+            ConversationStalePin::Tail(ConversationTailPin::AcceptedLocalTail),
+            Box::new(|value| value.pins.tail.accepted_local = None),
+        ),
+        (
+            ConversationStalePin::Tail(ConversationTailPin::LocalTail),
+            Box::new(|value| value.pins.tail.local = None),
+        ),
+        (
+            ConversationStalePin::Tail(ConversationTailPin::CloudTail),
+            Box::new(|value| value.pins.tail.cloud = None),
+        ),
+        (
+            ConversationStalePin::Tail(ConversationTailPin::CheckpointGeneration),
+            Box::new(|value| value.pins.tail.checkpoint_generation = Some(41)),
+        ),
+        (
+            ConversationStalePin::Tail(ConversationTailPin::LineageDigest),
+            Box::new(|value| value.pins.tail.lineage_digest = Some("e".repeat(64))),
+        ),
+        (
+            ConversationStalePin::Tail(ConversationTailPin::SemanticDigest),
+            Box::new(|value| value.pins.tail.semantic_digest = Some("e".repeat(64))),
+        ),
+        (
+            ConversationStalePin::Tail(ConversationTailPin::RawRange),
             Box::new(|value| {
-                value.provider_state.insert(
-                    "/tmp/provider/occupied.jsonl".to_string(),
-                    TargetExpectation::Absent,
+                value.pins.tail.raw_range = Some(crate::project_sync::domain::RawRangePin {
+                    start_byte_offset: 0,
+                    end_byte_offset: 1,
+                    range_sha256: "e".repeat(64),
+                })
+            }),
+        ),
+        (
+            ConversationStalePin::Target(ConversationTargetPin::LocalTarget),
+            Box::new(|value| value.pins.target.local = TargetExpectation::Sha256("e".repeat(64))),
+        ),
+        (
+            ConversationStalePin::Target(ConversationTargetPin::ProviderState),
+            Box::new(|value| {
+                value.pins.target.provider_state.push(
+                    crate::project_sync::domain::ProviderStateExpectation {
+                        target_path: "/tmp/provider/occupied.jsonl".to_string(),
+                        expectation: TargetExpectation::Absent,
+                    },
                 );
             }),
         ),
         (
-            ConversationStalePin::ProfileRevision,
-            Box::new(|value| value.profile_revision += 1),
-        ),
-        (
-            ConversationStalePin::ProjectBindingRevision,
-            Box::new(|value| value.project_binding_revision += 1),
-        ),
-        (
-            ConversationStalePin::BindingsDocumentRevision,
-            Box::new(|value| value.bindings_document_revision += 1),
-        ),
-        (
-            ConversationStalePin::BindingRevision,
-            Box::new(|value| value.binding_revision = Some(99)),
-        ),
-        (
             ConversationStalePin::Codec,
-            Box::new(|value| value.codec = "codex.lineage.unsupported".to_string()),
-        ),
-        (
-            ConversationStalePin::ProviderQuiescence,
-            Box::new(|value| value.provider_quiescent = false),
+            Box::new(|value| value.pins.codec = "codex.lineage.unsupported".to_string()),
         ),
     ];
     for (expected, mutate) in cases {
@@ -170,95 +188,41 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
 fn every_typed_action_rejects_a_stale_plan_before_apply() {
     let actions = [
         (
-            ConversationPlanDirection::Push,
-            ConversationPlanActionType::NoChanges,
-            TailClassification::Sync(SyncCurrency::Current),
-        ),
-        (
-            ConversationPlanDirection::Push,
-            ConversationPlanActionType::RequirePullMetadata,
-            TailClassification::Sync(SyncCurrency::Advanced),
-        ),
-        (
-            ConversationPlanDirection::Push,
             ConversationPlanActionType::Publish,
             TailClassification::LocalOutstanding,
         ),
         (
-            ConversationPlanDirection::Push,
-            ConversationPlanActionType::RequirePull,
-            TailClassification::CloudOutstanding,
-        ),
-        (
-            ConversationPlanDirection::Push,
             ConversationPlanActionType::CreateCloud,
             TailClassification::MissingCloud,
         ),
         (
-            ConversationPlanDirection::Push,
-            ConversationPlanActionType::NotPushable,
-            TailClassification::MissingLocal,
-        ),
-        (
-            ConversationPlanDirection::Push,
-            ConversationPlanActionType::Blocked,
-            TailClassification::Unknown,
-        ),
-        (
-            ConversationPlanDirection::Pull,
             ConversationPlanActionType::AdoptCloudMetadata,
             TailClassification::Sync(SyncCurrency::Current),
         ),
         (
-            ConversationPlanDirection::Pull,
-            ConversationPlanActionType::ReportPushEligible,
-            TailClassification::LocalOutstanding,
-        ),
-        (
-            ConversationPlanDirection::Pull,
             ConversationPlanActionType::MaterializeCloud,
             TailClassification::CloudOutstanding,
         ),
         (
-            ConversationPlanDirection::Pull,
             ConversationPlanActionType::KeepBoth,
             TailClassification::Divergent,
         ),
         (
-            ConversationPlanDirection::Pull,
             ConversationPlanActionType::CreateLocal,
             TailClassification::MissingLocal,
         ),
-        (
-            ConversationPlanDirection::Pull,
-            ConversationPlanActionType::ReportLocalOnly,
-            TailClassification::MissingCloud,
-        ),
-        (
-            ConversationPlanDirection::Pull,
-            ConversationPlanActionType::NotFound,
-            TailClassification::MissingBoth,
-        ),
-        (
-            ConversationPlanDirection::Pull,
-            ConversationPlanActionType::Blocked,
-            TailClassification::Unknown,
-        ),
     ];
 
-    for (direction, action_type, relation) in actions {
-        let (action, mut current) = reviewed_action(
-            direction,
-            action_type,
-            ConversationReasonCode::StalePlan,
-            relation,
-        );
+    for (action_type, relation) in actions {
+        let (action, mut current) = reviewed_action(action_type, relation);
         action.validate().unwrap();
-        current.revision += 1;
+        current.pins.revision.bundle_revision += 1;
         assert_eq!(
             validate_conversation_action_pins(&action, &current),
-            Err(ConversationStalePin::Revision),
-            "{direction:?} {action_type:?}",
+            Err(ConversationStalePin::Revision(
+                ConversationRevisionPin::BundleRevision
+            )),
+            "{action_type:?}",
         );
     }
 }
@@ -268,9 +232,7 @@ fn reviewed_push_plan_is_immutable_restart_readable_and_scope_pinned() {
     let temp = tempfile::tempdir().unwrap();
     let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
     let (action, _) = reviewed_action(
-        ConversationPlanDirection::Push,
         ConversationPlanActionType::Publish,
-        ConversationReasonCode::LocalOutstanding,
         TailClassification::LocalOutstanding,
     );
     let plan = ConversationPushPlan {
@@ -278,17 +240,17 @@ fn reviewed_push_plan_is_immutable_restart_readable_and_scope_pinned() {
         plan_id: PlanId::parse("plan-reviewed-push").unwrap(),
         storage_id: StorageId::parse("storage-reviewed-push").unwrap(),
         bundle_id: BundleId::parse("0123456789abcdef0123456789abcdef").unwrap(),
-        host_id: action.host_id.clone(),
-        replica_id: action.replica_id.clone(),
-        local_project_id: action.local_project_id.clone(),
-        expected_host_identity_revision: action.expected_host_identity_revision,
-        expected_project_binding_revision: action.expected_project_binding_revision,
-        expected_bindings_document_revision: action.expected_bindings_document_revision,
-        revision: action.pinned_revision,
-        commit_id: action.pinned_commit_id.clone(),
-        manifest_sha256: action.pinned_manifest_sha256.clone(),
+        host_id: action.pins.context.host_id.clone(),
+        replica_id: action.pins.context.replica_id.clone(),
+        local_project_id: action.pins.context.local_project_id.clone(),
+        expected_host_identity_revision: action.pins.context.host_identity_revision,
+        expected_project_binding_revision: action.pins.context.project_binding_revision,
+        expected_bindings_document_revision: action.pins.context.bindings_document_revision,
+        revision: action.pins.revision.bundle_revision,
+        commit_id: action.pins.revision.commit_id.clone(),
+        manifest_sha256: action.pins.revision.manifest_sha256.clone(),
         created_at: 1_000,
-        expires_at: action.expires_at,
+        expires_at: action.pins.expires_at,
         actions: vec![action],
     };
     repository.save_conversation_push_plan(&plan).unwrap();
@@ -352,6 +314,7 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
             staged_path: Some("/tmp/staging/thread-a.jsonl".to_string()),
             backup_path: None,
             staged_sha256: Some("d".repeat(64)),
+            index_rows: vec![],
             commit_started: false,
             committed: false,
         }],
@@ -596,6 +559,438 @@ fn every_local_commit_checkpoint_recovers_to_one_valid_fixed_point() {
 }
 
 #[test]
+fn every_keep_both_checkpoint_recovers_to_one_valid_fixed_point() {
+    let marker_title = "Fixture (Preserved 1 · Machine A)";
+    let checkpoints = vec![
+        (ConversationFailpoint::BeforeJournal, false),
+        (ConversationFailpoint::AfterJournal, false),
+        (
+            ConversationFailpoint::BeforeStage {
+                index: 0,
+                role: ConversationFileRole::Transcript,
+            },
+            true,
+        ),
+        (
+            ConversationFailpoint::AfterStage {
+                index: 0,
+                role: ConversationFileRole::Transcript,
+            },
+            true,
+        ),
+        (
+            ConversationFailpoint::BeforeStage {
+                index: 1,
+                role: ConversationFileRole::ProviderIndexFragment,
+            },
+            true,
+        ),
+        (
+            ConversationFailpoint::AfterStage {
+                index: 1,
+                role: ConversationFileRole::ProviderIndexFragment,
+            },
+            true,
+        ),
+        (ConversationFailpoint::BeforeStaged, true),
+        (ConversationFailpoint::AfterStaged, true),
+        (
+            ConversationFailpoint::BeforeTargetCommit {
+                index: 0,
+                role: ConversationFileRole::Transcript,
+            },
+            true,
+        ),
+        (
+            ConversationFailpoint::AfterTargetWrite {
+                index: 0,
+                role: ConversationFileRole::Transcript,
+            },
+            true,
+        ),
+        (
+            ConversationFailpoint::AfterTargetCommit {
+                index: 0,
+                role: ConversationFileRole::Transcript,
+            },
+            true,
+        ),
+        (
+            ConversationFailpoint::BeforeTargetCommit {
+                index: 1,
+                role: ConversationFileRole::ProviderIndexFragment,
+            },
+            true,
+        ),
+        (
+            ConversationFailpoint::AfterTargetWrite {
+                index: 1,
+                role: ConversationFileRole::ProviderIndexFragment,
+            },
+            true,
+        ),
+        (
+            ConversationFailpoint::AfterTargetCommit {
+                index: 1,
+                role: ConversationFileRole::ProviderIndexFragment,
+            },
+            true,
+        ),
+        (ConversationFailpoint::BeforeProviderCommitted, true),
+        (ConversationFailpoint::AfterProviderCommitted, true),
+        (ConversationFailpoint::BeforeBindingCommit, true),
+        (ConversationFailpoint::AfterBindingCommit, true),
+        (ConversationFailpoint::BeforeReceipt, true),
+        (ConversationFailpoint::AfterReceipt, true),
+        (ConversationFailpoint::BeforeLocalCommitted, true),
+        (ConversationFailpoint::AfterLocalCommitted, true),
+        (ConversationFailpoint::BeforeCleanup, true),
+        (ConversationFailpoint::AfterCleanup, true),
+    ];
+
+    for (checkpoint, complete) in checkpoints {
+        // A divergent keep-both fixture: an existing origin binding whose
+        // rollout stays untouched, a two-row index rewrite (the preserved
+        // rename plus the fresh destination), and a binding move that
+        // records the minted provenance.
+        let temp = tempfile::tempdir().unwrap();
+        let home_unresolved = temp.path().join("home");
+        fs::create_dir(&home_unresolved).unwrap();
+        let home = fs::canonicalize(&home_unresolved).unwrap();
+        let repository = LocalStateRepository::from_home_dir(&home).unwrap();
+        let identity = repository.load_or_create_host_identity().unwrap();
+        let project_root = home.join("project");
+        let provider_root = home.join("codex");
+        fs::create_dir(&project_root).unwrap();
+        fs::create_dir(&provider_root).unwrap();
+        fs::create_dir(provider_root.join("sessions")).unwrap();
+        let project_root = fs::canonicalize(project_root).unwrap();
+        let provider_root = fs::canonicalize(provider_root).unwrap();
+
+        let local_project_id = LocalProjectId::parse("project-materialize").unwrap();
+        let bundle_id = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let profile_id = LocalProviderProfileId::parse("profile-materialize").unwrap();
+        let replica_id = ReplicaId::parse("replica-materialize").unwrap();
+        let mut config = repository.load_config().unwrap();
+        config.projects.push(LocalProjectRegistration {
+            local_project_id: local_project_id.clone(),
+            bundle_id: bundle_id.clone(),
+            display_name: "Keep-both fixture".to_string(),
+            local_alias: None,
+            repository_fingerprint: None,
+            recipe: BundleRecipe::default(),
+            revision: 0,
+            created_at: 1,
+            updated_at: 1,
+        });
+        repository.save_config(config).unwrap();
+        repository
+            .mutate_bindings(|_, machine| {
+                machine.profiles.push(ProviderProfile {
+                    profile_id: profile_id.clone(),
+                    provider: codex(),
+                    display_name: "Codex fixture".to_string(),
+                    path: provider_root.to_string_lossy().into_owned(),
+                    canonical_path: provider_root.to_string_lossy().into_owned(),
+                    revision: 0,
+                    created_at: 1,
+                    updated_at: 1,
+                });
+                machine.bindings.push(ProjectBinding {
+                    host_id: identity.host_id.clone(),
+                    replica_id: replica_id.clone(),
+                    local_project_id: local_project_id.clone(),
+                    bundle_id: bundle_id.clone(),
+                    project_root: project_root.to_string_lossy().into_owned(),
+                    canonical_project_root: project_root.to_string_lossy().into_owned(),
+                    profile_ids: BTreeMap::from([(codex(), profile_id.clone())]),
+                    state: BindingState::Active,
+                    revision: 0,
+                    updated_at: 1,
+                });
+                Ok(())
+            })
+            .unwrap();
+
+        let origin_thread = ThreadId::parse("thread-materialize").unwrap();
+        let preserved_thread = ThreadId::parse("thread-preserved-journal").unwrap();
+        let local_transcript =
+            TranscriptBuilder::new("source-thread", project_root.to_str().unwrap())
+                .message("m-a", "user", "question")
+                .message("m-l", "assistant", "local branch")
+                .build();
+        fs::write(
+            provider_root.join("sessions/source-thread.jsonl"),
+            &local_transcript,
+        )
+        .unwrap();
+        let existing_index = b"{\"id\":\"source-thread\",\"thread_name\":\"Fixture\",\
+             \"updated_at\":\"2026-07-18T00:00:00.000000Z\"}\n"
+            .to_vec();
+        fs::write(provider_root.join("session_index.jsonl"), &existing_index).unwrap();
+        repository
+            .mutate_conversation_bindings(|document| {
+                document.bindings.push(LocalConversationBinding {
+                    host_id: identity.host_id.clone(),
+                    replica_id: replica_id.clone(),
+                    local_project_id: local_project_id.clone(),
+                    provider_profile_id: profile_id.clone(),
+                    thread_id: origin_thread.clone(),
+                    forked_from: None,
+                    preserved: None,
+                    root_tail_layout: Some(RootTailLayout {
+                        codec: PORTABLE_TAIL_CODEC_V1.to_string(),
+                        partition_kind: TailPartitionKind::WholeThread,
+                        start_record_count: 0,
+                    }),
+                    provider_thread_id: Some("source-thread".to_string()),
+                    materialization_state: ConversationMaterializationState::Resumable,
+                    revision: 0,
+                    created_at: 1,
+                    updated_at: 1,
+                });
+                Ok(())
+            })
+            .unwrap();
+
+        let cloud_transcript =
+            TranscriptBuilder::new("destination-thread", project_root.to_str().unwrap())
+                .message("m-a", "user", "question")
+                .message("m-c", "assistant", "cloud branch")
+                .build();
+        let (lineage_digest, semantic_digest) =
+            match analyze_codex_transcript(&cloud_transcript).lineage {
+                CodecLineage::Complete {
+                    lineage_digest,
+                    semantic_digest,
+                    ..
+                } => (lineage_digest, semantic_digest),
+                other => panic!("keep-both fixture transcript is not resumable: {other:?}"),
+            };
+        let accepted_tail_after = match analyze_codex_transcript(&cloud_transcript).lineage {
+            CodecLineage::Complete { ref chain, .. } => {
+                compute_portable_conversation_tail(TailPartitionKind::WholeThread, 0, chain)
+                    .unwrap()
+            }
+            ref other => panic!("keep-both fixture is not resumable: {other:?}"),
+        };
+        let index_payload = format!(
+            "{{\"id\":\"source-thread\",\"thread_name\":\"{marker_title}\",\
+             \"updated_at\":\"2026-07-18T00:00:01.000000Z\"}}\n\
+             {{\"id\":\"destination-thread\",\"thread_name\":\"Fixture\",\
+             \"updated_at\":\"2026-07-18T00:00:01.000000Z\"}}\n"
+        )
+        .into_bytes();
+        let targets = vec![
+            ConversationTargetPayload {
+                target_path: provider_root.join("sessions/destination-thread.jsonl"),
+                role: ConversationFileRole::Transcript,
+                expected: TargetExpectation::Absent,
+                index_rows: vec![],
+                bytes: cloud_transcript.clone(),
+            },
+            ConversationTargetPayload {
+                target_path: provider_root.join("session_index.jsonl"),
+                role: ConversationFileRole::ProviderIndexFragment,
+                expected: TargetExpectation::Sha256(sha256(&existing_index)),
+                index_rows: vec![
+                    "source-thread".to_string(),
+                    "destination-thread".to_string(),
+                ],
+                bytes: index_payload,
+            },
+        ];
+
+        let bindings_before = repository.load_conversation_bindings().unwrap();
+        let mut bindings_after = bindings_before.clone();
+        {
+            let row = bindings_after
+                .bindings
+                .iter_mut()
+                .find(|row| row.thread_id == origin_thread)
+                .unwrap();
+            row.thread_id = preserved_thread.clone();
+            row.forked_from = None;
+            row.preserved = Some(PreservedProvenance {
+                preserved_from: origin_thread.clone(),
+                ordinal: 1,
+            });
+            row.revision = row.revision.saturating_add(1);
+            row.updated_at = 20;
+        }
+        bindings_after.bindings.push(LocalConversationBinding {
+            host_id: identity.host_id.clone(),
+            replica_id: replica_id.clone(),
+            local_project_id: local_project_id.clone(),
+            provider_profile_id: profile_id.clone(),
+            thread_id: origin_thread.clone(),
+            forked_from: None,
+            preserved: None,
+            root_tail_layout: Some(RootTailLayout {
+                codec: PORTABLE_TAIL_CODEC_V1.to_string(),
+                partition_kind: TailPartitionKind::WholeThread,
+                start_record_count: 0,
+            }),
+            provider_thread_id: Some("destination-thread".to_string()),
+            materialization_state: ConversationMaterializationState::Resumable,
+            revision: 0,
+            created_at: 20,
+            updated_at: 20,
+        });
+        bindings_after.revision = bindings_after.revision.saturating_add(1);
+        let config_before = repository.load_config().unwrap();
+        let mut config_after = config_before.clone();
+        config_after.revision = config_after.revision.saturating_add(1);
+        let operation = ConversationSyncOperation {
+            operation_id: ConversationOperationId::parse("operation-keep-both").unwrap(),
+            plan_id: Some(PlanId::parse("plan-keep-both").unwrap()),
+            plan_action_id: None,
+            cloud: ConversationCloudAnchor {
+                storage_id: StorageId::parse("storage-materialize").unwrap(),
+                bundle_id,
+                revision: 7,
+                commit_id: "commit-keep-both".to_string(),
+                manifest_sha256: "a".repeat(64),
+            },
+            host_id: identity.host_id.clone(),
+            replica_id,
+            local_project_id,
+            provider_profile_id: profile_id,
+            provider: codex(),
+            thread_id: origin_thread.clone(),
+            operation: ConversationSyncOperationKind::ProviderMaterialization(
+                ConversationMaterializationOperation {
+                    phase: PullJournalPhase::TargetStaged,
+                    planned_relation: TailClassification::Divergent,
+                    accepted_tail_after,
+                    pinned_lineage_digest: lineage_digest,
+                    pinned_semantic_digest: semantic_digest,
+                    keep_both: Some(KeepBothJournal {
+                        preserved_thread_id: preserved_thread.clone(),
+                        remote_provider_thread_id: "destination-thread".to_string(),
+                    }),
+                    sync_config_before: config_before,
+                    sync_config_after: config_after,
+                    bindings_before: bindings_before.clone(),
+                    bindings_after,
+                },
+            ),
+            provider_thread_id: Some("destination-thread".to_string()),
+            materialization_state: ConversationMaterializationState::Resumable,
+            expected_host_identity_revision: identity.revision,
+            expected_bindings_document_revision: bindings_before.revision,
+            expected_binding_revision: Some(0),
+            expected_profile_revision: 0,
+            expected_project_binding_revision: 0,
+            targets: vec![],
+            created_at: 10,
+            updated_at: 10,
+        };
+        let request = ConversationMaterializationRequest {
+            operation,
+            targets: targets.clone(),
+        };
+        let mut fail_once = FailOnce::new(checkpoint.clone());
+        let result = apply_conversation_materialization(&repository, request, &mut fail_once);
+        assert!(result.is_err(), "checkpoint {checkpoint:?} did not fire");
+
+        let reopened = LocalStateRepository::from_home_dir(&home).unwrap();
+        recover_conversation_materializations(&reopened).unwrap();
+        let second = recover_conversation_materializations(&reopened).unwrap();
+        assert!(second.completed.is_empty());
+        assert!(second.rolled_back.is_empty());
+        assert!(second.recovery_required.is_empty());
+        assert!(reopened
+            .load_conversation_sync_journal()
+            .unwrap()
+            .operations
+            .is_empty());
+
+        // The fixed point: no staging litter, the untouched local rollout is
+        // byte-identical, and the index and bindings hold either the whole
+        // keep-both or none of it.
+        for parent in [provider_root.join("sessions"), provider_root.clone()] {
+            assert!(!fs::read_dir(&parent).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".mallard-")
+            }));
+        }
+        assert_eq!(
+            fs::read(provider_root.join("sessions/source-thread.jsonl")).unwrap(),
+            local_transcript
+        );
+        let index_bytes = fs::read(provider_root.join("session_index.jsonl")).unwrap();
+        let rows = index_bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let bindings = reopened.load_conversation_bindings().unwrap();
+        if complete {
+            assert_eq!(
+                fs::read(provider_root.join("sessions/destination-thread.jsonl")).unwrap(),
+                cloud_transcript,
+                "checkpoint {checkpoint:?} lost the destination transcript"
+            );
+            assert_eq!(rows.len(), 2, "checkpoint {checkpoint:?} index rows");
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row["id"] == "source-thread"
+                        && row["thread_name"] == marker_title)
+                    .count(),
+                1,
+                "checkpoint {checkpoint:?} marker row"
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row["id"] == "destination-thread")
+                    .count(),
+                1,
+                "checkpoint {checkpoint:?} destination row"
+            );
+            assert_eq!(bindings.bindings.len(), 2);
+            let preserved_row = bindings
+                .bindings
+                .iter()
+                .find(|row| row.thread_id == preserved_thread)
+                .unwrap();
+            assert_eq!(
+                preserved_row.preserved,
+                Some(PreservedProvenance {
+                    preserved_from: origin_thread.clone(),
+                    ordinal: 1,
+                })
+            );
+            assert_eq!(
+                preserved_row.provider_thread_id.as_deref(),
+                Some("source-thread")
+            );
+            let origin_row = bindings
+                .bindings
+                .iter()
+                .find(|row| row.thread_id == origin_thread)
+                .unwrap();
+            assert!(origin_row.preserved.is_none());
+            assert_eq!(
+                origin_row.provider_thread_id.as_deref(),
+                Some("destination-thread")
+            );
+        } else {
+            assert!(!provider_root
+                .join("sessions/destination-thread.jsonl")
+                .exists());
+            assert_eq!(index_bytes, existing_index);
+            assert_eq!(bindings.bindings.len(), 1);
+            assert_eq!(bindings.bindings[0].thread_id, origin_thread);
+            assert!(bindings.bindings[0].preserved.is_none());
+        }
+    }
+}
+
+#[test]
 fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
     let checkpoints = [
         (ConversationFailpoint::BeforeJournal, false),
@@ -672,6 +1067,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                     provider_profile_id: scope.profile_id.clone(),
                     thread_id: thread_id.clone(),
                     forked_from: None,
+                    preserved: None,
                     root_tail_layout: Some(RootTailLayout {
                         codec: PORTABLE_TAIL_CODEC_V1.to_string(),
                         partition_kind: TailPartitionKind::WholeThread,
@@ -1301,12 +1697,14 @@ impl MaterializationFixture {
                 target_path: provider_root.join("sessions/destination-thread.jsonl"),
                 role: ConversationFileRole::Transcript,
                 expected: TargetExpectation::Absent,
+                index_rows: vec![],
                 bytes: transcript.clone(),
             },
             ConversationTargetPayload {
                 target_path: provider_root.join("session_index.jsonl"),
                 role: ConversationFileRole::ProviderIndexFragment,
                 expected: TargetExpectation::Absent,
+                index_rows: vec![thread_id.to_string()],
                 bytes: index,
             },
             ConversationTargetPayload {
@@ -1315,6 +1713,7 @@ impl MaterializationFixture {
                     sidecar_kind: "thread-state".to_string(),
                 },
                 expected: TargetExpectation::Absent,
+                index_rows: vec![],
                 bytes: sidecar,
             },
         ];
@@ -1403,6 +1802,7 @@ impl MaterializationFixture {
                 provider_profile_id: operation.provider_profile_id.clone(),
                 thread_id: operation.thread_id.clone(),
                 forked_from: None,
+                preserved: None,
                 root_tail_layout: Some(RootTailLayout {
                     codec: PORTABLE_TAIL_CODEC_V1.to_string(),
                     partition_kind: TailPartitionKind::WholeThread,

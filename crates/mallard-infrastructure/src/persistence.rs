@@ -863,7 +863,7 @@ impl LocalStateRepository {
             .filter(|plan| {
                 plan.conversation_actions
                     .iter()
-                    .any(|action| &action.local_project_id == local_project_id)
+                    .any(|action| &action.pins.context.local_project_id == local_project_id)
                     || project_replica
                         .as_ref()
                         .is_some_and(|(host_id, replica_id)| {
@@ -2639,9 +2639,9 @@ mod tests {
         generated_named_id, BindingState, BundleId, BundleRecipe, ConversationMaterializationState,
         LocalConversationBinding, LocalProjectRegistration, LocalProviderProfileId,
         MaterializationId, MaterializationRecord, MaterializationStatus, OriginHostAlias, PlanId,
-        ProjectBinding, ProjectStorageLink, ProviderKey, ProviderProfile, RepositoryBase,
-        RootTailLayout, ScopeBase, StorageConfig, StorageId, StorageKind, SyncScopeKey,
-        TailPartitionKind, ThreadId, LOCAL_SCHEMA, PORTABLE_TAIL_CODEC_V1,
+        PreservedProvenance, ProjectBinding, ProjectStorageLink, ProviderKey, ProviderProfile,
+        RepositoryBase, RootTailLayout, ScopeBase, StorageConfig, StorageId, StorageKind,
+        SyncScopeKey, TailPartitionKind, ThreadId, LOCAL_SCHEMA, PORTABLE_TAIL_CODEC_V1,
     };
     use std::collections::BTreeMap;
 
@@ -2803,7 +2803,6 @@ mod tests {
                 s3_endpoint: String::new(),
                 region: String::new(),
                 local_dir: storage_root.to_string_lossy().into_owned(),
-                included_default_exclusions: Vec::new(),
                 supports_conditional_writes: None,
             });
             config.links.push(ProjectStorageLink {
@@ -2844,6 +2843,7 @@ mod tests {
                 provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
                 thread_id: ThreadId::parse("thread-a").unwrap(),
                 forked_from: None,
+                preserved: None,
                 root_tail_layout: Some(RootTailLayout {
                     codec: PORTABLE_TAIL_CODEC_V1.to_string(),
                     partition_kind: TailPartitionKind::WholeThread,
@@ -2919,6 +2919,98 @@ mod tests {
         assert_eq!(second.scope_bases_removed, 0);
         assert_eq!(second.conversation_bindings_removed, 0);
         assert_eq!(second.materializations_removed, 0);
+    }
+
+    #[test]
+    fn storage_clear_keeps_local_conversation_preservation_provenance() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let identity = repo.load_or_create_host_identity().unwrap();
+        let replica_id = install_bound_project(&repo, &temp, &identity);
+        let local_project_id = LocalProjectId::parse("project-a").unwrap();
+        let storage_id = StorageId::parse("storage-a").unwrap();
+        repo.mutate_config(|config| {
+            config.storages.push(StorageConfig {
+                id: storage_id.clone(),
+                name: "Storage A".to_string(),
+                kind: StorageKind::Local,
+                bucket: String::new(),
+                access_key_id: String::new(),
+                secret_access_key: String::new(),
+                account_id: String::new(),
+                s3_endpoint: String::new(),
+                region: String::new(),
+                local_dir: temp.path().join("storage").to_string_lossy().into_owned(),
+                supports_conditional_writes: None,
+            });
+            Ok(())
+        })
+        .unwrap();
+        repo.mutate_conversation_bindings(|bindings| {
+            bindings.bindings.push(LocalConversationBinding {
+                host_id: identity.host_id.clone(),
+                replica_id: replica_id.clone(),
+                local_project_id: local_project_id.clone(),
+                provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
+                thread_id: ThreadId::parse("thread-preserved").unwrap(),
+                forked_from: None,
+                preserved: Some(PreservedProvenance {
+                    preserved_from: ThreadId::parse("thread-origin").unwrap(),
+                    ordinal: 3,
+                }),
+                root_tail_layout: Some(RootTailLayout {
+                    codec: PORTABLE_TAIL_CODEC_V1.to_string(),
+                    partition_kind: TailPartitionKind::WholeThread,
+                    start_record_count: 0,
+                }),
+                provider_thread_id: Some("provider-thread-preserved".to_string()),
+                materialization_state: ConversationMaterializationState::Resumable,
+                revision: 0,
+                created_at: 1,
+                updated_at: 1,
+            });
+            Ok(())
+        })
+        .unwrap();
+        repo.mutate_materializations(|_, materializations| {
+            materializations.records.push(MaterializationRecord {
+                materialization_id: MaterializationId::parse("materialization-a").unwrap(),
+                plan_id: PlanId::parse("plan-a").unwrap(),
+                host_id: identity.host_id.clone(),
+                replica_id: replica_id.clone(),
+                local_project_id: local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                bundle_id: project().bundle_id,
+                revision: 1,
+                commit_id: "commit-a".to_string(),
+                manifest_sha256: "c".repeat(64),
+                binding_revision: 0,
+                status: MaterializationStatus::Partial,
+                applied_at: 1,
+                receipts: Vec::new(),
+            });
+            Ok(())
+        })
+        .unwrap();
+
+        let expected_config_revision = repo.load_config().unwrap().revision;
+        let (_, result) = repo
+            .clear_storage_data(&storage_id, expected_config_revision, |_| {
+                Ok::<_, String>(())
+            })
+            .unwrap();
+
+        assert_eq!(result.materializations_removed, 1);
+        assert!(repo.load_materializations().unwrap().records.is_empty());
+        let bindings = repo.load_conversation_bindings().unwrap();
+        assert_eq!(bindings.bindings.len(), 1);
+        assert_eq!(
+            bindings.bindings[0].preserved,
+            Some(PreservedProvenance {
+                preserved_from: ThreadId::parse("thread-origin").unwrap(),
+                ordinal: 3,
+            })
+        );
     }
 
     #[test]
@@ -3012,6 +3104,7 @@ mod tests {
                 provider_profile_id: first_profile_id.clone(),
                 thread_id: ThreadId::parse("group-a.variant-a").unwrap(),
                 forked_from: None,
+                preserved: None,
                 root_tail_layout: None,
                 provider_thread_id: None,
                 materialization_state: ConversationMaterializationState::StoredOnly,

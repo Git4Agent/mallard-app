@@ -191,16 +191,15 @@ export function buildPullOutcome({
       status: "synced" as const,
       threadId: threadByResource.get(resourceId),
     })),
-    ...preserved.map((thread) => {
-      const resourceId = resourceByAction.get(thread.action_id) ?? thread.action_id;
-      return {
-        key: thread.action_id,
-        title: displayThreadTitle(nameFor(resourceId)),
-        status: "preserved" as const,
-        reason: "Storage history was restored and the previous local history was kept as an independent session.",
-        threadId: thread.preserved_thread_id,
-      };
-    }),
+    ...preserved.map((thread) => ({
+      key: thread.action_id,
+      // The renamed marker title, so the row names the session exactly as
+      // it now appears in the provider's session list.
+      title: displayThreadTitle(thread.preserved_display_title),
+      status: "preserved" as const,
+      reason: "Storage history was restored and the previous local history was kept as an independent session.",
+      threadId: thread.preserved_thread_id,
+    })),
     ...failures.map((failure) => ({
       key: failure.action_id,
       title: displayThreadTitle(failure.display_name ?? failure.action_id),

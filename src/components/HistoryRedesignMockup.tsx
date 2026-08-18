@@ -1,6 +1,6 @@
 import { useState } from "react";
 import Icon from "./Icons";
-import ThreadStatusIcon from "./project-sync/ThreadStatusIcon";
+import ThreadStatusIcon from "./sync-review/ThreadStatusIcon";
 
 type LayoutVariant =
   | "column"

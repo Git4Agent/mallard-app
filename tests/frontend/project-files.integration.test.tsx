@@ -32,7 +32,6 @@ function descriptor(
     resource_id: resourceId,
     kind,
     provider: null,
-    scope: "project",
     display_name: path.split("/").slice(-1)[0],
     provenance: { kind: "project_local", relative_path: path },
     apply_policy: "explicit_review",
@@ -267,6 +266,7 @@ const pullPlan: RestorePlan = {
   expires_at: 2,
   project_content_eligibility: { state: "eligible", reason: "Not inside a Git work tree." },
   conversation_actions: [],
+  conversation_review: [],
   actions: [
     {
       action_id: "ensure-docs",

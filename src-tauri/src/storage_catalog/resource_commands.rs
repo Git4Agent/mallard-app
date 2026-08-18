@@ -6,7 +6,7 @@
 //! project binding, thread, or repository bundle.
 
 use bytes::Bytes;
-use mallard_domain::{StorageConfig, StorageId};
+use mallard_domain::{StorageConfig, StorageId, SyncConfig};
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::storage_core::ConfiguredObjectStore;
 use serde::{Deserialize, Serialize};
@@ -27,8 +27,8 @@ use super::domain::{
     CatalogRegistrationId, CatalogResource, CatalogResourceForkPlan, CatalogResourceId,
     CatalogResourceKindTag, CatalogResourceLink, CatalogResourcePlanDocument,
     CatalogResourcePullPlan, CatalogResourcePushPlan, CatalogResourceRegistration,
-    CatalogResourceRepositoryId, CatalogResourcesDocument, CatalogScope, CatalogScopeId,
-    CodexPetFormat, LibraryHeadCoordinate, LibraryResourceTag, LocalCatalogProfile,
+    CatalogResourceRepositoryId, CatalogResourceWarning, CatalogResourcesDocument, CatalogScope,
+    CatalogScopeId, CodexPetFormat, LibraryHeadCoordinate, LibraryResourceTag, LocalCatalogProfile,
     LocalCatalogProfileId, LocalCatalogTargetId, ProviderKey, CATALOG_SCHEMA,
 };
 use super::inventory::{
@@ -131,28 +131,6 @@ pub struct CatalogCapabilityDto {
 }
 
 #[derive(Serialize, Clone, Debug)]
-pub struct CatalogLocalCandidateDto {
-    pub resource_id: CatalogResourceId,
-    pub kind: CatalogResourceKindTag,
-    pub provider: ProviderKey,
-    pub display_name: String,
-    pub scope_label: Option<String>,
-    pub content_sha256: String,
-}
-
-#[derive(Serialize, Clone, Debug)]
-pub struct CatalogRemoteCandidateDto {
-    pub repository_id: CatalogResourceRepositoryId,
-    pub provider: ProviderKey,
-    pub kind: CatalogResourceKindTag,
-    pub resource_id: CatalogResourceId,
-    pub display_name: String,
-    pub scope_label: Option<String>,
-    pub head_revision: u64,
-    pub content_sha256: String,
-}
-
-#[derive(Serialize, Clone, Debug)]
 pub struct CatalogResourceLinkDto {
     pub link: CatalogResourceLink,
     pub storage_name: String,
@@ -173,24 +151,58 @@ pub struct CatalogScopeDto {
     pub profile: LocalCatalogProfile,
 }
 
-/// One registered resource inside a scope, with its local presence reported
-/// honestly rather than inferred.
+/// One row on a scope page: a resource of this kind, compared against the one
+/// storage the page is scoped to.
+///
+/// Registered, discovered-but-unlinked, and stored-but-not-installed
+/// resources are all this shape, because the page draws them the same way.
+/// Which of the three a row happens to be is readable from `linked`,
+/// `local_present` and `remote_present` rather than from its position in a
+/// separate list.
 #[derive(Serialize, Clone, Debug)]
-pub struct CatalogScopeResourceRowDto {
-    pub resource: CatalogResourceDto,
+pub struct CatalogScopeRowDto {
+    /// Stable across refreshes so selections survive a re-read.
+    pub row_id: String,
+    pub display_name: String,
+    pub resource_id: Option<CatalogResourceId>,
+    pub scope_label: Option<String>,
+    /// `None` only when no storage is chosen: with nothing to compare
+    /// against, no state can be claimed.
+    pub state: Option<CatalogLinkState>,
+    pub linked: bool,
     pub local_present: bool,
+    pub local_path: Option<String>,
+    pub local_modified_at: Option<u64>,
+    pub remote_present: bool,
+    pub remote_revision: Option<u64>,
+    pub remote_updated_at: Option<u64>,
+    pub registration_id: Option<CatalogRegistrationId>,
+    pub registration_revision: Option<u64>,
+    pub link_id: Option<CatalogLinkId>,
+    pub link_revision: Option<u64>,
+    pub repository_id: Option<CatalogResourceRepositoryId>,
+    /// Storages this resource is linked to besides the one being compared.
+    pub other_storage_names: Vec<String>,
+    pub warnings: Vec<CatalogResourceWarning>,
+    /// Why this resource cannot be synced at all — a symlinked skill
+    /// directory, an unreadable package. Set only with `state` Blocked.
+    pub blocker: Option<String>,
 }
 
-/// The complete content of one scope page: registered rows, locally
-/// discovered but unregistered candidates, and — when a storage is being
-/// browsed — verified stored resources not yet linked into this scope.
+/// The complete content of one scope page: the storage it compares against,
+/// and one row per resource of this kind on either side.
 #[derive(Serialize, Clone, Debug)]
 pub struct CatalogScopeResourcesDto {
     pub scope: CatalogScope,
     pub profile: LocalCatalogProfile,
-    pub registered: Vec<CatalogScopeResourceRowDto>,
-    pub discovered: Vec<CatalogLocalCandidateDto>,
-    pub remote_candidates: Vec<CatalogRemoteCandidateDto>,
+    /// The caller's choice when it made one; otherwise the storage this
+    /// scope's links already point at, so the page opens on the pairing that
+    /// exists rather than on nothing.
+    pub storage_id: Option<StorageId>,
+    pub storage_name: Option<String>,
+    pub rows: Vec<CatalogScopeRowDto>,
+    /// Scan notes that belong to the whole home rather than to a row.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -250,28 +262,6 @@ pub struct LinkCatalogScopeResourceRequest {
     pub storage_id: StorageId,
     pub local_resource_id: Option<CatalogResourceId>,
     pub repository_id: Option<CatalogResourceRepositoryId>,
-}
-
-fn local_candidates(inventory: &CatalogLocalInventory) -> Vec<CatalogLocalCandidateDto> {
-    let mut candidates: Vec<_> = inventory
-        .resources
-        .values()
-        .map(|record| CatalogLocalCandidateDto {
-            resource_id: record.resource.resource_id(),
-            kind: record.resource.kind_tag(),
-            provider: record.resource.provider(),
-            display_name: record.resource.display_name(),
-            scope_label: scope_label(&record.resource),
-            content_sha256: record.resource.content_sha256().to_string(),
-        })
-        .collect();
-    candidates.sort_by(|left, right| {
-        left.display_name
-            .to_lowercase()
-            .cmp(&right.display_name.to_lowercase())
-            .then_with(|| left.resource_id.cmp(&right.resource_id))
-    });
-    candidates
 }
 
 struct ResolvedScope {
@@ -744,75 +734,289 @@ pub fn list_catalog_scope_resources_with_repositories(
     .map_err(|blocker| blocker.to_string())?;
 
     let document = catalog.load_resources()?;
-    let mut registered = Vec::new();
-    let mut registered_resource_ids = BTreeSet::new();
-    let mut linked_repositories = BTreeSet::new();
+    let config = state.load_config()?;
+    let storage = match scope_storage(&scope, &document, &config, storage_id) {
+        Some(storage) => Some(storage_for(state, &storage)?),
+        None => None,
+    };
+
+    // Everything this storage holds of this kind, read once. Comparing row by
+    // row would re-list the bucket per resource, and the page draws the whole
+    // list at once.
+    let mut remote_by_repository = BTreeMap::new();
+    let mut remote_by_resource = BTreeMap::new();
+    if let Some(storage) = &storage {
+        for (listed, resource) in
+            verified_remote_choices(storage, scope.resource_kind, scope.provider)?
+        {
+            remote_by_resource.insert(resource.resource_id(), listed.tag.repository_id.clone());
+            remote_by_repository.insert(listed.tag.repository_id.clone(), (listed.head, resource));
+        }
+    }
+
+    let mut rows: Vec<CatalogScopeRowDto> = Vec::new();
+    let mut seen_resources = BTreeSet::new();
+    let mut seen_repositories = BTreeSet::new();
+
     for registration in &document.registrations {
         if !scope_owns(&scope, registration) {
             continue;
         }
-        registered_resource_ids.insert(registration.resource_id.clone());
-        for link in document.links_for(&registration.registration_id) {
-            linked_repositories.insert((link.storage_id.clone(), link.repository_id.clone()));
+        seen_resources.insert(registration.resource_id.clone());
+        let local = inventory
+            .resources
+            .get(&registration.resource_id)
+            .filter(|record| record.target == registration.local_target);
+        let link = storage.as_ref().and_then(|storage| {
+            document
+                .links_for(&registration.registration_id)
+                .find(|link| link.storage_id == storage.id)
+        });
+        let repository_id = link
+            .map(|link| link.repository_id.clone())
+            .or_else(|| remote_by_resource.get(&registration.resource_id).cloned());
+        let remote = repository_id
+            .as_ref()
+            .and_then(|repository_id| remote_by_repository.get(repository_id));
+        if let Some(repository_id) = &repository_id {
+            seen_repositories.insert(repository_id.clone());
         }
-        registered.push(CatalogScopeResourceRowDto {
-            resource: resource_dto(state, &document, registration)?,
-            local_present: inventory
-                .resources
-                .get(&registration.resource_id)
-                .is_some_and(|record| record.target == registration.local_target),
+        let mut row = row_for(
+            format!("registration:{}", registration.registration_id),
+            registration.display_name.clone(),
+            Some(registration.resource_id.clone()),
+            local,
+            remote,
+            link,
+            storage.is_some(),
+        );
+        row.scope_label = local
+            .map(|record| scope_label(&record.resource))
+            .unwrap_or_else(|| registration_scope_label(registration));
+        row.repository_id = repository_id;
+        row.registration_id = Some(registration.registration_id.clone());
+        row.registration_revision = Some(registration.revision);
+        row.other_storage_names = document
+            .links_for(&registration.registration_id)
+            .filter(|candidate| {
+                storage
+                    .as_ref()
+                    .is_none_or(|storage| candidate.storage_id != storage.id)
+            })
+            .map(|candidate| storage_name(&config, &candidate.storage_id))
+            .collect();
+        rows.push(row);
+    }
+
+    // On this Mac but not registered in this row yet. Push adopts them; until
+    // then they still belong on the page, because the page claims to list
+    // this home's resources of this kind.
+    for (resource_id, record) in &inventory.resources {
+        if seen_resources.contains(resource_id) {
+            continue;
+        }
+        let repository_id = remote_by_resource.get(resource_id).cloned();
+        let remote = repository_id
+            .as_ref()
+            .and_then(|repository_id| remote_by_repository.get(repository_id));
+        if let Some(repository_id) = &repository_id {
+            seen_repositories.insert(repository_id.clone());
+        }
+        let mut row = row_for(
+            format!("local:{}", resource_id),
+            record.resource.display_name(),
+            Some(resource_id.clone()),
+            Some(record),
+            remote,
+            None,
+            storage.is_some(),
+        );
+        row.repository_id = repository_id;
+        rows.push(row);
+    }
+
+    // In the storage and nowhere on this Mac. Pull installs them.
+    for (repository_id, (head, resource)) in &remote_by_repository {
+        if seen_repositories.contains(repository_id) {
+            continue;
+        }
+        let mut row = row_for(
+            format!("stored:{}", repository_id),
+            resource.display_name(),
+            Some(resource.resource_id()),
+            None,
+            Some(&(head.clone(), resource.clone())),
+            None,
+            true,
+        );
+        row.scope_label = scope_label(resource);
+        row.repository_id = Some(repository_id.clone());
+        rows.push(row);
+    }
+
+    // Present on disk and impossible to capture — a symlinked skill
+    // directory, an unreadable pet package. Hiding them would make the page
+    // disagree with the folder it claims to describe.
+    for blocked in &inventory.blocked {
+        rows.push(CatalogScopeRowDto {
+            row_id: format!("blocked:{}", blocked.display_name),
+            display_name: blocked.display_name.clone(),
+            resource_id: None,
+            scope_label: blocked.scope_label.clone(),
+            state: Some(CatalogLinkState::Blocked),
+            linked: false,
+            local_present: true,
+            local_path: None,
+            local_modified_at: None,
+            remote_present: false,
+            remote_revision: None,
+            remote_updated_at: None,
+            registration_id: None,
+            registration_revision: None,
+            link_id: None,
+            link_revision: None,
+            repository_id: None,
+            other_storage_names: Vec::new(),
+            warnings: Vec::new(),
+            blocker: Some(blocked.reason.clone()),
         });
     }
-    registered.sort_by(|left, right| {
-        left.resource
-            .registration
-            .display_name
+
+    // Name-ascending, the order every comparable list ships with. Sorting by
+    // state would move a row out from under the cursor the moment it synced.
+    rows.sort_by(|left, right| {
+        left.display_name
             .to_lowercase()
-            .cmp(&right.resource.registration.display_name.to_lowercase())
-            .then_with(|| {
-                left.resource
-                    .registration
-                    .registration_id
-                    .cmp(&right.resource.registration.registration_id)
-            })
+            .cmp(&right.display_name.to_lowercase())
+            .then_with(|| left.row_id.cmp(&right.row_id))
     });
-
-    let discovered = local_candidates(&inventory)
-        .into_iter()
-        .filter(|candidate| !registered_resource_ids.contains(&candidate.resource_id))
-        .collect();
-
-    let remote_candidates = match storage_id {
-        Some(storage_id) => {
-            let storage = storage_for(state, storage_id)?;
-            verified_remote_choices(&storage, scope.resource_kind, scope.provider)?
-                .into_iter()
-                .filter(|(listed, _)| {
-                    !linked_repositories
-                        .contains(&(storage.id.clone(), listed.tag.repository_id.clone()))
-                })
-                .map(|(listed, resource)| CatalogRemoteCandidateDto {
-                    repository_id: listed.tag.repository_id,
-                    provider: resource.provider(),
-                    kind: resource.kind_tag(),
-                    resource_id: resource.resource_id(),
-                    display_name: resource.display_name(),
-                    scope_label: scope_label(&resource),
-                    head_revision: listed.head.map(|head| head.revision).unwrap_or(0),
-                    content_sha256: resource.content_sha256().to_string(),
-                })
-                .collect()
-        }
-        None => Vec::new(),
-    };
 
     Ok(CatalogScopeResourcesDto {
         scope,
         profile,
-        registered,
-        discovered,
-        remote_candidates,
+        storage_id: storage.as_ref().map(|storage| storage.id.clone()),
+        storage_name: storage.as_ref().map(|storage| storage.name.clone()),
+        rows,
+        warnings: inventory.warnings,
     })
+}
+
+fn storage_name(config: &SyncConfig, storage_id: &StorageId) -> String {
+    config
+        .storages
+        .iter()
+        .find(|storage| &storage.id == storage_id)
+        .map(|storage| storage.name.clone())
+        .unwrap_or_else(|| "Missing storage".to_string())
+}
+
+/// The storage a scope page compares against: the caller's choice, else the
+/// one this scope's links already point at, else the only one configured.
+/// Opening on a storage the row has no history with would report every
+/// resource as unpushed.
+fn scope_storage(
+    scope: &CatalogScope,
+    document: &CatalogResourcesDocument,
+    config: &SyncConfig,
+    requested: Option<&StorageId>,
+) -> Option<StorageId> {
+    if let Some(requested) = requested {
+        return Some(requested.clone());
+    }
+    let mut counts: BTreeMap<StorageId, usize> = BTreeMap::new();
+    for registration in &document.registrations {
+        if !scope_owns(scope, registration) {
+            continue;
+        }
+        for link in document.links_for(&registration.registration_id) {
+            *counts.entry(link.storage_id.clone()).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(storage_id, _)| {
+            config
+                .storages
+                .iter()
+                .any(|storage| &storage.id == storage_id)
+        })
+        .max_by_key(|(storage_id, count)| (*count, storage_id.clone()))
+        .map(|(storage_id, _)| storage_id)
+        .or_else(|| config.storages.first().map(|storage| storage.id.clone()))
+}
+
+fn registration_scope_label(registration: &CatalogResourceRegistration) -> Option<String> {
+    match (&registration.local_target, registration.resource_kind) {
+        (LocalCatalogTargetId::SkillDirectory { scope, .. }, _) => {
+            Some(scope.display_label().to_string())
+        }
+        (LocalCatalogTargetId::PetDirectory { .. }, kind) => kind
+            .pet_format()
+            .map(|format| format.display_label().to_string()),
+        (LocalCatalogTargetId::Plugin { .. }, _) => None,
+    }
+}
+
+/// The one comparison every row makes, whether or not a link exists.
+///
+/// With a link, the accepted content is the base and drift is three-way. With
+/// no link there is no base, so a resource that exists on both sides is
+/// "never reviewed" rather than diverged — Pull is what establishes the base.
+fn row_for(
+    row_id: String,
+    display_name: String,
+    resource_id: Option<CatalogResourceId>,
+    local: Option<&LocalResourceRecord>,
+    remote: Option<&(Option<super::domain::LibraryResourceHead>, CatalogResource)>,
+    link: Option<&CatalogResourceLink>,
+    storage_chosen: bool,
+) -> CatalogScopeRowDto {
+    let local_sha = local.map(|record| record.resource.content_sha256());
+    let remote_sha = remote.map(|(_, resource)| resource.content_sha256());
+    let state = if !storage_chosen {
+        None
+    } else {
+        Some(match link {
+            Some(link) => derive_link_state(
+                link.accepted_content_sha256.as_deref(),
+                local_sha,
+                remote_sha,
+                link.accepted_head.is_some(),
+            ),
+            None => match (local_sha, remote_sha) {
+                (Some(_), None) => CatalogLinkState::New,
+                (None, _) => CatalogLinkState::LocalMissing,
+                (Some(local), Some(remote)) if local == remote => CatalogLinkState::InSync,
+                (Some(_), Some(_)) => CatalogLinkState::UnreviewedRemote,
+            },
+        })
+    };
+    CatalogScopeRowDto {
+        row_id,
+        display_name,
+        resource_id,
+        scope_label: local.and_then(|record| scope_label(&record.resource)),
+        state,
+        linked: link.is_some(),
+        local_present: local.is_some(),
+        local_path: local
+            .and_then(|record| record.target_path.as_ref())
+            .map(|path| path.to_string_lossy().to_string()),
+        local_modified_at: local.and_then(|record| record.local_modified_at),
+        remote_present: remote.is_some(),
+        remote_revision: remote.and_then(|(head, _)| head.as_ref().map(|head| head.revision)),
+        remote_updated_at: remote.and_then(|(head, _)| head.as_ref().map(|head| head.updated_at)),
+        registration_id: None,
+        registration_revision: None,
+        link_id: link.map(|link| link.link_id.clone()),
+        link_revision: link.map(|link| link.revision),
+        repository_id: None,
+        other_storage_names: Vec::new(),
+        warnings: local
+            .map(|record| record.warnings.clone())
+            .unwrap_or_default(),
+        blocker: None,
+    }
 }
 
 #[tauri::command]
@@ -1189,23 +1393,25 @@ struct ResolvedResourceWorkspace {
     state: CatalogLinkState,
 }
 
-fn resolve_resource_workspace(
-    state: &LocalStateRepository,
+struct ResolvedResourceLocalWorkspace {
+    registration: CatalogResourceRegistration,
+    context: ResolvedCatalogContext,
+    inventory: CatalogLocalInventory,
+}
+
+struct ResolvedResourceRemoteWorkspace {
+    storage: StorageConfig,
+    observed: Option<ObservedLibraryHead>,
+    remote_resource: Option<CatalogResource>,
+    state: CatalogLinkState,
+}
+
+fn resolve_resource_local_workspace(
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
-    link_id: &CatalogLinkId,
+    registration: CatalogResourceRegistration,
     user_home: &Path,
-) -> Result<ResolvedResourceWorkspace, String> {
-    let document = catalog.load_resources()?;
-    let link = document
-        .link(link_id)
-        .ok_or_else(|| format!("unknown catalog link '{}'", link_id))?
-        .clone();
-    let registration = document
-        .registration(&link.registration_id)
-        .ok_or("the catalog link lost its registration")?
-        .clone();
-    let storage = storage_for(state, &link.storage_id)?;
+) -> Result<ResolvedResourceLocalWorkspace, String> {
     let profiles = catalog.load_profiles()?;
     let context = resolve_profile_context(
         &profiles,
@@ -1214,14 +1420,36 @@ fn resolve_resource_workspace(
         user_home,
     )
     .map_err(|blocker| blocker.to_string())?;
-    let inventory = inventory_local(&context, CatalogInventoryFilter::Everything, runner)
-        .map_err(|blocker| blocker.to_string())?;
+    let inventory = inventory_local(
+        &context,
+        CatalogInventoryFilter::Resource {
+            kind: registration.resource_kind,
+            target: registration.local_target.clone(),
+        },
+        runner,
+    )
+    .map_err(|blocker| blocker.to_string())?;
     let local = inventory.resources.get(&registration.resource_id);
     if local.is_some_and(|record| record.target != registration.local_target) {
         return Err(
             "the linked local resource target no longer matches its registration".to_string(),
         );
     }
+    Ok(ResolvedResourceLocalWorkspace {
+        registration,
+        context,
+        inventory,
+    })
+}
+
+fn resolve_resource_remote_workspace(
+    state: &LocalStateRepository,
+    registration: &CatalogResourceRegistration,
+    inventory: &CatalogLocalInventory,
+    link: &CatalogResourceLink,
+) -> Result<ResolvedResourceRemoteWorkspace, String> {
+    let storage = storage_for(state, &link.storage_id)?;
+    let local = inventory.resources.get(&registration.resource_id);
     let engine = engine_for(&storage)?;
     let observed = engine.read_head(&link.repository_id)?;
     verify_library_continuity(
@@ -1259,94 +1487,152 @@ fn resolve_resource_workspace(
             .map(CatalogResource::content_sha256),
         link.accepted_head.is_some(),
     );
-    Ok(ResolvedResourceWorkspace {
-        registration,
-        link,
+    Ok(ResolvedResourceRemoteWorkspace {
         storage,
-        context,
-        inventory,
         observed,
         remote_resource,
         state: state_value,
     })
 }
 
-fn inspect_link_with_repositories(
+fn resolve_resource_workspace(
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
     link_id: &CatalogLinkId,
     user_home: &Path,
+) -> Result<ResolvedResourceWorkspace, String> {
+    let document = catalog.load_resources()?;
+    let link = document
+        .link(link_id)
+        .ok_or_else(|| format!("unknown catalog link '{}'", link_id))?
+        .clone();
+    let registration = document
+        .registration(&link.registration_id)
+        .ok_or("the catalog link lost its registration")?
+        .clone();
+    let local = resolve_resource_local_workspace(catalog, runner, registration, user_home)?;
+    let remote =
+        resolve_resource_remote_workspace(state, &local.registration, &local.inventory, &link)?;
+    Ok(ResolvedResourceWorkspace {
+        registration: local.registration,
+        link,
+        storage: remote.storage,
+        context: local.context,
+        inventory: local.inventory,
+        observed: remote.observed,
+        remote_resource: remote.remote_resource,
+        state: remote.state,
+    })
+}
+
+fn blocked_link_inspection(
+    registration: &CatalogResourceRegistration,
+    link: &CatalogResourceLink,
+    local: Option<&LocalResourceRecord>,
+    error: String,
     now: u64,
-) -> Result<CatalogResourceLinkInspectionDto, String> {
-    match resolve_resource_workspace(state, catalog, runner, link_id, user_home) {
-        Ok(workspace) => {
-            let local = workspace
-                .inventory
-                .resources
-                .get(&workspace.registration.resource_id);
-            Ok(CatalogResourceLinkInspectionDto {
-                registration_id: workspace.registration.registration_id,
-                link_id: workspace.link.link_id,
-                storage_id: workspace.link.storage_id,
-                repository_id: workspace.link.repository_id,
-                state: workspace.state,
-                local_present: local.is_some(),
-                remote_present: workspace.remote_resource.is_some(),
-                local_content_sha256: local
-                    .map(|record| record.resource.content_sha256().to_string()),
-                remote_content_sha256: workspace
-                    .remote_resource
-                    .as_ref()
-                    .map(|resource| resource.content_sha256().to_string()),
-                remote_revision: workspace.observed.map(|observed| observed.head.revision),
-                blocker: None,
-                generated_at: now,
-            })
-        }
-        Err(error) => {
-            let document = catalog.load_resources()?;
-            let link = document
-                .link(link_id)
-                .ok_or_else(|| format!("unknown catalog link '{}'", link_id))?;
-            Ok(CatalogResourceLinkInspectionDto {
-                registration_id: link.registration_id.clone(),
-                link_id: link.link_id.clone(),
-                storage_id: link.storage_id.clone(),
-                repository_id: link.repository_id.clone(),
-                state: CatalogLinkState::Blocked,
-                local_present: false,
-                remote_present: false,
-                local_content_sha256: None,
-                remote_content_sha256: None,
-                remote_revision: None,
-                blocker: Some(error),
-                generated_at: now,
-            })
-        }
+) -> CatalogResourceLinkInspectionDto {
+    CatalogResourceLinkInspectionDto {
+        registration_id: registration.registration_id.clone(),
+        link_id: link.link_id.clone(),
+        storage_id: link.storage_id.clone(),
+        repository_id: link.repository_id.clone(),
+        state: CatalogLinkState::Blocked,
+        local_present: local.is_some(),
+        remote_present: false,
+        local_content_sha256: local.map(|record| record.resource.content_sha256().to_string()),
+        remote_content_sha256: None,
+        remote_revision: None,
+        blocker: Some(error),
+        generated_at: now,
     }
 }
 
-#[tauri::command]
-pub async fn inspect_catalog_resource_link(
-    _app: tauri::AppHandle,
-    link_id: CatalogLinkId,
-    force_revalidate: bool,
-) -> Result<CatalogResourceLinkInspectionDto, String> {
-    run_blocking(move || {
-        let state = state_repository()?;
-        let catalog = catalog_repository()?;
-        if force_revalidate {
-            let document = catalog.load_resources()?;
-            if let Some(link) = document.link(&link_id) {
-                discard_plans_for(&catalog, &link.registration_id, Some(&link_id))?;
+fn inspect_links_with_repositories(
+    state: &LocalStateRepository,
+    catalog: &CatalogStateRepository,
+    runner: &dyn PluginProcessRunner,
+    registration_id: &CatalogRegistrationId,
+    user_home: &Path,
+    now: u64,
+) -> Result<Vec<CatalogResourceLinkInspectionDto>, String> {
+    let document = catalog.load_resources()?;
+    let registration = document
+        .registration(registration_id)
+        .ok_or_else(|| format!("unknown catalog registration '{}'", registration_id))?
+        .clone();
+    let mut links = document
+        .links_for(registration_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    links.sort_by(|left, right| left.link_id.cmp(&right.link_id));
+    if links.is_empty() {
+        return Ok(Vec::new());
+    }
+    let local_workspace =
+        match resolve_resource_local_workspace(catalog, runner, registration.clone(), user_home) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                return Ok(links
+                    .iter()
+                    .map(|link| {
+                        blocked_link_inspection(&registration, link, None, error.clone(), now)
+                    })
+                    .collect())
             }
-        }
-        inspect_link_with_repositories(
-            &state,
-            &catalog,
+        };
+    let local = local_workspace
+        .inventory
+        .resources
+        .get(&registration.resource_id);
+    Ok(links
+        .iter()
+        .map(|link| {
+            match resolve_resource_remote_workspace(
+                state,
+                &registration,
+                &local_workspace.inventory,
+                link,
+            ) {
+                Ok(remote) => CatalogResourceLinkInspectionDto {
+                    registration_id: registration.registration_id.clone(),
+                    link_id: link.link_id.clone(),
+                    storage_id: link.storage_id.clone(),
+                    repository_id: link.repository_id.clone(),
+                    state: remote.state,
+                    local_present: local.is_some(),
+                    remote_present: remote.remote_resource.is_some(),
+                    local_content_sha256: local
+                        .map(|record| record.resource.content_sha256().to_string()),
+                    remote_content_sha256: remote
+                        .remote_resource
+                        .as_ref()
+                        .map(|resource| resource.content_sha256().to_string()),
+                    remote_revision: remote
+                        .observed
+                        .as_ref()
+                        .map(|observed| observed.head.revision),
+                    blocker: None,
+                    generated_at: now,
+                },
+                Err(error) => blocked_link_inspection(&registration, link, local, error, now),
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn inspect_catalog_resource_links(
+    _app: tauri::AppHandle,
+    registration_id: CatalogRegistrationId,
+) -> Result<Vec<CatalogResourceLinkInspectionDto>, String> {
+    run_blocking(move || {
+        inspect_links_with_repositories(
+            &state_repository()?,
+            &catalog_repository()?,
             &NativeProcessRunner,
-            &link_id,
+            &registration_id,
             &os_user_home()?,
             now_secs(),
         )
@@ -1518,9 +1804,6 @@ pub async fn publish_catalog_resource(
         workspace
             .context
             .verify_pins(&plan.profile_pins, &plan.skill_root_pins)?;
-        if workspace.inventory.source_stamp != plan.source_stamp {
-            return Err("the local provider inventory changed after review".to_string());
-        }
         let record = workspace
             .inventory
             .resources
@@ -1528,6 +1811,9 @@ pub async fn publish_catalog_resource(
             .ok_or("the local resource disappeared after review")?;
         if record.resource != plan.resource {
             return Err("the local resource changed after review".to_string());
+        }
+        if record.warnings != plan.row.warnings {
+            return Err("the local resource warnings changed after review".to_string());
         }
         let engine = engine_for(&workspace.storage)?;
         let tag = match engine.read_tag(&workspace.link.repository_id)? {
@@ -1907,8 +2193,12 @@ fn prepare_fork_with_repositories(
         user_home,
     )
     .map_err(|blocker| blocker.to_string())?;
-    let inventory = inventory_local(&context, CatalogInventoryFilter::Everything, runner)
-        .map_err(|blocker| blocker.to_string())?;
+    let inventory = inventory_local(
+        &context,
+        CatalogInventoryFilter::Kind(registration.resource_kind),
+        runner,
+    )
+    .map_err(|blocker| blocker.to_string())?;
     let name_taken = name_taken_index(&inventory);
     let plan = build_resource_fork_plan(ResourceForkPlanInputs {
         registration: &registration,
@@ -2046,6 +2336,7 @@ mod tests {
     use super::super::domain::{AgentSkillScope, CatalogActionOutcome};
     use super::*;
     use mallard_domain::{StorageKind, SyncConfig};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct EmptyCodexRunner;
 
@@ -2067,6 +2358,23 @@ mod tests {
                 stdout: stdout.to_string(),
                 stderr: String::new(),
             })
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingCodexRunner {
+        calls: AtomicUsize,
+    }
+
+    impl PluginProcessRunner for CountingCodexRunner {
+        fn run(
+            &self,
+            provider: ProviderKey,
+            home: &Path,
+            argv: &[String],
+        ) -> Result<super::super::adapters::CmdOutput, String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            EmptyCodexRunner.run(provider, home, argv)
         }
     }
 
@@ -2199,7 +2507,6 @@ mod tests {
             s3_endpoint: String::new(),
             region: String::new(),
             local_dir: storage_path.to_string_lossy().to_string(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: None,
         };
         let mut config = SyncConfig::default();
@@ -2263,7 +2570,6 @@ mod tests {
             s3_endpoint: String::new(),
             region: String::new(),
             local_dir: path.to_string_lossy().to_string(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: None,
         };
         fixture
@@ -2274,6 +2580,76 @@ mod tests {
             })
             .unwrap();
         storage
+    }
+
+    /// Put the linked resource into its storage, the way Push does, without
+    /// the command's plan bookkeeping — these tests are about what the page
+    /// reads back, not about the review that got the content there.
+    fn publish_for_test(fixture: &LibraryFixture, link_id: &CatalogLinkId) {
+        let workspace = resolve_resource_workspace(
+            &fixture.state,
+            &fixture.catalog,
+            &EmptyCodexRunner,
+            link_id,
+            &fixture.user_home,
+        )
+        .unwrap();
+        let record = workspace
+            .inventory
+            .resources
+            .get(&workspace.registration.resource_id)
+            .unwrap();
+        let engine = engine_for(&workspace.storage).unwrap();
+        let published = engine
+            .publish(PublishLibraryResourceRequest {
+                repository_id: workspace.link.repository_id.clone(),
+                tag: LibraryResourceTag {
+                    schema_version: CATALOG_SCHEMA,
+                    repository_id: workspace.link.repository_id.clone(),
+                    provider: record.resource.provider(),
+                    resource_kind: record.resource.kind_tag(),
+                    resource_id: record.resource.resource_id(),
+                    stable_identity_sha256: record.resource.identity_sha256(),
+                    display_name: record.resource.display_name(),
+                    scope_label: scope_label(&record.resource),
+                    created_at: 3,
+                },
+                observed: workspace.observed,
+                resource: record.resource.clone(),
+                payloads: payloads_for_record(record),
+                captured_with: CatalogCapturedWith {
+                    app: "mallard".to_string(),
+                    version: "test".to_string(),
+                },
+                published_by_origin: super::super::domain::derive_library_origin(
+                    "host",
+                    workspace.link.link_id.as_str(),
+                    &workspace.link.repository_id,
+                )
+                .unwrap(),
+                updated_at: 4,
+            })
+            .unwrap();
+        let coordinate = head_coordinate(
+            &published.head,
+            &storage_identity_for_config(&workspace.storage),
+        );
+        let link_id = link_id.clone();
+        fixture
+            .catalog
+            .mutate_resources(|document| {
+                let link = document
+                    .links
+                    .iter_mut()
+                    .find(|link| link.link_id == link_id)
+                    .unwrap();
+                link.accepted_head = Some(coordinate);
+                link.accepted_content_sha256 =
+                    Some(published.manifest.resource.content_sha256().to_string());
+                link.revision = link.revision.saturating_add(1);
+                Ok(())
+            })
+            .unwrap();
     }
 
     fn skill_scope(fixture: &LibraryFixture) -> CatalogScopeDto {
@@ -2361,8 +2737,9 @@ mod tests {
         );
         assert!(!fixture.storage_path.join(".mallard/v1/library").exists());
 
-        // The scope page reports it as registered, locally present, and no
-        // longer a discoverable candidate.
+        // One row, not two: the registration absorbed the discovered
+        // candidate rather than sitting beside it. Nothing has been pushed,
+        // so it stands as New against the storage it just linked.
         let page = list_catalog_scope_resources_with_repositories(
             &fixture.state,
             &fixture.catalog,
@@ -2372,9 +2749,74 @@ mod tests {
             &fixture.user_home,
         )
         .unwrap();
-        assert_eq!(page.registered.len(), 1);
-        assert!(page.registered[0].local_present);
-        assert!(page.discovered.is_empty());
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.storage_id.as_ref(), Some(&fixture.storage.id));
+        assert!(page.rows[0].local_present);
+        assert!(!page.rows[0].remote_present);
+        assert!(page.rows[0].linked);
+        assert_eq!(page.rows[0].state, Some(CatalogLinkState::New));
+        assert!(page.rows[0].registration_id.is_some());
+        assert!(page.rows[0].local_modified_at.is_some());
+    }
+
+    #[test]
+    fn a_scope_page_pairs_local_and_stored_resources_into_one_row() {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        let page = |storage: Option<&StorageId>| {
+            list_catalog_scope_resources_with_repositories(
+                &fixture.state,
+                &fixture.catalog,
+                &EmptyCodexRunner,
+                &row.scope.scope_id,
+                storage,
+                &fixture.user_home,
+            )
+            .unwrap()
+        };
+
+        // Nothing linked yet: the local skill is still a row, and it is the
+        // storage's problem that it has never seen it.
+        let before = page(None);
+        assert_eq!(before.rows.len(), 1);
+        assert!(!before.rows[0].linked);
+        assert_eq!(before.rows[0].state, Some(CatalogLinkState::New));
+
+        // Publish it, then read the page again: the same one row, now paired
+        // with the stored copy and in sync.
+        let link = link_catalog_scope_resource_with_repositories(
+            &fixture.state,
+            &fixture.catalog,
+            &EmptyCodexRunner,
+            LinkCatalogScopeResourceRequest {
+                scope_id: row.scope.scope_id.clone(),
+                storage_id: fixture.storage.id.clone(),
+                local_resource_id: Some(review_resource_id()),
+                repository_id: None,
+            },
+            &fixture.user_home,
+            3,
+        )
+        .unwrap();
+        publish_for_test(&fixture, &link.link_id);
+
+        let after = page(Some(&fixture.storage.id));
+        assert_eq!(after.rows.len(), 1);
+        assert!(after.rows[0].local_present && after.rows[0].remote_present);
+        assert_eq!(after.rows[0].state, Some(CatalogLinkState::InSync));
+        assert_eq!(after.rows[0].remote_revision, Some(1));
+
+        // A second storage has never held it, so the same resource reads as
+        // New there — the page's state belongs to the pairing, not the row.
+        let second = second_storage(&fixture);
+        let elsewhere = page(Some(&second.id));
+        assert_eq!(elsewhere.rows.len(), 1);
+        assert!(!elsewhere.rows[0].linked);
+        assert_eq!(elsewhere.rows[0].state, Some(CatalogLinkState::New));
+        assert_eq!(
+            elsewhere.rows[0].other_storage_names,
+            vec![fixture.storage.name.clone()]
+        );
     }
 
     #[test]
@@ -2412,6 +2854,110 @@ mod tests {
     }
 
     #[test]
+    fn inspecting_multiple_links_scans_local_state_once() {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        let second = second_storage(&fixture);
+        let link = |storage_id: &StorageId, now| {
+            link_catalog_scope_resource_with_repositories(
+                &fixture.state,
+                &fixture.catalog,
+                &EmptyCodexRunner,
+                LinkCatalogScopeResourceRequest {
+                    scope_id: row.scope.scope_id.clone(),
+                    storage_id: storage_id.clone(),
+                    local_resource_id: Some(review_resource_id()),
+                    repository_id: None,
+                },
+                &fixture.user_home,
+                now,
+            )
+            .unwrap()
+        };
+        let first = link(&fixture.storage.id, 3);
+        link(&second.id, 4);
+
+        let runner = CountingCodexRunner::default();
+        let inspections = inspect_links_with_repositories(
+            &fixture.state,
+            &fixture.catalog,
+            &runner,
+            &first.resource.registration.registration_id,
+            &fixture.user_home,
+            5,
+        )
+        .unwrap();
+
+        assert_eq!(inspections.len(), 2);
+        assert_eq!(
+            runner.calls.load(Ordering::Relaxed),
+            2,
+            "one Codex inventory runs its marketplace and plugin commands once"
+        );
+    }
+
+    #[test]
+    fn unrelated_library_resources_do_not_stale_a_push_review() {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        let linked = link_catalog_scope_resource_with_repositories(
+            &fixture.state,
+            &fixture.catalog,
+            &EmptyCodexRunner,
+            LinkCatalogScopeResourceRequest {
+                scope_id: row.scope.scope_id,
+                storage_id: fixture.storage.id.clone(),
+                local_resource_id: Some(review_resource_id()),
+                repository_id: None,
+            },
+            &fixture.user_home,
+            3,
+        )
+        .unwrap();
+        let plan = prepare_push_with_repositories(
+            &fixture.state,
+            &fixture.catalog,
+            &EmptyCodexRunner,
+            &linked.link_id,
+            &fixture.user_home,
+            4,
+        )
+        .unwrap();
+
+        let skills_root = fixture.skill_path.parent().unwrap();
+        fs::create_dir_all(skills_root.join("unrelated")).unwrap();
+        fs::write(
+            skills_root.join("unrelated/SKILL.md"),
+            b"---\nname: unrelated\n---\nChanged elsewhere.\n",
+        )
+        .unwrap();
+        fs::create_dir_all(skills_root.join("bad name")).unwrap();
+        fs::write(
+            skills_root.join("bad name/SKILL.md"),
+            b"---\nname: bad-name\n---\n",
+        )
+        .unwrap();
+
+        let workspace = resolve_resource_workspace(
+            &fixture.state,
+            &fixture.catalog,
+            &EmptyCodexRunner,
+            &linked.link_id,
+            &fixture.user_home,
+        )
+        .unwrap();
+        let selected = workspace
+            .inventory
+            .resources
+            .get(&workspace.registration.resource_id)
+            .unwrap();
+        assert_eq!(workspace.inventory.resources.len(), 1);
+        assert!(workspace.inventory.blocked.is_empty());
+        assert_eq!(selected.resource, plan.resource);
+        assert_eq!(selected.warnings, plan.row.warnings);
+    }
+
+    #[test]
     fn a_pets_scope_lists_without_provider_clis() {
         let fixture = library_fixture();
         let codex_home = fixture.user_home.join("codex-home");
@@ -2441,9 +2987,10 @@ mod tests {
             &fixture.user_home,
         )
         .unwrap();
-        assert_eq!(page.discovered.len(), 1);
-        assert_eq!(page.discovered[0].display_name, "Duck");
-        assert_eq!(page.discovered[0].kind, CatalogResourceKindTag::CodexPetV1);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].display_name, "Duck");
+        assert_eq!(page.rows[0].scope_label.as_deref(), Some("v1"));
+        assert!(page.rows[0].local_present && !page.rows[0].linked);
     }
 
     #[test]

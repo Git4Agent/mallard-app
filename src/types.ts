@@ -606,7 +606,6 @@ export interface StorageConfig {
   s3_endpoint: string;
   region: string;
   local_dir: string;
-  included_default_exclusions: string[];
   supports_conditional_writes?: boolean | null;
 }
 
@@ -820,7 +819,6 @@ export interface RestoreAction {
   requires_explicit_approval: boolean;
 }
 
-export type ConversationPlanDirection = "push" | "pull";
 export type ConversationTargetExpectation =
   | { state: "absent" }
   | { state: "sha256"; sha256: string };
@@ -830,9 +828,20 @@ export interface ConversationProviderStateExpectation {
   expectation: ConversationTargetExpectation;
 }
 
+/**
+ * Portable provenance of a divergent keep-both preservation: the origin
+ * thread the preserved copy split from and its 1-based per-origin ordinal.
+ */
+export interface PreservedProvenance {
+  preserved_from: string;
+  ordinal: number;
+}
+
 export interface KeepBothPlan {
   preserved_thread_id: string;
   remote_provider_thread_id: string;
+  preserved: PreservedProvenance;
+  preserved_display_title: string;
 }
 
 export interface ConversationRawRangePin {
@@ -841,43 +850,70 @@ export interface ConversationRawRangePin {
   range_sha256: string;
 }
 
-export interface ConversationPlanAction {
-  action_id: string;
-  direction: ConversationPlanDirection;
-  action: ConversationPlanActionType;
-  reason_code: ConversationReasonCode;
-  relation: TailClassification;
-  provider: ProviderKey;
+export interface ConversationContextPins {
   host_id: string;
   replica_id: string;
   local_project_id: string;
   provider_profile_id: string;
+  host_identity_revision: number;
+  profile_revision: number;
+  project_binding_revision: number;
+  bindings_document_revision: number;
+  binding_revision?: number | null;
+}
+
+export interface ConversationRevisionPins {
+  bundle_revision: number;
+  commit_id: string;
+  manifest_sha256: string;
+  scope_revision: number;
+  scope_sha256: string;
+}
+
+export interface ConversationTailPins {
+  accepted?: PortableConversationTail | null;
+  accepted_local?: PortableConversationTail | null;
+  local?: PortableConversationTail | null;
+  cloud?: PortableConversationTail | null;
+  checkpoint_generation?: number | null;
+  lineage_digest?: string | null;
+  semantic_digest?: string | null;
+  raw_range?: ConversationRawRangePin | null;
+}
+
+export interface ConversationTargetPins {
+  local: ConversationTargetExpectation;
+  provider_state: ConversationProviderStateExpectation[];
+}
+
+export interface ConversationActionPins {
+  context: ConversationContextPins;
+  revision: ConversationRevisionPins;
+  tail: ConversationTailPins;
+  target: ConversationTargetPins;
+  codec: string;
+  expires_at: number;
+}
+
+export interface ConversationPlanAction {
+  action_id: string;
+  action: ConversationPlanActionType;
+  provider: ProviderKey;
   thread_id: string;
   source_resource_id?: string | null;
   proposed_provider_thread_id?: string | null;
   keep_both?: KeepBothPlan | null;
-  required_codec: string;
-  pinned_revision: number;
-  pinned_commit_id: string;
-  pinned_manifest_sha256: string;
-  pinned_scope_revision: number;
-  pinned_scope_sha256: string;
-  pinned_accepted_tail?: PortableConversationTail | null;
-  pinned_accepted_local_tail?: PortableConversationTail | null;
-  pinned_local_tail?: PortableConversationTail | null;
-  pinned_cloud_tail?: PortableConversationTail | null;
-  pinned_checkpoint_generation?: number | null;
-  pinned_lineage_digest?: string | null;
-  pinned_semantic_digest?: string | null;
-  pinned_raw_range?: ConversationRawRangePin | null;
-  expected_local_target: ConversationTargetExpectation;
-  expected_provider_state: ConversationProviderStateExpectation[];
-  expected_profile_revision: number;
-  expected_project_binding_revision: number;
-  expected_host_identity_revision: number;
-  expected_bindings_document_revision: number;
-  expected_binding_revision?: number | null;
-  expires_at: number;
+  pins: ConversationActionPins;
+}
+
+export interface ConversationReviewRow {
+  provider: ProviderKey;
+  thread_id: string;
+  resource_id: string;
+  action: ConversationReviewAction;
+  blocker?: ConversationBlocker | null;
+  blocked_reason?: string | null;
+  action_id?: string | null;
 }
 
 export interface RestorePlan {
@@ -896,6 +932,7 @@ export interface RestorePlan {
   expires_at: number;
   actions: RestoreAction[];
   conversation_actions: ConversationPlanAction[];
+  conversation_review: ConversationReviewRow[];
   project_content_eligibility?: ProjectFileSyncEligibility | null;
   remote_continuity?: RemoteContinuity | null;
 }
@@ -906,6 +943,8 @@ export interface PreservedThreadResult {
   action_id: string;
   original_thread_id: string;
   preserved_thread_id: string;
+  /** The plan-minted marker title the preserved copy was renamed to. */
+  preserved_display_title: string;
 }
 
 export interface RestoreResult {
@@ -987,7 +1026,7 @@ export interface ProjectSessionSummary {
   source: SessionSourceState;
   access: ProviderAccessState;
   title: string;
-  is_preserved_local: boolean;
+  preserved?: PreservedProvenance | null;
   summary?: string | null;
   started_at: number;
   ended_at: number;
@@ -1182,6 +1221,14 @@ export type TailClassification =
 export type ConversationPlanActionType =
   | "publish"
   | "create_cloud"
+  | "adopt_cloud_metadata"
+  | "materialize_cloud"
+  | "keep_both"
+  | "create_local";
+
+export type ConversationReviewAction =
+  | "publish"
+  | "create_cloud"
   | "no_changes"
   | "require_pull_metadata"
   | "require_pull"
@@ -1195,28 +1242,17 @@ export type ConversationPlanActionType =
   | "not_found"
   | "blocked";
 
-export type ConversationReasonCode =
-  | "sync_current"
-  | "sync_advanced"
-  | "local_outstanding"
-  | "cloud_outstanding"
-  | "divergent"
-  | "missing_local"
-  | "missing_cloud"
-  | "missing_both"
+export type ConversationBlocker =
   | "unknown_evidence"
   | "detached_requires_pull"
-  | "corruption_blocked"
-  | "provider_not_quiescent"
   | "codec_unsupported"
   | "ambiguous_binding"
   | "missing_binding"
-  | "stale_plan"
   | "busy";
 
 export interface ThreadSyncDecision {
-  action: ConversationPlanActionType;
-  reason_code: ConversationReasonCode;
+  action: ConversationReviewAction;
+  blocker?: ConversationBlocker | null;
   selectable: boolean;
   blocked_reason?: string | null;
 }
@@ -1226,6 +1262,7 @@ export interface ThreadSyncEntry {
   provider_display_name: string;
   access: ProviderAccessState;
   thread_id: string;
+  conversation_resource_id: string;
   resource_id: string;
   display_name: string;
   state: ThreadSyncState;
@@ -1237,7 +1274,6 @@ export interface ThreadSyncEntry {
   cloud_thread_id?: string | null;
   forked_from?: string | null;
   provider_thread_id?: string | null;
-  relation?: TailClassification | null;
   push_decision: ThreadSyncDecision;
   pull_decision: ThreadSyncDecision;
   origin_label?: string | null;
@@ -1296,7 +1332,6 @@ export interface GitHistoryPage {
   branches: GitBranchSummary[];
   commits: GitCommitSummary[];
   github_repository_url?: string | null;
-  next_cursor?: string | null;
   unique_session_count: number;
 }
 
@@ -1316,4 +1351,10 @@ export interface ProjectActivity {
   window_end: number;
   next_before?: number | null;
   storage_sync: StorageSyncSummary[];
+}
+
+export interface ProjectActivityWorkspace {
+  activity: ProjectActivity;
+  comparison?: ThreadSyncComparison | null;
+  comparison_error?: string | null;
 }

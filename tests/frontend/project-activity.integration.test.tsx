@@ -13,7 +13,7 @@ import ProjectActivityPage, {
   unresolvedSyncPresentation,
 } from "../../src/components/project-sync/ProjectActivityPage";
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
-import ThreadStatusIcon, { type ThreadStatusIconName } from "../../src/components/project-sync/ThreadStatusIcon";
+import ThreadStatusIcon, { type ThreadStatusIconName } from "../../src/components/sync-review/ThreadStatusIcon";
 import { createSingleFlight } from "../../src/components/project-sync/api";
 
 const project = {
@@ -76,7 +76,7 @@ const codexSession = {
   source: "local_only" as const,
   access: "bound_ready" as const,
   title: "Add Git history mapping",
-  is_preserved_local: false,
+  preserved: null,
   summary: "Map project-owned sessions onto the first-parent rail.",
   started_at: 1_752_800_000,
   ended_at: 1_752_803_600,
@@ -108,7 +108,6 @@ const activity = {
       session_refs: [{ resource_id: codexResourceId }],
     }],
     unique_session_count: 1,
-    next_cursor: null,
   },
   unmapped: [],
   providers: [{ provider: "codex", display_name: "Codex", access: "bound_ready" as const }],
@@ -179,9 +178,9 @@ test("the branch picker exposes branch state without using the native select men
 });
 
 test("path bar counts tally the whole comparison, split by the button that clears them", () => {
-  const decision = (action: string, reason_code = "ready") => ({
+  const decision = (action: string, blocker: string | null = null) => ({
     action,
-    reason_code,
+    blocker,
     selectable: true,
   });
   const entry = (
@@ -192,6 +191,7 @@ test("path bar counts tally the whole comparison, split by the button that clear
     provider_display_name: "Codex",
     access: "bound_ready",
     thread_id: `thread-${state}-${JSON.stringify(overrides)}`,
+    conversation_resource_id: `codex:conversation:${state}-${JSON.stringify(overrides)}`,
     resource_id: `codex:conversation:${state}-${JSON.stringify(overrides)}`,
     display_name: state,
     state,
@@ -232,7 +232,7 @@ test("path bar counts tally the whole comparison, split by the button that clear
 
   // A blocked push is not pushable, however the state reads on its own.
   const blocked = activityHeaderCounts({
-    entries: [entry("local_ahead", { push_decision: { action: "blocked", reason_code: "ready", selectable: false } })],
+    entries: [entry("local_ahead", { push_decision: { action: "blocked", selectable: false } })],
   } as Parameters<typeof activityHeaderCounts>[0], "Local storage 1");
   assert.equal(blocked.push, 0);
   assert.equal(blocked.attention, 1);
@@ -249,7 +249,7 @@ test("path bar counts tally the whole comparison, split by the button that clear
 
 test("the path bar hangs the branch on the section crumb and keeps one overflow", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  const bar = readFileSync("src/components/project-sync/SyncPathBar.tsx", "utf8");
+  const bar = readFileSync("src/components/sync-review/SyncPathBar.tsx", "utf8");
   const sync = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
 
   // The branch scopes the section, so it rides that crumb rather than standing
@@ -312,7 +312,7 @@ test("session indicators use the quiet desktop sync vocabulary", () => {
     status_detail: "The provider is still writing this task.",
     push_decision: {
       action: "blocked",
-      reason_code: "provider_not_quiescent",
+      blocker: "busy",
     },
   } as Parameters<typeof sessionSyncPresentation>[0], "Storage");
   assert.deepEqual(
@@ -324,7 +324,7 @@ test("session indicators use the quiet desktop sync vocabulary", () => {
     state: "local_only",
     push_decision: {
       action: "blocked",
-      reason_code: "codec_unsupported",
+      blocker: "codec_unsupported",
     },
   } as Parameters<typeof sessionSyncPresentation>[0], "Storage");
   assert.deepEqual(
@@ -339,7 +339,7 @@ test("session indicators use the quiet desktop sync vocabulary", () => {
     provider_display_name: "Claude",
     push_decision: {
       action: "blocked",
-      reason_code: "codec_unsupported",
+      blocker: "codec_unsupported",
     },
   } as Parameters<typeof sessionSyncPresentation>[0], "Storage");
   assert.match(claudeBlocked.label, /can't safely capture this Claude session/i);
@@ -558,7 +558,6 @@ test("fresh storage matches portable Activity rows to conversation comparisons",
   const syncResourceId = `codex:conversation:${CODEX_SESSION_ID}`;
   const decision = (action: string, selectable: boolean) => ({
     action,
-    reason_code: "missing_cloud",
     selectable,
   });
   const comparison = emptyComparison({
@@ -568,6 +567,7 @@ test("fresh storage matches portable Activity rows to conversation comparisons",
       provider_display_name: "Codex",
       access: "bound_ready",
       thread_id: CODEX_SESSION_ID,
+      conversation_resource_id: syncResourceId,
       resource_id: syncResourceId,
       display_name: codexSession.title,
       state: "local_only",
@@ -1182,9 +1182,11 @@ test("embedded activity follows the project workspace without repeating project 
   assert.doesNotMatch(html, /Local storage 1/);
 });
 
-test("Activity badges only the receipt-proven preserved side of a divergent Pull", () => {
-  const mintedTitle = "Respond to greeting — local before Pull · 2026-08-02 07:54Z";
-  const renderSession = (isPreservedLocal: boolean) => renderToStaticMarkup(
+test("Activity badges the provenance-carrying preserved side of a divergent Pull", () => {
+  const markerTitle = "Respond to greeting (Preserved 2 · Machine A) · 2026-08-02 07:54Z";
+  const renderSession = (
+    preserved: { preserved_from: string; ordinal: number } | null,
+  ) => renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
       embedded
@@ -1193,21 +1195,25 @@ test("Activity badges only the receipt-proven preserved side of a divergent Pull
         git: null,
         sessions: [{
           ...codexSession,
-          title: mintedTitle,
-          is_preserved_local: isPreservedLocal,
+          title: markerTitle,
+          preserved,
         }],
       }}
     />,
   );
 
-  const preserved = renderSession(true);
+  const preserved = renderSession({
+    preserved_from: "019fac21-4aba-7fc2-bb7d-df711c950987",
+    ordinal: 2,
+  });
   assert.match(preserved, /class="sync-history-preserved-badge"/);
-  assert.match(preserved, /title="Local branch preserved during a divergent Pull\."/);
-  assert.match(preserved, />Preserved<\/span>/);
-  assert.match(preserved, /Respond to greeting — local before Pull/);
+  assert.match(preserved, /title="Local branch preserved during a divergent Pull of thread 019fac21\."/);
+  assert.match(preserved, />Preserved 2<\/span>/);
+  // The compacted title drops only the trailing timestamp; the marker stays.
+  assert.match(preserved, /Respond to greeting \(Preserved 2 · Machine A\)/);
 
-  const titleOnly = renderSession(false);
-  assert.doesNotMatch(titleOnly, /sync-history-preserved-badge|>Preserved<\/span>/);
+  const titleOnly = renderSession(null);
+  assert.doesNotMatch(titleOnly, /sync-history-preserved-badge|>Preserved 2<\/span>/);
 });
 
 test("embedded non-Git activity is named once, and not on screen", () => {
@@ -1275,7 +1281,6 @@ test("Push review renders checkboxes only for selectable bound-ready rows", () =
   };
   const decision = (action: string, selectable: boolean) => ({
     action,
-    reason_code: "sync_current",
     selectable,
   });
   const comparison = emptyComparison({
@@ -1286,6 +1291,7 @@ test("Push review renders checkboxes only for selectable bound-ready rows", () =
         provider_display_name: "Codex",
         access: "bound_ready",
         thread_id: CODEX_SESSION_ID,
+        conversation_resource_id: syncedSyncResourceId,
         resource_id: syncedSyncResourceId,
         display_name: codexSession.title,
         state: "synced",
@@ -1301,6 +1307,7 @@ test("Push review renders checkboxes only for selectable bound-ready rows", () =
         provider_display_name: "Codex",
         access: "bound_ready",
         thread_id: localAheadId,
+        conversation_resource_id: localAheadResourceId,
         resource_id: localAheadSyncResourceId,
         display_name: localAheadSession.title,
         state: "local_ahead",
@@ -1308,8 +1315,8 @@ test("Push review renders checkboxes only for selectable bound-ready rows", () =
         storage_present: true,
         cloud_thread_id: localAheadId,
         provider_thread_id: localAheadId,
-        push_decision: { ...decision("publish", true), reason_code: "local_outstanding" },
-        pull_decision: { ...decision("report_push_eligible", false), reason_code: "local_outstanding" },
+        push_decision: decision("publish", true),
+        pull_decision: decision("report_push_eligible", false),
       },
     ],
   });
@@ -1365,6 +1372,7 @@ test("selected storage adds directional indicators and remote-only session rows"
         provider_display_name: "Codex",
         access: "bound_ready",
         thread_id: CODEX_SESSION_ID,
+        conversation_resource_id: codexResourceId,
         resource_id: localSyncResourceId,
         display_name: codexSession.title,
         state: "local_ahead",
@@ -1380,6 +1388,7 @@ test("selected storage adds directional indicators and remote-only session rows"
         provider_display_name: "Codex",
         access: "bound_ready",
         thread_id: remoteId,
+        conversation_resource_id: remoteResourceId,
         resource_id: remoteSyncResourceId,
         display_name: "Improve cloud thread titles",
         state: "storage_only",
@@ -1393,6 +1402,7 @@ test("selected storage adds directional indicators and remote-only session rows"
         provider_display_name: "Codex",
         access: "bound_ready",
         thread_id: olderId,
+        conversation_resource_id: `codex:conversation:${olderId}`,
         resource_id: `codex:conversation:${olderId}`,
         display_name: olderId,
         state: "local_ahead",
@@ -1455,6 +1465,7 @@ test("unavailable sessions explain why they cannot be synced", () => {
       provider_display_name: "Codex",
       access: "bound_ready",
       thread_id: CODEX_SESSION_ID,
+      conversation_resource_id: codexResourceId,
       resource_id: `codex:conversation:${CODEX_SESSION_ID}`,
       display_name: CODEX_SESSION_ID,
       state: "unavailable",
@@ -1521,7 +1532,6 @@ test("mixed-provider rows sort deterministically and never collide on native ids
   };
   const decision = {
     action: "create_cloud",
-    reason_code: "missing_cloud",
     selectable: true,
   };
   const comparison = emptyComparison({
@@ -1531,6 +1541,7 @@ test("mixed-provider rows sort deterministically and never collide on native ids
         provider_display_name: "Codex",
         access: "bound_ready",
         thread_id: nativeId,
+        conversation_resource_id: codexTwin.resource_id,
         resource_id: codexSyncResourceId,
         display_name: codexTwin.title,
         state: "local_only",
@@ -1546,6 +1557,7 @@ test("mixed-provider rows sort deterministically and never collide on native ids
         provider_display_name: "Claude",
         access: "bound_ready",
         thread_id: nativeId,
+        conversation_resource_id: claudeTwin.resource_id,
         resource_id: claudeSyncResourceId,
         display_name: claudeTwin.title,
         state: "local_only",
@@ -1766,9 +1778,9 @@ test("the page speaks only the provider-neutral activity contracts", () => {
   const source = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
 
   // New command surface only.
-  assert.match(source, /getProjectActivity\(/);
+  assert.match(source, /getProjectActivityWorkspace\(/);
   assert.match(source, /executeProjectSessionAction\(/);
-  assert.match(source, /getSessionSyncComparison\(/);
+  assert.doesNotMatch(source, /getSessionSyncComparison\(/);
   assert.match(source, /onOpenSessionDetail/);
   assert.doesNotMatch(source, /getProjectSessionDetails|getProjectChatHistory|getProjectChatThreadDetails|openCodexThreadInApp|openCodexThreadInTerminal|getThreadSyncComparison/);
 
@@ -2232,7 +2244,6 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
         s3_endpoint: "",
         region: "",
         local_dir: "/tmp/storage",
-        included_default_exclusions: [],
       }]}
       storageUsage={{ "storage-1": 1 }}
       storageIssues={{ "storage-1": "Storage folder unavailable." }}

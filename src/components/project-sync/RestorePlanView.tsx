@@ -13,7 +13,7 @@ import SyncReviewTabs from "../sync-review/SyncReviewTabs";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import { type SyncReviewStep, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { providerLabel } from "./model";
-import ThreadStatusIcon from "./ThreadStatusIcon";
+import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isIrrecoverableSyncError } from "./syncError";
 import type { PullApplyPhase, PullReviewSelection } from "./pullReviewFlow";
 import {
@@ -124,7 +124,8 @@ function ItemList({
         const checked = selected.has(item.resourceId) && !completed;
         const expanded = expandedItems.has(item.resourceId);
         const activeRestore = phase === "restoring" && checked && restoreActionIds(item).some((id) => !completedActionIds.has(id));
-        const conversationAction = item.conversationActions[0]?.action;
+        const conversationAction = item.conversationReviewRows[0]?.action
+          ?? item.conversationActions[0]?.action;
         const status: string | null = conversationAction === "adopt_cloud_metadata"
           ? checked ? "Mark synced" : "Not selected"
           : conversationAction === "blocked"

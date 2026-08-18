@@ -1,6 +1,6 @@
 import Icon from "../Icons";
 import type { ProjectStorageLink, StorageConfig } from "../../types";
-import SyncPathBar, { type PathBarMenuGroup } from "./SyncPathBar";
+import SyncPathBar, { type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import { storageSubtitle } from "./ProjectLinksWorkspace";
 
 /**

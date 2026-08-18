@@ -486,10 +486,19 @@ name, so fork creation is not treated as name application.
 
 Mallard never edits `session_index.jsonl` or Codex SQLite solely to set a
 name on an existing thread. The one index write happens while materializing
-a new thread on Pull: when the cloud thread carries a real title, the
-transaction appends that thread's own provider-schema row
-(`{id, thread_name, updated_at}`, with the cloud update time) so the title
-survives the machine round trip; a titleless thread writes no row.
+a thread on Pull, and it rewrites up to two provider-schema rows
+(`{id, thread_name, updated_at}`) in the same journaled transaction:
+
+- the destination row, when the cloud thread carries a real title (with the
+  cloud update time), so the title survives the machine round trip; and
+- on a divergent keep-both, the preserved copy's rename row — its existing
+  row is replaced with the plan-minted marker title
+  `"{base} (Preserved {N} · {device label})"` at the apply time.
+
+Both the marker title and its `PreservedProvenance { preserved_from,
+ordinal }` are minted during planning; apply composes bytes from the planned
+strings and never invents names. A titleless thread outside keep-both writes
+no row.
 
 ### Failure and recovery
 

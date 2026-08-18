@@ -1,5 +1,6 @@
 import type {
   ConversationPlanAction,
+  ConversationReviewRow,
   ProviderKey,
   RestoreAction,
   RestorePlan,
@@ -16,6 +17,7 @@ export interface PullReviewItem {
   provider: ProviderKey | null;
   restoreActions: RestoreAction[];
   conversationActions: ConversationPlanAction[];
+  conversationReviewRows: ConversationReviewRow[];
   projectContentPath: string | null;
   projectContentEntryType: "file" | "directory" | null;
   projectContentOperation: "add" | "replace" | "create_directory" | "delete_file" | "delete_directory" | null;
@@ -30,10 +32,8 @@ function humanize(value: string): string {
     .join(" ");
 }
 
-function blockedConversationDetail(action: ConversationPlanAction): string {
-  switch (action.reason_code) {
-    case "provider_not_quiescent":
-      return "The provider may still be writing this task. Finish the active turn, then refresh.";
+function blockedConversationDetail(row: ConversationReviewRow): string {
+  switch (row.blocker) {
     case "codec_unsupported":
       return "This task cannot be transformed safely by the active provider codec.";
     case "ambiguous_binding":
@@ -42,19 +42,15 @@ function blockedConversationDetail(action: ConversationPlanAction): string {
       return "Mallard cannot prove which local task this stored task belongs to.";
     case "detached_requires_pull":
       return "This task's local mapping changed. Refresh Pull to establish the current mapping.";
-    case "corruption_blocked":
-      return "This task failed local verification and needs repair before it can sync.";
-    case "stale_plan":
-      return "The reviewed task changed. Refresh and review it again.";
     case "busy":
       return "Another sync operation still owns this task. Finish recovery, then refresh.";
     default:
-      return "Mallard cannot prove that this task can be changed safely.";
+      return row.blocked_reason ?? "Mallard cannot prove that this task can be changed safely.";
   }
 }
 
-function conversationActionDetail(action: ConversationPlanAction): string {
-  switch (action.action) {
+function conversationActionDetail(row: ConversationReviewRow): string {
+  switch (row.action) {
     case "adopt_cloud_metadata":
       return "Records the reviewed storage version as accepted. No provider files change.";
     case "materialize_cloud":
@@ -70,9 +66,9 @@ function conversationActionDetail(action: ConversationPlanAction): string {
     case "not_found":
       return "This task no longer exists locally or in storage.";
     case "blocked":
-      return blockedConversationDetail(action);
+      return blockedConversationDetail(row);
     default:
-      return humanize(action.action);
+      return humanize(row.action);
   }
 }
 
@@ -189,6 +185,7 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
       provider,
       restoreActions: [],
       conversationActions: [],
+      conversationReviewRows: [],
       projectContentPath: null,
       projectContentEntryType: null,
       projectContentOperation: null,
@@ -212,18 +209,23 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
     if (copy.projectContentOperation) item.projectContentOperation = copy.projectContentOperation;
   }
 
-  for (const action of plan.conversation_actions ?? []) {
-    const resourceId = action.source_resource_id
-      ?? `${action.provider}:conversation:${action.thread_id}`;
-    const detail = conversationActionDetail(action);
+  const actionsById = new Map(plan.conversation_actions.map((action) => [action.action_id, action]));
+  for (const row of plan.conversation_review) {
+    const detail = conversationActionDetail(row);
     const item = ensure(
-      resourceId,
+      row.resource_id,
       "project_data",
       "Conversation",
       detail,
-      action.provider,
+      row.provider,
     );
-    item.conversationActions.push(action);
+    item.conversationReviewRows.push(row);
+    if (row.action_id) {
+      const action = actionsById.get(row.action_id);
+      if (action) {
+        item.conversationActions.push(action);
+      }
+    }
     item.detail = detail;
   }
 
@@ -272,7 +274,6 @@ export function restoreActionIds(item: PullReviewItem): string[] {
     .filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind))
     .map((action) => action.action_id);
   const conversationActions = item.conversationActions
-    .filter((action) => conversationActionSelectable(action))
     .map((action) => action.action_id);
   return [...fileActions, ...conversationActions];
 }
@@ -288,8 +289,8 @@ export function requiresApproval(item: PullReviewItem): boolean {
 }
 
 export function keepsLocalConversation(item: PullReviewItem): boolean {
-  return item.conversationActions.some((action) => (
-    action.action === "report_push_eligible" || action.action === "report_local_only"
+  return item.conversationReviewRows.some((row) => (
+    row.action === "report_push_eligible" || row.action === "report_local_only"
   )) || (/^(codex|claude):session:/.test(item.resourceId)
     && item.restoreActions.some((action) => (
       action.kind.kind === "manual"
@@ -300,7 +301,7 @@ export function keepsLocalConversation(item: PullReviewItem): boolean {
 }
 
 export function requiresManualResolution(item: PullReviewItem): boolean {
-  return item.conversationActions.some((action) => action.action === "blocked")
+  return item.conversationReviewRows.some((row) => row.action === "blocked")
     || (item.restoreActions.some((action) => action.kind.kind === "manual")
       && !keepsLocalConversation(item));
 }
@@ -308,14 +309,14 @@ export function requiresManualResolution(item: PullReviewItem): boolean {
 export function defaultSelected(item: PullReviewItem): boolean {
   if (item.category === "project_content") return false;
   const actions = item.restoreActions.filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind));
-  const selectedConversationActions = item.conversationActions.filter(conversationActionSelectable);
-  return (actions.length > 0 || selectedConversationActions.length > 0)
+  return (actions.length > 0 || item.conversationActions.length > 0)
     && actions.every((action) => !action.requires_explicit_approval);
 }
 
 export function itemKindLabel(item: PullReviewItem): string {
   if (
-    item.conversationActions.length > 0
+    item.conversationReviewRows.length > 0
+    || item.conversationActions.length > 0
     || /^(codex|claude):session:/.test(item.resourceId)
     || item.restoreActions.some((action) => action.kind.kind === "materialize_conversation")
   ) return "Conversation";
@@ -323,15 +324,6 @@ export function itemKindLabel(item: PullReviewItem): string {
   if (item.projectContentEntryType === "file") return "Project file";
   if (item.restoreActions.some((action) => action.kind.kind === "write_file" || action.kind.kind === "merge_file")) return "File";
   return "Definition";
-}
-
-function conversationActionSelectable(action: ConversationPlanAction): boolean {
-  return [
-    "adopt_cloud_metadata",
-    "materialize_cloud",
-    "keep_both",
-    "create_local",
-  ].includes(action.action);
 }
 
 export function buildPullReviewSelection(

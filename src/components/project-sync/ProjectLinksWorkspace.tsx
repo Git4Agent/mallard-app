@@ -30,7 +30,7 @@ import type {
 import ConversationPathRepairNotice, {
   shouldShowConversationPathRepairNotice,
 } from "./ConversationPathRepairNotice";
-import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "./SyncPathBar";
+import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import ProviderMark from "./ProviderMark";
 import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
@@ -276,14 +276,8 @@ export type AgentSetupEditorAdoption = {
 export function agentSetupEditorAdoption(storage: StorageConfig): AgentSetupEditorAdoption {
   return {
     editingStorage: { projectId: "", storageId: storage.id },
-    storageDraft: {
-      ...storage,
-      included_default_exclusions: [...storage.included_default_exclusions],
-    },
-    storageBaseline: {
-      ...storage,
-      included_default_exclusions: [...storage.included_default_exclusions],
-    },
+    storageDraft: { ...storage },
+    storageBaseline: { ...storage },
     storageDetailsExpanded: true,
     status: `Connected ${storage.name || "Cloudflare R2"}. Settings filled in automatically.`,
   };

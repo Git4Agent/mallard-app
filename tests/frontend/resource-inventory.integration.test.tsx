@@ -14,21 +14,19 @@ import ResourceInventory from "../../src/components/project-sync/ResourceInvento
 import { recipeWithSelection } from "../../src/components/project-sync/model";
 import type {
   BundleRecipe,
-  ConversationPlanActionType,
-  ConversationReasonCode,
+  ConversationReviewAction,
   ProjectResourceDescriptor,
   ThreadSyncComparison,
   ThreadSyncDecision,
 } from "../../src/types";
 
 function decision(
-  action: ConversationPlanActionType,
-  reasonCode: ConversationReasonCode,
+  action: ConversationReviewAction,
+  _classification: string,
   selectable = false,
 ): ThreadSyncDecision {
   return {
     action,
-    reason_code: reasonCode,
     selectable,
   };
 }
@@ -39,9 +37,9 @@ function memoryResource(
 ): ProjectResourceDescriptor {
   return {
     resource_id: `codex:memory:${name}`,
-    kind: "project_memory",
+    kind: "provider_state",
     provider: "codex",
-    scope: "provider_state",
+    provider_resource_type: "memory",
     display_name: name,
     provenance: { kind: "unknown" },
     apply_policy: blockedReason ? "explicit_review" : "safe_file",
@@ -59,7 +57,7 @@ function conversation(resourceId: string): ProjectResourceDescriptor {
     resource_id: resourceId,
     kind: "conversation",
     provider: "codex",
-    scope: "provider_state",
+    provider_resource_type: "session",
     display_name: resourceId,
     provenance: { kind: "conversation" },
     apply_policy: "safe_file",

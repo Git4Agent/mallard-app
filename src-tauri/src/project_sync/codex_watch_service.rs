@@ -1,6 +1,7 @@
-//! Watcher-backed reuse of Codex session inventory and local observations.
+//! Watcher-backed reuse of provider session inventory and Codex tail
+//! observations.
 //!
-//! One watcher per exact canonical Codex home, armed lazily on the first
+//! One watcher per exact canonical provider home, armed lazily on the first
 //! operation that consults it and shared by every project bound to that
 //! profile. Watcher silence between reliability signals is the reuse
 //! witness: a clean profile serves cached results with no filesystem work,
@@ -18,7 +19,8 @@
 
 use super::commands::LocalTailObservation;
 use super::domain::{
-    LocalProjectId, StorageId, TargetExpectation, ThreadId, MAX_CONVERSATION_FILE_BYTES,
+    LocalProjectId, ProviderKey, StorageId, TargetExpectation, ThreadId,
+    MAX_CONVERSATION_FILE_BYTES,
 };
 use super::provider_capture::{self, CaptureRequest, Discovery, LocalSessionView};
 use super::sync_metrics;
@@ -160,6 +162,7 @@ impl ManualScanner {
 }
 
 struct ProfileWatch {
+    provider: ProviderKey,
     canonical_home: PathBuf,
     backend: WatchBackend,
     receiver: Receiver<notify::Result<Event>>,
@@ -239,18 +242,18 @@ pub(crate) struct StoredObservation {
 #[derive(Default)]
 struct ServiceInner {
     profiles: BTreeMap<PathBuf, ProfileWatch>,
-    inventories: BTreeMap<(PathBuf, LocalProjectId), CachedInventory>,
+    inventories: BTreeMap<(ProviderKey, PathBuf, LocalProjectId), CachedInventory>,
     observations: BTreeMap<ObservationKey, CachedObservation>,
     candidate_pins: BTreeMap<(PathBuf, LocalProjectId, String), CachedCandidatePin>,
 }
 
-pub(crate) struct CodexWatchService {
+pub(crate) struct SessionWatchService {
     inner: Mutex<ServiceInner>,
 }
 
-pub(crate) fn codex_watch_service() -> &'static CodexWatchService {
-    static SERVICE: OnceLock<CodexWatchService> = OnceLock::new();
-    SERVICE.get_or_init(|| CodexWatchService {
+pub(crate) fn session_watch_service() -> &'static SessionWatchService {
+    static SERVICE: OnceLock<SessionWatchService> = OnceLock::new();
+    SERVICE.get_or_init(|| SessionWatchService {
         inner: Mutex::new(ServiceInner::default()),
     })
 }
@@ -283,6 +286,10 @@ fn canonical_home_of(home: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(home).ok()
 }
 
+fn codex_provider() -> ProviderKey {
+    ProviderKey::parse("codex").expect("static provider key")
+}
+
 /// Canonicalize every stored dependency path; an entry whose sources
 /// cannot be canonicalized is simply not retained.
 fn canonical_paths(paths: &[PathBuf]) -> Option<Vec<PathBuf>> {
@@ -292,20 +299,31 @@ fn canonical_paths(paths: &[PathBuf]) -> Option<Vec<PathBuf>> {
         .collect()
 }
 
-fn session_roots(canonical_home: &Path) -> Vec<PathBuf> {
-    ["sessions", "archived_sessions"]
+fn session_root_names(provider: &ProviderKey) -> &'static [&'static str] {
+    match provider.as_str() {
+        "codex" => &["sessions", "archived_sessions"],
+        "claude" => &["projects", "file-history", "todos"],
+        _ => &[],
+    }
+}
+
+fn session_roots(provider: &ProviderKey, canonical_home: &Path) -> Vec<PathBuf> {
+    session_root_names(provider)
         .iter()
         .map(|name| canonical_home.join(name))
         .filter(|path| path.is_dir())
         .collect()
 }
 
-fn arm_profile(canonical_home: &Path) -> Result<ProfileWatch, notify::Error> {
+fn arm_profile(
+    provider: &ProviderKey,
+    canonical_home: &Path,
+) -> Result<ProfileWatch, notify::Error> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(EVENT_QUEUE_DEPTH);
     let overflowed = Arc::new(AtomicBool::new(false));
     let mut backend = arm_backend(sender, Arc::clone(&overflowed))?;
     let mut watched_session_roots = BTreeSet::new();
-    for root in session_roots(canonical_home) {
+    for root in session_roots(provider, canonical_home) {
         backend.watch(&root, RecursiveMode::Recursive)?;
         watched_session_roots.insert(root);
     }
@@ -313,6 +331,7 @@ fn arm_profile(canonical_home: &Path) -> Result<ProfileWatch, notify::Error> {
     // session trees and atomic replacement of `session_index.jsonl`.
     backend.watch(canonical_home, RecursiveMode::NonRecursive)?;
     Ok(ProfileWatch {
+        provider: provider.clone(),
         canonical_home: canonical_home.to_path_buf(),
         backend,
         receiver,
@@ -344,7 +363,8 @@ impl ProfileWatch {
             return;
         }
         for path in &event.paths {
-            if path.file_name().and_then(|name| name.to_str()) == Some("session_index.jsonl")
+            if self.provider.as_str() == "codex"
+                && path.file_name().and_then(|name| name.to_str()) == Some("session_index.jsonl")
                 && path.parent() == Some(self.canonical_home.as_path())
             {
                 self.titles_dirty = true;
@@ -366,7 +386,10 @@ impl ProfileWatch {
                 // Direct children of the home (session tree creation) are
                 // membership changes; unrelated home files are not.
                 if path.parent() == Some(self.canonical_home.as_path())
-                    && (path.ends_with("sessions") || path.ends_with("archived_sessions"))
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| session_root_names(&self.provider).contains(&name))
                 {
                     self.inventory_dirty = true;
                     self.generation = self.generation.wrapping_add(1);
@@ -379,7 +402,8 @@ impl ProfileWatch {
                 self.dirty_roots.insert(path.clone());
                 let membership_change =
                     matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_))
-                        || !self.known_roots.contains(path);
+                        || !self.known_roots.contains(path)
+                        || self.provider.as_str() != "codex";
                 if membership_change {
                     self.inventory_dirty = true;
                 }
@@ -424,7 +448,7 @@ impl ProfileWatch {
 impl ServiceInner {
     fn drop_profile_caches(&mut self, canonical_home: &Path) {
         self.inventories
-            .retain(|(home, _), _| home != canonical_home);
+            .retain(|(_, home, _), _| home != canonical_home);
         self.observations
             .retain(|key, _| key.canonical_home != canonical_home);
         self.candidate_pins
@@ -434,7 +458,7 @@ impl ServiceInner {
     /// Arm (or re-arm) the profile and drain its queue. Returns whether the
     /// profile is healthy; an unhealthy or unarmable profile has no caches
     /// and every operation runs the bounded path.
-    fn ensure_profile(&mut self, canonical_home: &Path) -> bool {
+    fn ensure_profile(&mut self, provider: &ProviderKey, canonical_home: &Path) -> bool {
         if self.profiles.len() > MAX_WATCHED_PROFILES {
             self.evict_stale_profiles();
         }
@@ -442,8 +466,9 @@ impl ServiceInner {
             Some(profile) => {
                 // A session tree that appeared after arming needs a
                 // recursive watch it never got.
-                !profile.healthy
-                    || session_roots(canonical_home)
+                profile.provider != *provider
+                    || !profile.healthy
+                    || session_roots(provider, canonical_home)
                         .iter()
                         .any(|root| !profile.watched_session_roots.contains(root))
             }
@@ -452,7 +477,7 @@ impl ServiceInner {
         if rearm {
             self.drop_profile_caches(canonical_home);
             self.profiles.remove(canonical_home);
-            match arm_profile(canonical_home) {
+            match arm_profile(provider, canonical_home) {
                 Ok(profile) => {
                     self.profiles.insert(canonical_home.to_path_buf(), profile);
                 }
@@ -500,38 +525,64 @@ impl ServiceInner {
     }
 }
 
-impl CodexWatchService {
+impl SessionWatchService {
     /// The discovery and session views for one capture request, reusing the
-    /// cached inventory when the watcher proves it clean. Only a pure Codex
-    /// request (exactly one provider home, no project content) is cached;
-    /// anything else runs bounded discovery, though its Codex home is still
-    /// armed so observation reuse keeps working.
+    /// cached inventory when the provider-profile watcher proves it clean.
+    /// Each provider profile owns an independent cache entry. Multi-provider
+    /// requests compose those witnesses, so Activity, comparison, and detail
+    /// all reuse the same profile-scoped discovery.
     pub(crate) fn discovery_for(
         &self,
         registry: &'static super::providers::ProviderRegistry,
         local_project_id: &LocalProjectId,
         request: &CaptureRequest,
     ) -> Result<(Discovery, Vec<LocalSessionView>), String> {
-        let codex_home = request
-            .provider_homes
-            .iter()
-            .find(|(provider, _)| provider.as_str() == "codex")
-            .and_then(|(_, home)| canonical_home_of(home));
-        let cacheable = request.provider_homes.len() == 1
-            && codex_home.is_some()
-            && !request.include_project_content;
-        let healthy = match &codex_home {
-            Some(home) => {
+        // Project-content exclusions cannot affect a provider-only walk. Drop
+        // them from its cache identity so the same profile witness is reused
+        // whether the caller resolved one provider or every bound provider.
+        let normalized_request = (!request.include_project_content).then(|| {
+            let mut request = request.clone();
+            request.excluded_content_roots.clear();
+            request
+        });
+        let request = normalized_request.as_ref().unwrap_or(request);
+        if request.provider_homes.len() > 1 && !request.include_project_content {
+            let mut discoveries = Vec::with_capacity(request.provider_homes.len());
+            let mut views = Vec::new();
+            for (provider, home) in &request.provider_homes {
+                let mut provider_request = request.clone();
+                provider_request.provider_homes =
+                    BTreeMap::from([(provider.clone(), home.clone())]);
+                let (discovery, mut provider_views) =
+                    self.discovery_for(registry, local_project_id, &provider_request)?;
+                discoveries.push(discovery);
+                views.append(&mut provider_views);
+            }
+            return Ok((Discovery::combine(discoveries)?, views));
+        }
+        let cache_profile = (request.provider_homes.len() == 1 && !request.include_project_content)
+            .then(|| request.provider_homes.iter().next())
+            .flatten()
+            .and_then(|(provider, home)| {
+                (!session_root_names(provider).is_empty())
+                    .then(|| canonical_home_of(home).map(|home| (provider.clone(), home)))
+                    .flatten()
+            });
+        let cacheable = cache_profile.is_some();
+        let healthy = match &cache_profile {
+            Some((provider, home)) => {
                 let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                inner.ensure_profile(home)
+                inner.ensure_profile(provider, home)
             }
             None => false,
         };
 
         if cacheable && healthy {
-            let home = codex_home.clone().expect("cacheable requires a codex home");
+            let (provider, home) = cache_profile
+                .clone()
+                .expect("cacheable requires a provider profile");
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let key = (home.clone(), local_project_id.clone());
+            let key = (provider.clone(), home.clone(), local_project_id.clone());
             let titles_dirty = inner
                 .profiles
                 .get(&home)
@@ -552,7 +603,7 @@ impl CodexWatchService {
                 let mut stat_raced = false;
                 if let Some(cached) = inner.inventories.get_mut(&key) {
                     if cached.request == *request {
-                        if titles_dirty {
+                        if titles_dirty && provider.as_str() == "codex" {
                             let mut discovery = cached.discovery.clone();
                             provider_capture::refresh_codex_session_titles(&mut discovery, &home)?;
                             cached.discovery = discovery;
@@ -616,7 +667,7 @@ impl CodexWatchService {
         let discovery = provider_capture::discover_full(registry, request)?;
         let views = provider_capture::local_session_views(&discovery);
         if cacheable && healthy {
-            let home = codex_home.expect("cacheable requires a codex home");
+            let (provider, home) = cache_profile.expect("cacheable requires a provider profile");
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(profile) = inner.profiles.get_mut(&home) {
                 if profile.healthy {
@@ -624,11 +675,11 @@ impl CodexWatchService {
                     profile.titles_dirty = false;
                     profile.known_roots = views
                         .iter()
-                        .filter(|view| view.provider.as_str() == "codex")
+                        .filter(|view| view.provider == provider)
                         .map(|view| view.source_path.clone())
                         .collect();
                     inner.inventories.insert(
-                        (home, local_project_id.clone()),
+                        (provider, home, local_project_id.clone()),
                         CachedInventory {
                             request: request.clone(),
                             discovery: discovery.clone(),
@@ -656,7 +707,7 @@ impl CodexWatchService {
         };
         let canonical_home = canonical_home.as_path();
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if !inner.ensure_profile(canonical_home) {
+        if !inner.ensure_profile(&codex_provider(), canonical_home) {
             return served;
         }
         let Some(profile) = inner.profiles.get(canonical_home) else {
@@ -711,7 +762,7 @@ impl CodexWatchService {
         };
         let canonical_home = canonical_home.as_path();
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if !inner.ensure_profile(canonical_home) {
+        if !inner.ensure_profile(&codex_provider(), canonical_home) {
             return served;
         }
         let Some(profile) = inner.profiles.get(canonical_home) else {
@@ -861,8 +912,13 @@ mod tests {
     use super::*;
     use crate::project_sync::domain::TailSideEvidence;
 
-    fn service() -> CodexWatchService {
-        CodexWatchService {
+    fn write(path: &Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn service() -> SessionWatchService {
+        SessionWatchService {
             inner: Mutex::new(ServiceInner::default()),
         }
     }
@@ -877,6 +933,69 @@ mod tests {
             StorageId::parse("watch-test-storage").unwrap(),
             ThreadId::parse("watch-test-thread").unwrap(),
         )
+    }
+
+    #[test]
+    fn multi_provider_activity_populates_the_profile_caches_used_by_detail() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let codex = temp.path().join("codex");
+        let claude = temp.path().join("claude");
+        std::fs::create_dir_all(&project).unwrap();
+        let cwd = serde_json::to_string(project.to_str().unwrap()).unwrap();
+        write(
+            &codex.join("sessions/2026/08/17/rollout-thread-a.jsonl"),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-a\",\"cwd\":{cwd}}}}}\n"
+            )
+            .as_bytes(),
+        );
+        write(
+            &claude.join("projects/source/session-b.jsonl"),
+            format!("{{\"type\":\"system\",\"sessionId\":\"session-b\",\"cwd\":{cwd}}}\n")
+                .as_bytes(),
+        );
+        let codex_key = ProviderKey::parse("codex").unwrap();
+        let claude_key = ProviderKey::parse("claude").unwrap();
+        let project_id = LocalProjectId::parse("watch-multi-project").unwrap();
+        let request = CaptureRequest {
+            project_root: project.clone(),
+            provider_homes: BTreeMap::from([
+                (codex_key.clone(), codex.clone()),
+                (claude_key, claude),
+            ]),
+            excluded_project_roots: Vec::new(),
+            include_project_content: false,
+            excluded_content_roots: vec![temp.path().join("unrelated-exclusion")],
+        };
+        let service = service();
+        let (_, views) = service
+            .discovery_for(
+                super::super::providers::ProviderRegistry::production(),
+                &project_id,
+                &request,
+            )
+            .unwrap();
+        assert_eq!(views.len(), 2);
+
+        let metrics = sync_metrics::register_root(&std::fs::canonicalize(&codex).unwrap());
+        let before = metrics.snapshot();
+        let mut detail_request = request;
+        detail_request
+            .provider_homes
+            .retain(|provider, _| provider == &codex_key);
+        detail_request.excluded_content_roots = vec![project];
+        let (_, detail_views) = service
+            .discovery_for(
+                super::super::providers::ProviderRegistry::production(),
+                &project_id,
+                &detail_request,
+            )
+            .unwrap();
+        let delta = metrics.snapshot().delta_since(&before);
+        assert_eq!(detail_views.len(), 1);
+        assert_eq!(delta.inventory_reuse_hits, 1, "{delta:?}");
+        assert_eq!(delta.files_head_read, 0);
     }
 
     #[test]
@@ -967,7 +1086,7 @@ mod tests {
         service.take_reusable_observations(&home, &project, &storage, &[]);
         {
             let mut inner = service.inner.lock().unwrap();
-            assert!(inner.ensure_profile(&home));
+            assert!(inner.ensure_profile(&codex_provider(), &home));
             let profile = inner.profiles.get(&home).unwrap();
             assert!(!profile.inventory_dirty);
         }
@@ -975,7 +1094,7 @@ mod tests {
         std::fs::write(sessions.join("rollout-new.jsonl"), b"{}\n").unwrap();
         {
             let mut inner = service.inner.lock().unwrap();
-            assert!(inner.ensure_profile(&home));
+            assert!(inner.ensure_profile(&codex_provider(), &home));
             let profile = inner.profiles.get(&home).unwrap();
             assert!(profile.inventory_dirty, "unknown rollout dirties inventory");
         }
@@ -985,12 +1104,15 @@ mod tests {
         {
             let mut inner = service.inner.lock().unwrap();
             // First consult sees the removal and drops the profile...
-            let _ = inner.ensure_profile(&home);
+            let _ = inner.ensure_profile(&codex_provider(), &home);
         }
         std::fs::create_dir_all(&sessions).unwrap();
         {
             let mut inner = service.inner.lock().unwrap();
-            assert!(inner.ensure_profile(&home), "rearm after recreation");
+            assert!(
+                inner.ensure_profile(&codex_provider(), &home),
+                "rearm after recreation"
+            );
         }
     }
 }

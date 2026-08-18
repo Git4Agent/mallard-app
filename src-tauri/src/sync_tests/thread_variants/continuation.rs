@@ -1,13 +1,13 @@
 use super::harness::{
-    assert_manifest_consistent, chain, codex, codex_scope, rewrite_transcript_identity,
-    ThreadSpec, VariantWorld,
+    assert_manifest_consistent, chain, codex, codex_scope, rewrite_transcript_identity, ThreadSpec,
+    VariantWorld,
 };
 use super::recovery::install_scope;
 use crate::project_sync::commands::ThreadSyncState;
 use crate::project_sync::conversation_codec::{analyze_codex_transcript, CODEX_LINEAGE_CODEC_KEY};
 use crate::project_sync::domain::{
-    ConversationMaterializationState, ConversationPlanActionType, LocalConversationBinding,
-    SessionPresentation, TailClassification, ThreadId,
+    ConversationBlocker, ConversationMaterializationState, ConversationReviewAction,
+    LocalConversationBinding, SessionPresentation, ThreadId,
 };
 use crate::project_sync::provider_capture::{
     CapturedConversation, CapturedFile, CapturedResources,
@@ -514,6 +514,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
                 provider_profile_id: scope.profile_id.clone(),
                 thread_id: t2_id.clone(),
                 forked_from: None,
+                preserved: None,
                 root_tail_layout: Some(whole_thread_layout()),
                 provider_thread_id: Some("local-v2".to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
@@ -528,6 +529,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
                 provider_profile_id: scope.profile_id.clone(),
                 thread_id: t3_id.clone(),
                 forked_from: None,
+                preserved: None,
                 root_tail_layout: Some(whole_thread_layout()),
                 provider_thread_id: Some("local-v3".to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
@@ -617,12 +619,8 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     assert!(!origin_thread.local_present);
     assert_eq!(origin_thread.state, ThreadSyncState::StorageOnly);
     assert_eq!(
-        origin_thread.relation,
-        Some(TailClassification::MissingLocal)
-    );
-    assert_eq!(
         origin_thread.pull_decision.action,
-        ConversationPlanActionType::CreateLocal
+        ConversationReviewAction::CreateLocal
     );
     assert!(origin_thread.provider_thread_id.is_none());
     assert!(origin_thread.origin_label.is_some());
@@ -642,14 +640,13 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
         "fork provenance is surfaced as a hint, never used for matching",
     );
     assert!(bound.local_present);
-    assert_eq!(bound.relation, Some(TailClassification::LocalOutstanding));
     assert_eq!(
         bound.push_decision.action,
-        ConversationPlanActionType::Publish
+        ConversationReviewAction::Publish
     );
     assert_eq!(
         bound.pull_decision.action,
-        ConversationPlanActionType::ReportPushEligible
+        ConversationReviewAction::ReportPushEligible
     );
     assert_eq!(bound.provider_thread_id.as_deref(), Some("local-v2"));
     assert_ne!(origin_thread.thread_id, bound.thread_id);
@@ -662,14 +659,17 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
         .find(|entry| entry.cloud_thread_id.as_ref() == Some(&t3_id))
         .unwrap();
     assert!(diverged.local_present);
-    assert_eq!(diverged.relation, Some(TailClassification::Unknown));
     assert_eq!(
         diverged.push_decision.action,
-        ConversationPlanActionType::Blocked
+        ConversationReviewAction::Blocked
     );
     assert_eq!(
         diverged.pull_decision.action,
-        ConversationPlanActionType::Blocked
+        ConversationReviewAction::Blocked
+    );
+    assert_eq!(
+        diverged.pull_decision.blocker,
+        Some(ConversationBlocker::UnknownEvidence)
     );
     assert_eq!(diverged.provider_thread_id.as_deref(), Some("local-v3"));
 }
@@ -788,6 +788,7 @@ fn install_active_branch(
                 provider_profile_id: scope.profile_id.clone(),
                 thread_id: thread_id.clone(),
                 forked_from: None,
+                preserved: None,
                 root_tail_layout: Some(whole_thread_layout()),
                 provider_thread_id: Some(provider_thread_id.to_string()),
                 materialization_state: ConversationMaterializationState::Resumable,
@@ -995,6 +996,7 @@ fn materialize_thread(
             provider_profile_id: scope.profile_id.clone(),
             thread_id: thread_id.clone(),
             forked_from: None,
+            preserved: None,
             root_tail_layout: Some(whole_thread_layout()),
             provider_thread_id: Some(destination_thread_id.to_string()),
             materialization_state: ConversationMaterializationState::Resumable,
@@ -1058,12 +1060,14 @@ fn materialize_thread(
                 target_path: transcript_path.clone(),
                 role: ConversationFileRole::Transcript,
                 expected: target_expectation(&transcript_path),
+                index_rows: vec![],
                 bytes: rewritten,
             },
             ConversationTargetPayload {
                 target_path: index_path.clone(),
                 role: ConversationFileRole::ProviderIndexFragment,
                 expected: target_expectation(&index_path),
+                index_rows: vec![destination_thread_id.to_string()],
                 bytes: index,
             },
         ],

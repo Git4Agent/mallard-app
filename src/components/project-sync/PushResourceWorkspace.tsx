@@ -18,7 +18,7 @@ import SyncReviewTabs from "../sync-review/SyncReviewTabs";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import { type SyncReviewStep, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { categoryFor } from "./model";
-import ThreadStatusIcon from "./ThreadStatusIcon";
+import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isIrrecoverableSyncError } from "./syncError";
 
 const EMPTY_STATUSES = new Map<string, string>();

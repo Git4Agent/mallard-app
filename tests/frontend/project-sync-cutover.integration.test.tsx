@@ -532,10 +532,11 @@ test("the titlebar stays silent for a project and names the screens without a tr
   const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
 
   // The project workspace names itself in the path bar, so the titlebar would
-  // only repeat it. Every other screen still has to say what it is.
+  // only repeat it — and so does the Catalog row's page, which is why it is
+  // not named here either. Every screen without a trail still says what it is.
   assert.match(
     workspace,
-    /const workspaceTitle = activeDraftSummary\?\.display_name\s*\?\? \(addingCatalogScope \? "Add Catalog resource" : null\)\s*\?\? \(activeCatalogScope \? catalogScopeLabel\([^)]*\) : null\)\s*\?\? \(activeSummary \? null : "Projects"\);/,
+    /const workspaceTitle = activeDraftSummary\?\.display_name\s*\?\? \(addingCatalogScope \? "Add Catalog resource" : null\)\s*\?\? \(activeSummary \? null : "Projects"\);/,
   );
   assert.match(workspace, /\{workspaceTitle && \(/);
   assert.match(workspace, /<Icon name=\{workspaceIcon\} size=\{16\} \/>/);
@@ -703,7 +704,7 @@ test("host-scoped workflows keep their originating epoch across async continuati
 test("path bar menus keep one home per scope", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   const sync = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
-  const bar = readFileSync("src/components/project-sync/SyncPathBar.tsx", "utf8");
+  const bar = readFileSync("src/components/sync-review/SyncPathBar.tsx", "utf8");
 
   // Storage crumb: header block, settings + unlink beside their noun, and the
   // link row that stays put at zero candidates with its reason spelled out.

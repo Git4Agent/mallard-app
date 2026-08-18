@@ -7139,24 +7139,241 @@ button.sync-project-file-expand { cursor: pointer; }
   margin-bottom: 8px;
 }
 
-/* ── Draft-linked Catalog resources ──────────────────────────────────────── */
+/* ── Catalog rows ────────────────────────────────────────────────────────── */
 
-.catalog-link-grid,
-.catalog-resource-list {
+/* One line per resource: state, name, where it lives, when it last moved.
+   Nothing is printed that a glyph can carry, because the page's job is to be
+   read down a column of forty. */
+
+.catalog-list-section {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-card);
+}
+
+/* The only thing the path bar's last crumb cannot say: how many rows are
+   under it. */
+.catalog-list-heading {
+  display: flex;
+  align-items: center;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border-mid);
+}
+
+.catalog-list-count {
+  color: var(--text-3);
+  font-family: var(--font-pixel);
+  font-size: var(--type-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.catalog-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px 3px 6px;
+  background: var(--surface-row);
+}
+
+.catalog-row + .catalog-row {
+  border-top: 1px solid var(--border);
+}
+
+.catalog-row:hover {
+  background: var(--surface-row-hover);
+}
+
+.catalog-row.selected {
+  background: var(--surface-row-active);
+}
+
+.catalog-row-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-0);
+  font: inherit;
+  font-size: var(--type-md);
+  font-weight: var(--weight-semibold);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.catalog-row-name {
+  cursor: pointer;
+}
+
+button.catalog-row-name:hover {
+  text-decoration: underline;
+}
+
+/* Fixed width whether or not a glyph is there, so the names and dates beside
+   it stay in their columns down the whole list. */
+.catalog-row-place {
+  position: relative;
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  line-height: 0;
+  cursor: help;
+  outline: none;
+}
+
+/* The stamp is a column, not a suffix: a fixed box and lining figures keep
+   every date starting at the same x. */
+.catalog-row-stamp {
+  position: relative;
+  min-width: 58px;
+  flex: 0 0 auto;
+  color: var(--text-3);
+  font-size: var(--type-2xs);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  cursor: help;
+  outline: none;
+}
+
+.catalog-row-open {
+  flex: 0 0 auto;
+  padding: 3px;
+  opacity: 0;
+}
+
+.catalog-row:hover .catalog-row-open,
+.catalog-row-open:focus-visible {
+  opacity: 1;
+}
+
+.catalog-row-place::after,
+.catalog-row-stamp::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  z-index: 45;
+  top: calc(100% + 6px);
+  right: 0;
+  width: max-content;
+  max-width: min(340px, calc(100vw - 40px));
+  padding: 5px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-popover);
+  box-shadow: var(--shadow-popover);
+  color: var(--text-0);
+  font-family: var(--font);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
+  line-height: 1.3;
+  text-align: left;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.catalog-row-place:hover::after,
+.catalog-row-place:focus-visible::after,
+.catalog-row-stamp:hover::after,
+.catalog-row-stamp:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* The Pull review's local action: the row states it in one word, the way the
+   project's Pull review states "Keep local" or "Keep both" — a readout, not a
+   form control. Nothing else in Mallard draws a native select, and one here
+   painted a platform-white slab three rows deep. */
+.catalog-row-action {
+  flex: 0 0 auto;
+  color: var(--text-2);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+/* Only rows the plan gives a real choice become a control, and it is the same
+   small ghost button and chevron the path bar's crumbs use. */
+button.catalog-row-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 6px;
+  border: 1px solid var(--border-mid);
+  border-radius: 5px;
+  background: var(--button-bg);
+  cursor: pointer;
+}
+
+button.catalog-row-action:hover {
+  border-color: var(--border-strong);
+  background: var(--button-bg-hover);
+  color: var(--text-1);
+}
+
+button.catalog-row-action[aria-expanded="true"] {
+  border-color: var(--border-strong);
+  background: var(--button-bg-active);
+  color: var(--text-0);
+}
+
+/* Specific enough to survive the hover and expanded rules above: an action
+   that replaces local content stays red while its list is open. */
+.catalog-row-action.destructive,
+button.catalog-row-action.destructive,
+button.catalog-row-action.destructive:hover,
+button.catalog-row-action.destructive[aria-expanded="true"] {
+  border-color: var(--danger-border, var(--border-strong));
+  color: var(--danger-text);
+}
+
+/* The acknowledgement rides under the row that raised it, aligned to the name
+   column: the footer says why the button is off, this says which row turned
+   it off. */
+.catalog-row-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 10px 9px 62px;
+  padding: 0 12px;
+  color: var(--danger-text);
+  font-size: var(--type-xs);
+  line-height: 1.35;
+}
+
+/* The pill is the popover's anchor. */
+.catalog-row-action-shell {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+}
+
+/* Review rows are wrapped once they hang a menu and an acknowledgement off
+   themselves, so the hairline between rows is drawn on the wrapper's child. */
+.catalog-review-row + .catalog-review-row > .catalog-row {
+  border-top: 1px solid var(--border);
+}
+
+/* ── The resource behind a row ───────────────────────────────────────────── */
+
+.catalog-link-grid {
   display: grid;
   gap: 10px;
 }
 
-.catalog-link-card,
-.catalog-review-card,
-.catalog-resource-row {
+.catalog-link-card {
   border: 1px solid var(--border);
   border-radius: var(--r);
   background: var(--bg-1);
 }
 
-.catalog-link-card h2,
-.catalog-review-card h2 {
+.catalog-link-card h2 {
   margin: 0;
   color: var(--text-0);
   font-size: var(--type-lg);
@@ -7169,7 +7386,6 @@ button.sync-project-file-expand { cursor: pointer; }
   font-size: var(--type-sm);
 }
 
-.catalog-resource-row small,
 .catalog-link-meta {
   color: var(--text-2);
   font-size: var(--type-xs);
@@ -7236,34 +7452,6 @@ button.sync-project-file-expand { cursor: pointer; }
   gap: 7px;
 }
 
-.catalog-resource-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 13px 15px;
-}
-
-.catalog-resource-row > div {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-/* The inline Link picker on a row: a storage select beside the action, never
-   stacked by the row's text grid above. */
-.catalog-resource-row > div.catalog-row-actions,
-.catalog-row-actions {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex-shrink: 0;
-}
-
-.catalog-browse-storage {
-  margin: 18px 0 10px;
-}
-
 .catalog-state-badge {
   display: inline-flex;
   width: fit-content;
@@ -7298,8 +7486,7 @@ button.sync-project-file-expand { cursor: pointer; }
   padding: 15px;
 }
 
-.catalog-link-card-heading,
-.catalog-review-heading {
+.catalog-link-card-heading {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -7307,7 +7494,6 @@ button.sync-project-file-expand { cursor: pointer; }
 }
 
 .catalog-link-card-heading > div,
-.catalog-review-heading > div,
 .catalog-link-meta {
   display: grid;
   gap: 5px;
@@ -7315,41 +7501,6 @@ button.sync-project-file-expand { cursor: pointer; }
 
 .catalog-link-actions {
   justify-content: flex-end;
-}
-
-.catalog-review-card {
-  display: grid;
-  gap: 14px;
-  padding: 16px;
-}
-
-.catalog-review-heading p {
-  margin: 4px 0 0;
-  color: var(--text-2);
-  font-size: var(--type-sm);
-}
-
-.catalog-review-option,
-.catalog-action-choices label {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  color: var(--text-1);
-  font-size: var(--type-sm);
-}
-
-.catalog-action-choices {
-  display: grid;
-  gap: 9px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-}
-
-.catalog-action-choices legend {
-  padding: 0 5px;
-  color: var(--text-2);
-  font-size: var(--type-xs);
 }
 
 /* Provider-neutral session detail ---------------------------------------- */

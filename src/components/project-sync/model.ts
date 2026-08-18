@@ -2,6 +2,7 @@ import type {
   BundleRecipe,
   ProjectResourceCategory,
   ProjectResourceDescriptor,
+  ProjectResourceKind,
   ProviderKey,
   ResourceInventory,
   StorageConfig,
@@ -34,16 +35,9 @@ export const RESOURCE_GROUPS: Array<{
 
 /* Wire enums never reach the screen raw: a resource's kind and apply policy
    are backend vocabulary ("manual_only", "explicit_review"), and the field
-   that tells a user what will happen to their file must say so in words.
-   Runtime kinds are wider than the ProjectResourceKind union (provider-
-   prefixed variants arrive from older recipes), so lookups fall back to the
-   raw value rather than lying. */
-export const KIND_LABELS: Record<string, string> = {
+   that tells a user what will happen to their file must say so in words. */
+export const KIND_LABELS: Record<ProjectResourceKind, string> = {
   conversation: "Session",
-  codex_conversation: "Session",
-  claude_conversation: "Session",
-  codex_task: "Session",
-  claude_session: "Session",
   provider_state: "Provider state",
   project_content_file: "Project file",
   project_content_directory: "Project folder",
@@ -58,24 +52,17 @@ export const APPLY_POLICY_LABELS: Record<string, string> = {
   never: "Never applied",
 };
 
-export function kindLabel(kind: string): string {
-  return KIND_LABELS[kind] ?? kind;
+export function kindLabel(kind: ProjectResourceKind): string {
+  return KIND_LABELS[kind];
 }
 
 export function applyPolicyLabel(policy: string): string {
   return APPLY_POLICY_LABELS[policy] ?? policy;
 }
 
-const CATEGORY_BY_KIND: Record<string, ProjectResourceCategory> = {
-  codex_conversation: "conversations",
-  claude_conversation: "conversations",
-  codex_task: "conversations",
-  claude_session: "conversations",
+const CATEGORY_BY_KIND: Record<ProjectResourceKind, ProjectResourceCategory> = {
   conversation: "conversations",
-  task: "conversations",
-  session: "conversations",
-  memory: "conversations",
-  project_memory: "conversations",
+  provider_state: "conversations",
   project_content_file: "project_files",
   project_content_directory: "project_files",
   requirement: "tools",
@@ -86,7 +73,7 @@ export function categoryFor(resource: ProjectResourceDescriptor): ProjectResourc
   if (explicit === "conversations" || explicit === "project_files" || explicit === "tools") {
     return explicit;
   }
-  return CATEGORY_BY_KIND[resource.kind.toLowerCase()] ?? "tools";
+  return CATEGORY_BY_KIND[resource.kind];
 }
 
 export function inventoryResources(inventory: ResourceInventory | null): ProjectResourceDescriptor[] {

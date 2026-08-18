@@ -2326,7 +2326,6 @@ pub struct CatalogResourcePushPlan {
     pub skill_root_pins: Vec<CatalogSkillRootPin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_head: Option<LibraryHeadCoordinate>,
-    pub source_stamp: String,
     pub resource: CatalogResource,
     pub row: CatalogPushRow,
     pub warning_digests: Vec<String>,
@@ -2346,7 +2345,6 @@ impl CatalogResourcePushPlan {
             "catalog resource Push storage identity",
             &self.storage_identity_sha256,
         )?;
-        validate_sha256("catalog resource Push source stamp", &self.source_stamp)?;
         if let Some(head) = &self.observed_head {
             head.validate()?;
             if head.repository_id != self.repository_id {
@@ -2366,11 +2364,10 @@ impl CatalogResourcePushPlan {
             .iter()
             .map(|warning| &warning.digest)
             .collect();
+        let warning_digests: BTreeSet<_> = self.warning_digests.iter().collect();
         if warnings.len() != self.row.warnings.len()
-            || self
-                .warning_digests
-                .iter()
-                .any(|digest| !warnings.contains(digest))
+            || warning_digests.len() != self.warning_digests.len()
+            || warning_digests != warnings
         {
             return Err("catalog resource Push warning pins are inconsistent".to_string());
         }
@@ -2642,12 +2639,6 @@ pub fn warning_digest(code: &str, resource_id: &CatalogResourceId, message: &str
             message.as_bytes(),
         ],
     )
-}
-
-/// Deterministic inventory source stamp over ordered observation inputs.
-pub fn source_stamp(fields: &[&str]) -> String {
-    let bytes: Vec<&[u8]> = fields.iter().map(|field| field.as_bytes()).collect();
-    length_prefixed_digest(b"mallard-catalog-source-stamp-v1", &bytes)
 }
 
 #[cfg(test)]

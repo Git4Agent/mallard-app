@@ -1,17 +1,18 @@
 //! Provider-neutral, local-only rich session detail orchestration.
 //!
 //! Provider adapters own transcript syntax. This module owns registered
-//! project/profile resolution, local transcript ownership, metadata-only
-//! index caching, snapshot/cursor validation, Git checkpoint correlation,
+//! project/profile resolution, local transcript ownership, bounded summary
+//! and metadata-index caching, snapshot/cursor validation, Git checkpoint correlation,
 //! response bounds, and DTOs that may cross the Tauri boundary.
 
 use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
 use crate::project_activity::{parse_conversation_resource_id, resolve_activity_project};
+use crate::provider_capture::LocalSessionView;
 use crate::providers::traits::TIMELINE_TOOL_PREVIEW_BYTES;
 use crate::providers::{
     ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionCheckpoint,
-    SessionCount, SessionCountQuality, SessionDetailWarning, SessionDiscoveryContext,
-    SessionEventCounts, SessionEventDetail, SessionTimelineContext, SessionTimelineEvent,
+    SessionCount, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
+    SessionEventDetail, SessionFileSummary, SessionTimelineContext, SessionTimelineEvent,
     SessionTimelineEventKind, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
     SessionToolCategory,
 };
@@ -154,6 +155,7 @@ struct TimelineCacheEntry {
     size: u64,
     modified_nanos: u64,
     timeline_version: u32,
+    summary: SessionFileSummary,
     index: SessionTimelineIndex,
 }
 
@@ -673,6 +675,7 @@ fn resolve_local_session(
     registry: &ProviderRegistry,
     local_project_id: &LocalProjectId,
     resource_id: &str,
+    views: &[LocalSessionView],
 ) -> SessionDetailResult<ResolvedLocalSession> {
     ensure_identifier("resource id", resource_id)?;
     let (provider, thread_id) = parse_conversation_resource_id(resource_id)
@@ -710,43 +713,36 @@ fn resolve_local_session(
                 && binding.provider_profile_id == home.profile_id
         })
         .and_then(|binding| binding.provider_thread_id.clone());
-    let context = SessionDiscoveryContext {
-        provider_home: &home.home,
-        project_root: &resolved.project_root,
-        excluded_roots: &[],
-    };
-    let discovery = adapter.discover(&context).map_err(|_| {
-        SessionDetailError::new(
-            SessionDetailErrorCode::ProviderError,
-            "The provider could not safely discover local sessions.",
-        )
-    })?;
     let mut matches = Vec::new();
-    for session in discovery.sessions {
+    for session in views.iter().filter(|session| session.provider == provider) {
         let identity_matches = session_for_thread
             .as_ref()
-            .map(|expected| expected == &session.session_id)
+            .map(|expected| expected == &session.provider_thread_id)
             .unwrap_or_else(|| {
-                initial_conversation_thread_id(&resolved.bundle_id, &provider, &session.session_id)
-                    .map(|derived| derived == thread_id)
-                    .unwrap_or(false)
+                initial_conversation_thread_id(
+                    &resolved.bundle_id,
+                    &provider,
+                    &session.provider_thread_id,
+                )
+                .map(|derived| derived == thread_id)
+                .unwrap_or(false)
             });
         if !identity_matches {
             continue;
         }
-        if ensure_identifier("provider session id", &session.session_id).is_err() {
+        if ensure_identifier("provider session id", &session.provider_thread_id).is_err() {
             return Err(SessionDetailError::new(
                 SessionDetailErrorCode::ProviderError,
                 "The provider returned an invalid native session ID.",
             ));
         }
-        if session.blocked_reason.is_some() {
+        if session.descriptor.blocked_reason.is_some() {
             return Err(SessionDetailError::new(
                 SessionDetailErrorCode::OwnershipChanged,
                 "The provider blocked access to this local session.",
             ));
         }
-        let link_metadata = fs::symlink_metadata(&session.physical_path).map_err(|_| {
+        let link_metadata = fs::symlink_metadata(&session.source_path).map_err(|_| {
             SessionDetailError::new(
                 SessionDetailErrorCode::OwnershipChanged,
                 "The local session file is no longer readable.",
@@ -758,7 +754,7 @@ fn resolve_local_session(
                 "The local session is not a regular no-follow file.",
             ));
         }
-        let canonical_path = fs::canonicalize(&session.physical_path).map_err(|_| {
+        let canonical_path = fs::canonicalize(&session.source_path).map_err(|_| {
             SessionDetailError::new(
                 SessionDetailErrorCode::OwnershipChanged,
                 "The local session path changed during validation.",
@@ -776,7 +772,7 @@ fn resolve_local_session(
                 "The provider could not revalidate this session's identity.",
             )
         })?;
-        if native.session_id != session.session_id || native.is_internal_subagent {
+        if native.session_id != session.provider_thread_id || native.is_internal_subagent {
             return Err(SessionDetailError::new(
                 SessionDetailErrorCode::OwnershipChanged,
                 "The local session identity changed since discovery.",
@@ -799,9 +795,9 @@ fn resolve_local_session(
             resource_id: resource_id.to_string(),
             project_root: resolved.project_root.clone(),
             provider_home: home.home.clone(),
-            provider_session_id: session.session_id,
+            provider_session_id: session.provider_thread_id.clone(),
             transcript_path: canonical_path,
-            display_name: session.display_name,
+            display_name: session.descriptor.display_name.clone(),
             file_size: metadata.len(),
             modified_nanos: modified_nanos(&metadata),
             is_active: now_secs().saturating_sub(modified_secs(&metadata)) < 300,
@@ -858,7 +854,7 @@ fn load_timeline_cache(
             },
             vec![SessionDetailWarning {
                 code: "timeline_cache_ignored".to_string(),
-                message: "Mallard ignored an unreadable local timeline cache and rebuilt it."
+                message: "Mallard rebuilt its local timeline cache because the saved cache was outdated or unreadable."
                     .to_string(),
             }],
         ),
@@ -906,7 +902,12 @@ fn load_or_build_index(
     repository: &LocalStateRepository,
     registry: &ProviderRegistry,
     session: &mut ResolvedLocalSession,
-) -> SessionDetailResult<(SessionTimelineIndex, String, Vec<SessionDetailWarning>)> {
+) -> SessionDetailResult<(
+    SessionTimelineIndex,
+    SessionFileSummary,
+    String,
+    Vec<SessionDetailWarning>,
+)> {
     let adapter = registry.require_sessions(&session.provider).map_err(|_| {
         SessionDetailError::new(
             SessionDetailErrorCode::NotFound,
@@ -930,13 +931,16 @@ fn load_or_build_index(
                 && entry.size == expected_size
                 && entry.modified_nanos == expected_nanos
                 && entry.timeline_version == timeline_version
+                && entry.summary.session_id == session.provider_session_id
+                && !entry.summary.is_internal_subagent
                 && entry.index.parser_version == timeline_version
         }) {
             if validate_index(&entry.index, expected_size).is_ok() {
                 let index = entry.index.clone();
+                let summary = entry.summary.clone();
                 refresh_file_state(session)?;
                 if session.file_size == expected_size && session.modified_nanos == expected_nanos {
-                    return Ok((index, current_snapshot_id, warnings));
+                    return Ok((index, summary, current_snapshot_id, warnings));
                 }
                 if attempt == 0 {
                     continue;
@@ -965,6 +969,7 @@ fn load_or_build_index(
             ));
         }
         validate_index(&index, expected_size)?;
+        let summary = summarize_session(registry, session)?;
         refresh_file_state(session)?;
         if session.file_size != expected_size || session.modified_nanos != expected_nanos {
             if attempt == 0 {
@@ -983,6 +988,7 @@ fn load_or_build_index(
                 size: expected_size,
                 modified_nanos: expected_nanos,
                 timeline_version,
+                summary: summary.clone(),
                 index: index.clone(),
             },
         );
@@ -996,6 +1002,7 @@ fn load_or_build_index(
                     size: expected_size,
                     modified_nanos: expected_nanos,
                     timeline_version,
+                    summary: summary.clone(),
                     index: index.clone(),
                 },
             );
@@ -1018,7 +1025,7 @@ fn load_or_build_index(
                 message: "Mallard could not update the local timeline cache.".to_string(),
             });
         }
-        return Ok((index, current_snapshot_id, warnings));
+        return Ok((index, summary, current_snapshot_id, warnings));
     }
     Err(SessionDetailError::new(
         SessionDetailErrorCode::ProviderError,
@@ -1479,11 +1486,12 @@ pub fn get_project_session_detail(
     registry: &ProviderRegistry,
     local_project_id: &LocalProjectId,
     resource_id: &str,
+    views: &[LocalSessionView],
 ) -> SessionDetailResult<ProjectSessionDetail> {
-    let mut session = resolve_local_session(repository, registry, local_project_id, resource_id)?;
-    let (index, snapshot_id, cache_warnings) =
+    let mut session =
+        resolve_local_session(repository, registry, local_project_id, resource_id, views)?;
+    let (index, summary, snapshot_id, cache_warnings) =
         load_or_build_index(repository, registry, &mut session)?;
-    let summary = summarize_session(registry, &session)?;
     let checkpoint = checkpoint_support(
         &session.project_root,
         summary.branch.as_deref(),
@@ -1525,10 +1533,18 @@ pub fn get_project_session_detail(
     };
     let mut warnings = timeline_warnings(&index, cache_warnings);
     sanitize_warnings(&mut warnings, &session);
-    let title = summary
-        .title
-        .clone()
+    // The provider index title leads: keep-both preservation markers are
+    // title renames in the provider's session index, which the transcript
+    // summary never reflects. The transcript title covers unnamed sessions.
+    let title = (session.display_name != session.provider_session_id)
+        .then(|| session.display_name.clone())
         .filter(|title| !title.trim().is_empty())
+        .or_else(|| {
+            summary
+                .title
+                .clone()
+                .filter(|title| !title.trim().is_empty())
+        })
         .unwrap_or_else(|| session.display_name.clone());
     let detail = ProjectSessionDetail {
         resource_id: session.resource_id.clone(),
@@ -1573,6 +1589,7 @@ pub fn get_project_session_timeline_page(
     local_project_id: &LocalProjectId,
     resource_id: &str,
     request: ProjectSessionTimelineRequest,
+    views: &[LocalSessionView],
 ) -> SessionDetailResult<ProjectSessionTimelinePage> {
     ensure_identifier("snapshot id", &request.snapshot_id)?;
     if request.cursor.is_some() && request.anchor_event_id.is_some() {
@@ -1586,8 +1603,9 @@ pub fn get_project_session_timeline_page(
     if let Some(anchor) = &request.anchor_event_id {
         ensure_identifier("anchor event id", anchor)?;
     }
-    let mut session = resolve_local_session(repository, registry, local_project_id, resource_id)?;
-    let (index, current_snapshot_id, cache_warnings) =
+    let mut session =
+        resolve_local_session(repository, registry, local_project_id, resource_id, views)?;
+    let (index, summary, current_snapshot_id, cache_warnings) =
         load_or_build_index(repository, registry, &mut session)?;
     if request.snapshot_id != current_snapshot_id {
         return Err(SessionDetailError::snapshot_changed(current_snapshot_id));
@@ -1607,7 +1625,6 @@ pub fn get_project_session_timeline_page(
         }
         start_index = Some(cursor.next_index);
     }
-    let summary = summarize_session(registry, &session)?;
     let checkpoint = checkpoint_support(
         &session.project_root,
         summary.branch.as_deref(),
@@ -1737,11 +1754,14 @@ pub fn get_project_session_event_detail(
     resource_id: &str,
     snapshot_id_value: &str,
     event_id: &str,
+    views: &[LocalSessionView],
 ) -> SessionDetailResult<SessionEventDetail> {
     ensure_identifier("snapshot id", snapshot_id_value)?;
     ensure_identifier("event id", event_id)?;
-    let mut session = resolve_local_session(repository, registry, local_project_id, resource_id)?;
-    let (index, current_snapshot_id, _) = load_or_build_index(repository, registry, &mut session)?;
+    let mut session =
+        resolve_local_session(repository, registry, local_project_id, resource_id, views)?;
+    let (index, _, current_snapshot_id, _) =
+        load_or_build_index(repository, registry, &mut session)?;
     if snapshot_id_value != current_snapshot_id {
         return Err(SessionDetailError::snapshot_changed(current_snapshot_id));
     }

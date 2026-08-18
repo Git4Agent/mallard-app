@@ -548,8 +548,7 @@ impl ConversationCheckpoint {
                     .to_string(),
             );
         }
-        if let (Some(accepted), Some(accepted_local)) =
-            (&self.accepted, &self.accepted_local_tail)
+        if let (Some(accepted), Some(accepted_local)) = (&self.accepted, &self.accepted_local_tail)
         {
             accepted.validate()?;
             accepted_local.validate()?;

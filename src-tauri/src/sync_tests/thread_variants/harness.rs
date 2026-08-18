@@ -9,8 +9,8 @@ use crate::project_sync::domain::{
     conversation_resource_id, conversation_transcript_path, ApplyPolicy, BundleId, BundleIdentity,
     BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot, CapturedWith,
     ConversationFileRef, ConversationFileRole, ConversationLineageStatus, ConversationThread,
-    PortableOrigin, Provenance, ProviderKey, RecipeEntry, ReplicaId, ResourceDescriptor,
-    ResourceKind, SessionPresentation, StorageId, SyncScopeKey, ThreadId,
+    PortableOrigin, PreservedProvenance, Provenance, ProviderKey, RecipeEntry, ReplicaId,
+    ResourceDescriptor, ResourceKind, SessionPresentation, StorageId, SyncScopeKey, ThreadId,
 };
 use crate::project_sync::persistence::LocalStateRepository;
 use crate::project_sync::storage_core::{LocalObjectStore, ObjectStore};
@@ -158,6 +158,7 @@ pub struct ThreadSpec {
     pub created_by: Option<PortableOrigin>,
     pub last_updated_by: Option<PortableOrigin>,
     pub forked_from: Option<ThreadId>,
+    pub preserved: Option<PreservedProvenance>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -178,6 +179,7 @@ impl ThreadSpec {
             created_by: Some(origin.clone()),
             last_updated_by: Some(origin),
             forked_from: None,
+            preserved: None,
             created_at: 1,
             updated_at,
         }
@@ -270,6 +272,7 @@ pub fn publish_request(
                 .expect("harness chains fold to a portable tail"),
             ),
             forked_from: spec.forked_from.clone(),
+            preserved: spec.preserved.clone(),
             source_thread_id: Some(spec.source_thread_id.clone()),
             created_by_origin: spec.created_by.clone(),
             last_updated_by_origin: spec.last_updated_by.clone(),

@@ -1505,6 +1505,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             expires_at: created_at.saturating_add(DEFAULT_PLAN_LIFETIME_SECS),
             actions,
             conversation_actions: Vec::new(),
+            conversation_review: Vec::new(),
             project_content_eligibility: None,
             // Continuity is a plan-phase input the command layer supplies;
             // the engine builds the plan from the snapshot alone.

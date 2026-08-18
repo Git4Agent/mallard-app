@@ -4,13 +4,14 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
   BundleReadiness,
+  ConversationBlocker,
   ConversationPlanAction,
   ConversationPlanActionType,
-  ConversationReasonCode,
+  ConversationReviewAction,
+  ConversationReviewRow,
   ProjectBinding,
   RestorePlan,
   RestoreResult,
-  TailClassification,
 } from "../../src/types";
 import RestorePlanView, {
   pullSelectableResourceIds,
@@ -79,6 +80,7 @@ const restorePlan: RestorePlan = {
   created_at: 1,
   expires_at: 2,
   conversation_actions: [],
+  conversation_review: [],
   actions: [{
     action_id: "action-session",
     resource_id: "codex:session:thread-a",
@@ -96,49 +98,76 @@ const restorePlan: RestorePlan = {
 
 function conversationAction(
   action: ConversationPlanActionType,
-  reasonCode: ConversationReasonCode,
-  relation: TailClassification,
 ): ConversationPlanAction {
   return {
     action_id: `conversation-${action}`,
-    direction: "pull",
     action,
-    reason_code: reasonCode,
-    relation,
     provider: "codex",
-    host_id: binding.host_id,
-    replica_id: binding.replica_id,
-    local_project_id: binding.local_project_id,
-    provider_profile_id: "profile-codex",
     thread_id: "019fac21-4aba-7fc2-bb7d-df711c950987",
     source_resource_id: "codex:conversation:019fac21-4aba-7fc2-bb7d-df711c950987",
     proposed_provider_thread_id: null,
     keep_both: null,
-    required_codec: "codex.lineage.v1",
-    pinned_revision: restorePlan.revision,
-    pinned_commit_id: restorePlan.commit_id,
-    pinned_manifest_sha256: restorePlan.manifest_sha256,
-    pinned_scope_revision: restorePlan.revision,
-    pinned_scope_sha256: "c".repeat(64),
-    expected_local_target: { state: "absent" },
-    expected_provider_state: [],
-    expected_profile_revision: 0,
-    expected_project_binding_revision: binding.revision,
-    expected_host_identity_revision: restorePlan.expected_host_identity_revision,
-    expected_bindings_document_revision: 0,
-    expires_at: restorePlan.expires_at,
+    pins: {
+      context: {
+        host_id: binding.host_id,
+        replica_id: binding.replica_id,
+        local_project_id: binding.local_project_id,
+        provider_profile_id: "profile-codex",
+        host_identity_revision: restorePlan.expected_host_identity_revision,
+        profile_revision: 0,
+        project_binding_revision: binding.revision,
+        bindings_document_revision: 0,
+      },
+      revision: {
+        bundle_revision: restorePlan.revision,
+        commit_id: restorePlan.commit_id,
+        manifest_sha256: restorePlan.manifest_sha256,
+        scope_revision: restorePlan.revision,
+        scope_sha256: "c".repeat(64),
+      },
+      tail: {},
+      target: { local: { state: "absent" }, provider_state: [] },
+      codec: "codex.lineage.v1",
+      expires_at: restorePlan.expires_at,
+    },
+  };
+}
+
+function conversationRow(
+  action: ConversationReviewAction,
+  actionId: string | null = null,
+  blocker: ConversationBlocker | null = null,
+): ConversationReviewRow {
+  return {
+    provider: "codex",
+    thread_id: "019fac21-4aba-7fc2-bb7d-df711c950987",
+    resource_id: "codex:conversation:019fac21-4aba-7fc2-bb7d-df711c950987",
+    action,
+    action_id: actionId,
+    blocker,
   };
 }
 
 function keepBothAction(): ConversationPlanAction {
   return {
-    ...conversationAction("keep_both", "divergent", "diverged"),
+    ...conversationAction("keep_both"),
     action_id: "conversation-keep-both",
     keep_both: {
       preserved_thread_id: "019fac21-4aba-7fc2-bb7d-df711c950988",
       remote_provider_thread_id: "019fac21-4aba-7fc2-bb7d-df711c950989",
+      preserved: {
+        preserved_from: "019fac21-4aba-7fc2-bb7d-df711c950987",
+        ordinal: 1,
+      },
+      preserved_display_title: "Diverged conversation (Preserved 1 · Machine A)",
     },
-    expected_local_target: { state: "sha256", sha256: "d".repeat(64) },
+    pins: {
+      ...conversationAction("keep_both").pins,
+      target: {
+        local: { state: "sha256", sha256: "d".repeat(64) },
+        provider_state: [],
+      },
+    },
   };
 }
 
@@ -203,22 +232,28 @@ test("a replacement storage history offers unlinking without gating Pull", () =>
 });
 
 test("only actionable or blocked conversation rows keep a Pull review open", () => {
-  const plan = (actions: ConversationPlanAction[]): RestorePlan => ({
+  const plan = (
+    rows: ConversationReviewRow[],
+    actions: ConversationPlanAction[] = [],
+  ): RestorePlan => ({
     ...restorePlan,
     actions: [],
     conversation_actions: actions,
+    conversation_review: rows,
   });
 
   assert.equal(hasPendingRestoreMutations(plan([
-    conversationAction("no_changes", "sync_current", { sync: "current" }),
-    conversationAction("report_push_eligible", "local_outstanding", "local_outstanding"),
-    conversationAction("report_local_only", "missing_cloud", "missing_cloud"),
+    conversationRow("no_changes"),
+    conversationRow("report_push_eligible"),
+    conversationRow("report_local_only"),
   ])), false);
+  const materialize = conversationAction("materialize_cloud");
+  assert.equal(hasPendingRestoreMutations(plan(
+    [conversationRow("materialize_cloud", materialize.action_id)],
+    [materialize],
+  )), true);
   assert.equal(hasPendingRestoreMutations(plan([
-    conversationAction("materialize_cloud", "cloud_outstanding", "cloud_outstanding"),
-  ])), true);
-  assert.equal(hasPendingRestoreMutations(plan([
-    conversationAction("blocked", "unknown_evidence", "unknown"),
+    conversationRow("blocked", null, "unknown_evidence"),
   ])), true);
 });
 
@@ -227,6 +262,7 @@ test("keep-both is one reviewed action with no second resolution payload", () =>
     ...restorePlan,
     actions: [],
     conversation_actions: [keepBothAction()],
+    conversation_review: [conversationRow("keep_both", "conversation-keep-both")],
   };
   const items = buildPullReviewItems(plan);
   const selected = new Set(items.map((item) => item.resourceId));
@@ -248,8 +284,12 @@ test("keep-both is one reviewed action with no second resolution payload", () =>
 });
 
 test("blocked conversation evidence is visible but cannot be selected", () => {
-  const action = conversationAction("blocked", "corruption_blocked", "unknown");
-  const plan = { ...restorePlan, actions: [], conversation_actions: [action] };
+  const plan = {
+    ...restorePlan,
+    actions: [],
+    conversation_actions: [],
+    conversation_review: [conversationRow("blocked", null, "unknown_evidence")],
+  };
   const items = buildPullReviewItems(plan);
 
   assert.deepEqual(pullSelectableResourceIds(items, new Set(), new Set()), new Set());
@@ -260,13 +300,19 @@ test("blocked conversation evidence is visible but cannot be selected", () => {
 
 test("keep-both completion reports the independent session and optional Codex refresh", () => {
   const action = keepBothAction();
-  const plan = { ...restorePlan, actions: [], conversation_actions: [action] };
+  const plan = {
+    ...restorePlan,
+    actions: [],
+    conversation_actions: [action],
+    conversation_review: [conversationRow("keep_both", action.action_id)],
+  };
   const completed = result({
     applied_action_ids: [action.action_id],
     preserved_threads: [{
       action_id: action.action_id,
       original_thread_id: action.thread_id,
       preserved_thread_id: action.keep_both!.preserved_thread_id,
+      preserved_display_title: action.keep_both!.preserved_display_title,
     }],
     codex_app_refresh: {
       operation_id: "operation-materialize",
@@ -288,6 +334,8 @@ test("keep-both completion reports the independent session and optional Codex re
 
   assert.equal(outcome.rows[0].status, "preserved");
   assert.equal(outcome.rows[0].threadId, action.keep_both!.preserved_thread_id);
+  // The row is named by the marker title the copy was renamed to.
+  assert.equal(outcome.rows[0].title, "Diverged conversation (Preserved 1 · Machine A)");
   assert.deepEqual(outcome.action, {
     kind: "restart_codex",
     label: "Restart Codex",

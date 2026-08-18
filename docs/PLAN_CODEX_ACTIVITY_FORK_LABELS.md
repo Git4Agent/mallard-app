@@ -40,7 +40,7 @@ The first implementation does **not** change persisted metadata.
 | Surface | Change |
 | --- | --- |
 | Codex rollout JSONL | Read existing authoritative `forked_from_id`; never write |
-| Codex `session_index.jsonl` | Read the latest existing `thread_name`; never write |
+| Codex `session_index.jsonl` | Read the latest existing `thread_name`; this plan never writes (Pull materialization separately writes reviewed rows: the destination title and, on keep-both, the preserved marker rename) |
 | `~/.mallard` Activity cache | No field or schema change |
 | `~/.mallard` bindings, sync config, checkpoints, plans, journals, and receipts | No change |
 | Portable `ConversationThread` manifest entry | No new field and no changed write behavior |

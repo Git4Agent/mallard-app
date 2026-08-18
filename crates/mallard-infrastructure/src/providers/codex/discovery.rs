@@ -1,7 +1,7 @@
 //! Codex session discovery under one `CODEX_HOME`.
 
 use crate::provider_capture::{
-    canonical_existing_dir, filter_jsonl_by_ids, inspect_candidate_files_with_limit,
+    canonical_existing_dir, filter_codex_session_index_by_ids, inspect_candidate_files_with_limit,
     owned_relative_cwd, provider_walk_entry,
 };
 use crate::providers::codex::history::parse_session_index_titles;
@@ -98,7 +98,7 @@ pub(super) fn discover(
     if !selected_thread_ids.is_empty() && index.is_file() {
         // The index is local provider state, not a portable resource; read
         // only the selected rows to enrich the typed conversation titles.
-        let filtered = filter_jsonl_by_ids(&index, &selected_thread_ids)?;
+        let filtered = filter_codex_session_index_by_ids(&index, &selected_thread_ids)?;
         if !filtered.is_empty() {
             for (thread_id, title) in parse_session_index_titles(&filtered) {
                 if let Some(position) = by_session.get(&thread_id) {

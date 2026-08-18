@@ -798,27 +798,6 @@ impl CatalogProviderAdapter for ClaudeCatalogAdapter {
     }
 }
 
-/// Deterministic source-stamp fields for one provider inventory.
-pub fn inventory_stamp_fields(inventory: &ProviderInventory) -> Vec<String> {
-    let mut fields = Vec::new();
-    for marketplace in &inventory.marketplaces {
-        fields.push(format!(
-            "marketplace:{}:{}:{}",
-            marketplace.name, marketplace.source_type, marketplace.source
-        ));
-    }
-    for observation in &inventory.plugins {
-        fields.push(format!(
-            "plugin:{}:{}:{}",
-            observation.plugin_id,
-            observation.installed,
-            observation.observed_version.as_deref().unwrap_or("")
-        ));
-    }
-    fields.sort();
-    fields
-}
-
 /// A stub runner for tests: canned outputs per argv.
 #[cfg(test)]
 pub struct StubRunner {

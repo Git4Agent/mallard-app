@@ -500,7 +500,6 @@ fn connect_r2_storage_journaled(
         s3_endpoint: destination.endpoint().to_string(),
         region: "auto".to_string(),
         local_dir: String::new(),
-        included_default_exclusions: Vec::new(),
         supports_conditional_writes: Some(true),
     };
     let journal = R2SetupJournalStore::new(repository);
@@ -709,7 +708,6 @@ pub(crate) fn connect_r2_storage_with_probe_for_setup(
         s3_endpoint: destination.endpoint().to_string(),
         region: "auto".to_string(),
         local_dir: String::new(),
-        included_default_exclusions: Vec::new(),
         supports_conditional_writes: Some(true),
     });
     pending
@@ -873,7 +871,6 @@ fn same_setup(existing: &StorageConfig, pending: &StorageConfig) -> bool {
         && existing.s3_endpoint == pending.s3_endpoint
         && existing.region == pending.region
         && existing.local_dir == pending.local_dir
-        && existing.included_default_exclusions == pending.included_default_exclusions
         && existing.supports_conditional_writes == pending.supports_conditional_writes
 }
 
@@ -1406,7 +1403,6 @@ mod tests {
             s3_endpoint: endpoint,
             region: "auto".to_string(),
             local_dir: String::new(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: Some(true),
         }
     }

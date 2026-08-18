@@ -22,6 +22,7 @@ import type {
   OriginHostAlias,
   OriginHostLabel,
   ProjectActivity,
+  ProjectActivityWorkspace,
   ProjectBinding,
   ProjectDetail,
   ProjectContentInventory,
@@ -54,7 +55,6 @@ import type {
   SessionEventDetail,
   StorageDataClearResult,
   SyncConfig,
-  ThreadSyncComparison,
   UpdateHostDisplayNameRequest,
 } from "../../types";
 
@@ -209,9 +209,6 @@ export const projectSyncApi = {
   getPushDestinationStatus: (localProjectId: string, storageId: string) =>
     invoke<PushDestinationStatus>("get_push_destination_status", { localProjectId, storageId }),
 
-  getSessionSyncComparison: (localProjectId: string, storageId: string) =>
-    invoke<ThreadSyncComparison>("get_project_session_sync_comparison", { localProjectId, storageId }),
-
   inspectProjectFiles: (localProjectId: string, storageId: string) =>
     invoke<ProjectContentInventory>("inspect_project_files", { localProjectId, storageId }),
 
@@ -319,6 +316,28 @@ export const projectSyncApi = {
     return projectSyncSingleFlight(
       JSON.stringify(["get_project_activity", request]),
       () => invoke<ProjectActivity>("get_project_activity", request),
+    );
+  },
+
+  getProjectActivityWorkspace: (
+    localProjectId: string,
+    storageId?: string | null,
+    branch?: string | null,
+    beforeTime?: number | null,
+    windowDays = 30,
+    forceRevalidate = false,
+  ) => {
+    const request = {
+      localProjectId,
+      storageId: storageId ?? null,
+      branch: branch ?? null,
+      beforeTime: beforeTime ?? null,
+      windowDays,
+      forceRevalidate,
+    };
+    return projectSyncSingleFlight(
+      JSON.stringify(["get_project_activity_workspace", request]),
+      () => invoke<ProjectActivityWorkspace>("get_project_activity_workspace", request),
     );
   },
 

@@ -1,9 +1,11 @@
 import type { IconName } from "../Icons";
+import type { ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 import type {
   CatalogLinkState,
   CatalogPullAction,
   CatalogResourceKind,
   CatalogScope,
+  CatalogScopeRow,
   LocalCatalogProfile,
 } from "./types";
 
@@ -51,6 +53,106 @@ export function linkStateLabel(state: CatalogLinkState): string {
     unreviewed_remote: "Pull review needed",
     blocked: "Blocked",
   }[state];
+}
+
+/** The badge a row wears. Every one of these is a state the backend derives,
+ * so no badge on the page is decorative — and it is the same vocabulary a
+ * project thread wears, because the question is the same one. */
+export function rowStatus(row: CatalogScopeRow): ThreadStatusIconName {
+  if (!row.state) return "untracked";
+  switch (row.state) {
+    case "in_sync":
+      return "synced";
+    case "new":
+    case "local_changed":
+    case "remote_missing":
+      return "local-outstanding";
+    case "storage_changed":
+    case "local_missing":
+      return "cloud-outstanding";
+    case "diverged":
+      return "divergent";
+    case "unreviewed_remote":
+      return "pending";
+    case "blocked":
+      return "unavailable";
+  }
+}
+
+/** The badge's sentence: what this row's state means for this storage, said
+ * in the one place the state is shown. */
+export function rowStatusLabel(row: CatalogScopeRow, storageName: string | null): string {
+  const storage = storageName ?? "storage";
+  if (!row.state) return "Only on this Mac. Choose a storage to compare and sync it.";
+  switch (row.state) {
+    case "in_sync":
+      return `Up to date here and in ${storage}.`;
+    case "new":
+      return row.linked
+        ? `Never pushed. Push to save it in ${storage}.`
+        : `Only on this computer. Push to save it in ${storage}.`;
+    case "local_changed":
+      return `Newer on this computer. Push to update ${storage}.`;
+    case "remote_missing":
+      return `Gone from ${storage}. Push to put it back.`;
+    case "storage_changed":
+      return `Newer in ${storage}. Pull to update this computer.`;
+    case "local_missing":
+      if (!row.remote_present) return `Not on this computer, and not in ${storage}.`;
+      return row.linked
+        ? `Gone from this computer. Pull to reinstall it from ${storage}.`
+        : `Only in ${storage}. Pull to download it here.`;
+    case "diverged":
+      return `Changed here and in ${storage}. Review before syncing.`;
+    case "unreviewed_remote":
+      return `Held until you Pull: ${storage} has a version this computer has never reviewed.`;
+    case "blocked":
+      return row.blocker ?? "Can't be synced.";
+  }
+}
+
+/** Push adds to the storage; Pull changes this Mac. A row is offered to
+ * exactly one of them, and only when there is something for it to move. */
+export function rowPushable(row: CatalogScopeRow): boolean {
+  return row.local_present && (row.state === "new" || row.state === "local_changed");
+}
+
+export function rowPullable(row: CatalogScopeRow): boolean {
+  if (!row.remote_present) return false;
+  return row.state === "storage_changed"
+    || row.state === "local_missing"
+    || row.state === "diverged"
+    || row.state === "unreviewed_remote";
+}
+
+/** Where the resource lives, said in one glyph. `$HOME/.agents/skills` is
+ * user scope rather than config scope — the distinction Git draws with
+ * --global vs --local — so editing it there changes it for every Codex config
+ * on the Mac, and the row has to say so. */
+export function rowLocation(row: CatalogScopeRow): { icon: IconName; label: string } | null {
+  if (!row.local_present || !row.local_path) return null;
+  return row.scope_label === "Shared user"
+    ? { icon: "user", label: `User-wide · shared by every Codex config on this Mac · ${row.local_path}` }
+    : { icon: "folder", label: `In this provider home · ${row.local_path}` };
+}
+
+/** The date a row last moved, and which side moved it. Local time wins when
+ * the resource is on this Mac, because that is the copy you can edit. */
+export function rowStamp(row: CatalogScopeRow): { short: string; detail: string } | null {
+  const local = row.local_present ? row.local_modified_at ?? null : null;
+  const seconds = local ?? row.remote_updated_at ?? null;
+  if (seconds == null) return null;
+  const when = new Date(seconds * 1000);
+  const elapsed = Date.now() - when.getTime();
+  const short = elapsed < 60_000
+    ? "just now"
+    : elapsed < 3_600_000
+      ? `${Math.floor(elapsed / 60_000)}m ago`
+      : elapsed < 86_400_000
+        ? `${Math.floor(elapsed / 3_600_000)}h ago`
+        : when.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const exact = `${when.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })} · ${when.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+  return { short, detail: `${local == null ? "Stored" : "Edited"} ${exact}` };
 }
 
 export function actionLabel(action: CatalogPullAction): string {

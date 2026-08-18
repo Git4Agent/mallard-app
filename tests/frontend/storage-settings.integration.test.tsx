@@ -156,7 +156,6 @@ function r2Storage(patch: Partial<StorageConfig> = {}): StorageConfig {
     s3_endpoint: "",
     region: "auto",
     local_dir: "",
-    included_default_exclusions: [],
     ...patch,
   };
 }
@@ -594,7 +593,7 @@ test("the storage page is a rooted trail; sidebar and banners deep-link into it"
   assert.match(shell, /mode: "open",\s*storageId,\s*settingsExpanded,/);
   assert.match(shell, /onClearStorage=\{\(storageId\) => void clearStorageData\(storageId\)\}/);
   assert.match(shell, /storageIndexOpen \? \(\s*<StorageIndexPage/);
-  assert.match(shell, /\(!!activeSummary \|\| storageIndexOpen \|\| activeStorageSettingsId != null\)/);
+  assert.match(shell, /\(!!activeSummary\s*\|\| !!activeCatalogScope\s*\|\| storageIndexOpen\s*\|\| activeStorageSettingsId != null\)/);
   // Removing the storage whose page is open lands on the trail's root.
   assert.match(shell, /if \(activeStorageSettingsId === storageId\) setStorageIndexOpen\(true\);/);
 

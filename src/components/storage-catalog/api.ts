@@ -11,6 +11,7 @@ import type {
   CatalogResourcePushOutcome,
   CatalogResourcePushPlan,
   CatalogResourceStatus,
+  CatalogResourceView,
   CatalogScopeLinkOutcome,
   CatalogScopeResources,
   CatalogScopeView,
@@ -61,6 +62,10 @@ export const storageCatalogApi = {
   linkScopeResource: (request: LinkCatalogScopeResourceRequest) =>
     invoke<CatalogScopeLinkOutcome>("link_catalog_scope_resource", { request }),
 
+  /** The per-resource detail behind a row: its storage links and identity. */
+  getResource: (registrationId: string) =>
+    invoke<CatalogResourceView>("get_catalog_resource", { registrationId }),
+
   unlink: (registrationId: string, linkId: string, expectedRevision: number) =>
     invoke<boolean>("unlink_catalog_resource", {
       registrationId,
@@ -71,10 +76,9 @@ export const storageCatalogApi = {
   remove: (registrationId: string, expectedRevision: number) =>
     invoke<boolean>("remove_catalog_resource", { registrationId, expectedRevision }),
 
-  inspectLink: (linkId: string, forceRevalidate: boolean) =>
-    invoke<CatalogLinkInspection>("inspect_catalog_resource_link", {
-      linkId,
-      forceRevalidate,
+  inspectLinks: (registrationId: string) =>
+    invoke<CatalogLinkInspection[]>("inspect_catalog_resource_links", {
+      registrationId,
     }),
 
   preparePush: (linkId: string) =>

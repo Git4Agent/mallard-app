@@ -82,6 +82,16 @@ fn is_meta_record(object: &serde_json::Map<String, Value>) -> bool {
 
 pub(crate) fn summarize_file(path: &Path) -> Result<SessionFileSummary, String> {
     let bytes = read_bounded(path)?;
+    summarize_bytes(&bytes)
+}
+
+pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String> {
+    if bytes.len() as u64 > MAX_CONVERSATION_FILE_BYTES {
+        return Err(format!(
+            "Claude session exceeds {} bytes",
+            MAX_CONVERSATION_FILE_BYTES
+        ));
+    }
     let mut summary = SessionFileSummary {
         metrics_complete: true,
         ..SessionFileSummary::default()

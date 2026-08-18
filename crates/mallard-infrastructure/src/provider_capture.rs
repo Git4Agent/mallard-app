@@ -218,7 +218,7 @@ struct DiscoveredResource {
 /// a Discovery opaquely and feed it back into the inventory/capture views,
 /// sharing the walk (and derived candidates such as the filtered session
 /// index) across several consumers without re-scanning.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Discovery {
     resources: BTreeMap<String, DiscoveredResource>,
     directories: BTreeMap<String, SourceDirectory>,
@@ -230,6 +230,56 @@ pub struct Discovery {
 }
 
 impl Discovery {
+    /// Combine independently cached provider-profile discoveries into the
+    /// same opaque witness produced by one multi-provider walk.
+    pub fn combine(discoveries: Vec<Self>) -> Result<Self, String> {
+        let mut combined = Self::default();
+        for discovery in discoveries {
+            for (resource_id, resource) in discovery.resources {
+                if combined
+                    .resources
+                    .insert(resource_id.clone(), resource)
+                    .is_some()
+                {
+                    return Err(format!(
+                        "provider discoveries produced duplicate resource '{}'",
+                        resource_id
+                    ));
+                }
+            }
+            for (logical_path, directory) in discovery.directories {
+                if combined
+                    .directories
+                    .insert(logical_path.clone(), directory)
+                    .is_some()
+                {
+                    return Err(format!(
+                        "provider discoveries produced duplicate directory '{}'",
+                        logical_path
+                    ));
+                }
+            }
+            combined.warnings.extend(discovery.warnings);
+            combined.ignored_count = combined
+                .ignored_count
+                .saturating_add(discovery.ignored_count);
+            combined.blocked_count = combined
+                .blocked_count
+                .saturating_add(discovery.blocked_count);
+            for (provider, session_ids) in discovery.excluded_subagent_session_ids {
+                combined
+                    .excluded_subagent_session_ids
+                    .entry(provider)
+                    .or_default()
+                    .extend(session_ids);
+            }
+            combined
+                .excluded_subagent_resource_ids
+                .extend(discovery.excluded_subagent_resource_ids);
+        }
+        Ok(combined)
+    }
+
     /// Descriptor-only view for inventory-style callers. The Discovery keeps
     /// its physical paths for a later capture.
     pub fn project_inventory(&self) -> ProjectInventory {
@@ -326,10 +376,22 @@ struct CapturedUnit {
     warnings: Vec<String>,
 }
 
+fn take_capture_outcome(
+    resource_id: &str,
+    slot: &mut std::sync::OnceLock<Result<CapturedUnit, String>>,
+) -> Result<CapturedUnit, String> {
+    slot.take().unwrap_or_else(|| {
+        Err(format!(
+            "resource capture worker produced no outcome for resource '{}'",
+            resource_id
+        ))
+    })
+}
+
 /// The per-resource parallel stage: read, secret-scan, digest, analyze, and
-/// summarize one preflighted resource. A transcript's read and the
-/// summarizer's re-read stay in the same worker so each file's view is
-/// per-worker coherent.
+/// summarize one preflighted resource. Conversation analysis and
+/// presentation are both derived from the retained byte snapshot; the
+/// mutable provider path is never reopened after capture.
 fn capture_resource(
     registry: &crate::providers::ProviderRegistry,
     item: &CapturePlanItem<'_>,
@@ -414,7 +476,7 @@ fn capture_resource(
                 )
             })?;
         let analysis = adapter.analyze(&transcript.bytes);
-        let presentation = match adapter.summarize_file(&transcript_source.physical_path) {
+        let presentation = match adapter.summarize_bytes(&transcript.bytes) {
             Ok(file_summary) => session_presentation(
                 &file_summary,
                 item.discovered.descriptor.relative_cwd.as_deref(),
@@ -612,10 +674,9 @@ fn capture_from_discovery_with_workers(
 
     // Phase 3 — serial merge in resource-ID order: deterministic output and
     // the earliest failing resource's error, regardless of completion order.
+    // An unexpectedly unset slot is a controlled stage error, never a panic.
     for (item, slot) in items.iter().zip(slots.iter_mut()) {
-        let unit = slot
-            .take()
-            .expect("in-order dispatch settles every slot before the first failure")?;
+        let unit = take_capture_outcome(item.resource_id, slot)?;
         result
             .resources
             .insert(item.resource_id.to_string(), unit.resource);
@@ -795,9 +856,9 @@ pub fn refresh_codex_session_titles(
         .collect::<BTreeSet<_>>();
     let index = canonical_home.join("session_index.jsonl");
     let titles = if !ids.is_empty() && index.is_file() {
-        crate::providers::codex::history::parse_session_index_titles(&filter_jsonl_by_ids(
-            &index, &ids,
-        )?)
+        crate::providers::codex::history::parse_session_index_titles(
+            &filter_codex_session_index_by_ids(&index, &ids)?,
+        )
     } else {
         BTreeMap::new()
     };
@@ -1583,28 +1644,23 @@ fn glob_path_matches(pattern: &str, value: &str) -> bool {
     )
 }
 
-/// Provider-specific rules for the bounded head-of-file metadata scan.
-/// Adapters supply these; the scan loop itself is provider-neutral.
-pub struct MetadataScanSpec {
-    /// Whether one parsed record is authoritative session metadata, given
-    /// its lowercased `type` and the full record.
-    pub authoritative: fn(&str, &serde_json::Value) -> bool,
-    pub id_keys_authoritative: &'static [&'static str],
-    pub id_keys_fallback: &'static [&'static str],
-    pub detect_subagent: fn(&serde_json::Value) -> bool,
+/// One complete provider-owned metadata record found in a transcript head.
+/// Adapters construct this only from their exact current wire shape; the
+/// shared scanner never searches arbitrary JSON for identity fields.
+pub(crate) struct ParsedSessionMetadata {
+    pub session_id: String,
+    pub cwd: String,
+    pub is_internal_subagent: bool,
 }
 
-pub fn scan_session_metadata_with(
+pub(crate) fn scan_session_metadata_with(
     path: &Path,
-    spec: &MetadataScanSpec,
+    parse_record: fn(&[u8]) -> Option<ParsedSessionMetadata>,
 ) -> Result<crate::providers::SessionFileMetadata, String> {
     crate::sync_metrics::record_file_head_read(path);
     let file = fs::File::open(path).map_err(|e| format!("open: {}", e))?;
     let mut reader = BufReader::new(file);
     let mut total = 0_usize;
-    let mut fallback_id = None;
-    let mut fallback_cwd = None;
-    let mut fallback_is_internal_subagent = false;
     for _ in 0..MAX_METADATA_LINES {
         let mut line = Vec::new();
         let read = reader
@@ -1620,47 +1676,17 @@ pub fn scan_session_metadata_with(
         if line.len() > 256 * 1024 {
             continue;
         }
-        let value: serde_json::Value = match serde_json::from_slice(&line) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let event_type = find_string_for_keys(&value, &["type"])
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let cwd = find_string_for_keys(
-            &value,
-            &[
-                "cwd",
-                "working_directory",
-                "workingDirectory",
-                "projectPath",
-            ],
-        );
-        let authoritative = (spec.authoritative)(&event_type, &value);
-        let is_internal_subagent = (spec.detect_subagent)(&value);
-        let id = if authoritative {
-            find_string_for_keys(&value, spec.id_keys_authoritative)
-        } else {
-            find_string_for_keys(&value, spec.id_keys_fallback)
-        };
-        if fallback_cwd.is_none() {
-            fallback_cwd = cwd.clone();
-        }
-        if fallback_id.is_none() {
-            fallback_id = id.clone();
-            fallback_is_internal_subagent = is_internal_subagent;
-        }
-        if authoritative {
-            if let (Some(id), Some(cwd)) = (id, cwd) {
-                return validated_session_metadata(id, cwd, is_internal_subagent);
-            }
+        if let Some(metadata) = parse_record(&line) {
+            return validated_session_metadata(
+                metadata.session_id,
+                metadata.cwd,
+                metadata.is_internal_subagent,
+            );
         }
     }
-    let id =
-        fallback_id.ok_or_else(|| "session ID was not found in bounded metadata".to_string())?;
-    let cwd = fallback_cwd.ok_or_else(|| "cwd was not found in bounded metadata".to_string())?;
-    validated_session_metadata(id, cwd, fallback_is_internal_subagent)
+    Err("authoritative session metadata was not found in bounded file head".to_string())
 }
+
 fn validated_session_metadata(
     id: String,
     cwd: String,
@@ -1684,32 +1710,6 @@ fn validated_session_metadata(
         cwd,
         is_internal_subagent,
     })
-}
-
-fn find_string_for_keys(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    match value {
-        serde_json::Value::Object(map) => {
-            for key in keys {
-                if let Some(text) = map.get(*key).and_then(serde_json::Value::as_str) {
-                    if !text.is_empty() {
-                        return Some(text.to_string());
-                    }
-                }
-            }
-            // Provider metadata normally lives in `payload`; searching
-            // recursively also accommodates recorded older codec fixtures.
-            for nested in map.values() {
-                if let Some(value) = find_string_for_keys(nested, keys) {
-                    return Some(value);
-                }
-            }
-            None
-        }
-        serde_json::Value::Array(values) => values
-            .iter()
-            .find_map(|nested| find_string_for_keys(nested, keys)),
-        _ => None,
-    }
 }
 
 pub(crate) fn owned_relative_cwd(
@@ -1740,7 +1740,15 @@ pub(crate) fn owned_relative_cwd(
     }
 }
 
-pub(crate) fn filter_jsonl_by_ids(path: &Path, ids: &BTreeSet<String>) -> Result<Vec<u8>, String> {
+#[derive(Deserialize)]
+struct CodexSessionIndexIdentity {
+    id: String,
+}
+
+pub(crate) fn filter_codex_session_index_by_ids(
+    path: &Path,
+    ids: &BTreeSet<String>,
+) -> Result<Vec<u8>, String> {
     let meta = fs::metadata(path).map_err(|e| format!("inspect '{}': {}", path.display(), e))?;
     if meta.len() > MAX_FILE_BYTES {
         return Err(format!(
@@ -1756,15 +1764,11 @@ pub(crate) fn filter_jsonl_by_ids(path: &Path, ids: &BTreeSet<String>) -> Result
         if line.len() > 1024 * 1024 {
             continue;
         }
-        let value: serde_json::Value = match serde_json::from_slice(&line) {
-            Ok(value) => value,
+        let row: CodexSessionIndexIdentity = match serde_json::from_slice(&line) {
+            Ok(row) => row,
             Err(_) => continue,
         };
-        let matches = ["thread_id", "threadId", "session_id", "sessionId", "id"]
-            .iter()
-            .filter_map(|key| find_string_for_keys(&value, &[*key]))
-            .any(|value| ids.contains(&value));
-        if matches {
+        if ids.contains(&row.id) {
             output.extend_from_slice(&line);
             output.push(b'\n');
         }
@@ -2656,12 +2660,23 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("index.jsonl");
         let mut file = fs::File::create(&path).unwrap();
-        writeln!(file, "{{\"thread_id\":\"a\",\"title\":\"A\"}}").unwrap();
-        writeln!(file, "{{\"thread_id\":\"b\",\"title\":\"B\"}}").unwrap();
-        let bytes = filter_jsonl_by_ids(&path, &BTreeSet::from(["b".to_string()])).unwrap();
+        writeln!(file, "{{\"id\":\"a\",\"thread_name\":\"Unselected\"}}").unwrap();
+        writeln!(file, "{{\"id\":\"b\",\"thread_name\":\"Selected\"}}").unwrap();
+        writeln!(
+            file,
+            "{{\"event\":{{\"id\":\"b\"}},\"thread_name\":\"Nested\"}}"
+        )
+        .unwrap();
+        writeln!(file, "{{\"sessionId\":\"b\",\"thread_name\":\"Alias\"}}").unwrap();
+        let bytes =
+            filter_codex_session_index_by_ids(&path, &BTreeSet::from(["b".to_string()])).unwrap();
         let text = String::from_utf8(bytes).unwrap();
-        assert!(!text.contains("\"a\""));
-        assert!(text.contains("\"b\""));
+        let rows = text.lines().collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(rows[0]).unwrap()["thread_name"],
+            "Selected"
+        );
     }
 
     #[test]
@@ -2930,6 +2945,28 @@ mod tests {
             opaque_content: opaque,
             derived_bytes: None,
         }
+    }
+
+    #[test]
+    fn capture_worker_outcome_preserves_errors_and_rejects_missing_slots() {
+        let mut failed = std::sync::OnceLock::new();
+        assert!(failed
+            .set(Err("sentinel capture error".to_string()))
+            .is_ok());
+        assert_eq!(
+            take_capture_outcome("resource-a", &mut failed)
+                .err()
+                .as_deref(),
+            Some("sentinel capture error")
+        );
+
+        let mut missing = std::sync::OnceLock::new();
+        assert_eq!(
+            take_capture_outcome("resource-b", &mut missing)
+                .err()
+                .as_deref(),
+            Some("resource capture worker produced no outcome for resource 'resource-b'")
+        );
     }
 
     #[test]

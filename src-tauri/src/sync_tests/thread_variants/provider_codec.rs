@@ -6,13 +6,11 @@ use crate::project_sync::codex_standalone_builder::{
 use crate::project_sync::conversation_codec::{
     analyze_codex_transcript, CodecLineage, CodecUnknownReason,
 };
-use crate::project_sync::conversation_sync::{
-    default_conversation_decision, ConversationCapabilities,
-};
 use crate::project_sync::domain::{
-    compare_conversation_tail, compute_portable_conversation_tail, ConversationPlanActionType,
-    ConversationPlanDirection, SyncCurrency, TailClassification, TailComparisonEvidence,
-    TailPartitionKind, TailSideEvidence, MAX_CONVERSATION_FILE_BYTES,
+    compare_conversation_tail, compute_portable_conversation_tail, default_conversation_decision,
+    ConversationCapabilities, ConversationPlanDirection, ConversationReviewAction, SyncCurrency,
+    TailClassification, TailPartitionKind, TailSideEvidence, VerifiedTailEvidence,
+    MAX_CONVERSATION_FILE_BYTES,
 };
 use serde_json::{json, Value};
 
@@ -182,16 +180,15 @@ fn canonical_digests_survive_envelope_restamps_and_context_reserialization() {
     )
     .unwrap();
     assert_eq!(
-        compare_conversation_tail(TailComparisonEvidence {
-            accepted: TailSideEvidence::Present(before_tail.clone()),
-            accepted_local: TailSideEvidence::Present(before_tail.clone()),
-            local: TailSideEvidence::Present(after_tail),
-            cloud: TailSideEvidence::Present(before_tail),
-            local_provenance_verified: true,
-            accepted_witness_verified: true,
-            cloud_ancestry_verified: true,
-            coordinates_verified: true,
-        }),
+        compare_conversation_tail(
+            &VerifiedTailEvidence::new(
+                TailSideEvidence::Present(before_tail.clone()),
+                TailSideEvidence::Present(before_tail.clone()),
+                TailSideEvidence::Present(after_tail),
+                TailSideEvidence::Present(before_tail),
+            )
+            .unwrap(),
+        ),
         TailClassification::Sync(SyncCurrency::Current)
     );
 }
@@ -318,19 +315,18 @@ fn every_codex_unknown_reason_is_bounded_and_never_resumable() {
             ConversationPlanDirection::Pull,
             TailClassification::Unknown,
             ConversationCapabilities {
-                cloud_safely_readable: false,
-                destination_codec_resumable: false,
+                cloud_materializable: false,
                 ..ConversationCapabilities::default()
             },
         );
         assert_eq!(
             push.action,
-            ConversationPlanActionType::Blocked,
+            ConversationReviewAction::Blocked,
             "{name} Push"
         );
         assert_eq!(
             pull.action,
-            ConversationPlanActionType::Blocked,
+            ConversationReviewAction::Blocked,
             "{name} Pull"
         );
     }

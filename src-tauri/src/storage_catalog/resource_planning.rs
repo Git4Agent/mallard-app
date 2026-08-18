@@ -280,7 +280,6 @@ pub fn build_resource_push_plan(
         profile_pins: inputs.context.profile_pins(),
         skill_root_pins: inputs.context.skill_root_pins(),
         observed_head: inputs.observed_head,
-        source_stamp: inputs.inventory.source_stamp.clone(),
         resource: record.resource.clone(),
         warning_digests: record
             .warnings

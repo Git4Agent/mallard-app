@@ -14,9 +14,10 @@ use super::traits::{
 };
 use crate::provider_capture::{
     canonical_existing_dir, owned_relative_cwd, provider_walk_entry, scan_session_metadata_with,
-    MetadataScanSpec,
+    ParsedSessionMetadata,
 };
 use mallard_domain::{ConversationFileRole, ProviderKey};
+use serde::Deserialize;
 use std::path::Path;
 use walkdir::WalkDir;
 
@@ -27,12 +28,41 @@ pub fn provider_key() -> ProviderKey {
     ProviderKey::parse(TEST_PROVIDER_KEY).expect("static provider key")
 }
 
-const TEST_SCAN_SPEC: MetadataScanSpec = MetadataScanSpec {
-    authoritative: |_event_type, value| value.get("sessionId").is_some(),
-    id_keys_authoritative: &["sessionId"],
-    id_keys_fallback: &["sessionId"],
-    detect_subagent: |_value| false,
-};
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum TestMetadataRecordType {
+    User,
+    Assistant,
+    System,
+}
+
+#[derive(Deserialize)]
+struct TestSessionMetadataRecord {
+    #[serde(rename = "type")]
+    record_type: TestMetadataRecordType,
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    cwd: String,
+    #[serde(default, rename = "isSidechain")]
+    is_sidechain: bool,
+}
+
+fn parse_test_session_metadata(line: &[u8]) -> Option<ParsedSessionMetadata> {
+    let record: TestSessionMetadataRecord = serde_json::from_slice(line).ok()?;
+    match record.record_type {
+        TestMetadataRecordType::User
+        | TestMetadataRecordType::Assistant
+        | TestMetadataRecordType::System => {}
+    }
+    if record.is_sidechain {
+        return None;
+    }
+    Some(ParsedSessionMetadata {
+        session_id: record.session_id,
+        cwd: record.cwd,
+        is_internal_subagent: false,
+    })
+}
 
 pub struct TestProviderAdapter;
 
@@ -128,7 +158,7 @@ impl SessionAdapter for TestProviderAdapter {
     }
 
     fn scan_metadata(&self, path: &Path) -> Result<SessionFileMetadata, String> {
-        scan_session_metadata_with(path, &TEST_SCAN_SPEC)
+        scan_session_metadata_with(path, parse_test_session_metadata)
     }
 
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis {
@@ -173,6 +203,10 @@ impl SessionAdapter for TestProviderAdapter {
 
     fn summarize_file(&self, path: &Path) -> Result<SessionFileSummary, String> {
         super::claude::history::summarize_file(path)
+    }
+
+    fn summarize_bytes(&self, bytes: &[u8]) -> Result<SessionFileSummary, String> {
+        super::claude::history::summarize_bytes(bytes)
     }
 
     fn build_timeline_index(

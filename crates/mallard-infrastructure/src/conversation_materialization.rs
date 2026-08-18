@@ -29,6 +29,9 @@ pub struct ConversationTargetPayload {
     pub target_path: PathBuf,
     pub role: ConversationFileRole,
     pub expected: TargetExpectation,
+    /// The provider index row ids this payload rewrites; non-empty exactly
+    /// for `ProviderIndexFragment` payloads.
+    pub index_rows: Vec<String>,
     pub bytes: Vec<u8>,
 }
 
@@ -850,6 +853,7 @@ fn prepare_operation(
                 .map(|path| path_text(path))
                 .transpose()?,
             staged_sha256: Some(staged_sha256),
+            index_rows: payload.index_rows,
             commit_started: false,
             committed: false,
         });
@@ -1281,13 +1285,14 @@ fn verify_provider_payload(
             }
         }
         ConversationFileRole::ProviderIndexFragment => {
-            let thread_id = operation
-                .provider_thread_id
-                .as_deref()
-                .ok_or_else(|| "provider index lacks a destination thread id".to_string())?;
-            crate::providers::ProviderRegistry::production()
-                .require_sessions(&operation.provider)?
-                .verify_index_fragment(&bytes, thread_id)?;
+            // The journaled target names every row this fragment rewrites
+            // (destination and, on keep-both, the preserved rename); the
+            // domain guarantees the list is non-empty for this role.
+            let adapter = crate::providers::ProviderRegistry::production()
+                .require_sessions(&operation.provider)?;
+            for thread_id in &target.index_rows {
+                adapter.verify_index_fragment(&bytes, thread_id)?;
+            }
         }
         ConversationFileRole::Sidecar { .. } => {
             serde_json::from_slice::<serde_json::Value>(&bytes)

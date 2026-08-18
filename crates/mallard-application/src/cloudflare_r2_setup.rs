@@ -310,7 +310,6 @@ fn provision_r2_storage_with(
         s3_endpoint: destination.endpoint().to_string(),
         region: "auto".to_string(),
         local_dir: String::new(),
-        included_default_exclusions: Vec::new(),
         supports_conditional_writes: Some(true),
     };
     if let Err(error) = reconcile_previous_probes(
@@ -498,7 +497,6 @@ fn cleanup_r2_setup_with(
                 s3_endpoint: destination.endpoint().to_string(),
                 region: "auto".to_string(),
                 local_dir: String::new(),
-                included_default_exclusions: Vec::new(),
                 supports_conditional_writes: Some(true),
             }
         };
@@ -1911,7 +1909,6 @@ mod tests {
             s3_endpoint: "https://s3.example.com".to_string(),
             region: "auto".to_string(),
             local_dir: String::new(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: Some(true),
         });
         repository.save_config(config).unwrap();
@@ -2091,7 +2088,6 @@ mod tests {
             s3_endpoint: format!("https://{ACCOUNT}.r2.cloudflarestorage.com"),
             region: "auto".to_string(),
             local_dir: String::new(),
-            included_default_exclusions: Vec::new(),
             supports_conditional_writes: Some(true),
         });
         repository.save_config(config).unwrap();

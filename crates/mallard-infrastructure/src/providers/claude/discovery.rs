@@ -13,6 +13,50 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
+fn sidecar_session_id(
+    sidecar_kind: &str,
+    relative: &str,
+    session_ids: &BTreeSet<String>,
+) -> Result<Option<String>, String> {
+    match sidecar_kind {
+        "file-history" => {
+            let Some((session_id, remainder)) = relative.split_once('/') else {
+                return Ok(None);
+            };
+            if remainder.is_empty() || !session_ids.contains(session_id) {
+                return Ok(None);
+            }
+            Ok(Some(session_id.to_string()))
+        }
+        "todos" => {
+            if relative.contains('/') {
+                return Ok(None);
+            }
+            let Some(stem) = relative.strip_suffix(".json") else {
+                return Ok(None);
+            };
+            let matches = session_ids
+                .iter()
+                .filter(|session_id| {
+                    stem.strip_prefix(session_id.as_str())
+                        .and_then(|suffix| suffix.strip_prefix("-agent-"))
+                        .is_some_and(|agent_id| !agent_id.is_empty())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [] => Ok(None),
+                [session_id] => Ok(Some(session_id.clone())),
+                _ => Err("todo filename matches multiple proven session IDs".to_string()),
+            }
+        }
+        _ => Err(format!(
+            "unsupported Claude sidecar kind '{}'",
+            sidecar_kind
+        )),
+    }
+}
+
 pub(super) fn discover(
     context: &SessionDiscoveryContext<'_>,
     scan_metadata: impl Fn(
@@ -74,8 +118,8 @@ pub(super) fn discover(
         });
     }
 
-    // Sidecars are associated only through an already-proven session ID in
-    // their path; substring matches against unproven sessions cannot attach.
+    // Sidecars are associated only through the provider's exact path grammar
+    // and an already-proven session ID. Ambiguous todo names are rejected.
     for directory in ["file-history", "todos"] {
         let sidecar_root = canonical_home.join(directory);
         if !sidecar_root.exists() {
@@ -92,12 +136,16 @@ pub(super) fn discover(
                 continue;
             }
             let relative = normalized_relative(&sidecar_root, entry.path())?;
-            let Some(session_id) = session_ids
-                .iter()
-                .find(|id| relative.contains(id.as_str()))
-                .cloned()
-            else {
-                continue;
+            let session_id = match sidecar_session_id(directory, &relative, &session_ids) {
+                Ok(Some(session_id)) => session_id,
+                Ok(None) => continue,
+                Err(error) => {
+                    discovery.warnings.push(format!(
+                        "ignored Claude {} sidecar '{}': {}",
+                        directory, relative, error
+                    ));
+                    continue;
+                }
             };
             discovery.sidecars.push(DiscoveredSidecar {
                 session_id,
@@ -146,4 +194,46 @@ pub(super) fn discover(
         });
     }
     Ok(discovery)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_history_uses_an_exact_first_path_component() {
+        let ids = BTreeSet::from(["session".to_string(), "session-agent-child".to_string()]);
+
+        assert_eq!(
+            sidecar_session_id("file-history", "session-agent-child/file@v1", &ids).unwrap(),
+            Some("session-agent-child".to_string())
+        );
+        assert_eq!(
+            sidecar_session_id("file-history", "prefix-session/file@v1", &ids).unwrap(),
+            None
+        );
+        assert_eq!(
+            sidecar_session_id("file-history", "session-file@v1", &ids).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn todo_filename_rejects_ambiguous_or_incidental_session_ids() {
+        let ids = BTreeSet::from(["session".to_string(), "session-agent-child".to_string()]);
+
+        assert_eq!(
+            sidecar_session_id("todos", "session-agent-task.json", &ids).unwrap(),
+            Some("session".to_string())
+        );
+        assert_eq!(
+            sidecar_session_id("todos", "prefix-session-agent-task.json", &ids).unwrap(),
+            None
+        );
+        assert!(
+            sidecar_session_id("todos", "session-agent-child-agent-task.json", &ids)
+                .unwrap_err()
+                .contains("multiple proven session IDs")
+        );
+    }
 }

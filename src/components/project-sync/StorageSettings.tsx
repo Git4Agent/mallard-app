@@ -126,7 +126,6 @@ export function newStorage(kind: "s3" | "local", index: number): StorageConfig {
     s3_endpoint: "",
     region: kind === "s3" ? "auto" : "",
     local_dir: "",
-    included_default_exclusions: [],
   };
 }
 

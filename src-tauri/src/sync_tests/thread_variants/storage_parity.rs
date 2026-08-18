@@ -167,7 +167,6 @@ async fn stub_s3_current_schema_noop_and_fast_forward_match_local_protocol() {
         s3_endpoint: server.endpoint.clone(),
         region: "auto".to_string(),
         local_dir: String::new(),
-        included_default_exclusions: Vec::new(),
         supports_conditional_writes: None,
     };
     let store = S3ObjectStore::from_config(&config, tokio::runtime::Handle::current()).unwrap();
@@ -288,7 +287,6 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
         s3_endpoint: server.endpoint.clone(),
         region: "auto".to_string(),
         local_dir: String::new(),
-        included_default_exclusions: Vec::new(),
         supports_conditional_writes: None,
     };
     let store = S3ObjectStore::from_config(&config, tokio::runtime::Handle::current()).unwrap();
@@ -476,7 +474,6 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         s3_endpoint: server.endpoint.clone(),
         region: "auto".to_string(),
         local_dir: String::new(),
-        included_default_exclusions: Vec::new(),
         supports_conditional_writes: None,
     };
     let store = S3ObjectStore::from_config(&config, tokio::runtime::Handle::current()).unwrap();

@@ -16,15 +16,15 @@ import { projectSyncApi } from "./api";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
 import ProviderMark from "./ProviderMark";
 import { formatCompactNumber, formatSessionDetailTimestamp, type OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
-import ThreadStatusIcon, { type ThreadStatusIconName } from "./ThreadStatusIcon";
+import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 
 /**
  * What the workspace path bar renders on this page's behalf.
  *
  * The list owns the data — branches arrive with the activity page, counts with
  * the storage comparison — but the controls belong in the bar, beside the Push
- * and Pull buttons the numbers describe. Rather than fetch the same two things
- * twice, the page hands the bar a model and the handlers to drive it.
+ * and Pull buttons the numbers describe. One backend read projects both, and
+ * the page hands the bar a model plus the handlers that drive it.
  */
 export interface ActivityHeaderModel {
   branches: GitBranchSummary[];
@@ -59,8 +59,8 @@ interface PageProps {
   ) => void;
   /**
    * Fires with whether the review list is trustworthy: the timeline needs
-   * `activity` and the storage rows need the comparison, both fetched here
-   * asynchronously. A hosting review gates its primary action on this so
+   * `activity` and the storage rows need the comparison, projected from one
+   * asynchronous backend read. A hosting review gates its primary action so
    * nothing is applied sight unseen.
    */
   onReviewListReadyChange?: (ready: boolean) => void;
@@ -352,42 +352,14 @@ type SessionSyncPresentation = {
 type ComparisonStatus = Exclude<ThreadStatusIconName, "untracked" | "checking" | "unknown">;
 type ComparisonPresentation = SessionSyncPresentation & { status: ComparisonStatus };
 
-type SessionSyncIndex = {
-  byResourceId: Map<string, ThreadSyncEntry>;
-  byLogicalThread: Map<string, ThreadSyncEntry>;
-  byProviderSession: Map<string, ThreadSyncEntry>;
-};
+type SessionSyncIndex = Map<string, ThreadSyncEntry>;
 
-function providerScopedIdentity(provider: string, identity: string): string {
-  return `${provider}\u0000${identity}`;
-}
-
-/** Activity exposes the portable conversation identity, while sync review
- *  keeps the capture resource identity used by Push recipes. Index both
- *  identity domains so the row can present the comparison without replacing
- *  the raw resource ID that selection and apply flows require. */
+/** Activity and comparison expose the same portable conversation identity.
+ *  The comparison's capture resource ID remains reserved for plan selection. */
 function indexSessionSyncEntries(entries: readonly ThreadSyncEntry[]): SessionSyncIndex {
-  const index: SessionSyncIndex = {
-    byResourceId: new Map(),
-    byLogicalThread: new Map(),
-    byProviderSession: new Map(),
-  };
+  const index: SessionSyncIndex = new Map();
   for (const entry of entries) {
-    index.byResourceId.set(entry.resource_id, entry);
-    if (entry.cloud_thread_id) {
-      index.byLogicalThread.set(
-        providerScopedIdentity(entry.provider, entry.cloud_thread_id),
-        entry,
-      );
-    }
-    for (const providerSessionId of [entry.provider_thread_id, entry.thread_id]) {
-      if (providerSessionId) {
-        index.byProviderSession.set(
-          providerScopedIdentity(entry.provider, providerSessionId),
-          entry,
-        );
-      }
-    }
+    index.set(entry.conversation_resource_id, entry);
   }
   return index;
 }
@@ -396,37 +368,24 @@ function syncEntryForSession(
   session: ProjectSessionSummary,
   index: SessionSyncIndex,
 ): ThreadSyncEntry | undefined {
-  const exact = index.byResourceId.get(session.resource_id);
-  if (exact) return exact;
-  if (session.logical_thread_id) {
-    const logical = index.byLogicalThread.get(
-      providerScopedIdentity(session.provider, session.logical_thread_id),
-    );
-    if (logical) return logical;
-  }
-  if (session.provider_session_id) {
-    return index.byProviderSession.get(
-      providerScopedIdentity(session.provider, session.provider_session_id),
-    );
-  }
-  return undefined;
+  return index.get(session.resource_id);
 }
 
 export function sessionSyncPresentation(
   entry: ThreadSyncEntry,
   storageName: string,
 ): ComparisonPresentation {
-  type ReasonCode = ThreadSyncEntry["push_decision"]["reason_code"];
-  const decisionWithReason = (reasons: readonly ReasonCode[]) => {
-    if (entry.push_decision && reasons.includes(entry.push_decision.reason_code)) {
+  type Blocker = NonNullable<ThreadSyncEntry["push_decision"]["blocker"]>;
+  const decisionWithBlocker = (blockers: readonly Blocker[]) => {
+    if (entry.push_decision?.blocker && blockers.includes(entry.push_decision.blocker)) {
       return { mode: "push" as const };
     }
-    if (entry.pull_decision && reasons.includes(entry.pull_decision.reason_code)) {
+    if (entry.pull_decision?.blocker && blockers.includes(entry.pull_decision.blocker)) {
       return { mode: "pull" as const };
     }
     return null;
   };
-  const pending = decisionWithReason(["busy", "provider_not_quiescent", "stale_plan"]);
+  const pending = decisionWithBlocker(["busy"]);
   if (pending) {
     return {
       status: "pending",
@@ -436,12 +395,11 @@ export function sessionSyncPresentation(
         ?? "Sync is waiting for this session to become ready.",
     };
   }
-  const conflict = decisionWithReason([
+  const conflict = decisionWithBlocker([
     "unknown_evidence",
     "ambiguous_binding",
     "missing_binding",
     "detached_requires_pull",
-    "corruption_blocked",
   ]);
   if (conflict) {
     return {
@@ -1039,7 +997,7 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
   const decision = mode === "push" ? entry.push_decision : entry.pull_decision;
   if (!decision) return null;
   if (decision.action === "blocked") {
-    switch (decision.reason_code) {
+    switch (decision.blocker) {
       case "codec_unsupported":
         return mode === "push"
           ? `Can't sync — Mallard can't safely capture this ${providerName} session. It still opens on this computer.`
@@ -1048,16 +1006,10 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
         return "Can't sync — more than one stored session could match this one.";
       case "missing_binding":
         return "Can't sync — this session isn't linked to a stored copy yet.";
-      case "provider_not_quiescent":
-        return `Can't sync right now — ${providerName} may still be writing this session.`;
-      case "stale_plan":
-        return "The comparison is out of date. Refresh and review again.";
       case "busy":
         return `Another ${providerName} sync operation is still finishing. Wait for recovery, then refresh.`;
       case "detached_requires_pull":
         return "This session's local mapping changed. Pull to establish the current mapping.";
-      case "corruption_blocked":
-        return "Can't sync — this session failed local verification and needs repair.";
       case "unknown_evidence":
         return "Can't sync — Mallard could not prove the local and stored session state safely.";
       default:
@@ -1182,12 +1134,12 @@ function SessionCard({
           ) : (
             <strong title={visibleTitle === fullTitle ? undefined : fullTitle}>{visibleTitle}</strong>
           )}
-          {session.is_preserved_local && (
+          {session.preserved && (
             <span
               className="sync-history-preserved-badge"
-              title="Local branch preserved during a divergent Pull."
+              title={`Local branch preserved during a divergent Pull of thread ${session.preserved.preserved_from.slice(0, 8)}.`}
             >
-              Preserved
+              Preserved {session.preserved.ordinal}
             </span>
           )}
           <ReviewPullRowAction
@@ -1886,47 +1838,57 @@ export default function ProjectActivityPage({
     }
   };
 
-  const loadComparison = async () => {
+  const loadWorkspace = async (requestedBranch = branch, forceRevalidate = false) => {
     if (comparisonOverride !== undefined) {
       comparisonRequestRef.current += 1;
       setComparison(comparisonOverride);
       setComparisonLoading(false);
       setComparisonError(null);
+      await load(null, requestedBranch, forceRevalidate);
       return;
     }
-    if (!hasBoundProvider || !activeStorageId) {
-      comparisonRequestRef.current += 1;
-      setComparison(null);
-      setComparisonLoading(false);
-      setComparisonError(null);
-      return;
-    }
-    const requestId = ++comparisonRequestRef.current;
-    setComparisonLoading(true);
+    if (!hasBoundProvider) return;
+    const activityRequestId = ++requestRef.current;
+    const comparisonRequestId = ++comparisonRequestRef.current;
+    setLoading(true);
+    setActionError(null);
+    setLoadError(null);
+    setComparisonLoading(activeStorageId !== null);
     setComparisonError(null);
     try {
-      const next = await projectSyncApi.getSessionSyncComparison(project.local_project_id, activeStorageId);
-      if (requestId !== comparisonRequestRef.current) return;
-      setComparison(next);
+      const next = await projectSyncApi.getProjectActivityWorkspace(
+        project.local_project_id,
+        activeStorageId,
+        requestedBranch,
+        null,
+        30,
+        forceRevalidate,
+      );
+      if (activityRequestId === requestRef.current) {
+        setActivity(next.activity);
+        setBranch(next.activity.git?.selected_branch ?? null);
+      }
+      if (comparisonRequestId === comparisonRequestRef.current) {
+        setComparison(next.comparison ?? null);
+        setComparisonError(next.comparison_error ?? null);
+      }
     } catch (reason) {
-      if (requestId !== comparisonRequestRef.current) return;
-      setComparison(null);
-      setComparisonError(errorMessage(reason));
+      const message = errorMessage(reason);
+      if (activityRequestId === requestRef.current) setLoadError(message);
+      if (comparisonRequestId === comparisonRequestRef.current) {
+        setComparison(null);
+        setComparisonError(activeStorageId ? message : null);
+      }
     } finally {
-      if (requestId === comparisonRequestRef.current) setComparisonLoading(false);
+      if (activityRequestId === requestRef.current) setLoading(false);
+      if (comparisonRequestId === comparisonRequestRef.current) setComparisonLoading(false);
     }
   };
 
   useEffect(() => {
-    setActivity(null); setBranch(null); void load(null, null);
-    return () => { requestRef.current += 1; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project.local_project_id, binding?.revision, activeStorageId, refreshEpoch]);
-
-  useEffect(() => {
-    setComparison(null);
-    void loadComparison();
-    return () => { comparisonRequestRef.current += 1; };
+    setActivity(null); setBranch(null); setComparison(null);
+    void loadWorkspace(null);
+    return () => { requestRef.current += 1; comparisonRequestRef.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.local_project_id, binding?.revision, activeStorageId, refreshEpoch, comparisonOverride]);
 
@@ -1939,8 +1901,8 @@ export default function ProjectActivityPage({
   // is a new object every render would drive it into a re-render loop. These
   // two handlers are the only mutable part of it; a latest-ref keeps their
   // identity fixed while they still see this render's `load` and `branch`.
-  const latest = useRef({ load, loadComparison, branch });
-  latest.current = { load, loadComparison, branch };
+  const latest = useRef({ load, loadWorkspace, branch });
+  latest.current = { load, loadWorkspace, branch };
 
   const changeBranch = useCallback((nextBranch: string) => {
     setBranch(nextBranch);
@@ -1948,10 +1910,7 @@ export default function ProjectActivityPage({
     void latest.current.load(null, nextBranch);
   }, []);
   const refreshActivity = useCallback(() => {
-    void Promise.all([
-      latest.current.load(null, latest.current.branch, true),
-      latest.current.loadComparison(),
-    ]);
+    void latest.current.loadWorkspace(latest.current.branch, true);
   }, []);
 
   const headerCounts = useMemo(
@@ -2001,5 +1960,5 @@ export default function ProjectActivityPage({
       setActionBusyActionId(null);
     }
   };
-  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void load(null, branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.next_before ?? null, branch)} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
+  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.next_before ?? null, branch)} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
 }

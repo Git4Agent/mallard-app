@@ -1,11 +1,8 @@
 use super::harness::{analyzed_chain, chain};
-use crate::project_sync::conversation_sync::{
-    default_conversation_decision, ConversationCapabilities,
-};
 use crate::project_sync::domain::{
-    compare_conversation_tail, compute_portable_conversation_tail, ConversationPlanActionType,
-    ConversationPlanDirection, SyncCurrency, TailClassification, TailComparisonEvidence,
-    TailPartitionKind, TailSideEvidence,
+    compare_conversation_tail, compute_portable_conversation_tail, default_conversation_decision,
+    ConversationCapabilities, ConversationPlanDirection, ConversationReviewAction, SyncCurrency,
+    TailClassification, TailPartitionKind, TailSideEvidence, VerifiedTailEvidence,
 };
 
 fn whole_tail(chain: &[mallard_domain::CanonicalConversationMessage]) -> TailSideEvidence {
@@ -20,17 +17,8 @@ fn evidence(
     accepted: TailSideEvidence,
     local: TailSideEvidence,
     cloud: TailSideEvidence,
-) -> TailComparisonEvidence {
-    TailComparisonEvidence {
-        accepted_local: accepted.clone(),
-        accepted,
-        local,
-        cloud,
-        local_provenance_verified: true,
-        accepted_witness_verified: true,
-        cloud_ancestry_verified: true,
-        coordinates_verified: true,
-    }
+) -> VerifiedTailEvidence {
+    VerifiedTailEvidence::new(accepted.clone(), accepted, local, cloud).unwrap()
 }
 
 #[test]
@@ -55,7 +43,7 @@ fn divergence_is_pull_first_and_pull_defaults_to_keep_both() {
             ("m-cloud", "cloud branch"),
         ],
     ));
-    let relation = compare_conversation_tail(evidence(
+    let relation = compare_conversation_tail(&evidence(
         whole_tail(&base),
         whole_tail(&local),
         whole_tail(&cloud),
@@ -67,7 +55,7 @@ fn divergence_is_pull_first_and_pull_defaults_to_keep_both() {
         relation,
         ConversationCapabilities::default(),
     );
-    assert_eq!(push.action, ConversationPlanActionType::RequirePull);
+    assert_eq!(push.action, ConversationReviewAction::RequirePull);
     assert!(!push.selectable);
 
     let pull = default_conversation_decision(
@@ -75,7 +63,7 @@ fn divergence_is_pull_first_and_pull_defaults_to_keep_both() {
         relation,
         ConversationCapabilities::default(),
     );
-    assert_eq!(pull.action, ConversationPlanActionType::KeepBoth);
+    assert_eq!(pull.action, ConversationReviewAction::KeepBoth);
     assert!(pull.selectable);
 }
 
@@ -86,7 +74,7 @@ fn unknown_evidence_never_becomes_a_push() {
         TailClassification::Unknown,
         ConversationCapabilities::default(),
     );
-    assert_eq!(push.action, ConversationPlanActionType::Blocked);
+    assert_eq!(push.action, ConversationReviewAction::Blocked);
     assert!(!push.selectable);
 
     let pull = default_conversation_decision(
@@ -94,7 +82,7 @@ fn unknown_evidence_never_becomes_a_push() {
         TailClassification::Unknown,
         ConversationCapabilities::default(),
     );
-    assert_eq!(pull.action, ConversationPlanActionType::Blocked);
+    assert_eq!(pull.action, ConversationReviewAction::Blocked);
     assert!(!pull.selectable);
 }
 
@@ -104,7 +92,7 @@ fn a_resolved_original_branch_reaches_a_noop_fixed_point() {
         "thread-a",
         &[("m-1", "shared"), ("m-cloud", "cloud branch")],
     ));
-    let relation = compare_conversation_tail(evidence(
+    let relation = compare_conversation_tail(&evidence(
         whole_tail(&cloud),
         whole_tail(&cloud),
         whole_tail(&cloud),
@@ -115,13 +103,13 @@ fn a_resolved_original_branch_reaches_a_noop_fixed_point() {
         relation,
         ConversationCapabilities::default(),
     );
-    assert_eq!(push.action, ConversationPlanActionType::NoChanges);
+    assert_eq!(push.action, ConversationReviewAction::NoChanges);
     assert!(!push.selectable);
     let pull = default_conversation_decision(
         ConversationPlanDirection::Pull,
         relation,
         ConversationCapabilities::default(),
     );
-    assert_eq!(pull.action, ConversationPlanActionType::NoChanges);
+    assert_eq!(pull.action, ConversationReviewAction::NoChanges);
     assert!(!pull.selectable);
 }

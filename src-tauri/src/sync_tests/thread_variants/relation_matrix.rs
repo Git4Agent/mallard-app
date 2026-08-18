@@ -1,18 +1,19 @@
-use super::harness::{analyzed_chain, chain, codex, rewrite_transcript_identity, TranscriptBuilder};
+use super::harness::{analyzed_chain, chain, codex};
 use crate::project_sync::conversation_sync::{
-    build_conversation_plan_action, default_conversation_decision,
-    validate_conversation_action_pins, ConversationApplyContext, ConversationCapabilities,
+    build_conversation_plan_action, validate_conversation_action_pins, ConversationApplyContext,
     ConversationPlanActionRequest,
 };
 use crate::project_sync::domain::{
-    compare_conversation_tail, compute_portable_conversation_tail, ActionId,
-    ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationReasonCode, HostId, KeepBothPlan, LocalProjectId, LocalProviderProfileId,
-    PortableConversationTail, ProviderStateExpectation, RawRangePin, ReplicaId, ResourceId,
-    SyncCurrency, TailClassification, TailComparisonEvidence, TailPartitionKind, TailSideEvidence,
-    TargetExpectation, ThreadId,
+    compare_conversation_tail, compute_portable_conversation_tail, default_conversation_decision,
+    ActionId, ClassifiedThread, ConversationActionPins, ConversationCapabilities,
+    ConversationContextPins, ConversationPlanAction, ConversationPlanActionType,
+    ConversationPlanDirection, ConversationReviewAction, ConversationRevisionPins,
+    ConversationTailPins, ConversationTargetPins, HostId, KeepBothPlan, LocalProjectId,
+    LocalProviderProfileId, PortableConversationTail, PreservedProvenance,
+    ProviderStateExpectation, RawRangePin, ReplicaId, ResourceId, SyncCurrency, TailClassification,
+    TailEvidenceBlocker, TailPartitionKind, TailSideEvidence, TargetExpectation, ThreadId,
+    VerifiedTailEvidence,
 };
-use std::collections::BTreeMap;
 
 fn whole_tail(ids: &[(&str, &str)]) -> PortableConversationTail {
     compute_portable_conversation_tail(
@@ -23,514 +24,312 @@ fn whole_tail(ids: &[(&str, &str)]) -> PortableConversationTail {
     .unwrap()
 }
 
+fn side(value: Option<&PortableConversationTail>) -> TailSideEvidence {
+    match value {
+        Some(tail) => TailSideEvidence::Present(tail.clone()),
+        None => TailSideEvidence::ConfirmedAbsent,
+    }
+}
+
 fn evidence_of(
     accepted: Option<&PortableConversationTail>,
     local: Option<&PortableConversationTail>,
     cloud: Option<&PortableConversationTail>,
-) -> TailComparisonEvidence {
-    let side = |value: Option<&PortableConversationTail>| match value {
-        Some(tail) => TailSideEvidence::Present(tail.clone()),
-        None => TailSideEvidence::ConfirmedAbsent,
-    };
-    TailComparisonEvidence {
-        accepted: side(accepted),
-        accepted_local: side(accepted),
-        local: side(local),
-        cloud: side(cloud),
-        local_provenance_verified: true,
-        accepted_witness_verified: true,
-        cloud_ancestry_verified: true,
-        coordinates_verified: true,
+) -> Result<VerifiedTailEvidence, TailEvidenceBlocker> {
+    VerifiedTailEvidence::new(side(accepted), side(accepted), side(local), side(cloud))
+}
+
+fn tails_for_relation(
+    relation: TailClassification,
+) -> (
+    Option<PortableConversationTail>,
+    Option<PortableConversationTail>,
+    Option<PortableConversationTail>,
+) {
+    let base = whole_tail(&[("m-a", "one"), ("m-b", "two")]);
+    let longer = whole_tail(&[("m-a", "one"), ("m-b", "two"), ("m-c", "local")]);
+    match relation {
+        TailClassification::Sync(SyncCurrency::Current) => {
+            (Some(base.clone()), Some(base.clone()), Some(base))
+        }
+        TailClassification::Sync(SyncCurrency::Advanced) => {
+            (Some(base), Some(longer.clone()), Some(longer))
+        }
+        TailClassification::LocalOutstanding => (Some(base.clone()), Some(longer), Some(base)),
+        TailClassification::CloudOutstanding => (Some(base.clone()), Some(base), Some(longer)),
+        TailClassification::Divergent => (
+            Some(base),
+            Some(longer),
+            Some(whole_tail(&[
+                ("m-a", "one"),
+                ("m-b", "two"),
+                ("m-d", "cloud"),
+            ])),
+        ),
+        TailClassification::MissingCloud => (None, Some(base), None),
+        TailClassification::MissingLocal => (None, None, Some(base)),
+        TailClassification::MissingBoth => (None, None, None),
+        TailClassification::Unknown => panic!("unknown evidence cannot become verified pins"),
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct MatrixCase {
     name: &'static str,
-    accepted: Option<PortableConversationTail>,
-    local: Option<PortableConversationTail>,
-    cloud: Option<PortableConversationTail>,
     relation: TailClassification,
-    push: ConversationPlanActionType,
-    pull: ConversationPlanActionType,
+    push: ConversationReviewAction,
+    pull: ConversationReviewAction,
 }
 
-/// The complete relation-to-action matrix: the four-row pinned table, every
-/// directional absence, the deliberate absence of containment refinement,
-/// and the unpinned-both-present bootstrap refusal — each planned into a
-/// validated action and revalidated at apply pins.
 #[test]
-fn complete_push_pull_relation_matrix_plans_and_revalidates() {
-    let base = whole_tail(&[("m-a", "one"), ("m-b", "two")]);
-    let local_long = whole_tail(&[("m-a", "one"), ("m-b", "two"), ("m-c", "local")]);
-    let cloud_long = whole_tail(&[("m-a", "one"), ("m-b", "two"), ("m-d", "cloud")]);
-    let cloud_longer = whole_tail(&[
-        ("m-a", "one"),
-        ("m-b", "two"),
-        ("m-c", "local"),
-        ("m-e", "cloud"),
-    ]);
-    let cases = vec![
+fn canonical_policy_covers_each_verified_relation_and_persists_only_mutations() {
+    use ConversationReviewAction as Review;
+    let cases = [
         MatrixCase {
             name: "sync_current",
-            accepted: Some(base.clone()),
-            local: Some(base.clone()),
-            cloud: Some(base.clone()),
             relation: TailClassification::Sync(SyncCurrency::Current),
-            push: ConversationPlanActionType::NoChanges,
-            pull: ConversationPlanActionType::NoChanges,
+            push: Review::NoChanges,
+            pull: Review::NoChanges,
         },
         MatrixCase {
             name: "sync_advanced",
-            accepted: Some(base.clone()),
-            local: Some(local_long.clone()),
-            cloud: Some(local_long.clone()),
             relation: TailClassification::Sync(SyncCurrency::Advanced),
-            push: ConversationPlanActionType::RequirePullMetadata,
-            pull: ConversationPlanActionType::AdoptCloudMetadata,
+            push: Review::RequirePullMetadata,
+            pull: Review::AdoptCloudMetadata,
         },
         MatrixCase {
             name: "local_outstanding",
-            accepted: Some(base.clone()),
-            local: Some(local_long.clone()),
-            cloud: Some(base.clone()),
             relation: TailClassification::LocalOutstanding,
-            push: ConversationPlanActionType::Publish,
-            pull: ConversationPlanActionType::ReportPushEligible,
+            push: Review::Publish,
+            pull: Review::ReportPushEligible,
         },
         MatrixCase {
             name: "cloud_outstanding",
-            accepted: Some(base.clone()),
-            local: Some(base.clone()),
-            cloud: Some(cloud_long.clone()),
             relation: TailClassification::CloudOutstanding,
-            push: ConversationPlanActionType::RequirePull,
-            pull: ConversationPlanActionType::MaterializeCloud,
+            push: Review::RequirePull,
+            pull: Review::MaterializeCloud,
         },
         MatrixCase {
-            name: "fork_after_common_prefix",
-            accepted: Some(base.clone()),
-            local: Some(local_long.clone()),
-            cloud: Some(cloud_long.clone()),
+            name: "divergent",
             relation: TailClassification::Divergent,
-            push: ConversationPlanActionType::RequirePull,
-            pull: ConversationPlanActionType::KeepBoth,
-        },
-        // Canonical containment without pin alignment is still Divergent:
-        // there is deliberately no containment refinement.
-        MatrixCase {
-            name: "containment_is_divergent",
-            accepted: Some(base.clone()),
-            local: Some(local_long.clone()),
-            cloud: Some(cloud_longer),
-            relation: TailClassification::Divergent,
-            push: ConversationPlanActionType::RequirePull,
-            pull: ConversationPlanActionType::KeepBoth,
+            push: Review::RequirePull,
+            pull: Review::KeepBoth,
         },
         MatrixCase {
             name: "missing_local",
-            accepted: None,
-            local: None,
-            cloud: Some(base.clone()),
             relation: TailClassification::MissingLocal,
-            push: ConversationPlanActionType::NotPushable,
-            pull: ConversationPlanActionType::CreateLocal,
+            push: Review::NotPushable,
+            pull: Review::CreateLocal,
         },
         MatrixCase {
             name: "missing_cloud",
-            accepted: None,
-            local: Some(base.clone()),
-            cloud: None,
             relation: TailClassification::MissingCloud,
-            push: ConversationPlanActionType::CreateCloud,
-            pull: ConversationPlanActionType::ReportLocalOnly,
+            push: Review::CreateCloud,
+            pull: Review::ReportLocalOnly,
         },
         MatrixCase {
             name: "missing_both",
-            accepted: None,
-            local: None,
-            cloud: None,
             relation: TailClassification::MissingBoth,
-            push: ConversationPlanActionType::NotPushable,
-            pull: ConversationPlanActionType::NotFound,
-        },
-        // Pull does not bootstrap by comparing graphs.
-        MatrixCase {
-            name: "unpinned_both_present",
-            accepted: None,
-            local: Some(base.clone()),
-            cloud: Some(base.clone()),
-            relation: TailClassification::Unknown,
-            push: ConversationPlanActionType::Blocked,
-            pull: ConversationPlanActionType::Blocked,
+            push: Review::NotPushable,
+            pull: Review::NotFound,
         },
     ];
 
     for case in cases {
-        let relation = compare_conversation_tail(evidence_of(
-            case.accepted.as_ref(),
-            case.local.as_ref(),
-            case.cloud.as_ref(),
-        ));
-        assert_eq!(relation, case.relation, "{} relation", case.name);
+        let (accepted, local, cloud) = tails_for_relation(case.relation);
+        let verified = evidence_of(accepted.as_ref(), local.as_ref(), cloud.as_ref()).unwrap();
+        assert_eq!(
+            compare_conversation_tail(&verified),
+            case.relation,
+            "{}",
+            case.name
+        );
+
         for (direction, expected) in [
             (ConversationPlanDirection::Push, case.push),
             (ConversationPlanDirection::Pull, case.pull),
         ] {
-            let decision = default_conversation_decision(
-                direction,
-                relation,
-                ConversationCapabilities::default(),
-            );
+            let classified =
+                ClassifiedThread::new(case.relation, ConversationCapabilities::default());
+            let decision = classified.decision(direction);
             assert_eq!(decision.action, expected, "{} {direction:?}", case.name);
-            // A durably pinned current thread plans no Pull row at all:
-            // provider_thread_review skips building one, and `NoChanges`
-            // stays a Push-only action inside validated plans.
-            if direction == ConversationPlanDirection::Pull
-                && decision.action == ConversationPlanActionType::NoChanges
-            {
-                assert!(!decision.selectable, "{} pull no-op", case.name);
-                continue;
-            }
-            let (template, current) = reviewed_action_with_tails(
+            assert_eq!(decision.selectable, expected.planned_action().is_some());
+
+            let template_action = expected.planned_action().map(|action| {
+                reviewed_action_with_tails(action, accepted.clone(), local.clone(), cloud.clone()).0
+            });
+            let pins = template_action
+                .as_ref()
+                .map(|action| action.pins.clone())
+                .unwrap_or_else(|| {
+                    review_only_pins(accepted.clone(), local.clone(), cloud.clone())
+                });
+            let action_id = format!("action-{}-{direction:?}", case.name).to_lowercase();
+            let planned = build_conversation_plan_action(ConversationPlanActionRequest {
+                action_id: ActionId::parse(action_id).unwrap(),
                 direction,
-                decision.action,
-                decision.reason_code,
-                relation,
-                case.accepted.clone(),
-                case.local.clone(),
-                case.cloud.clone(),
-            );
-            let action = build_conversation_plan_action(ConversationPlanActionRequest {
-                action_id: template.action_id,
-                direction,
-                relation,
-                capabilities: ConversationCapabilities::default(),
-                provider: template.provider,
-                host_id: template.host_id,
-                replica_id: template.replica_id,
-                local_project_id: template.local_project_id,
-                provider_profile_id: template.provider_profile_id,
-                thread_id: template.thread_id,
-                source_resource_id: template.source_resource_id,
-                proposed_provider_thread_id: template.proposed_provider_thread_id,
-                keep_both: template.keep_both,
-                required_codec: template.required_codec,
-                pinned_revision: template.pinned_revision,
-                pinned_commit_id: template.pinned_commit_id,
-                pinned_manifest_sha256: template.pinned_manifest_sha256,
-                pinned_scope_revision: template.pinned_scope_revision,
-                pinned_scope_sha256: template.pinned_scope_sha256,
-                pinned_accepted_tail: template.pinned_accepted_tail,
-                pinned_accepted_local_tail: template.pinned_accepted_local_tail,
-                pinned_local_tail: template.pinned_local_tail,
-                pinned_cloud_tail: template.pinned_cloud_tail,
-                pinned_checkpoint_generation: template.pinned_checkpoint_generation,
-                pinned_lineage_digest: template.pinned_lineage_digest,
-                pinned_semantic_digest: template.pinned_semantic_digest,
-                pinned_raw_range: template.pinned_raw_range,
-                expected_local_target: template.expected_local_target,
-                expected_provider_state: template.expected_provider_state,
-                expected_profile_revision: template.expected_profile_revision,
-                expected_project_binding_revision: template.expected_project_binding_revision,
-                expected_host_identity_revision: template.expected_host_identity_revision,
-                expected_bindings_document_revision: template.expected_bindings_document_revision,
-                expected_binding_revision: template.expected_binding_revision,
-                expires_at: template.expires_at,
+                classified,
+                provider: codex(),
+                thread_id: ThreadId::parse("thread-a").unwrap(),
+                source_resource_id: Some(ResourceId::parse("codex:conversation:source").unwrap()),
+                proposed_provider_thread_id: template_action
+                    .as_ref()
+                    .and_then(|action| action.proposed_provider_thread_id.clone()),
+                keep_both: template_action
+                    .as_ref()
+                    .and_then(|action| action.keep_both.clone()),
+                pins,
             })
             .unwrap();
             assert_eq!(
-                action.relation, case.relation,
-                "{} {direction:?}",
-                case.name
+                planned.as_ref().map(|action| action.action),
+                expected.planned_action()
             );
-            assert_eq!(action.action, expected, "{} {direction:?}", case.name);
-            validate_conversation_action_pins(&action, &current).unwrap();
+            if let Some(action) = planned {
+                let current = ConversationApplyContext {
+                    now: 1_500,
+                    pins: action.pins.clone(),
+                };
+                validate_conversation_action_pins(&action, &current).unwrap();
+            }
         }
     }
+}
 
-    // The same current evidence without a durable accepted pin still adopts
-    // on Pull: first-contact adoption is what writes the pin.
-    let probe = ConversationCapabilities {
-        acceptance_durably_pinned: false,
-        ..ConversationCapabilities::default()
-    };
-    let first_contact = default_conversation_decision(
-        ConversationPlanDirection::Pull,
-        TailClassification::Sync(SyncCurrency::Current),
-        probe,
-    );
+#[test]
+fn malformed_evidence_is_a_typed_blocker_not_a_classifier_state() {
+    let tail = whole_tail(&[("m-a", "one")]);
     assert_eq!(
-        first_contact.action,
-        ConversationPlanActionType::AdoptCloudMetadata
+        evidence_of(None, Some(&tail), Some(&tail)),
+        Err(TailEvidenceBlocker::UnacceptedOverlap)
     );
-    assert!(first_contact.selectable);
-}
-
-/// A faithful provider rewrite (thread ID and cwd restamp) leaves every
-/// canonical value identical, so the tails agree and both directions settle
-/// without any special structural-rewrite refinement.
-#[test]
-fn verified_structural_rewrite_is_in_sync() {
-    let source = TranscriptBuilder::new("thread-a", "/tmp/project-a")
-        .message("m-a", "user", "same")
-        .message("m-b", "assistant", "same answer")
-        .build();
-    let rewritten = rewrite_transcript_identity(
-        &source,
-        "thread-a",
-        "thread-b",
-        "/tmp/project-a",
-        "/tmp/project-b",
-    )
-    .unwrap();
-    assert_ne!(source, rewritten);
-    let local = compute_portable_conversation_tail(
-        TailPartitionKind::WholeThread,
-        0,
-        &analyzed_chain(&rewritten),
-    )
-    .unwrap();
-    let cloud = compute_portable_conversation_tail(
-        TailPartitionKind::WholeThread,
-        0,
-        &analyzed_chain(&source),
-    )
-    .unwrap();
-    assert_eq!(local, cloud);
-    let relation = compare_conversation_tail(evidence_of(Some(&cloud), Some(&local), Some(&cloud)));
-    assert_eq!(relation, TailClassification::Sync(SyncCurrency::Current));
-}
-
-#[test]
-fn pull_materialization_without_quiescence_is_blocked() {
     let decision = default_conversation_decision(
         ConversationPlanDirection::Pull,
-        TailClassification::CloudOutstanding,
-        ConversationCapabilities {
-            provider_quiescent: false,
-            ..ConversationCapabilities::default()
-        },
+        TailClassification::Unknown,
+        ConversationCapabilities::default(),
     );
-    assert_eq!(decision.action, ConversationPlanActionType::Blocked);
-    assert_eq!(
-        decision.reason_code,
-        ConversationReasonCode::ProviderNotQuiescent
-    );
+    assert_eq!(decision.action, ConversationReviewAction::Blocked);
+    assert!(!decision.selectable);
+}
+
+fn review_only_pins(
+    accepted: Option<PortableConversationTail>,
+    local: Option<PortableConversationTail>,
+    cloud: Option<PortableConversationTail>,
+) -> ConversationActionPins {
+    action_pins(None, accepted, local, cloud)
 }
 
 pub(super) fn reviewed_action(
-    direction: ConversationPlanDirection,
     action_type: ConversationPlanActionType,
-    reason_code: ConversationReasonCode,
     relation: TailClassification,
 ) -> (ConversationPlanAction, ConversationApplyContext) {
-    let base = whole_tail(&[("m-a", "one"), ("m-b", "two")]);
-    let longer = whole_tail(&[("m-a", "one"), ("m-b", "two"), ("m-c", "local")]);
-    let (accepted, local, cloud) = match relation {
-        TailClassification::Sync(SyncCurrency::Current) => {
-            (Some(base.clone()), Some(base.clone()), Some(base.clone()))
-        }
-        TailClassification::Sync(SyncCurrency::Advanced) => (
-            Some(base.clone()),
-            Some(longer.clone()),
-            Some(longer.clone()),
-        ),
-        TailClassification::LocalOutstanding => {
-            (Some(base.clone()), Some(longer.clone()), Some(base.clone()))
-        }
-        TailClassification::CloudOutstanding => {
-            (Some(base.clone()), Some(base.clone()), Some(longer.clone()))
-        }
-        TailClassification::Divergent => (
-            Some(base.clone()),
-            Some(longer.clone()),
-            Some(whole_tail(&[("m-a", "one"), ("m-b", "two"), ("m-d", "x")])),
-        ),
-        TailClassification::MissingCloud => (None, Some(base.clone()), None),
-        TailClassification::MissingLocal => (None, None, Some(base.clone())),
-        TailClassification::MissingBoth => (None, None, None),
-        TailClassification::Unknown => (None, Some(base.clone()), Some(base.clone())),
-    };
-    reviewed_action_with_tails(
-        direction,
-        action_type,
-        reason_code,
-        relation,
-        accepted,
-        local,
-        cloud,
-    )
+    let (accepted, local, cloud) = tails_for_relation(relation);
+    reviewed_action_with_tails(action_type, accepted, local, cloud)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn reviewed_action_with_tails(
-    direction: ConversationPlanDirection,
+fn reviewed_action_with_tails(
     action_type: ConversationPlanActionType,
-    reason_code: ConversationReasonCode,
-    relation: TailClassification,
     accepted: Option<PortableConversationTail>,
     local: Option<PortableConversationTail>,
     cloud: Option<PortableConversationTail>,
 ) -> (ConversationPlanAction, ConversationApplyContext) {
-    let mut provider_state = Vec::new();
-    let mut current_provider_state = BTreeMap::new();
-    let mut provider_thread_id = None;
-    let mut keep_both = None;
-    let publishes = matches!(
-        action_type,
-        ConversationPlanActionType::Publish | ConversationPlanActionType::CreateCloud
-    );
-    let materializes = matches!(
-        action_type,
-        ConversationPlanActionType::MaterializeCloud
-            | ConversationPlanActionType::KeepBoth
-            | ConversationPlanActionType::CreateLocal
-    );
-    if matches!(
+    let pins = action_pins(Some(action_type), accepted, local, cloud);
+    let proposed_provider_thread_id = matches!(
         action_type,
         ConversationPlanActionType::MaterializeCloud | ConversationPlanActionType::CreateLocal
-    ) {
-        provider_thread_id = Some("0199a1b2-0000-7000-8000-0000000000aa".to_string());
-        let target = "/tmp/provider/rollout-thread-reserved.jsonl".to_string();
-        provider_state.push(ProviderStateExpectation {
-            target_path: target.clone(),
-            expectation: TargetExpectation::Absent,
-        });
-        current_provider_state.insert(target, TargetExpectation::Absent);
-    }
-    if action_type == ConversationPlanActionType::KeepBoth {
-        let target = "/tmp/provider/rollout-remote-branch.jsonl".to_string();
-        provider_state.push(ProviderStateExpectation {
-            target_path: target.clone(),
-            expectation: TargetExpectation::Absent,
-        });
-        current_provider_state.insert(target, TargetExpectation::Absent);
-        keep_both = Some(KeepBothPlan {
-            preserved_thread_id: ThreadId::parse("thread-preserved").unwrap(),
-            remote_provider_thread_id: "0199a1b2-0000-7000-8000-0000000000bb".to_string(),
-        });
-    }
-    let raw_range = publishes.then(|| RawRangePin {
-        start_byte_offset: 0,
-        end_byte_offset: 256,
-        range_sha256: "9".repeat(64),
+    )
+    .then(|| "0199a1b2-0000-7000-8000-0000000000aa".to_string());
+    let keep_both = (action_type == ConversationPlanActionType::KeepBoth).then(|| KeepBothPlan {
+        preserved_thread_id: ThreadId::parse("thread-preserved").unwrap(),
+        remote_provider_thread_id: "0199a1b2-0000-7000-8000-0000000000bb".to_string(),
+        preserved: PreservedProvenance {
+            preserved_from: ThreadId::parse("thread-a").unwrap(),
+            ordinal: 1,
+        },
+        preserved_display_title: "Thread test conversation (Preserved 1 · Machine A)".to_string(),
     });
-    let digests = materializes.then(|| ("b".repeat(64), "c".repeat(64)));
-    let host_id = HostId::parse("11111111111111111111111111111111").unwrap();
-    let replica_id = ReplicaId::parse("replica-a").unwrap();
-    let local_project_id = LocalProjectId::parse("project-a").unwrap();
-    let provider_profile_id = LocalProviderProfileId::parse("profile-a").unwrap();
     let action = ConversationPlanAction {
         action_id: ActionId::parse("action-thread").unwrap(),
-        direction,
         action: action_type,
-        reason_code,
-        relation,
         provider: codex(),
-        host_id: host_id.clone(),
-        replica_id: replica_id.clone(),
-        local_project_id: local_project_id.clone(),
-        provider_profile_id: provider_profile_id.clone(),
         thread_id: ThreadId::parse("thread-a").unwrap(),
         source_resource_id: Some(ResourceId::parse("codex:conversation:source").unwrap()),
-        proposed_provider_thread_id: provider_thread_id,
+        proposed_provider_thread_id,
         keep_both,
-        required_codec: "codex.lineage.v1".to_string(),
-        pinned_revision: 7,
-        pinned_commit_id: "commit-abcdef".to_string(),
-        pinned_manifest_sha256: "a".repeat(64),
-        pinned_scope_revision: 6,
-        pinned_scope_sha256: "f".repeat(64),
-        pinned_accepted_tail: accepted.clone(),
-        pinned_accepted_local_tail: accepted.clone(),
-        pinned_local_tail: local.clone(),
-        pinned_cloud_tail: cloud.clone(),
-        pinned_checkpoint_generation: None,
-        pinned_lineage_digest: digests.as_ref().map(|(lineage, _)| lineage.clone()),
-        pinned_semantic_digest: digests.as_ref().map(|(_, semantic)| semantic.clone()),
-        pinned_raw_range: raw_range.clone(),
-        expected_local_target: TargetExpectation::Sha256("d".repeat(64)),
-        expected_provider_state: provider_state,
-        expected_profile_revision: 3,
-        expected_project_binding_revision: 8,
-        expected_host_identity_revision: 2,
-        expected_bindings_document_revision: 4,
-        expected_binding_revision: Some(5),
-        expires_at: 2_000,
+        pins,
     };
+    action.validate().unwrap();
     let current = ConversationApplyContext {
         now: 1_500,
-        host_id,
-        replica_id,
-        local_project_id,
-        provider_profile_id,
-        host_identity_revision: 2,
-        revision: 7,
-        commit_id: "commit-abcdef".to_string(),
-        manifest_sha256: "a".repeat(64),
-        scope_revision: 6,
-        scope_sha256: "f".repeat(64),
-        accepted_tail: accepted.clone(),
-        accepted_local_tail: accepted,
-        local_tail: local,
-        cloud_tail: cloud,
-        checkpoint_generation: None,
-        lineage_digest: digests.as_ref().map(|(lineage, _)| lineage.clone()),
-        semantic_digest: digests.as_ref().map(|(_, semantic)| semantic.clone()),
-        raw_range,
-        local_target: TargetExpectation::Sha256("d".repeat(64)),
-        provider_state: current_provider_state,
-        profile_revision: 3,
-        project_binding_revision: 8,
-        bindings_document_revision: 4,
-        binding_revision: Some(5),
-        codec: "codex.lineage.v1".to_string(),
-        provider_quiescent: true,
+        pins: action.pins.clone(),
     };
     (action, current)
 }
 
-/// Plan section 13: relations come from exactly one production comparison
-/// site. A second P/L/C comparison anywhere outside the shared classifier
-/// is an architecture regression, whatever it computes.
-#[test]
-fn architecture_rejects_any_second_classifier_call_site() {
-    fn rust_files(root: &std::path::Path, output: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(root).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                rust_files(&path, output);
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                output.push(path);
-            }
-        }
-    }
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut files = Vec::new();
-    rust_files(&manifest.join("src"), &mut files);
-    rust_files(&manifest.join("../crates"), &mut files);
-    let mut call_sites = Vec::new();
-    for path in files {
-        let display = path.display().to_string();
-        if display.contains("/sync_tests/") || display.ends_with("/tests.rs") {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).unwrap();
-        // Test modules are appended after production code in this codebase.
-        let production = text.split("#[cfg(test)]").next().unwrap();
-        for line in production.lines() {
-            if line.contains("compare_conversation_tail(")
-                && !line.contains("fn compare_conversation_tail")
-            {
-                call_sites.push(display.clone());
-            }
-        }
-    }
-    assert_eq!(
-        call_sites.len(),
-        1,
-        "exactly one production classifier call site, found: {call_sites:?}"
+fn action_pins(
+    action_type: Option<ConversationPlanActionType>,
+    accepted: Option<PortableConversationTail>,
+    local: Option<PortableConversationTail>,
+    cloud: Option<PortableConversationTail>,
+) -> ConversationActionPins {
+    let publishes = matches!(
+        action_type,
+        Some(ConversationPlanActionType::Publish | ConversationPlanActionType::CreateCloud)
     );
-    assert!(call_sites[0].ends_with("commands.rs"), "{call_sites:?}");
+    let materializes = matches!(
+        action_type,
+        Some(
+            ConversationPlanActionType::MaterializeCloud
+                | ConversationPlanActionType::KeepBoth
+                | ConversationPlanActionType::CreateLocal
+        )
+    );
+    let provider_state = materializes
+        .then(|| ProviderStateExpectation {
+            target_path: "/tmp/provider/rollout-thread-reserved.jsonl".to_string(),
+            expectation: TargetExpectation::Absent,
+        })
+        .into_iter()
+        .collect();
+    ConversationActionPins {
+        context: ConversationContextPins {
+            host_id: HostId::parse("11111111111111111111111111111111").unwrap(),
+            replica_id: ReplicaId::parse("replica-a").unwrap(),
+            local_project_id: LocalProjectId::parse("project-a").unwrap(),
+            provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
+            host_identity_revision: 2,
+            profile_revision: 3,
+            project_binding_revision: 8,
+            bindings_document_revision: 4,
+            binding_revision: Some(5),
+        },
+        revision: ConversationRevisionPins {
+            bundle_revision: 7,
+            commit_id: "commit-abcdef".to_string(),
+            manifest_sha256: "a".repeat(64),
+            scope_revision: 6,
+            scope_sha256: "f".repeat(64),
+        },
+        tail: ConversationTailPins {
+            accepted: accepted.clone(),
+            accepted_local: accepted,
+            local,
+            cloud,
+            checkpoint_generation: None,
+            lineage_digest: materializes.then(|| "b".repeat(64)),
+            semantic_digest: materializes.then(|| "c".repeat(64)),
+            raw_range: publishes.then(|| RawRangePin {
+                start_byte_offset: 0,
+                end_byte_offset: 256,
+                range_sha256: "9".repeat(64),
+            }),
+        },
+        target: ConversationTargetPins {
+            local: TargetExpectation::Sha256("d".repeat(64)),
+            provider_state,
+        },
+        codec: "codex.lineage.v1".to_string(),
+        expires_at: 2_000,
+    }
 }

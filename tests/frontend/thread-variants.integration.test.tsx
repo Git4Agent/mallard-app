@@ -7,8 +7,8 @@ import {
   syncHoldDetail,
 } from "../../src/components/project-sync/ProjectActivityPage";
 import type {
-  ConversationPlanActionType,
-  ConversationReasonCode,
+  ConversationBlocker,
+  ConversationReviewAction,
   ThreadSyncDecision,
   ThreadSyncEntry,
 } from "../../src/types";
@@ -58,7 +58,7 @@ function localSession(threadId: string, title: string) {
     source: "local_only" as const,
     access: "bound_ready" as const,
     title,
-    is_preserved_local: false,
+    preserved: null,
     summary: "",
     started_at: WINDOW_START + 1_000,
     ended_at: WINDOW_START + 2_000,
@@ -109,11 +109,11 @@ const activity = {
 };
 
 function decision(
-  action: ConversationPlanActionType,
-  reasonCode: ConversationReasonCode,
+  action: ConversationReviewAction,
+  blocker: ConversationBlocker | null = null,
   selectable = false,
 ): ThreadSyncDecision {
-  return { action, reason_code: reasonCode, selectable };
+  return { action, blocker, selectable };
 }
 
 function entry(overrides: Partial<ThreadSyncEntry> & Pick<ThreadSyncEntry, "thread_id">): ThreadSyncEntry {
@@ -121,15 +121,15 @@ function entry(overrides: Partial<ThreadSyncEntry> & Pick<ThreadSyncEntry, "thre
     provider: "codex",
     provider_display_name: "Codex",
     access: "bound_ready",
+    conversation_resource_id: `codex:conversation:${overrides.thread_id}`,
     resource_id: `codex:conversation:${overrides.thread_id}`,
     display_name: overrides.thread_id,
     state: "local_only",
     local_present: true,
     storage_present: false,
     cloud_thread_id: overrides.thread_id,
-    relation: "missing_cloud",
-    push_decision: decision("create_cloud", "missing_cloud", true),
-    pull_decision: decision("report_local_only", "missing_cloud"),
+    push_decision: decision("create_cloud", null, true),
+    pull_decision: decision("report_local_only"),
     ...overrides,
   };
 }
@@ -150,11 +150,10 @@ const divergedEntry = entry({
   display_name: "Changed on both machines",
   state: "diverged",
   storage_present: true,
-  relation: "diverged",
   local_updated_at: WINDOW_START + 2_000,
   storage_updated_at: WINDOW_START + 1_500,
-  push_decision: decision("require_pull", "divergent"),
-  pull_decision: decision("keep_both", "divergent", true),
+  push_decision: decision("require_pull"),
+  pull_decision: decision("keep_both", null, true),
 });
 const storedEntry = entry({
   thread_id: STORED_ID,
@@ -162,10 +161,9 @@ const storedEntry = entry({
   state: "storage_only",
   local_present: false,
   storage_present: true,
-  relation: "missing_local",
   storage_updated_at: WINDOW_START + 1_000,
-  push_decision: decision("not_pushable", "missing_local"),
-  pull_decision: decision("create_local", "missing_local", true),
+  push_decision: decision("not_pushable"),
+  pull_decision: decision("create_local", null, true),
 });
 const olderEntry = entry({
   thread_id: OLDER_ID,
@@ -300,7 +298,7 @@ test("hold details explain metadata pulls, divergence, and unsupported codecs", 
       thread_id: HEALTHY_ID,
       state: "synced",
       storage_present: true,
-      push_decision: decision("require_pull_metadata", "sync_advanced"),
+      push_decision: decision("require_pull_metadata"),
     })) ?? "",
     /storage has newer sync metadata/,
   );

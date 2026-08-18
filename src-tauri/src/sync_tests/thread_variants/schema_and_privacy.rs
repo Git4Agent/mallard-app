@@ -2,7 +2,7 @@ use super::harness::{chain, codex_scope, codex_scope_key, ThreadSpec, VariantWor
 use crate::project_sync::domain::{
     BundleId, BundleManifest, BundleScope, ConversationFileRef, ConversationFileRole,
     ConversationLineageStatus, ConversationMaterializationState, ConversationPlanActionType,
-    ConversationPlanDirection, LocalConversationBinding, LogicalPath, OriginHostAlias, ProviderKey,
+    LocalConversationBinding, LogicalPath, OriginHostAlias, PreservedProvenance, ProviderKey,
     ReplicaId, ThreadId, Tombstone, TombstoneTarget,
 };
 use crate::project_sync::storage_core::ObjectStore;
@@ -84,17 +84,13 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
     );
 
     let (mut action, mut current) = super::relation_matrix::reviewed_action(
-        ConversationPlanDirection::Push,
-        ConversationPlanActionType::NoChanges,
-        crate::project_sync::domain::ConversationReasonCode::SyncCurrent,
-        crate::project_sync::domain::TailClassification::Sync(
-            crate::project_sync::domain::SyncCurrency::Current,
-        ),
+        ConversationPlanActionType::Publish,
+        crate::project_sync::domain::TailClassification::LocalOutstanding,
     );
-    action.host_id = identity_a.host_id.clone();
-    action.expected_host_identity_revision = identity_a.revision;
-    current.host_id = identity_a.host_id.clone();
-    current.host_identity_revision = identity_a.revision;
+    action.pins.context.host_id = identity_a.host_id.clone();
+    action.pins.context.host_identity_revision = identity_a.revision;
+    current.pins.context.host_id = identity_a.host_id.clone();
+    current.pins.context.host_identity_revision = identity_a.revision;
     crate::project_sync::conversation_sync::validate_conversation_action_pins(&action, &current)
         .unwrap();
     let rotated = world
@@ -113,13 +109,17 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
             .0,
         same_a1.0
     );
-    current.host_id = rotated.host_id;
-    current.host_identity_revision = rotated.revision;
+    current.pins.context.host_id = rotated.host_id;
+    current.pins.context.host_identity_revision = rotated.revision;
     assert_eq!(
         crate::project_sync::conversation_sync::validate_conversation_action_pins(
             &action, &current,
         ),
-        Err(crate::project_sync::conversation_sync::ConversationStalePin::Host)
+        Err(
+            crate::project_sync::conversation_sync::ConversationStalePin::Context(
+                crate::project_sync::conversation_sync::ConversationContextPin::Host,
+            )
+        )
     );
 
     let origin = world.origin(&world.repo_b, "replica-b");
@@ -238,6 +238,22 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
         let thread = scope.conversations.get_mut(&thread_id()).unwrap();
         thread.forked_from = Some(thread.thread_id.clone());
     }));
+    // Preservation provenance fails closed under the same reference rules:
+    // no self-preserve and no zero ordinal.
+    mutations.push(Box::new(|scope| {
+        let thread = scope.conversations.get_mut(&thread_id()).unwrap();
+        thread.preserved = Some(PreservedProvenance {
+            preserved_from: thread.thread_id.clone(),
+            ordinal: 1,
+        });
+    }));
+    mutations.push(Box::new(|scope| {
+        let thread = scope.conversations.get_mut(&thread_id()).unwrap();
+        thread.preserved = Some(PreservedProvenance {
+            preserved_from: ThreadId::parse("thread-v2").unwrap(),
+            ordinal: 0,
+        });
+    }));
     mutations.push(Box::new(|scope| {
         let v2 = ThreadId::parse("thread-v2").unwrap();
         let v1_resource = scope.conversations[&thread_id()].resource_id.clone();
@@ -355,6 +371,7 @@ fn local_bindings_reject_duplicate_provider_thread_ownership_profile_wide() {
         provider_profile_id: scope.profile_id.clone(),
         thread_id: ThreadId::parse(thread).unwrap(),
         forked_from: None,
+        preserved: None,
         provider_thread_id: Some("same-provider-thread".to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
         root_tail_layout: Some(mallard_domain::RootTailLayout {

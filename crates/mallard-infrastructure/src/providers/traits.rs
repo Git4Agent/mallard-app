@@ -530,6 +530,9 @@ pub trait SessionAdapter: Send + Sync {
     }
     /// Bounded full-file summary for Activity.
     fn summarize_file(&self, path: &Path) -> Result<SessionFileSummary, String>;
+    /// Summarize an already captured transcript snapshot. Capture callers
+    /// must use this instead of reopening the mutable source path.
+    fn summarize_bytes(&self, bytes: &[u8]) -> Result<SessionFileSummary, String>;
     /// Build a metadata-only, bounded rich-timeline index. Implementations
     /// must not retain visible message text, tool arguments, or tool output.
     fn build_timeline_index(

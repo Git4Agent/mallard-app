@@ -1107,8 +1107,8 @@ mod tests {
         use mallard_domain::{
             compare_conversation_tail, compute_conversation_tail_state,
             compute_portable_conversation_tail, PortableConversationTail, RootTailLayout,
-            SyncCurrency, TailAccumulator, TailClassification, TailComparisonEvidence,
-            TailSideEvidence, PORTABLE_TAIL_CODEC_V1, PORTABLE_TAIL_CODEC_WIRE_V1,
+            SyncCurrency, TailAccumulator, TailClassification, TailSideEvidence,
+            VerifiedTailEvidence, PORTABLE_TAIL_CODEC_V1, PORTABLE_TAIL_CODEC_WIRE_V1,
         };
 
         const ROOT_A: &str = "/tmp/machine-a";
@@ -1119,17 +1119,8 @@ mod tests {
             accepted_local: TailSideEvidence,
             local: TailSideEvidence,
             cloud: TailSideEvidence,
-        ) -> TailComparisonEvidence {
-            TailComparisonEvidence {
-                accepted,
-                accepted_local,
-                local,
-                cloud,
-                local_provenance_verified: true,
-                accepted_witness_verified: true,
-                cloud_ancestry_verified: true,
-                coordinates_verified: true,
-            }
+        ) -> VerifiedTailEvidence {
+            VerifiedTailEvidence::new(accepted, accepted_local, local, cloud).unwrap()
         }
         let present = |tail: &PortableConversationTail| TailSideEvidence::Present(tail.clone());
         let paginated_layout = |start: u64| RootTailLayout {
@@ -1262,7 +1253,7 @@ mod tests {
         assert_eq!(seeded_b.observed_tail, b_local_v1);
         assert_eq!(seeded_b.layout, imported);
         assert_eq!(
-            compare_conversation_tail(evidence(
+            compare_conversation_tail(&evidence(
                 present(&cloud_v1),
                 present(&b_local_v1),
                 present(&seeded_b.observed_tail),
@@ -1281,7 +1272,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            compare_conversation_tail(evidence(
+            compare_conversation_tail(&evidence(
                 present(&cloud_v1),
                 present(&a_local_v1),
                 present(&a_local_v2),
@@ -1306,9 +1297,7 @@ mod tests {
             &cloud_v1.accepted_tail_state,
         )
         .unwrap();
-        resumed
-            .fold_message(&resolved_staged_two.chain[8])
-            .unwrap();
+        resumed.fold_message(&resolved_staged_two.chain[8]).unwrap();
         assert_eq!(resumed.state_hex(), cloud_v2.accepted_tail_state);
 
         // B appends a conflicting m5 before seeing the new head: a pinned
@@ -1318,7 +1307,7 @@ mod tests {
         let b_bytes2 = fs::read(&b_local).unwrap();
         let diverged_b = seed_codex_root(&resolved_b2, &b_bytes2, Some(&imported)).unwrap();
         assert_eq!(
-            compare_conversation_tail(evidence(
+            compare_conversation_tail(&evidence(
                 present(&cloud_v1),
                 present(&b_local_v1),
                 present(&diverged_b.observed_tail),
@@ -1357,7 +1346,7 @@ mod tests {
         let seeded_tracked =
             seed_codex_root(&resolved_tracked, &tracked_bytes, Some(&imported)).unwrap();
         assert_eq!(
-            compare_conversation_tail(evidence(
+            compare_conversation_tail(&evidence(
                 present(&cloud_v2),
                 present(&b_tracked_v2),
                 present(&seeded_tracked.observed_tail),
@@ -1365,12 +1354,9 @@ mod tests {
             )),
             TailClassification::LocalOutstanding
         );
-        let push_three = build_standalone_codex_root(
-            &resolved_tracked,
-            &encode(ROOT_B),
-            Some(&imported),
-        )
-        .unwrap();
+        let push_three =
+            build_standalone_codex_root(&resolved_tracked, &encode(ROOT_B), Some(&imported))
+                .unwrap();
         let cloud_v3 = push_three.portable_tail.clone();
         assert_eq!(cloud_v3.codec, PORTABLE_TAIL_CODEC_WIRE_V1);
         assert_eq!(cloud_v3.start_record_count, 5);
@@ -1395,7 +1381,7 @@ mod tests {
         // content — the fold state over the restored prefix equals A's own
         // local value.
         assert_eq!(
-            compare_conversation_tail(evidence(
+            compare_conversation_tail(&evidence(
                 present(&cloud_v2),
                 present(&a_local_v2),
                 present(&a_local_v2),
@@ -1431,7 +1417,7 @@ mod tests {
         // from the cloud, and its first Push publishes the preserved layout
         // with no family metadata.
         assert_eq!(
-            compare_conversation_tail(evidence(
+            compare_conversation_tail(&evidence(
                 TailSideEvidence::ConfirmedAbsent,
                 TailSideEvidence::ConfirmedAbsent,
                 present(&diverged_b.observed_tail),
@@ -1439,13 +1425,12 @@ mod tests {
             )),
             TailClassification::MissingCloud
         );
-        let preserved_push = build_standalone_codex_root(
-            &resolved_b2,
-            &encode(ROOT_B),
-            Some(&imported),
-        )
-        .unwrap();
-        assert_eq!(preserved_push.portable_tail.codec, PORTABLE_TAIL_CODEC_WIRE_V1);
+        let preserved_push =
+            build_standalone_codex_root(&resolved_b2, &encode(ROOT_B), Some(&imported)).unwrap();
+        assert_eq!(
+            preserved_push.portable_tail.codec,
+            PORTABLE_TAIL_CODEC_WIRE_V1
+        );
         assert_eq!(preserved_push.portable_tail.start_record_count, 5);
         assert_eq!(preserved_push.portable_tail.accepted_end_record_count, 9);
         assert!(preserved_push.subagents.is_empty());
