@@ -152,8 +152,8 @@ const PULL_PLANS: Record<string, CatalogResourcePullPlan> = {
 };
 
 const STORAGES = [
-  { id: "storage-local-1", name: "Local storage 1", kind: "local" as const },
-  { id: "storage-vault", name: "Vault", kind: "s3" as const },
+  { id: "storage-local-1", name: "Local storage 1", kind: "local" as const, detail: "~/Library/Mallard/local-1", detailIsPath: true },
+  { id: "storage-vault", name: "Vault", kind: "s3" as const, detail: "Bucket · mallard-vault", detailIsPath: false },
 ];
 
 function stubApi(storageId: string | null): StorageCatalogApi {
@@ -257,9 +257,11 @@ function Harness() {
             }],
           }]}
           onOpenScope={() => undefined}
-          onOpenStorages={() => undefined}
           onOpenStorageSettings={() => undefined}
+          onAddStorage={() => undefined}
+          onAddScope={() => undefined}
           onRemoveScope={() => undefined}
+          notify={(message) => console.info("notice:", message)}
           onScopeGone={() => undefined}
           api={stubApi(storageId)}
         />

@@ -45,6 +45,10 @@ export interface CatalogStorageOption {
   id: string;
   name: string;
   kind: "local" | "s3";
+  /** The one-line "where is it" the shell already computes for every storage
+   * menu — a folder for local, a bucket for S3. */
+  detail: string;
+  detailIsPath: boolean;
 }
 
 type Mode =
@@ -220,17 +224,21 @@ function ResourceRow({
       >
         {stamp?.short ?? ""}
       </span>
-      {onOpen && (
-        <button
-          type="button"
-          className="btn btn-ghost catalog-row-open"
-          title="Storage links, fork, unlink"
-          aria-label={`Open ${row.display_name}`}
-          onClick={onOpen}
-        >
-          <Icon name="chevron-right" size={14} />
-        </button>
-      )}
+      {/* The slot is always here, empty or not: a row with no detail page
+          used to drop the column and shunt its date left of every row that
+          had one. */}
+      <span className="catalog-row-open">
+        {onOpen && (
+          <button
+            type="button"
+            title="Storage links, fork, unlink"
+            aria-label={`Open ${row.display_name}`}
+            onClick={onOpen}
+          >
+            <Icon name="chevron-right" size={14} />
+          </button>
+        )}
+      </span>
     </article>
   );
 }
@@ -241,10 +249,12 @@ export default function StorageCatalogPage({
   storages,
   appActions,
   onOpenScope,
-  onOpenStorages,
   onOpenStorageSettings,
+  onAddStorage,
+  onAddScope,
   onRemoveScope,
   onScopeGone,
+  notify,
   api = storageCatalogApi,
 }: {
   scope: CatalogScopeView;
@@ -254,11 +264,15 @@ export default function StorageCatalogPage({
   /** Theme and app-wide commands: this bar is the window's only chrome. */
   appActions: PathBarMenuGroup[];
   onOpenScope: (scopeId: string) => void;
-  onOpenStorages: () => void;
   onOpenStorageSettings: (storageId: string) => void;
+  onAddStorage: () => void;
+  onAddScope: () => void;
   onRemoveScope: () => void;
   /** The row disappeared underneath the page (deleted elsewhere). */
   onScopeGone: () => void;
+  /** Outcomes go to the shell's one notification surface, the way every other
+   * screen reports them — not to a block that pushes the list down. */
+  notify: (message: string) => void;
   api?: StorageCatalogApi;
 }) {
   const label = catalogScopeLabel(scope.scope, scope.profile);
@@ -271,7 +285,6 @@ export default function StorageCatalogPage({
   const [inspectingLinks, setInspectingLinks] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [outcome, setOutcome] = useState<string | null>(null);
 
   const [pushSelected, setPushSelected] = useState<Set<string>>(new Set());
   const [pushAcks, setPushAcks] = useState<Set<string>>(new Set());
@@ -321,7 +334,6 @@ export default function StorageCatalogPage({
   useEffect(() => {
     setMode({ kind: "list" });
     setChosenStorageId(null);
-    setOutcome(null);
   }, [scope.scope.scope_id]);
 
   const rows = useMemo(() => page?.rows ?? [], [page]);
@@ -401,7 +413,6 @@ export default function StorageCatalogPage({
     setPushSelected(new Set(pushRows.map((row) => row.row_id)));
     setPushAcks(new Set());
     setError(null);
-    setOutcome(null);
     setMode({ kind: "push" });
   };
 
@@ -433,7 +444,7 @@ export default function StorageCatalogPage({
     setMode({ kind: "list" });
     await load();
     const noun = pushed === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase();
-    setOutcome(`Pushed ${pushed} ${noun} to ${storageName ?? "storage"}.`);
+    notify(`Pushed ${pushed} ${noun} to ${storageName ?? "storage"}.`);
     if (failures.length > 0) setError(failures.join("\n"));
   };
 
@@ -444,7 +455,6 @@ export default function StorageCatalogPage({
   const openPull = async () => {
     setBusy(true);
     setError(null);
-    setOutcome(null);
     setMode({ kind: "pull" });
     const entries: PullEntry[] = [];
     const blocked: Record<string, string> = {};
@@ -504,7 +514,7 @@ export default function StorageCatalogPage({
     setMode({ kind: "list" });
     await load();
     const noun = applied === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase();
-    setOutcome(unaccepted > 0
+    notify(unaccepted > 0
       ? `Pulled ${applied} ${noun}. Pull did not advance the comparison base for ${unaccepted} of them.`
       : `Pulled ${applied} ${noun} from ${storageName ?? "storage"}.`);
     if (failures.length > 0) setError(failures.join("\n"));
@@ -533,7 +543,7 @@ export default function StorageCatalogPage({
       setBusy(false);
     }
     await load();
-    setOutcome("Storage links removed. Local and stored content were left untouched.");
+    notify("Storage links removed. Local and stored content were left untouched.");
     if (failures.length > 0) setError(failures.join("\n"));
   };
 
@@ -593,7 +603,7 @@ export default function StorageCatalogPage({
       const plan = await api.prepareFork(resource.registration.registration_id, forkName.trim());
       const result = await api.applyFork(resource.registration.registration_id, plan.plan_id);
       setForkName("");
-      setOutcome(result.message ?? `Created ${result.display_name}`);
+      notify(result.message ?? `Created ${result.display_name}`);
       await load();
     } catch (reason) {
       setError(errorMessage(reason));
@@ -615,7 +625,7 @@ export default function StorageCatalogPage({
     setError(null);
     try {
       await api.unlink(resource.registration.registration_id, linkId, revision);
-      setOutcome("Storage link removed. Local and remote content were left untouched.");
+      notify("Storage link removed. Local and remote content were left untouched.");
       setMode({ kind: "list" });
       await load();
     } catch (reason) {
@@ -635,7 +645,7 @@ export default function StorageCatalogPage({
     setError(null);
     try {
       await api.remove(resource.registration.registration_id, resource.registration.revision);
-      setOutcome("Registration removed. Provider content was left untouched.");
+      notify("Registration removed. Provider content was left untouched.");
       setMode({ kind: "list" });
       await load();
     } catch (reason) {
@@ -647,22 +657,27 @@ export default function StorageCatalogPage({
 
   // ---- the bar -----------------------------------------------------------
 
+  /* The project workspace's trail exactly: the storage it syncs with, then
+     the thing being synced. No Storages crumb — that belongs to the storage
+     screens, which are rooted at their index; a workspace starts at its own
+     outer scope. */
+  const storage = storages.find((candidate) => candidate.id === storageId) ?? null;
   const crumbs: PathBarCrumb[] = [
     {
-      id: "storages",
-      label: "Storages",
-      icon: "drive",
-      tone: "section",
-      onActivate: onOpenStorages,
-    },
-    {
       id: "storage",
-      label: storageName ?? "No storage",
-      icon: "cloud",
+      label: storage?.name || (storageId ? "(unnamed)" : "No storage"),
+      icon: storage?.kind === "s3" ? "cloud" : "drive",
       tone: "root",
       warning: !storageId,
-      menuLabel: storageId ? "Switch storage" : "Choose storage",
-      menuHeader: { label: storageName ?? "No storage linked", icon: "cloud" },
+      title: storage ? `${storage.name || "Storage"} · ${storage.detail}` : undefined,
+      ariaLabel: `${storage?.name ?? "No storage"}. Storage menu`,
+      menuLabel: "Storage",
+      menuHeader: {
+        label: storage?.name || "No storage linked",
+        detail: storage?.detail,
+        detailIsPath: storage?.detailIsPath,
+        icon: storage?.kind === "s3" ? "cloud" : "drive",
+      },
       menuBanner: storageId
         ? undefined
         : `Add a storage to compare these ${kind.plural.toLowerCase()} and turn on Push and Pull.`,
@@ -671,35 +686,48 @@ export default function StorageCatalogPage({
           items: [
             {
               id: "settings",
-              label: "Storage settings",
+              label: "Storage settings…",
               icon: "settings",
-              disabled: !storageId,
+              disabled: !storageId || busy,
               onSelect: () => storageId && onOpenStorageSettings(storageId),
             },
             {
               id: "unlink",
-              label: `Unlink from these ${kind.plural.toLowerCase()}`,
+              label: `Unlink from ${label}…`,
               icon: "link-off",
               danger: true,
-              disabled: !storageId || !rows.some((row) => row.link_id),
-              disabledReason: "Nothing here is paired with it yet",
+              disabled: !storageId || busy || !rows.some((row) => row.link_id),
+              disabledReason: storageId ? "Nothing here is paired with it yet" : undefined,
+              title: "Stop syncing this pairing; content already in storage is kept",
               onSelect: () => void unlinkStorage(),
             },
           ],
         },
-        {
+        ...(storages.filter((candidate) => candidate.id !== storageId).length > 0 ? [{
           label: "Switch to",
           items: storages
-            .filter((storage) => storage.id !== storageId)
-            .map((storage) => ({
-              id: storage.id,
-              label: storage.name,
-              icon: storage.kind === "local" ? ("drive" as const) : ("cloud" as const),
+            .filter((candidate) => candidate.id !== storageId)
+            .map((candidate) => ({
+              id: candidate.id,
+              label: candidate.name || "(unnamed)",
+              detail: candidate.detail,
+              detailIsPath: candidate.detailIsPath,
+              icon: candidate.kind === "s3" ? ("cloud" as const) : ("drive" as const),
+              disabled: busy,
               onSelect: () => {
-                setChosenStorageId(storage.id);
+                setChosenStorageId(candidate.id);
                 setMode({ kind: "list" });
               },
             })),
+        }] : []),
+        {
+          items: [{
+            id: "add-storage",
+            label: "Add storage…",
+            icon: "plus",
+            disabled: busy,
+            onSelect: onAddStorage,
+          }],
         },
       ],
     },
@@ -707,8 +735,11 @@ export default function StorageCatalogPage({
       id: "scope",
       label,
       icon: kind.icon,
-      title: `${label} · reads ${scope.profile.configured_home}`,
-      menuLabel: "Catalog row actions",
+      title: `${label}\n${scope.profile.configured_home}`,
+      ariaLabel: mode.kind === "detail"
+        ? `Back to ${label}`
+        : `${label}. Catalog row menu`,
+      menuLabel: "Catalog row",
       menuHeader: {
         label,
         detail: scope.profile.configured_home,
@@ -719,20 +750,46 @@ export default function StorageCatalogPage({
       menu: mode.kind === "detail" ? undefined : [
         {
           items: [
-            { id: "rescan", label: "Rescan this provider home", icon: "refresh", onSelect: () => void load() },
-            { id: "remove", label: "Remove this Catalog row", icon: "trash", danger: true, onSelect: onRemoveScope },
+            {
+              id: "rescan",
+              label: "Rescan this provider home",
+              icon: "refresh",
+              disabled: busy || loading,
+              onSelect: () => void load(),
+            },
+            {
+              id: "remove",
+              label: "Remove this Catalog row…",
+              icon: "trash",
+              danger: true,
+              disabled: busy,
+              title: "Stop listing this home's resources; nothing on disk or in storage is deleted",
+              onSelect: onRemoveScope,
+            },
           ],
         },
-        {
+        ...(scopes.filter((candidate) => candidate.scope.scope_id !== scope.scope.scope_id).length > 0 ? [{
           label: "Switch to",
           items: scopes
             .filter((candidate) => candidate.scope.scope_id !== scope.scope.scope_id)
             .map((candidate) => ({
               id: candidate.scope.scope_id,
               label: catalogScopeLabel(candidate.scope, candidate.profile),
+              detail: candidate.profile.configured_home,
+              detailIsPath: true,
               icon: catalogKindMeta(candidate.scope.resource_kind).icon,
+              disabled: busy,
               onSelect: () => onOpenScope(candidate.scope.scope_id),
             })),
+        }] : []),
+        {
+          items: [{
+            id: "add-scope",
+            label: "Add Catalog resource…",
+            icon: "plus",
+            disabled: busy,
+            onSelect: onAddScope,
+          }],
         },
       ],
     },
@@ -810,16 +867,13 @@ export default function StorageCatalogPage({
     />
   );
 
+  /* Only what has to stay on screen: work in flight, and failures the user
+     has to read line by line. Successes go to the shell's notice, which is
+     where every other screen puts them. */
   const notices = (
     <>
       {progress && <div className="sync-callout info" role="status">{progress}</div>}
       {error && <div className="sync-callout error" role="alert">{error}</div>}
-      {outcome && (
-        <div className="sync-callout success" role="status">
-          <Icon name="check-circle" size={14} /> {outcome}
-          <button type="button" className="btn btn-ghost" onClick={() => setOutcome(null)}>Dismiss</button>
-        </div>
-      )}
     </>
   );
 
@@ -1198,21 +1252,20 @@ export default function StorageCatalogPage({
         {loading && !page ? (
           <div className="sync-history-state">{`Loading ${label}…`}</div>
         ) : rows.length === 0 ? (
-          /* Its own container: wrapping one sentence in the list card drew a
+          /* Its own container: wrapping one sentence in a list card drew a
              second border around it. Nor does it name the home or the
              storage — the crumb bar above is already saying both. */
           <div className="sync-history-state">
             {`No ${kind.label.toLowerCase()} on this Mac, and none stored yet.`}
           </div>
         ) : (
-          <section className="catalog-list-section">
-            <div className="catalog-list-heading">
-              {/* The last crumb already says "Skills · conf2", so the section
-                  keeps its accessible name and shows the one thing the crumb
-                  cannot: how many. */}
-              <h2 className="sync-visually-hidden">{label}</h2>
-              <span className="catalog-list-count">
-                {`${rows.length} ${rows.length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()}`}
+          <section className="profile-links-section" aria-label={label}>
+            {/* The project's own section heading: what the list is, and how
+                many, in the same shape at the same weight. */}
+            <div className="sync-history-section-heading">
+              <h2><Icon name={kind.icon} size={14} />{kind.plural}</h2>
+              <span className="sync-history-heading-count">
+                <Icon name={kind.icon} size={12} />{rows.length}
               </span>
             </div>
             <div className="catalog-row-list">

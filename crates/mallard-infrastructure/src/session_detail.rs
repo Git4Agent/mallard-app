@@ -6,7 +6,7 @@
 //! response bounds, and DTOs that may cross the Tauri boundary.
 
 use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
-use crate::project_activity::{parse_conversation_resource_id, resolve_activity_project};
+use crate::project_activity::resolve_activity_project;
 use crate::provider_capture::LocalSessionView;
 use crate::providers::traits::TIMELINE_TOOL_PREVIEW_BYTES;
 use crate::providers::{
@@ -16,7 +16,9 @@ use crate::providers::{
     SessionTimelineEventKind, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
     SessionToolCategory,
 };
-use mallard_domain::{initial_conversation_thread_id, LocalProjectId, ProviderKey};
+use mallard_domain::{
+    initial_conversation_thread_id, parse_conversation_resource_id, LocalProjectId, ProviderKey,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};

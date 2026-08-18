@@ -7,6 +7,7 @@
 pub mod codex_watch_service;
 pub mod commands;
 pub mod config_watcher;
+pub mod service;
 
 // Temporary reorganization shims (PLAN_PROJECT_STRUCTURE_REORGANIZATION.md
 // §3.2): these modules now live in the mallard-domain and

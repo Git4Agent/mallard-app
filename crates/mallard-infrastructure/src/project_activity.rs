@@ -16,9 +16,9 @@ use crate::providers::{
 };
 use crate::storage_core::ConfiguredObjectStore;
 use mallard_domain::{
-    conversation_resource_id, initial_conversation_thread_id, BindingState, BundleSnapshot,
-    LocalProjectId, MaterializationStatus, Materializations, PreservedProvenance, ProviderKey,
-    StorageId, SyncScopeKey, ThreadId,
+    conversation_resource_id, initial_conversation_thread_id, parse_conversation_resource_id,
+    BindingState, BundleSnapshot, LocalProjectId, MaterializationStatus, Materializations,
+    PreservedProvenance, ProviderKey, StorageId, SyncScopeKey, ThreadId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1035,30 +1035,6 @@ pub fn list_project_repository_kinds(
 // ---------------------------------------------------------------------------
 // Session details and actions
 // ---------------------------------------------------------------------------
-
-/// Parse the provider key and thread id out of one conversation resource id
-/// (`<provider>:conversation:<thread>`).
-pub fn parse_conversation_resource_id(
-    resource_id: &str,
-) -> Result<(ProviderKey, mallard_domain::ThreadId), String> {
-    let mut parts = resource_id.splitn(3, ':');
-    let provider = parts
-        .next()
-        .ok_or_else(|| "resource id is empty".to_string())?;
-    let class = parts.next();
-    let thread = parts.next();
-    if class != Some("conversation") {
-        return Err(format!(
-            "'{}' is not a conversation resource id",
-            resource_id
-        ));
-    }
-    let thread = thread.ok_or_else(|| format!("'{}' has no thread id", resource_id))?;
-    Ok((
-        ProviderKey::parse(provider)?,
-        mallard_domain::ThreadId::parse(thread)?,
-    ))
-}
 
 /// Match a discovered provider session to one portable thread. Once a local
 /// binding names the provider session, that mapping is authoritative. The

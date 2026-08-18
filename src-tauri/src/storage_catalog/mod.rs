@@ -8,8 +8,9 @@
 //! `codex_pet` validate and transform payload directories; `inventory`
 //! assembles the local view; `resource_engine` owns the independent remote
 //! repository protocol; `resource_planning` reconciles and pins per-resource
-//! plans; `apply` executes approved mutations; `resource_commands` is the
-//! Tauri surface.
+//! plans; `apply` executes approved mutations; `service` is the non-Tauri
+//! application boundary shared by tests and `resource_commands`, the Tauri
+//! surface.
 
 pub mod adapters;
 pub mod apply;
@@ -21,6 +22,7 @@ pub mod profiles;
 pub mod resource_commands;
 pub mod resource_engine;
 pub mod resource_planning;
+pub mod service;
 pub mod skill_tree;
 
 /// Cross-feature deletion guard over the shared storage registry. This is the

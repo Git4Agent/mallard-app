@@ -11,8 +11,10 @@
     "preview": "vite preview",
     "test:frontend-integration": "node scripts/run-frontend-integration-tests.mjs",
     "test:release-config": "node --test tests/release-config.test.mjs",
-    "test:backend-integration": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
+    "test:backend-integration": "cargo test --manifest-path src-tauri/Cargo.toml --lib && npm run test:storage-catalog-e2e",
+    "test:storage-catalog-e2e": "cargo test --manifest-path src-tauri/Cargo.toml --test storage_catalog_e2e",
     "test:cli": "cargo test -p mallard-cli",
+    "test:live-codex-e2e": "node scripts/run-live-codex-e2e.mjs",
     "test:integration": "npm run test:frontend-integration && npm run test:release-config && npm run test:backend-integration && npm run test:cli",
     "tauri": "node scripts/tauri-build.mjs"
   },

@@ -35,13 +35,13 @@ use super::domain::{
     absent_bundle_head_pin, classify_remote_continuity, classify_scope_continuity,
     compare_conversation_tail, compose_preserved_title, conversation_resource_id,
     conversation_transcript_path, fallback_origin_host_label, generated_named_id,
-    generated_uuid_v4, initial_conversation_thread_id, validate_absolute_clean_path, ActionId,
-    ActionStatus, ApplyPolicy, ApplyReceipt, BindingResolution, BindingState, BundleDirectoryEntry,
-    BundleId, BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleSnapshot,
-    CapturedWith, ClassifiedThread, ConversationActionPins, ConversationBlocker,
-    ConversationCapabilities, ConversationCheckpoint, ConversationCloudAnchor,
-    ConversationContextPins, ConversationDecision, ConversationFileRef, ConversationFileRole,
-    ConversationLineageStatus, ConversationMaterializationOperation,
+    generated_uuid_v4, initial_conversation_thread_id, parse_conversation_resource_id,
+    validate_absolute_clean_path, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt,
+    BindingResolution, BindingState, BundleDirectoryEntry, BundleId, BundleIdentity, BundleKind,
+    BundleManifest, BundleRecipe, BundleSnapshot, CapturedWith, ClassifiedThread,
+    ConversationActionPins, ConversationBlocker, ConversationCapabilities, ConversationCheckpoint,
+    ConversationCloudAnchor, ConversationContextPins, ConversationDecision, ConversationFileRef,
+    ConversationFileRole, ConversationLineageStatus, ConversationMaterializationOperation,
     ConversationMaterializationState, ConversationOperationId, ConversationOperationState,
     ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
     ConversationPublicationOperation, ConversationPushPlan, ConversationReviewAction,
@@ -78,6 +78,7 @@ use super::providers::{
     ProviderDescriptor, ProviderRegistry, SessionEventDetail, SessionTimelineEventKind,
     SessionToolCategory,
 };
+use super::service::{ProjectSyncService, PushApproval};
 use super::session_detail::{
     self, ProjectSessionDetail, ProjectSessionTimelinePage, ProjectSessionTimelineRequest,
     SessionDetailError, SessionDetailErrorCode,
@@ -394,10 +395,10 @@ pub struct ProjectContentInventory {
 }
 
 #[derive(Clone, Debug, Default)]
-struct ProjectContentPushReview {
-    review_token: Option<String>,
-    removal_ids: BTreeSet<ResourceId>,
-    acknowledged_warning_digests: BTreeSet<String>,
+pub(super) struct ProjectContentPushReview {
+    pub(super) review_token: Option<String>,
+    pub(super) removal_ids: BTreeSet<ResourceId>,
+    pub(super) acknowledged_warning_digests: BTreeSet<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1530,13 +1531,12 @@ fn load_project_session_views(
     local_project_id: &LocalProjectId,
     resource_id: &str,
 ) -> Result<Vec<LocalSessionView>, SessionDetailError> {
-    let (provider, thread_id) = project_activity::parse_conversation_resource_id(resource_id)
-        .map_err(|_| {
-            session_detail_error(
-                SessionDetailErrorCode::InvalidRequest,
-                "The session resource ID is invalid.",
-            )
-        })?;
+    let (provider, thread_id) = parse_conversation_resource_id(resource_id).map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::InvalidRequest,
+            "The session resource ID is invalid.",
+        )
+    })?;
     let activity_project = project_activity::resolve_activity_project(repository, local_project_id)
         .map_err(|_| {
             session_detail_error(
@@ -2349,24 +2349,18 @@ pub async fn push_bundle(
                 selected_count
             ),
         );
-        push_bundle_reviewed_with_progress(
-            &repository,
+        ProjectSyncService::new(&repository).push_reviewed_with_progress(
             &local_project_id,
             &storage_id,
-            recipe,
-            ProjectContentPushReview {
-                review_token: project_content_review_token,
-                removal_ids: project_content_removal_ids
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect(),
-                acknowledged_warning_digests: acknowledged_warning_digests
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect(),
+            PushApproval {
+                recipe,
+                project_content_review_token,
+                project_content_removal_ids: project_content_removal_ids.unwrap_or_default(),
+                acknowledged_warning_digests: acknowledged_warning_digests.unwrap_or_default(),
+                conversation_push_plan_id,
+                approved_conversation_action_ids: approved_conversation_action_ids
+                    .unwrap_or_default(),
             },
-            conversation_push_plan_id,
-            approved_conversation_action_ids.unwrap_or_default(),
             &mut |update| {
                 if let Some(emitter) = upload_progress.as_mut() {
                     emitter.observe(update);
@@ -2660,8 +2654,7 @@ pub async fn plan_bundle_restore(
     let phase_log = log.clone();
     let total_started = Instant::now();
     let result = run_blocking(move || {
-        plan_bundle_restore_with_progress(
-            &repository,
+        ProjectSyncService::new(&repository).plan_bundle_restore_with_progress(
             &storage_id,
             &bundle_id,
             &binding,
@@ -2764,8 +2757,7 @@ pub async fn apply_bundle_restore(
     let phase_log = log.clone();
     let total_started = Instant::now();
     let result = run_blocking(move || {
-        apply_bundle_restore_with_progress(
-            &repository,
+        ProjectSyncService::new(&repository).apply_bundle_restore_with_progress(
             &plan_id,
             approved_action_ids,
             &mut |update| {
@@ -4049,19 +4041,17 @@ fn get_bundle_inventory_with_repository(
 /// Project/link recipes are machine-local selection state. A remote manifest's
 /// generic resources can seed that state, but its conversation entries remain
 /// cloud identities and are reviewed through `ThreadSyncComparison` instead.
-fn local_recipe_from_manifest(manifest: &BundleManifest) -> BundleRecipe {
+fn machine_local_recipe_from_manifest(manifest: &BundleManifest) -> Result<BundleRecipe, String> {
     let mut recipe = BundleRecipe::default();
     for scope in manifest.scopes.values() {
         for (resource_id, entry) in &scope.recipe.entries {
-            let is_conversation = manifest
-                .find_resource(resource_id)
-                .is_some_and(|(_, descriptor)| descriptor.kind == ResourceKind::Conversation);
-            if !is_conversation {
+            if parse_conversation_resource_id(resource_id.as_str()).is_err() {
                 recipe.entries.insert(resource_id.clone(), entry.clone());
             }
         }
     }
-    recipe
+    recipe.validate_machine_local()?;
+    Ok(recipe)
 }
 
 /// Inventory section over a shared discovery. Inventory is read-only: a
@@ -4079,6 +4069,7 @@ fn build_resource_inventory(
         .cloned()
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
     let mut recipe = project.recipe.clone();
+    recipe.validate_machine_local()?;
     remove_excluded_codex_subagents_from_recipe(
         &mut recipe,
         discovery.excluded_subagent_resource_ids(),
@@ -6656,8 +6647,7 @@ fn build_comparison_from_reads(
     Ok(comparison)
 }
 
-#[cfg(test)]
-fn get_project_thread_sync_comparison_with_progress(
+pub(super) fn get_project_thread_sync_comparison_with_progress(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -7208,6 +7198,7 @@ fn get_bundle_status_with_repository(
     let capture_request = capture_request_for_binding(repository, &binding)?;
     let discovery = provider_capture::discover_full(provider_registry(), &capture_request)?;
     let mut effective_recipe = destination_recipe.unwrap_or_else(|| project.recipe.clone());
+    effective_recipe.validate_machine_local()?;
     remove_excluded_codex_subagents_from_recipe(
         &mut effective_recipe,
         discovery.excluded_subagent_resource_ids(),
@@ -7555,7 +7546,7 @@ fn prepare_push_review_with_repository(
     prepare_push_review_with_progress(repository, local_project_id, storage_id, &mut |_, _| {})
 }
 
-fn prepare_push_review_with_progress(
+pub(super) fn prepare_push_review_with_progress(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -7839,8 +7830,7 @@ pub async fn prepare_push_review(
     let phase_log = log.clone();
     let total_started = Instant::now();
     let result = run_blocking(move || {
-        prepare_push_review_with_progress(
-            &repository,
+        ProjectSyncService::new(&repository).prepare_push_review_with_phases(
             &local_project_id,
             &storage_id,
             &mut |phase, elapsed| {
@@ -7935,8 +7925,10 @@ fn push_bundle_with_recipe_with_repository(
     )
 }
 
-#[cfg(test)]
-fn recommended_review_recipe(review: &PushReviewContext, storage_id: &StorageId) -> BundleRecipe {
+pub(super) fn recommended_review_recipe(
+    review: &PushReviewContext,
+    storage_id: &StorageId,
+) -> BundleRecipe {
     let mut recipe = review
         .project
         .links
@@ -8310,6 +8302,30 @@ fn split_recipe_by_scope(
     Ok(by_scope)
 }
 
+/// Pull seeds machine-local selection from generic resources only and resets
+/// its local concurrency revision. Reuse the published scope recipe revision
+/// when that generic selection is unchanged so a converged Pull cannot create
+/// a recipe-metadata-only remote revision on the next Push.
+fn preserve_unchanged_scope_recipe_revision(
+    recipe: &mut BundleRecipe,
+    previous: Option<&BundleRecipe>,
+) {
+    let Some(previous) = previous else {
+        return;
+    };
+    let previous_generic_entries = previous
+        .entries
+        .iter()
+        .filter(|(resource_id, _)| parse_conversation_resource_id(resource_id.as_str()).is_err())
+        .map(|(resource_id, entry)| (resource_id.clone(), entry.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if recipe.schema_version == previous.schema_version
+        && recipe.entries == previous_generic_entries
+    {
+        recipe.revision = previous.revision;
+    }
+}
+
 fn captured_with_for_provider(provider: &ProviderKey) -> CapturedWith {
     let mut captured_with = CapturedWith {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -8401,7 +8417,7 @@ fn build_publish_request(
                 .map(|scope| (scope.revision, scope.content_sha256.clone()))
                 .unwrap_or_else(absent_scope_pin),
         );
-        let scope_recipe = recipes_by_scope
+        let mut scope_recipe = recipes_by_scope
             .get(&scope_key)
             .cloned()
             .unwrap_or_else(|| BundleRecipe {
@@ -8409,6 +8425,10 @@ fn build_publish_request(
                 revision: recipe.revision,
                 entries: BTreeMap::new(),
             });
+        preserve_unchanged_scope_recipe_revision(
+            &mut scope_recipe,
+            previous_scope.as_ref().map(|scope| &scope.recipe),
+        );
         let scope_descriptors = generic_descriptors
             .iter()
             .filter(|(resource_id, _)| scope_recipe.entries.contains_key(*resource_id))
@@ -9384,7 +9404,7 @@ fn push_bundle_reviewed_with_repository(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn push_bundle_reviewed_with_progress(
+pub(super) fn push_bundle_reviewed_with_progress(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -9395,6 +9415,7 @@ fn push_bundle_reviewed_with_progress(
     on_progress: &mut dyn FnMut(FetchProgress),
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<ProjectOperationResult, String> {
+    requested_recipe.validate_machine_local()?;
     let phase_started = Instant::now();
     let _host_operation = repository.acquire_host_operation()?;
     let config = repository.load_config()?;
@@ -9452,7 +9473,6 @@ fn push_bundle_reviewed_with_progress(
     }
     on_phase("discover local state", phase_started.elapsed());
     let phase_started = Instant::now();
-    requested_recipe.validate()?;
     let mut push_recipe = requested_recipe;
     remove_excluded_codex_subagents_from_recipe(
         &mut push_recipe,
@@ -9865,7 +9885,7 @@ fn plan_bundle_restore_with_repository(
     )
 }
 
-fn plan_bundle_restore_with_progress(
+pub(super) fn plan_bundle_restore_with_progress(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
     bundle_id: &BundleId,
@@ -10998,7 +11018,7 @@ fn apply_prepared_pull_conversation(
     })
 }
 
-fn apply_bundle_restore_with_progress(
+pub(super) fn apply_bundle_restore_with_progress(
     repository: &LocalStateRepository,
     plan_id: &PlanId,
     approved_action_ids: Vec<ActionId>,
@@ -11303,7 +11323,7 @@ fn apply_bundle_restore_with_progress(
                 .ok_or_else(|| {
                     "project storage link was removed while applying Pull".to_string()
                 })?;
-            link.recipe = Some(local_recipe_from_manifest(&snapshot.manifest));
+            link.recipe = Some(machine_local_recipe_from_manifest(&snapshot.manifest)?);
             project.revision = project.revision.saturating_add(1);
             project.updated_at = applied_at;
             Ok(())
@@ -11898,6 +11918,27 @@ fn resolve_project_binding(
     Ok(resolved)
 }
 
+pub(super) fn rebaseline_project_provider_caches(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+) -> Result<(), String> {
+    let binding = repository
+        .load_bindings()?
+        .active_for(local_project_id)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "project '{}' is not mapped on this machine",
+                local_project_id
+            )
+        })?;
+    let resolved = resolve_project_binding(repository, &binding)?;
+    for home in resolved.homes.values() {
+        super::codex_watch_service::session_watch_service().force_rebaseline(Path::new(home));
+    }
+    Ok(())
+}
+
 fn current_binding_for_restore_plan(
     repository: &LocalStateRepository,
     plan: &RestorePlan,
@@ -12200,7 +12241,7 @@ fn require_project_link(
     }
 }
 
-fn storage_engine(
+pub(super) fn storage_engine(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
 ) -> Result<(StorageConfig, StorageEngine), String> {
@@ -12442,7 +12483,7 @@ fn save_bundle_recipe_with_repository(
     local_project_id: &LocalProjectId,
     mut recipe: BundleRecipe,
 ) -> Result<LocalProjectRegistration, String> {
-    recipe.validate()?;
+    recipe.validate_machine_local()?;
     repository.mutate_config(|config| {
         let project = config
             .projects
@@ -12629,7 +12670,7 @@ fn connect_project_to_remote_bundle_guarded(
         Ok(())
     })?;
 
-    let remote_recipe = local_recipe_from_manifest(&remote.manifest);
+    let remote_recipe = machine_local_recipe_from_manifest(&remote.manifest)?;
     let new_bundle_id = request.bundle_id.clone();
     let config_result = repository.mutate_config(|config| {
         let project = config
@@ -13142,7 +13183,10 @@ pub async fn create_setup_draft(
     project_root: String,
 ) -> Result<CreateSetupDraftResult, String> {
     let repository = repository(&app)?;
-    run_blocking(move || create_setup_draft_with_repository(&repository, &project_root)).await
+    run_blocking(move || {
+        ProjectSyncService::new(&repository).create_setup_draft(Path::new(&project_root))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -13159,7 +13203,7 @@ pub async fn update_setup_draft(
     draft: ProjectSetupDraft,
 ) -> Result<ProjectSetupDraft, String> {
     let repository = repository(&app)?;
-    run_blocking(move || update_setup_draft_with_repository(&repository, draft)).await
+    run_blocking(move || ProjectSyncService::new(&repository).update_setup_draft(draft)).await
 }
 
 #[tauri::command]
@@ -13176,7 +13220,7 @@ pub async fn inspect_setup_draft(
     draft_id: SetupDraftId,
 ) -> Result<SetupDraftInspection, String> {
     let repository = repository(&app)?;
-    run_blocking(move || inspect_setup_draft_with_repository(&repository, &draft_id)).await
+    run_blocking(move || ProjectSyncService::new(&repository).inspect_setup_draft(&draft_id)).await
 }
 
 #[tauri::command]
@@ -13194,7 +13238,7 @@ pub async fn finalize_project_setup(
         "Finalizing project setup…",
     );
     let result = run_blocking(move || {
-        finalize_project_setup_with_repository(&repository, &draft_id, expected_revision)
+        ProjectSyncService::new(&repository).finalize_project_setup(&draft_id, expected_revision)
     })
     .await;
     match &result {
@@ -13267,7 +13311,7 @@ fn draft_references_are_present(
     profiles_present && storage_present
 }
 
-fn create_setup_draft_with_repository(
+pub(super) fn create_setup_draft_with_repository(
     repository: &LocalStateRepository,
     project_root: &str,
 ) -> Result<CreateSetupDraftResult, String> {
@@ -13366,7 +13410,7 @@ fn create_setup_draft_with_repository(
     })
 }
 
-fn update_setup_draft_with_repository(
+pub(super) fn update_setup_draft_with_repository(
     repository: &LocalStateRepository,
     submitted: ProjectSetupDraft,
 ) -> Result<ProjectSetupDraft, String> {
@@ -13572,7 +13616,7 @@ fn verified_repository_identity(
     local.is_some_and(|local| local.matches(remote.as_deref()))
 }
 
-fn inspect_setup_draft_with_repository(
+pub(super) fn inspect_setup_draft_with_repository(
     repository: &LocalStateRepository,
     draft_id: &SetupDraftId,
 ) -> Result<SetupDraftInspection, String> {
@@ -13788,6 +13832,7 @@ fn build_setup_transaction(
                 })?;
             let engine = engine_for_storage_config(&storage.storage)?;
             let snapshot = engine.inspect(bundle_id)?;
+            let machine_local_recipe = machine_local_recipe_from_manifest(&snapshot.manifest)?;
             let summary = bundle_snapshot_summary_from_snapshot(snapshot)?;
             if !verified_repository_identity(
                 &summary.repository_fingerprint,
@@ -13803,7 +13848,7 @@ fn build_setup_transaction(
                 bundle_id.clone(),
                 summary.display_name.clone(),
                 summary.repository_fingerprint.clone().or(local_fingerprint),
-                summary.recipe.clone(),
+                machine_local_recipe,
             )
         }
     };
@@ -14209,7 +14254,7 @@ fn record_draft_error(repository: &LocalStateRepository, draft_id: &SetupDraftId
     let _ = repository.save_setup_draft(draft);
 }
 
-fn finalize_project_setup_with_repository(
+pub(super) fn finalize_project_setup_with_repository(
     repository: &LocalStateRepository,
     draft_id: &SetupDraftId,
     expected_revision: u64,
@@ -15454,6 +15499,54 @@ mod tests {
     };
 
     #[test]
+    fn unchanged_scope_recipe_preserves_remote_revision_after_pull() {
+        let generic_resource_id = ResourceId::parse("codex:memory").unwrap();
+        let generic_entry = RecipeEntry {
+            resource_id: generic_resource_id.clone(),
+            apply_policy: ApplyPolicy::SafeFile,
+            required: false,
+        };
+        let conversation_resource_id = conversation_resource_id(
+            &codex_key(),
+            &ThreadId::parse("thread-recipe-revision").unwrap(),
+        )
+        .unwrap();
+        let conversation_entry = RecipeEntry {
+            resource_id: conversation_resource_id.clone(),
+            apply_policy: ApplyPolicy::Merge,
+            required: false,
+        };
+
+        let mut previous = BundleRecipe::default();
+        previous.revision = 7;
+        previous
+            .entries
+            .insert(generic_resource_id.clone(), generic_entry.clone());
+        previous
+            .entries
+            .insert(conversation_resource_id, conversation_entry);
+
+        let mut unchanged = BundleRecipe::default();
+        unchanged
+            .entries
+            .insert(generic_resource_id.clone(), generic_entry);
+        preserve_unchanged_scope_recipe_revision(&mut unchanged, Some(&previous));
+        assert_eq!(unchanged.revision, 7);
+
+        let mut changed = BundleRecipe::default();
+        changed.entries.insert(
+            generic_resource_id.clone(),
+            RecipeEntry {
+                resource_id: generic_resource_id,
+                apply_policy: ApplyPolicy::ExplicitReview,
+                required: false,
+            },
+        );
+        preserve_unchanged_scope_recipe_revision(&mut changed, Some(&previous));
+        assert_eq!(changed.revision, 0);
+    }
+
+    #[test]
     fn observation_worker_outcome_preserves_errors_and_rejects_missing_slots() {
         let thread_id = ThreadId::parse("thread-worker-test").unwrap();
         let mut failed = std::sync::OnceLock::new();
@@ -16460,6 +16553,215 @@ mod tests {
             removal_ids: BTreeSet::new(),
             acknowledged_warning_digests: BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn clean_push_review_separates_one_divergence_from_local_recipe_resources() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("clean-conversation-recipe-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        let binding =
+            bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let first_provider_id = "019fa660-0000-7000-8000-000000000001";
+        let second_provider_id = "019fa660-0000-7000-8000-000000000002";
+        let sessions = codex_home.join("sessions/2026/07/28");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let first_path = sessions.join(format!(
+            "rollout-2026-07-28T12-00-00-{first_provider_id}.jsonl"
+        ));
+        let second_path = sessions.join(format!(
+            "rollout-2026-07-28T12-01-00-{second_provider_id}.jsonl"
+        ));
+        std::fs::write(
+            &first_path,
+            command_test_transcript(
+                first_provider_id,
+                &project_root,
+                &[("first-base", "user", "first base")],
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &second_path,
+            command_test_transcript(
+                second_provider_id,
+                &project_root,
+                &[("second-base", "user", "second base")],
+            ),
+        )
+        .unwrap();
+
+        // The first Push is the clean cutover producer: local capture IDs are
+        // persisted in the link recipe while portable conversation IDs exist
+        // only in the provider scope of the bundle manifest.
+        push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let initial = engine.inspect(&project.bundle_id).unwrap();
+        let first_thread = initial
+            .manifest
+            .all_conversations()
+            .find_map(|(_, thread_id, thread)| {
+                (thread.source_thread_id.as_deref() == Some(first_provider_id))
+                    .then_some(thread_id.clone())
+            })
+            .unwrap();
+        let second_thread = initial
+            .manifest
+            .all_conversations()
+            .find_map(|(_, thread_id, thread)| {
+                (thread.source_thread_id.as_deref() == Some(second_provider_id))
+                    .then_some(thread_id.clone())
+            })
+            .unwrap();
+        assert_ne!(first_thread, second_thread);
+
+        let config = repo.load_config().unwrap();
+        config
+            .project(&project.local_project_id)
+            .unwrap()
+            .recipe
+            .validate_machine_local()
+            .unwrap();
+        let link_recipe = project_link(&config, &project.local_project_id, &storage_id)
+            .unwrap()
+            .recipe
+            .as_ref()
+            .unwrap();
+        link_recipe.validate_machine_local().unwrap();
+        assert!(link_recipe
+            .entries
+            .keys()
+            .all(|resource_id| { parse_conversation_resource_id(resource_id.as_str()).is_err() }));
+
+        // Both local sessions advance. Only the first also advances remotely,
+        // producing one real divergence and leaving the second safe to Push.
+        std::fs::write(
+            &first_path,
+            command_test_transcript(
+                first_provider_id,
+                &project_root,
+                &[
+                    ("first-base", "user", "first base"),
+                    ("first-local", "user", "first local branch"),
+                ],
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &second_path,
+            command_test_transcript(
+                second_provider_id,
+                &project_root,
+                &[
+                    ("second-base", "user", "second base"),
+                    ("second-local", "user", "second local change"),
+                ],
+            ),
+        )
+        .unwrap();
+        let (origin_host_token, origin_replica_token) = repo
+            .derive_origin_tokens(&project.bundle_id, &binding.replica_id)
+            .unwrap();
+        let origin = PortableOrigin {
+            origin_host_token,
+            origin_replica_token,
+            shared_label: None,
+        };
+        let mut first_remote = ThreadSpec::new(
+            first_thread.as_str(),
+            first_provider_id,
+            command_test_transcript(
+                first_provider_id,
+                &project_root,
+                &[
+                    ("first-base", "user", "first base"),
+                    ("first-remote", "user", "first remote branch"),
+                ],
+            ),
+            origin.clone(),
+            20,
+        );
+        first_remote.title = "First".to_string();
+        let mut second_remote = ThreadSpec::new(
+            second_thread.as_str(),
+            second_provider_id,
+            command_test_transcript(
+                second_provider_id,
+                &project_root,
+                &[("second-base", "user", "second base")],
+            ),
+            origin.clone(),
+            20,
+        );
+        second_remote.title = "Second".to_string();
+        let (_, head_token) = engine.read_head(&project.bundle_id).unwrap().unwrap();
+        let remote = engine
+            .publish(publish_request(
+                project.bundle_id.clone(),
+                &[first_remote, second_remote],
+                origin,
+                20,
+                Some(&initial.manifest),
+                PublishExpectation::Match(head_token),
+            ))
+            .unwrap()
+            .snapshot;
+        // The repository head and scope were explicitly reviewed, while the
+        // per-thread accepted checkpoint remains the common first-Push base.
+        record_reviewed_scope_bases(&repo, &project, &binding, &storage_id, &remote, 20);
+
+        let review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        assert_eq!(
+            review.destination_status,
+            PushDestinationStatus::Ready { revision: Some(2) }
+        );
+        let comparison = review.thread_comparison.as_ref().unwrap();
+        assert_eq!(comparison.counts.diverged, 1);
+        assert_eq!(comparison.counts.local, 1);
+        let divergent = comparison
+            .entries
+            .iter()
+            .find(|entry| entry.provider_thread_id.as_deref() == Some(first_provider_id))
+            .unwrap();
+        assert_eq!(divergent.state, ThreadSyncState::Diverged);
+        assert_eq!(
+            divergent.push_decision.action,
+            ConversationReviewAction::RequirePull
+        );
+        assert!(!divergent.push_decision.selectable);
+        let pushable = comparison
+            .entries
+            .iter()
+            .find(|entry| entry.provider_thread_id.as_deref() == Some(second_provider_id))
+            .unwrap();
+        assert_eq!(pushable.state, ThreadSyncState::LocalAhead);
+        assert_eq!(
+            pushable.push_decision.action,
+            ConversationReviewAction::Publish
+        );
+        assert!(pushable.push_decision.selectable);
+        assert!(!review
+            .conversation_action_ids
+            .contains_key(&divergent.resource_id));
+        assert!(review
+            .conversation_action_ids
+            .contains_key(&pushable.resource_id));
+
+        assert!(review.inventory.resources.iter().all(|resource| {
+            parse_conversation_resource_id(resource.descriptor.resource_id.as_str()).is_err()
+        }));
+        assert!(review
+            .inventory
+            .resources
+            .iter()
+            .all(|resource| { resource.descriptor.kind != ResourceKind::Requirement }));
+        review.inventory.recipe.validate_machine_local().unwrap();
     }
 
     #[test]
@@ -17814,6 +18116,15 @@ mod tests {
             crate::project_sync::domain::BUNDLE_SCHEMA
         );
         snapshot.manifest.published_by_origin.validate().unwrap();
+        let portable_conversation_ids = snapshot
+            .manifest
+            .all_conversations()
+            .map(|(_, _, thread)| thread.resource_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(portable_conversation_ids.len(), 3);
+        assert!(portable_conversation_ids
+            .iter()
+            .all(|resource_id| { parse_conversation_resource_id(resource_id.as_str()).is_ok() }));
         let third = snapshot
             .manifest
             .all_conversations()
@@ -17830,6 +18141,7 @@ mod tests {
             .recipe
             .clone();
         assert!(project_recipe.entries.is_empty());
+        project_recipe.validate_machine_local().unwrap();
         let selected_destination_recipe = repo
             .load_config()
             .unwrap()
@@ -17840,9 +18152,29 @@ mod tests {
             })
             .and_then(|link| link.recipe.clone())
             .unwrap();
+        selected_destination_recipe
+            .validate_machine_local()
+            .unwrap();
         assert!(selected_destination_recipe
             .entries
             .contains_key(&ResourceId::parse(format!("codex:session:{}", third_id)).unwrap()));
+        assert!(selected_destination_recipe
+            .entries
+            .keys()
+            .all(|resource_id| { parse_conversation_resource_id(resource_id.as_str()).is_err() }));
+
+        let clean_review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        assert!(clean_review.inventory.resources.iter().all(|resource| {
+            parse_conversation_resource_id(resource.descriptor.resource_id.as_str()).is_err()
+        }));
+        assert!(clean_review
+            .inventory
+            .recipe
+            .entries
+            .keys()
+            .all(|resource_id| { parse_conversation_resource_id(resource_id.as_str()).is_err() }));
         // A later reviewed selection belongs only to this destination.
         let pushed_empty = push_bundle_with_recipe_with_repository(
             &repo,
@@ -18052,6 +18384,68 @@ mod tests {
         )
         .unwrap_err()
         .contains("changed"));
+    }
+
+    #[test]
+    fn machine_local_recipe_write_boundaries_reject_portable_conversations() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("recipe-boundary-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        bind_and_link_test_replica(
+            &repo,
+            &project,
+            &storage_id,
+            &temp.path().join("project"),
+            &temp.path().join("codex-home"),
+        );
+        let portable_id = conversation_resource_id(
+            &codex_key(),
+            &ThreadId::parse("thread-machine-local-recipe-boundary").unwrap(),
+        )
+        .unwrap();
+        let mut invalid = BundleRecipe::default();
+        invalid.entries.insert(
+            portable_id.clone(),
+            RecipeEntry {
+                resource_id: portable_id.clone(),
+                apply_policy: ApplyPolicy::SafeFile,
+                required: false,
+            },
+        );
+        let before = repo.load_config().unwrap();
+
+        let save_error =
+            save_bundle_recipe_with_repository(&repo, &project.local_project_id, invalid.clone())
+                .unwrap_err();
+        assert!(
+            save_error.contains("machine-local recipe contains portable conversation resource"),
+            "{save_error}"
+        );
+        assert_eq!(repo.load_config().unwrap(), before);
+
+        let push_error = push_bundle_reviewed_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            invalid,
+            empty_project_content_review(),
+            None,
+            Vec::new(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            push_error.contains("machine-local recipe contains portable conversation resource"),
+            "{push_error}"
+        );
+        assert_eq!(repo.load_config().unwrap(), before);
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        assert!(engine
+            .inspect_optional(&project.bundle_id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -19392,7 +19786,7 @@ mod tests {
         .unwrap();
         let canonical_home = std::fs::canonicalize(&codex_home).unwrap();
         super::super::codex_watch_service::session_watch_service()
-            .force_rebaseline_for_tests(&canonical_home);
+            .force_rebaseline(&canonical_home);
         let rediscovered = get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
@@ -19812,8 +20206,7 @@ mod tests {
         // A forced rebaseline (the reliability-signal path) runs the
         // bounded pipeline and produces identical rows.
         let canonical = std::fs::canonicalize(&codex_home).unwrap();
-        super::super::codex_watch_service::session_watch_service()
-            .force_rebaseline_for_tests(&canonical);
+        super::super::codex_watch_service::session_watch_service().force_rebaseline(&canonical);
         let before_cold = metrics.snapshot();
         let rebaselined = get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -21907,6 +22300,13 @@ mod tests {
         .unwrap();
         let second_binding = second.binding.expect("reactivated binding");
         assert_eq!(second.project.local_project_id, project_id);
+        second.project.recipe.validate_machine_local().unwrap();
+        assert!(second
+            .project
+            .recipe
+            .entries
+            .keys()
+            .all(|resource_id| parse_conversation_resource_id(resource_id.as_str()).is_err()));
         assert_eq!(second_binding.replica_id, first_binding.replica_id);
         assert_eq!(second_binding.revision, detached.revision + 1);
 

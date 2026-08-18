@@ -68,9 +68,9 @@ function conversation(resourceId: string): ProjectResourceDescriptor {
 }
 
 test("recommended Push selection includes only locally changed sessions", () => {
-  const localAhead = conversation("codex:conversation:local-ahead");
-  const synced = conversation("codex:conversation:synced");
-  const storageAhead = conversation("codex:conversation:storage-ahead");
+  const localAhead = conversation("codex:session:local-ahead");
+  const synced = conversation("codex:session:synced");
+  const storageAhead = conversation("codex:session:storage-ahead");
   const sessionIndex = conversation("codex:session-index");
   const memory = memoryResource("frontend-memory");
   const comparison: ThreadSyncComparison = {
@@ -147,9 +147,9 @@ test("recommended Push selection includes only locally changed sessions", () => 
 });
 
 test("non-uploadable sessions cannot remain in the active Push selection", () => {
-  const localAhead = conversation("codex:conversation:local-ahead");
-  const synced = conversation("codex:conversation:synced");
-  const storageAhead = conversation("codex:conversation:storage-ahead");
+  const localAhead = conversation("codex:session:local-ahead");
+  const synced = conversation("codex:session:synced");
+  const storageAhead = conversation("codex:session:storage-ahead");
   const comparison: ThreadSyncComparison = {
     project_id: "project-a",
     storage_id: "storage-a",
@@ -202,7 +202,7 @@ test("non-uploadable sessions cannot remain in the active Push selection", () =>
 });
 
 test("conversation divergence holds only its thread instead of blocking Push", () => {
-  const resource = conversation("codex:conversation:diverged");
+  const resource = conversation("codex:session:diverged");
   const entry = {
     thread_id: "provider-diverged",
     resource_id: resource.resource_id,
@@ -312,7 +312,7 @@ test("a resource named by its own id states that id once, and says why once", ()
   // The shape the backend fabricates for a recipe entry that no longer
   // resolves locally: the id is the only name it has, so display_name is the
   // id (commands.rs, "resource is unavailable" branch).
-  const ghostId = "codex:conversation:thread-687bc2c49612313da3d26d29d1b003a0";
+  const ghostId = "codex:session:687bc2c4-9612-313d-a3d2-6d29d1b003a0";
   const ghost: ProjectResourceDescriptor = {
     ...memoryResource("ghost", "Selected for sync, but unavailable at the mapped paths on this machine"),
     resource_id: ghostId,
@@ -335,7 +335,7 @@ test("a resource named by its own id states that id once, and says why once", ()
   assert.equal((html.match(new RegExp(ghostId, "g")) ?? []).length, 1);
   // The hidden `provider · kind` line is gone with its display:none rule, so
   // the name is the only thing in the copy slot.
-  assert.match(html, /sync-resource-copy"><strong>codex:conversation:thread-[^<]*<\/strong><\/span>/);
+  assert.match(html, /sync-resource-copy"><strong>codex:session:[^<]*<\/strong><\/span>/);
 
   // The fold is internal state, so static rendering cannot open it — pin the
   // guard at the source instead, and that the caption survives for a resource
@@ -537,8 +537,8 @@ test("an unreviewed storage and a changed binding each get their own plain sente
 });
 
 test("held threads and storage blockers share one banner with one way forward", () => {
-  const held = conversation("codex:conversation:held");
-  const pushable = conversation("codex:conversation:pushable");
+  const held = conversation("codex:session:held");
+  const pushable = conversation("codex:session:pushable");
   const comparison: ThreadSyncComparison = {
     project_id: "project-a",
     storage_id: "storage-a",
@@ -594,6 +594,8 @@ test("held threads and storage blockers share one banner with one way forward", 
   assert.match(html, /class="sync-callout sync-sync-review-pull-holds" role="status"/);
   assert.match(bannerZone(html) ?? "", /data-thread-status="divergent"/);
   assert.doesNotMatch(bannerZone(html) ?? "", /data-icon="git-compare-arrows"/);
+  assert.doesNotMatch(html, />Requirements</);
+  assert.doesNotMatch(html, /codex:conversation:/);
   // The held thread keeps its cloud version and Push stays available for the rest.
   const pushButton = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[^>]*>/)?.[0];
   assert.doesNotMatch(pushButton ?? "", /disabled=""/);
@@ -652,7 +654,7 @@ test("a row's status icon is keyed off its state, not off the selection", () => 
 test("the header count reserves its widest slot so ticking a row moves no icon", () => {
   // tabular-nums equalises digit widths but not digit counts: 9 → 10 grew the
   // string by a character and pushed the header's icon buttons 6px sideways.
-  const rows = Array.from({ length: 13 }, (_, i) => conversation(`codex:conversation:n${i}`));
+  const rows = Array.from({ length: 13 }, (_, i) => conversation(`codex:session:n${i}`));
   const comparison: ThreadSyncComparison = {
     project_id: "project-a",
     storage_id: "storage-a",
@@ -701,7 +703,7 @@ test("a selected item that cannot be captured reports in the footer, not above t
   // The banner zone sits above the list inside the scroll: a banner that
   // appeared on a checkbox click would shove the clicked row out from under
   // the cursor (measured at 255px before this fix).
-  const broken = conversation("codex:conversation:broken");
+  const broken = conversation("codex:session:broken");
   const comparison: ThreadSyncComparison = {
     project_id: "project-a",
     storage_id: "storage-a",

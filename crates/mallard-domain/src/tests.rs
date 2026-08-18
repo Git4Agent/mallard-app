@@ -127,6 +127,80 @@ fn initial_conversation_ids_are_stable_and_bundle_scoped() {
         )
         .unwrap()
     );
+
+    let resource_id = conversation_resource_id(&provider("codex"), &first).unwrap();
+    assert_eq!(
+        parse_conversation_resource_id(resource_id.as_str()).unwrap(),
+        (provider("codex"), first)
+    );
+    assert!(
+        parse_conversation_resource_id("codex:session:019f742a-a206-7932-876c-9db8d8ce575a")
+            .is_err()
+    );
+}
+
+#[test]
+fn machine_local_recipes_reject_portable_conversation_identities() {
+    let thread_id = ThreadId::parse("thread-local-recipe-boundary").unwrap();
+    let portable_id = conversation_resource_id(&provider("codex"), &thread_id).unwrap();
+    let mut portable_recipe = BundleRecipe::default();
+    portable_recipe.entries.insert(
+        portable_id.clone(),
+        RecipeEntry {
+            resource_id: portable_id.clone(),
+            apply_policy: ApplyPolicy::SafeFile,
+            required: false,
+        },
+    );
+
+    // The same recipe is valid in a portable provider scope but never as
+    // machine-local project or storage-link selection state.
+    portable_recipe.validate().unwrap();
+    let error = portable_recipe.validate_machine_local().unwrap_err();
+    assert!(error.contains("machine-local recipe contains portable conversation resource"));
+    assert!(error.contains(portable_id.as_str()));
+
+    let local_session_id = resource_id("codex:session:019f742a-a206-7932-876c-9db8d8ce575a");
+    let mut local_recipe = BundleRecipe::default();
+    local_recipe.entries.insert(
+        local_session_id.clone(),
+        RecipeEntry {
+            resource_id: local_session_id,
+            apply_policy: ApplyPolicy::SafeFile,
+            required: false,
+        },
+    );
+    local_recipe.validate_machine_local().unwrap();
+
+    let mut project = sample_project();
+    project.recipe = portable_recipe.clone();
+    assert!(project
+        .validate()
+        .unwrap_err()
+        .contains("machine-local recipe contains portable conversation resource"));
+
+    project.recipe = BundleRecipe::default();
+    let config = SyncConfig {
+        schema: LOCAL_SCHEMA,
+        revision: 0,
+        storages: vec![sample_storage()],
+        projects: vec![project.clone()],
+        links: vec![ProjectStorageLink {
+            local_project_id: project.local_project_id,
+            storage_id: StorageId::parse("personal").unwrap(),
+            bundle_id: project.bundle_id,
+            recipe: Some(portable_recipe),
+            scope_bases: BTreeMap::new(),
+            project_content_preferences: Default::default(),
+            conversation_checkpoints: BTreeMap::new(),
+            pinned: false,
+            created_at: 1,
+        }],
+    };
+    assert!(config
+        .validate()
+        .unwrap_err()
+        .contains("machine-local recipe contains portable conversation resource"));
 }
 
 #[test]

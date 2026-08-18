@@ -83,7 +83,7 @@ fn os_user_home() -> Result<PathBuf, String> {
     dirs::home_dir().ok_or_else(|| "could not resolve the user home directory".to_string())
 }
 
-fn storage_for(
+pub(crate) fn storage_for(
     state: &LocalStateRepository,
     storage_id: &StorageId,
 ) -> Result<StorageConfig, String> {
@@ -95,7 +95,7 @@ fn storage_for(
         .ok_or_else(|| format!("unknown storage '{}'", storage_id))
 }
 
-fn engine_for(
+pub(crate) fn engine_for(
     storage: &StorageConfig,
 ) -> Result<LibraryResourceEngine<ConfiguredObjectStore>, String> {
     storage.validate()?;
@@ -456,12 +456,10 @@ pub async fn save_catalog_resource_profile(
     path: String,
 ) -> Result<LocalCatalogProfile, String> {
     run_blocking(move || {
-        save_catalog_resource_profile_with_repository(
-            &catalog_repository()?,
+        super::service::StorageCatalogService::from_user_home()?.save_profile(
             provider,
             display_name,
             path,
-            now_secs(),
         )
     })
     .await
@@ -654,12 +652,10 @@ pub async fn create_catalog_scope(
     resource_kind: CatalogResourceKindTag,
 ) -> Result<CatalogScopeDto, String> {
     run_blocking(move || {
-        create_catalog_scope_with_repositories(
-            &catalog_repository()?,
+        super::service::StorageCatalogService::from_user_home()?.create_scope(
             provider,
             profile_id,
             resource_kind,
-            now_secs(),
         )
     })
     .await
@@ -1026,14 +1022,8 @@ pub async fn list_catalog_scope_resources(
     storage_id: Option<StorageId>,
 ) -> Result<CatalogScopeResourcesDto, String> {
     run_blocking(move || {
-        list_catalog_scope_resources_with_repositories(
-            &state_repository()?,
-            &catalog_repository()?,
-            &NativeProcessRunner,
-            &scope_id,
-            storage_id.as_ref(),
-            &os_user_home()?,
-        )
+        super::service::StorageCatalogService::from_user_home()?
+            .list_scope_resources(&scope_id, storage_id.as_ref())
     })
     .await
 }
@@ -1214,14 +1204,7 @@ pub async fn link_catalog_scope_resource(
     request: LinkCatalogScopeResourceRequest,
 ) -> Result<CatalogScopeLinkOutcomeDto, String> {
     run_blocking(move || {
-        link_catalog_scope_resource_with_repositories(
-            &state_repository()?,
-            &catalog_repository()?,
-            &NativeProcessRunner,
-            request,
-            &os_user_home()?,
-            now_secs(),
-        )
+        super::service::StorageCatalogService::from_user_home()?.link_scope_resource(request)
     })
     .await
 }
@@ -1549,7 +1532,7 @@ fn blocked_link_inspection(
     }
 }
 
-fn inspect_links_with_repositories(
+pub(crate) fn inspect_links_with_repositories(
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
@@ -1628,14 +1611,7 @@ pub async fn inspect_catalog_resource_links(
     registration_id: CatalogRegistrationId,
 ) -> Result<Vec<CatalogResourceLinkInspectionDto>, String> {
     run_blocking(move || {
-        inspect_links_with_repositories(
-            &state_repository()?,
-            &catalog_repository()?,
-            &NativeProcessRunner,
-            &registration_id,
-            &os_user_home()?,
-            now_secs(),
-        )
+        super::service::StorageCatalogService::from_user_home()?.inspect_links(&registration_id)
     })
     .await
 }
@@ -1658,7 +1634,7 @@ fn discard_link_plans(
     Ok(())
 }
 
-fn prepare_push_with_repositories(
+pub(crate) fn prepare_push_with_repositories(
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
@@ -1694,14 +1670,7 @@ pub async fn prepare_catalog_resource_push(
     link_id: CatalogLinkId,
 ) -> Result<CatalogResourcePushPlan, String> {
     run_blocking(move || {
-        prepare_push_with_repositories(
-            &state_repository()?,
-            &catalog_repository()?,
-            &NativeProcessRunner,
-            &link_id,
-            &os_user_home()?,
-            now_secs(),
-        )
+        super::service::StorageCatalogService::from_user_home()?.prepare_push(&link_id)
     })
     .await
 }
@@ -1736,6 +1705,141 @@ fn observed_matches(
     }
 }
 
+pub(crate) fn publish_with_repositories(
+    state: &LocalStateRepository,
+    catalog: &CatalogStateRepository,
+    runner: &dyn PluginProcessRunner,
+    link_id: &CatalogLinkId,
+    plan_id: CatalogPlanId,
+    include: bool,
+    acknowledged_warning_digests: Vec<String>,
+    user_home: &Path,
+    now: u64,
+) -> Result<CatalogResourcePushOutcomeDto, String> {
+    let CatalogResourcePlanDocument::Push(plan) = catalog.load_resource_plan(&plan_id)? else {
+        return Err("the referenced plan is not a Push review".to_string());
+    };
+    if &plan.link_id != link_id {
+        return Err("the Push review belongs to another link".to_string());
+    }
+    if now < plan.created_at || now > plan.expires_at {
+        return Err("the Push review expired; review again".to_string());
+    }
+    if !include {
+        catalog.discard_plan(&plan_id)?;
+        return Ok(CatalogResourcePushOutcomeDto {
+            plan_id,
+            published: false,
+            revision: plan.observed_head.map(|head| head.revision),
+            message: "Nothing was pushed".to_string(),
+        });
+    }
+    if !plan.row.selectable {
+        return Err(plan
+            .row
+            .blocked_reason
+            .clone()
+            .unwrap_or_else(|| "this resource has nothing safe to Push".to_string()));
+    }
+    let acknowledged: BTreeSet<_> = acknowledged_warning_digests.into_iter().collect();
+    for warning in &plan.row.warnings {
+        if !acknowledged.contains(&warning.digest) {
+            return Err(format!("unacknowledged warning: {}", warning.message));
+        }
+    }
+    let workspace = resolve_resource_workspace(state, catalog, runner, link_id, user_home)?;
+    if workspace.registration.revision != plan.registration_revision
+        || workspace.link.revision != plan.link_revision
+    {
+        return Err("the resource or link changed after review".to_string());
+    }
+    let storage_identity = storage_identity_for_config(&workspace.storage);
+    if storage_identity != plan.storage_identity_sha256
+        || !observed_matches(
+            plan.observed_head.as_ref(),
+            workspace.observed.as_ref(),
+            &storage_identity,
+        )
+    {
+        return Err("the storage head changed after review".to_string());
+    }
+    workspace
+        .context
+        .verify_pins(&plan.profile_pins, &plan.skill_root_pins)?;
+    let record = workspace
+        .inventory
+        .resources
+        .get(&workspace.registration.resource_id)
+        .ok_or("the local resource disappeared after review")?;
+    if record.resource != plan.resource {
+        return Err("the local resource changed after review".to_string());
+    }
+    if record.warnings != plan.row.warnings {
+        return Err("the local resource warnings changed after review".to_string());
+    }
+    let engine = engine_for(&workspace.storage)?;
+    let tag = match engine.read_tag(&workspace.link.repository_id)? {
+        Some((tag, _)) => tag,
+        None => LibraryResourceTag {
+            schema_version: CATALOG_SCHEMA,
+            repository_id: workspace.link.repository_id.clone(),
+            provider: record.resource.provider(),
+            resource_kind: record.resource.kind_tag(),
+            resource_id: record.resource.resource_id(),
+            stable_identity_sha256: record.resource.identity_sha256(),
+            display_name: record.resource.display_name(),
+            scope_label: scope_label(&record.resource),
+            created_at: workspace.link.created_at,
+        },
+    };
+    let host = state.load_or_create_host_identity()?;
+    let published = engine.publish(PublishLibraryResourceRequest {
+        repository_id: workspace.link.repository_id.clone(),
+        tag,
+        observed: workspace.observed,
+        resource: record.resource.clone(),
+        payloads: payloads_for_record(record),
+        captured_with: CatalogCapturedWith {
+            app: "mallard".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        published_by_origin: super::domain::derive_library_origin(
+            host.host_id.as_str(),
+            workspace.link.link_id.as_str(),
+            &workspace.link.repository_id,
+        )?,
+        updated_at: now,
+    })?;
+    let coordinate = head_coordinate(&published.head, &storage_identity);
+    catalog.mutate_resources(|document| {
+        let link = document
+            .links
+            .iter_mut()
+            .find(|link| &link.link_id == link_id)
+            .ok_or("the catalog link disappeared while publishing")?;
+        if link.revision != plan.link_revision {
+            return Err("the catalog link changed while publishing".to_string());
+        }
+        link.accepted_head = Some(coordinate);
+        link.accepted_content_sha256 =
+            Some(published.manifest.resource.content_sha256().to_string());
+        link.revision = link.revision.saturating_add(1);
+        link.updated_at = now;
+        Ok(())
+    })?;
+    catalog.discard_plan(&plan_id)?;
+    Ok(CatalogResourcePushOutcomeDto {
+        plan_id,
+        published: published.published,
+        revision: Some(published.head.revision),
+        message: if published.published {
+            format!("Published resource revision {}", published.head.revision)
+        } else {
+            "The linked storage already had this content".to_string()
+        },
+    })
+}
+
 #[tauri::command]
 pub async fn publish_catalog_resource(
     _app: tauri::AppHandle,
@@ -1745,137 +1849,14 @@ pub async fn publish_catalog_resource(
     acknowledged_warning_digests: Vec<String>,
 ) -> Result<CatalogResourcePushOutcomeDto, String> {
     run_blocking(move || {
-        let state = state_repository()?;
-        let catalog = catalog_repository()?;
-        let CatalogResourcePlanDocument::Push(plan) = catalog.load_resource_plan(&plan_id)? else {
-            return Err("the referenced plan is not a Push review".to_string());
-        };
-        if plan.link_id != link_id {
-            return Err("the Push review belongs to another link".to_string());
-        }
-        let now = now_secs();
-        if now < plan.created_at || now > plan.expires_at {
-            return Err("the Push review expired; review again".to_string());
-        }
-        if !include {
-            catalog.discard_plan(&plan_id)?;
-            return Ok(CatalogResourcePushOutcomeDto {
-                plan_id,
-                published: false,
-                revision: plan.observed_head.map(|head| head.revision),
-                message: "Nothing was pushed".to_string(),
-            });
-        }
-        if !plan.row.selectable {
-            return Err(plan
-                .row
-                .blocked_reason
-                .clone()
-                .unwrap_or_else(|| "this resource has nothing safe to Push".to_string()));
-        }
-        let acknowledged: BTreeSet<_> = acknowledged_warning_digests.into_iter().collect();
-        for warning in &plan.row.warnings {
-            if !acknowledged.contains(&warning.digest) {
-                return Err(format!("unacknowledged warning: {}", warning.message));
-            }
-        }
-        let workspace = resolve_resource_workspace(
-            &state,
-            &catalog,
-            &NativeProcessRunner,
+        super::service::StorageCatalogService::from_user_home()?.publish_reviewed(
             &link_id,
-            &os_user_home()?,
-        )?;
-        if workspace.registration.revision != plan.registration_revision
-            || workspace.link.revision != plan.link_revision
-        {
-            return Err("the resource or link changed after review".to_string());
-        }
-        let storage_identity = storage_identity_for_config(&workspace.storage);
-        if storage_identity != plan.storage_identity_sha256
-            || !observed_matches(
-                plan.observed_head.as_ref(),
-                workspace.observed.as_ref(),
-                &storage_identity,
-            )
-        {
-            return Err("the storage head changed after review".to_string());
-        }
-        workspace
-            .context
-            .verify_pins(&plan.profile_pins, &plan.skill_root_pins)?;
-        let record = workspace
-            .inventory
-            .resources
-            .get(&workspace.registration.resource_id)
-            .ok_or("the local resource disappeared after review")?;
-        if record.resource != plan.resource {
-            return Err("the local resource changed after review".to_string());
-        }
-        if record.warnings != plan.row.warnings {
-            return Err("the local resource warnings changed after review".to_string());
-        }
-        let engine = engine_for(&workspace.storage)?;
-        let tag = match engine.read_tag(&workspace.link.repository_id)? {
-            Some((tag, _)) => tag,
-            None => LibraryResourceTag {
-                schema_version: CATALOG_SCHEMA,
-                repository_id: workspace.link.repository_id.clone(),
-                provider: record.resource.provider(),
-                resource_kind: record.resource.kind_tag(),
-                resource_id: record.resource.resource_id(),
-                stable_identity_sha256: record.resource.identity_sha256(),
-                display_name: record.resource.display_name(),
-                scope_label: scope_label(&record.resource),
-                created_at: workspace.link.created_at,
+            super::service::CatalogPublishApproval {
+                plan_id,
+                include,
+                acknowledged_warning_digests,
             },
-        };
-        let host = state.load_or_create_host_identity()?;
-        let published = engine.publish(PublishLibraryResourceRequest {
-            repository_id: workspace.link.repository_id.clone(),
-            tag,
-            observed: workspace.observed,
-            resource: record.resource.clone(),
-            payloads: payloads_for_record(record),
-            captured_with: CatalogCapturedWith {
-                app: "mallard".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-            },
-            published_by_origin: super::domain::derive_library_origin(
-                host.host_id.as_str(),
-                workspace.link.link_id.as_str(),
-                &workspace.link.repository_id,
-            )?,
-            updated_at: now,
-        })?;
-        let coordinate = head_coordinate(&published.head, &storage_identity);
-        catalog.mutate_resources(|document| {
-            let link = document
-                .links
-                .iter_mut()
-                .find(|link| link.link_id == link_id)
-                .ok_or("the catalog link disappeared while publishing")?;
-            if link.revision != plan.link_revision {
-                return Err("the catalog link changed while publishing".to_string());
-            }
-            link.accepted_head = Some(coordinate);
-            link.accepted_content_sha256 =
-                Some(published.manifest.resource.content_sha256().to_string());
-            link.revision = link.revision.saturating_add(1);
-            link.updated_at = now;
-            Ok(())
-        })?;
-        catalog.discard_plan(&plan_id)?;
-        Ok(CatalogResourcePushOutcomeDto {
-            plan_id,
-            published: published.published,
-            revision: Some(published.head.revision),
-            message: if published.published {
-                format!("Published resource revision {}", published.head.revision)
-            } else {
-                "The linked storage already had this content".to_string()
-            },
-        })
+        )
     })
     .await
 }
@@ -1982,7 +1963,7 @@ fn conflicting_claim_pins(
     ))
 }
 
-fn prepare_pull_with_repositories(
+pub(crate) fn prepare_pull_with_repositories(
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
@@ -2042,17 +2023,116 @@ pub async fn prepare_catalog_resource_pull(
     requested_copy_name: Option<String>,
 ) -> Result<CatalogResourcePullPlan, String> {
     run_blocking(move || {
-        prepare_pull_with_repositories(
-            &state_repository()?,
-            &catalog_repository()?,
-            &NativeProcessRunner,
-            &link_id,
-            requested_copy_name.as_deref(),
-            &os_user_home()?,
-            now_secs(),
-        )
+        super::service::StorageCatalogService::from_user_home()?
+            .prepare_pull(&link_id, requested_copy_name.as_deref())
     })
     .await
+}
+
+pub(crate) fn apply_pull_with_repositories(
+    state: &LocalStateRepository,
+    catalog: &CatalogStateRepository,
+    runner: &dyn PluginProcessRunner,
+    link_id: &CatalogLinkId,
+    plan_id: CatalogPlanId,
+    approved_action_id: Option<CatalogPlanActionId>,
+    destructive_acknowledged: bool,
+    user_home: &Path,
+    now: u64,
+) -> Result<CatalogResourcePullOutcomeDto, String> {
+    let CatalogResourcePlanDocument::Pull(plan) = catalog.load_resource_plan(&plan_id)? else {
+        return Err("the referenced plan is not a Pull review".to_string());
+    };
+    if &plan.link_id != link_id {
+        return Err("the Pull review belongs to another link".to_string());
+    }
+    if now < plan.created_at || now > plan.expires_at {
+        return Err("the Pull review expired; review again".to_string());
+    }
+    let workspace = resolve_resource_workspace(state, catalog, runner, link_id, user_home)?;
+    if workspace.registration.revision != plan.registration_revision
+        || workspace.link.revision != plan.link_revision
+        || storage_identity_for_config(&workspace.storage) != plan.storage_identity_sha256
+    {
+        return Err("the resource, link, or storage changed after review".to_string());
+    }
+    workspace
+        .context
+        .verify_pins(&plan.profile_pins, &plan.skill_root_pins)?;
+    let observed = workspace
+        .observed
+        .as_ref()
+        .ok_or("the linked repository head disappeared")?;
+    if head_coordinate(&observed.head, &plan.storage_identity_sha256) != plan.head
+        || workspace.remote_resource.as_ref() != Some(&plan.resource)
+    {
+        return Err("the stored resource changed after review".to_string());
+    }
+    let approved = validate_resource_pull_selection(
+        &plan,
+        approved_action_id.as_ref(),
+        destructive_acknowledged,
+    )?;
+    if let Some(action) = approved.first().copied() {
+        let current_claims = conflicting_claim_pins(
+            &catalog,
+            &workspace.inventory,
+            &workspace.link.storage_id,
+            &action.target,
+            &action.incoming_content_sha256,
+        )?;
+        if current_claims != plan.conflicting_claims {
+            return Err(
+                "cross-storage claims changed after review; refresh and review Pull again"
+                    .to_string(),
+            );
+        }
+        if !current_claims.is_empty()
+            && action.kind.preservation().is_none()
+            && !action.kind.is_destructive_overwrite()
+        {
+            return Err(
+                    "this target is claimed by another storage at a different version; choose preservation, acknowledged overwrite, or Skip"
+                        .to_string(),
+                );
+        }
+    }
+    let engine = engine_for(&workspace.storage)?;
+    let fetch = |sha256: &str, size: u64| engine.fetch_payload(&plan.repository_id, sha256, size);
+    let environment = PullApplyEnvironment {
+        repository: catalog,
+        runner,
+        fetch_payload: &fetch,
+    };
+    let result = execute_resource_pull_action(&environment, &plan, approved.first().copied(), now);
+    let remote_accepted = pull_outcome_accepts_remote(result.outcome);
+    let accepted_content_sha256 = plan.resource.content_sha256().to_string();
+    let accepted_base_changed = workspace.link.accepted_head.as_ref() != Some(&plan.head)
+        || workspace.link.accepted_content_sha256.as_deref()
+            != Some(accepted_content_sha256.as_str());
+    if remote_accepted && accepted_base_changed {
+        catalog.mutate_resources(|document| {
+            let link = document
+                .links
+                .iter_mut()
+                .find(|link| &link.link_id == link_id)
+                .ok_or("the catalog link disappeared while accepting Pull")?;
+            if link.revision != plan.link_revision {
+                return Err("the catalog link changed while accepting Pull".to_string());
+            }
+            link.accepted_head = Some(plan.head.clone());
+            link.accepted_content_sha256 = Some(accepted_content_sha256.clone());
+            link.revision = link.revision.saturating_add(1);
+            link.updated_at = now;
+            Ok(())
+        })?;
+    }
+    catalog.discard_plan(&plan_id)?;
+    Ok(CatalogResourcePullOutcomeDto {
+        plan_id,
+        remote_accepted,
+        result,
+    })
 }
 
 #[tauri::command]
@@ -2064,111 +2144,14 @@ pub async fn apply_catalog_resource_pull(
     destructive_acknowledged: bool,
 ) -> Result<CatalogResourcePullOutcomeDto, String> {
     run_blocking(move || {
-        let state = state_repository()?;
-        let catalog = catalog_repository()?;
-        let CatalogResourcePlanDocument::Pull(plan) = catalog.load_resource_plan(&plan_id)? else {
-            return Err("the referenced plan is not a Pull review".to_string());
-        };
-        if plan.link_id != link_id {
-            return Err("the Pull review belongs to another link".to_string());
-        }
-        let now = now_secs();
-        if now < plan.created_at || now > plan.expires_at {
-            return Err("the Pull review expired; review again".to_string());
-        }
-        let workspace = resolve_resource_workspace(
-            &state,
-            &catalog,
-            &NativeProcessRunner,
+        super::service::StorageCatalogService::from_user_home()?.apply_pull(
             &link_id,
-            &os_user_home()?,
-        )?;
-        if workspace.registration.revision != plan.registration_revision
-            || workspace.link.revision != plan.link_revision
-            || storage_identity_for_config(&workspace.storage) != plan.storage_identity_sha256
-        {
-            return Err("the resource, link, or storage changed after review".to_string());
-        }
-        workspace
-            .context
-            .verify_pins(&plan.profile_pins, &plan.skill_root_pins)?;
-        let observed = workspace
-            .observed
-            .as_ref()
-            .ok_or("the linked repository head disappeared")?;
-        if head_coordinate(&observed.head, &plan.storage_identity_sha256) != plan.head
-            || workspace.remote_resource.as_ref() != Some(&plan.resource)
-        {
-            return Err("the stored resource changed after review".to_string());
-        }
-        let approved = validate_resource_pull_selection(
-            &plan,
-            approved_action_id.as_ref(),
-            destructive_acknowledged,
-        )?;
-        if let Some(action) = approved.first().copied() {
-            let current_claims = conflicting_claim_pins(
-                &catalog,
-                &workspace.inventory,
-                &workspace.link.storage_id,
-                &action.target,
-                &action.incoming_content_sha256,
-            )?;
-            if current_claims != plan.conflicting_claims {
-                return Err(
-                    "cross-storage claims changed after review; refresh and review Pull again"
-                        .to_string(),
-                );
-            }
-            if !current_claims.is_empty()
-                && action.kind.preservation().is_none()
-                && !action.kind.is_destructive_overwrite()
-            {
-                return Err(
-                    "this target is claimed by another storage at a different version; choose preservation, acknowledged overwrite, or Skip"
-                        .to_string(),
-                );
-            }
-        }
-        let engine = engine_for(&workspace.storage)?;
-        let fetch = |sha256: &str, size: u64| {
-            engine.fetch_payload(&plan.repository_id, sha256, size)
-        };
-        let environment = PullApplyEnvironment {
-            repository: &catalog,
-            runner: &NativeProcessRunner,
-            fetch_payload: &fetch,
-        };
-        let result = execute_resource_pull_action(
-            &environment,
-            &plan,
-            approved.first().copied(),
-            now,
-        );
-        let remote_accepted = pull_outcome_accepts_remote(result.outcome);
-        if remote_accepted {
-            catalog.mutate_resources(|document| {
-                let link = document
-                    .links
-                    .iter_mut()
-                    .find(|link| link.link_id == link_id)
-                    .ok_or("the catalog link disappeared while accepting Pull")?;
-                if link.revision != plan.link_revision {
-                    return Err("the catalog link changed while accepting Pull".to_string());
-                }
-                link.accepted_head = Some(plan.head.clone());
-                link.accepted_content_sha256 = Some(plan.resource.content_sha256().to_string());
-                link.revision = link.revision.saturating_add(1);
-                link.updated_at = now;
-                Ok(())
-            })?;
-        }
-        catalog.discard_plan(&plan_id)?;
-        Ok(CatalogResourcePullOutcomeDto {
-            plan_id,
-            remote_accepted,
-            result,
-        })
+            super::service::CatalogPullApproval {
+                plan_id,
+                approved_action_id,
+                destructive_acknowledged,
+            },
+        )
     })
     .await
 }

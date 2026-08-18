@@ -44,7 +44,11 @@ import LogPanel, { ACTIVITY_LOG_TYPES } from "../LogPanel";
 import BundleConnectionDialog from "./BundleConnectionDialog";
 import LogManagerDialog from "./LogManagerDialog";
 import ProjectBindingEditor, { type ProjectBindingDraft } from "./ProjectBindingEditor";
-import ProjectLinksWorkspace, { type StorageNotice } from "./ProjectLinksWorkspace";
+import ProjectLinksWorkspace, {
+  storageSubtitle,
+  storageSubtitleIsPath,
+  type StorageNotice,
+} from "./ProjectLinksWorkspace";
 import StorageIndexPage from "./StorageIndexPage";
 import type { PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import PushResourceWorkspace, {
@@ -802,6 +806,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     id: storage.id,
     name: storage.name,
     kind: storage.kind,
+    detail: storageSubtitle(storage),
+    detailIsPath: storageSubtitleIsPath(storage),
   }));
   // The project workspace names itself in its path bar, so the titlebar stays
   // silent there and speaks only for the screens that carry no trail.
@@ -3401,9 +3407,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             storages={catalogStorages}
             appActions={appActions}
             onOpenScope={openCatalogScope}
-            onOpenStorages={openStorageIndex}
             onOpenStorageSettings={(storageId) => openStorageWorkspace(storageId, true)}
+            onAddStorage={openNewStorageConfiguration}
+            onAddScope={() => beginAddCatalogScope()}
             onRemoveScope={() => void removeCatalogScope(activeCatalogScope.scope.scope_id)}
+            notify={(message) => notify(message)}
             onScopeGone={() => {
               setCatalogScopeId(null);
               void refreshCatalogScopes();

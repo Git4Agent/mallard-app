@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn symlinks_and_nested_vcs_metadata_fail_closed() {
+    fn symlinks_special_files_and_nested_vcs_metadata_fail_closed() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("skill");
         write(&dir.join("SKILL.md"), b"---\nname: skill\n---\n");
@@ -400,6 +400,13 @@ mod tests {
         {
             std::os::unix::fs::symlink("/etc/hosts", dir.join("link")).unwrap();
             assert!(capture_skill_tree(&dir).unwrap_err().contains("symlink"));
+            fs::remove_file(dir.join("link")).unwrap();
+
+            let socket = std::os::unix::net::UnixListener::bind(dir.join("socket")).unwrap();
+            assert!(capture_skill_tree(&dir)
+                .unwrap_err()
+                .contains("special file"));
+            drop(socket);
         }
     }
 

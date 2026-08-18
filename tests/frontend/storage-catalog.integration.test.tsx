@@ -116,22 +116,25 @@ function renderScopePage() {
     <StorageCatalogPage
       scope={scopeView}
       scopes={[scopeView]}
-      storages={[{ id: "storage-a", name: "Vault", kind: "local" }]}
+      storages={[{ id: "storage-a", name: "Vault", kind: "local", detail: "~/Vault", detailIsPath: true }]}
       appActions={[]}
       onOpenScope={() => undefined}
-      onOpenStorages={() => undefined}
       onOpenStorageSettings={() => undefined}
+      onAddStorage={() => undefined}
+      onAddScope={() => undefined}
       onRemoveScope={() => undefined}
-      onScopeGone={() => undefined}
+      notify={() => undefined}
     />,
   );
 }
 
-test("the scope page is a path bar over one list, rooted at Storages", () => {
+test("the scope page wears the project workspace's trail and list", () => {
   const html = renderScopePage();
-  // The bar is the titlebar: Storages → the storage → this row. The page
-  // never names itself twice, so there is no <h1> over the list.
-  assert.match(html, /Storages/);
+  // The project workspace's own two crumbs — the storage it syncs with, then
+  // the thing being synced. No Storages crumb: that roots the storage
+  // screens, not a workspace. The page never names itself twice, so there is
+  // no <h1> over the list.
+  assert.doesNotMatch(html, /Storages/);
   assert.match(html, /Skills · conf2/);
   assert.doesNotMatch(html, /<h1>Skills · conf2<\/h1>/);
   assert.match(html, /Loading Skills · conf2…/);
@@ -243,9 +246,9 @@ test("Refresh, Unlink and Fork stay scoped to one resource behind the row", () =
   assert.doesNotMatch(page, /forceRevalidate|force_revalidate/);
   assert.match(page, /api\.prepareFork\(resource\.registration\.registration_id/);
   assert.match(page, /api\.unlink\(resource\.registration\.registration_id, linkId, revision\)/);
-  // Unlinking the whole pairing is the storage crumb's verb, and it names the
-  // count before it runs.
-  assert.match(page, /Unlink from these \$\{kind\.plural\.toLowerCase\(\)\}/);
+  // Unlinking the whole pairing is the storage crumb's verb, worded the way
+  // the project's is, and it names the count before it runs.
+  assert.match(page, /label: `Unlink from \$\{label\}…`/);
   assert.match(page, /Push and Pull stop for all \$\{linked\.length\} paired/);
   assert.doesNotMatch(page, /forkCodexThread|fork_codex_thread|storage-wide|bulk sync/i);
 });

@@ -299,6 +299,31 @@ fn canonical_paths(paths: &[PathBuf]) -> Option<Vec<PathBuf>> {
         .collect()
 }
 
+/// Normalize a delivered watcher path to the same spelling used by profile
+/// and dependency keys. Existing paths canonicalize directly. Removal events
+/// may name a path that has already disappeared, so canonicalize its nearest
+/// existing ancestor and append the missing suffix without following it.
+fn canonical_event_path(path: &Path) -> PathBuf {
+    let mut current = path;
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(mut canonical) = std::fs::canonicalize(current) {
+            for component in missing.iter().rev() {
+                canonical.push(component);
+            }
+            return canonical;
+        }
+        let Some(name) = current.file_name() else {
+            return path.to_path_buf();
+        };
+        missing.push(name.to_os_string());
+        let Some(parent) = current.parent() else {
+            return path.to_path_buf();
+        };
+        current = parent;
+    }
+}
+
 fn session_root_names(provider: &ProviderKey) -> &'static [&'static str] {
     match provider.as_str() {
         "codex" => &["sessions", "archived_sessions"],
@@ -362,7 +387,9 @@ impl ProfileWatch {
             self.healthy = false;
             return;
         }
-        for path in &event.paths {
+        for delivered_path in &event.paths {
+            let canonical_path = canonical_event_path(delivered_path);
+            let path = canonical_path.as_path();
             if self.provider.as_str() == "codex"
                 && path.file_name().and_then(|name| name.to_str()) == Some("session_index.jsonl")
                 && path.parent() == Some(self.canonical_home.as_path())
@@ -399,7 +426,7 @@ impl ProfileWatch {
             let is_jsonl = path.extension().and_then(|ext| ext.to_str()) == Some("jsonl");
             if is_jsonl {
                 self.generation = self.generation.wrapping_add(1);
-                self.dirty_roots.insert(path.clone());
+                self.dirty_roots.insert(path.to_path_buf());
                 let membership_change =
                     matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_))
                         || !self.known_roots.contains(path)
@@ -736,10 +763,11 @@ impl SessionWatchService {
         served
     }
 
-    /// Test-only reliability signal: drop the profile's watcher and caches
-    /// as a backend failure would, forcing the next operation to rebaseline.
-    #[cfg(test)]
-    pub(crate) fn force_rebaseline_for_tests(&self, canonical_home: &Path) {
+    /// Explicit reliability reset: drop the profile's watcher and caches as a
+    /// backend failure would, forcing the next operation to rebaseline.
+    /// Reviewed application operations use this boundary so asynchronous
+    /// event delivery can never authorize a stale Push or Pull decision.
+    pub(crate) fn force_rebaseline(&self, canonical_home: &Path) {
         let Some(canonical_home) = canonical_home_of(canonical_home) else {
             return;
         };
@@ -935,6 +963,35 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn watcher_event_paths_match_canonical_dependency_spelling() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_home = temp.path().join("real-home");
+        let sessions = real_home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let alias_home = temp.path().join("alias-home");
+        symlink(&real_home, &alias_home).unwrap();
+        let delivered = alias_home.join("sessions/rollout.jsonl");
+        let real_file = sessions.join("rollout.jsonl");
+        std::fs::write(&real_file, b"{}\n").unwrap();
+
+        assert_eq!(
+            canonical_event_path(&delivered),
+            std::fs::canonicalize(&real_file).unwrap()
+        );
+
+        std::fs::remove_file(&real_file).unwrap();
+        assert_eq!(
+            canonical_event_path(&delivered),
+            std::fs::canonicalize(&sessions)
+                .unwrap()
+                .join("rollout.jsonl")
+        );
+    }
+
     #[test]
     fn multi_provider_activity_populates_the_profile_caches_used_by_detail() {
         let temp = tempfile::tempdir().unwrap();
@@ -1079,6 +1136,7 @@ mod tests {
         let home = temp.path().join("codex-home");
         let sessions = home.join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
+        let canonical_home = canonical_home_of(&home).unwrap();
         let service = service();
         let (project, storage, _) = ids();
 
@@ -1086,16 +1144,16 @@ mod tests {
         service.take_reusable_observations(&home, &project, &storage, &[]);
         {
             let mut inner = service.inner.lock().unwrap();
-            assert!(inner.ensure_profile(&codex_provider(), &home));
-            let profile = inner.profiles.get(&home).unwrap();
+            assert!(inner.ensure_profile(&codex_provider(), &canonical_home));
+            let profile = inner.profiles.get(&canonical_home).unwrap();
             assert!(!profile.inventory_dirty);
         }
         // A new rollout is membership work.
         std::fs::write(sessions.join("rollout-new.jsonl"), b"{}\n").unwrap();
         {
             let mut inner = service.inner.lock().unwrap();
-            assert!(inner.ensure_profile(&codex_provider(), &home));
-            let profile = inner.profiles.get(&home).unwrap();
+            assert!(inner.ensure_profile(&codex_provider(), &canonical_home));
+            let profile = inner.profiles.get(&canonical_home).unwrap();
             assert!(profile.inventory_dirty, "unknown rollout dirties inventory");
         }
         // Removing the watched sessions root is a reliability signal: the
@@ -1104,13 +1162,13 @@ mod tests {
         {
             let mut inner = service.inner.lock().unwrap();
             // First consult sees the removal and drops the profile...
-            let _ = inner.ensure_profile(&codex_provider(), &home);
+            let _ = inner.ensure_profile(&codex_provider(), &canonical_home);
         }
         std::fs::create_dir_all(&sessions).unwrap();
         {
             let mut inner = service.inner.lock().unwrap();
             assert!(
-                inner.ensure_profile(&codex_provider(), &home),
+                inner.ensure_profile(&codex_provider(), &canonical_home),
                 "rearm after recreation"
             );
         }

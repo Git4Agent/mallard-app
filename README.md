@@ -231,11 +231,54 @@ npm run build
 npm run test:frontend-integration
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml --lib
+npm run test:storage-catalog-e2e
 npm run test:cli
 ```
 
 The Rust suite includes tests that bind localhost for the stub S3 transport;
 restricted environments may require permission for that test server.
+
+### Live Codex end-to-end test
+
+The live Codex test is deliberately separate from `npm run test:integration`.
+It makes authenticated, paid Codex calls and requires an existing profile with
+`auth.json`. Each run copies that authentication into isolated temporary
+provider homes, creates temporary projects and local-folder storage, and
+removes those fixtures after the test. It does not run against the source
+profile or Mallard's real local state.
+
+Run it only when you intend to spend API tokens:
+
+```sh
+MALLARD_RUN_LIVE_CODEX_E2E=1 npm run test:live-codex-e2e
+```
+
+The source profile defaults to `~/.codex`. To use another profile without
+changing it, set `MALLARD_LIVE_CODEX_SOURCE_HOME`:
+
+```sh
+MALLARD_RUN_LIVE_CODEX_E2E=1 \
+  MALLARD_LIVE_CODEX_SOURCE_HOME=/path/to/codex-home \
+  npm run test:live-codex-e2e
+```
+
+The test makes exactly 25 `gpt-5.6-luna` requests with low reasoning effort:
+five conversation turns and twenty headless old-history checks over disposable
+Codex-home snapshots. It exercises two isolated machine homes through project
+revision 10, including paginated dependency histories, reviewed Push/Pull,
+stale-plan rejection, divergence in both directions, Keep Both, and a no-op
+fixed point. The same topology also shares and updates nested Codex skills and
+fake v1/v2 pets through the storage Library without additional model calls.
+
+The old-history checks use public `codex exec resume` rather than a terminal
+UI. Codex 0.147 appends a turn even with `--ephemeral`, so each check runs
+against a fresh disposable snapshot and the test proves that the authoritative
+temporary homes remain byte-identical. It also verifies that credentials do
+not enter stored objects, machine-local paths do not enter portable manifests
+or object keys, and Library activity cannot mutate the project repository.
+
+See [`docs/PLAN_LIVE_CODEX_INTEGRATION_TEST.md`](./docs/PLAN_LIVE_CODEX_INTEGRATION_TEST.md)
+for the topology, POC evidence, revision matrix, and safety assertions.
 
 ## Code map
 

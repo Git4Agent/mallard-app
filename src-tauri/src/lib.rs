@@ -15,6 +15,30 @@ mod storage_catalog;
 #[cfg(test)]
 mod sync_tests;
 
+pub use project_sync::service::{
+    CreateSetupDraftResult, ProjectDetail, ProjectOperationResult, ProjectSyncService,
+    PushApproval, PushDestinationPullReason, PushDestinationStatus, PushReviewContext,
+    RestoreResult, SetupDraftInspection, ThreadSyncComparison, ThreadSyncState,
+};
+pub use storage_catalog::adapters::{CmdOutput, PluginProcessRunner};
+pub use storage_catalog::domain::{
+    CatalogActionOutcome, CatalogLinkId, CatalogLinkState, CatalogPlanActionId, CatalogPlanId,
+    CatalogPullActionKind, CatalogPullDisposition, CatalogRegistrationId, CatalogResource,
+    CatalogResourceId, CatalogResourceKindTag, CatalogResourcePullPlan, CatalogResourcePushPlan,
+    CatalogResourceRelation, CatalogResourceRepositoryId, CatalogScopeId, CodexPetFormat,
+    LibraryHeadCoordinate, LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId,
+    ProviderKey, CATALOG_SCHEMA,
+};
+pub use storage_catalog::resource_commands::{
+    CatalogResourceLinkInspectionDto, CatalogResourcePullOutcomeDto, CatalogResourcePushOutcomeDto,
+    CatalogScopeDto, CatalogScopeLinkOutcomeDto, CatalogScopeResourcesDto, CatalogScopeRowDto,
+    LinkCatalogScopeResourceRequest,
+};
+pub use storage_catalog::service::{
+    CatalogPublishApproval, CatalogPullApproval, CatalogRepositoryInspectionDto,
+    StorageCatalogService,
+};
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[cfg(not(test))]
 pub fn run() {

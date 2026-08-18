@@ -923,6 +923,26 @@ impl BundleRecipe {
         Ok(())
     }
 
+    /// Validate a recipe used as machine-local selection state. Portable
+    /// conversation identities are valid inside bundle scope recipes, but a
+    /// local project or storage-link recipe selects provider capture resources
+    /// instead. Conversation publication is authorized separately through a
+    /// reviewed conversation plan.
+    pub fn validate_machine_local(&self) -> Result<(), String> {
+        self.validate()?;
+        if let Some(resource_id) = self
+            .entries
+            .keys()
+            .find(|resource_id| parse_conversation_resource_id(resource_id.as_str()).is_ok())
+        {
+            return Err(format!(
+                "machine-local recipe contains portable conversation resource '{}'; conversations must be reviewed through a conversation plan",
+                resource_id
+            ));
+        }
+        Ok(())
+    }
+
     pub fn selected_ids(&self) -> BTreeSet<ResourceId> {
         self.entries.keys().cloned().collect()
     }
@@ -1156,7 +1176,7 @@ impl LocalProjectRegistration {
         if let Some(fingerprint) = &self.repository_fingerprint {
             validate_sha256("repository fingerprint", fingerprint)?;
         }
-        self.recipe.validate()?;
+        self.recipe.validate_machine_local()?;
         if self.created_at > self.updated_at {
             return Err(format!(
                 "project '{}' has invalid timestamps",
@@ -1404,7 +1424,7 @@ impl SyncConfig {
                 ));
             }
             if let Some(recipe) = &link.recipe {
-                recipe.validate()?;
+                recipe.validate_machine_local()?;
             }
             if link.scope_bases.len() > MAX_PROVIDER_SCOPES + 1 {
                 return Err(format!(
@@ -3621,6 +3641,28 @@ pub fn conversation_resource_id(
     thread_id: &ThreadId,
 ) -> Result<ResourceId, String> {
     ResourceId::parse(format!("{}:conversation:{}", provider.as_str(), thread_id))
+}
+
+/// Parse the canonical portable conversation resource identity
+/// (`<provider>:conversation:<thread>`). Provider-native capture identities
+/// such as `<provider>:session:<id>` deliberately do not match.
+pub fn parse_conversation_resource_id(
+    resource_id: &str,
+) -> Result<(ProviderKey, ThreadId), String> {
+    let mut parts = resource_id.splitn(3, ':');
+    let provider = parts
+        .next()
+        .ok_or_else(|| "resource id is empty".to_string())?;
+    let class = parts.next();
+    let thread = parts.next();
+    if class != Some("conversation") {
+        return Err(format!(
+            "'{}' is not a conversation resource id",
+            resource_id
+        ));
+    }
+    let thread = thread.ok_or_else(|| format!("'{}' has no thread id", resource_id))?;
+    Ok((ProviderKey::parse(provider)?, ThreadId::parse(thread)?))
 }
 
 pub fn conversation_transcript_path(
