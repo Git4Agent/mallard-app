@@ -14,7 +14,7 @@ import type {
 import Icon, { type IconName } from "../Icons";
 import { projectSyncApi } from "./api";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
-import ProviderMark from "./ProviderMark";
+import ProviderMark from "../sync-review/ProviderMark";
 import { formatCompactNumber, formatSessionDetailTimestamp, type OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 
@@ -1390,6 +1390,7 @@ export function ProjectChatHistoryContent({
 }: ContentProps) {
   const [collapsedCommitShas, setCollapsedCommitShas] = useState<Set<string>>(new Set());
   const [uncommittedCollapsed, setUncommittedCollapsed] = useState(false);
+  const [storageOnlyCollapsed, setStorageOnlyCollapsed] = useState(false);
   const label = projectLabel(project);
   const aliased = label !== project.display_name;
   const sessions = useMemo(
@@ -1427,6 +1428,17 @@ export function ProjectChatHistoryContent({
     [comparison?.provider_errors],
   );
   const comparisonStorageName = comparison?.storage_name ?? activeStorageName ?? "selected storage";
+  // Resolved the same way the rows' status badges resolve it, so the group
+  // heading and the tooltips under it can never name two different storages.
+  const storageOnlyName = (comparison ? comparisonStorageName : activeStorageName) ?? "storage";
+  // Unmapped rows split by where the session lives. A storage-only session is
+  // not uncommitted local work, so it never renders under a heading that
+  // promises a commit is coming; one that does map to a commit still renders
+  // on the rail, because the rail records which sessions produced the commit
+  // and that stays true wherever the transcript is.
+  const unmappedReferences = activity?.unmapped ?? [];
+  const storageOnlyReferences = unmappedReferences.filter((reference) => sessionsByResource.get(reference.resource_id)?.source === "remote_only");
+  const uncommittedReferences = unmappedReferences.filter((reference) => sessionsByResource.get(reference.resource_id)?.source !== "remote_only");
   const compactSelectionReview = embedded && selectionMode != null;
   const olderEntries = useMemo(() => {
     if (!selectionMode) return [];
@@ -1616,21 +1628,44 @@ export function ProjectChatHistoryContent({
               </section>
             )}
 
+            {activity.git && storageOnlyReferences.length > 0 && (
+              /* Above the timeline, not on it: these rows have no commit and no
+                 local file, so the group draws the timeline's frame treatment
+                 but no rail segment. The rows are the ordinary session card —
+                 the backend already hands a stored session no actions, and
+                 details stay closed for `remote_only`, so nothing on the row
+                 offers what a missing transcript cannot honor. */
+              <section className={`sync-history-storage-only${storageOnlyCollapsed ? " collapsed" : ""}`} aria-labelledby="storage-only-heading">
+                <SectionFold
+                  collapsed={storageOnlyCollapsed}
+                  controls="storage-only-list"
+                  label={`${storageOnlyCollapsed ? "Expand" : "Collapse"} ${storageOnlyReferences.length} session${storageOnlyReferences.length === 1 ? "" : "s"} only in ${storageOnlyName}`}
+                  onToggle={() => setStorageOnlyCollapsed(!storageOnlyCollapsed)}
+                />
+                <div className="sync-history-section-heading">
+                  <h2 id="storage-only-heading"><Icon name="cloud" size={13} />Only in <span className="sync-history-storage-name">{storageOnlyName}</span></h2>
+                  <span className="sync-history-heading-count" title={`${storageOnlyReferences.length} session${storageOnlyReferences.length === 1 ? "" : "s"} not on this computer`} aria-label={`${storageOnlyReferences.length} session${storageOnlyReferences.length === 1 ? "" : "s"} not on this computer`}><Icon name="message" size={12} />{storageOnlyReferences.length}</span>
+                </div>
+                {!storageOnlyCollapsed && (
+                  <div id="storage-only-list" className="sync-history-thread-list flat">{storageOnlyReferences.map((reference) => { const session = sessionsByResource.get(reference.resource_id); return session ? renderSession(session, `storage-only:${session.resource_id}`) : null; })}</div>
+                )}
+              </section>
+            )}
             {activity.git ? (
-              <div className={`sync-history-timeline${activity.unmapped.length > 0 ? " has-uncommitted" : ""}`}>
-                {activity.unmapped.length > 0 && (
+              <div className={`sync-history-timeline${uncommittedReferences.length > 0 ? " has-uncommitted" : ""}`}>
+                {uncommittedReferences.length > 0 && (
                   <section className={`sync-history-uncommitted${uncommittedCollapsed ? " collapsed" : ""}`} aria-labelledby="uncommitted-heading">
                     <SectionFold
                       collapsed={uncommittedCollapsed}
                       controls="uncommitted-list"
-                      label={`${uncommittedCollapsed ? "Expand" : "Collapse"} ${activity.unmapped.length} session${activity.unmapped.length === 1 ? "" : "s"} not linked to a commit`}
+                      label={`${uncommittedCollapsed ? "Expand" : "Collapse"} ${uncommittedReferences.length} session${uncommittedReferences.length === 1 ? "" : "s"} not linked to a commit`}
                       onToggle={() => setUncommittedCollapsed(!uncommittedCollapsed)}
                     />
                     <div className="sync-history-section-heading">
                       <h2 id="uncommitted-heading"><Icon name="edit" size={13} />Uncommitted</h2>
                     </div>
                     {!uncommittedCollapsed && (
-                      <div id="uncommitted-list" className="sync-history-thread-list flat">{activity.unmapped.map((reference) => { const session = sessionsByResource.get(reference.resource_id); return session ? renderSession(session, `uncommitted:${session.resource_id}`) : null; })}</div>
+                      <div id="uncommitted-list" className="sync-history-thread-list flat">{uncommittedReferences.map((reference) => { const session = sessionsByResource.get(reference.resource_id); return session ? renderSession(session, `uncommitted:${session.resource_id}`) : null; })}</div>
                     )}
                   </section>
                 )}

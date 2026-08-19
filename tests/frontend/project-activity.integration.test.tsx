@@ -1157,6 +1157,8 @@ test("embedded activity follows the project workspace without repeating project 
   assert.match(html, /aria-label="Git history"/);
   assert.match(html, /class="sync-history-timeline has-uncommitted"/);
   assert.match(html, /<h2 id="uncommitted-heading"><svg[^>]*data-icon="edit"[^>]*>.*<\/svg>Uncommitted<\/h2>/s);
+  // Local-only unmapped rows never conjure the storage-only group.
+  assert.doesNotMatch(html, /storage-only-heading/);
   // The unmapped reason is bookkeeping, not something the reader needs on screen.
   assert.doesNotMatch(html, /No subsequent commit/);
   // The empty placeholder is gone. It existed to reserve the 18px box while
@@ -1180,6 +1182,89 @@ test("embedded activity follows the project workspace without repeating project 
   assert.doesNotMatch(html, /aria-label="Project settings"/);
   assert.doesNotMatch(html, /sync-history-project-context/);
   assert.doesNotMatch(html, /Local storage 1/);
+});
+
+test("storage-only sessions leave Uncommitted for their own group above the rail", () => {
+  const storedId = "019f7798-5437-7632-9dbc-5b589cf68bf1";
+  const storedResourceId = `codex:conversation:${storedId}`;
+  const storedSession = {
+    ...codexSession,
+    resource_id: storedResourceId,
+    provider_session_id: null,
+    logical_thread_id: storedId,
+    source: "remote_only" as const,
+    title: "Add horror story document",
+    working_directory: null,
+    recorded_sha: null,
+    actions: [],
+  };
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      embedded
+      activeStorageName="Local storage 1"
+      activity={{
+        ...activity,
+        sessions: [codexSession, storedSession],
+        unmapped: [
+          { resource_id: codexResourceId, reason: "No subsequent commit" },
+          { resource_id: storedResourceId, reason: "No subsequent commit" },
+        ],
+      }}
+    />,
+  );
+
+  // The heading names the storage the way the row badges do, and the group
+  // sits above the timeline — it is not on the rail.
+  assert.match(html, /<h2 id="storage-only-heading"><svg[^>]*data-icon="cloud"[^>]*>.*?<\/svg>Only in <span class="sync-history-storage-name">Local storage 1<\/span><\/h2>/s);
+  assert.ok(html.indexOf('id="storage-only-heading"') < html.indexOf("sync-history-timeline"));
+  assert.match(html, /class="sync-history-heading-count"[^>]*aria-label="1 session not on this computer"/);
+  assert.match(html, /class="sync-history-spine-fold"[^>]*aria-label="Collapse 1 session only in Local storage 1"[^>]*aria-expanded="true"[^>]*aria-controls="storage-only-list"/);
+  // Each list holds only its own rows; the local draft keeps Uncommitted and
+  // its fold count follows the split.
+  const storageList = html.slice(html.indexOf('id="storage-only-list"'), html.indexOf('id="uncommitted-list"'));
+  assert.match(storageList, /Add horror story document/);
+  assert.doesNotMatch(storageList, /Add Git history mapping/);
+  const uncommittedList = html.slice(html.indexOf('id="uncommitted-list"'));
+  assert.match(uncommittedList, /Add Git history mapping/);
+  assert.doesNotMatch(uncommittedList, /Add horror story document/);
+  assert.match(html, /aria-label="Collapse 1 session not linked to a commit"/);
+});
+
+test("a page whose unmapped rows are all storage-only renders no Uncommitted group", () => {
+  const storedId = "019f7798-5437-7632-9dbc-5b589cf68bf1";
+  const storedResourceId = `codex:conversation:${storedId}`;
+  const storedSession = {
+    ...codexSession,
+    resource_id: storedResourceId,
+    provider_session_id: null,
+    logical_thread_id: storedId,
+    source: "remote_only" as const,
+    title: "Add horror story document",
+    working_directory: null,
+    recorded_sha: null,
+    actions: [],
+  };
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      embedded
+      activeStorageName="Local storage 1"
+      activity={{
+        ...activity,
+        sessions: [codexSession, storedSession],
+        unmapped: [{ resource_id: storedResourceId, reason: "No subsequent commit" }],
+      }}
+    />,
+  );
+
+  assert.match(html, /id="storage-only-heading"/);
+  // No local unmapped rows: no Uncommitted frame, and the timeline drops the
+  // padding that exists only to clear it.
+  assert.doesNotMatch(html, /uncommitted-heading|has-uncommitted/);
+  assert.match(html, /class="sync-history-timeline"/);
+  // The committed local session still renders on the rail as provenance.
+  assert.match(html.slice(html.indexOf("sync-history-commit-rail")), /Add Git history mapping/);
 });
 
 test("Activity badges the provenance-carrying preserved side of a divergent Pull", () => {
@@ -2025,7 +2110,6 @@ test("completed projects use their main row for history and only mark Git reposi
       onAddProject={() => undefined}
       onRefresh={() => undefined}
       onOpenStorage={() => undefined}
-      onClearStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
       onOpenCatalogMenu={() => undefined}
@@ -2118,7 +2202,6 @@ test("the project menu accepts multiple bound provider profiles", () => {
       onToggleActivity={() => undefined}
       onAddProject={() => undefined}
       onOpenStorage={() => undefined}
-      onClearStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
       onOpenCatalogMenu={() => undefined}
@@ -2192,7 +2275,6 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
         onToggleActivity={() => undefined}
         onAddProject={() => undefined}
         onOpenStorage={() => undefined}
-        onClearStorage={() => undefined}
         onRemoveStorage={() => undefined}
         onAddStorage={() => undefined}
         onOpenCatalogMenu={() => undefined}
@@ -2264,7 +2346,6 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
       onAddProject={() => undefined}
       onRefresh={() => undefined}
       onOpenStorage={() => undefined}
-      onClearStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
       onOpenCatalogMenu={() => undefined}
@@ -2280,10 +2361,19 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
   const storageButton = html.slice(html.lastIndexOf("<button", storageMarker), html.indexOf(">", html.lastIndexOf("<button", storageMarker)) + 1);
   const addStorageMarker = html.indexOf('aria-label="Add storage"');
   const addStorageButton = html.slice(html.lastIndexOf("<button", addStorageMarker), html.indexOf(">", addStorageMarker) + 1);
+  const removeStorageMarker = html.indexOf('aria-label="Remove Local storage 1 from Mallard"');
+  const removeStorageButton = html.slice(
+    html.lastIndexOf("<button", removeStorageMarker),
+    html.indexOf("</button>", removeStorageMarker) + "</button>".length,
+  );
 
   assert.match(projectButton, /disabled=""/);
   assert.match(storageButton, /disabled=""/);
   assert.match(addStorageButton, /disabled=""/);
+  assert.match(removeStorageButton, /class="sidebar-profile-remove"/);
+  assert.match(removeStorageButton, /disabled=""/);
+  assert.match(removeStorageButton, /data-icon="trash"/);
+  assert.doesNotMatch(html, /data-icon="more"/);
   assert.match(html, /sync-sidebar-storage-warning/);
   assert.match(storageButton, /Storage issue: Storage folder unavailable\./);
   assert.doesNotMatch(html, /Legacy profiles|Open legacy/);

@@ -5,6 +5,7 @@
 //! and metadata-index caching, snapshot/cursor validation, Git checkpoint correlation,
 //! response bounds, and DTOs that may cross the Tauri boundary.
 
+use crate::path_text_boundary::replace_sensitive_path_occurrences;
 use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
 use crate::project_activity::resolve_activity_project;
 use crate::provider_capture::LocalSessionView;
@@ -182,6 +183,7 @@ struct ResolvedLocalSession {
     provider: ProviderKey,
     resource_id: String,
     project_root: PathBuf,
+    project_root_aliases: Vec<PathBuf>,
     provider_home: PathBuf,
     provider_session_id: String,
     transcript_path: PathBuf,
@@ -796,6 +798,7 @@ fn resolve_local_session(
             provider: provider.clone(),
             resource_id: resource_id.to_string(),
             project_root: resolved.project_root.clone(),
+            project_root_aliases: project_root_aliases(&resolved),
             provider_home: home.home.clone(),
             provider_session_id: session.provider_thread_id.clone(),
             transcript_path: canonical_path,
@@ -816,6 +819,26 @@ fn resolve_local_session(
             "More than one local transcript matched this session; access was refused.",
         )),
     }
+}
+
+fn project_root_aliases(
+    resolved: &crate::project_activity::ResolvedActivityProject,
+) -> Vec<PathBuf> {
+    let mut spellings = vec![
+        PathBuf::from(&resolved.binding.project_root),
+        PathBuf::from(&resolved.binding.canonical_project_root),
+        resolved.project_root.clone(),
+    ];
+    spellings.retain(|spelling| !spelling.as_os_str().is_empty());
+    spellings.sort_by(|left, right| {
+        right
+            .as_os_str()
+            .len()
+            .cmp(&left.as_os_str().len())
+            .then_with(|| left.as_os_str().cmp(right.as_os_str()))
+    });
+    spellings.dedup();
+    spellings
 }
 
 fn cwd_belongs_to_project(cwd: &Path, project_root: &Path) -> bool {
@@ -955,6 +978,7 @@ fn load_or_build_index(
             resource_id: &session.resource_id,
             provider_session_id: &session.provider_session_id,
             project_root: &session.project_root,
+            project_root_aliases: &session.project_root_aliases,
         };
         let index = adapter
             .build_timeline_index(&session.transcript_path, &context)
@@ -1305,11 +1329,17 @@ fn summarize_session(
 fn sanitize_boundary_text(value: &str, session: &ResolvedLocalSession) -> String {
     let transcript = session.transcript_path.to_string_lossy();
     let provider_home = session.provider_home.to_string_lossy();
-    let project_root = session.project_root.to_string_lossy();
-    value
+    let mut redacted = value
         .replace(transcript.as_ref(), "<session-transcript>")
-        .replace(provider_home.as_ref(), "<provider-home>")
-        .replace(project_root.as_ref(), ".")
+        .replace(provider_home.as_ref(), "<provider-home>");
+    for project_root in &session.project_root_aliases {
+        redacted = replace_sensitive_path_occurrences(
+            &redacted,
+            project_root.to_string_lossy().as_ref(),
+            ".",
+        );
+    }
+    redacted
 }
 
 fn sanitize_timeline_events(events: &mut [SessionTimelineEvent], session: &ResolvedLocalSession) {
@@ -1872,11 +1902,133 @@ mod tests {
         }
     }
 
+    fn sanitization_session() -> ResolvedLocalSession {
+        ResolvedLocalSession {
+            provider: ProviderKey::parse("codex").unwrap(),
+            resource_id: "codex:conversation:thread-1".to_string(),
+            project_root: PathBuf::from("/tmp/run/project1"),
+            project_root_aliases: vec![PathBuf::from("/tmp/run/project1")],
+            provider_home: PathBuf::from("/tmp/run/myconf1"),
+            provider_session_id: "thread-1".to_string(),
+            transcript_path: PathBuf::from("/tmp/run/myconf1/sessions/thread.jsonl"),
+            display_name: "thread-1".to_string(),
+            file_size: 0,
+            modified_nanos: 0,
+            is_active: false,
+        }
+    }
+
+    #[test]
+    fn session_text_sanitizes_only_boundary_valid_project_root_occurrences() {
+        let session = sanitization_session();
+        let cases = [
+            ("/tmp/run/project1", "."),
+            ("/tmp/run/project1/file", "./file"),
+            (
+                "/tmp/run/project1_external/file",
+                "/tmp/run/project1_external/file",
+            ),
+            ("/tmp/run/project1+copy/file", "/tmp/run/project1+copy/file"),
+            ("/tmp/run/project1:copy/file", "/tmp/run/project1:copy/file"),
+            ("/tmp/run/project1=copy/file", "/tmp/run/project1=copy/file"),
+            ("/tmp/run/project1?copy/file", "/tmp/run/project1?copy/file"),
+            ("/tmp/run/project1!copy/file", "/tmp/run/project1!copy/file"),
+            (
+                "/tmp/run/project1\\copy/file",
+                "/tmp/run/project1\\copy/file",
+            ),
+            ("/tmp/run/project1é/file", "/tmp/run/project1é/file"),
+            ("/tmp/run/project1🦆/file", "/tmp/run/project1🦆/file"),
+            ("/tmp/run/project1-copy/file", "/tmp/run/project1-copy/file"),
+            ("/tmp/run/project1.bak/file", "/tmp/run/project1.bak/file"),
+            ("/tmp/run/project10/file", "/tmp/run/project10/file"),
+            ("/host/tmp/run/project1/file", "/host/tmp/run/project1/file"),
+            (
+                "outside=/tmp/run/project1_external/file inside=/tmp/run/project1/file",
+                "outside=/tmp/run/project1_external/file inside=./file",
+            ),
+            ("wrote /tmp/run/project1.", "wrote ."),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(sanitize_boundary_text(input, &session), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn session_text_sanitizes_selected_and_canonical_project_root_spellings() {
+        let mut session = sanitization_session();
+        session.project_root = PathBuf::from("/private/var/folders/run/project1_copy");
+        session.project_root_aliases = vec![
+            PathBuf::from("/private/var/folders/run/project1_copy"),
+            PathBuf::from("/var/folders/run/project1_copy"),
+        ];
+
+        let input = concat!(
+            "selected=/var/folders/run/project1_copy/generated/a.txt ",
+            "canonical=/private/var/folders/run/project1_copy/generated/b.txt ",
+            "outside=/var/folders/run/project1_copy_external/outside.txt"
+        );
+        assert_eq!(
+            sanitize_boundary_text(input, &session),
+            concat!(
+                "selected=./generated/a.txt ",
+                "canonical=./generated/b.txt ",
+                "outside=/var/folders/run/project1_copy_external/outside.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn session_text_keeps_transcript_first_and_provider_home_redactions() {
+        let session = sanitization_session();
+        let input = concat!(
+            "transcript=/tmp/run/myconf1/sessions/thread.jsonl ",
+            "cache=/tmp/run/myconf1/cache/index.json ",
+            "project=/tmp/run/project1/src/lib.rs"
+        );
+        assert_eq!(
+            sanitize_boundary_text(input, &session),
+            concat!(
+                "transcript=<session-transcript> ",
+                "cache=<provider-home>/cache/index.json ",
+                "project=./src/lib.rs"
+            )
+        );
+    }
+
+    #[test]
+    fn session_text_uses_the_same_boundaries_in_uri_and_json_text() {
+        let session = sanitization_session();
+        let input = r#"{"path":"/tmp/run/project1/file","outside":"/tmp/run/project1_external/file","changes":{"/tmp/run/project1/file":{},"/tmp/run/project1_external/file":{}},"uri":"file:///tmp/run/project1/file","outside_uri":"file:///tmp/run/project1_external/file"}"#;
+        let expected = r#"{"path":"./file","outside":"/tmp/run/project1_external/file","changes":{"./file":{},"/tmp/run/project1_external/file":{}},"uri":"file://./file","outside_uri":"file:///tmp/run/project1_external/file"}"#;
+        let sanitized = sanitize_boundary_text(input, &session);
+        assert_eq!(sanitized, expected);
+        serde_json::from_str::<serde_json::Value>(&sanitized)
+            .expect("sanitization preserves serialized JSON text");
+    }
+
+    #[test]
+    fn session_text_redacts_exact_json_roots_without_rewriting_root_dot_siblings() {
+        let session = sanitization_session();
+        let input = r#"{"cwd":"/tmp/run/project1","changes":{"/tmp/run/project1":{}},"outside":"/tmp/run/project1."}"#;
+        let expected = r#"{"cwd":".","changes":{".":{}},"outside":"/tmp/run/project1."}"#;
+        let sanitized = sanitize_boundary_text(input, &session);
+        assert_eq!(sanitized, expected);
+        serde_json::from_str::<serde_json::Value>(&sanitized)
+            .expect("sanitization preserves exact-root JSON text");
+    }
+
     #[test]
     fn timeline_index_rejects_absolute_affected_paths() {
-        let error = validate_index(&index_with_path("/private/project/secret"), 4)
-            .expect_err("absolute path must fail closed");
-        assert_eq!(error.code, SessionDetailErrorCode::ProviderError);
+        for path in [
+            "/private/project/secret",
+            "/tmp/run/project1_external/outside.txt",
+        ] {
+            let error = validate_index(&index_with_path(path), 4)
+                .expect_err("absolute path must fail closed");
+            assert_eq!(error.code, SessionDetailErrorCode::ProviderError);
+        }
         assert!(validate_index(&index_with_path("src/main.rs"), 4).is_ok());
     }
 

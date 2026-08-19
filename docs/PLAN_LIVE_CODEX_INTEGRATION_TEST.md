@@ -762,3 +762,403 @@ The final implementation keeps every machine-local, project-bundle, and
 Library schema at 1. It introduces no migration, legacy reader or writer,
 fallback execution path, or compatibility layer, and the deterministic Library
 test rejects creation of the obsolete `.mallard/v1/catalog` namespace.
+
+## 21. Proposed expansion: file paths in Session Details
+
+This phase extends the existing live test without adding another conversation
+or changing the revision graph. The existing revision-1 Codex request becomes
+the file-producing request. It runs from `myconf1` with `project1` as its
+working directory, creates deterministic files both inside and outside the
+project, and still finishes with the existing `MALLARD_BASE` assistant marker.
+
+The required end-to-end contract is:
+
+```text
+source rollout in myconf1
+  project1/generated/session-paths/...       project1_external/...
+                    |                                |
+                    | Push encode                    | unchanged
+                    v                                v
+portable conversation object
+  /__mallard_root__/generated/session-paths/...      project1_external/...
+                    |                                |
+                    | Pull decode                    | unchanged
+                    v                                v
+target rollout in myconf2
+  project1_copy/generated/session-paths/...          project1_external/...
+```
+
+Session Details intentionally presents a normalized view rather than exposing
+the active checkout root. On both replicas, in-project occurrences therefore
+render as `./generated/session-paths/...`, while the outside absolute path
+renders unchanged. The raw target rollout separately proves that Pull changed
+the physical project prefix from `project1` to `project1_copy` before Session
+Details normalized it.
+
+`affected_paths` keeps its existing safety contract: it contains only clean,
+project-relative paths. Outside absolute paths remain visible in the bounded
+Arguments or Result section, but they must never enter the dedicated Paths
+list. This phase does not weaken that boundary or add an absolute-path DTO.
+
+## 22. Development POC and remaining preflight
+
+A disposable, copied-auth POC was run against `codex-cli 0.147.0` with
+`gpt-5.6-luna`, low reasoning, `codex exec`, `workspace-write`, and one exact
+`--add-dir` directory. The successful request used a file-edit operation to
+create one nested in-project file and one outside-project file. It proved that:
+
+- the child Codex sandbox can write both allowed locations without
+  `danger-full-access`;
+- both files are created with exact requested bytes as regular files;
+- the durable rollout contains a successful `patch_apply_end` record;
+- the record's `changes` object contains both absolute path keys.
+
+The first development request was blocked by the enclosing desktop sandbox;
+the same bounded command was then rerun outside that enclosing layer while the
+child Codex process retained `workspace-write` and the exact `--add-dir`.
+Thus the development POC used two Luna-low requests, one blocked and one
+successful. Its copied credential and complete temporary tree were removed
+after inspection. These development-only calls do not change the committed
+live-test budget.
+
+The POC intentionally stopped at the raw provider record. Before modifying the
+paid live flow, add a credential-free fixture with the observed current 0.147
+`custom_tool_call` plus `patch_apply_end` shape and pass it through the
+production Codex history and Session Detail projection. If the current
+code-mode completion does not attach its in-project `changes` keys to the
+durable tool event, extend only the current-format projection so those paths
+reach `affected_paths`. Do not add a legacy parser or a conditional assertion
+that silently accepts a missing Paths row.
+
+## 23. Deterministic fixture topology
+
+Create two nested files in `project1`:
+
+```text
+project1/generated/session-paths/inside-alpha.txt
+project1/generated/session-paths/nested/inside-beta.json
+```
+
+Create two files in a sibling directory that is outside the project but whose
+name deliberately shares the project-root byte prefix:
+
+```text
+project1_external/outside-alpha.txt
+project1_external/nested/outside-beta.json
+```
+
+The prefix-lookalike is intentional. For a project root ending in
+`/project1`, `/project1_external/...` is not a descendant because `_` is not a
+path boundary. The wire mapper already handles this correctly. The fixture
+also exposes a current Session Detail bug where plain `str::replace` can render
+that outside path as `._external/...`.
+
+All four files use small fixed contents. Immediately after revision 1, assert:
+
+- the selected project spelling and its canonical alias resolve to the same
+  no-follow directory, while the canonical external root is disjoint;
+- every fixture is a no-follow regular file with exact bytes, digest, and Unix
+  mode;
+- the project-root tree changed only by the two expected relative files;
+- the external tree contains only the two expected files; and
+- the provider rollout contains all four absolute paths and no wire token.
+
+Only the exact external fixture directory is passed to `--add-dir`; never pass
+the system temporary root, the whole live-test root, either provider home,
+Mallard state, or storage.
+
+## 24. Bounded Codex execution policy
+
+Replace the test runner's hard-coded access mode with an explicit closed enum:
+
+```rust
+enum CodexRunAccess<'a> {
+    ReadOnly,
+    WorkspaceWrite { additional_dir: &'a Path },
+}
+```
+
+Only revision 1 receives `WorkspaceWrite`. All revision-2-through-5 chats and
+all twenty headless history checks remain read-only. The write-capable command
+uses this shape:
+
+```text
+codex --ask-for-approval never exec
+  --json
+  --ignore-user-config
+  --ignore-rules
+  --skip-git-repo-check
+  --sandbox workspace-write
+  --add-dir <exact-project1_external-directory>
+  --model gpt-5.6-luna
+  --config model_reasoning_effort="low"
+  --cd <project1>
+  <bounded deterministic prompt>
+```
+
+The prompt requires a file-edit operation, exact relative paths and contents,
+no reads, no network, no other filesystem changes, and the existing final
+`MALLARD_BASE` response. The runner retains its closed environment, null
+stdin, bounded prompt/output sizes, timeout, exact version gate, and request
+counter. The test asserts outcomes from filesystem state and production
+Session Details rather than accepting arbitrary shell output as proof.
+
+## 25. Session Detail production seam and boundary fix
+
+The external live test must use the same orchestration path as the desktop UI.
+Today, project-bound session discovery is private to the Tauri commands while
+`ProjectSyncService` stops at bundle inspection. Extract synchronous,
+repository-parameterized cores for:
+
+```text
+get_project_session_detail
+get_project_session_timeline_page
+get_project_session_event_detail
+```
+
+Make both the Tauri wrappers and `ProjectSyncService` delegate to those cores.
+Reuse the existing request and response DTOs, ownership checks, provider
+registry, watcher-backed discovery, snapshot IDs, pagination cache, and error
+types. Do not construct `LocalSessionView` values in the integration test and
+do not add a test-only parser.
+
+Replace Session Detail's plain project-root string replacement with the same
+conservative exact-root-or-descendant text boundary used by the path mapper.
+A slash may prove descent, while punctuation and non-ASCII bytes that can
+continue a path component must not turn a prefix-lookalike sibling into a
+match. Carry both the configured and canonical spellings of a validated bound
+root so macOS `/var` and `/private/var` aliases normalize identically. Preserve
+the stronger transcript and provider-home redactions. Add focused regressions
+proving:
+
+- `/tmp/.../project1/file` becomes `./file`;
+- `/tmp/.../project1_external/file` remains byte-identical;
+- URI, JSON-string, and object-key occurrences use the same boundary decision;
+- provider-home and transcript paths remain redacted; and
+- no absolute or escaping value can enter `affected_paths`.
+
+This is a current-path correctness fix. It adds no alternate codec, fallback,
+legacy execution path, or serialized field.
+
+## 26. Copy-before-sync sequence
+
+Place the new work around the existing A-to-B revision-1 flow:
+
+1. Finish setup for `project1` and `myconf1`.
+2. Run the enhanced revision-1 Luna-low request.
+3. Verify the four files, source rollout, and replica-A Session Details before
+   Push.
+4. Copy only the two in-project files into `project1_copy` at the identical
+   relative paths. Use bounded, no-follow regular-file checks; create only the
+   expected parent directories; preserve exact bytes and Unix modes.
+5. Snapshot the two outside files' identities, bytes, digests, and modes. They
+   are not copied and Mallard must never open them for mutation.
+6. Push revision 1 to `mystorage1` only after the explicit project-file copy
+   has completed and passed its assertions.
+7. Finish setup for `project1_copy` and `myconf2`.
+8. Pull revision 1 through the existing reviewed Pull path.
+9. Verify the materialized target rollout, replica-B Session Details, copied
+   files, and unchanged outside files.
+10. Continue revisions 2 through 10, divergence, Keep Both, Library flow, and
+    the existing headless reopen matrix unchanged.
+
+Because every revision-1-derived primary or preserved conversation contains
+the original file event, repeat the read-only Session Detail path assertions
+for every final materialized R1 descendant in both provider homes. This adds
+coverage without another model call.
+
+## 27. Three-layer path assertions
+
+The test must prove all three representations rather than inferring remapping
+from the normalized UI response:
+
+| Surface | In-project path | Outside-project path |
+| --- | --- | --- |
+| `myconf1` raw rollout | absolute `project1/generated/...` | original absolute `project1_external/...` |
+| portable rollout object | `/__mallard_root__/generated/...` | byte-identical original absolute path |
+| `myconf2` raw rollout | absolute `project1_copy/generated/...` | byte-identical original absolute path |
+| Session Details on A | `generated/...` in Paths and `./generated/...` in visible payloads | unchanged absolute path in Arguments or Result |
+| Session Details on B | same portable display as A | same unchanged absolute path in Arguments or Result |
+
+For each replica, load the header, retain its `snapshot_id`, request timeline
+pages with limit 1 until `next_cursor` is absent, and expand every relevant
+tool event. Assert that:
+
+- both in-project relative paths occur in `affected_paths` for the required
+  file-edit event;
+- every `affected_paths` entry is clean and relative;
+- neither external absolute path enters `affected_paths`;
+- the aggregate full bounded Arguments and Results contain all four visible
+  paths;
+- Session Details contains no boundary-valid active absolute project root and
+  contains neither provider home nor transcript path;
+- the B rollout contains `project1_copy` descendants and no boundary-valid
+  `project1` descendant;
+- the B rollout contains no `/__mallard_root__` token or portable path-map
+  marker; and
+- the outside path spelling and bytes are identical at source, wire, and
+  target.
+
+Add a frontend integration case that renders the same DTO contract: two
+relative Paths entries, normalized `./...` in Arguments, unchanged external
+absolute paths in Arguments or Result, and no external path in the Paths
+section.
+
+An outside absolute path is intentionally provider-native conversation
+content in this scenario. It is permitted only in the expected immutable,
+provider-native conversation object bodies. Portable manifests, tags, commits,
+object keys, Library objects, credentials, and project-control documents must
+remain free of that path. The storage assertions should identify those expected
+conversation bodies rather than broadly exempting every object body.
+
+## 28. Request budget, verification, and completion gate
+
+Enhancing revision 1 instead of creating a sixth conversation keeps the
+successful committed gate at exactly 25 requests:
+
+```text
+5 conversation requests, including the enhanced revision 1
+20 disposable-snapshot headless history verification requests
+```
+
+All requests remain `gpt-5.6-luna` with low reasoning. Session Detail reads,
+file verification, manual copying, codec inspection, and Push/Pull operations
+make no model calls.
+
+Implement and verify in layers:
+
+1. add the sanitized observed-record fixture and production projection tests;
+2. fix boundary-aware Session Detail display sanitization;
+3. add the non-Tauri Session Detail service seam and make Tauri delegate;
+4. add the frontend rendering regression;
+5. add the test-local bounded write policy and deterministic revision-1
+   prompt;
+6. add copy-before-Pull and source/wire/target assertions;
+7. compile the ignored live target and run all offline suites; and
+8. run the paid live gate once only after every offline check is green.
+
+Verification remains:
+
+```sh
+cargo fmt --all -- --check
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+cargo test --manifest-path src-tauri/Cargo.toml --test live_codex_e2e --no-run
+npm run build
+npm run test:frontend-integration
+npm run test:backend-integration
+MALLARD_RUN_LIVE_CODEX_E2E=1 npm run test:live-codex-e2e
+```
+
+This phase is complete only when the real source and pulled sessions display
+the expected paths through the production Session Detail API, the target raw
+rollout proves physical remapping, the copied in-project files are exact, the
+outside files and path spellings are unchanged, every R1-derived final alias
+passes, the gate uses exactly 25 Luna-low requests, and every machine-local,
+project-bundle, and Library schema remains 1. No migration, legacy reader or
+writer, fallback execution path, compatibility layer, or obsolete namespace
+is added.
+
+## 29. Implemented path-remapping result
+
+The phase-21 expansion is implemented. Revision 1 now makes one bounded
+code-mode call to `await tools.apply_patch(...)` under `workspace-write`, with
+only the exact sibling outside directory granted through `--add-dir`. The
+prompt preserves the user-selected project spelling instead of silently
+canonicalizing it. This is material on macOS, where the selected temporary
+root can use `/var/...` while its canonical spelling is `/private/var/...`.
+The production Session Detail projection carries both validated spellings and
+normalizes either spelling without treating a prefix-lookalike sibling as an
+in-project path.
+
+The completed test proves all of the following in one isolated two-replica
+topology:
+
+- revision 1 creates exactly two nested files in `project1` and two nested
+  files in the outside `project1_external` sibling;
+- the runner observes exactly one successful `patch_apply_end`, its complete
+  four-key `changes` map, and exactly one final `MALLARD_BASE` response before
+  accepting the filesystem result;
+- only the two in-project files are copied into `project1_copy`, at identical
+  relative paths, before the first Push;
+- source, portable wire, and pulled target rollouts respectively contain the
+  selected `project1` spelling, `/__mallard_root__/...`, and the remapped
+  `project1_copy` spelling;
+- both outside paths remain byte-identical and are never admitted to the
+  dedicated relative `affected_paths` list;
+- the production Session Detail header, limit-one pagination, and expanded
+  event APIs display both in-project paths as relative paths on both replicas,
+  while retaining the expected outside absolute paths in bounded provider
+  arguments/results;
+- all three final revision-1-derived logical conversations are checked through
+  both provider homes, for six production Session Detail aliases total;
+- the existing Push, Pull, divergent Pull, Keep Both, paginated graph,
+  cross-machine skill/pet, and twenty disposable headless-resume checks still
+  run in the same scenario; and
+- the source authentication, copied authentication, source session inventory,
+  three fixture trees, complete project repository, and portable privacy
+  boundaries remain unchanged where required.
+
+The runner now captures stdout and stderr concurrently under independent
+64-KiB limits and parses every non-empty stdout line as object-valued JSON. Its
+failure synopsis uses an explicit allowlist of public lifecycle labels and
+fixed stderr category flags; provider messages, arbitrary error codes, paths,
+credentials, and model-written fixture bytes are never printed. The offline
+test covers malformed JSONL, the event-count limit, selected-versus-canonical
+prompt spelling, credential-shaped error codes, and content-free diagnostics.
+
+The first path-expansion gate attempt stopped immediately after its first
+Luna-low revision-1 request because no fixture files were present. It had not
+performed a Push, Pull, Library operation, or any of the remaining requests.
+That version discarded the provider event evidence, so the failure could not
+be attributed conclusively. Before retrying, the prompt was made explicit
+about the current code-mode tool call, selected-path spelling was preserved,
+and bounded rollout/output evidence was made mandatory. No blind retry was
+performed.
+
+After the offline target passed, the complete gate passed on 2026-08-18:
+
+```text
+MALLARD_RUN_LIVE_CODEX_E2E=1 npm run test:live-codex-e2e
+
+live Codex phase: conversation revisions 1-5
+live Codex phase: paginated graph revisions 6-10
+live Codex phase: storage Library skills and pets
+live Codex phase: twenty disposable headless history resumes
+live Codex phase: complete (25 Luna-low requests)
+
+test live_codex_mallard_setup_push_pull_divergence ... ok
+test result: ok. 1 passed; 0 failed
+finished in 204.00s
+```
+
+The successful gate made exactly 25 requests: five conversation requests and
+twenty disposable-snapshot headless history checks. The aborted preflight made
+one request, so this implementation gate phase consumed 26 Luna-low requests
+in total. The two development POC requests are recorded separately in section
+22. Every request used `gpt-5.6-luna` with low reasoning.
+
+After the passing gate, a final review found two failure-log-only hardening
+opportunities: an equality assertion could have debug-printed unexpected
+fixture bytes, and an arbitrary short provider error code could have entered a
+diagnostic synopsis. Both were replaced with content-free comparisons and an
+explicit diagnostic allowlist, then the complete non-paid live target was
+rerun:
+
+```text
+cargo fmt --all -- --check
+git diff --check
+cargo test --manifest-path src-tauri/Cargo.toml --test live_codex_e2e
+
+test result: ok. 3 passed; 0 failed; 1 ignored
+```
+
+Those final edits affect only failure formatting and preserve the exact
+successful execution and assertions exercised by the paid gate, so another 25
+model requests were intentionally not spent.
+
+All machine-local, project-bundle, and Library schema constants remain 1. The
+Codex and Claude timeline parser-version increments only invalidate derived
+machine-local caches after current-format projection changes; they are not
+serialized schema migrations. The implementation adds no legacy reader,
+legacy writer, migration, fallback execution path, compatibility layer, or
+obsolete storage namespace.

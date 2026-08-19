@@ -12,6 +12,7 @@
 //! only proof machinery — there is no escaping, and reserved-namespace
 //! collisions fail closed with a typed error naming the record.
 
+use crate::path_text_boundary::{boundary_valid, left_boundary_valid, valid_json_text};
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use serde_json::{Map, Value};
 
@@ -123,17 +124,6 @@ fn percent_encode_path(path: &str) -> String {
     output
 }
 
-/// The boundary rule: a match counts only when the bytes before and after
-/// are outside `[A-Za-z0-9._-]` (string edge counts as a boundary).
-fn is_boundary_byte(byte: u8) -> bool {
-    !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
-fn boundary_valid(bytes: &[u8], start: usize, end: usize) -> bool {
-    (start == 0 || is_boundary_byte(bytes[start - 1]))
-        && (end == bytes.len() || is_boundary_byte(bytes[end]))
-}
-
 /// One matched-source-spelling pattern with its two replacement spellings.
 struct EncodePattern {
     /// Wire form emitted at this span.
@@ -157,6 +147,23 @@ pub struct CodexPathMapper {
 }
 
 impl CodexPathMapper {
+    fn match_boundary_valid(
+        input: &str,
+        start: usize,
+        end: usize,
+        embedded_json_valid: &mut Option<bool>,
+    ) -> bool {
+        let bytes = input.as_bytes();
+        if boundary_valid(bytes, start, end) {
+            return true;
+        }
+        if !left_boundary_valid(bytes, start) || bytes.get(end) != Some(&b'"') {
+            return false;
+        }
+
+        *embedded_json_valid.get_or_insert_with(|| valid_json_text(input))
+    }
+
     /// Build the mapper for one binding root. `canonical_root` is the
     /// binding's canonical alias spelling when it differs (macOS `/var` ↔
     /// `/private/var`); `home` is the encoding machine's `$HOME`, used only
@@ -247,13 +254,14 @@ impl CodexPathMapper {
         let mut last_emit = 0_usize;
         let mut search_from = 0_usize;
         let mut matched = false;
+        let mut embedded_json_valid = None;
         while search_from < bytes.len() {
             let Some(found) = automaton.find(&input[search_from..]) else {
                 break;
             };
             let start = search_from + found.start();
             let end = search_from + found.end();
-            if boundary_valid(bytes, start, end) {
+            if Self::match_boundary_valid(input, start, end, &mut embedded_json_valid) {
                 primary.push_str(&input[last_emit..start]);
                 secondary.push_str(&input[last_emit..start]);
                 let (primary_replacement, secondary_replacement) =
@@ -462,11 +470,12 @@ impl CodexPathMapper {
     fn first_match_in(&self, input: &str) -> Option<String> {
         let bytes = input.as_bytes();
         let mut search_from = 0_usize;
+        let mut embedded_json_valid = None;
         while search_from < bytes.len() {
             let found = self.encode_automaton.find(&input[search_from..])?;
             let start = search_from + found.start();
             let end = search_from + found.end();
-            if boundary_valid(bytes, start, end) {
+            if Self::match_boundary_valid(input, start, end, &mut embedded_json_valid) {
                 return Some(input[start..end].to_string());
             }
             search_from = start + 1;
@@ -565,7 +574,39 @@ mod tests {
                 "dotted": "/homeA/projact_alpha.bak",
                 "hosted": "/host/homeA/projact_alpha/x",
                 "quoted": "\"/__mallard_root__\"",
-                "colon": "/__mallard_root__:42",
+                "colon": "/homeA/projact_alpha:42",
+            })
+        );
+    }
+
+    #[test]
+    fn boundary_rule_does_not_rewrite_a_project_name_prefix_sibling() {
+        let mapper = CodexPathMapper::new("/tmp/run/project1", None, None).unwrap();
+        let record = json!({
+            "inside": "/tmp/run/project1/file",
+            "outside_underscore": "/tmp/run/project1_external/outside.txt",
+            "outside_plus": "/tmp/run/project1+copy/outside.txt",
+            "outside_colon": "/tmp/run/project1:copy/outside.txt",
+            "outside_equals": "/tmp/run/project1=copy/outside.txt",
+            "outside_question": "/tmp/run/project1?copy/outside.txt",
+            "outside_bang": "/tmp/run/project1!copy/outside.txt",
+            "outside_backslash": "/tmp/run/project1\\copy/outside.txt",
+            "outside_unicode": "/tmp/run/project1é/outside.txt",
+            "outside_emoji": "/tmp/run/project1🦆/outside.txt",
+        });
+        assert_eq!(
+            mapper.encode_record_gated(&record).unwrap(),
+            json!({
+                "inside": "/__mallard_root__/file",
+                "outside_underscore": "/tmp/run/project1_external/outside.txt",
+                "outside_plus": "/tmp/run/project1+copy/outside.txt",
+                "outside_colon": "/tmp/run/project1:copy/outside.txt",
+                "outside_equals": "/tmp/run/project1=copy/outside.txt",
+                "outside_question": "/tmp/run/project1?copy/outside.txt",
+                "outside_bang": "/tmp/run/project1!copy/outside.txt",
+                "outside_backslash": "/tmp/run/project1\\copy/outside.txt",
+                "outside_unicode": "/tmp/run/project1é/outside.txt",
+                "outside_emoji": "/tmp/run/project1🦆/outside.txt",
             })
         );
     }

@@ -1599,6 +1599,63 @@ fn load_project_session_views(
     Ok(views)
 }
 
+pub(super) fn get_project_session_detail_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+) -> Result<ProjectSessionDetail, SessionDetailError> {
+    rebaseline_project_provider_caches(repository, local_project_id).map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::OwnershipChanged,
+            "The project or its provider profile changed; open Project Settings.",
+        )
+    })?;
+    let views = load_project_session_views(repository, local_project_id, resource_id)?;
+    session_detail::get_project_session_detail(
+        repository,
+        provider_registry(),
+        local_project_id,
+        resource_id,
+        &views,
+    )
+}
+
+pub(super) fn get_project_session_timeline_page_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+    request: ProjectSessionTimelineRequest,
+) -> Result<ProjectSessionTimelinePage, SessionDetailError> {
+    let views = load_project_session_views(repository, local_project_id, resource_id)?;
+    session_detail::get_project_session_timeline_page(
+        repository,
+        provider_registry(),
+        local_project_id,
+        resource_id,
+        request,
+        &views,
+    )
+}
+
+pub(super) fn get_project_session_event_detail_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+    snapshot_id: &str,
+    event_id: &str,
+) -> Result<SessionEventDetail, SessionDetailError> {
+    let views = load_project_session_views(repository, local_project_id, resource_id)?;
+    session_detail::get_project_session_event_detail(
+        repository,
+        provider_registry(),
+        local_project_id,
+        resource_id,
+        snapshot_id,
+        event_id,
+        &views,
+    )
+}
+
 #[tauri::command]
 pub async fn get_project_session_detail(
     app: tauri::AppHandle,
@@ -1611,14 +1668,7 @@ pub async fn get_project_session_detail(
         current_snapshot_id: None,
     })?;
     run_session_detail_blocking(move || {
-        let views = load_project_session_views(&repository, &local_project_id, &resource_id)?;
-        session_detail::get_project_session_detail(
-            &repository,
-            ProviderRegistry::production(),
-            &local_project_id,
-            &resource_id,
-            &views,
-        )
+        get_project_session_detail_with_repository(&repository, &local_project_id, &resource_id)
     })
     .await
 }
@@ -1643,10 +1693,8 @@ pub async fn get_project_session_timeline_page(
         current_snapshot_id: None,
     })?;
     run_session_detail_blocking(move || {
-        let views = load_project_session_views(&repository, &local_project_id, &resource_id)?;
-        session_detail::get_project_session_timeline_page(
+        get_project_session_timeline_page_with_repository(
             &repository,
-            ProviderRegistry::production(),
             &local_project_id,
             &resource_id,
             ProjectSessionTimelineRequest {
@@ -1658,7 +1706,6 @@ pub async fn get_project_session_timeline_page(
                 included_tool_categories: included_tool_categories.into_iter().collect(),
                 turn_id,
             },
-            &views,
         )
     })
     .await
@@ -1678,15 +1725,12 @@ pub async fn get_project_session_event_detail(
         current_snapshot_id: None,
     })?;
     run_session_detail_blocking(move || {
-        let views = load_project_session_views(&repository, &local_project_id, &resource_id)?;
-        session_detail::get_project_session_event_detail(
+        get_project_session_event_detail_with_repository(
             &repository,
-            ProviderRegistry::production(),
             &local_project_id,
             &resource_id,
             &snapshot_id,
             &event_id,
-            &views,
         )
     })
     .await
@@ -12509,9 +12553,11 @@ fn save_project_link_with_repository(
     request: SaveProjectLinkRequest,
 ) -> Result<ProjectStorageLink, String> {
     repository.mutate_config(|config| {
-        let project = config
+        let bundle_id = config
             .project(&request.local_project_id)
-            .ok_or_else(|| format!("unknown local project '{}'", request.local_project_id))?;
+            .ok_or_else(|| format!("unknown local project '{}'", request.local_project_id))?
+            .bundle_id
+            .clone();
         if !config
             .storages
             .iter()
@@ -12519,10 +12565,19 @@ fn save_project_link_with_repository(
         {
             return Err(format!("unknown storage '{}'", request.storage_id));
         }
+        if let Some(existing) = config.links.iter_mut().find(|existing| {
+            existing.local_project_id == request.local_project_id
+                && existing.storage_id == request.storage_id
+        }) {
+            // The request edits only user intent. Destination-specific review
+            // state belongs to the existing link and is dropped only by unlink.
+            existing.pinned = request.pinned;
+            return Ok(existing.clone());
+        }
         let link = ProjectStorageLink {
             local_project_id: request.local_project_id.clone(),
             storage_id: request.storage_id.clone(),
-            bundle_id: project.bundle_id.clone(),
+            bundle_id,
             recipe: None,
             scope_bases: BTreeMap::new(),
             project_content_preferences: Default::default(),
@@ -12530,24 +12585,8 @@ fn save_project_link_with_repository(
             pinned: request.pinned,
             created_at: now_secs(),
         };
-        if let Some(existing) = config.links.iter_mut().find(|existing| {
-            existing.local_project_id == link.local_project_id
-                && existing.storage_id == link.storage_id
-        }) {
-            // Preserve creation time, the reviewed destination recipe, the
-            // reviewed scope bases, and content decisions while updating
-            // user intent. Only an explicit unlink drops review state.
-            let mut updated = link;
-            updated.created_at = existing.created_at;
-            updated.recipe = existing.recipe.clone();
-            updated.scope_bases = existing.scope_bases.clone();
-            updated.project_content_preferences = existing.project_content_preferences.clone();
-            *existing = updated.clone();
-            Ok(updated)
-        } else {
-            config.links.push(link.clone());
-            Ok(link)
-        }
+        config.links.push(link.clone());
+        Ok(link)
     })
 }
 
@@ -15517,8 +15556,10 @@ mod tests {
             required: false,
         };
 
-        let mut previous = BundleRecipe::default();
-        previous.revision = 7;
+        let mut previous = BundleRecipe {
+            revision: 7,
+            ..BundleRecipe::default()
+        };
         previous
             .entries
             .insert(generic_resource_id.clone(), generic_entry.clone());
@@ -16335,6 +16376,227 @@ mod tests {
             builder = builder.message(message_id, role, text);
         }
         builder.build()
+    }
+
+    #[test]
+    fn project_sync_service_rebaselines_before_loading_a_session_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(codex_home.join("sessions/2026/08/18")).unwrap();
+        let profile_id = add_profile(&repo, &codex_key(), &codex_home);
+        let binding = save_project_binding_with_repository(
+            &repo,
+            SaveProjectBindingRequest {
+                local_project_id: project.local_project_id.clone(),
+                project_root: project_root.to_string_lossy().into_owned(),
+                profile_ids: BTreeMap::from([(codex_key(), profile_id)]),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+
+        let provider_thread_id = "019f7800-0000-7000-8000-000000000098";
+        let thread_id =
+            initial_conversation_thread_id(&project.bundle_id, &codex_key(), provider_thread_id)
+                .unwrap();
+        let resource_id = conversation_resource_id(&codex_key(), &thread_id).unwrap();
+        let capture_request = capture_request_for_binding(&repo, &binding).unwrap();
+        let (_, empty_views) = super::super::codex_watch_service::session_watch_service()
+            .discovery_for(
+                provider_registry(),
+                &project.local_project_id,
+                &capture_request,
+            )
+            .unwrap();
+        assert!(empty_views.is_empty(), "the primed inventory must be empty");
+
+        let session_path = codex_home.join(format!(
+            "sessions/2026/08/18/rollout-2026-08-18T00-00-00-{provider_thread_id}.jsonl"
+        ));
+        std::fs::write(
+            &session_path,
+            command_test_transcript(
+                provider_thread_id,
+                &project_root,
+                &[
+                    ("message-user", "user", "Open the new session"),
+                    ("message-agent", "assistant", "The session is ready."),
+                ],
+            ),
+        )
+        .unwrap();
+
+        // Model the watcher event being consumed by another project sharing
+        // this profile. Its fresh inventory makes the profile clean while the
+        // original project's empty inventory remains cached.
+        let cache_consumer = LocalProjectId::parse("session-detail-cache-consumer").unwrap();
+        let (_, refreshed_views) = super::super::codex_watch_service::session_watch_service()
+            .discovery_for(provider_registry(), &cache_consumer, &capture_request)
+            .unwrap();
+        assert_eq!(refreshed_views.len(), 1);
+        let stale_views =
+            load_project_session_views(&repo, &project.local_project_id, resource_id.as_str())
+                .unwrap();
+        assert!(stale_views.is_empty());
+
+        let detail = ProjectSyncService::new(&repo)
+            .get_project_session_detail(&project.local_project_id, &resource_id)
+            .unwrap();
+        assert_eq!(detail.resource_id, resource_id.as_str());
+        assert_eq!(detail.provider_session_id, provider_thread_id);
+    }
+
+    #[test]
+    fn project_sync_service_uses_repository_backed_session_detail_pipeline() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        std::fs::create_dir_all(project_root.join("src")).unwrap();
+        let profile_id = add_profile(&repo, &codex_key(), &codex_home);
+        save_project_binding_with_repository(
+            &repo,
+            SaveProjectBindingRequest {
+                local_project_id: project.local_project_id.clone(),
+                project_root: project_root.to_string_lossy().into_owned(),
+                profile_ids: BTreeMap::from([(codex_key(), profile_id)]),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+
+        let provider_thread_id = "019f7800-0000-7000-8000-000000000099";
+        let inside_path = project_root.join("src/lib.rs");
+        let arguments = serde_json::to_string(&serde_json::json!({
+            "file_path": inside_path,
+        }))
+        .unwrap();
+        let records = vec![
+            serde_json::json!({
+                "timestamp": "2026-08-18T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": provider_thread_id, "cwd": project_root},
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-18T00:00:01Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "Inspect the source file"},
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-18T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": "read-1",
+                    "name": "read_file",
+                    "arguments": arguments,
+                },
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-18T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "read-1",
+                    "output": "source contents",
+                },
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-18T00:00:04Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "Inspection complete."},
+            }),
+        ];
+        let mut transcript = Vec::new();
+        for record in records {
+            transcript.extend_from_slice(&serde_json::to_vec(&record).unwrap());
+            transcript.push(b'\n');
+        }
+        let session_path = codex_home.join(format!(
+            "sessions/2026/08/18/rollout-2026-08-18T00-00-00-{provider_thread_id}.jsonl"
+        ));
+        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        std::fs::write(&session_path, transcript).unwrap();
+        std::fs::write(
+            codex_home.join("session_index.jsonl"),
+            format!(
+                "{{\"id\":\"{provider_thread_id}\",\"thread_name\":\"Service seam session\",\"updated_at\":\"2026-08-18T00:00:04Z\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        let thread_id =
+            initial_conversation_thread_id(&project.bundle_id, &codex_key(), provider_thread_id)
+                .unwrap();
+        let resource_id = conversation_resource_id(&codex_key(), &thread_id).unwrap();
+        let service = ProjectSyncService::new(&repo);
+
+        let detail = service
+            .get_project_session_detail(&project.local_project_id, &resource_id)
+            .unwrap();
+        let direct_detail = get_project_session_detail_with_repository(
+            &repo,
+            &project.local_project_id,
+            resource_id.as_str(),
+        )
+        .unwrap();
+        assert_eq!(detail, direct_detail);
+        assert_eq!(detail.title, "Service seam session");
+
+        let request = ProjectSessionTimelineRequest {
+            snapshot_id: detail.snapshot_id.clone(),
+            cursor: None,
+            anchor_event_id: None,
+            limit: Some(1),
+            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
+            included_tool_categories: BTreeSet::from([SessionToolCategory::Read]),
+            turn_id: None,
+        };
+        let page = service
+            .get_project_session_timeline_page(
+                &project.local_project_id,
+                &resource_id,
+                request.clone(),
+            )
+            .unwrap();
+        let direct_page = get_project_session_timeline_page_with_repository(
+            &repo,
+            &project.local_project_id,
+            resource_id.as_str(),
+            request,
+        )
+        .unwrap();
+        assert_eq!(page, direct_page);
+        assert_eq!(page.events.len(), 1);
+        let event_id = page.events[0].event_id.clone();
+
+        let event_detail = service
+            .get_project_session_event_detail(
+                &project.local_project_id,
+                &resource_id,
+                &detail.snapshot_id,
+                &event_id,
+            )
+            .unwrap();
+        let direct_event_detail = get_project_session_event_detail_with_repository(
+            &repo,
+            &project.local_project_id,
+            resource_id.as_str(),
+            &detail.snapshot_id,
+            &event_id,
+        )
+        .unwrap();
+        assert_eq!(event_detail, direct_event_detail);
+        assert_eq!(event_detail.result.as_deref(), Some("source contents"));
+        assert!(event_detail
+            .arguments
+            .as_deref()
+            .is_some_and(|value| value.contains("src/lib.rs")));
     }
 
     fn command_test_subagent_transcript(
@@ -17733,12 +17995,13 @@ mod tests {
         assert!(repaired.audit.ready);
         assert_eq!(repaired.audit.matching_thread_count, 2);
         let repaired_source = std::fs::read_to_string(&stale_path).unwrap();
-        // Content mentions under the old root remap with the structural
-        // fields — the widened matcher scope the old repair missed.
-        assert!(!repaired_source.contains(stale_root.to_str().unwrap()));
+        // Structural root fields remap. An exact-root prose mention followed
+        // by whitespace remains byte-identical because POSIX permits spaces
+        // in an outside sibling's component; only end-of-value or `/` proves
+        // an exact root or descendant for portable remapping.
         assert!(repaired_source.contains(&format!(
             "keep the literal {} unchanged",
-            project_root.display()
+            stale_root.display()
         )));
         for line in repaired_source.lines() {
             let value: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -17757,9 +18020,11 @@ mod tests {
             unrelated_source.as_bytes()
         );
 
-        // §6.5 rebase: the wire pin is untouched, the local column refolds
-        // from the repaired bytes, the generation advanced, and with no
-        // unpushed suffix the thread sits in Sync — nothing to republish.
+        // §6.5 rebase: the wire pin is untouched, the local column is
+        // recomputed from the repaired bytes, the generation advanced, and
+        // with no unpushed suffix the thread sits in Sync — nothing to
+        // republish. Structural cwd records are outside the semantic fold, so
+        // preserving the ambiguous prose literal leaves the fold unchanged.
         let rebased = repo
             .load_config()
             .unwrap()
@@ -17791,10 +18056,10 @@ mod tests {
             Some(repaired_local_tail.clone())
         );
         assert_eq!(rebased.observed_tail, repaired_local_tail);
-        assert_ne!(
+        assert_eq!(
             rebased.observed_tail.accepted_tail_state,
             seeded_stale.observed_tail.accepted_tail_state,
-            "content remap must change the local fold"
+            "structural-only remap must preserve the local fold"
         );
         rebased.validate().unwrap();
         // Wire invariance end-to-end: re-encoding the repaired bytes under
@@ -18478,6 +18743,120 @@ mod tests {
         )
         .unwrap();
         assert_eq!(link.bundle_id, project.bundle_id);
+    }
+
+    #[test]
+    fn saving_existing_project_link_changes_only_pinned() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let project = register(&repo);
+        let storage_id = StorageId::parse("backup").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        save_project_link_with_repository(
+            &repo,
+            SaveProjectLinkRequest {
+                local_project_id: project.local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                pinned: false,
+            },
+        )
+        .unwrap();
+
+        let observed_tail = mallard_domain::compute_portable_conversation_tail(
+            TailPartitionKind::WholeThread,
+            0,
+            &[mallard_domain::CanonicalConversationMessage {
+                message_id: mallard_domain::MessageId::parse("message-link-checkpoint").unwrap(),
+                parent_message_id: None,
+                semantic_fingerprint: "d".repeat(64),
+            }],
+        )
+        .unwrap();
+        let checkpoint = ConversationCheckpoint {
+            generation: 5,
+            accepted: None,
+            accepted_local_tail: None,
+            observed_tail,
+            physical: PhysicalMappingState::Detached {
+                expected_provider_thread_id: "0199a1b2-0000-7000-8000-000000000001".to_string(),
+                expected_binding_revision: 8,
+            },
+            prefix_witness: None,
+            binding_revision: 8,
+        };
+        let excluded_resource_id =
+            ResourceId::parse(format!("project:content-file:{}", "e".repeat(64))).unwrap();
+        let before = repo
+            .mutate_config(|config| {
+                let link = config
+                    .links
+                    .iter_mut()
+                    .find(|link| {
+                        link.local_project_id == project.local_project_id
+                            && link.storage_id == storage_id
+                    })
+                    .unwrap();
+                link.recipe = Some(BundleRecipe {
+                    revision: 7,
+                    ..BundleRecipe::default()
+                });
+                link.scope_bases.insert(
+                    SyncScopeKey::Project,
+                    ScopeBase {
+                        scope: SyncScopeKey::Project,
+                        scope_revision: 3,
+                        scope_sha256: "b".repeat(64),
+                        reviewed_in: RepositoryBase {
+                            revision: 3,
+                            commit_id: "commit-link-state".to_string(),
+                            manifest_sha256: "a".repeat(64),
+                            manifest_size: 1,
+                        },
+                        binding_revision: 8,
+                        last_pull_at: Some(10),
+                        last_push_at: Some(11),
+                    },
+                );
+                link.project_content_preferences.revision = 4;
+                link.project_content_preferences
+                    .excluded_resource_ids
+                    .insert(excluded_resource_id);
+                link.conversation_checkpoints.insert(
+                    SyncScopeKey::Provider(codex_key()),
+                    BTreeMap::from([(
+                        ThreadId::parse("thread-link-checkpoint").unwrap(),
+                        checkpoint,
+                    )]),
+                );
+                Ok(link.clone())
+            })
+            .unwrap();
+        assert!(!before.conversation_checkpoints.is_empty());
+
+        let updated = save_project_link_with_repository(
+            &repo,
+            SaveProjectLinkRequest {
+                local_project_id: project.local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+        let mut expected = before;
+        expected.pinned = true;
+        assert_eq!(updated, expected);
+
+        let persisted = repo
+            .load_config()
+            .unwrap()
+            .links
+            .into_iter()
+            .find(|link| {
+                link.local_project_id == project.local_project_id && link.storage_id == storage_id
+            })
+            .unwrap();
+        assert_eq!(persisted, expected);
+        assert!(!persisted.conversation_checkpoints.is_empty());
     }
 
     #[test]

@@ -1557,8 +1557,7 @@ summary:focus-visible {
 .sync-resource-detail-grid { display: grid !important; grid-template-columns: 85px 1fr; gap: 4px 9px !important; }
 .sync-resource-blocker { color: var(--danger-text); }
 
-.sync-callout,
-.sync-binding-safety {
+.sync-callout {
   max-width: 1180px;
   margin: 0 auto 12px;
   padding: 9px 11px;
@@ -1751,6 +1750,11 @@ summary:focus-visible {
 .sync-provider-toggle input { align-self: center; }
 .sync-provider-toggle strong { color: var(--text-0); font-size: var(--type-sm); font-weight: var(--weight-semibold); }
 .sync-provider-toggle span { color: var(--text-3); font-size: var(--type-2xs); }
+/* The toggle line without the toggle: a locked card states its provider. */
+.sync-provider-name { display: flex; align-items: baseline; gap: 8px; }
+.sync-provider-name strong { color: var(--text-0); font-size: var(--type-sm); font-weight: var(--weight-semibold); }
+.sync-provider-name span { color: var(--text-3); font-size: var(--type-2xs); }
+.sync-provider-card > small code { font-family: var(--font-mono); font-size: var(--type-2xs); }
 .sync-field-grid label,
 .sync-provider-home-grid label,
 .sync-storage-fields label,
@@ -1851,7 +1855,6 @@ summary:focus-visible {
 .sync-folder-field > div > .btn { flex: 0 0 auto; white-space: nowrap; }
 .sync-folder-field > small { color: var(--text-3); font-size: var(--type-2xs); }
 .sync-folder-field.compact { padding: 0; border: 0; background: transparent; }
-.sync-binding-safety { color: var(--success-text); background: color-mix(in srgb, var(--green) 7%, transparent); }
 
 .sync-card-heading { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .sync-card-heading > div { display: flex; flex-direction: column; }
@@ -3825,35 +3828,6 @@ span.sync-path-crumb {
   cursor: not-allowed;
 }
 
-.sidebar-storage-item .sidebar-profile-actions {
-  width: 31px;
-  flex-basis: 31px;
-  overflow: visible;
-}
-
-.sidebar-storage-actions-menu {
-  z-index: 80;
-  right: -5px;
-  width: 210px;
-}
-
-.sidebar-profile-actions .storage-link-actions-menu-item {
-  width: 100%;
-  min-height: 32px;
-  height: auto;
-  display: grid;
-  justify-content: initial;
-}
-
-.sidebar-storage-pane:has(.sidebar-storage-actions.open) {
-  z-index: 30;
-  overflow: visible;
-}
-
-.sidebar-storage-pane:has(.sidebar-storage-actions.open) > .sidebar-links-list {
-  overflow: visible;
-}
-
 .sidebar-settings-sections .sidebar-link-item {
   min-height: 40px;
   gap: 13px;
@@ -4964,8 +4938,27 @@ span.sync-path-crumb {
   justify-content: start;
   gap: 6px;
 }
+/* The select keeps a readable cap; the path field owns the slack and may
+   shrink to nothing, so the row can never outgrow its column — the binding
+   dialog tracks the window where the setup page's column is capped. */
 .sync-agent-profile-row.has-custom-path {
-  grid-template-columns: minmax(180px, 320px) minmax(280px, 620px) auto;
+  grid-template-columns: minmax(140px, 220px) minmax(0, 1fr) auto;
+}
+/* Below ~480px of list, a shared line leaves the path field a slot too small
+   to read a path in: the field takes its own line, and the hint follows it
+   across the row. */
+.sync-agent-profile-list { container-type: inline-size; }
+@container (max-width: 480px) {
+  .sync-agent-profile-row.has-custom-path {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .sync-agent-profile-row.has-custom-path input {
+    grid-row: 2;
+    grid-column: 1 / -1;
+  }
+  .sync-agent-profile-row.has-custom-path .sync-setup-path-hint {
+    grid-column: 1 / -1;
+  }
 }
 /* One 32px control height for everything in the form body. */
 .sync-agent-profile-row select,
@@ -5109,6 +5102,21 @@ span.sync-path-crumb {
 }
 .sync-setup-save-state { color: var(--text-2); }
 .sync-setup-footer > div { margin-left: auto; }
+
+/* Machine-local binding dialog: the setup page's bands inside the modal
+   shell. The sections span the body — the dialog is narrower than the setup
+   column cap — and the fact grid rides inside the Project band. */
+.sync-binding-dialog .sync-modal-body {
+  padding-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.sync-binding-dialog .sync-setup-section { max-width: none; }
+.sync-binding-dialog .sync-fact-grid { margin: 2px 0 0; }
+.sync-binding-dialog .sync-field-grid { grid-template-columns: minmax(0, 1fr); gap: 9px; }
+.sync-binding-dialog .sync-field-grid label { gap: 5px; }
+.sync-binding-dialog .sync-profile-select-row .btn { min-height: 32px; }
 .sync-draft-badge {
   margin-left: auto;
   padding: 1px 7px;
@@ -7149,33 +7157,23 @@ button.sync-project-file-expand { cursor: pointer; }
   margin-bottom: 8px;
 }
 
-/* ── Catalog rows ────────────────────────────────────────────────────────── */
+/* ── Catalog cards ───────────────────────────────────────────────────────── */
 
-/* One line per resource: state, name, where it lives, when it last moved.
-   Nothing is printed that a glyph can carry, because the page's job is to be
-   read down a column of forty. */
+/* One card per resource, wearing the activity card's grammar: line one is the
+   badge, the name as the door, the provider mark and Reveal in Finder; line
+   two is files and size, the rule, the ⓘ, and the full stamp. */
 
-.catalog-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 8px 5px 6px;
-  border-top: 1px solid var(--border);
-  background: transparent;
-  transition: background 140ms ease;
+/* Line one's name takes only its own width, so the Pull action pill stays
+   beside it while the provider mark and launch verb stay pinned right. */
+.catalog-card .sync-history-thread-title > strong {
+  flex: 0 1 auto;
 }
 
-.catalog-row:hover {
-  background: var(--surface-subtle);
-}
-
-.catalog-row.selected {
-  background: var(--surface-row-active);
-}
-
-.catalog-row-name {
+/* The name as the door. Same treatment a plain name gets, plus an underline
+   only under the pointer — the row's one opening affordance. */
+.catalog-card-name {
   min-width: 0;
-  flex: 1;
+  flex: 0 1 auto;
   overflow: hidden;
   padding: 0;
   border: 0;
@@ -7187,114 +7185,11 @@ button.sync-project-file-expand { cursor: pointer; }
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-button.catalog-row-name {
   cursor: pointer;
 }
 
-button.catalog-row-name:hover {
+.catalog-card-name:hover {
   text-decoration: underline;
-}
-
-/* Fixed width whether or not a glyph is there, so the names and dates beside
-   it stay in their columns down the whole list. */
-.catalog-row-place {
-  position: relative;
-  display: inline-flex;
-  width: 22px;
-  height: 22px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-3);
-  line-height: 0;
-  cursor: help;
-  outline: none;
-}
-
-/* The stamp is a column, not a suffix: a fixed box and lining figures keep
-   every date starting at the same x. */
-.catalog-row-stamp {
-  position: relative;
-  min-width: 58px;
-  flex: 0 0 auto;
-  color: var(--text-3);
-  font-size: var(--type-2xs);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  cursor: help;
-  outline: none;
-}
-
-/* Fixed whether or not the row has a detail page, for the same reason the
-   place slot is: every column right of the name has to start at one x down
-   the whole list. */
-.catalog-row-open {
-  display: inline-flex;
-  width: 22px;
-  height: 22px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-}
-
-.catalog-row-open > button {
-  display: inline-flex;
-  width: 100%;
-  height: 100%;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-2);
-  cursor: pointer;
-  opacity: 0;
-}
-
-.catalog-row:hover .catalog-row-open > button,
-.catalog-row-open > button:focus-visible {
-  opacity: 1;
-}
-
-.catalog-row-open > button:hover {
-  background: var(--bg-hover);
-  color: var(--text-0);
-}
-
-.catalog-row-place::after,
-.catalog-row-stamp::after {
-  content: attr(data-tooltip);
-  position: absolute;
-  z-index: 45;
-  top: calc(100% + 6px);
-  right: 0;
-  width: max-content;
-  max-width: min(340px, calc(100vw - 40px));
-  padding: 5px 7px;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: var(--surface-popover);
-  box-shadow: var(--shadow-popover);
-  color: var(--text-0);
-  font-family: var(--font);
-  font-size: var(--type-xs);
-  font-weight: var(--weight-medium);
-  line-height: 1.3;
-  text-align: left;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-}
-
-.catalog-row-place:hover::after,
-.catalog-row-place:focus-visible::after,
-.catalog-row-stamp:hover::after,
-.catalog-row-stamp:focus-visible::after {
-  opacity: 1;
-  visibility: visible;
 }
 
 /* The Pull review's local action: the row states it in one word, the way the
@@ -7344,18 +7239,41 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   color: var(--danger-text);
 }
 
-/* The acknowledgement rides under the row that raised it, aligned to the name
-   column: the footer says why the button is off, this says which row turned
-   it off. */
-.catalog-row-ack {
+/* The acknowledgement is a callout, row-sized: the tint and radius the banner
+   zone wears — warning for a scan finding, danger for an overwrite — and the
+   app's own monochrome checkbox, the one the title line already uses. It hugs
+   its sentence at line two's x, so it reads as furniture of the card rather
+   than a form under it. */
+.catalog-card-ack {
+  width: fit-content;
+  min-height: 28px;
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin: 0 10px 9px 62px;
-  padding: 0 12px;
+  align-items: center;
+  gap: 7px;
+  margin-left: 26px;
+  padding: 2px 11px 2px 2px;
+  border: 1px solid color-mix(in srgb, var(--yellow) 22%, transparent);
+  border-radius: 9px;
+  background: var(--warning-soft);
+  color: var(--warning-text);
+  font-size: var(--type-2xs);
+  cursor: pointer;
+}
+
+.catalog-card-ack.danger {
+  border-color: color-mix(in srgb, var(--red) 24%, transparent);
+  background: var(--danger-soft);
   color: var(--danger-text);
-  font-size: var(--type-xs);
-  line-height: 1.35;
+}
+
+.catalog-card-ack > .sync-sync-row-choice {
+  width: 24px;
+  min-width: 24px;
+  min-height: 24px;
+}
+
+.catalog-card-ack > svg {
+  flex: 0 0 auto;
 }
 
 /* The pill is the popover's anchor. */

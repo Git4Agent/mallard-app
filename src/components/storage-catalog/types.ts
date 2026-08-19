@@ -127,9 +127,16 @@ export interface CatalogScopeRow {
   local_present: boolean;
   local_path?: string | null;
   local_modified_at?: number | null;
+  /** Portable payload facts from this Mac's capture. Null when nothing local
+   * was captured — stored-only rows, and rows whose capture is blocked. */
+  local_files?: number | null;
+  local_bytes?: number | null;
   remote_present: boolean;
   remote_revision?: number | null;
   remote_updated_at?: number | null;
+  /** The digest the comparison used: the local capture's when one exists,
+   * otherwise the stored version's. */
+  content_sha256?: string | null;
   registration_id?: string | null;
   registration_revision?: number | null;
   link_id?: string | null;

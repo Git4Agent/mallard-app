@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { SessionCount, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
-import ProviderMark from "../ProviderMark";
+import ProviderMark from "../../sync-review/ProviderMark";
 import SessionDetailToolCall, { type SessionToolDetailState } from "./SessionDetailToolCall";
 import {
   eventAnchorId,

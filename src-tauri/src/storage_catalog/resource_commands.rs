@@ -173,9 +173,18 @@ pub struct CatalogScopeRowDto {
     pub local_present: bool,
     pub local_path: Option<String>,
     pub local_modified_at: Option<u64>,
+    /// Portable payload facts from this Mac's capture: how many files the
+    /// resource owns, and how many bytes they total. `None` when nothing
+    /// local was captured — stored-only rows, and rows whose capture is
+    /// blocked.
+    pub local_files: Option<u64>,
+    pub local_bytes: Option<u64>,
     pub remote_present: bool,
     pub remote_revision: Option<u64>,
     pub remote_updated_at: Option<u64>,
+    /// The digest the comparison used: the local capture's when one exists,
+    /// otherwise the stored version's. `None` when neither side is captured.
+    pub content_sha256: Option<String>,
     pub registration_id: Option<CatalogRegistrationId>,
     pub registration_revision: Option<u64>,
     pub link_id: Option<CatalogLinkId>,
@@ -864,9 +873,12 @@ pub fn list_catalog_scope_resources_with_repositories(
             local_present: true,
             local_path: None,
             local_modified_at: None,
+            local_files: None,
+            local_bytes: None,
             remote_present: false,
             remote_revision: None,
             remote_updated_at: None,
+            content_sha256: None,
             registration_id: None,
             registration_revision: None,
             link_id: None,
@@ -999,9 +1011,12 @@ fn row_for(
             .and_then(|record| record.target_path.as_ref())
             .map(|path| path.to_string_lossy().to_string()),
         local_modified_at: local.and_then(|record| record.local_modified_at),
+        local_files: local.map(|record| record.resource.file_count() as u64),
+        local_bytes: local.map(|record| record.resource.payload_bytes()),
         remote_present: remote.is_some(),
         remote_revision: remote.and_then(|(head, _)| head.as_ref().map(|head| head.revision)),
         remote_updated_at: remote.and_then(|(head, _)| head.as_ref().map(|head| head.updated_at)),
+        content_sha256: local_sha.or(remote_sha).map(str::to_string),
         registration_id: None,
         registration_revision: None,
         link_id: link.map(|link| link.link_id.clone()),
@@ -1705,6 +1720,7 @@ fn observed_matches(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn publish_with_repositories(
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
@@ -2029,6 +2045,7 @@ pub async fn prepare_catalog_resource_pull(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_pull_with_repositories(
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
@@ -2075,7 +2092,7 @@ pub(crate) fn apply_pull_with_repositories(
     )?;
     if let Some(action) = approved.first().copied() {
         let current_claims = conflicting_claim_pins(
-            &catalog,
+            catalog,
             &workspace.inventory,
             &workspace.link.storage_id,
             &action.target,

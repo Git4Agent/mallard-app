@@ -409,7 +409,7 @@ impl ProfileWatch {
                 self.healthy = false;
                 return;
             }
-            if !under_sessions && path != &self.canonical_home {
+            if !under_sessions && path != self.canonical_home {
                 // Direct children of the home (session tree creation) are
                 // membership changes; unrelated home files are not.
                 if path.parent() == Some(self.canonical_home.as_path())

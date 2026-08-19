@@ -314,6 +314,39 @@ pub struct SessionTimelineContext<'a> {
     pub resource_id: &'a str,
     pub provider_session_id: &'a str,
     pub project_root: &'a Path,
+    /// Other validated spellings of the same bound root, such as macOS's
+    /// `/var` and `/private/var` aliases. Provider transcripts may retain the
+    /// configured spelling even though ownership checks use the canonical one.
+    pub project_root_aliases: &'a [PathBuf],
+}
+
+/// Strip the most specific validated spelling of a bound project root.
+/// Choosing by component depth prevents a selected symlink spelling nested
+/// beneath its canonical target from leaking the alias component into the
+/// user-facing relative path.
+pub(crate) fn most_specific_project_relative_path<'a>(
+    candidate: &'a Path,
+    project_root: &Path,
+    project_root_aliases: &[PathBuf],
+) -> Option<&'a Path> {
+    let mut best: Option<((usize, usize), &'a Path)> = None;
+    for root in project_root_aliases
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(std::iter::once(project_root))
+    {
+        let Ok(relative) = candidate.strip_prefix(root) else {
+            continue;
+        };
+        let specificity = (root.components().count(), root.as_os_str().len());
+        if best
+            .as_ref()
+            .map_or(true, |(current, _)| specificity > *current)
+        {
+            best = Some((specificity, relative));
+        }
+    }
+    best.map(|(_, relative)| relative)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

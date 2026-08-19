@@ -148,7 +148,7 @@ test("the scope page wears the project workspace's trail and list", () => {
   assert.doesNotMatch(page, /CatalogCategory|CATALOG_CATEGORIES|family/);
 });
 
-test("every row wears a derived badge, a place and a date, and nothing else", () => {
+test("every row is the activity card: badge, name as the door, facts, one ⓘ", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
   const model = readFileSync("src/components/storage-catalog/model.ts", "utf8");
   // The badge is the project's own indicator, so the two pages answer the
@@ -162,11 +162,33 @@ test("every row wears a derived badge, a place and a date, and nothing else", ()
   ]) {
     assert.match(model, new RegExp(`case "${state}":`), `${state} has a badge`);
   }
-  // Location is one glyph with the path in its tooltip, and the shared user
-  // root says it is shared.
-  assert.match(model, /User-wide · shared by every Codex config on this Mac/);
-  // A row prints its name once — no title repeating the text beside it.
-  assert.doesNotMatch(page, /catalog-row-name" title=/);
+  // The card is the activity card, and the name is its one door — the chevron
+  // column went with the row grammar that carried it.
+  assert.match(page, /sync-history-thread-card catalog-card/);
+  assert.match(page, /className="catalog-card-name"/);
+  assert.doesNotMatch(
+    page,
+    /chevron-right|catalog-row-name|catalog-row-place|catalog-row-stamp|catalog-row-open|catalog-review-row|catalog-row-list/,
+  );
+  // Line two states what the scan measured — files, bytes on disk — never a
+  // recount of its own.
+  assert.match(page, /row\.local_files/);
+  assert.match(page, /row\.local_bytes/);
+  // The ⓘ carries the row's paths and digests in the session card's own
+  // popover, each a click to copy.
+  assert.match(page, /sync-history-debug-popover/);
+  assert.match(page, /sha256:\$\{row\.content_sha256\}/);
+  // Reveal in Finder is the card's one launch verb, off when nothing is
+  // local; the provider mark beside it is inert.
+  assert.match(page, /revealItemInDir/);
+  assert.match(page, /disabled=\{!row\.local_path\}/);
+  assert.match(page, /sync-history-provider-inert/);
+  // Acknowledgements are row-sized callouts inside the card that raised them:
+  // the warning tint for a scan finding, the danger tint for an overwrite,
+  // and the app's own checkbox rather than the platform's.
+  assert.match(page, /className="catalog-card-ack"/);
+  assert.match(page, /className="catalog-card-ack danger"/);
+  assert.match(page, /Reviewed this warning — /);
 });
 
 test("Push and Pull are page verbs with one review each, and link on the way", () => {

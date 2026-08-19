@@ -10,11 +10,11 @@
 mod support;
 
 use mallard_domain::{
-    ActionId, BundleId, ConversationPlanActionType, ConversationReviewAction,
+    ActionId, BundleId, ConversationFileRole, ConversationPlanActionType, ConversationReviewAction,
     DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection, KeepBothPlan,
     LocalConversationBinding, LocalProjectId, ProjectBinding, ProjectSetupDraft, ProviderKey,
-    RestoreActionKind, RestorePlan, StorageConfig, StorageId, StorageKind, ThreadId,
-    MAX_CONVERSATION_FILE_BYTES,
+    ResourceId, RestoreActionKind, RestorePlan, StorageConfig, StorageId, StorageKind,
+    SyncScopeKey, ThreadId, MAX_CONVERSATION_FILE_BYTES,
 };
 use mallard_infrastructure::codex_history_graph::{resolve_codex_root, seed_codex_root};
 use mallard_infrastructure::codex_paginated_projection::verify_projection_fixpoint;
@@ -23,6 +23,10 @@ use mallard_infrastructure::codex_standalone_builder::{
     build_standalone_codex_root, StandaloneBuildMode,
 };
 use mallard_infrastructure::persistence::LocalStateRepository;
+use mallard_infrastructure::providers::{
+    ProviderRegistry, SessionTimelineContext, SessionTimelineQuery,
+};
+use mallard_infrastructure::storage_core::repository_object_key;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
@@ -34,9 +38,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 use tauri_app_lib::{
-    ProjectDetail, ProjectOperationResult, ProjectSyncService, PushApproval,
-    PushDestinationPullReason, PushDestinationStatus, RestoreResult, ThreadSyncComparison,
-    ThreadSyncState,
+    ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSyncService,
+    PushApproval, PushDestinationPullReason, PushDestinationStatus, RestoreResult,
+    SessionTimelineEventKind, SessionToolCategory, ThreadSyncComparison, ThreadSyncState,
 };
 use walkdir::WalkDir;
 
@@ -48,11 +52,17 @@ const MODEL: &str = "gpt-5.6-luna";
 const REASONING_OVERRIDE: &str = "model_reasoning_effort=\"low\"";
 const MAX_AUTH_BYTES: u64 = 1024 * 1024;
 const MAX_CODEX_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_CODEX_OUTPUT_EVENTS: usize = 4_096;
+const MAX_CODEX_SYNOPSIS_EVENTS: usize = 64;
 const MAX_COMMAND_ARGUMENT_BYTES: usize = 4096;
 const MAX_COMMAND_ARGUMENTS: usize = 24;
 const MAX_PROMPT_BYTES: usize = 512;
+const MAX_WRITE_PROMPT_BYTES: usize = 2 * 1024;
 const MAX_STORAGE_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SNAPSHOT_FILES: usize = 2_048;
+const MAX_FIXTURE_FILE_BYTES: u64 = 4 * 1024;
+const MAX_FIXTURE_TREE_ENTRIES: usize = 32;
+const MAX_SESSION_DETAIL_EVENTS: usize = 1_024;
 const CODEX_TIMEOUT: Duration = Duration::from_secs(180);
 const EXPECTED_CODEX_VERSION_PREFIX: &str = "codex-cli 0.147.";
 const EXPECTED_MODEL_REQUESTS: usize = 25;
@@ -62,6 +72,23 @@ const P1: &str = "019f7800-0000-7000-8000-000000000002";
 const P2: &str = "019f7800-0000-7000-8000-000000000003";
 const P3: &str = "019f7800-0000-7000-8000-000000000004";
 const P4: &str = "019f7800-0000-7000-8000-000000000005";
+
+const INSIDE_ALPHA_PATH: &str = "generated/session-paths/inside-alpha.txt";
+const INSIDE_BETA_PATH: &str = "generated/session-paths/nested/inside-beta.json";
+const OUTSIDE_ALPHA_PATH: &str = "outside-alpha.txt";
+const OUTSIDE_BETA_PATH: &str = "nested/outside-beta.json";
+const INSIDE_ALPHA_BYTES: &[u8] = b"MALLARD_IN_PROJECT_ALPHA\n";
+const INSIDE_BETA_BYTES: &[u8] = b"{\"fixture\":\"MALLARD_IN_PROJECT_BETA\",\"version\":1}\n";
+const OUTSIDE_ALPHA_BYTES: &[u8] = b"MALLARD_OUTSIDE_ALPHA\n";
+const OUTSIDE_BETA_BYTES: &[u8] = b"{\"fixture\":\"MALLARD_OUTSIDE_BETA\",\"version\":1}\n";
+const IN_PROJECT_FIXTURES: [(&str, &[u8]); 2] = [
+    (INSIDE_ALPHA_PATH, INSIDE_ALPHA_BYTES),
+    (INSIDE_BETA_PATH, INSIDE_BETA_BYTES),
+];
+const OUTSIDE_PROJECT_FIXTURES: [(&str, &[u8]); 2] = [
+    (OUTSIDE_ALPHA_PATH, OUTSIDE_ALPHA_BYTES),
+    (OUTSIDE_BETA_PATH, OUTSIDE_BETA_BYTES),
+];
 
 fn redacted<T, E>(result: Result<T, E>, message: &'static str) -> T {
     match result {
@@ -138,6 +165,26 @@ struct AuthFileState {
     gid: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FixtureFileState {
+    len: u64,
+    modified: Option<SystemTime>,
+    readonly: bool,
+    digest: [u8; 32],
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    mode: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodexRunAccess<'a> {
+    ReadOnly,
+    WorkspaceWrite { additional_dir: &'a Path },
+}
+
 fn regular_auth_metadata(path: &Path) -> Metadata {
     let metadata = std::fs::symlink_metadata(path).expect("live Codex auth.json is unavailable");
     assert!(
@@ -199,6 +246,263 @@ fn auth_file_state(path: &Path) -> AuthFileState {
     }
 }
 
+fn clean_fixture_relative_path(value: &str) -> &Path {
+    let path = Path::new(value);
+    assert!(
+        !path.as_os_str().is_empty()
+            && !path.is_absolute()
+            && path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "live path fixture has an unsafe relative path"
+    );
+    path
+}
+
+fn assert_no_follow_directory_chain(root: &Path, relative: &Path) {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            panic!("fixture directory chain has an unsafe component");
+        };
+        current.push(component);
+        let metadata =
+            std::fs::symlink_metadata(&current).expect("inspect fixture directory chain");
+        assert!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "fixture directory chain contains a non-directory or symlink"
+        );
+    }
+}
+
+fn prepare_fixture_parents(root: &Path, fixtures: &[(&str, &[u8])]) {
+    let root_metadata = std::fs::symlink_metadata(root).expect("inspect live path fixture root");
+    assert!(
+        root_metadata.is_dir() && !root_metadata.file_type().is_symlink(),
+        "live path fixture root must be a regular directory"
+    );
+    let canonical_root = std::fs::canonicalize(root).expect("canonicalize live path fixture root");
+    for (relative, _) in fixtures {
+        let relative = clean_fixture_relative_path(relative);
+        let parent = relative.parent().expect("fixture path has a parent");
+        std::fs::create_dir_all(root.join(parent)).expect("create live path fixture parent");
+        assert_no_follow_directory_chain(root, parent);
+        let canonical_parent =
+            std::fs::canonicalize(root.join(parent)).expect("canonicalize fixture parent");
+        assert!(
+            canonical_parent.starts_with(&canonical_root),
+            "live path fixture parent escaped its root"
+        );
+    }
+}
+
+fn fixture_file_state(path: &Path, expected: &[u8]) -> FixtureFileState {
+    let metadata = std::fs::symlink_metadata(path).expect("live path fixture is unavailable");
+    assert!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "live path fixture must be a no-follow regular file"
+    );
+    assert!(
+        metadata.len() <= MAX_FIXTURE_FILE_BYTES,
+        "live path fixture exceeds its safety bound"
+    );
+    let bytes = read_bounded_file(path, MAX_FIXTURE_FILE_BYTES, "live path fixture");
+    assert!(bytes == expected, "live path fixture has unexpected bytes");
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
+    #[cfg(unix)]
+    assert_eq!(
+        metadata.mode() & 0o777,
+        0o644,
+        "live path fixture has an unexpected Unix mode"
+    );
+    FixtureFileState {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        readonly: metadata.permissions().readonly(),
+        digest: Sha256::digest(bytes).into(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(unix)]
+        mode: metadata.mode() & 0o777,
+    }
+}
+
+fn fixture_file_states(
+    root: &Path,
+    fixtures: &[(&str, &[u8])],
+) -> BTreeMap<PathBuf, FixtureFileState> {
+    fixtures
+        .iter()
+        .map(|(relative, expected)| {
+            let relative = clean_fixture_relative_path(relative).to_path_buf();
+            let state = fixture_file_state(&root.join(&relative), expected);
+            (relative, state)
+        })
+        .collect()
+}
+
+fn assert_exact_fixture_tree(root: &Path, fixtures: &[(&str, &[u8])]) {
+    let expected_files = fixtures
+        .iter()
+        .map(|(relative, _)| clean_fixture_relative_path(relative).to_path_buf())
+        .collect::<BTreeSet<_>>();
+    let mut expected_directories = BTreeSet::new();
+    for relative in &expected_files {
+        let mut parent = relative.parent();
+        while let Some(directory) = parent {
+            if directory.as_os_str().is_empty() {
+                break;
+            }
+            expected_directories.insert(directory.to_path_buf());
+            parent = directory.parent();
+        }
+    }
+
+    let mut found_files = BTreeSet::new();
+    let mut entries = 0_usize;
+    for entry in WalkDir::new(root).follow_links(false).max_depth(8) {
+        let entry = redacted(entry, "cannot inspect live path fixture tree");
+        entries = entries.saturating_add(1);
+        assert!(
+            entries <= MAX_FIXTURE_TREE_ENTRIES,
+            "live path fixture tree exceeds its entry bound"
+        );
+        assert!(
+            !entry.file_type().is_symlink(),
+            "live path fixture tree contains a symlink"
+        );
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .expect("fixture entry remains below its root");
+        if relative.as_os_str().is_empty() {
+            assert!(entry.file_type().is_dir());
+        } else if entry.file_type().is_dir() {
+            assert!(
+                expected_directories.contains(relative),
+                "live path fixture tree contains an unexpected directory"
+            );
+        } else if entry.file_type().is_file() {
+            assert!(
+                expected_files.contains(relative),
+                "live path fixture tree contains an unexpected file"
+            );
+            found_files.insert(relative.to_path_buf());
+        } else {
+            panic!("live path fixture tree contains a special file");
+        }
+    }
+    assert_eq!(
+        found_files, expected_files,
+        "live path fixture tree is incomplete"
+    );
+    let _ = fixture_file_states(root, fixtures);
+}
+
+fn copy_in_project_fixtures(source_root: &Path, target_root: &Path) {
+    let source_root = std::fs::canonicalize(source_root).expect("canonicalize source project");
+    let target_root = std::fs::canonicalize(target_root).expect("canonicalize target project");
+    assert_ne!(source_root, target_root, "project replicas share one root");
+    assert!(
+        !source_root.starts_with(&target_root) && !target_root.starts_with(&source_root),
+        "project replica roots overlap"
+    );
+
+    for (relative, expected) in IN_PROJECT_FIXTURES {
+        let relative = clean_fixture_relative_path(relative);
+        let source = source_root.join(relative);
+        let source_state = fixture_file_state(&source, expected);
+        let target = target_root.join(relative);
+        assert!(!target.exists(), "fixture copy would overwrite a target");
+        let target_parent = target.parent().expect("fixture target has a parent");
+        std::fs::create_dir_all(target_parent).expect("create copied fixture parent");
+        assert_no_follow_directory_chain(
+            &target_root,
+            target_parent
+                .strip_prefix(&target_root)
+                .expect("copied fixture parent remains below target"),
+        );
+        let canonical_parent =
+            std::fs::canonicalize(target_parent).expect("canonicalize copied fixture parent");
+        assert!(
+            canonical_parent.starts_with(&target_root),
+            "copied fixture parent escaped the target project"
+        );
+        std::fs::copy(&source, &target).expect("copy in-project fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(source_state.mode))
+                .expect("preserve copied fixture mode");
+        }
+        let target_state = fixture_file_state(&target, expected);
+        assert_eq!(target_state.len, source_state.len);
+        assert_eq!(target_state.digest, source_state.digest);
+        assert_eq!(target_state.readonly, source_state.readonly);
+        #[cfg(unix)]
+        {
+            assert_eq!(target_state.mode, source_state.mode);
+            assert_ne!(
+                (target_state.device, target_state.inode),
+                (source_state.device, source_state.inode),
+                "fixture copy reused the source file identity"
+            );
+        }
+    }
+    assert_exact_fixture_tree(&target_root, &IN_PROJECT_FIXTURES);
+}
+
+fn canonical_fixture_paths(root: &Path, fixtures: &[(&str, &[u8])]) -> Vec<PathBuf> {
+    let root = std::fs::canonicalize(root).expect("canonicalize live path fixture root");
+    fixtures
+        .iter()
+        .map(|(relative, _)| root.join(clean_fixture_relative_path(relative)))
+        .collect()
+}
+
+fn fixture_path_spellings(root: &Path, relative: &str) -> BTreeSet<PathBuf> {
+    let relative = clean_fixture_relative_path(relative);
+    let canonical_root =
+        std::fs::canonicalize(root).expect("canonicalize live path fixture root spelling");
+    [root.join(relative), canonical_root.join(relative)]
+        .into_iter()
+        .collect()
+}
+
+fn revision_one_file_prompt(project_root: &Path, outside_root: &Path) -> String {
+    let mut requirements = Vec::new();
+    for (root, fixtures) in [
+        (project_root, IN_PROJECT_FIXTURES.as_slice()),
+        (outside_root, OUTSIDE_PROJECT_FIXTURES.as_slice()),
+    ] {
+        assert!(root.is_absolute(), "prompt fixture root must be absolute");
+        for (relative, contents) in fixtures {
+            let path = root.join(clean_fixture_relative_path(relative));
+            let path = path
+                .to_str()
+                .expect("live path fixture must have a UTF-8 path");
+            let contents = std::str::from_utf8(contents).expect("fixture bytes must be UTF-8");
+            requirements.push(format!(
+                "path {} with exact UTF-8 bytes {}",
+                serde_json::to_string(path).expect("quote fixture path"),
+                serde_json::to_string(contents).expect("quote fixture contents")
+            ));
+        }
+    }
+    let prompt = format!(
+        "LIVE_USER_R1. Make exactly one code-mode tool call. In that call, invoke await tools.apply_patch(...) exactly once with one patch that creates exactly these four new files and makes no other filesystem changes: {}. Do not invoke any other nested tool, read files, run shell commands, or access the network. After the patch succeeds, reply with exactly: MALLARD_BASE",
+        requirements.join("; ")
+    );
+    assert!(
+        prompt.len() <= MAX_WRITE_PROMPT_BYTES && !prompt.chars().any(char::is_control),
+        "revision-1 file prompt violates the argument bound"
+    );
+    prompt
+}
+
 fn copy_auth_only(source_home: &Path, target_home: &Path) -> AuthFileState {
     let source = source_home.join("auth.json");
     regular_auth_metadata(&source);
@@ -245,18 +549,112 @@ fn source_session_files(source_home: &Path) -> BTreeSet<PathBuf> {
     files
 }
 
+fn parse_codex_output_events(stdout: &[u8]) -> Result<Vec<Value>, &'static str> {
+    let stdout = std::str::from_utf8(stdout).map_err(|_| "stdout_not_utf8")?;
+    let mut events = Vec::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        if events.len() >= MAX_CODEX_OUTPUT_EVENTS {
+            return Err("stdout_event_limit");
+        }
+        let event = serde_json::from_str::<Value>(line).map_err(|_| "malformed_stdout_jsonl")?;
+        if !event.is_object() {
+            return Err("non_object_stdout_event");
+        }
+        events.push(event);
+    }
+    if events.is_empty() {
+        return Err("empty_stdout_jsonl");
+    }
+    Ok(events)
+}
+
+fn diagnostic_atom(value: Option<&Value>) -> String {
+    const SAFE_ATOMS: &[&str] = &[
+        "agent_message",
+        "cancelled",
+        "command_execution",
+        "completed",
+        "error",
+        "failed",
+        "file_change",
+        "in_progress",
+        "item.completed",
+        "item.started",
+        "item.updated",
+        "mcp_tool_call",
+        "reasoning",
+        "success",
+        "thread.started",
+        "todo_list",
+        "turn.completed",
+        "turn.failed",
+        "turn.started",
+        "web_search",
+    ];
+    match value.and_then(Value::as_str) {
+        Some(value) if SAFE_ATOMS.contains(&value) => value.to_string(),
+        Some(_) => "other".to_string(),
+        None => "-".to_string(),
+    }
+}
+
+fn codex_event_synopsis(events: &[Value]) -> String {
+    let start = events.len().saturating_sub(MAX_CODEX_SYNOPSIS_EVENTS);
+    let mut synopsis = format!("count={}", events.len());
+    if start > 0 {
+        synopsis.push_str(&format!(",omitted={start}"));
+    }
+    for event in &events[start..] {
+        let item = event.get("item");
+        let error = event.get("error");
+        synopsis.push_str(&format!(
+            ";type={},item={},status={},code={}",
+            diagnostic_atom(event.get("type")),
+            diagnostic_atom(item.and_then(|item| item.get("type"))),
+            diagnostic_atom(
+                event
+                    .get("status")
+                    .or_else(|| item.and_then(|item| item.get("status")))
+            ),
+            diagnostic_atom(
+                event
+                    .get("code")
+                    .or_else(|| error.and_then(|error| error.get("code")))
+            ),
+        ));
+    }
+    synopsis
+}
+
+fn codex_stderr_synopsis(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    format!(
+        "bytes={},lines={},sandbox={},permission_denied={},operation_not_permitted={},approval={},error={}",
+        stderr.len(),
+        text.lines().count(),
+        text.contains("sandbox"),
+        text.contains("permission denied"),
+        text.contains("operation not permitted"),
+        text.contains("approval"),
+        text.contains("error"),
+    )
+}
+
 fn run_codex(
     request_count: &mut usize,
     codex_home: &Path,
     process_home: &Path,
     project_root: &Path,
+    access: CodexRunAccess<'_>,
     resume_thread_id: Option<&str>,
     prompt: &str,
 ) -> String {
+    let prompt_limit = match access {
+        CodexRunAccess::ReadOnly => MAX_PROMPT_BYTES,
+        CodexRunAccess::WorkspaceWrite { .. } => MAX_WRITE_PROMPT_BYTES,
+    };
     assert!(
-        !prompt.is_empty()
-            && prompt.len() <= MAX_PROMPT_BYTES
-            && !prompt.chars().any(char::is_control),
+        !prompt.is_empty() && prompt.len() <= prompt_limit && !prompt.chars().any(char::is_control),
         "live Codex prompt violates the test argument bound"
     );
     if let Some(thread_id) = resume_thread_id {
@@ -269,13 +667,13 @@ fn run_codex(
     }
 
     let mut arguments = [
+        "--ask-for-approval",
+        "never",
         "exec",
         "--json",
         "--ignore-user-config",
         "--ignore-rules",
         "--skip-git-repo-check",
-        "--sandbox",
-        "read-only",
         "--model",
         MODEL,
         "--config",
@@ -286,6 +684,48 @@ fn run_codex(
     .map(OsString::from)
     .collect::<Vec<_>>();
     arguments.push(project_root.as_os_str().to_owned());
+    match access {
+        CodexRunAccess::ReadOnly => {
+            arguments.extend([OsString::from("--sandbox"), OsString::from("read-only")]);
+        }
+        CodexRunAccess::WorkspaceWrite { additional_dir } => {
+            let project_metadata =
+                std::fs::symlink_metadata(project_root).expect("inspect live Codex project root");
+            let additional_metadata = std::fs::symlink_metadata(additional_dir)
+                .expect("inspect live Codex additional directory");
+            assert!(
+                project_metadata.is_dir()
+                    && additional_metadata.is_dir()
+                    && !project_metadata.file_type().is_symlink()
+                    && !additional_metadata.file_type().is_symlink(),
+                "write-capable Codex roots must be no-follow directories"
+            );
+            let canonical_project =
+                std::fs::canonicalize(project_root).expect("canonicalize live Codex project");
+            let canonical_additional = std::fs::canonicalize(additional_dir)
+                .expect("canonicalize live Codex additional directory");
+            assert_eq!(
+                canonical_project.parent(),
+                canonical_additional.parent(),
+                "write-capable Codex roots must be exact siblings"
+            );
+            assert!(
+                !canonical_project.starts_with(&canonical_additional)
+                    && !canonical_additional.starts_with(&canonical_project),
+                "write-capable Codex roots overlap"
+            );
+            assert_eq!(
+                canonical_additional, additional_dir,
+                "write-capable Codex additional directory must use its canonical spelling"
+            );
+            arguments.extend([
+                OsString::from("--sandbox"),
+                OsString::from("workspace-write"),
+                OsString::from("--add-dir"),
+                additional_dir.as_os_str().to_owned(),
+            ]);
+        }
+    }
     if let Some(thread_id) = resume_thread_id {
         arguments.extend([OsString::from("resume"), OsString::from(thread_id)]);
     }
@@ -311,13 +751,21 @@ fn run_codex(
         .env_remove("AZURE_OPENAI_API_KEY")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("start the Codex CLI");
     let stdout = child.stdout.take().expect("capture Codex JSON output");
-    let reader = std::thread::spawn(move || {
+    let stderr = child.stderr.take().expect("capture Codex stderr");
+    let stdout_reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         stdout
+            .take((MAX_CODEX_OUTPUT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr
             .take((MAX_CODEX_OUTPUT_BYTES + 1) as u64)
             .read_to_end(&mut bytes)
             .map(|_| bytes)
@@ -331,34 +779,94 @@ fn run_codex(
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = reader.join();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
             panic!("the live Codex request exceeded its timeout");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     let status = child.wait().expect("finish the Codex CLI");
-    let output = reader
+    let stdout = stdout_reader
         .join()
-        .expect("Codex output reader panicked")
-        .expect("collect Codex output");
+        .expect("Codex stdout reader panicked")
+        .expect("collect Codex stdout");
+    let stderr = stderr_reader
+        .join()
+        .expect("Codex stderr reader panicked")
+        .expect("collect Codex stderr");
     assert!(
-        output.len() <= MAX_CODEX_OUTPUT_BYTES,
+        stdout.len() <= MAX_CODEX_OUTPUT_BYTES && stderr.len() <= MAX_CODEX_OUTPUT_BYTES,
         "the live Codex response exceeded its output bound"
     );
+    let stderr_synopsis = codex_stderr_synopsis(&stderr);
+    let events = parse_codex_output_events(&stdout).unwrap_or_else(|reason| {
+        panic!("the live Codex response was invalid ({reason}); stderr: {stderr_synopsis}")
+    });
+    let event_synopsis = codex_event_synopsis(&events);
     assert!(
         status.success(),
-        "the live Codex request failed without exposing provider output"
+        "the live Codex request failed; events: {event_synopsis}; stderr: {stderr_synopsis}"
     );
-    let stdout = String::from_utf8(output).expect("Codex JSON output must be UTF-8");
-    stdout
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find_map(|event| {
-            (event.get("type").and_then(serde_json::Value::as_str) == Some("thread.started"))
-                .then(|| event.get("thread_id")?.as_str().map(str::to_owned))
-                .flatten()
-        })
-        .expect("Codex did not report a started thread")
+    let thread_ids = events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("thread.started"))
+        .filter_map(|event| event.get("thread_id").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        thread_ids.len(),
+        1,
+        "Codex did not report exactly one started thread; events: {event_synopsis}; stderr: {stderr_synopsis}"
+    );
+    let provider_thread_id = thread_ids[0].to_string();
+
+    if matches!(access, CodexRunAccess::WorkspaceWrite { .. }) {
+        let final_messages = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("item.completed"))
+            .filter_map(|event| event.get("item"))
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("agent_message"))
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(
+            final_messages.len() == 1 && final_messages[0] == "MALLARD_BASE",
+            "revision-1 Codex output lacked its single exact final marker; events: {event_synopsis}; stderr: {stderr_synopsis}"
+        );
+        let rollout = rollout_lookup(codex_home, &provider_thread_id)
+            .unwrap_or_else(|_| {
+                panic!(
+                    "revision-1 rollout discovery failed; events: {event_synopsis}; stderr: {stderr_synopsis}"
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "revision-1 rollout was not materialized; events: {event_synopsis}; stderr: {stderr_synopsis}"
+                )
+            });
+        let rollout = read_bounded_file(
+            &rollout,
+            MAX_CONVERSATION_FILE_BYTES,
+            "revision-1 Codex rollout",
+        );
+        let patch_keys = try_patch_apply_change_keys(&rollout).unwrap_or_else(|reason| {
+            panic!(
+                "revision-1 patch evidence failed ({reason}); events: {event_synopsis}; stderr: {stderr_synopsis}"
+            )
+        });
+        assert!(
+            local_patch_change_key_candidates(
+                project_root,
+                match access {
+                    CodexRunAccess::WorkspaceWrite { additional_dir } => additional_dir,
+                    CodexRunAccess::ReadOnly => unreachable!(),
+                },
+            )
+            .iter()
+            .any(|expected| expected == &patch_keys),
+            "revision-1 patch keys did not exactly match the requested fixtures; events: {event_synopsis}; stderr: {stderr_synopsis}"
+        );
+    }
+
+    provider_thread_id
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -602,10 +1110,9 @@ fn rollout_lookup(codex_home: &Path, thread_id: &str) -> Result<Option<PathBuf>,
                     .file_name()
                     .to_str()
                     .is_some_and(|name| name.ends_with(&suffix))
+                && match_path.replace(entry.path().to_path_buf()).is_some()
             {
-                if match_path.replace(entry.path().to_path_buf()).is_some() {
-                    return Err("Codex rollout lookup found duplicate identities".to_string());
-                }
+                return Err("Codex rollout lookup found duplicate identities".to_string());
             }
         }
     }
@@ -1147,6 +1654,8 @@ fn run_headless_history_verification(
         "headless verification prompt violates the argument bound"
     );
     let arguments = vec![
+        OsString::from("--ask-for-approval"),
+        OsString::from("never"),
         OsString::from("exec"),
         OsString::from("--json"),
         OsString::from("--ignore-user-config"),
@@ -1541,6 +2050,446 @@ fn assert_rollout_cwd(codex_home: &Path, provider_thread_id: &str, expected_cwd:
             .iter()
             .all(|cwd| cwd == expected.as_ref()),
         "materialized Codex rollout retained a foreign structural cwd"
+    );
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn assert_bytes_contain_path(bytes: &[u8], path: &Path, label: &str) {
+    let path = path
+        .to_str()
+        .expect("live path assertion requires a UTF-8 path");
+    assert!(
+        byte_slice_contains(bytes, path.as_bytes()),
+        "{label} does not contain an expected path"
+    );
+}
+
+fn assert_bytes_exclude_path(bytes: &[u8], path: &Path, label: &str) {
+    let path = path
+        .to_str()
+        .expect("live path assertion requires a UTF-8 path");
+    assert!(
+        !byte_slice_contains(bytes, path.as_bytes()),
+        "{label} retained a forbidden path"
+    );
+}
+
+fn try_patch_apply_change_keys(bytes: &[u8]) -> Result<BTreeSet<String>, &'static str> {
+    let mut patches = Vec::new();
+    for raw in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|raw| !raw.is_empty())
+    {
+        let record: Value = serde_json::from_slice(raw).map_err(|_| "malformed_rollout_jsonl")?;
+        let payload = record.get("payload").unwrap_or(&record);
+        if payload.get("type").and_then(Value::as_str) != Some("patch_apply_end") {
+            continue;
+        }
+        if payload.get("success").and_then(Value::as_bool) != Some(true) {
+            return Err("patch_not_successful");
+        }
+        let changes = payload
+            .get("changes")
+            .and_then(Value::as_object)
+            .ok_or("patch_changes_missing")?;
+        patches.push(changes.keys().cloned().collect::<BTreeSet<_>>());
+    }
+    if patches.len() != 1 {
+        return Err("patch_count_not_one");
+    }
+    patches.pop().ok_or("patch_count_not_one")
+}
+
+fn patch_apply_change_keys(bytes: &[u8]) -> BTreeSet<String> {
+    try_patch_apply_change_keys(bytes)
+        .unwrap_or_else(|reason| panic!("path-bearing rollout patch evidence failed: {reason}"))
+}
+
+fn local_patch_change_key_candidates(
+    project_root: &Path,
+    outside_root: &Path,
+) -> Vec<BTreeSet<String>> {
+    let canonical_project =
+        std::fs::canonicalize(project_root).expect("canonicalize patch-key project root");
+    let outside = canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES)
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<BTreeSet<_>>();
+    [project_root, canonical_project.as_path()]
+        .into_iter()
+        .map(|root| {
+            IN_PROJECT_FIXTURES
+                .iter()
+                .map(|(relative, _)| {
+                    root.join(clean_fixture_relative_path(relative))
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .chain(outside.iter().cloned())
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn assert_local_patch_change_keys(bytes: &[u8], project_root: &Path, outside_root: &Path) {
+    let actual = patch_apply_change_keys(bytes);
+    assert!(
+        local_patch_change_key_candidates(project_root, outside_root)
+            .iter()
+            .any(|expected| expected == &actual),
+        "materialized rollout patch keys do not exactly match the local and outside fixtures"
+    );
+}
+
+fn assert_portable_patch_change_keys(bytes: &[u8], outside_root: &Path) {
+    let expected = IN_PROJECT_FIXTURES
+        .iter()
+        .map(|(relative, _)| format!("/__mallard_root__/{relative}"))
+        .chain(
+            canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES)
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        )
+        .collect::<BTreeSet<_>>();
+    assert!(
+        patch_apply_change_keys(bytes) == expected,
+        "portable rollout patch keys did not tokenize only in-project fixtures"
+    );
+}
+
+fn assert_raw_rollout_paths(
+    codex_home: &Path,
+    provider_thread_id: &str,
+    expected_project_root: &Path,
+    outside_root: &Path,
+    forbidden_project_root: Option<&Path>,
+) {
+    let bytes = read_bounded_file(
+        &rollout_path(codex_home, provider_thread_id),
+        MAX_CONVERSATION_FILE_BYTES,
+        "live path rollout",
+    );
+    assert_local_patch_change_keys(&bytes, expected_project_root, outside_root);
+    for (relative, _) in IN_PROJECT_FIXTURES {
+        let spellings = fixture_path_spellings(expected_project_root, relative);
+        assert!(
+            spellings
+                .iter()
+                .any(|path| byte_slice_contains(&bytes, path.to_string_lossy().as_bytes())),
+            "provider rollout does not contain an expected project-path spelling"
+        );
+    }
+    for path in canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES) {
+        assert_bytes_contain_path(&bytes, &path, "provider rollout");
+    }
+    if let Some(forbidden_project_root) = forbidden_project_root {
+        for (relative, _) in IN_PROJECT_FIXTURES {
+            for path in fixture_path_spellings(forbidden_project_root, relative) {
+                assert_bytes_exclude_path(&bytes, &path, "remapped provider rollout");
+            }
+        }
+    }
+    assert!(
+        !byte_slice_contains(&bytes, b"/__mallard_root__"),
+        "materialized provider rollout retained the portable root token"
+    );
+    assert!(
+        !byte_slice_contains(&bytes, b"__mallard_path_map__"),
+        "materialized provider rollout retained the portable path-map marker"
+    );
+}
+
+fn portable_conversation_rollout(
+    service: &ProjectSyncService<'_>,
+    storage_id: &StorageId,
+    bundle_id: &BundleId,
+    storage_root: &Path,
+    logical_thread_id: &ThreadId,
+) -> Vec<u8> {
+    let snapshot = redacted(
+        service.inspect_bundle(storage_id, bundle_id),
+        "cannot inspect the path-bearing bundle",
+    );
+    let scope = snapshot
+        .manifest
+        .scopes
+        .get(&SyncScopeKey::provider(codex_key()))
+        .expect("published bundle lacks its Codex scope");
+    let conversation = scope
+        .conversations
+        .get(logical_thread_id)
+        .expect("published bundle lacks its path-bearing conversation");
+    let transcript = conversation
+        .files
+        .iter()
+        .find(|file| file.role == ConversationFileRole::Transcript)
+        .expect("path-bearing conversation lacks its transcript");
+    let entry = scope
+        .files
+        .get(&transcript.logical_path)
+        .expect("path-bearing transcript lacks a file entry");
+    assert_eq!(
+        entry.resource_id, conversation.resource_id,
+        "path-bearing transcript belongs to another resource"
+    );
+    let key = repository_object_key(bundle_id, &entry.object_key)
+        .expect("path-bearing transcript has an invalid object key");
+    let bytes = read_bounded_file(
+        &storage_root.join(key.as_str()),
+        MAX_CONVERSATION_FILE_BYTES,
+        "portable path-bearing rollout",
+    );
+    assert_eq!(bytes.len() as u64, entry.size);
+    assert_eq!(hex_sha256(&bytes), entry.sha256);
+    bytes
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_portable_rollout_paths(
+    service: &ProjectSyncService<'_>,
+    storage_id: &StorageId,
+    bundle_id: &BundleId,
+    storage_root: &Path,
+    logical_thread_id: &ThreadId,
+    source_project_root: &Path,
+    target_project_root: &Path,
+    outside_root: &Path,
+) {
+    let bytes = portable_conversation_rollout(
+        service,
+        storage_id,
+        bundle_id,
+        storage_root,
+        logical_thread_id,
+    );
+    assert_portable_patch_change_keys(&bytes, outside_root);
+    for (relative, _) in IN_PROJECT_FIXTURES {
+        let token_path = format!("/__mallard_root__/{relative}");
+        assert!(
+            byte_slice_contains(&bytes, token_path.as_bytes()),
+            "portable rollout lacks an expected tokenized project path"
+        );
+    }
+    for path in canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES) {
+        assert_bytes_contain_path(&bytes, &path, "portable rollout");
+    }
+    for root in [source_project_root, target_project_root] {
+        for (relative, _) in IN_PROJECT_FIXTURES {
+            for path in fixture_path_spellings(root, relative) {
+                assert_bytes_exclude_path(&bytes, &path, "portable rollout");
+            }
+        }
+    }
+}
+
+fn assert_clean_affected_path(path: &str) {
+    let path = Path::new(path);
+    assert!(
+        !path.as_os_str().is_empty()
+            && !path.is_absolute()
+            && path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "Session Details exposed an unsafe affected path"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_session_detail_paths(
+    service: &ProjectSyncService<'_>,
+    project_id: &LocalProjectId,
+    resource_id: &ResourceId,
+    project_root: &Path,
+    codex_home: &Path,
+    provider_thread_id: &str,
+    outside_root: &Path,
+) {
+    let header = service
+        .get_project_session_detail(project_id, resource_id)
+        .expect("cannot load path-bearing Session Details header");
+    assert_eq!(header.resource_id, resource_id.as_str());
+    assert_eq!(header.provider, codex_key());
+    assert_eq!(header.provider_session_id, provider_thread_id);
+    assert!(header.capabilities.tool_calls);
+    assert!(header.capabilities.event_detail);
+
+    let included_event_kinds = BTreeSet::from([SessionTimelineEventKind::ToolCall]);
+    let included_tool_categories = BTreeSet::from([
+        SessionToolCategory::FileEdit,
+        SessionToolCategory::Shell,
+        SessionToolCategory::Read,
+        SessionToolCategory::Other,
+    ]);
+    let required_paths = IN_PROJECT_FIXTURES
+        .iter()
+        .map(|(relative, _)| relative.to_string())
+        .collect::<BTreeSet<_>>();
+    let external_paths = canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES)
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let mut visible = serde_json::to_string(&header).expect("serialize Session Details header");
+    let mut cursor = None;
+    let mut seen_cursors = BTreeSet::new();
+    let mut seen_event_ids = BTreeSet::new();
+    let mut path_event_count = 0_usize;
+    let mut event_count = 0_usize;
+
+    loop {
+        let page = service
+            .get_project_session_timeline_page(
+                project_id,
+                resource_id,
+                ProjectSessionTimelineRequest {
+                    snapshot_id: header.snapshot_id.clone(),
+                    cursor: cursor.clone(),
+                    anchor_event_id: None,
+                    limit: Some(1),
+                    included_event_kinds: included_event_kinds.clone(),
+                    included_tool_categories: included_tool_categories.clone(),
+                    turn_id: None,
+                },
+            )
+            .expect("cannot load a path-bearing Session Details timeline page");
+        assert_eq!(page.resource_id, resource_id.as_str());
+        assert_eq!(page.snapshot_id, header.snapshot_id);
+        assert!(
+            page.events.len() <= 1,
+            "Session Details ignored limit-one pagination"
+        );
+        for event in page.events {
+            event_count = event_count.saturating_add(1);
+            assert!(
+                event_count <= MAX_SESSION_DETAIL_EVENTS,
+                "Session Details timeline exceeds the live-test event bound"
+            );
+            assert_eq!(event.kind, SessionTimelineEventKind::ToolCall);
+            assert!(
+                seen_event_ids.insert(event.event_id.clone()),
+                "Session Details pagination repeated an event"
+            );
+            let tool = event
+                .tool
+                .as_ref()
+                .expect("tool timeline event lacks its preview");
+            for path in &tool.affected_paths {
+                assert_clean_affected_path(path);
+                assert!(
+                    !external_paths.iter().any(|external| external == path),
+                    "outside path entered the Session Details Paths list"
+                );
+            }
+            let affected = tool.affected_paths.iter().cloned().collect::<BTreeSet<_>>();
+            if required_paths.is_subset(&affected) {
+                path_event_count = path_event_count.saturating_add(1);
+            }
+            if let Some(arguments) = &tool.argument_preview {
+                visible.push('\n');
+                visible.push_str(arguments);
+            }
+            if let Some(result) = &tool.result_preview {
+                visible.push('\n');
+                visible.push_str(result);
+            }
+
+            let detail = service
+                .get_project_session_event_detail(
+                    project_id,
+                    resource_id,
+                    &header.snapshot_id,
+                    &event.event_id,
+                )
+                .expect("cannot expand a path-bearing Session Details event");
+            assert_eq!(detail.event_id, event.event_id);
+            assert_eq!(detail.affected_paths, tool.affected_paths);
+            for path in &detail.affected_paths {
+                assert_clean_affected_path(path);
+            }
+            if let Some(arguments) = &detail.arguments {
+                visible.push('\n');
+                visible.push_str(arguments);
+            }
+            if let Some(result) = &detail.result {
+                visible.push('\n');
+                visible.push_str(result);
+            }
+        }
+
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        assert!(
+            seen_cursors.insert(next_cursor.clone()),
+            "Session Details pagination repeated a cursor"
+        );
+        assert!(
+            seen_cursors.len() <= MAX_SESSION_DETAIL_EVENTS,
+            "Session Details pagination exceeds the live-test page bound"
+        );
+        cursor = Some(next_cursor);
+    }
+
+    assert!(
+        event_count > 0,
+        "Session Details did not expose tool events"
+    );
+    assert_eq!(
+        header.event_counts.tool_calls.value,
+        Some(event_count as u64),
+        "Session Details pagination did not visit every counted tool event"
+    );
+    assert_eq!(
+        path_event_count, 1,
+        "Session Details did not expose exactly one file operation with both project-relative paths"
+    );
+    for (relative, _) in IN_PROJECT_FIXTURES {
+        assert!(
+            visible.contains(&format!("./{relative}")),
+            "Session Details did not display a normalized in-project path"
+        );
+    }
+    for external in &external_paths {
+        assert!(
+            visible.contains(external),
+            "Session Details did not display an unchanged outside path"
+        );
+    }
+    let transcript = rollout_path(codex_home, provider_thread_id);
+    let canonical_project =
+        std::fs::canonicalize(project_root).expect("canonicalize Session Details project root");
+    let canonical_home =
+        std::fs::canonicalize(codex_home).expect("canonicalize Session Details provider home");
+    let mut privacy_view = visible.clone();
+    for external in &external_paths {
+        privacy_view = privacy_view.replace(external, "<expected-outside-path>");
+    }
+    for forbidden in [
+        project_root.to_string_lossy(),
+        canonical_project.to_string_lossy(),
+        codex_home.to_string_lossy(),
+        canonical_home.to_string_lossy(),
+        transcript.to_string_lossy(),
+    ] {
+        assert!(
+            !privacy_view.contains(forbidden.as_ref()),
+            "Session Details leaked a protected path outside the expected outside fixtures"
+        );
+    }
+    assert!(
+        !visible.contains("/__mallard_root__"),
+        "Session Details exposed the portable root token"
+    );
+    assert!(
+        !visible.contains("__mallard_path_map__"),
+        "Session Details exposed the portable path-map marker"
     );
 }
 
@@ -1966,6 +2915,321 @@ fn assert_pull_is_no_op(
     );
 }
 
+fn assert_offline_path_timeline(
+    rollout: &Path,
+    project_root: &Path,
+    expected_argument_root: &Path,
+    outside_root: &Path,
+    expected_provider_call_id: &str,
+) {
+    let adapter = ProviderRegistry::production()
+        .require_sessions(&codex_key())
+        .expect("Codex session adapter is unavailable");
+    let context = SessionTimelineContext {
+        resource_id: "codex:conversation:offline-path-fixture",
+        provider_session_id: "offline-path-fixture",
+        project_root,
+        project_root_aliases: &[],
+    };
+    let index = adapter
+        .build_timeline_index(rollout, &context)
+        .expect("current Codex path fixture did not index");
+    let tool_entry = index
+        .events
+        .iter()
+        .find(|event| event.kind == SessionTimelineEventKind::ToolCall)
+        .expect("current Codex path fixture lacks its durable tool event");
+    let tool = tool_entry
+        .tool
+        .as_ref()
+        .expect("current Codex path fixture tool lacks its index entry");
+    assert_eq!(
+        tool.provider_call_id, expected_provider_call_id,
+        "current Codex patch paths attached to the wrong durable tool"
+    );
+    assert_eq!(
+        tool.affected_paths.iter().cloned().collect::<BTreeSet<_>>(),
+        IN_PROJECT_FIXTURES
+            .iter()
+            .map(|(relative, _)| relative.to_string())
+            .collect::<BTreeSet<_>>()
+    );
+    assert!(tool.affected_paths.iter().all(|path| {
+        let path = Path::new(path);
+        !path.is_absolute()
+            && path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+    }));
+    let page = adapter
+        .read_timeline_page(
+            rollout,
+            &index,
+            &SessionTimelineQuery {
+                start_index: None,
+                anchor_event_id: None,
+                limit: 1,
+                included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
+                included_tool_categories: BTreeSet::from([
+                    SessionToolCategory::FileEdit,
+                    SessionToolCategory::Shell,
+                    SessionToolCategory::Read,
+                    SessionToolCategory::Other,
+                ]),
+                turn_id: None,
+            },
+        )
+        .expect("current Codex path fixture timeline did not load");
+    assert_eq!(page.events.len(), 1);
+    let detail = adapter
+        .read_event_detail(rollout, &index, &tool_entry.event_id)
+        .expect("current Codex path fixture event did not expand");
+    assert_eq!(detail.affected_paths, tool.affected_paths);
+    let arguments = detail
+        .arguments
+        .expect("current Codex path fixture lacks tool arguments");
+    for path in canonical_fixture_paths(expected_argument_root, &IN_PROJECT_FIXTURES) {
+        assert!(arguments.contains(path.to_string_lossy().as_ref()));
+    }
+    for path in canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES) {
+        assert!(arguments.contains(path.to_string_lossy().as_ref()));
+        assert!(!tool
+            .affected_paths
+            .iter()
+            .any(|affected| affected == path.to_string_lossy().as_ref()));
+    }
+}
+
+#[test]
+fn revision_one_prompt_and_diagnostics_preserve_only_safe_evidence() {
+    let selected_project = Path::new("/var/folders/mallard-live/project1");
+    let canonical_external = Path::new("/private/var/folders/mallard-live/project1_external");
+    let prompt = revision_one_file_prompt(selected_project, canonical_external);
+    assert_eq!(prompt.matches("await tools.apply_patch(...)").count(), 1);
+    for (relative, _) in IN_PROJECT_FIXTURES {
+        assert!(prompt.contains(selected_project.join(relative).to_string_lossy().as_ref()));
+        assert!(!prompt.contains(
+            Path::new("/private/var/folders/mallard-live/project1")
+                .join(relative)
+                .to_string_lossy()
+                .as_ref()
+        ));
+    }
+    for (relative, _) in OUTSIDE_PROJECT_FIXTURES {
+        assert!(prompt.contains(canonical_external.join(relative).to_string_lossy().as_ref()));
+    }
+
+    let stdout = br#"{"type":"thread.started","thread_id":"safe-thread"}
+{"type":"item.completed","item":{"type":"agent_message","text":"MALLARD_BASE /private/secret"}}
+"#;
+    let events = parse_codex_output_events(stdout).expect("parse diagnostic fixture JSONL");
+    let event_synopsis = codex_event_synopsis(&events);
+    assert!(event_synopsis.contains("type=thread.started"));
+    assert!(event_synopsis.contains("item=agent_message"));
+    assert!(!event_synopsis.contains("MALLARD_BASE"));
+    assert!(!event_synopsis.contains("/private/secret"));
+    let credential_shaped = parse_codex_output_events(
+        br#"{"type":"error","error":{"code":"sk-proj-private-token"}}
+"#,
+    )
+    .expect("parse credential-shaped diagnostic fixture");
+    let credential_synopsis = codex_event_synopsis(&credential_shaped);
+    assert!(credential_synopsis.contains("type=error"));
+    assert!(credential_synopsis.contains("code=other"));
+    assert!(!credential_synopsis.contains("sk-proj-private-token"));
+
+    let stderr_synopsis =
+        codex_stderr_synopsis(b"error: sandbox permission denied at /private/secret");
+    assert!(stderr_synopsis.contains("sandbox=true"));
+    assert!(stderr_synopsis.contains("permission_denied=true"));
+    assert!(!stderr_synopsis.contains("/private/secret"));
+    let malformed = parse_codex_output_events(b"{\"message\":\"/private/secret\"\n")
+        .expect_err("malformed diagnostic JSONL was accepted");
+    assert_eq!(malformed, "malformed_stdout_jsonl");
+    assert!(!malformed.contains("/private/secret"));
+    let overlong = "{}\n".repeat(MAX_CODEX_OUTPUT_EVENTS + 1);
+    assert_eq!(
+        parse_codex_output_events(overlong.as_bytes()),
+        Err("stdout_event_limit")
+    );
+}
+
+#[test]
+fn current_codex_nested_file_edit_paths_survive_wire_projection() {
+    let root = tempfile::tempdir().expect("create current Codex path fixture root");
+    let project1 = root.path().join("project1");
+    let project1_copy = root.path().join("project1_copy");
+    let project1_external = root.path().join("project1_external");
+    for directory in [&project1, &project1_copy, &project1_external] {
+        std::fs::create_dir_all(directory).expect("create current Codex path fixture directory");
+    }
+    let project1 = std::fs::canonicalize(project1).expect("canonicalize source fixture project");
+    let project1_copy =
+        std::fs::canonicalize(project1_copy).expect("canonicalize target fixture project");
+    let project1_external =
+        std::fs::canonicalize(project1_external).expect("canonicalize outside fixture root");
+    let source_thread_id = fixture_uuid(0x401);
+    let target_thread_id = fixture_uuid(0x402);
+    let inside_paths = canonical_fixture_paths(&project1, &IN_PROJECT_FIXTURES);
+    let outside_paths = canonical_fixture_paths(&project1_external, &OUTSIDE_PROJECT_FIXTURES);
+    let input = inside_paths
+        .iter()
+        .chain(outside_paths.iter())
+        .map(|path| path.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let changes = json!({
+        (inside_paths[0].to_string_lossy().into_owned()): {"type": "add"},
+        (inside_paths[1].to_string_lossy().into_owned()): {"type": "add"},
+        (outside_paths[0].to_string_lossy().into_owned()): {"type": "add"},
+        (outside_paths[1].to_string_lossy().into_owned()): {"type": "add"},
+    });
+    let user_message_id = fixture_uuid(0x404);
+    let assistant_message_id = fixture_uuid(0x405);
+    let tool_message_id = fixture_uuid(0x406);
+    let tool_output_message_id = fixture_uuid(0x407);
+    let turn = [
+        json!({
+            "timestamp": "2026-08-18T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": user_message_id,
+                "parent_id": null,
+                "role": "user",
+                "content": [{"type": "input_text", "text": "LIVE_USER_R1"}],
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "id": tool_message_id,
+                "parent_id": user_message_id,
+                "call_id": "exec-path-fixture",
+                "name": "exec",
+                "input": input,
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "patch_apply_end",
+                "call_id": "nested-patch-path-fixture",
+                "success": true,
+                "status": "completed",
+                "changes": changes.clone(),
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "id": tool_output_message_id,
+                "parent_id": tool_message_id,
+                "call_id": "exec-path-fixture",
+                "output": "done",
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": assistant_message_id,
+                "parent_id": tool_output_message_id,
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "MALLARD_BASE"}],
+                "phase": "final_answer",
+            },
+        }),
+    ];
+    let mut records = vec![session_meta_record(&source_thread_id, &project1, None)];
+    records.extend(turn);
+    let source_bytes = encode_rollout_records(records);
+    assert_local_patch_change_keys(&source_bytes, &project1, &project1_external);
+    let source_rollout = root.path().join("source.jsonl");
+    std::fs::write(&source_rollout, &source_bytes).expect("write source path fixture rollout");
+    assert_offline_path_timeline(
+        &source_rollout,
+        &project1,
+        &project1,
+        &project1_external,
+        "exec-path-fixture",
+    );
+
+    let no_bases = |_: &str| Ok(None);
+    let source = resolve_codex_root(&source_rollout, &no_bases)
+        .expect("resolve source current Codex path fixture");
+    let wire = build_standalone_codex_root(
+        &source,
+        &StandaloneBuildMode::Encode {
+            root: project1.to_string_lossy().into_owned(),
+            canonical_root: Some(project1.to_string_lossy().into_owned()),
+        },
+        None,
+    )
+    .expect("encode current Codex path fixture");
+    assert_portable_patch_change_keys(&wire.root_bytes, &project1_external);
+    for (relative, _) in IN_PROJECT_FIXTURES {
+        assert!(byte_slice_contains(
+            &wire.root_bytes,
+            format!("/__mallard_root__/{relative}").as_bytes()
+        ));
+    }
+    for path in &inside_paths {
+        assert_bytes_exclude_path(&wire.root_bytes, path, "offline portable rollout");
+    }
+    for path in &outside_paths {
+        assert_bytes_contain_path(&wire.root_bytes, path, "offline portable rollout");
+    }
+
+    let wire_rollout = root.path().join("wire.jsonl");
+    std::fs::write(&wire_rollout, &wire.root_bytes).expect("write portable path fixture rollout");
+    let wire_root = resolve_codex_root(&wire_rollout, &no_bases)
+        .expect("resolve portable current Codex path fixture");
+    let target = build_standalone_codex_root(
+        &wire_root,
+        &StandaloneBuildMode::Decode {
+            root_provider_thread_id: target_thread_id,
+            target_root: project1_copy.to_string_lossy().into_owned(),
+            canonical_target_root: Some(project1_copy.to_string_lossy().into_owned()),
+        },
+        None,
+    )
+    .expect("decode current Codex path fixture");
+    assert_local_patch_change_keys(&target.root_bytes, &project1_copy, &project1_external);
+    let target_rollout = root.path().join("target.jsonl");
+    std::fs::write(&target_rollout, &target.root_bytes).expect("write target path fixture rollout");
+    for path in canonical_fixture_paths(&project1_copy, &IN_PROJECT_FIXTURES) {
+        assert_bytes_contain_path(&target.root_bytes, &path, "offline target rollout");
+    }
+    for path in &inside_paths {
+        assert_bytes_exclude_path(&target.root_bytes, path, "offline target rollout");
+    }
+    for path in &outside_paths {
+        assert_bytes_contain_path(&target.root_bytes, path, "offline target rollout");
+    }
+    assert!(!byte_slice_contains(
+        &target.root_bytes,
+        b"/__mallard_root__"
+    ));
+    assert!(!byte_slice_contains(
+        &target.root_bytes,
+        b"__mallard_path_map__"
+    ));
+    assert_offline_path_timeline(
+        &target_rollout,
+        &project1_copy,
+        &project1_copy,
+        &project1_external,
+        "nested-patch-path-fixture",
+    );
+}
+
 #[test]
 fn current_codex_paginated_graph_fixture_passes_production_validators() {
     let root = tempfile::tempdir().expect("create paginated fixture test root");
@@ -2057,6 +3321,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     let myconf2 = root.path().join("myconf2");
     let project1 = root.path().join("project1");
     let project1_copy = root.path().join("project1_copy");
+    let project1_external = root.path().join("project1_external");
     let mystorage1 = root.path().join("mystorage1");
     let machine1_home = root.path().join("machine1");
     let machine2_home = root.path().join("machine2");
@@ -2064,12 +3329,15 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         &process_home,
         &project1,
         &project1_copy,
+        &project1_external,
         &mystorage1,
         &machine1_home,
         &machine2_home,
     ] {
         std::fs::create_dir_all(directory).expect("create isolated live-test directory");
     }
+    let project1_external =
+        std::fs::canonicalize(project1_external).expect("canonicalize external fixture root");
     let copied_auth1_before = copy_auth_only(&source_home, &myconf1);
     let copied_auth2_before = copy_auth_only(&source_home, &myconf2);
     let _home_guard = EnvironmentGuard::set("HOME", &process_home);
@@ -2089,10 +3357,16 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     let storage_id = storage.id.clone();
     let mut credentials = credential_needles(&myconf1.join("auth.json"));
     credentials.extend(credential_needles(&myconf2.join("auth.json")));
-    let path_needles = vec![
+    let mut path_needles = vec![
         root.path().to_string_lossy().as_bytes().to_vec(),
         source_home.to_string_lossy().as_bytes().to_vec(),
     ];
+    let canonical_live_root =
+        std::fs::canonicalize(root.path()).expect("canonicalize isolated live-test root");
+    let canonical_live_root = canonical_live_root.to_string_lossy().as_bytes().to_vec();
+    if !path_needles.contains(&canonical_live_root) {
+        path_needles.push(canonical_live_root);
+    }
     let mut request_count = 0;
 
     // Replica A creates a real thread and publishes revision 1.
@@ -2110,17 +3384,76 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         .expect("first setup created a binding");
     let project_id1 = first.project.local_project_id.clone();
     let bundle_id = first.project.bundle_id.clone();
+    prepare_fixture_parents(&project1, &IN_PROJECT_FIXTURES);
+    prepare_fixture_parents(&project1_external, &OUTSIDE_PROJECT_FIXTURES);
+    for path in canonical_fixture_paths(&project1, &IN_PROJECT_FIXTURES)
+        .into_iter()
+        .chain(canonical_fixture_paths(
+            &project1_external,
+            &OUTSIDE_PROJECT_FIXTURES,
+        ))
+    {
+        assert!(!path.exists(), "revision-1 fixture already exists");
+    }
     let provider_thread1 = run_codex(
         &mut request_count,
         &myconf1,
         &machine1_home,
         &project1,
+        CodexRunAccess::WorkspaceWrite {
+            additional_dir: &project1_external,
+        },
         None,
-        "LIVE_USER_R1. Do not use tools. Reply with exactly: MALLARD_BASE",
+        &revision_one_file_prompt(&project1, &project1_external),
+    );
+    assert_exact_fixture_tree(&project1, &IN_PROJECT_FIXTURES);
+    assert_exact_fixture_tree(&project1_external, &OUTSIDE_PROJECT_FIXTURES);
+    let project1_fixture_states = fixture_file_states(&project1, &IN_PROJECT_FIXTURES);
+    let external_fixture_states =
+        fixture_file_states(&project1_external, &OUTSIDE_PROJECT_FIXTURES);
+    assert_raw_rollout_paths(
+        &myconf1,
+        &provider_thread1,
+        &project1,
+        &project1_external,
+        Some(&project1_copy),
+    );
+    copy_in_project_fixtures(&project1, &project1_copy);
+    let project1_copy_fixture_states = fixture_file_states(&project1_copy, &IN_PROJECT_FIXTURES);
+    assert_eq!(
+        fixture_file_states(&project1, &IN_PROJECT_FIXTURES),
+        project1_fixture_states,
+        "copying project fixtures changed their source files"
+    );
+    assert_eq!(
+        fixture_file_states(&project1_external, &OUTSIDE_PROJECT_FIXTURES),
+        external_fixture_states,
+        "copying project fixtures changed an outside file"
     );
     let first_push = push(&service1, &project_id1, &storage_id);
     assert_eq!(first_push.revision, Some(1));
     let logical_thread = logical_thread_id(&repository1, &project_id1, &provider_thread1);
+    let session_resource = mallard_domain::conversation_resource_id(&codex_key(), &logical_thread)
+        .expect("derive revision-1 conversation resource ID");
+    assert_portable_rollout_paths(
+        &service1,
+        &storage_id,
+        &bundle_id,
+        &mystorage1,
+        &logical_thread,
+        &project1,
+        &project1_copy,
+        &project1_external,
+    );
+    assert_session_detail_paths(
+        &service1,
+        &project_id1,
+        &session_resource,
+        &project1,
+        &myconf1,
+        &provider_thread1,
+        &project1_external,
+    );
     assert_portable_state_is_safe(
         &service1,
         &storage_id,
@@ -2155,6 +3488,28 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     let provider_thread2 = provider_thread_id(&repository2, &project_id2, &logical_thread);
     assert_ne!(provider_thread2, provider_thread1);
     assert_rollout_cwd(&myconf2, &provider_thread2, &project1_copy);
+    assert_raw_rollout_paths(
+        &myconf2,
+        &provider_thread2,
+        &project1_copy,
+        &project1_external,
+        Some(&project1),
+    );
+    assert_session_detail_paths(
+        &service2,
+        &project_id2,
+        &session_resource,
+        &project1_copy,
+        &myconf2,
+        &provider_thread2,
+        &project1_external,
+    );
+    assert_exact_fixture_tree(&project1_copy, &IN_PROJECT_FIXTURES);
+    assert_eq!(
+        fixture_file_states(&project1_external, &OUTSIDE_PROJECT_FIXTURES),
+        external_fixture_states,
+        "initial Push/Pull changed an outside file"
+    );
     assert_fixed_point(
         &redacted(
             service1.compare_threads(&project_id1, &storage_id),
@@ -2174,12 +3529,23 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         &myconf2,
         &machine2_home,
         &project1_copy,
+        CodexRunAccess::ReadOnly,
         Some(&provider_thread2),
         "LIVE_USER_R2. Do not use tools. Reply with exactly: MALLARD_REMOTE_BRANCH",
     );
     assert_eq!(resumed2, provider_thread2);
     let second_push = push(&service2, &project_id2, &storage_id);
     assert_eq!(second_push.revision, Some(2));
+    assert_portable_rollout_paths(
+        &service2,
+        &storage_id,
+        &bundle_id,
+        &mystorage1,
+        &logical_thread,
+        &project1,
+        &project1_copy,
+        &project1_external,
+    );
     assert_portable_state_is_safe(
         &service2,
         &storage_id,
@@ -2197,6 +3563,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         &myconf1,
         &machine1_home,
         &project1,
+        CodexRunAccess::ReadOnly,
         Some(&provider_thread1),
         "LIVE_USER_R3. Do not use tools. Reply with exactly: MALLARD_LOCAL_BRANCH",
     );
@@ -2278,6 +3645,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         &myconf1,
         &machine1_home,
         &project1,
+        CodexRunAccess::ReadOnly,
         Some(&first_remote_alias),
         "LIVE_USER_R4. Do not use tools. Reply with exactly: MALLARD_REVISION_FOUR",
     );
@@ -2287,6 +3655,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         &myconf2,
         &machine2_home,
         &project1_copy,
+        CodexRunAccess::ReadOnly,
         Some(&provider_thread2),
         "LIVE_USER_R5. Do not use tools. Reply with exactly: MALLARD_SECOND_LOCAL_BRANCH",
     );
@@ -2934,6 +4303,51 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         ),
     ];
     assert_eq!(histories.len(), 10);
+    let r1_derived_threads = [
+        logical_thread.clone(),
+        first_keep_both.preserved_thread_id.clone(),
+        second_keep_both.preserved_thread_id.clone(),
+    ];
+    for (service, repository, project_id, codex_home, project_root, forbidden_root) in [
+        (
+            &service1,
+            &repository1,
+            &project_id1,
+            myconf1.as_path(),
+            project1.as_path(),
+            project1_copy.as_path(),
+        ),
+        (
+            &service2,
+            &repository2,
+            &project_id2,
+            myconf2.as_path(),
+            project1_copy.as_path(),
+            project1.as_path(),
+        ),
+    ] {
+        for logical in &r1_derived_threads {
+            let provider_id = provider_thread_id(repository, project_id, logical);
+            let resource_id = mallard_domain::conversation_resource_id(&codex_key(), logical)
+                .expect("derive final R1-derived resource ID");
+            assert_raw_rollout_paths(
+                codex_home,
+                &provider_id,
+                project_root,
+                &project1_external,
+                Some(forbidden_root),
+            );
+            assert_session_detail_paths(
+                service,
+                project_id,
+                &resource_id,
+                project_root,
+                codex_home,
+                &provider_id,
+                &project1_external,
+            );
+        }
+    }
     eprintln!("live Codex phase: twenty disposable headless history resumes");
     verify_all_histories(
         &mut request_count,
@@ -2946,6 +4360,24 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     assert_eq!(
         request_count, EXPECTED_MODEL_REQUESTS,
         "live scenario changed its Luna-low model-request budget"
+    );
+    assert_exact_fixture_tree(&project1, &IN_PROJECT_FIXTURES);
+    assert_exact_fixture_tree(&project1_copy, &IN_PROJECT_FIXTURES);
+    assert_exact_fixture_tree(&project1_external, &OUTSIDE_PROJECT_FIXTURES);
+    assert_eq!(
+        fixture_file_states(&project1, &IN_PROJECT_FIXTURES),
+        project1_fixture_states,
+        "the completed live flow changed source project fixtures"
+    );
+    assert_eq!(
+        fixture_file_states(&project1_copy, &IN_PROJECT_FIXTURES),
+        project1_copy_fixture_states,
+        "the completed live flow changed copied project fixtures"
+    );
+    assert_eq!(
+        fixture_file_states(&project1_external, &OUTSIDE_PROJECT_FIXTURES),
+        external_fixture_states,
+        "the completed live flow changed outside project fixtures"
     );
     eprintln!("live Codex phase: complete ({request_count} Luna-low requests)");
     assert_portable_state_is_safe(

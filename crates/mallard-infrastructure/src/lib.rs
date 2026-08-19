@@ -5,6 +5,8 @@
 //! `docs/PLAN_PROJECT_STRUCTURE_REORGANIZATION.md`; the module layout mirrors
 //! the original file names so behavior and history stay traceable.
 
+mod path_text_boundary;
+
 pub mod activity_log;
 pub mod bundle_engine;
 pub mod codex_app_refresh;

@@ -149,7 +149,6 @@ interface Props {
   onToggleActivity: () => void;
   onAddProject: () => void;
   onOpenStorage: (storageId: string, settingsExpanded: boolean) => void;
-  onClearStorage: (storageId: string) => void;
   onRemoveStorage: (storageId: string) => void;
   onAddStorage: () => void;
   onOpenCatalogMenu: () => void;
@@ -181,7 +180,6 @@ export default function ProjectSidebar({
   onToggleActivity,
   onAddProject,
   onOpenStorage,
-  onClearStorage,
   onRemoveStorage,
   onAddStorage,
   onOpenCatalogMenu,
@@ -191,7 +189,6 @@ export default function ProjectSidebar({
 }: Props) {
   const [sectionLayout, setSectionLayout] = useState<SectionLayout>(storedSectionLayout);
   const [resizingSections, setResizingSections] = useState(false);
-  const [storageMenuId, setStorageMenuId] = useState<string | null>(null);
   const sectionsRef = useRef<HTMLDivElement>(null);
   const headRef = useRef<HTMLDivElement>(null);
   const sectionResizeRef = useRef<
@@ -209,31 +206,6 @@ export default function ProjectSidebar({
       headRange: [number, number];
     } | null
   >(null);
-
-  useEffect(() => {
-    if (!storageMenuId) return;
-    const closeOutside = (event: PointerEvent) => {
-      if (event.target instanceof Element && event.target.closest(".sidebar-storage-actions")) {
-        return;
-      }
-      setStorageMenuId(null);
-    };
-    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setStorageMenuId(null);
-    };
-    document.addEventListener("pointerdown", closeOutside);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOutside);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [storageMenuId]);
-
-  useEffect(() => {
-    if (storageMenuId && (busy || !storages.some((storage) => storage.id === storageMenuId))) {
-      setStorageMenuId(null);
-    }
-  }, [busy, storageMenuId, storages]);
 
   /* The list is fixed, so its height is the one number the pin must respect. It
      is read off the laid-out rows rather than the pane, which reports whatever
@@ -636,15 +608,12 @@ export default function ProjectSidebar({
               return (
                 <div
                   key={storage.id}
-                  className={`sidebar-profile-item sidebar-storage-item${activeStorageId === storage.id ? " active" : ""}`}
+                  className={`sidebar-profile-item${activeStorageId === storage.id ? " active" : ""}`}
                 >
                   <button
                     type="button"
                     className="sidebar-profile-main"
-                    onClick={() => {
-                      setStorageMenuId(null);
-                      onOpenStorage(storage.id, false);
-                    }}
+                    onClick={() => onOpenStorage(storage.id, false)}
                     disabled={busy}
                     title={storageIssue ? `Open ${storageName} — ${storageIssue}` : `Open ${storageName}`}
                     aria-label={storageIssue
@@ -663,72 +632,18 @@ export default function ProjectSidebar({
                     )}
                   </button>
                   <div className="sidebar-profile-actions">
-                    <div className={`storage-link-overflow sidebar-storage-actions${storageMenuId === storage.id ? " open" : ""}`}>
-                      <button
-                        type="button"
-                        className="storage-link-more"
-                        aria-haspopup="menu"
-                        aria-expanded={storageMenuId === storage.id}
-                        aria-controls={`sidebar-storage-actions-${storage.id}`}
-                        onClick={() => setStorageMenuId((current) => current === storage.id ? null : storage.id)}
-                        disabled={busy}
-                        title={`Actions for ${storageName}`}
-                        aria-label={`Actions for ${storageName}`}
-                      >
-                        <Icon name="more" size={14} />
-                      </button>
-                      <div
-                        id={`sidebar-storage-actions-${storage.id}`}
-                        className="storage-link-actions-menu sidebar-storage-actions-menu"
-                        role="menu"
-                        aria-label={`Actions for ${storageName}`}
-                        hidden={storageMenuId !== storage.id}
-                      >
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="storage-link-actions-menu-item"
-                          disabled={busy}
-                          onClick={() => {
-                            setStorageMenuId(null);
-                            onOpenStorage(storage.id, true);
-                          }}
-                        >
-                          <Icon name="settings" size={14} />
-                          <span>Storage settings</span>
-                        </button>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="storage-link-actions-menu-item danger"
-                          disabled={busy}
-                          onClick={() => {
-                            setStorageMenuId(null);
-                            onClearStorage(storage.id);
-                          }}
-                        >
-                          <Icon name="trash" size={14} />
-                          <span>Clear storage data</span>
-                        </button>
-                        <div className="storage-link-actions-menu-separator" role="separator" />
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="storage-link-actions-menu-item danger"
-                          onClick={() => {
-                            setStorageMenuId(null);
-                            onRemoveStorage(storage.id);
-                          }}
-                          disabled={busy || usage > 0}
-                          title={usage > 0
-                            ? `${storageName} is linked to ${usage} project${usage === 1 ? "" : "s"}; unlink it before removing`
-                            : `Remove ${storageName}; synced files stay in storage`}
-                        >
-                          <Icon name="x" size={14} />
-                          <span>Remove storage</span>
-                        </button>
-                      </div>
-                    </div>
+                    <button
+                      type="button"
+                      className="sidebar-profile-remove"
+                      onClick={() => onRemoveStorage(storage.id)}
+                      disabled={busy || usage > 0}
+                      title={usage > 0
+                        ? `${storageName} is linked to ${usage} project${usage === 1 ? "" : "s"}; unlink it before removing`
+                        : `Remove ${storageName}; synced files stay in storage`}
+                      aria-label={`Remove ${storageName} from Mallard`}
+                    >
+                      <Icon name="trash" size={13} />
+                    </button>
                   </div>
                 </div>
               );

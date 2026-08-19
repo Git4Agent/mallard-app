@@ -40,6 +40,15 @@ const scope: CatalogScopeView = {
   },
 };
 
+/** A stable sha-shaped stand-in per name, so the ⓘ popover carries a digest
+ *  of realistic width without pretending to be anyone's data. */
+function digest(name: string): string {
+  let seed = 7;
+  for (const ch of name) seed = (seed * 31 + ch.charCodeAt(0)) % 0xffff;
+  return Array.from({ length: 16 }, (_, i) => (((seed + 1) * (i + 3) * 2_654_435_761) % 0xffff)
+    .toString(16).padStart(4, "0")).join("");
+}
+
 function row(overrides: Partial<CatalogScopeRow> & { row_id: string; display_name: string }): CatalogScopeRow {
   return {
     resource_id: `resource-${overrides.row_id}`,
@@ -49,9 +58,12 @@ function row(overrides: Partial<CatalogScopeRow> & { row_id: string; display_nam
     local_present: true,
     local_path: `/Users/hequ/.codex/skills/${overrides.display_name}`,
     local_modified_at: NOW - 86_400 * 3,
+    local_files: 5,
+    local_bytes: 22_100,
     remote_present: false,
     remote_revision: null,
     remote_updated_at: null,
+    content_sha256: digest(overrides.display_name),
     registration_id: `registration-${overrides.row_id}`,
     registration_revision: 1,
     link_id: `link-${overrides.row_id}`,
@@ -69,10 +81,12 @@ const ROWS: CatalogScopeRow[] = [
     row_id: "triage", display_name: "triage", state: "in_sync",
     remote_present: true, remote_revision: 4, other_storage_names: ["Vault"],
     local_modified_at: NOW - 86_400 * 3,
+    local_files: 6, local_bytes: 41_300,
   }),
   row({
     row_id: "changelog-writer", display_name: "changelog-writer", state: "local_changed",
     remote_present: true, remote_revision: 2, local_modified_at: NOW - 7_200,
+    local_files: 3, local_bytes: 12_800,
     warnings: [{ code: "secret_shaped", message: "contains a secret-shaped value", digest: "digest-secret" }],
   }),
   row({
@@ -80,14 +94,17 @@ const ROWS: CatalogScopeRow[] = [
     scope_label: "Shared user", local_path: "/Users/hequ/.agents/skills/pdf-filler",
     link_id: null, registration_id: null, repository_id: null,
     local_modified_at: NOW - 86_400 * 2,
+    local_files: 11, local_bytes: 264_000,
   }),
   row({
     row_id: "release-notes", display_name: "release-notes", state: "storage_changed",
     remote_present: true, remote_revision: 6, local_modified_at: NOW - 86_400 * 5,
+    local_files: 4, local_bytes: 18_400,
   }),
   row({
     row_id: "sql-review", display_name: "sql-review", state: "local_missing",
     local_present: false, local_path: null, local_modified_at: null, linked: false,
+    local_files: null, local_bytes: null,
     link_id: null, registration_id: null,
     remote_present: true, remote_revision: 3, remote_updated_at: NOW - 86_400 * 8,
   }),
@@ -95,15 +112,18 @@ const ROWS: CatalogScopeRow[] = [
     row_id: "api-designer", display_name: "api-designer", state: "diverged",
     scope_label: "Shared user", local_path: "/Users/hequ/.agents/skills/api-designer",
     remote_present: true, remote_revision: 5, local_modified_at: NOW - 3_600,
+    local_files: 9, local_bytes: 87_600,
     warnings: [{ code: "executable", message: "contains an executable file", digest: "digest-exec" }],
   }),
   row({
     row_id: "deploy-checklist", display_name: "deploy-checklist", state: "unreviewed_remote",
     remote_present: true, remote_revision: 1, local_modified_at: NOW - 86_400 * 6,
+    local_files: 5, local_bytes: 22_100,
   }),
   row({
     row_id: "legacy-import", display_name: "legacy-import", state: "blocked",
     scope_label: "Shared user", local_path: null, local_modified_at: null,
+    local_files: null, local_bytes: null, content_sha256: null,
     link_id: null, registration_id: null, repository_id: null,
     blocker: "the skill directory is a symlink, so its contents can't be captured safely",
   }),
@@ -162,7 +182,11 @@ function stubApi(storageId: string | null): StorageCatalogApi {
     profile: scope.profile,
     storage_id: storageId,
     storage_name: STORAGES.find((storage) => storage.id === storageId)?.name ?? null,
-    rows: storageId ? ROWS : ROWS.map((entry) => ({ ...entry, state: null, linked: false })),
+    /* Without a storage the backend lists only what the home scan saw — no
+       stored-only rows — and a blocked row keeps saying so. */
+    rows: storageId ? ROWS : ROWS
+      .filter((entry) => entry.local_present || entry.blocker)
+      .map((entry) => ({ ...entry, state: entry.blocker ? entry.state : null, linked: false })),
     warnings: [],
   });
   const unsupported = () => Promise.reject(new Error("not wired in the live harness"));

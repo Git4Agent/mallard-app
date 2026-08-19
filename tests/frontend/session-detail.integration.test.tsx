@@ -633,6 +633,74 @@ test("payloads stack labelled bounded sections, arguments beside their result", 
   assert.match(envelope, /<code>Script completed<\/code>/);
 });
 
+test("path-bearing tool detail keeps external paths visible but out of the Paths list", () => {
+  const inProjectPaths = [
+    "generated/session-paths/inside-alpha.txt",
+    "generated/session-paths/nested/inside-beta.json",
+  ];
+  const externalPaths = [
+    "/private/tmp/mallard-live-123/project1_external/outside-alpha.txt",
+    "/private/tmp/mallard-live-123/project1_external/nested/outside-beta.json",
+  ];
+  const argumentsValue = JSON.stringify({
+    alpha: `./${inProjectPaths[0]}`,
+    outside_alpha: externalPaths[0],
+  });
+  const resultValue = [
+    `Created ./${inProjectPaths[1]}`,
+    `Preserved ${externalPaths[1]}`,
+  ].join("\n");
+
+  const html = renderToStaticMarkup(
+    <SessionDetailToolCall
+      event={{
+        ...toolEvent,
+        event_id: "tool-path-remap",
+        tool: {
+          ...toolEvent.tool!,
+          provider_call_id: "call-path-remap",
+          category: "file_edit",
+          summary: "Create the bounded path fixtures",
+          argument_preview: argumentsValue,
+          result_preview: resultValue,
+          affected_paths: inProjectPaths,
+        },
+      }}
+      expanded
+      detailState={{
+        loading: false,
+        error: null,
+        detail: {
+          event_id: "tool-path-remap",
+          arguments: argumentsValue,
+          arguments_truncated: false,
+          result: resultValue,
+          result_truncated: false,
+          affected_paths: inProjectPaths,
+        },
+      }}
+      onExpandedChange={() => undefined}
+    />,
+  );
+
+  // Session Details normalizes the active checkout to `.` while preserving
+  // unrelated absolute paths in the bounded provider-native payload.
+  assert.ok(html.includes(`./${inProjectPaths[0]}`));
+  assert.ok(html.includes(`./${inProjectPaths[1]}`));
+  for (const externalPath of externalPaths) {
+    assert.ok(html.includes(externalPath));
+  }
+
+  // The dedicated Paths section remains project-scoped: it contains the two
+  // safe relative paths and never promotes either external absolute path.
+  const pathsSection = html.match(
+    /<span class="session-detail-payload-label">Paths<\/span>[\s\S]*?<ul class="session-detail-tool-paths">([\s\S]*?)<\/ul>/,
+  )?.[1];
+  assert.ok(pathsSection, "expected the dedicated Paths list to render");
+  for (const inProjectPath of inProjectPaths) assert.ok(pathsSection.includes(inProjectPath));
+  for (const externalPath of externalPaths) assert.ok(!pathsSection.includes(externalPath));
+});
+
 test("a stored transport payload is unwrapped, with the raw value one click away", () => {
   const envelope = JSON.stringify([
     { type: "input_text", text: "Script completed\nWall time 0.1 seconds" },

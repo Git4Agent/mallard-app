@@ -62,6 +62,76 @@ export interface ProfilePathHint {
   path?: string;
 }
 
+export interface ProfileProbeTarget {
+  provider: ProviderKey;
+  path: string;
+}
+
+/** The home folder with its trailing slash trimmed — resolved once, because
+ *  the path fields accept `~` and the backend does not. */
+export function useHomePath(): string | null {
+  const [homePath, setHomePath] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void homeDir()
+      .then((resolved) => { if (!cancelled) setHomePath(resolved.replace(/\/+$/, "")); })
+      .catch(() => { if (!cancelled) setHomePath(null); });
+    return () => { cancelled = true; };
+  }, []);
+  return homePath;
+}
+
+/**
+ * Debounced probes for every pending custom path, keyed by provider. A typed
+ * path is judged as it is typed: the save-time probe is the same call, so the
+ * row can say now what saving would say later.
+ */
+export function useProfilePathProbes(
+  targets: ProfileProbeTarget[],
+  isActive: () => boolean = () => true,
+): Record<string, ProfilePathProbeState> {
+  const [probes, setProbes] = useState<Record<string, ProfilePathProbeState>>({});
+  const requestRef = useRef(0);
+  const targetsRef = useRef(targets);
+  targetsRef.current = targets;
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
+  const fingerprint = targets
+    .map((target) => `${target.provider}=${target.path}`)
+    .join(" ");
+  useEffect(() => {
+    const current = targetsRef.current;
+    if (current.length === 0) {
+      setProbes((existing) => (Object.keys(existing).length === 0 ? existing : {}));
+      return;
+    }
+    const requestId = ++requestRef.current;
+    setProbes((existing) => {
+      const next = { ...existing };
+      for (const target of current) next[target.provider] = { status: "checking" };
+      return next;
+    });
+    const timer = window.setTimeout(() => {
+      void Promise.all(current.map(async (target) => {
+        try {
+          const probe = await projectSyncApi.probeProviderProfile(target.provider, target.path);
+          return [target.provider, { status: "ok", probe } as ProfilePathProbeState] as const;
+        } catch (reason) {
+          return [
+            target.provider,
+            { status: "error", message: errorMessage(reason) } as ProfilePathProbeState,
+          ] as const;
+        }
+      })).then((results) => {
+        if (requestRef.current !== requestId || !isActiveRef.current()) return;
+        setProbes(Object.fromEntries(results));
+      });
+    }, PATH_PROBE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [fingerprint]);
+  return probes;
+}
+
 /**
  * The backend takes absolute clean paths only, so a typed `~` has to be
  * resolved here before it can be probed at all.
@@ -176,10 +246,7 @@ export default function ProjectSetupWorkspace({
   // chosen profile are persisted on the draft itself; an enabled provider
   // without a selection blocks finalization locally.
   const [enabledProviders, setEnabledProviders] = useState<ReadonlySet<ProviderKey> | null>(null);
-  // A typed custom path is judged as it is typed: the finish-time probe is the
-  // same call, so the row can say now what finalization would say later.
-  const [pathProbes, setPathProbes] = useState<Record<string, ProfilePathProbeState>>({});
-  const [homePath, setHomePath] = useState<string | null>(null);
+  const homePath = useHomePath();
 
   // Autosave bookkeeping: edits mark the draft dirty; one debounced save
   // persists the latest state and refreshes inspection afterwards.
@@ -187,7 +254,6 @@ export default function ProjectSetupWorkspace({
   const savingRef = useRef(false);
   const inspectRequest = useRef(0);
   const repoAutoSelected = useRef(false);
-  const probeRequest = useRef(0);
   const mountedRef = useRef(true);
   const workflowIsActive = () => (
     mountedRef.current && isWorkflowCurrent(workflowEpoch)
@@ -362,16 +428,7 @@ export default function ProjectSetupWorkspace({
     repositoryFingerprint,
   ]);
 
-  // Resolved once: the field accepts `~`, the backend does not.
-  useEffect(() => {
-    let cancelled = false;
-    void homeDir()
-      .then((resolved) => { if (!cancelled) setHomePath(resolved.replace(/\/+$/, "")); })
-      .catch(() => { if (!cancelled) setHomePath(null); });
-    return () => { cancelled = true; };
-  }, []);
-
-  const probeTargets = useMemo(() => (
+  const probeTargets = useMemo<ProfileProbeTarget[]>(() => (
     providers.flatMap((descriptor) => {
       const selection = draft?.profiles[descriptor.key];
       if (selection?.kind !== "pending") return [];
@@ -379,42 +436,7 @@ export default function ProjectSetupWorkspace({
       return path.startsWith("/") ? [{ provider: descriptor.key, path }] : [];
     })
   ), [draft?.profiles, homePath, providers]);
-  const probeFingerprint = probeTargets
-    .map((target) => `${target.provider}=${target.path}`)
-    .join(" ");
-  const probeTargetsRef = useRef(probeTargets);
-  probeTargetsRef.current = probeTargets;
-
-  useEffect(() => {
-    const targets = probeTargetsRef.current;
-    if (targets.length === 0) {
-      setPathProbes((current) => (Object.keys(current).length === 0 ? current : {}));
-      return;
-    }
-    const requestId = ++probeRequest.current;
-    setPathProbes((current) => {
-      const next = { ...current };
-      for (const target of targets) next[target.provider] = { status: "checking" };
-      return next;
-    });
-    const timer = window.setTimeout(() => {
-      void Promise.all(targets.map(async (target) => {
-        try {
-          const probe = await projectSyncApi.probeProviderProfile(target.provider, target.path);
-          return [target.provider, { status: "ok", probe } as ProfilePathProbeState] as const;
-        } catch (reason) {
-          return [
-            target.provider,
-            { status: "error", message: errorMessage(reason) } as ProfilePathProbeState,
-          ] as const;
-        }
-      })).then((results) => {
-        if (probeRequest.current !== requestId || !workflowIsActive()) return;
-        setPathProbes(Object.fromEntries(results));
-      });
-    }, PATH_PROBE_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [probeFingerprint]);
+  const pathProbes = useProfilePathProbes(probeTargets, workflowIsActive);
 
   const sections = inspection?.sections ?? [];
   const usesExistingRepo = draft?.repository.kind === "existing";

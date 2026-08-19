@@ -2,9 +2,9 @@
 
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
-    SessionCount, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
-    SessionEventDetail, SessionFileSummary, SessionSourceSpan, SessionTimelineContext,
-    SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
+    most_specific_project_relative_path, SessionCount, SessionCountQuality, SessionDetailWarning,
+    SessionEventCounts, SessionEventDetail, SessionFileSummary, SessionSourceSpan,
+    SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
     SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
     SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
     SessionTurnToolSummary, TIMELINE_TOOL_PREVIEW_BYTES,
@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 const TITLE_CHARS: usize = 120;
 const MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -22,7 +22,7 @@ const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_CLAUDE_RECORDS: usize = 100_000;
 const TIMELINE_MESSAGE_PREVIEW_BYTES: usize = 16 * 1024;
 const TIMELINE_DETAIL_BYTES: usize = 64 * 1024;
-pub(crate) const TIMELINE_PARSER_VERSION: u32 = 1;
+pub(crate) const TIMELINE_PARSER_VERSION: u32 = 2;
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     let meta = fs::metadata(path).map_err(|e| format!("inspect '{}': {}", path.display(), e))?;
@@ -823,10 +823,14 @@ fn classify_claude_tool(name: &str) -> SessionToolCategory {
     }
 }
 
-fn safe_project_relative_path(path: &str, project_root: &Path) -> Option<String> {
+fn safe_project_relative_path(
+    path: &str,
+    project_root: &Path,
+    project_root_aliases: &[PathBuf],
+) -> Option<String> {
     let candidate = Path::new(path);
     let relative = if candidate.is_absolute() {
-        candidate.strip_prefix(project_root).ok()?
+        most_specific_project_relative_path(candidate, project_root, project_root_aliases)?
     } else {
         candidate
     };
@@ -857,6 +861,7 @@ fn affected_paths(
     input: &Value,
     category: SessionToolCategory,
     project_root: &Path,
+    project_root_aliases: &[PathBuf],
 ) -> Vec<String> {
     if category != SessionToolCategory::FileEdit {
         return Vec::new();
@@ -864,7 +869,9 @@ fn affected_paths(
     let mut paths = Vec::new();
     for key in ["file_path", "filePath", "notebook_path", "notebookPath"] {
         if let Some(path) = input.get(key).and_then(Value::as_str) {
-            if let Some(relative) = safe_project_relative_path(path, project_root) {
+            if let Some(relative) =
+                safe_project_relative_path(path, project_root, project_root_aliases)
+            {
                 paths.push(relative);
             }
         }
@@ -1007,7 +1014,12 @@ fn consume_claude_record(
                             timestamp,
                             source,
                             block_index,
-                            affected_paths(input, category, context.project_root),
+                            affected_paths(
+                                input,
+                                category,
+                                context.project_root,
+                                context.project_root_aliases,
+                            ),
                             parent_event_id.clone(),
                         );
                     }
@@ -1439,6 +1451,7 @@ mod tests {
             resource_id: "conversation:claude:test",
             provider_session_id: "session-1",
             project_root,
+            project_root_aliases: &[],
         }
     }
 
@@ -1577,6 +1590,48 @@ mod tests {
             .affected_paths
             .iter()
             .all(|path| !Path::new(path).is_absolute()));
+    }
+
+    #[test]
+    fn edit_paths_choose_the_most_specific_root_alias_and_reject_a_prefix_sibling() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        let canonical_root = PathBuf::from("/tmp/project");
+        let selected_root = PathBuf::from("/tmp/project/alias");
+        let aliases = vec![canonical_root.clone(), selected_root.clone()];
+        let inside = selected_root.join("src/lib.rs");
+        let outside = PathBuf::from("/tmp/project_external/alias_external/outside.rs");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"user","uuid":"u-1","sessionId":"session-1","cwd":selected_root,"message":{"role":"user","content":"Do the work"}}),
+                json!({"type":"assistant","uuid":"a-1","sessionId":"session-1","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[
+                    {"type":"tool_use","id":"write-inside","name":"Write","input":{"file_path":inside,"content":"inside"}},
+                    {"type":"tool_use","id":"write-outside","name":"Write","input":{"file_path":outside,"content":"outside"}}
+                ]}}),
+                json!({"type":"user","uuid":"r-1","sessionId":"session-1","message":{"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"write-inside","content":"ok"},
+                    {"type":"tool_result","tool_use_id":"write-outside","content":"ok"}
+                ]}}),
+            ],
+        );
+        let context = SessionTimelineContext {
+            resource_id: "conversation:claude:test",
+            provider_session_id: "session-1",
+            project_root: &canonical_root,
+            project_root_aliases: &aliases,
+        };
+
+        let index = build_timeline_index(&transcript, &context).unwrap();
+        assert_eq!(index.parser_version, 2);
+        let tools = index
+            .events
+            .iter()
+            .filter_map(|event| event.tool.as_ref())
+            .map(|tool| (tool.provider_call_id.as_str(), tool.affected_paths.clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(tools["write-inside"], vec!["src/lib.rs"]);
+        assert!(tools["write-outside"].is_empty());
     }
 
     #[test]

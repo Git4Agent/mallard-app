@@ -414,9 +414,11 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   // reservation left ~97px of blank between the ellipsized title and the
   // first of the two buttons the markup settled on.
   assert.match(retroCss, /\.sync-history-timeline,\s*\.sync-history-storage-only\s*\{[^}]*--sync-history-row-actions-column: auto;[^}]*--sync-history-commit-actions-column: 26px;[^}]*--sync-history-commit-date-column: 26ch;[^}]*--sync-history-row-icon-size: 18px;[^}]*--sync-history-row-anchor-y: 15px;[^}]*--sync-history-rail-x: 8px;[^}]*--sync-history-card-offset: 26px;/s);
-  // The storage-only card takes the timeline's inset so its rail mark lands in
-  // the same column.
-  assert.match(retroCss, /\.sync-history-storage-only\s*\{[^}]*margin: 12px 0 12px var\(--sync-history-card-offset\);/s);
+  // The storage-only group takes the timeline's inset so its fold lands in the
+  // rail column, and keeps the Uncommitted frame's 10px gap before the rail.
+  assert.match(retroCss, /\.sync-history-storage-only\s*\{[^}]*margin: 12px 0 10px var\(--sync-history-card-offset\);/s);
+  // Its heading count closes the bar at the card edge, like the stamps below.
+  assert.match(retroCss, /\.sync-history-storage-only \.sync-history-heading-count\s*\{[^}]*margin-left: auto;/s);
   assert.match(retroCss, /@container sync-history-layout \(min-width: 700px\)\s*\{[^{]*\.sync-history-timeline,\s*\.sync-history-storage-only\s*\{[^}]*--sync-history-row-anchor-y: 19px;/s);
   assert.doesNotMatch(retroCss, /sync-history-spine-mark/);
   assert.doesNotMatch(retroCss, /--sync-history-commit-thread-rail-x|--sync-history-commit-child-offset|--sync-history-commit-branch-length/);
@@ -642,9 +644,12 @@ test("host-scoped workflows keep their originating epoch across async continuati
   assert.match(addProject, /await projectSyncApi\.createSetupDraft\(picked\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return;/);
   assert.match(addProject, /refreshSetupDrafts\(undefined, workflowEpoch\)/);
 
-  const chooseProfile = section(workspace, "chooseAndCreateProfile", "refreshSetupDrafts");
-  capturesBefore(chooseProfile, "await open(");
-  assert.match(chooseProfile, /createProfileAtPath\(provider, picked, workflowEpoch\)/);
+  // ensureProfileAtPath runs inside a caller's envelope: the epoch arrives as
+  // a parameter, and every await re-checks it before touching state.
+  const ensureProfile = section(workspace, "ensureProfileAtPath", "refreshSetupDrafts");
+  assert.match(ensureProfile, /workflowEpoch: number,/);
+  assert.match(ensureProfile, /await projectSyncApi\.probeProviderProfile\(provider, path\.trim\(\)\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return null;/);
+  assert.match(ensureProfile, /if \(hostWorkflowEpoch\.current !== workflowEpoch\) return null;\s*setProfiles\(nextProfiles\);/);
 
   const discardDraft = section(workspace, "discardSetupDraft", "completeSetup");
   capturesBefore(discardDraft, "await confirm(");
@@ -822,6 +827,50 @@ test("a custom profile path can be typed, and ~ resolves before the probe", () =
   assert.match(pendingBranch, /kind: "pending", path: "", display_name: ""/);
   assert.doesNotMatch(pendingBranch, /chooseProfileFolder/);
   assert.match(setupWorkspace, /className="btn" onClick=\{\(\) => void chooseProfileFolder\(provider\)\}/);
+});
+
+test("the binding dialog wears the setup page's language", () => {
+  const editor = readFileSync("src/components/project-sync/ProjectBindingEditor.tsx", "utf8");
+
+  // The body is the setup page's bands, and the profile row is the setup
+  // page's row: profiles and a Custom path… choice in one select, an inline
+  // path field, Browse, and the judged-as-typed hint.
+  assert.match(editor, /sync-setup-section/);
+  assert.match(editor, /<option value="__pending">Custom path…<\/option>/);
+  assert.match(editor, /<Icon name="folder" size=\{13\} \/> Browse/);
+  assert.match(editor, /sync-setup-path-hint/);
+  assert.match(editor, /useProfilePathProbes|profilePathHint/);
+
+  // An active binding renders as a fact sheet: read-only checkout, each
+  // agent's profile shown as its name and path, and one Done button. Only an
+  // unbound or unconfirmed project still gets the editor.
+  assert.match(editor, /readOnly title=\{projectRoot\}/);
+  assert.match(editor, /binding\.locked \? \(/);
+  assert.match(editor, /sync-provider-name/);
+  assert.match(editor, /<code>\{compactProjectPath\(profile\.path\)\}<\/code>/);
+  assert.match(editor, /Profile missing on this machine/);
+  assert.match(editor, />Done<\/button>/);
+  assert.doesNotMatch(editor, /onChange=\{\(event\) => setProjectRoot/);
+
+  // The old dialog's furniture stays deleted: the banner, the folder card,
+  // the header paragraph, and the parent-driven Add flow.
+  assert.doesNotMatch(editor, /sync-binding-safety|sync-folder-field|onAddProfile/);
+  assert.doesNotMatch(editor, /\{description\}/);
+
+  // Typed paths ride the submission as pending selections; ProjectSync
+  // registers them before the binding command, which takes ids only.
+  assert.match(editor, /kind: "pending", path: expandHomePath\(selection\.path, homePath\)/);
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  assert.match(workspace, /ensureProfileAtPath\(provider, selection\.path, workflowEpoch\)/);
+  assert.match(workspace, /locked: projectBinding\?\.state === "active"/);
+  assert.doesNotMatch(workspace, /chooseAndCreateProfile|onAddProfile/);
+
+  // The shared row can never outgrow its column, and hands the path field its
+  // own line when the column gets too tight to share.
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.sync-agent-profile-row\.has-custom-path \{\s*grid-template-columns: minmax\(140px, 220px\) minmax\(0, 1fr\) auto;\s*\}/);
+  assert.match(css, /\.sync-agent-profile-list \{ container-type: inline-size; \}/);
+  assert.match(css, /@container \(max-width: 480px\)/);
 });
 
 test("the custom path field reports what the finish-time probe would say", () => {

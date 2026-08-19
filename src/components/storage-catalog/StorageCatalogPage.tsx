@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import Icon from "../Icons";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import Icon, { type IconName } from "../Icons";
+import ProviderMark from "../sync-review/ProviderMark";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
@@ -11,7 +13,6 @@ import {
   catalogScopeLabel,
   errorMessage,
   linkStateLabel,
-  rowLocation,
   rowPullable,
   rowPushable,
   rowStamp,
@@ -110,135 +111,306 @@ interface RowAction {
   onChoose: (actionId: string) => void;
 }
 
-/** One line: what state it is in, what it is called, where it lives, when it
- * last moved. Everything else — revisions, other storage links — is a tooltip
- * or the detail page behind the chevron. */
-function ResourceRow({
+/** "12.8 KB", "1.2 MB": the size a card states for its payload on disk. */
+function formatBytes(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_048_576).toFixed(1)} MB`;
+  return `${value === 0 ? 0 : Math.max(1, Math.round(value / 1024))} KB`;
+}
+
+/** The activity page's own stamp, to the character: "Aug 17, 2026 at 9:11 PM". */
+function fullStamp(seconds: number): string {
+  const when = new Date(seconds * 1_000);
+  const date = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(when);
+  const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(when);
+  return `${date} at ${clock}`;
+}
+
+/** Local time wins when the resource is on this Mac, because that is the copy
+ * you can edit; a stored-only row shows when the storage last moved. */
+function stampSeconds(row: CatalogScopeRow): number | null {
+  return (row.local_present ? row.local_modified_at ?? null : null) ?? row.remote_updated_at ?? null;
+}
+
+function badge(row: CatalogScopeRow, storageName: string | null) {
+  const status = rowStatus(row);
+  const label = [
+    rowStatusLabel(row, storageName),
+    row.other_storage_names.length > 0 && `Also linked to ${row.other_storage_names.join(", ")}.`,
+  ].filter(Boolean).join(" ");
+  return (
+    <span
+      className={`sync-thread-sync-indicator ${TONE[status] ?? "unknown"}`}
+      data-tooltip={label}
+      aria-label={label}
+      tabIndex={0}
+    >
+      <ThreadStatusIcon status={status} size={18} />
+    </span>
+  );
+}
+
+/** One readout, drawn exactly as a session's is: a 12px glyph, a mono figure,
+ * and the sentence in a tooltip rather than on the row. */
+function Metric({ icon, value, detail, muted }: { icon: IconName; value: string; detail: string; muted?: boolean }) {
+  return (
+    <span
+      className={`sync-history-thread-metric${muted ? " sync-history-partial" : ""}`}
+      data-tooltip={detail}
+      aria-label={detail}
+      tabIndex={0}
+    >
+      <Icon name={icon} size={12} /><b>{value}</b>
+    </span>
+  );
+}
+
+/** The ⓘ, carrying what a session card's debug menu carries: the row's paths
+ * and digests, each a click to copy. Same wrapper, same popover. */
+function InfoMenu({ row }: { row: CatalogScopeRow }) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timeout = window.setTimeout(() => setCopied(null), 2_000);
+    return () => window.clearTimeout(timeout);
+  }, [copied]);
+
+  const values = [
+    {
+      label: "Local path",
+      value: row.local_path
+        ?? (row.local_present ? "In this provider home — not captured" : "Not on this Mac"),
+    },
+    { label: "Storage repository", value: row.repository_id ?? "Not stored yet" },
+    {
+      label: "Content digest",
+      value: row.content_sha256 ? `sha256:${row.content_sha256}` : "Nothing captured",
+    },
+  ];
+
+  return (
+    <div ref={rootRef} className="sync-history-debug-menu">
+      <button
+        type="button"
+        className="btn btn-ghost sync-history-session-detail-action"
+        title="Paths and digests"
+        aria-label={`Paths and digests for ${row.display_name}`}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => { setCopied(null); setOpen(!open); }}
+      >
+        <Icon name="info" size={13} />
+      </button>
+      <div className="sync-history-debug-popover" role="dialog" aria-label="Paths and digests" hidden={!open}>
+        <header>
+          <strong>Paths and digests</strong>
+          <span>Click a value to copy it.</span>
+        </header>
+        <div className="sync-history-debug-values">
+          {values.map((entry) => (
+            <button
+              key={entry.label}
+              type="button"
+              className="sync-history-debug-copy"
+              title={`Copy ${entry.label.toLowerCase()}`}
+              onClick={() => {
+                void navigator.clipboard?.writeText(entry.value)
+                  .then(() => setCopied(entry.label))
+                  .catch(() => setCopied(null));
+              }}
+            >
+              <span>{entry.label}</span>
+              <code>{entry.value}</code>
+              <small className={copied === entry.label ? "copied" : undefined}>
+                {copied === entry.label ? "Copied" : "Copy"}
+              </small>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** One card per resource, wearing the activity card's grammar. Line one: the
+ * badge, the name as the door, the provider mark and Reveal in Finder. Line
+ * two: files and size, the rule, the ⓘ, and the full stamp. Reviews put the
+ * checkbox where a session's review puts it — inside the title line — and
+ * hang the Pull action pill after the name. */
+function ResourceCard({
   row,
   storageName,
+  provider,
+  providerTitle,
+  onOpen,
+  onReveal,
   selectable,
   selected,
   onToggle,
   action,
-  failure,
-  onOpen,
+  acks,
 }: {
   row: CatalogScopeRow;
   storageName: string | null;
+  provider: CatalogProviderKey;
+  providerTitle: string;
+  onOpen?: () => void;
+  onReveal: () => void;
   selectable?: boolean;
   selected?: boolean;
   onToggle?: () => void;
   action?: RowAction;
-  failure?: string;
-  onOpen?: () => void;
+  /** Acknowledgement chips, part of the card the way the project files
+   * review attaches "Reviewed this warning." to its own row. */
+  acks?: ReactNode;
 }) {
-  const status = rowStatus(row);
-  const location = rowLocation(row);
-  const stamp = rowStamp(row);
-  const badgeLabel = [
-    rowStatusLabel(row, storageName),
-    row.other_storage_names.length > 0 && `Also linked to ${row.other_storage_names.join(", ")}.`,
-    failure,
-  ].filter(Boolean).join(" ");
+  const seconds = stampSeconds(row);
   return (
-    <article className={`catalog-row${selectable ? " sync-sync-selectable-row" : ""}${selected ? " selected" : ""}`}>
-      {selectable && (
-        <label className="sync-sync-row-choice" title={`${selected ? "Exclude" : "Include"} ${row.display_name}`}>
-          <input
-            type="checkbox"
-            checked={!!selected}
-            aria-label={`${selected ? "Exclude" : "Include"} ${row.display_name}`}
-            onChange={() => onToggle?.()}
-          />
-        </label>
-      )}
-      <span
-        className={`sync-thread-sync-indicator ${TONE[status] ?? "unknown"}`}
-        data-tooltip={badgeLabel}
-        aria-label={badgeLabel}
-        tabIndex={0}
-      >
-        <ThreadStatusIcon status={status} size={18} />
-      </span>
-      {onOpen ? (
-        <button type="button" className="catalog-row-name" onClick={onOpen}>{row.display_name}</button>
-      ) : (
-        <span className="catalog-row-name">{row.display_name}</span>
-      )}
-      {action && (action.options.length > 1 ? (
-        <span className="catalog-row-action-shell">
-          <button
-            type="button"
-            className={`catalog-row-action is-choice${action.destructive ? " destructive" : ""}`}
-            aria-expanded={action.expanded}
-            aria-haspopup="menu"
-            title={`${action.chosen} — choose a different local action`}
-            onClick={action.onToggle}
-          >
-            {actionVerb(action.chosen)}
-            <Icon name={action.expanded ? "chevron-up" : "chevron-down"} size={10} />
-          </button>
-          {action.expanded && (
-            /* The app's own popover, item markup and all: a checkable list
-               with the current choice ticked. */
-            <div className="sync-path-menu end" role="menu" aria-label={`Local action for ${row.display_name}`}>
-              <div className="sync-path-menu-group">
-                {action.options.map((option) => (
-                  <button
-                    key={option.id}
-                    type="button"
-                    role="menuitemcheckbox"
-                    aria-checked={action.chosen === option.label}
-                    className={`sync-path-menu-item${option.label.startsWith("Overwrite") ? " danger" : ""}`}
-                    onClick={() => action.onChoose(option.id)}
-                  >
-                    <span className="sync-path-menu-copy">
-                      <span>{actionVerb(option.label)}</span>
-                      <small className="phrase">{option.label}</small>
-                    </span>
-                    {action.chosen === option.label && (
-                      <Icon name="check" size={13} className="sync-path-menu-check" />
-                    )}
-                  </button>
-                ))}
-              </div>
-            </div>
+    <article className="sync-history-thread-card catalog-card">
+      <div className="sync-history-thread-topline">
+        <div className="sync-history-thread-title">
+          {selectable && (
+            <label className="sync-sync-row-choice" title={`${selected ? "Exclude" : "Include"} ${row.display_name}`}>
+              <input
+                type="checkbox"
+                checked={!!selected}
+                aria-label={`${selected ? "Exclude" : "Include"} ${row.display_name}`}
+                onChange={() => onToggle?.()}
+              />
+            </label>
           )}
-        </span>
-      ) : (
-        <span className="catalog-row-action" title={action.chosen}>{actionVerb(action.chosen)}</span>
-      ))}
-      <span
-        className="catalog-row-place"
-        data-tooltip={location?.label}
-        aria-label={location?.label}
-        tabIndex={location ? 0 : undefined}
-      >
-        {location && <Icon name={location.icon} size={13} />}
-      </span>
-      <span
-        className="catalog-row-stamp"
-        data-tooltip={stamp?.detail}
-        aria-label={stamp?.detail}
-        tabIndex={stamp ? 0 : undefined}
-      >
-        {stamp?.short ?? ""}
-      </span>
-      {/* The slot is always here, empty or not: a row with no detail page
-          used to drop the column and shunt its date left of every row that
-          had one. */}
-      <span className="catalog-row-open">
-        {onOpen && (
+          {badge(row, storageName)}
+          {onOpen ? (
+            <button type="button" className="catalog-card-name" title="Storage links, fork, unlink" onClick={onOpen}>
+              {row.display_name}
+            </button>
+          ) : (
+            <strong title={row.display_name}>{row.display_name}</strong>
+          )}
+          {action && (action.options.length > 1 ? (
+            <span className="catalog-row-action-shell">
+              <button
+                type="button"
+                className={`catalog-row-action is-choice${action.destructive ? " destructive" : ""}`}
+                aria-expanded={action.expanded}
+                aria-haspopup="menu"
+                title={`${action.chosen} — choose a different local action`}
+                onClick={action.onToggle}
+              >
+                {actionVerb(action.chosen)}
+                <Icon name={action.expanded ? "chevron-up" : "chevron-down"} size={10} />
+              </button>
+              {action.expanded && (
+                /* The app's own popover, item markup and all: a checkable
+                   list with the current choice ticked. */
+                <div className="sync-path-menu end" role="menu" aria-label={`Local action for ${row.display_name}`}>
+                  <div className="sync-path-menu-group">
+                    {action.options.map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        role="menuitemcheckbox"
+                        aria-checked={action.chosen === option.label}
+                        className={`sync-path-menu-item${option.label.startsWith("Overwrite") ? " danger" : ""}`}
+                        onClick={() => action.onChoose(option.id)}
+                      >
+                        <span className="sync-path-menu-copy">
+                          <span>{actionVerb(option.label)}</span>
+                          <small className="phrase">{option.label}</small>
+                        </span>
+                        {action.chosen === option.label && (
+                          <Icon name="check" size={13} className="sync-path-menu-check" />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </span>
+          ) : (
+            <span className="catalog-row-action" title={action.chosen}>{actionVerb(action.chosen)}</span>
+          ))}
+        </div>
+        {/* Line one's right-hand pair, read across from a session's: the
+            provider mark that says whose home this is, and the one verb that
+            opens the thing somewhere else — Finder rather than a terminal. */}
+        <div className="sync-history-thread-actions">
+          <span className="sync-history-launch-action sync-history-provider-inert" title={providerTitle}>
+            <ProviderMark provider={provider} displayName={providerLabel(provider)} />
+          </span>
           <button
             type="button"
-            title="Storage links, fork, unlink"
-            aria-label={`Open ${row.display_name}`}
-            onClick={onOpen}
+            className="btn btn-ghost sync-history-launch-action"
+            disabled={!row.local_path}
+            title={row.local_path ? `Reveal ${row.local_path} in Finder` : "Not on this Mac"}
+            aria-label={`Reveal ${row.display_name} in Finder`}
+            onClick={onReveal}
           >
-            <Icon name="chevron-right" size={14} />
+            <Icon name="folder" size={14} />
           </button>
-        )}
-      </span>
+        </div>
+      </div>
+      <div className="sync-history-session-details">
+        <div className="sync-history-session-summary">
+          <div className="sync-history-thread-meta" aria-label={`${row.display_name} details`}>
+            <Metric
+              icon="file"
+              value={row.local_files == null ? "—" : String(row.local_files)}
+              detail={row.local_files == null
+                ? (row.local_present ? "On this Mac, but nothing could be captured" : "Not on this Mac, so nothing was counted")
+                : `Files · ${row.local_files}`}
+            />
+            <Metric
+              icon="drive"
+              value={row.local_bytes == null ? "—" : formatBytes(row.local_bytes)}
+              detail={row.local_bytes == null
+                ? (row.local_present ? "On this Mac, but nothing could be captured" : "Not on this Mac, so nothing was measured")
+                : `On disk · ${formatBytes(row.local_bytes)}`}
+            />
+            {row.warnings.length > 0
+              ? (
+                <Metric
+                  icon="alert-triangle"
+                  value={String(row.warnings.length)}
+                  muted
+                  detail={row.warnings.map((warning) => warning.message).join("\n")}
+                />
+              )
+              : <span className="sync-history-thread-metric" aria-hidden="true" />}
+          </div>
+          {/* The rule parts the two readouts from the one button. */}
+          <span className="sync-history-actions-divider" aria-hidden="true" />
+          <div className="sync-history-row-clickables">
+            <InfoMenu row={row} />
+          </div>
+          <span
+            className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end"
+            data-tooltip={rowStamp(row)?.detail}
+            tabIndex={0}
+          >
+            <time>{seconds == null ? "—" : fullStamp(seconds)}</time>
+          </span>
+        </div>
+      </div>
+      {acks}
     </article>
   );
 }
@@ -277,6 +449,9 @@ export default function StorageCatalogPage({
 }) {
   const label = catalogScopeLabel(scope.scope, scope.profile);
   const kind = catalogKindMeta(scope.scope.resource_kind);
+  /* The provider mark's sentence, e.g. "Codex skill": whose home this is, in
+     one glyph on every card. */
+  const markTitle = `${providerLabel(scope.scope.provider)} ${kind.label.toLowerCase()}`;
   const [page, setPage] = useState<CatalogScopeResources | null>(null);
   const [chosenStorageId, setChosenStorageId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "list" });
@@ -392,6 +567,13 @@ export default function StorageCatalogPage({
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [openChoices]);
+
+  /** The card's one launch verb. Failures land on the page's own error
+   * surface, the same place every other verb reports. */
+  const reveal = useCallback((row: CatalogScopeRow) => {
+    if (!row.local_path) return;
+    void revealItemInDir(row.local_path).catch((reason) => setError(errorMessage(reason)));
+  }, []);
 
   /** Every row Push and Pull act on needs a pairing with this storage.
    * Linking is configuration only, no provider content changed, so creating
@@ -923,44 +1105,56 @@ export default function StorageCatalogPage({
                     </div>
                   </div>
                 )}
-                <div className="catalog-row-list">
+                <div className="sync-history-thread-list">
                   {pushRows.map((row) => (
-                    <div key={row.row_id} className="catalog-review-row">
-                      <ResourceRow
-                        row={row}
-                        storageName={storageName}
-                        selectable
-                        selected={pushSelected.has(row.row_id)}
-                        onToggle={() => setPushSelected((current) => {
-                          const next = new Set(current);
-                          if (next.has(row.row_id)) next.delete(row.row_id);
-                          else next.add(row.row_id);
-                          return next;
-                        })}
-                      />
-                      {/* Under the row that raised it, the way the Pull
-                          review's overwrite acknowledgement sits under its
-                          own row: a warning collected at the foot of the list
-                          makes you count rows to find out who it is about. */}
-                      {pushSelected.has(row.row_id) && row.warnings.map((warning) => (
-                        <label key={warning.digest} className="catalog-row-ack">
-                          <input
-                            type="checkbox"
-                            checked={pushAcks.has(warning.digest)}
-                            onChange={(event) => setPushAcks((current) => {
-                              const next = new Set(current);
-                              if (event.target.checked) next.add(warning.digest);
-                              else next.delete(warning.digest);
-                              return next;
-                            })}
-                          />
-                          <span>{warning.message}</span>
+                    <ResourceCard
+                      key={row.row_id}
+                      row={row}
+                      storageName={storageName}
+                      provider={scope.scope.provider}
+                      providerTitle={markTitle}
+                      onReveal={() => reveal(row)}
+                      selectable
+                      selected={pushSelected.has(row.row_id)}
+                      onToggle={() => setPushSelected((current) => {
+                        const next = new Set(current);
+                        if (next.has(row.row_id)) next.delete(row.row_id);
+                        else next.add(row.row_id);
+                        return next;
+                      })}
+                      acks={pushSelected.has(row.row_id) && row.warnings.map((warning) => (
+                        /* Inside the card that raised it, as a row-sized
+                           callout: a warning collected at the foot of the
+                           list makes you count rows to find out who it is
+                           about. */
+                        <label key={warning.digest} className="catalog-card-ack">
+                          <span className="sync-sync-row-choice">
+                            <input
+                              type="checkbox"
+                              checked={pushAcks.has(warning.digest)}
+                              aria-label={`Reviewed: ${warning.message}`}
+                              onChange={(event) => setPushAcks((current) => {
+                                const next = new Set(current);
+                                if (event.target.checked) next.add(warning.digest);
+                                else next.delete(warning.digest);
+                                return next;
+                              })}
+                            />
+                          </span>
+                          <Icon name="alert-triangle" size={12} />
+                          <span>{`Reviewed this warning — ${warning.message}.`}</span>
                         </label>
                       ))}
-                    </div>
+                    />
                   ))}
                   {pushRows.length === 0 && (
-                    <div className="sync-history-state">{`Nothing on this Mac is ahead of ${storageName ?? "storage"}.`}</div>
+                    <div className="sync-pull-empty">
+                      <Icon name="check-circle" size={16} />
+                      <span>
+                        <strong>Nothing to push</strong>
+                        <small>{`This Mac already matches ${storageName ?? "storage"}.`}</small>
+                      </span>
+                    </div>
                   )}
                 </div>
               </div>
@@ -1030,78 +1224,88 @@ export default function StorageCatalogPage({
             <div className="sync-inline-action-content sync-sync-review-content">
               <div className="sync-inline-action-scroll sync-sync-review-scroll">
                 {notices}
-                {claimed.map((entry) => (
-                  <div key={entry.row.row_id} className="sync-review-banners">
-                    <div className="sync-callout warning" role="status">
-                      <Icon name="alert-triangle" size={16} />
-                      <span>
-                        <strong>
-                          {`${entry.row.display_name} is claimed by ${entry.plan.conflicting_claims
-                            .map((claim) => storages.find((storage) => storage.id === claim.storage_id)?.name ?? claim.storage_id)
-                            .join(", ")}`}
-                        </strong>
-                        A different version of this local target is pinned there. Preserve a copy, acknowledge overwrite, or Skip.
-                      </span>
-                    </div>
+                {/* One banner zone above the list, the way the project
+                    reviews place plan-derived facts — never a zone per row. */}
+                {claimed.length > 0 && (
+                  <div className="sync-review-banners">
+                    {claimed.map((entry) => (
+                      <div key={entry.row.row_id} className="sync-callout warning" role="status">
+                        <Icon name="alert-triangle" size={16} />
+                        <span>
+                          <strong>
+                            {`${entry.row.display_name} is claimed by ${entry.plan.conflicting_claims
+                              .map((claim) => storages.find((storage) => storage.id === claim.storage_id)?.name ?? claim.storage_id)
+                              .join(", ")}`}
+                          </strong>
+                          A different version of this local target is pinned there. Preserve a copy, acknowledge overwrite, or Skip.
+                        </span>
+                      </div>
+                    ))}
                   </div>
-                ))}
-                <div className="catalog-row-list" ref={pullListRef}>
+                )}
+                <div className="sync-history-thread-list" ref={pullListRef}>
                   {pullEntries.map((entry) => {
                     const included = pullSelected.has(entry.row.row_id);
                     const expanded = openChoices === entry.row.row_id;
                     const chosen = chosenLabel(entry);
                     return (
-                      <div key={entry.row.row_id} className="catalog-review-row">
-                        <ResourceRow
-                          row={entry.row}
-                          storageName={storageName}
-                          selectable
-                          selected={included}
-                          onToggle={() => setPullSelected((current) => {
-                            const next = new Set(current);
-                            if (next.has(entry.row.row_id)) next.delete(entry.row.row_id);
-                            else next.add(entry.row.row_id);
-                            return next;
-                          })}
-                          action={included ? {
-                            chosen,
-                            options: entry.plan.item.actions.map((action) => ({
-                              id: action.action_id,
-                              label: actionLabel(action),
-                            })),
-                            expanded,
-                            destructive: needsAck(entry),
-                            onToggle: () => setOpenChoices(expanded ? null : entry.row.row_id),
-                            onChoose: (actionId) => {
-                              setPullChoice((current) => ({ ...current, [entry.row.row_id]: actionId }));
-                              setPullAcks((current) => {
-                                const next = new Set(current);
-                                next.delete(entry.row.row_id);
-                                return next;
-                              });
-                              setOpenChoices(null);
-                            },
-                          } : undefined}
-                        />
-                        {included && needsAck(entry) && (
-                          /* Sits under the row it belongs to, not in the
-                             footer: the footer says why the button is off,
-                             this says which row turned it off. */
-                          <label className="catalog-row-ack">
-                            <input
-                              type="checkbox"
-                              checked={pullAcks.has(entry.row.row_id)}
-                              onChange={(event) => setPullAcks((current) => {
-                                const next = new Set(current);
-                                if (event.target.checked) next.add(entry.row.row_id);
-                                else next.delete(entry.row.row_id);
-                                return next;
-                              })}
-                            />
+                      <ResourceCard
+                        key={entry.row.row_id}
+                        row={entry.row}
+                        storageName={storageName}
+                        provider={scope.scope.provider}
+                        providerTitle={markTitle}
+                        onReveal={() => reveal(entry.row)}
+                        selectable
+                        selected={included}
+                        onToggle={() => setPullSelected((current) => {
+                          const next = new Set(current);
+                          if (next.has(entry.row.row_id)) next.delete(entry.row.row_id);
+                          else next.add(entry.row.row_id);
+                          return next;
+                        })}
+                        action={included ? {
+                          chosen,
+                          options: entry.plan.item.actions.map((action) => ({
+                            id: action.action_id,
+                            label: actionLabel(action),
+                          })),
+                          expanded,
+                          destructive: needsAck(entry),
+                          onToggle: () => setOpenChoices(expanded ? null : entry.row.row_id),
+                          onChoose: (actionId) => {
+                            setPullChoice((current) => ({ ...current, [entry.row.row_id]: actionId }));
+                            setPullAcks((current) => {
+                              const next = new Set(current);
+                              next.delete(entry.row.row_id);
+                              return next;
+                            });
+                            setOpenChoices(null);
+                          },
+                        } : undefined}
+                        acks={included && needsAck(entry) && (
+                          /* Part of the card it belongs to, not the footer:
+                             the footer says why the button is off, this says
+                             which row turned it off. */
+                          <label className="catalog-card-ack danger">
+                            <span className="sync-sync-row-choice">
+                              <input
+                                type="checkbox"
+                                checked={pullAcks.has(entry.row.row_id)}
+                                aria-label={`Approve overwriting ${entry.row.display_name}`}
+                                onChange={(event) => setPullAcks((current) => {
+                                  const next = new Set(current);
+                                  if (event.target.checked) next.add(entry.row.row_id);
+                                  else next.delete(entry.row.row_id);
+                                  return next;
+                                })}
+                              />
+                            </span>
+                            <Icon name="alert-triangle" size={12} />
                             <span>{`I understand this replaces the current ${entry.row.display_name} on this Mac.`}</span>
                           </label>
                         )}
-                      </div>
+                      />
                     );
                   })}
                   {Object.entries(pullBlocked).map(([rowId, reason]) => (
@@ -1110,7 +1314,13 @@ export default function StorageCatalogPage({
                     </div>
                   ))}
                   {pullEntries.length === 0 && !busy && (
-                    <div className="sync-history-state">{`Nothing in ${storageName ?? "storage"} is ahead of this Mac.`}</div>
+                    <div className="sync-pull-empty">
+                      <Icon name="check-circle" size={16} />
+                      <span>
+                        <strong>Nothing to pull</strong>
+                        <small>{`These ${kind.plural.toLowerCase()} already match ${storageName ?? "storage"}.`}</small>
+                      </span>
+                    </div>
                   )}
                 </div>
               </div>
@@ -1268,12 +1478,15 @@ export default function StorageCatalogPage({
                 <Icon name={kind.icon} size={12} />{rows.length}
               </span>
             </div>
-            <div className="catalog-row-list">
+            <div className="sync-history-thread-list">
               {rows.map((row) => (
-                <ResourceRow
+                <ResourceCard
                   key={row.row_id}
                   row={row}
                   storageName={storageName}
+                  provider={scope.scope.provider}
+                  providerTitle={markTitle}
+                  onReveal={() => reveal(row)}
                   onOpen={row.registration_id
                     ? () => setMode({ kind: "detail", registrationId: row.registration_id! })
                     : undefined}

@@ -21,6 +21,12 @@
         { "url": "codex://threads/*" }
       ]
     },
+    {
+      "identifier": "opener:allow-reveal-item-in-dir",
+      "allow": [
+        { "path": "$HOME/**" }
+      ]
+    },
     "dialog:default"
   ]
 }

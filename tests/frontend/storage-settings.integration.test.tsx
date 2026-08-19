@@ -574,23 +574,24 @@ test("the storage group is skipped when it would frame nothing", () => {
   assert.match(workspace, /if \(!activeNotice && !reviewOpen\) return null;/);
 });
 
-test("the storage page is a rooted trail; sidebar and banners deep-link into it", () => {
+test("the storage page is a rooted trail; the sidebar opens it and removes directly", () => {
   const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
   const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
 
   assert.match(sidebar, /onOpenStorage\(storage\.id, false\)/);
-  assert.match(sidebar, /onOpenStorage\(storage\.id, true\)/);
-  assert.match(sidebar, /aria-haspopup="menu"/);
-  assert.match(sidebar, /<Icon name="more" size=\{14\} \/>/);
-  assert.match(sidebar, />Storage settings</);
-  assert.match(sidebar, />Clear storage data</);
-  assert.match(sidebar, /onClearStorage\(storage\.id\)/);
+  assert.match(sidebar, /className="sidebar-profile-remove"[\s\S]*?onClick=\{\(\) => onRemoveStorage\(storage\.id\)\}/);
+  assert.match(sidebar, /disabled=\{busy \|\| usage > 0\}/);
+  assert.match(sidebar, /aria-label=\{`Remove \$\{storageName\} from Mallard`\}/);
+  assert.match(sidebar, /<Icon name="trash" size=\{13\} \/>/);
+  assert.doesNotMatch(sidebar, /storageMenuId|sidebar-storage-actions|Actions for \$\{storageName\}/);
+  assert.doesNotMatch(sidebar, /onClearStorage/);
 
   // One route into a storage page, shared by every caller; every storage
   // screen suppresses the titlebar because the trail is the titlebar.
   assert.match(shell, /onOpenStorage=\{openStorageWorkspace\}/);
   assert.match(shell, /mode: "open",\s*storageId,\s*settingsExpanded,/);
+  assert.match(shell, /onRemoveStorage=\{\(storageId\) => void removeStorage\(storageId\)\}/);
   assert.match(shell, /onClearStorage=\{\(storageId\) => void clearStorageData\(storageId\)\}/);
   assert.match(shell, /storageIndexOpen \? \(\s*<StorageIndexPage/);
   assert.match(shell, /\(!!activeSummary\s*\|\| !!activeCatalogScope\s*\|\| storageIndexOpen\s*\|\| activeStorageSettingsId != null\)/);

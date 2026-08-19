@@ -5,9 +5,9 @@
 
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
-    SessionCount, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
-    SessionEventDetail, SessionFileSummary, SessionSourceSpan, SessionTimelineContext,
-    SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
+    most_specific_project_relative_path, SessionCount, SessionCountQuality, SessionDetailWarning,
+    SessionEventCounts, SessionEventDetail, SessionFileSummary, SessionSourceSpan,
+    SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
     SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
     SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
     SessionTurnToolSummary, TIMELINE_TOOL_PREVIEW_BYTES,
@@ -18,7 +18,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 /// A single Codex JSONL record may embed a generated image or a tool result.
 /// Match the transcript bound so every record admitted by the transcript
@@ -28,7 +28,8 @@ const MAX_SUMMARY_CHARS: usize = 180;
 const TIMELINE_MESSAGE_PREVIEW_BYTES: usize = 16 * 1024;
 const TIMELINE_DETAIL_BYTES: usize = 64 * 1024;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
-pub(crate) const TIMELINE_PARSER_VERSION: u32 = 3;
+const MAX_AFFECTED_PATHS_PER_TOOL: usize = 1_024;
+pub(crate) const TIMELINE_PARSER_VERSION: u32 = 4;
 
 pub(crate) fn normalize_summary(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -611,6 +612,15 @@ struct TimelineBuilder {
     warnings: Vec<SessionDetailWarning>,
 }
 
+fn merge_affected_paths(target: &mut Vec<String>, incoming: Vec<String>) -> bool {
+    target.extend(incoming);
+    target.sort();
+    target.dedup();
+    let truncated = target.len() > MAX_AFFECTED_PATHS_PER_TOOL;
+    target.truncate(MAX_AFFECTED_PATHS_PER_TOOL);
+    truncated
+}
+
 impl TimelineBuilder {
     fn warning(&mut self, code: &str, message: &str) {
         if self.warnings.iter().any(|warning| warning.code == code) {
@@ -721,28 +731,35 @@ impl TimelineBuilder {
     ) {
         let tool_key = format!("{turn_id}\0{call_id}");
         if let Some(position) = self.tool_positions.get(&tool_key).copied() {
-            let pending = &mut self.events[position];
-            let Some(tool) = pending.entry.tool.as_mut() else {
-                return;
-            };
-            if tool.native_name == "unknown" && native_name != "unknown" {
-                tool.native_name = native_name;
-            }
-            if tool.category == SessionToolCategory::Other && category != SessionToolCategory::Other
-            {
-                tool.category = category;
-            }
-            tool.status = merge_tool_status(tool.status, status);
-            if result_source.is_some() {
-                tool.result_source = result_source;
-            }
-            for path in affected_paths {
-                if !tool.affected_paths.contains(&path) {
-                    tool.affected_paths.push(path);
+            let paths_truncated = {
+                let pending = &mut self.events[position];
+                let Some(tool) = pending.entry.tool.as_mut() else {
+                    return;
+                };
+                if tool.native_name == "unknown" && native_name != "unknown" {
+                    tool.native_name = native_name;
                 }
-            }
-            if pending.entry.parent_event_id.is_none() {
-                pending.entry.parent_event_id = parent_event_id;
+                if tool.category == SessionToolCategory::Other
+                    && category != SessionToolCategory::Other
+                {
+                    tool.category = category;
+                }
+                tool.status = merge_tool_status(tool.status, status);
+                if result_source.is_some() {
+                    tool.result_source = result_source;
+                }
+                let paths_truncated =
+                    merge_affected_paths(&mut tool.affected_paths, affected_paths);
+                if pending.entry.parent_event_id.is_none() {
+                    pending.entry.parent_event_id = parent_event_id;
+                }
+                paths_truncated
+            };
+            if paths_truncated {
+                self.mark_tools_lower_bound(
+                    "affected_path_limit",
+                    "At least one Codex tool call changed more paths than Mallard can display.",
+                );
             }
             return;
         }
@@ -753,6 +770,14 @@ impl TimelineBuilder {
             );
             self.truncated = true;
             return;
+        }
+        let mut affected_paths_bounded = Vec::new();
+        let paths_truncated = merge_affected_paths(&mut affected_paths_bounded, affected_paths);
+        if paths_truncated {
+            self.mark_tools_lower_bound(
+                "affected_path_limit",
+                "At least one Codex tool call changed more paths than Mallard can display.",
+            );
         }
         let position = self.events.len();
         self.tool_positions.insert(tool_key, position);
@@ -777,7 +802,7 @@ impl TimelineBuilder {
                     category,
                     status,
                     result_source,
-                    affected_paths,
+                    affected_paths: affected_paths_bounded,
                 }),
             },
             order: (source.offset, 1),
@@ -792,6 +817,7 @@ impl TimelineBuilder {
         status: SessionToolCallStatus,
         result_source: SessionSourceSpan,
         allow_nested_completion: bool,
+        affected_paths: Vec<String>,
     ) {
         let current_turn = self.current_turn_id.as_deref();
         let position = self
@@ -822,6 +848,30 @@ impl TimelineBuilder {
                             .is_none_or(|turn_id| pending.entry.turn_id.as_deref() == Some(turn_id))
                 });
             if nested_under_code_mode {
+                let mut paths_truncated = false;
+                if !affected_paths.is_empty() {
+                    if let Some(parent) = self.events.iter_mut().rev().find(|pending| {
+                        let Some(tool) = pending.entry.tool.as_ref() else {
+                            return false;
+                        };
+                        tool.native_name.eq_ignore_ascii_case("exec")
+                            && tool.status == SessionToolCallStatus::Incomplete
+                            && current_turn.is_none_or(|turn_id| {
+                                pending.entry.turn_id.as_deref() == Some(turn_id)
+                            })
+                    }) {
+                        if let Some(tool) = parent.entry.tool.as_mut() {
+                            paths_truncated =
+                                merge_affected_paths(&mut tool.affected_paths, affected_paths);
+                        }
+                    }
+                }
+                if paths_truncated {
+                    self.mark_tools_lower_bound(
+                        "affected_path_limit",
+                        "At least one Codex tool call changed more paths than Mallard can display.",
+                    );
+                }
                 return;
             }
             self.mark_tools_lower_bound(
@@ -830,15 +880,26 @@ impl TimelineBuilder {
             );
             return;
         };
-        let pending = &mut self.events[position];
-        if let Some(tool) = pending.entry.tool.as_mut() {
+        let paths_truncated = {
+            let pending = &mut self.events[position];
+            let Some(tool) = pending.entry.tool.as_mut() else {
+                return;
+            };
             tool.status = merge_tool_status(tool.status, status);
             tool.result_source = Some(result_source);
+            let paths_truncated = merge_affected_paths(&mut tool.affected_paths, affected_paths);
             pending.entry.quality = if tool.status == SessionToolCallStatus::Incomplete {
                 SessionCountQuality::LowerBound
             } else {
                 SessionCountQuality::Exact
             };
+            paths_truncated
+        };
+        if paths_truncated {
+            self.mark_tools_lower_bound(
+                "affected_path_limit",
+                "At least one Codex tool call changed more paths than Mallard can display.",
+            );
         }
     }
 
@@ -1171,10 +1232,14 @@ fn classify_codex_tool(name: &str) -> SessionToolCategory {
     }
 }
 
-fn safe_project_relative_path(path: &str, project_root: &Path) -> Option<String> {
+fn safe_project_relative_path(
+    path: &str,
+    project_root: &Path,
+    project_root_aliases: &[PathBuf],
+) -> Option<String> {
     let candidate = Path::new(path);
     let relative = if candidate.is_absolute() {
-        candidate.strip_prefix(project_root).ok()?
+        most_specific_project_relative_path(candidate, project_root, project_root_aliases)?
     } else {
         candidate
     };
@@ -1204,12 +1269,20 @@ fn safe_project_relative_path(path: &str, project_root: &Path) -> Option<String>
 fn affected_paths_from_value(
     value: &Value,
     project_root: &Path,
+    project_root_aliases: &[PathBuf],
     include_direct_path: bool,
-) -> Vec<String> {
+) -> (Vec<String>, bool) {
     let mut result = Vec::new();
+    let mut truncated = false;
     if let Some(changes) = value.get("changes").and_then(Value::as_object) {
         for path in changes.keys() {
-            if let Some(relative) = safe_project_relative_path(path, project_root) {
+            if let Some(relative) =
+                safe_project_relative_path(path, project_root, project_root_aliases)
+            {
+                if result.len() >= MAX_AFFECTED_PATHS_PER_TOOL {
+                    truncated = true;
+                    break;
+                }
                 result.push(relative);
             }
         }
@@ -1223,9 +1296,15 @@ fn affected_paths_from_value(
             "path",
         ] {
             if let Some(path) = value.get(key).and_then(Value::as_str) {
-                if let Some(relative) = safe_project_relative_path(path, project_root) {
+                if let Some(relative) =
+                    safe_project_relative_path(path, project_root, project_root_aliases)
+                {
                     if !result.contains(&relative) {
-                        result.push(relative);
+                        if result.len() >= MAX_AFFECTED_PATHS_PER_TOOL {
+                            truncated = true;
+                        } else {
+                            result.push(relative);
+                        }
                     }
                 }
             }
@@ -1233,7 +1312,7 @@ fn affected_paths_from_value(
     }
     result.sort();
     result.dedup();
-    result
+    (result, truncated)
 }
 
 fn canonical_tool(
@@ -1245,6 +1324,7 @@ fn canonical_tool(
     SessionToolCategory,
     SessionToolCallStatus,
     Vec<String>,
+    bool,
 )> {
     let item_type = normalized_type(item.get("type").and_then(Value::as_str));
     let id = string_alias(item, &["id", "call_id", "callId"])?.to_string();
@@ -1281,9 +1361,10 @@ fn canonical_tool(
         _ => return None,
     };
     let category = classify_codex_tool(&classifier_name);
-    let paths = affected_paths_from_value(
+    let (paths, paths_truncated) = affected_paths_from_value(
         item,
         context.project_root,
+        context.project_root_aliases,
         category == SessionToolCategory::FileEdit,
     );
     let mut status = canonical_item_status(item);
@@ -1292,7 +1373,7 @@ fn canonical_tool(
     {
         status = SessionToolCallStatus::Completed;
     }
-    Some((id, native_name, category, status, paths))
+    Some((id, native_name, category, status, paths, paths_truncated))
 }
 
 fn consume_canonical_item(
@@ -1314,7 +1395,15 @@ fn consume_canonical_item(
     let item_type = normalized_type(item.get("type").and_then(Value::as_str));
     let turn_id = canonical_turn_id(payload, item, source);
     if !completed {
-        if let Some((call_id, name, category, _, paths)) = canonical_tool(item, context) {
+        if let Some((call_id, name, category, _, paths, paths_truncated)) =
+            canonical_tool(item, context)
+        {
+            if paths_truncated {
+                builder.mark_tools_lower_bound(
+                    "affected_path_limit",
+                    "At least one Codex tool call changed more paths than Mallard can display.",
+                );
+            }
             let parent = builder.latest_assistant_event_id(&turn_id);
             builder.add_tool(
                 call_id,
@@ -1416,7 +1505,15 @@ fn consume_canonical_item(
         "reasoning" | "contextcompaction" | "hookprompt" | "enteredreviewmode"
         | "exitedreviewmode" | "subagentactivity" => {}
         _ => {
-            if let Some((call_id, name, category, status, paths)) = canonical_tool(item, context) {
+            if let Some((call_id, name, category, status, paths, paths_truncated)) =
+                canonical_tool(item, context)
+            {
+                if paths_truncated {
+                    builder.mark_tools_lower_bound(
+                        "affected_path_limit",
+                        "At least one Codex tool call changed more paths than Mallard can display.",
+                    );
+                }
                 let parent = builder.latest_assistant_event_id(&turn_id);
                 builder.add_tool(
                     call_id,
@@ -1482,7 +1579,7 @@ fn consume_legacy_response_item(
         "functioncall" | "customtoolcall" => {
             let name = string_alias(payload, &["name"]).unwrap_or("unknown");
             let category = classify_codex_tool(name);
-            let paths = affected_paths_from_value(
+            let (paths, paths_truncated) = affected_paths_from_value(
                 payload
                     .get("arguments")
                     .and_then(Value::as_str)
@@ -1490,8 +1587,15 @@ fn consume_legacy_response_item(
                     .as_ref()
                     .unwrap_or(payload),
                 context.project_root,
+                context.project_root_aliases,
                 category == SessionToolCategory::FileEdit,
             );
+            if paths_truncated {
+                builder.mark_tools_lower_bound(
+                    "affected_path_limit",
+                    "At least one Codex tool call changed more paths than Mallard can display.",
+                );
+            }
             let parent = builder.latest_assistant_event_id(&turn_id);
             builder.add_tool(
                 legacy_call_id(payload, source),
@@ -1557,6 +1661,7 @@ fn consume_legacy_response_item(
                 },
                 source,
                 false,
+                Vec::new(),
             );
         }
         "message" | "agentmessage" | "reasoning" | "compaction" | "contextcompaction"
@@ -1685,11 +1790,18 @@ fn consume_legacy_event(
                 }
             };
             let category = classify_codex_tool(&classifier);
-            let paths = affected_paths_from_value(
+            let (paths, paths_truncated) = affected_paths_from_value(
                 payload,
                 context.project_root,
+                context.project_root_aliases,
                 category == SessionToolCategory::FileEdit,
             );
+            if paths_truncated {
+                builder.mark_tools_lower_bound(
+                    "affected_path_limit",
+                    "At least one Codex tool call changed more paths than Mallard can display.",
+                );
+            }
             let turn_id = legacy_turn(builder);
             let parent = builder.latest_assistant_event_id(&turn_id);
             builder.add_tool(
@@ -1716,7 +1828,23 @@ fn consume_legacy_event(
             if status == SessionToolCallStatus::Incomplete {
                 status = SessionToolCallStatus::Completed;
             }
-            builder.complete_tool(&call_id, status, source, true);
+            let (affected_paths, paths_truncated) = if payload_type == "patchapplyend" {
+                affected_paths_from_value(
+                    payload,
+                    context.project_root,
+                    context.project_root_aliases,
+                    true,
+                )
+            } else {
+                (Vec::new(), false)
+            };
+            if paths_truncated {
+                builder.mark_tools_lower_bound(
+                    "affected_path_limit",
+                    "At least one Codex tool call changed more paths than Mallard can display.",
+                );
+            }
+            builder.complete_tool(&call_id, status, source, true, affected_paths);
         }
         "viewimagetoolcall" | "requestuserinput" => {
             let call_id = legacy_call_id(payload, source);
@@ -2333,6 +2461,7 @@ mod tests {
             resource_id: "conversation:codex:test",
             provider_session_id: "session-1",
             project_root,
+            project_root_aliases: &[],
         }
     }
 
@@ -2508,6 +2637,116 @@ mod tests {
     }
 
     #[test]
+    fn current_codex_0147_code_mode_patch_paths_attach_to_the_durable_exec() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project1");
+        let external_root = temp.path().join("project1_external");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::create_dir_all(&external_root).unwrap();
+        let inside_alpha = project_root.join("generated/session-paths/inside-alpha.txt");
+        let inside_beta = project_root.join("generated/session-paths/nested/inside-beta.json");
+        let outside = external_root.join("outside-alpha.txt");
+        let transcript = temp.path().join("rollout.jsonl");
+        let exec_input = format!(
+            "await tools.apply_patch for {}, {}, and {}",
+            inside_alpha.display(),
+            inside_beta.display(),
+            outside.display()
+        );
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","session_id":"session-1","cwd":project_root}}),
+                json!({"type":"event_msg","payload":{"type":"user_message","message":"Create the path fixtures"}}),
+                json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"exec-1","name":"exec","input":exec_input}}),
+                json!({"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"patch-1","success":true,"status":"completed","changes":{
+                    (inside_alpha.to_string_lossy().to_string()): {"type":"add"},
+                    (inside_beta.to_string_lossy().to_string()): {"type":"add"},
+                    (outside.to_string_lossy().to_string()): {"type":"add"}
+                }}}),
+                json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"exec-1","output":"done"}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        assert_eq!(count_value(&index.counts.tool_calls), 1);
+        assert_eq!(index.counts.tool_calls.quality, SessionCountQuality::Exact);
+        assert!(index.warnings.is_empty(), "{:?}", index.warnings);
+        let tool_entry = index
+            .events
+            .iter()
+            .find(|event| event.tool.is_some())
+            .unwrap();
+        let tool = tool_entry.tool.as_ref().unwrap();
+        assert_eq!(tool.provider_call_id, "exec-1");
+        assert_eq!(tool.native_name, "exec");
+        assert_eq!(tool.status, SessionToolCallStatus::Completed);
+        assert_eq!(
+            tool.affected_paths,
+            vec![
+                "generated/session-paths/inside-alpha.txt",
+                "generated/session-paths/nested/inside-beta.json",
+            ]
+        );
+        assert!(tool
+            .affected_paths
+            .iter()
+            .all(|path| !Path::new(path).is_absolute()));
+
+        let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
+        let arguments = detail.arguments.unwrap();
+        assert!(arguments.contains(inside_alpha.to_string_lossy().as_ref()));
+        assert!(arguments.contains(inside_beta.to_string_lossy().as_ref()));
+        assert!(arguments.contains(outside.to_string_lossy().as_ref()));
+        assert!(!tool
+            .affected_paths
+            .iter()
+            .any(|path| path.contains("project1_external")));
+    }
+
+    #[test]
+    fn current_codex_0147_patch_paths_accept_a_validated_project_root_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        let canonical_root = PathBuf::from("/private/var/folders/run/project1_copy");
+        let selected_root = PathBuf::from("/var/folders/run/project1_copy");
+        let aliases = vec![canonical_root.clone(), selected_root.clone()];
+        let inside = selected_root.join("generated/session-paths/inside-alpha.txt");
+        let outside = PathBuf::from("/var/folders/run/project1_copy_external/outside-alpha.txt");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","session_id":"session-1","cwd":selected_root}}),
+                json!({"type":"event_msg","payload":{"type":"user_message","message":"Create the path fixtures"}}),
+                json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"exec-1","name":"exec","input":"run nested tools"}}),
+                json!({"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"patch-1","success":true,"status":"completed","changes":{
+                    (inside.to_string_lossy().to_string()): {"type":"add"},
+                    (outside.to_string_lossy().to_string()): {"type":"add"}
+                }}}),
+                json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"exec-1","output":"done"}}),
+            ],
+        );
+        let context = SessionTimelineContext {
+            resource_id: "conversation:codex:test",
+            provider_session_id: "session-1",
+            project_root: &canonical_root,
+            project_root_aliases: &aliases,
+        };
+
+        let index = build_timeline_index(&transcript, &context).unwrap();
+        let tool = index
+            .events
+            .iter()
+            .find_map(|event| event.tool.as_ref())
+            .unwrap();
+        assert_eq!(tool.provider_call_id, "exec-1");
+        assert_eq!(
+            tool.affected_paths,
+            vec!["generated/session-paths/inside-alpha.txt"]
+        );
+    }
+
+    #[test]
     fn unmatched_completion_outside_code_mode_remains_an_orphan() {
         let temp = tempfile::tempdir().unwrap();
         let project_root = temp.path().join("project");
@@ -2645,5 +2884,48 @@ mod tests {
             .affected_paths
             .iter()
             .all(|path| !Path::new(path).is_absolute()));
+    }
+
+    #[test]
+    fn affected_paths_are_bounded_and_reported_as_a_lower_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        let changes = (0..MAX_AFFECTED_PATHS_PER_TOOL + 32)
+            .map(|index| {
+                (
+                    project_root
+                        .join(format!("generated/file-{index:04}.txt"))
+                        .to_string_lossy()
+                        .into_owned(),
+                    json!({"type": "add"}),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","cwd":project_root}}),
+                json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":"Create many files"}]}}}),
+                json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","item":{"type":"FileChange","id":"edit-1","status":"completed","changes":changes}}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        let tool = index
+            .events
+            .iter()
+            .find_map(|event| event.tool.as_ref())
+            .unwrap();
+        assert_eq!(tool.affected_paths.len(), MAX_AFFECTED_PATHS_PER_TOOL);
+        assert_eq!(
+            index.counts.tool_calls.quality,
+            SessionCountQuality::LowerBound
+        );
+        assert!(index
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "affected_path_limit"));
     }
 }

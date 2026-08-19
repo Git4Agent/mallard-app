@@ -125,17 +125,6 @@ export function rowPullable(row: CatalogScopeRow): boolean {
     || row.state === "unreviewed_remote";
 }
 
-/** Where the resource lives, said in one glyph. `$HOME/.agents/skills` is
- * user scope rather than config scope — the distinction Git draws with
- * --global vs --local — so editing it there changes it for every Codex config
- * on the Mac, and the row has to say so. */
-export function rowLocation(row: CatalogScopeRow): { icon: IconName; label: string } | null {
-  if (!row.local_present || !row.local_path) return null;
-  return row.scope_label === "Shared user"
-    ? { icon: "user", label: `User-wide · shared by every Codex config on this Mac · ${row.local_path}` }
-    : { icon: "folder", label: `In this provider home · ${row.local_path}` };
-}
-
 /** The date a row last moved, and which side moved it. Local time wins when
  * the resource is on this Mac, because that is the copy you can edit. */
 export function rowStamp(row: CatalogScopeRow): { short: string; detail: string } | null {

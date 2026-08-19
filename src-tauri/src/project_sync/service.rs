@@ -20,6 +20,13 @@ pub use super::commands::{
     PushDestinationStatus, PushReviewContext, RestoreResult, SetupDraftInspection,
     ThreadSyncComparison, ThreadSyncState,
 };
+pub use mallard_infrastructure::providers::{
+    SessionEventDetail, SessionTimelineEventKind, SessionToolCategory,
+};
+pub use mallard_infrastructure::session_detail::{
+    ProjectSessionDetail, ProjectSessionTimelinePage, ProjectSessionTimelineRequest,
+    SessionDetailError, SessionDetailErrorCode,
+};
 
 /// The complete approval captured by a reviewed Push.
 ///
@@ -257,6 +264,48 @@ impl<'a> ProjectSyncService<'a> {
             local_project_id,
             storage_id,
             &mut |_, _| {},
+        )
+    }
+
+    pub fn get_project_session_detail(
+        &self,
+        local_project_id: &LocalProjectId,
+        resource_id: &ResourceId,
+    ) -> Result<ProjectSessionDetail, SessionDetailError> {
+        commands::get_project_session_detail_with_repository(
+            self.repository,
+            local_project_id,
+            resource_id.as_str(),
+        )
+    }
+
+    pub fn get_project_session_timeline_page(
+        &self,
+        local_project_id: &LocalProjectId,
+        resource_id: &ResourceId,
+        request: ProjectSessionTimelineRequest,
+    ) -> Result<ProjectSessionTimelinePage, SessionDetailError> {
+        commands::get_project_session_timeline_page_with_repository(
+            self.repository,
+            local_project_id,
+            resource_id.as_str(),
+            request,
+        )
+    }
+
+    pub fn get_project_session_event_detail(
+        &self,
+        local_project_id: &LocalProjectId,
+        resource_id: &ResourceId,
+        snapshot_id: &str,
+        event_id: &str,
+    ) -> Result<SessionEventDetail, SessionDetailError> {
+        commands::get_project_session_event_detail_with_repository(
+            self.repository,
+            local_project_id,
+            resource_id.as_str(),
+            snapshot_id,
+            event_id,
         )
     }
 

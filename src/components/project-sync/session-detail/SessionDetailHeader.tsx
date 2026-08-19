@@ -1,7 +1,7 @@
 import type { ReactNode, RefObject } from "react";
 import type { ProjectSessionDetail, SessionActionDescriptor } from "../../../types";
 import Icon, { type IconName } from "../../Icons";
-import ProviderMark from "../ProviderMark";
+import ProviderMark from "../../sync-review/ProviderMark";
 import {
   formatCompactCount,
   formatSessionCount,

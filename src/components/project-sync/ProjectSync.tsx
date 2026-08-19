@@ -43,7 +43,11 @@ import Icon from "../Icons";
 import LogPanel, { ACTIVITY_LOG_TYPES } from "../LogPanel";
 import BundleConnectionDialog from "./BundleConnectionDialog";
 import LogManagerDialog from "./LogManagerDialog";
-import ProjectBindingEditor, { type ProjectBindingDraft } from "./ProjectBindingEditor";
+import ProjectBindingEditor, {
+  type BindingProfileSelection,
+  type ProjectBindingDraft,
+  type ProjectBindingSubmission,
+} from "./ProjectBindingEditor";
 import ProjectLinksWorkspace, {
   storageSubtitle,
   storageSubtitleIsPath,
@@ -1321,49 +1325,31 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
   };
 
-  const createProfileAtPath = async (
+  /** Probe a provider path and reuse the profile it already belongs to, or
+   *  register one under the probe's suggested name. Refreshes the profile
+   *  list; refusals throw into the caller's error envelope. */
+  const ensureProfileAtPath = async (
     provider: ProviderKey,
     path: string,
-    workflowEpoch = hostWorkflowEpoch.current,
+    workflowEpoch: number,
   ): Promise<ProviderProfile | null> => {
-    if (!path.trim() || hostWorkflowEpoch.current !== workflowEpoch) return null;
-    setBusy(true);
-    setError(null);
-    try {
-      const probe = await projectSyncApi.probeProviderProfile(provider, path.trim());
-      if (hostWorkflowEpoch.current !== workflowEpoch) return null;
-      const currentProfiles = await projectSyncApi.listProviderProfiles();
-      if (hostWorkflowEpoch.current !== workflowEpoch) return null;
-      const existing = probe.existing_profile_id
-        ? currentProfiles.find((profile) => profile.profile_id === probe.existing_profile_id) ?? null
-        : null;
-      const profile = existing ?? await projectSyncApi.createProviderProfile(
-        provider,
-        probe.suggested_name,
-        path.trim(),
-      );
-      if (hostWorkflowEpoch.current !== workflowEpoch) return null;
-      const nextProfiles = existing ? currentProfiles : await projectSyncApi.listProviderProfiles();
-      if (hostWorkflowEpoch.current !== workflowEpoch) return null;
-      setProfiles(nextProfiles);
-      return profile;
-    } catch (reason) {
-      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
-      return null;
-    } finally {
-      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
-    }
-  };
-
-  const chooseAndCreateProfile = async (provider: ProviderKey): Promise<ProviderProfile | null> => {
-    const workflowEpoch = hostWorkflowEpoch.current;
-    const picked = await open({ directory: true, multiple: false });
-    if (
-      hostWorkflowEpoch.current !== workflowEpoch
-      || typeof picked !== "string"
-      || !picked
-    ) return null;
-    return createProfileAtPath(provider, picked, workflowEpoch);
+    const probe = await projectSyncApi.probeProviderProfile(provider, path.trim());
+    if (hostWorkflowEpoch.current !== workflowEpoch) return null;
+    const currentProfiles = await projectSyncApi.listProviderProfiles();
+    if (hostWorkflowEpoch.current !== workflowEpoch) return null;
+    const existing = probe.existing_profile_id
+      ? currentProfiles.find((profile) => profile.profile_id === probe.existing_profile_id) ?? null
+      : null;
+    const profile = existing ?? await projectSyncApi.createProviderProfile(
+      provider,
+      probe.suggested_name,
+      path.trim(),
+    );
+    if (hostWorkflowEpoch.current !== workflowEpoch) return null;
+    const nextProfiles = existing ? currentProfiles : await projectSyncApi.listProviderProfiles();
+    if (hostWorkflowEpoch.current !== workflowEpoch) return null;
+    setProfiles(nextProfiles);
+    return profile;
   };
 
   const refreshSetupDrafts = async (shellRequestId?: number, workflowEpoch?: number) => {
@@ -2089,18 +2075,30 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     );
   };
 
-  const saveRemap = async (nextBinding: ProjectBindingDraft) => {
+  const saveRemap = async (submission: ProjectBindingSubmission) => {
     if (!activeProjectId) return;
     const workflowEpoch = hostWorkflowEpoch.current;
     const projectId = activeProjectId;
     setBusy(true);
     setError(null);
     try {
+      // Typed custom paths become registered profiles first; the binding
+      // command itself only accepts profile ids.
+      const profileIds: Record<ProviderKey, string> = {};
+      for (const [provider, selection] of Object.entries(submission.profiles) as Array<[ProviderKey, BindingProfileSelection]>) {
+        if (selection.kind === "existing") {
+          profileIds[provider] = selection.profile_id;
+          continue;
+        }
+        const profile = await ensureProfileAtPath(provider, selection.path, workflowEpoch);
+        if (!profile) return;
+        profileIds[provider] = profile.profile_id;
+      }
       const saved = await projectSyncApi.saveBinding({
         local_project_id: projectId,
-        project_root: nextBinding.project_root,
-        profile_ids: nextBinding.profile_ids,
-        expected_revision: nextBinding.expected_revision ?? binding?.revision ?? null,
+        project_root: submission.project_root,
+        profile_ids: profileIds,
+        expected_revision: submission.expected_revision ?? binding?.revision ?? null,
       });
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       setEditingBinding(null);
@@ -2346,6 +2344,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           bundle_id: nextDetail.project.bundle_id,
           project_root: nextDetail.binding?.project_root ?? "",
           profile_ids: nextDetail.binding?.profile_ids ?? defaultProfileIds(),
+          // The binding is missing or unconfirmed here, so the checkout and
+          // profiles are still this machine's to choose.
+          locked: false,
           expected_revision: nextDetail.binding?.revision ?? null,
         });
         notify(nextDetail.binding
@@ -2678,6 +2679,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       bundle_id: project.bundle_id,
       project_root: projectBinding?.project_root ?? "",
       profile_ids: projectBinding?.profile_ids ?? defaultProfileIds(),
+      locked: projectBinding?.state === "active",
       expected_revision: projectBinding?.revision ?? null,
     });
   };
@@ -3322,7 +3324,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         }}
         onAddProject={() => void beginAddProject()}
         onOpenStorage={openStorageWorkspace}
-        onClearStorage={(storageId) => void clearStorageData(storageId)}
         onRemoveStorage={(storageId) => void removeStorage(storageId)}
         onAddStorage={openNewStorageConfiguration}
         onOpenCatalogMenu={openCatalogMenu}
@@ -3554,7 +3555,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       {editingBinding && (
         <ProjectBindingEditor
           title={`Project setup for ${activeSummary ? projectLabel(activeSummary) : "project"}`}
-          description="Choose this machine's checkout and the agent profiles this project uses. Existing files and provider state are never moved or deleted."
           binding={editingBinding}
           providers={agentProviders}
           profiles={profiles}
@@ -3562,7 +3562,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           error={error}
           actionLabel="Save project setup"
           onCancel={() => setEditingBinding(null)}
-          onAddProfile={chooseAndCreateProfile}
           onSubmit={(next) => void saveRemap(next)}
         />
       )}

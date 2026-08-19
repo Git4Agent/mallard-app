@@ -31,7 +31,7 @@ import ConversationPathRepairNotice, {
   shouldShowConversationPathRepairNotice,
 } from "./ConversationPathRepairNotice";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
-import ProviderMark from "./ProviderMark";
+import ProviderMark from "../sync-review/ProviderMark";
 import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
 import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";

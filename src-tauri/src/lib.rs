@@ -16,9 +16,11 @@ mod storage_catalog;
 mod sync_tests;
 
 pub use project_sync::service::{
-    CreateSetupDraftResult, ProjectDetail, ProjectOperationResult, ProjectSyncService,
-    PushApproval, PushDestinationPullReason, PushDestinationStatus, PushReviewContext,
-    RestoreResult, SetupDraftInspection, ThreadSyncComparison, ThreadSyncState,
+    CreateSetupDraftResult, ProjectDetail, ProjectOperationResult, ProjectSessionDetail,
+    ProjectSessionTimelinePage, ProjectSessionTimelineRequest, ProjectSyncService, PushApproval,
+    PushDestinationPullReason, PushDestinationStatus, PushReviewContext, RestoreResult,
+    SessionDetailError, SessionDetailErrorCode, SessionEventDetail, SessionTimelineEventKind,
+    SessionToolCategory, SetupDraftInspection, ThreadSyncComparison, ThreadSyncState,
 };
 pub use storage_catalog::adapters::{CmdOutput, PluginProcessRunner};
 pub use storage_catalog::domain::{

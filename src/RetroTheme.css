@@ -2010,9 +2010,10 @@ summary {
      rounded background is what shows at the corners. */
   overflow: visible;
   /* Top margin so the frame clears the tab strip above it rather than butting
-     into it; the left inset matches the timeline cards, so this group's fold
+     into it; the bottom is the same 10px the Uncommitted frame keeps before
+     the rail; the left inset matches the timeline cards, so this group's fold
      lands in the same rail column as every other fold on the page. */
-  margin: 12px 0 12px var(--sync-history-card-offset);
+  margin: 12px 0 10px var(--sync-history-card-offset);
   border: 1px solid var(--border-mid);
   border-radius: 4px;
   background: var(--surface-row);
@@ -2046,6 +2047,12 @@ summary {
   height: var(--sync-history-row-icon-size);
   flex: 0 0 var(--sync-history-row-icon-size);
   color: var(--text-2);
+}
+
+/* The count closes the heading line at the card edge, the column the row
+   stamps under it already end at. */
+.sync-history-storage-only .sync-history-heading-count {
+  margin-left: auto;
 }
 
 .sync-history-storage-only .sync-history-thread-list.flat {
@@ -2447,7 +2454,6 @@ summary {
 }
 
 .sync-callout,
-.sync-binding-safety,
 .conversation-path-repair-notice {
   border-radius: 4px;
   box-shadow: none;
@@ -2523,7 +2529,8 @@ summary {
 }
 
 /* Field names take the log-policy labels' pairing: 10px, whole-pixel air. */
-.sync-setup-workspace .sync-field-grid label > span {
+.sync-setup-workspace .sync-field-grid label > span,
+.sync-binding-dialog .sync-field-grid label > span {
   color: var(--text-2);
   font-size: var(--type-2xs);
   letter-spacing: 1px;
@@ -2556,19 +2563,23 @@ summary {
 }
 
 /* One 32px control height; values in the reading faces at whole sizes. */
-.sync-setup-workspace .sync-field-grid input {
+.sync-setup-workspace .sync-field-grid input,
+.sync-binding-dialog .sync-field-grid input {
   height: 32px;
   padding: 0 10px;
   font-size: var(--type-sm);
 }
 
 /* A path is a machine identifier even while it is read-only. */
-.sync-setup-workspace .sync-field-grid input[readonly] {
+.sync-setup-workspace .sync-field-grid input[readonly],
+.sync-binding-dialog .sync-field-grid input[readonly] {
   font-family: var(--font-mono);
 }
 
 .sync-setup-workspace .sync-agent-profile-row select,
-.sync-setup-workspace .sync-agent-profile-row input {
+.sync-setup-workspace .sync-agent-profile-row input,
+.sync-binding-dialog .sync-agent-profile-row select,
+.sync-binding-dialog .sync-agent-profile-row input {
   font-size: var(--type-sm);
 }
 
@@ -2672,7 +2683,8 @@ summary {
 /* Disabled at 0.38 opacity left the primary action a ghost that read as a
    rendering fault rather than as "not yet". An inert fill with a legible
    label says the same thing and stays visible. */
-.sync-setup-footer .btn-primary:disabled {
+.sync-setup-footer .btn-primary:disabled,
+.sync-binding-dialog .btn-primary:disabled {
   opacity: 1;
   border-color: var(--border-mid);
   background: var(--surface-subtle);
