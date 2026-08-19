@@ -1,13 +1,13 @@
 //! Bounded, versioned Claude Code transcript codec.
 //!
 //! Claude sessions are JSONL files whose durable records (`user`,
-//! `assistant`, `system`) carry `uuid`/`parentUuid` lineage plus a
-//! `sessionId` and `cwd` on every record. The codec derives one linear
-//! canonical chain from the main (non-sidechain) records, returns typed
-//! `Unknown` reasons instead of guessing, and rewrites only the declared
-//! structural `sessionId` and `cwd` fields — round-tripping the result
-//! through this same parser and proving unchanged lineage and semantic
-//! digests before bytes may become a resumable provider transcript.
+//! `assistant`, `system`, and `attachment`) carry `uuid`/`parentUuid`
+//! lineage plus a `sessionId` and `cwd` on every record. The codec derives
+//! one linear canonical chain from the main (non-sidechain) records, returns
+//! typed `Unknown` reasons instead of guessing, and rewrites only the
+//! declared structural `sessionId` and `cwd` fields — round-tripping the
+//! result through this same parser and proving unchanged lineage and
+//! semantic digests before bytes may become a resumable provider transcript.
 
 use crate::conversation_codec::{CodecLineage, CodecUnknownReason};
 use crate::providers::traits::SessionAnalysis;
@@ -221,13 +221,14 @@ pub fn analyze_claude_transcript(bytes: &[u8]) -> SessionAnalysis {
     }
 }
 
-/// Main-chain records: durable typed records with lineage identity, skipping
-/// sidechain (subagent) branches, which root their own parentage.
+/// Main-chain records: durable typed records with lineage identity, including
+/// Claude's attachment records that bridge message ancestry. Sidechain
+/// (subagent) branches root their own parentage and remain excluded.
 fn is_chain_record(object: &Map<String, Value>) -> bool {
     let record_type = object.get("type").and_then(Value::as_str);
     let durable = matches!(
         record_type,
-        Some("user") | Some("assistant") | Some("system")
+        Some("user") | Some("assistant") | Some("system") | Some("attachment")
     );
     let sidechain = object
         .get("isSidechain")
@@ -469,6 +470,104 @@ mod tests {
         );
         assert_eq!(analysis.source_cwd.as_deref(), Some("/tmp/project-a"));
         assert_eq!(analysis.lineage.chain().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn claude_codec_includes_attachment_records_in_linear_chain() {
+        let session = "11111111-1111-4111-8111-111111111111";
+        let cwd = "/tmp/project-a";
+        let records = [
+            json!({
+                "type": "attachment",
+                "uuid": "attachment-hook",
+                "parentUuid": null,
+                "sessionId": session,
+                "cwd": cwd,
+                "attachment": {"type": "hook_success", "name": "SessionStart"}
+            }),
+            json!({
+                "type": "user",
+                "uuid": "user-1",
+                "parentUuid": "attachment-hook",
+                "sessionId": session,
+                "cwd": cwd,
+                "message": {"role": "user", "content": "draw a bird"}
+            }),
+            json!({
+                "type": "attachment",
+                "uuid": "attachment-tools",
+                "parentUuid": "user-1",
+                "sessionId": session,
+                "cwd": cwd,
+                "attachment": {"type": "deferred_tools_delta", "enabled": ["Read"]}
+            }),
+            json!({
+                "type": "attachment",
+                "uuid": "attachment-skills",
+                "parentUuid": "attachment-tools",
+                "sessionId": session,
+                "cwd": cwd,
+                "attachment": {"type": "skill_listing", "skills": ["example"]}
+            }),
+            json!({
+                "type": "assistant",
+                "uuid": "assistant-1",
+                "parentUuid": "attachment-skills",
+                "sessionId": session,
+                "cwd": cwd,
+                "message": {"role": "assistant", "content": "done"}
+            }),
+            json!({
+                "type": "attachment",
+                "uuid": "sidechain-attachment",
+                "parentUuid": null,
+                "isSidechain": true,
+                "sessionId": session,
+                "cwd": cwd,
+                "attachment": {"type": "agent_listing_delta"}
+            }),
+        ];
+        let mut bytes = records
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes();
+        bytes.push(b'\n');
+
+        let before = analyze_claude_transcript(&bytes);
+        assert!(before.is_resumable(), "{:?}", before.lineage);
+        assert_eq!(before.record_count, 6);
+        let chain = before.lineage.chain().unwrap();
+        assert_eq!(
+            chain
+                .iter()
+                .map(|message| message.message_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "attachment-hook",
+                "user-1",
+                "attachment-tools",
+                "attachment-skills",
+                "assistant-1",
+            ]
+        );
+
+        let rewritten = rewrite_claude_transcript(
+            &bytes,
+            session,
+            "33333333-3333-4333-8333-333333333333",
+            cwd,
+            "/tmp/project-b",
+        )
+        .unwrap();
+        let after = analyze_claude_transcript(&rewritten);
+        assert_eq!(lineage_digests(&before), lineage_digests(&after));
+        assert_eq!(
+            after.source_provider_session_id.as_deref(),
+            Some("33333333-3333-4333-8333-333333333333")
+        );
+        assert_eq!(after.source_cwd.as_deref(), Some("/tmp/project-b"));
     }
 
     #[test]

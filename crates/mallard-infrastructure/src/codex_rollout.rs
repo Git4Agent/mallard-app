@@ -14,9 +14,11 @@ pub const MAX_CODEX_FORK_DEPTH: usize = 256;
 pub const MAX_CODEX_RECORDS: usize = 100_000;
 
 /// A paginated rollout's reference to the physical segment it continues:
-/// the base rollout's thread plus its exact byte and record cutoffs. Both
-/// cutoffs must agree with the resolved canonical count before any tail
-/// boundary is seeded from them.
+/// the base rollout's thread plus its exact byte and global ordinal cutoffs.
+/// The ordinal is the first logical rollout ordinal excluded from the base,
+/// not the number of physical records stored in that one segment. Both
+/// coordinates must agree with the resolved segment before any tail boundary
+/// is seeded from them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexHistoryBase {
     pub thread_id: String,
@@ -458,16 +460,18 @@ fn parse_history_base(
         .get("end_ordinal_exclusive")
         .or_else(|| base.get("endOrdinalExclusive"))
         .and_then(Value::as_u64)
-        .ok_or_else(|| malformed_meta("has a history base without a record cutoff"))?;
+        .ok_or_else(|| malformed_meta("has a history base without an ordinal cutoff"))?;
     let end_byte_offset = base
         .get("end_byte_offset")
         .or_else(|| base.get("endByteOffset"))
         .and_then(Value::as_u64)
         .ok_or_else(|| malformed_meta("has a history base without a byte cutoff"))?;
-    if end_ordinal_exclusive > MAX_CODEX_RECORDS as u64
-        || end_byte_offset > MAX_CONVERSATION_FILE_BYTES
-        || end_ordinal_exclusive > end_byte_offset
-    {
+    // `end_ordinal_exclusive` is global across a paginated lineage. It can
+    // therefore exceed both this segment's physical record limit and this
+    // segment's byte length. The graph resolver proves it against the
+    // referenced prefix's contiguous ordinals; only the byte coordinate has
+    // a standalone structural bound here.
+    if end_byte_offset > MAX_CONVERSATION_FILE_BYTES {
         return Err(malformed_meta("has a history base with impossible cutoffs"));
     }
     Ok(Some(CodexHistoryBase {
@@ -606,6 +610,26 @@ mod tests {
         )
         .unwrap();
         assert!(!regular.current.is_internal_subagent);
+    }
+
+    #[test]
+    fn accepts_global_history_ordinals_without_local_count_or_byte_assumptions() {
+        let mut record = meta("child", Some("parent"), "/tmp/project");
+        record["payload"]["history_mode"] = json!("paginated");
+        record["payload"]["history_base"] = json!({
+            "thread_id": "parent",
+            "end_ordinal_exclusive": (MAX_CODEX_RECORDS as u64) + 7,
+            "end_byte_offset": 1,
+        });
+
+        let structure =
+            analyze_codex_rollout_structure(&rollout(vec![record]), Some("child")).unwrap();
+        let history_base = structure.current.history_base.unwrap();
+        assert_eq!(
+            history_base.end_ordinal_exclusive,
+            (MAX_CODEX_RECORDS as u64) + 7
+        );
+        assert_eq!(history_base.end_byte_offset, 1);
     }
 
     #[test]

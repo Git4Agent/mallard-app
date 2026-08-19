@@ -631,7 +631,25 @@ mod tests {
         lines: &[String],
     ) -> PathBuf {
         let path = directory.path().join(format!("{thread}.jsonl"));
-        std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+        let mut values = lines
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let mut ordinal = values
+            .first()
+            .and_then(|value| value.get("payload"))
+            .and_then(|payload| payload.get("history_base"))
+            .and_then(|base| base.get("end_ordinal_exclusive"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let mut bytes = Vec::new();
+        for value in &mut values {
+            value["ordinal"] = Value::from(ordinal);
+            ordinal = ordinal.checked_add(1).unwrap();
+            serde_json::to_writer(&mut bytes, value).unwrap();
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, bytes).unwrap();
         files.insert(thread.to_string(), path.clone());
         path
     }
@@ -1108,7 +1126,6 @@ mod tests {
         let p0_len = std::fs::metadata(&p0).unwrap().len();
         let leaf_head = serde_json::to_string(&json!({
             "timestamp": "2026-08-08T21:42:48Z",
-            "ordinal": 20,
             "type": "session_meta",
             "payload": {
                 "id": "p1",
@@ -1126,7 +1143,6 @@ mod tests {
         .unwrap();
         let metadata_update = serde_json::to_string(&json!({
             "timestamp": "2026-08-09T00:00:00Z",
-            "ordinal": 99,
             "type": "session_meta",
             "payload": {
                 "id": "p1",

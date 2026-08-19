@@ -17,8 +17,10 @@ use crate::providers::{
 use crate::storage_core::ConfiguredObjectStore;
 use mallard_domain::{
     conversation_resource_id, initial_conversation_thread_id, parse_conversation_resource_id,
-    BindingState, BundleSnapshot, LocalProjectId, MaterializationStatus, Materializations,
-    PreservedProvenance, ProviderKey, StorageId, SyncScopeKey, ThreadId,
+    retained_conversation_thread_id, ActionStatus, BindingState, BundleSnapshot,
+    ConversationBindings, ConversationMaterializationState, LocalProjectId, MaterializationStatus,
+    Materializations, PreservedProvenance, ProviderKey, StorageId, SyncConfig, SyncScopeKey,
+    ThreadId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -595,6 +597,256 @@ fn short_id(value: &str) -> &str {
     value.get(..8).unwrap_or(value)
 }
 
+#[derive(Default)]
+struct ActivityConversationAliases {
+    thread_by_session: BTreeMap<(ProviderKey, String), ThreadId>,
+    session_by_thread: BTreeMap<(ProviderKey, ThreadId), String>,
+    historical_owners: BTreeMap<(ProviderKey, String), BTreeSet<ThreadId>>,
+}
+
+fn activity_conversation_aliases(
+    resolved: &ResolvedActivityProject,
+    bindings: &ConversationBindings,
+    materializations: &Materializations,
+) -> ActivityConversationAliases {
+    let provider_by_profile = resolved
+        .binding
+        .profile_ids
+        .iter()
+        .map(|(provider, profile_id)| (profile_id, provider))
+        .collect::<BTreeMap<_, _>>();
+    let mut aliases = ActivityConversationAliases::default();
+
+    for binding in &bindings.bindings {
+        if binding.host_id != resolved.binding.host_id
+            || binding.replica_id != resolved.binding.replica_id
+            || binding.local_project_id != resolved.project_id
+        {
+            continue;
+        }
+        let Some(provider) = provider_by_profile.get(&binding.provider_profile_id) else {
+            continue;
+        };
+        let Some(provider_thread_id) = &binding.provider_thread_id else {
+            continue;
+        };
+        aliases.thread_by_session.insert(
+            ((*provider).clone(), provider_thread_id.clone()),
+            binding.thread_id.clone(),
+        );
+        aliases.session_by_thread.insert(
+            ((*provider).clone(), binding.thread_id.clone()),
+            provider_thread_id.clone(),
+        );
+    }
+
+    for record in &materializations.records {
+        if record.host_id != resolved.binding.host_id
+            || record.replica_id != resolved.binding.replica_id
+            || record.local_project_id != resolved.project_id
+            || record.bundle_id != resolved.bundle_id
+        {
+            continue;
+        }
+        for receipt in &record.receipts {
+            if receipt.status != ActionStatus::Applied {
+                continue;
+            }
+            let Some(conversation) = &receipt.conversation else {
+                continue;
+            };
+            if conversation.host_id != resolved.binding.host_id
+                || conversation.replica_id != resolved.binding.replica_id
+                || conversation.materialization_state != ConversationMaterializationState::Resumable
+            {
+                continue;
+            }
+            let Some(provider) = provider_by_profile.get(&conversation.provider_profile_id) else {
+                continue;
+            };
+            let Ok((resource_provider, resource_thread_id)) =
+                parse_conversation_resource_id(receipt.resource_id.as_str())
+            else {
+                continue;
+            };
+            if &resource_provider != *provider || resource_thread_id != conversation.thread_id {
+                continue;
+            }
+            let Some(provider_thread_id) = &conversation.provider_thread_id else {
+                continue;
+            };
+            aliases
+                .historical_owners
+                .entry(((*provider).clone(), provider_thread_id.clone()))
+                .or_default()
+                .insert(conversation.thread_id.clone());
+        }
+    }
+
+    aliases
+}
+
+fn displaced_provider_alias_owners(
+    bundle_id: &mallard_domain::BundleId,
+    provider: &ProviderKey,
+    provider_thread_id: &str,
+    aliases: &ActivityConversationAliases,
+) -> Result<BTreeSet<ThreadId>, String> {
+    let current_alias_moved = |thread_id: &ThreadId| {
+        aliases
+            .session_by_thread
+            .get(&(provider.clone(), thread_id.clone()))
+            .is_some_and(|current| current != provider_thread_id)
+    };
+
+    let mut owners = aliases
+        .historical_owners
+        .get(&(provider.clone(), provider_thread_id.to_string()))
+        .cloned()
+        .unwrap_or_default();
+    owners.insert(initial_conversation_thread_id(
+        bundle_id,
+        provider,
+        provider_thread_id,
+    )?);
+    owners.retain(current_alias_moved);
+    Ok(owners)
+}
+
+/// Resolve one displaced, unbound provider alias into its stable retained
+/// branch identity and prove whether its physical bytes still exactly match
+/// a copy-on-write witness. Missing, partial, unreadable, or mismatching
+/// evidence always fails open as visible local work.
+pub fn retained_provider_alias_identity(
+    bundle_id: &mallard_domain::BundleId,
+    local_project_id: &LocalProjectId,
+    provider: &ProviderKey,
+    provider_thread_id: &str,
+    physical_path: &Path,
+    moved_owners: &BTreeSet<ThreadId>,
+    bound_thread_ids: &BTreeSet<ThreadId>,
+    config: &SyncConfig,
+) -> Result<(ThreadId, bool), String> {
+    let mut frontier = moved_owners.clone();
+    let mut candidates = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    for _ in 0..=bound_thread_ids.len() {
+        let mut next = BTreeSet::new();
+        for owner in frontier {
+            if !visited.insert(owner.clone()) {
+                continue;
+            }
+            let retained =
+                retained_conversation_thread_id(bundle_id, provider, &owner, provider_thread_id)?;
+            if bound_thread_ids.contains(&retained) {
+                next.insert(retained);
+            } else {
+                candidates.insert(retained);
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    let mut witnessed = Vec::new();
+    for retained_thread_id in &candidates {
+        for checkpoint in config
+            .links
+            .iter()
+            .filter(|link| &link.local_project_id == local_project_id)
+            .filter_map(|link| {
+                link.conversation_checkpoints
+                    .get(&SyncScopeKey::Provider(provider.clone()))
+                    .and_then(|threads| threads.get(retained_thread_id))
+            })
+        {
+            if crate::codex_history_graph::retained_root_is_byte_identical(
+                physical_path,
+                checkpoint,
+            )
+            .unwrap_or(false)
+            {
+                return Ok((retained_thread_id.clone(), true));
+            }
+            witnessed.push(retained_thread_id.clone());
+        }
+    }
+    let retained_thread_id = witnessed
+        .into_iter()
+        .max()
+        .or_else(|| candidates.into_iter().max())
+        .ok_or_else(|| "displaced provider alias has no logical owner".to_string())?;
+    Ok((retained_thread_id, false))
+}
+
+fn activity_thread_for_provider_alias(
+    resolved: &ResolvedActivityProject,
+    provider: &ProviderKey,
+    provider_thread_id: &str,
+    physical_path: &Path,
+    aliases: &ActivityConversationAliases,
+    config: &SyncConfig,
+) -> Result<Option<ThreadId>, String> {
+    if let Some(thread_id) = aliases
+        .thread_by_session
+        .get(&(provider.clone(), provider_thread_id.to_string()))
+    {
+        // A live binding is authoritative even when an older receipt says
+        // that another logical thread once occupied the same native alias.
+        return Ok(Some(thread_id.clone()));
+    }
+    let moved_owners = displaced_provider_alias_owners(
+        &resolved.bundle_id,
+        provider,
+        provider_thread_id,
+        aliases,
+    )?;
+    if !moved_owners.is_empty() {
+        let (retained_thread_id, unchanged) = retained_provider_alias_identity(
+            &resolved.bundle_id,
+            &resolved.project_id,
+            provider,
+            provider_thread_id,
+            physical_path,
+            &moved_owners,
+            &aliases
+                .session_by_thread
+                .keys()
+                .map(|(_, id)| id.clone())
+                .collect(),
+            config,
+        )?;
+        return Ok((!unchanged).then_some(retained_thread_id));
+    }
+    initial_conversation_thread_id(&resolved.bundle_id, provider, provider_thread_id).map(Some)
+}
+
+/// Resolve one discovered local provider alias through the same direct-
+/// binding and retained-copy witness rules used by Activity. This is the
+/// single-session ownership gate used by Session Detail and provider actions;
+/// callers must not independently guess an unbound logical identity.
+pub fn resolve_local_provider_alias_thread(
+    repository: &LocalStateRepository,
+    resolved: &ResolvedActivityProject,
+    provider: &ProviderKey,
+    provider_thread_id: &str,
+    physical_path: &Path,
+) -> Result<Option<ThreadId>, String> {
+    let bindings = repository.load_conversation_bindings()?;
+    let materializations = repository.load_materializations()?;
+    let config = repository.load_config()?;
+    let aliases = activity_conversation_aliases(resolved, &bindings, &materializations);
+    activity_thread_for_provider_alias(
+        resolved,
+        provider,
+        provider_thread_id,
+        physical_path,
+        &aliases,
+        &config,
+    )
+}
+
 /// Merge local bound-provider sessions with all remote provider slices by
 /// provider and logical thread identity, then sort deterministically by
 /// activity time, provider key, and resource ID.
@@ -607,6 +859,31 @@ pub fn merge_activity_sessions(
     warnings: &mut Vec<String>,
 ) -> Result<Vec<ProjectSessionSummary>, String> {
     let bindings = repository.load_conversation_bindings()?;
+    let materializations = repository.load_materializations()?;
+    let config = repository.load_config()?;
+    merge_activity_sessions_with_state(
+        registry,
+        resolved,
+        local,
+        remote,
+        warnings,
+        &bindings,
+        &materializations,
+        &config,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_activity_sessions_with_state(
+    registry: &ProviderRegistry,
+    resolved: &ResolvedActivityProject,
+    local: Vec<LocalSessionRecord>,
+    remote: Vec<RemoteSessionRecord>,
+    warnings: &mut Vec<String>,
+    bindings: &ConversationBindings,
+    materializations: &Materializations,
+    config: &SyncConfig,
+) -> Result<Vec<ProjectSessionSummary>, String> {
     let preserved_threads = bindings
         .bindings
         .iter()
@@ -627,55 +904,29 @@ pub fn merge_activity_sessions(
                 .map(|preserved| (binding.thread_id.clone(), preserved))
         })
         .collect::<BTreeMap<ThreadId, PreservedProvenance>>();
-    let mut thread_by_session: BTreeMap<(ProviderKey, String), mallard_domain::ThreadId> =
-        BTreeMap::new();
-    for binding in &bindings.bindings {
-        if binding.host_id != resolved.binding.host_id
-            || binding.replica_id != resolved.binding.replica_id
-            || binding.local_project_id != resolved.project_id
-        {
-            continue;
-        }
-        let Some(provider_thread_id) = &binding.provider_thread_id else {
-            continue;
-        };
-        let Some(provider) = resolved
-            .binding
-            .profile_ids
-            .iter()
-            .find(|(_, profile_id)| **profile_id == binding.provider_profile_id)
-            .map(|(provider, _)| provider.clone())
-        else {
-            continue;
-        };
-        thread_by_session.insert(
-            (provider, provider_thread_id.clone()),
-            binding.thread_id.clone(),
-        );
-    }
+    let aliases = activity_conversation_aliases(resolved, bindings, materializations);
 
     let mut rows: BTreeMap<String, ProjectSessionSummary> = BTreeMap::new();
     for record in local {
-        let thread_id = thread_by_session
-            .get(&(record.provider.clone(), record.session_id.clone()))
-            .cloned()
-            .map(Ok)
-            .unwrap_or_else(|| {
-                initial_conversation_thread_id(
-                    &resolved.bundle_id,
-                    &record.provider,
-                    &record.session_id,
-                )
-            });
-        let thread_id = match thread_id {
+        let thread_id = match activity_thread_for_provider_alias(
+            resolved,
+            &record.provider,
+            &record.session_id,
+            &record.physical_path,
+            &aliases,
+            config,
+        ) {
             Ok(thread_id) => thread_id,
             Err(error) => {
                 warnings.push(format!(
                     "session '{}' has no portable identity: {}",
                     record.session_id, error
                 ));
-                continue;
+                None
             }
+        };
+        let Some(thread_id) = thread_id else {
+            continue;
         };
         let resource_id = conversation_resource_id(&record.provider, &thread_id)?;
         let access = provider_access(registry, resolved, &record.provider);
@@ -843,14 +1094,18 @@ pub fn build_project_activity(
         .iter()
         .map(|record| record.provider.clone())
         .collect::<BTreeSet<_>>();
+    let bindings = repository.load_conversation_bindings()?;
     let materializations = repository.load_materializations()?;
-    let all_sessions = merge_activity_sessions(
+    let config = repository.load_config()?;
+    let all_sessions = merge_activity_sessions_with_state(
         registry,
-        repository,
-        &resolved,
+        resolved,
         local,
         remote,
         &mut warnings,
+        &bindings,
+        &materializations,
+        &config,
     )?;
 
     let window_end = before_time.unwrap_or_else(|| now_secs().saturating_add(1));
@@ -1036,27 +1291,6 @@ pub fn list_project_repository_kinds(
 // Session details and actions
 // ---------------------------------------------------------------------------
 
-/// Match a discovered provider session to one portable thread. Once a local
-/// binding names the provider session, that mapping is authoritative. The
-/// deterministic initial identity is only a fallback for sessions that have
-/// never been bound; after keep-both, it still derives the original thread
-/// from the preserved session ID and must not steal the pulled branch.
-fn session_matches_thread(
-    bundle_id: &mallard_domain::BundleId,
-    provider: &ProviderKey,
-    thread_id: &mallard_domain::ThreadId,
-    bound_provider_session_id: Option<&str>,
-    candidate_provider_session_id: &str,
-) -> bool {
-    bound_provider_session_id
-        .map(|expected| expected == candidate_provider_session_id)
-        .unwrap_or_else(|| {
-            initial_conversation_thread_id(bundle_id, provider, candidate_provider_session_id)
-                .map(|derived| &derived == thread_id)
-                .unwrap_or(false)
-        })
-}
-
 /// Execute one safe provider session action. The backend re-resolves the
 /// registered adapter and validates project ownership before anything runs;
 /// the opaque action id never carries executable text.
@@ -1091,18 +1325,28 @@ pub fn execute_project_session_action(
         excluded_roots: &[],
     };
     let discovery = adapter.discover(&context)?;
-    let session = discovery
-        .sessions
-        .into_iter()
-        .find(|session| {
-            session_matches_thread(
-                &resolved.bundle_id,
-                &provider,
-                &thread_id,
-                session_for_thread.as_deref(),
-                &session.session_id,
-            )
-        })
+    let mut matched_session = None;
+    for session in discovery.sessions {
+        let matches = match session_for_thread.as_deref() {
+            Some(expected) => expected == session.session_id,
+            None => {
+                resolve_local_provider_alias_thread(
+                    repository,
+                    &resolved,
+                    &provider,
+                    &session.session_id,
+                    &session.physical_path,
+                )?
+                .as_ref()
+                    == Some(&thread_id)
+            }
+        };
+        if matches {
+            matched_session = Some(session);
+            break;
+        }
+    }
+    let session = matched_session
         .ok_or_else(|| "session does not belong to the selected project".to_string())?;
     let mut request = SessionActionRequest {
         action_id,
@@ -1144,20 +1388,26 @@ pub fn validate_session_ownership(
         excluded_roots: &[],
     };
     let discovery = adapter.discover(&context)?;
-    discovery
-        .sessions
-        .into_iter()
-        .find(|session| {
-            session_matches_thread(
-                &resolved.bundle_id,
-                &provider,
-                &thread_id,
-                session_for_thread.as_deref(),
-                &session.session_id,
-            )
-        })
-        .map(|_| ())
-        .ok_or_else(|| "session does not belong to the selected project".to_string())
+    for session in discovery.sessions {
+        let matches = match session_for_thread.as_deref() {
+            Some(expected) => expected == session.session_id,
+            None => {
+                resolve_local_provider_alias_thread(
+                    repository,
+                    &resolved,
+                    &provider,
+                    &session.session_id,
+                    &session.physical_path,
+                )?
+                .as_ref()
+                    == Some(&thread_id)
+            }
+        };
+        if matches {
+            return Ok(());
+        }
+    }
+    Err("session does not belong to the selected project".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1503,9 +1753,11 @@ mod activity_only_tests {
         SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
     };
     use mallard_domain::{
-        BundleId, BundleRecipe, ConversationMaterializationState, LocalConversationBinding,
-        LocalProjectRegistration, LocalProviderProfileId, ProjectBinding, ProviderProfile,
-        ReplicaId,
+        ActionId, ApplyReceipt, BundleId, BundleRecipe, ConversationApplyReceipt,
+        ConversationMaterializationState, ConversationOperationId, HostId,
+        LocalConversationBinding, LocalProjectRegistration, LocalProviderProfileId,
+        MaterializationId, MaterializationRecord, PlanId, ProjectBinding, ProviderProfile,
+        ReplicaId, RestoreActionType,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1656,37 +1908,416 @@ mod activity_only_tests {
         }
     }
 
-    #[test]
-    fn bound_provider_session_overrides_the_initial_thread_derivation() {
-        let bundle_id = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+    fn alias_test_context() -> (ResolvedActivityProject, ProviderKey, LocalProviderProfileId) {
         let provider = ProviderKey::parse("codex").unwrap();
-        let preserved_provider_session = "01a00e98-6cb6-7633-82c9-fb4b929b4a57";
-        let pulled_provider_session = "01a00f06-5e68-7100-a460-7b54cf3413aa";
-        let original_thread =
-            initial_conversation_thread_id(&bundle_id, &provider, preserved_provider_session)
+        let profile_id = LocalProviderProfileId::parse("profile-alias-test").unwrap();
+        let project_id = LocalProjectId::parse("project-alias-test").unwrap();
+        let bundle_id = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let host_id = HostId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let replica_id = ReplicaId::parse("replica-alias-test").unwrap();
+        let project_root = PathBuf::from("/tmp/mallard-activity-alias-test");
+        let binding = ProjectBinding {
+            host_id,
+            replica_id,
+            local_project_id: project_id.clone(),
+            bundle_id: bundle_id.clone(),
+            project_root: project_root.to_string_lossy().into_owned(),
+            canonical_project_root: project_root.to_string_lossy().into_owned(),
+            profile_ids: BTreeMap::from([(provider.clone(), profile_id.clone())]),
+            state: BindingState::Active,
+            revision: 0,
+            updated_at: 1,
+        };
+        (
+            ResolvedActivityProject {
+                project_id,
+                bundle_id,
+                project_root,
+                binding,
+                homes: BTreeMap::new(),
+                unavailable: BTreeMap::new(),
+            },
+            provider,
+            profile_id,
+        )
+    }
+
+    fn alias_test_binding(
+        resolved: &ResolvedActivityProject,
+        profile_id: &LocalProviderProfileId,
+        thread_id: &ThreadId,
+        provider_thread_id: &str,
+    ) -> LocalConversationBinding {
+        LocalConversationBinding {
+            host_id: resolved.binding.host_id.clone(),
+            replica_id: resolved.binding.replica_id.clone(),
+            local_project_id: resolved.project_id.clone(),
+            provider_profile_id: profile_id.clone(),
+            thread_id: thread_id.clone(),
+            forked_from: None,
+            preserved: None,
+            root_tail_layout: None,
+            provider_thread_id: Some(provider_thread_id.to_string()),
+            materialization_state: ConversationMaterializationState::Resumable,
+            revision: 0,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn alias_test_receipt(
+        resolved: &ResolvedActivityProject,
+        profile_id: &LocalProviderProfileId,
+        provider: &ProviderKey,
+        thread_id: &ThreadId,
+        resource_thread_id: &ThreadId,
+        provider_thread_id: &str,
+        suffix: &str,
+        status: ActionStatus,
+        materialization_state: ConversationMaterializationState,
+    ) -> ApplyReceipt {
+        ApplyReceipt {
+            action_id: ActionId::parse(format!("action-{suffix}")).unwrap(),
+            resource_id: conversation_resource_id(provider, resource_thread_id).unwrap(),
+            action_type: RestoreActionType::MaterializeConversation,
+            logical_path: None,
+            source_sha256: None,
+            target_path: None,
+            target_sha256_after: None,
+            status,
+            applied_at: 1,
+            error: None,
+            conversation: Some(ConversationApplyReceipt {
+                host_id: resolved.binding.host_id.clone(),
+                replica_id: resolved.binding.replica_id.clone(),
+                thread_id: thread_id.clone(),
+                provider_profile_id: profile_id.clone(),
+                provider_thread_id: Some(provider_thread_id.to_string()),
+                materialization_state,
+                lineage_digest: None,
+                semantic_digest: None,
+                local_file_sha256_after: None,
+                cloud_revision: 1,
+                cloud_commit_id: format!("commit-{suffix}"),
+                cloud_manifest_sha256: "a".repeat(64),
+                published_origin_host_token: None,
+                published_origin_replica_token: None,
+                journal_operation_id: ConversationOperationId::parse(format!("operation-{suffix}"))
+                    .unwrap(),
+                accepted_tail: None,
+                preserved_thread_id: None,
+                source_disposition: None,
+            }),
+        }
+    }
+
+    fn alias_test_materializations(
+        resolved: &ResolvedActivityProject,
+        receipts: Vec<ApplyReceipt>,
+        status: MaterializationStatus,
+    ) -> Materializations {
+        let mut materializations = Materializations::default();
+        materializations.records.push(MaterializationRecord {
+            materialization_id: MaterializationId::parse("materialization-alias-test").unwrap(),
+            plan_id: PlanId::parse("plan-alias-test").unwrap(),
+            host_id: resolved.binding.host_id.clone(),
+            replica_id: resolved.binding.replica_id.clone(),
+            local_project_id: resolved.project_id.clone(),
+            storage_id: StorageId::parse("storage-alias-test").unwrap(),
+            bundle_id: resolved.bundle_id.clone(),
+            revision: 1,
+            commit_id: "commit-alias-test".to_string(),
+            manifest_sha256: "b".repeat(64),
+            binding_revision: 0,
+            status,
+            applied_at: 1,
+            receipts,
+        });
+        materializations
+    }
+
+    #[test]
+    fn activity_exposes_displaced_native_alias_without_an_exact_byte_witness() {
+        let (resolved, provider, profile_id) = alias_test_context();
+        let old_alias = "native-old";
+        let current_alias = "native-current";
+        let thread_id =
+            initial_conversation_thread_id(&resolved.bundle_id, &provider, old_alias).unwrap();
+        let mut bindings = ConversationBindings::empty(resolved.binding.host_id.clone());
+        bindings.bindings.push(alias_test_binding(
+            &resolved,
+            &profile_id,
+            &thread_id,
+            current_alias,
+        ));
+        let aliases =
+            activity_conversation_aliases(&resolved, &bindings, &Materializations::default());
+        let retained =
+            retained_conversation_thread_id(&resolved.bundle_id, &provider, &thread_id, old_alias)
                 .unwrap();
 
-        assert!(session_matches_thread(
-            &bundle_id,
-            &provider,
-            &original_thread,
-            Some(pulled_provider_session),
-            pulled_provider_session,
+        assert_eq!(
+            activity_thread_for_provider_alias(
+                &resolved,
+                &provider,
+                old_alias,
+                Path::new("/tmp/mallard-retained-native-old.jsonl"),
+                &aliases,
+                &SyncConfig::default(),
+            )
+            .unwrap(),
+            Some(retained)
+        );
+        assert_eq!(
+            activity_thread_for_provider_alias(
+                &resolved,
+                &provider,
+                current_alias,
+                Path::new("/tmp/mallard-retained-native-current.jsonl"),
+                &aliases,
+                &SyncConfig::default(),
+            )
+            .unwrap(),
+            Some(thread_id)
+        );
+    }
+
+    #[test]
+    fn activity_uses_applied_receipt_owners_for_retained_branch_identity() {
+        let (resolved, provider, profile_id) = alias_test_context();
+        let imported_thread = ThreadId::parse("imported-thread").unwrap();
+        let unrelated_thread = ThreadId::parse("unrelated-thread").unwrap();
+        let current_alias = "alias-current";
+        let mut bindings = ConversationBindings::empty(resolved.binding.host_id.clone());
+        bindings.bindings.push(alias_test_binding(
+            &resolved,
+            &profile_id,
+            &imported_thread,
+            current_alias,
         ));
-        assert!(!session_matches_thread(
-            &bundle_id,
-            &provider,
-            &original_thread,
-            Some(pulled_provider_session),
-            preserved_provider_session,
+        let receipts = vec![
+            alias_test_receipt(
+                &resolved,
+                &profile_id,
+                &provider,
+                &imported_thread,
+                &imported_thread,
+                "alias-old",
+                "old-owner-moved",
+                ActionStatus::Applied,
+                ConversationMaterializationState::Resumable,
+            ),
+            // A later second owner must not erase the earlier owner from the
+            // alias ledger. Any owner that now binds elsewhere displaces it.
+            alias_test_receipt(
+                &resolved,
+                &profile_id,
+                &provider,
+                &unrelated_thread,
+                &unrelated_thread,
+                "alias-old",
+                "old-owner-unbound",
+                ActionStatus::Applied,
+                ConversationMaterializationState::Resumable,
+            ),
+            alias_test_receipt(
+                &resolved,
+                &profile_id,
+                &provider,
+                &imported_thread,
+                &imported_thread,
+                "alias-middle",
+                "middle-owner-moved",
+                ActionStatus::Applied,
+                ConversationMaterializationState::Resumable,
+            ),
+        ];
+        // Partial records still contain durable applied receipts; record
+        // completion is not an alias-history condition.
+        let materializations =
+            alias_test_materializations(&resolved, receipts, MaterializationStatus::Partial);
+        let aliases = activity_conversation_aliases(&resolved, &bindings, &materializations);
+
+        for displaced in ["alias-old", "alias-middle"] {
+            let retained = retained_conversation_thread_id(
+                &resolved.bundle_id,
+                &provider,
+                &imported_thread,
+                displaced,
+            )
+            .unwrap();
+            assert_eq!(
+                activity_thread_for_provider_alias(
+                    &resolved,
+                    &provider,
+                    displaced,
+                    Path::new("/tmp/mallard-retained-imported.jsonl"),
+                    &aliases,
+                    &SyncConfig::default(),
+                )
+                .unwrap(),
+                Some(retained)
+            );
+        }
+        assert_eq!(
+            activity_thread_for_provider_alias(
+                &resolved,
+                &provider,
+                current_alias,
+                Path::new("/tmp/mallard-retained-imported-current.jsonl"),
+                &aliases,
+                &SyncConfig::default(),
+            )
+            .unwrap(),
+            Some(imported_thread)
+        );
+    }
+
+    #[test]
+    fn activity_current_binding_wins_over_another_threads_alias_history() {
+        let (resolved, provider, profile_id) = alias_test_context();
+        let historical_owner = ThreadId::parse("historical-owner").unwrap();
+        let current_owner = ThreadId::parse("current-owner").unwrap();
+        let mut bindings = ConversationBindings::empty(resolved.binding.host_id.clone());
+        bindings.bindings.extend([
+            alias_test_binding(
+                &resolved,
+                &profile_id,
+                &historical_owner,
+                "historical-owner-current",
+            ),
+            alias_test_binding(&resolved, &profile_id, &current_owner, "reused-alias"),
+        ]);
+        let materializations = alias_test_materializations(
+            &resolved,
+            vec![alias_test_receipt(
+                &resolved,
+                &profile_id,
+                &provider,
+                &historical_owner,
+                &historical_owner,
+                "reused-alias",
+                "reused-alias",
+                ActionStatus::Applied,
+                ConversationMaterializationState::Resumable,
+            )],
+            MaterializationStatus::Complete,
+        );
+        let aliases = activity_conversation_aliases(&resolved, &bindings, &materializations);
+
+        assert_eq!(
+            activity_thread_for_provider_alias(
+                &resolved,
+                &provider,
+                "reused-alias",
+                Path::new("/tmp/mallard-retained-reused.jsonl"),
+                &aliases,
+                &SyncConfig::default(),
+            )
+            .unwrap(),
+            Some(current_owner)
+        );
+    }
+
+    #[test]
+    fn activity_ignores_receipts_without_exact_applied_resumable_identity() {
+        let (resolved, provider, profile_id) = alias_test_context();
+        let target = ThreadId::parse("filter-target").unwrap();
+        let mismatched = ThreadId::parse("filter-mismatch").unwrap();
+        let other_profile = LocalProviderProfileId::parse("profile-filter-other").unwrap();
+        let other_provider = ProviderKey::parse("claude").unwrap();
+        let mut bindings = ConversationBindings::empty(resolved.binding.host_id.clone());
+        bindings.bindings.push(alias_test_binding(
+            &resolved,
+            &profile_id,
+            &target,
+            "filter-current",
         ));
-        assert!(session_matches_thread(
-            &bundle_id,
-            &provider,
-            &original_thread,
-            None,
-            preserved_provider_session,
-        ));
+        let receipts = vec![
+            alias_test_receipt(
+                &resolved,
+                &profile_id,
+                &provider,
+                &target,
+                &target,
+                "skipped-alias",
+                "filter-skipped",
+                ActionStatus::Skipped,
+                ConversationMaterializationState::Resumable,
+            ),
+            alias_test_receipt(
+                &resolved,
+                &profile_id,
+                &provider,
+                &target,
+                &target,
+                "pending-alias",
+                "filter-pending",
+                ActionStatus::Applied,
+                ConversationMaterializationState::Pending,
+            ),
+            alias_test_receipt(
+                &resolved,
+                &profile_id,
+                &provider,
+                &target,
+                &mismatched,
+                "logical-mismatch-alias",
+                "filter-logical",
+                ActionStatus::Applied,
+                ConversationMaterializationState::Resumable,
+            ),
+            alias_test_receipt(
+                &resolved,
+                &other_profile,
+                &provider,
+                &target,
+                &target,
+                "profile-mismatch-alias",
+                "filter-profile",
+                ActionStatus::Applied,
+                ConversationMaterializationState::Resumable,
+            ),
+            alias_test_receipt(
+                &resolved,
+                &profile_id,
+                &other_provider,
+                &target,
+                &target,
+                "provider-mismatch-alias",
+                "filter-provider",
+                ActionStatus::Applied,
+                ConversationMaterializationState::Resumable,
+            ),
+        ];
+        let materializations =
+            alias_test_materializations(&resolved, receipts, MaterializationStatus::Complete);
+        let aliases = activity_conversation_aliases(&resolved, &bindings, &materializations);
+
+        for retained in [
+            "skipped-alias",
+            "pending-alias",
+            "logical-mismatch-alias",
+            "profile-mismatch-alias",
+            "provider-mismatch-alias",
+        ] {
+            assert_eq!(
+                activity_thread_for_provider_alias(
+                    &resolved,
+                    &provider,
+                    retained,
+                    Path::new("/tmp/mallard-retained-filter.jsonl"),
+                    &aliases,
+                    &SyncConfig::default(),
+                )
+                .unwrap(),
+                Some(
+                    initial_conversation_thread_id(&resolved.bundle_id, &provider, retained)
+                        .unwrap()
+                )
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,7105 @@
+//! Opt-in end-to-end coverage for two isolated Codex homes synchronizing
+//! through one real Mallard local-folder repository.
+//!
+//! This test makes deterministic Codex turns against one Rust-owned local
+//! aimock process, creates a native paginated fork graph through the Codex
+//! app-server, and reopens twenty synchronized histories through public
+//! headless Codex CLI resumes.
+//! It is ignored by default, separately environment-gated, and intended to run
+//! as the only test process so its temporary `HOME` override cannot affect
+//! other tests.
+
+mod support;
+
+use mallard_domain::{
+    ActionId, BundleId, ConversationFileRole, ConversationPlanActionType, ConversationReviewAction,
+    DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection, KeepBothPlan,
+    LocalConversationBinding, LocalProjectId, ProjectBinding, ProjectSetupDraft, ProviderKey,
+    ResourceId, RestoreActionKind, RestorePlan, StorageConfig, StorageId, StorageKind,
+    SyncScopeKey, ThreadId, MAX_CONVERSATION_FILE_BYTES,
+};
+use mallard_infrastructure::codex_history_graph::{resolve_codex_root, seed_codex_root};
+use mallard_infrastructure::codex_paginated_projection::verify_projection_fixpoint;
+use mallard_infrastructure::codex_rollout::analyze_codex_rollout_structure;
+use mallard_infrastructure::codex_standalone_builder::{
+    build_standalone_codex_root, StandaloneBuildMode,
+};
+use mallard_infrastructure::codex_thread_allocator::validate_uuid_v7;
+use mallard_infrastructure::persistence::LocalStateRepository;
+use mallard_infrastructure::providers::{
+    ProviderRegistry, SessionCountQuality, SessionTimelineContext, SessionTimelineQuery,
+};
+use mallard_infrastructure::storage_core::repository_object_key;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest as _, Sha256};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::OsString;
+use std::io::{BufReader, Read as _, Write as _};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant, SystemTime};
+use tauri_app_lib::{
+    ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSyncService,
+    PushApproval, PushDestinationPullReason, PushDestinationStatus, RestoreResult,
+    SessionTimelineEventKind, SessionToolCategory, ThreadSyncComparison, ThreadSyncState,
+};
+use walkdir::WalkDir;
+
+use support::catalog_flow::{run_catalog_flow, storage_snapshot, CatalogFlowInputs};
+
+const LIVE_TEST_GATE: &str = "MALLARD_RUN_LIVE_CODEX_AIMOCK_E2E";
+const MODEL: &str = "gpt-5.6-luna";
+const PROVIDER_ID: &str = "mallard_aimock";
+const HEADLESS_REOPEN_ACK: &str = "MALLARD_HEADLESS_REOPEN_CAPTURED";
+const CREDENTIAL_ENV_KEYS: &[&str] = &[
+    "AIMOCK_DUMMY_KEY_MARKER",
+    "AIMOCK_PROVIDER_ANTHROPIC_KEY",
+    "AIMOCK_PROVIDER_AZURE_KEY",
+    "AIMOCK_PROVIDER_COHERE_KEY",
+    "AIMOCK_PROVIDER_ELEVENLABS_KEY",
+    "AIMOCK_PROVIDER_FAL_KEY",
+    "AIMOCK_PROVIDER_GEMINI_KEY",
+    "AIMOCK_PROVIDER_GROK_KEY",
+    "AIMOCK_PROVIDER_OLLAMA_KEY",
+    "AIMOCK_PROVIDER_OPENAI_KEY",
+    "AIMOCK_PROVIDER_OPENROUTER_KEY",
+    "AIMOCK_PROVIDER_VEO_KEY",
+    "ANTHROPIC_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AZURE_OPENAI_ENDPOINT",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORGANIZATION",
+    "OPENAI_ORG_ID",
+    "OPENAI_PROJECT_ID",
+    "CODEX_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "MALLARD_CODEX_PROVIDER_URL",
+    "MALLARD_LIVE_CODEX_PROVIDER_KEY",
+    "MALLARD_LIVE_CODEX_PROVIDER_URL",
+    "MALLARD_LIVE_CODEX_SOURCE_HOME",
+    "MALLARD_TUZI_POC_KEY",
+    "MALLARD_CODEX_PROVIDER_API_KEY",
+];
+const PROXY_ENV_KEYS: [&str; 6] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+];
+const REASONING_OVERRIDE: &str = "model_reasoning_effort=\"low\"";
+const MAX_CODEX_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_CODEX_OUTPUT_EVENTS: usize = 4_096;
+const MAX_CODEX_SYNOPSIS_EVENTS: usize = 64;
+const MAX_COMMAND_ARGUMENT_BYTES: usize = 4096;
+const MAX_COMMAND_ARGUMENTS: usize = 48;
+const MAX_PROMPT_BYTES: usize = 512;
+const MAX_WRITE_PROMPT_BYTES: usize = 2 * 1024;
+const MAX_STORAGE_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SNAPSHOT_FILES: usize = 2_048;
+const MAX_FIXTURE_FILE_BYTES: u64 = 4 * 1024;
+const MAX_FIXTURE_TREE_ENTRIES: usize = 32;
+const MAX_SESSION_DETAIL_EVENTS: usize = 1_024;
+const HISTORY_TIMELINE_PAGE_LIMIT: usize = 2;
+const MAX_CODEX_HOME_PRIVACY_ENTRIES: usize = 12_000;
+const MAX_CODEX_HOME_PRIVACY_BYTES: u64 = 256 * 1024 * 1024;
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEX_TIMEOUT: Duration = Duration::from_secs(180);
+const APP_SERVER_TIMEOUT: Duration = Duration::from_secs(180);
+const MAX_APP_SERVER_LINE_BYTES: usize = 1024 * 1024;
+const MAX_APP_SERVER_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_APP_SERVER_MESSAGES: usize = 4_096;
+const MAX_AIMOCK_CONTROL_BYTES: u64 = 512 * 1024;
+const AIMOCK_START_TIMEOUT: Duration = Duration::from_secs(30);
+const EXPECTED_CODEX_VERSION_PREFIX: &str = "codex-cli 0.147.";
+const EXPECTED_SOURCE_CODEX_TURNS: usize = 5;
+const EXPECTED_GRAPH_APP_SERVER_TURNS: usize = 5;
+const EXPECTED_GRAPH_MUTATION_TURNS: usize = 7;
+const EXPECTED_HEADLESS_RESUMES: usize = 20;
+const EXPECTED_CODEX_CLI_TURNS: usize =
+    EXPECTED_SOURCE_CODEX_TURNS + EXPECTED_GRAPH_MUTATION_TURNS + EXPECTED_HEADLESS_RESUMES;
+const EXPECTED_AIMOCK_REQUESTS: usize = 38;
+
+const P0: &str = "019f7800-0000-7000-8000-000000000001";
+const P1: &str = "019f7800-0000-7000-8000-000000000002";
+const P2: &str = "019f7800-0000-7000-8000-000000000003";
+const P3: &str = "019f7800-0000-7000-8000-000000000004";
+const P4: &str = "019f7800-0000-7000-8000-000000000005";
+
+const INSIDE_ALPHA_PATH: &str = "generated/session-paths/inside-alpha.txt";
+const INSIDE_BETA_PATH: &str = "generated/session-paths/nested/inside-beta.json";
+const OUTSIDE_ALPHA_PATH: &str = "outside-alpha.txt";
+const OUTSIDE_BETA_PATH: &str = "nested/outside-beta.json";
+const INSIDE_ALPHA_BYTES: &[u8] = b"MALLARD_IN_PROJECT_ALPHA\n";
+const INSIDE_BETA_BYTES: &[u8] = b"{\"fixture\":\"MALLARD_IN_PROJECT_BETA\",\"version\":1}\n";
+const OUTSIDE_ALPHA_BYTES: &[u8] = b"MALLARD_OUTSIDE_ALPHA\n";
+const OUTSIDE_BETA_BYTES: &[u8] = b"{\"fixture\":\"MALLARD_OUTSIDE_BETA\",\"version\":1}\n";
+const IN_PROJECT_FIXTURES: [(&str, &[u8]); 2] = [
+    (INSIDE_ALPHA_PATH, INSIDE_ALPHA_BYTES),
+    (INSIDE_BETA_PATH, INSIDE_BETA_BYTES),
+];
+const OUTSIDE_PROJECT_FIXTURES: [(&str, &[u8]); 2] = [
+    (OUTSIDE_ALPHA_PATH, OUTSIDE_ALPHA_BYTES),
+    (OUTSIDE_BETA_PATH, OUTSIDE_BETA_BYTES),
+];
+
+fn redacted<T, E>(result: Result<T, E>, message: &'static str) -> T {
+    match result {
+        Ok(value) => value,
+        Err(_) => panic!("{message}"),
+    }
+}
+
+fn codex_binary() -> PathBuf {
+    redacted(
+        mallard_infrastructure::codex_binary::find_binary("codex"),
+        "the live test requires an installed Codex CLI",
+    )
+}
+
+fn assert_supported_codex_version() {
+    let isolated = tempfile::tempdir().expect("create isolated Codex version-probe root");
+    let process_home = isolated.path().join("process-home");
+    let codex_home = isolated.path().join("codex-home");
+    std::fs::create_dir(&process_home).expect("create isolated Codex version-probe home");
+    create_secure_codex_home(&codex_home);
+
+    let mut command = Command::new(codex_binary());
+    remove_credential_environment(&mut command);
+    let output = command
+        .arg("--version")
+        .env("CODEX_HOME", &codex_home)
+        .env("HOME", &process_home)
+        .env("USERPROFILE", &process_home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("query the Codex CLI version");
+    assert!(
+        output.status.success(),
+        "cannot query the Codex CLI version"
+    );
+    assert!(
+        output.stdout.len() <= 256 && output.stderr.len() <= 1024,
+        "Codex version output exceeds the test safety bound"
+    );
+    let version = String::from_utf8(output.stdout).expect("Codex version must be UTF-8");
+    assert!(
+        version.trim().starts_with(EXPECTED_CODEX_VERSION_PREFIX),
+        "the live fixture requires Codex 0.147.x; update the current-format writer before running against another version"
+    );
+    assert_codex_home_has_no_sensitive_state(&codex_home, &[]);
+    assert_process_home_has_no_sensitive_state(&process_home, &[]);
+}
+
+struct EnvironmentGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvironmentGuard {
+    fn set(key: &'static str, value: &Path) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvironmentGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FixtureFileState {
+    len: u64,
+    modified: Option<SystemTime>,
+    readonly: bool,
+    digest: [u8; 32],
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    mode: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodexRunAccess<'a> {
+    ReadOnly,
+    WorkspaceWrite { additional_dir: &'a Path },
+}
+
+#[derive(Clone)]
+struct LocalAimockProvider {
+    base_url: String,
+}
+
+impl LocalAimockProvider {
+    fn new(base_url: String) -> Result<Self, &'static str> {
+        validate_aimock_base_url(&base_url)?;
+        Ok(Self { base_url })
+    }
+
+    fn config_arguments(&self) -> Vec<OsString> {
+        // This fixture exercises Mallard skill/pet portability, not the Codex
+        // curated marketplace. Disable its background repository sync so
+        // repeated short-lived CLIs cannot race or retain plugin clones in
+        // the otherwise bounded provider homes.
+        let overrides = [
+            format!("model_provider=\"{PROVIDER_ID}\""),
+            REASONING_OVERRIDE.to_string(),
+            "features.plugins=false".to_string(),
+            "features.enable_request_compression=false".to_string(),
+            format!("model_providers.{PROVIDER_ID}.name=\"Mallard deterministic local aimock\""),
+            format!(
+                "model_providers.{PROVIDER_ID}.base_url={}",
+                serde_json::to_string(&self.base_url).expect("serialize validated provider URL")
+            ),
+            format!("model_providers.{PROVIDER_ID}.wire_api=\"responses\""),
+            format!("model_providers.{PROVIDER_ID}.requires_openai_auth=false"),
+            format!("model_providers.{PROVIDER_ID}.request_max_retries=0"),
+            format!("model_providers.{PROVIDER_ID}.stream_max_retries=0"),
+            format!("model_providers.{PROVIDER_ID}.stream_idle_timeout_ms=60000"),
+        ];
+        let mut arguments = Vec::with_capacity(overrides.len() * 2);
+        for value in overrides {
+            arguments.push(OsString::from("--config"));
+            arguments.push(OsString::from(value));
+        }
+        arguments
+    }
+}
+
+#[derive(Debug)]
+enum CodexAppServerMessage {
+    Line(Vec<u8>),
+    Oversized,
+    StderrOversized,
+    Io,
+    Eof,
+}
+
+struct CodexAppServer {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    output: mpsc::Receiver<CodexAppServerMessage>,
+    readers: Vec<std::thread::JoinHandle<()>>,
+    pending: VecDeque<Value>,
+    next_id: u64,
+    received_bytes: usize,
+    received_messages: usize,
+}
+
+impl CodexAppServer {
+    fn start(
+        provider: &LocalAimockProvider,
+        codex_home: &Path,
+        process_home: &Path,
+        project_root: &Path,
+    ) -> Result<Self, &'static str> {
+        let mut command = Command::new(codex_binary());
+        configure_local_codex_child(&mut command);
+        let mut arguments = vec![OsString::from("app-server"), OsString::from("--stdio")];
+        arguments.extend(provider.config_arguments());
+        assert!(
+            arguments.len() <= MAX_COMMAND_ARGUMENTS
+                && arguments.iter().all(|argument| {
+                    argument.as_encoded_bytes().len() <= MAX_COMMAND_ARGUMENT_BYTES
+                }),
+            "Codex app-server command violates the argv safety bound"
+        );
+        assert!(
+            arguments.iter().all(|argument| {
+                let value = argument.to_string_lossy();
+                !value.contains("env_key") && !value.contains("codex fork")
+            }),
+            "Codex app-server command contains a forbidden compatibility or credential route"
+        );
+        let mut child = command
+            .args(arguments)
+            .current_dir(project_root)
+            .env("CODEX_HOME", codex_home)
+            .env("HOME", process_home)
+            .env("USERPROFILE", process_home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| "cannot start Codex app-server")?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or("Codex app-server stdin is unavailable")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("Codex app-server stdout is unavailable")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("Codex app-server stderr is unavailable")?;
+        let (sender, output) = mpsc::channel();
+        let stderr_sender = sender.clone();
+        let stderr_reader = std::thread::spawn(move || {
+            let mut reader = stderr;
+            let mut buffer = [0_u8; 8192];
+            let mut received = 0_usize;
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        received = received.saturating_add(count);
+                        if received > MAX_APP_SERVER_OUTPUT_BYTES {
+                            let _ = stderr_sender.send(CodexAppServerMessage::StderrOversized);
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        let _ = stderr_sender.send(CodexAppServerMessage::Io);
+                        break;
+                    }
+                }
+            }
+        });
+        let stdout_reader = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = Vec::new();
+                match read_bounded_jsonl_line(&mut reader, &mut line, MAX_APP_SERVER_LINE_BYTES) {
+                    Ok(0) => {
+                        let _ = sender.send(CodexAppServerMessage::Eof);
+                        break;
+                    }
+                    Ok(_) => {
+                        if sender.send(CodexAppServerMessage::Line(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(BoundedJsonlLineError::Oversized) => {
+                        let _ = sender.send(CodexAppServerMessage::Oversized);
+                        break;
+                    }
+                    Err(BoundedJsonlLineError::Io) => {
+                        let _ = sender.send(CodexAppServerMessage::Io);
+                        break;
+                    }
+                }
+            }
+        });
+        let mut server = Self {
+            child,
+            stdin: Some(stdin),
+            output,
+            readers: vec![stdout_reader, stderr_reader],
+            pending: VecDeque::new(),
+            next_id: 1,
+            received_bytes: 0,
+            received_messages: 0,
+        };
+        let initialized = server.request(
+            "initialize",
+            json!({
+                "clientInfo": {
+                    "name": "mallard-live-test",
+                    "title": "Mallard live test",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "capabilities": { "experimentalApi": true },
+            }),
+        )?;
+        if initialized.get("result").is_none() {
+            return Err("Codex app-server initialize failed");
+        }
+        server.write_json(&json!({ "method": "initialized" }))?;
+        Ok(server)
+    }
+
+    fn thread_start_paginated(&mut self, project_root: &Path) -> Result<String, &'static str> {
+        let response = self.request(
+            "thread/start",
+            json!({
+                "historyMode": "paginated",
+                "modelProvider": PROVIDER_ID,
+                "model": MODEL,
+                "cwd": project_root.to_string_lossy(),
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+                "ephemeral": false,
+            }),
+        )?;
+        let thread = response
+            .pointer("/result/thread")
+            .ok_or("Codex thread/start returned no thread")?;
+        let thread_id = thread
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("Codex thread/start returned no thread identity")?;
+        validate_uuid_v7(thread_id).map_err(|_| "Codex thread/start returned a non-UUIDv7")?;
+        if thread.get("historyMode").and_then(Value::as_str) != Some("paginated")
+            || thread.get("modelProvider").and_then(Value::as_str) != Some(PROVIDER_ID)
+            || thread.get("cwd").and_then(Value::as_str)
+                != Some(project_root.to_string_lossy().as_ref())
+            || !thread.get("forkedFromId").is_none_or(Value::is_null)
+            || thread.get("ephemeral").and_then(Value::as_bool) != Some(false)
+            || !thread
+                .get("turns")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+        {
+            return Err("Codex thread/start returned unexpected paginated metadata");
+        }
+        Ok(thread_id.to_string())
+    }
+
+    fn thread_fork_excluding_turns(
+        &mut self,
+        source: &str,
+        project_root: &Path,
+    ) -> Result<String, &'static str> {
+        validate_uuid_v7(source).map_err(|_| "Codex fork source is not UUIDv7")?;
+        let response = self.request(
+            "thread/fork",
+            json!({
+                "threadId": source,
+                "excludeTurns": true,
+                "ephemeral": false,
+                "modelProvider": PROVIDER_ID,
+                "model": MODEL,
+                "cwd": project_root.to_string_lossy(),
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+            }),
+        )?;
+        let thread = response
+            .pointer("/result/thread")
+            .ok_or("Codex thread/fork returned no thread")?;
+        let thread_id = thread
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("Codex thread/fork returned no thread identity")?;
+        validate_uuid_v7(thread_id).map_err(|_| "Codex thread/fork returned a non-UUIDv7")?;
+        if thread.get("forkedFromId").and_then(Value::as_str) != Some(source) {
+            return Err("Codex thread/fork returned the wrong source identity");
+        }
+        if thread.get("historyMode").and_then(Value::as_str) != Some("paginated")
+            || thread.get("modelProvider").and_then(Value::as_str) != Some(PROVIDER_ID)
+            || thread.get("cwd").and_then(Value::as_str)
+                != Some(project_root.to_string_lossy().as_ref())
+            || thread.get("ephemeral").and_then(Value::as_bool) != Some(false)
+            || !thread
+                .get("turns")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+        {
+            return Err("Codex thread/fork returned unexpected metadata or inherited turns");
+        }
+        Ok(thread_id.to_string())
+    }
+
+    fn turn_start_and_wait(&mut self, thread_id: &str, prompt: &str) -> Result<(), &'static str> {
+        validate_uuid_v7(thread_id).map_err(|_| "Codex turn source is not UUIDv7")?;
+        validate_exact_marker(prompt).map_err(|_| "Codex app-server prompt is not a marker")?;
+        let response = self.request(
+            "turn/start",
+            json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": prompt }],
+                "approvalPolicy": "never",
+                "sandboxPolicy": { "type": "readOnly", "networkAccess": false },
+            }),
+        )?;
+        let turn_id = response
+            .pointer("/result/turn/id")
+            .and_then(Value::as_str)
+            .ok_or("Codex turn/start returned no turn identity")?
+            .to_string();
+        let deadline = Instant::now() + APP_SERVER_TIMEOUT;
+        loop {
+            let message = self.next_value(deadline)?;
+            if message.get("id").is_some() {
+                return Err("Codex app-server emitted an unexpected response while awaiting turn");
+            }
+            if message.get("method").and_then(Value::as_str) != Some("turn/completed") {
+                continue;
+            }
+            if message.pointer("/params/threadId").and_then(Value::as_str) != Some(thread_id)
+                || message.pointer("/params/turn/id").and_then(Value::as_str)
+                    != Some(turn_id.as_str())
+            {
+                return Err("Codex app-server completed the wrong thread or turn");
+            }
+            if message
+                .pointer("/params/turn/status")
+                .and_then(Value::as_str)
+                != Some("completed")
+            {
+                return Err("Codex app-server turn did not complete successfully");
+            }
+            return Ok(());
+        }
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Result<Value, &'static str> {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.write_json(&json!({ "method": method, "id": id, "params": params }))?;
+        let deadline = Instant::now() + APP_SERVER_TIMEOUT;
+        let mut deferred = std::mem::take(&mut self.pending);
+        loop {
+            let value = self.receive_value(deadline)?;
+            if let Some(response_id) = value.get("id") {
+                if response_id.as_u64() != Some(id) {
+                    return Err("Codex app-server returned an unexpected response identity");
+                }
+                if value.get("error").is_some() || value.get("result").is_none() {
+                    return Err("Codex app-server request failed");
+                }
+                self.pending = deferred;
+                return Ok(value);
+            }
+            deferred.push_back(value);
+        }
+    }
+
+    fn next_value(&mut self, deadline: Instant) -> Result<Value, &'static str> {
+        if let Some(value) = self.pending.pop_front() {
+            return Ok(value);
+        }
+        self.receive_value(deadline)
+    }
+
+    fn receive_value(&mut self, deadline: Instant) -> Result<Value, &'static str> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("Codex app-server request timed out");
+        }
+        let line = match self.output.recv_timeout(remaining) {
+            Ok(CodexAppServerMessage::Line(line)) => line,
+            Ok(CodexAppServerMessage::Oversized) => {
+                return Err("Codex app-server emitted an oversized JSONL line")
+            }
+            Ok(CodexAppServerMessage::StderrOversized) => {
+                return Err("Codex app-server stderr exceeded its bound")
+            }
+            Ok(CodexAppServerMessage::Io) => return Err("Codex app-server output failed"),
+            Ok(CodexAppServerMessage::Eof) => return Err("Codex app-server exited early"),
+            Err(_) => return Err("Codex app-server request timed out"),
+        };
+        self.received_messages = self.received_messages.saturating_add(1);
+        self.received_bytes = self.received_bytes.saturating_add(line.len());
+        if self.received_messages > MAX_APP_SERVER_MESSAGES
+            || self.received_bytes > MAX_APP_SERVER_OUTPUT_BYTES
+        {
+            return Err("Codex app-server output exceeded its aggregate bound");
+        }
+        let value: Value =
+            serde_json::from_slice(&line).map_err(|_| "Codex app-server emitted malformed JSON")?;
+        if !value.is_object() {
+            return Err("Codex app-server emitted a non-object message");
+        }
+        Ok(value)
+    }
+
+    fn write_json(&mut self, value: &Value) -> Result<(), &'static str> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or("Codex app-server stdin is closed")?;
+        serde_json::to_writer(&mut *stdin, value)
+            .map_err(|_| "cannot encode Codex app-server request")?;
+        stdin
+            .write_all(b"\n")
+            .and_then(|_| stdin.flush())
+            .map_err(|_| "cannot write Codex app-server request")
+    }
+
+    fn finish(mut self) -> Result<(), &'static str> {
+        self.stdin.take();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    for reader in self.readers.drain(..) {
+                        let _ = reader.join();
+                    }
+                    if !status.success() {
+                        return Err("Codex app-server exited unsuccessfully");
+                    }
+                    return Ok(());
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                _ => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    return Err("Codex app-server did not stop cleanly");
+                }
+            }
+        }
+    }
+}
+
+impl Drop for CodexAppServer {
+    fn drop(&mut self) {
+        self.stdin.take();
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+    }
+}
+
+enum BoundedJsonlLineError {
+    Oversized,
+    Io,
+}
+
+fn read_bounded_jsonl_line(
+    reader: &mut impl std::io::BufRead,
+    output: &mut Vec<u8>,
+    limit: usize,
+) -> Result<usize, BoundedJsonlLineError> {
+    loop {
+        let available = reader.fill_buf().map_err(|_| BoundedJsonlLineError::Io)?;
+        if available.is_empty() {
+            return Ok(output.len());
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(available.len());
+        if output.len().saturating_add(take) > limit {
+            return Err(BoundedJsonlLineError::Oversized);
+        }
+        output.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if output.last() == Some(&b'\n') {
+            while output
+                .last()
+                .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+            {
+                output.pop();
+            }
+            return Ok(output.len());
+        }
+    }
+}
+
+fn read_bounded_file(path: &Path, maximum: u64, label: &str) -> Vec<u8> {
+    let metadata =
+        std::fs::symlink_metadata(path).unwrap_or_else(|_| panic!("{label} is unreadable"));
+    assert!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "{label} must be a regular file"
+    );
+    assert!(
+        metadata.len() <= maximum,
+        "{label} exceeds its safety bound"
+    );
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    std::fs::File::open(path)
+        .unwrap_or_else(|_| panic!("{label} is unreadable"))
+        .take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .unwrap_or_else(|_| panic!("{label} is unreadable"));
+    assert!(
+        bytes.len() as u64 <= maximum,
+        "{label} exceeds its safety bound"
+    );
+    bytes
+}
+
+fn validate_aimock_base_url(value: &str) -> Result<(), &'static str> {
+    if value.is_empty()
+        || value.len() > 2_048
+        || value.chars().any(char::is_control)
+        || value.trim() != value
+        || value.contains('@')
+    {
+        return Err("invalid_provider_url");
+    }
+    let url = tauri::Url::parse(value).map_err(|_| "invalid_provider_url")?;
+    if url.scheme() != "http"
+        || url.cannot_be_a_base()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str() != Some("127.0.0.1")
+        || url.port().is_none_or(|port| port == 0)
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/v1"
+    {
+        return Err("invalid_provider_url");
+    }
+    Ok(())
+}
+
+fn create_secure_codex_home(path: &Path) {
+    std::fs::create_dir(path).expect("create isolated Codex home");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .expect("secure isolated Codex home");
+    }
+    assert!(!path.join("auth.json").exists());
+    assert!(!path.join("config.toml").exists());
+}
+
+fn clean_fixture_relative_path(value: &str) -> &Path {
+    let path = Path::new(value);
+    assert!(
+        !path.as_os_str().is_empty()
+            && !path.is_absolute()
+            && path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "live path fixture has an unsafe relative path"
+    );
+    path
+}
+
+fn assert_no_follow_directory_chain(root: &Path, relative: &Path) {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            panic!("fixture directory chain has an unsafe component");
+        };
+        current.push(component);
+        let metadata =
+            std::fs::symlink_metadata(&current).expect("inspect fixture directory chain");
+        assert!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "fixture directory chain contains a non-directory or symlink"
+        );
+    }
+}
+
+fn prepare_fixture_parents(root: &Path, fixtures: &[(&str, &[u8])]) {
+    let root_metadata = std::fs::symlink_metadata(root).expect("inspect live path fixture root");
+    assert!(
+        root_metadata.is_dir() && !root_metadata.file_type().is_symlink(),
+        "live path fixture root must be a regular directory"
+    );
+    let canonical_root = std::fs::canonicalize(root).expect("canonicalize live path fixture root");
+    for (relative, _) in fixtures {
+        let relative = clean_fixture_relative_path(relative);
+        let parent = relative.parent().expect("fixture path has a parent");
+        std::fs::create_dir_all(root.join(parent)).expect("create live path fixture parent");
+        assert_no_follow_directory_chain(root, parent);
+        let canonical_parent =
+            std::fs::canonicalize(root.join(parent)).expect("canonicalize fixture parent");
+        assert!(
+            canonical_parent.starts_with(&canonical_root),
+            "live path fixture parent escaped its root"
+        );
+    }
+}
+
+fn fixture_file_state(path: &Path, expected: &[u8]) -> FixtureFileState {
+    let metadata = std::fs::symlink_metadata(path).expect("live path fixture is unavailable");
+    assert!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "live path fixture must be a no-follow regular file"
+    );
+    assert!(
+        metadata.len() <= MAX_FIXTURE_FILE_BYTES,
+        "live path fixture exceeds its safety bound"
+    );
+    let bytes = read_bounded_file(path, MAX_FIXTURE_FILE_BYTES, "live path fixture");
+    assert!(bytes == expected, "live path fixture has unexpected bytes");
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
+    #[cfg(unix)]
+    assert_eq!(
+        metadata.mode() & 0o777,
+        0o644,
+        "live path fixture has an unexpected Unix mode"
+    );
+    FixtureFileState {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        readonly: metadata.permissions().readonly(),
+        digest: Sha256::digest(bytes).into(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(unix)]
+        mode: metadata.mode() & 0o777,
+    }
+}
+
+fn fixture_file_states(
+    root: &Path,
+    fixtures: &[(&str, &[u8])],
+) -> BTreeMap<PathBuf, FixtureFileState> {
+    fixtures
+        .iter()
+        .map(|(relative, expected)| {
+            let relative = clean_fixture_relative_path(relative).to_path_buf();
+            let state = fixture_file_state(&root.join(&relative), expected);
+            (relative, state)
+        })
+        .collect()
+}
+
+fn assert_exact_fixture_tree(root: &Path, fixtures: &[(&str, &[u8])]) {
+    let expected_files = fixtures
+        .iter()
+        .map(|(relative, _)| clean_fixture_relative_path(relative).to_path_buf())
+        .collect::<BTreeSet<_>>();
+    let mut expected_directories = BTreeSet::new();
+    for relative in &expected_files {
+        let mut parent = relative.parent();
+        while let Some(directory) = parent {
+            if directory.as_os_str().is_empty() {
+                break;
+            }
+            expected_directories.insert(directory.to_path_buf());
+            parent = directory.parent();
+        }
+    }
+
+    let mut found_files = BTreeSet::new();
+    let mut entries = 0_usize;
+    for entry in WalkDir::new(root).follow_links(false).max_depth(8) {
+        let entry = redacted(entry, "cannot inspect live path fixture tree");
+        entries = entries.saturating_add(1);
+        assert!(
+            entries <= MAX_FIXTURE_TREE_ENTRIES,
+            "live path fixture tree exceeds its entry bound"
+        );
+        assert!(
+            !entry.file_type().is_symlink(),
+            "live path fixture tree contains a symlink"
+        );
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .expect("fixture entry remains below its root");
+        if relative.as_os_str().is_empty() {
+            assert!(entry.file_type().is_dir());
+        } else if entry.file_type().is_dir() {
+            assert!(
+                expected_directories.contains(relative),
+                "live path fixture tree contains an unexpected directory"
+            );
+        } else if entry.file_type().is_file() {
+            assert!(
+                expected_files.contains(relative),
+                "live path fixture tree contains an unexpected file"
+            );
+            found_files.insert(relative.to_path_buf());
+        } else {
+            panic!("live path fixture tree contains a special file");
+        }
+    }
+    assert_eq!(
+        found_files, expected_files,
+        "live path fixture tree is incomplete"
+    );
+    let _ = fixture_file_states(root, fixtures);
+}
+
+fn copy_in_project_fixtures(source_root: &Path, target_root: &Path) {
+    let source_root = std::fs::canonicalize(source_root).expect("canonicalize source project");
+    let target_root = std::fs::canonicalize(target_root).expect("canonicalize target project");
+    assert_ne!(source_root, target_root, "project replicas share one root");
+    assert!(
+        !source_root.starts_with(&target_root) && !target_root.starts_with(&source_root),
+        "project replica roots overlap"
+    );
+
+    for (relative, expected) in IN_PROJECT_FIXTURES {
+        let relative = clean_fixture_relative_path(relative);
+        let source = source_root.join(relative);
+        let source_state = fixture_file_state(&source, expected);
+        let target = target_root.join(relative);
+        assert!(!target.exists(), "fixture copy would overwrite a target");
+        let target_parent = target.parent().expect("fixture target has a parent");
+        std::fs::create_dir_all(target_parent).expect("create copied fixture parent");
+        assert_no_follow_directory_chain(
+            &target_root,
+            target_parent
+                .strip_prefix(&target_root)
+                .expect("copied fixture parent remains below target"),
+        );
+        let canonical_parent =
+            std::fs::canonicalize(target_parent).expect("canonicalize copied fixture parent");
+        assert!(
+            canonical_parent.starts_with(&target_root),
+            "copied fixture parent escaped the target project"
+        );
+        std::fs::copy(&source, &target).expect("copy in-project fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(source_state.mode))
+                .expect("preserve copied fixture mode");
+        }
+        let target_state = fixture_file_state(&target, expected);
+        assert_eq!(target_state.len, source_state.len);
+        assert_eq!(target_state.digest, source_state.digest);
+        assert_eq!(target_state.readonly, source_state.readonly);
+        #[cfg(unix)]
+        {
+            assert_eq!(target_state.mode, source_state.mode);
+            assert_ne!(
+                (target_state.device, target_state.inode),
+                (source_state.device, source_state.inode),
+                "fixture copy reused the source file identity"
+            );
+        }
+    }
+    assert_exact_fixture_tree(&target_root, &IN_PROJECT_FIXTURES);
+}
+
+fn canonical_fixture_paths(root: &Path, fixtures: &[(&str, &[u8])]) -> Vec<PathBuf> {
+    let root = std::fs::canonicalize(root).expect("canonicalize live path fixture root");
+    fixtures
+        .iter()
+        .map(|(relative, _)| root.join(clean_fixture_relative_path(relative)))
+        .collect()
+}
+
+fn fixture_path_spellings(root: &Path, relative: &str) -> BTreeSet<PathBuf> {
+    let relative = clean_fixture_relative_path(relative);
+    let canonical_root =
+        std::fs::canonicalize(root).expect("canonicalize live path fixture root spelling");
+    [root.join(relative), canonical_root.join(relative)]
+        .into_iter()
+        .collect()
+}
+
+fn revision_one_patch_body(outside_root: &Path) -> String {
+    assert!(
+        outside_root.is_absolute(),
+        "outside fixture patch root must be absolute"
+    );
+    let outside_root = outside_root
+        .to_str()
+        .expect("outside fixture patch root must be UTF-8");
+    let mut patch = String::from("*** Begin Patch\n");
+    for (relative, contents) in IN_PROJECT_FIXTURES {
+        let contents = std::str::from_utf8(contents).expect("fixture bytes must be UTF-8");
+        let contents = contents
+            .strip_suffix('\n')
+            .expect("fixture bytes must end in one newline");
+        assert!(
+            !contents.contains('\n'),
+            "revision-1 patch fixtures must each contain one line"
+        );
+        patch.push_str(&format!("*** Add File: ./{relative}\n+{contents}\n"));
+    }
+    for (relative, contents) in OUTSIDE_PROJECT_FIXTURES {
+        let contents = std::str::from_utf8(contents).expect("fixture bytes must be UTF-8");
+        let contents = contents
+            .strip_suffix('\n')
+            .expect("fixture bytes must end in one newline");
+        assert!(
+            !contents.contains('\n'),
+            "revision-1 patch fixtures must each contain one line"
+        );
+        patch.push_str(&format!(
+            "*** Add File: {outside_root}/{relative}\n+{contents}\n"
+        ));
+    }
+    patch.push_str("*** End Patch\n");
+    patch
+}
+
+fn revision_one_patch_command(outside_root: &Path) -> String {
+    let command = format!(
+        "apply_patch <<'MALLARD_PATCH'\n{}MALLARD_PATCH\n",
+        revision_one_patch_body(outside_root)
+    );
+    assert!(
+        command.len() <= MAX_COMMAND_ARGUMENT_BYTES
+            && !command.contains('`')
+            && !command.contains("$("),
+        "revision-1 deterministic patch command violates its safety bound"
+    );
+    command
+}
+
+fn revision_one_file_prompt(project_root: &Path, outside_root: &Path) -> String {
+    let mut requirements = Vec::new();
+    for (root, fixtures) in [
+        (project_root, IN_PROJECT_FIXTURES.as_slice()),
+        (outside_root, OUTSIDE_PROJECT_FIXTURES.as_slice()),
+    ] {
+        assert!(root.is_absolute(), "prompt fixture root must be absolute");
+        for (relative, contents) in fixtures {
+            let path = root.join(clean_fixture_relative_path(relative));
+            let path = path
+                .to_str()
+                .expect("live path fixture must have a UTF-8 path");
+            let contents = std::str::from_utf8(contents).expect("fixture bytes must be UTF-8");
+            requirements.push(format!(
+                "path {} with exact UTF-8 bytes {}",
+                serde_json::to_string(path).expect("quote fixture path"),
+                serde_json::to_string(contents).expect("quote fixture contents")
+            ));
+        }
+    }
+    let prompt = format!(
+        "LIVE_USER_R1 Create exactly these deterministic path fixtures using the single supplied tool call, then reply with exactly MALLARD_BASE: {}",
+        requirements.join("; "),
+    );
+    assert!(
+        prompt.len() <= MAX_WRITE_PROMPT_BYTES && !prompt.chars().any(char::is_control),
+        "revision-1 file prompt violates the argument bound"
+    );
+    prompt
+}
+
+fn parse_codex_output_events(stdout: &[u8]) -> Result<Vec<Value>, &'static str> {
+    let stdout = std::str::from_utf8(stdout).map_err(|_| "stdout_not_utf8")?;
+    let mut events = Vec::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        if events.len() >= MAX_CODEX_OUTPUT_EVENTS {
+            return Err("stdout_event_limit");
+        }
+        let event = serde_json::from_str::<Value>(line).map_err(|_| "malformed_stdout_jsonl")?;
+        if !event.is_object() {
+            return Err("non_object_stdout_event");
+        }
+        events.push(event);
+    }
+    if events.is_empty() {
+        return Err("empty_stdout_jsonl");
+    }
+    Ok(events)
+}
+
+fn diagnostic_atom(value: Option<&Value>) -> String {
+    const SAFE_ATOMS: &[&str] = &[
+        "agent_message",
+        "cancelled",
+        "command_execution",
+        "completed",
+        "error",
+        "failed",
+        "file_change",
+        "in_progress",
+        "item.completed",
+        "item.started",
+        "item.updated",
+        "mcp_tool_call",
+        "reasoning",
+        "success",
+        "thread.started",
+        "todo_list",
+        "turn.completed",
+        "turn.failed",
+        "turn.started",
+        "web_search",
+    ];
+    match value.and_then(Value::as_str) {
+        Some(value) if SAFE_ATOMS.contains(&value) => value.to_string(),
+        Some(_) => "other".to_string(),
+        None => "-".to_string(),
+    }
+}
+
+fn codex_event_synopsis(events: &[Value]) -> String {
+    let start = events.len().saturating_sub(MAX_CODEX_SYNOPSIS_EVENTS);
+    let mut synopsis = format!("count={}", events.len());
+    if start > 0 {
+        synopsis.push_str(&format!(",omitted={start}"));
+    }
+    for event in &events[start..] {
+        let item = event.get("item");
+        let error = event.get("error");
+        synopsis.push_str(&format!(
+            ";type={},item={},status={},code={}",
+            diagnostic_atom(event.get("type")),
+            diagnostic_atom(item.and_then(|item| item.get("type"))),
+            diagnostic_atom(
+                event
+                    .get("status")
+                    .or_else(|| item.and_then(|item| item.get("status")))
+            ),
+            diagnostic_atom(
+                event
+                    .get("code")
+                    .or_else(|| error.and_then(|error| error.get("code")))
+            ),
+        ));
+    }
+    synopsis
+}
+
+fn codex_stderr_synopsis(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    format!(
+        "bytes={},lines={},sandbox={},permission_denied={},operation_not_permitted={},approval={},error={}",
+        stderr.len(),
+        text.lines().count(),
+        text.contains("sandbox"),
+        text.contains("permission denied"),
+        text.contains("operation not permitted"),
+        text.contains("approval"),
+        text.contains("error"),
+    )
+}
+
+fn remove_credential_environment(command: &mut Command) {
+    for key in CREDENTIAL_ENV_KEYS.iter().copied() {
+        command.env_remove(key);
+    }
+}
+
+fn configure_local_codex_child(command: &mut Command) {
+    remove_credential_environment(command);
+    for key in PROXY_ENV_KEYS {
+        command.env_remove(key);
+    }
+    command
+        .env("NO_PROXY", "127.0.0.1")
+        .env("no_proxy", "127.0.0.1");
+}
+
+fn remove_exact_generated_project_trust(codex_home: &Path, project_root: &Path) {
+    let config_path = codex_home.join("config.toml");
+    if !config_path.exists() {
+        return;
+    }
+    let canonical_project = std::fs::canonicalize(project_root)
+        .expect("canonicalize generated Codex project trust path");
+    let quoted_project = serde_json::to_string(canonical_project.to_string_lossy().as_ref())
+        .expect("serialize generated Codex project trust path");
+    let expected = format!("[projects.{quoted_project}]\ntrust_level = \"trusted\"\n");
+    let metadata = std::fs::symlink_metadata(&config_path)
+        .expect("inspect generated Codex project trust config");
+    assert!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "generated Codex project trust config is not a no-follow regular file"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(
+            metadata.mode() & 0o7777,
+            0o600,
+            "generated Codex project trust config has unsafe permissions"
+        );
+    }
+    let bytes = read_bounded_file(
+        &config_path,
+        4 * 1024,
+        "generated Codex project trust config",
+    );
+    assert_eq!(
+        bytes,
+        expected.as_bytes(),
+        "Codex persisted unexpected configuration during the isolated write turn"
+    );
+    std::fs::remove_file(&config_path).expect("remove exact generated Codex project trust config");
+}
+
+fn run_codex(
+    codex_turn_count: &mut usize,
+    provider: &LocalAimockProvider,
+    codex_home: &Path,
+    process_home: &Path,
+    project_root: &Path,
+    access: CodexRunAccess<'_>,
+    resume_thread_id: Option<&str>,
+    prompt: &str,
+    expected_final_marker: &str,
+) -> String {
+    let prompt_limit = match access {
+        CodexRunAccess::ReadOnly => MAX_PROMPT_BYTES,
+        CodexRunAccess::WorkspaceWrite { .. } => MAX_WRITE_PROMPT_BYTES,
+    };
+    assert!(
+        !prompt.is_empty() && prompt.len() <= prompt_limit && !prompt.chars().any(char::is_control),
+        "live Codex prompt violates the test argument bound"
+    );
+    assert!(
+        !expected_final_marker.is_empty()
+            && expected_final_marker.len() <= 128
+            && expected_final_marker
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'),
+        "live Codex expected marker violates the test argument bound"
+    );
+    if let Some(thread_id) = resume_thread_id {
+        assert!(
+            !thread_id.is_empty()
+                && thread_id.len() <= 128
+                && !thread_id.chars().any(char::is_control),
+            "live Codex resume ID violates the test argument bound"
+        );
+    }
+
+    let mut arguments = [
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--json",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--model",
+        MODEL,
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    arguments.extend(provider.config_arguments());
+    arguments.push(OsString::from("--cd"));
+    arguments.push(project_root.as_os_str().to_owned());
+    match access {
+        CodexRunAccess::ReadOnly => {
+            arguments.extend([OsString::from("--sandbox"), OsString::from("read-only")]);
+        }
+        CodexRunAccess::WorkspaceWrite { additional_dir } => {
+            let project_metadata =
+                std::fs::symlink_metadata(project_root).expect("inspect live Codex project root");
+            let additional_metadata = std::fs::symlink_metadata(additional_dir)
+                .expect("inspect live Codex additional directory");
+            assert!(
+                project_metadata.is_dir()
+                    && additional_metadata.is_dir()
+                    && !project_metadata.file_type().is_symlink()
+                    && !additional_metadata.file_type().is_symlink(),
+                "write-capable Codex roots must be no-follow directories"
+            );
+            let canonical_project =
+                std::fs::canonicalize(project_root).expect("canonicalize live Codex project");
+            let canonical_additional = std::fs::canonicalize(additional_dir)
+                .expect("canonicalize live Codex additional directory");
+            assert_eq!(
+                canonical_project.parent(),
+                canonical_additional.parent(),
+                "write-capable Codex roots must be exact siblings"
+            );
+            assert!(
+                !canonical_project.starts_with(&canonical_additional)
+                    && !canonical_additional.starts_with(&canonical_project),
+                "write-capable Codex roots overlap"
+            );
+            assert_eq!(
+                canonical_additional, additional_dir,
+                "write-capable Codex additional directory must use its canonical spelling"
+            );
+            arguments.extend([
+                OsString::from("--sandbox"),
+                OsString::from("workspace-write"),
+                OsString::from("--add-dir"),
+                additional_dir.as_os_str().to_owned(),
+            ]);
+        }
+    }
+    if let Some(thread_id) = resume_thread_id {
+        arguments.extend([OsString::from("resume"), OsString::from(thread_id)]);
+    }
+    arguments.push(OsString::from(prompt));
+    assert!(
+        arguments.len() <= MAX_COMMAND_ARGUMENTS
+            && arguments
+                .iter()
+                .all(|argument| argument.as_encoded_bytes().len() <= MAX_COMMAND_ARGUMENT_BYTES),
+        "live Codex command violates the argv safety bound"
+    );
+    for argument in &arguments {
+        assert_no_sensitive_bytes(
+            argument.as_encoded_bytes(),
+            &[],
+            "live Codex command argument",
+        );
+    }
+
+    let mut command = Command::new(codex_binary());
+    configure_local_codex_child(&mut command);
+    let mut child = command
+        .args(arguments)
+        .current_dir(project_root)
+        .env("CODEX_HOME", codex_home)
+        .env("HOME", process_home)
+        .env("USERPROFILE", process_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the Codex CLI");
+    *codex_turn_count = codex_turn_count.saturating_add(1);
+    let stdout = child.stdout.take().expect("capture Codex JSON output");
+    let stderr = child.stderr.take().expect("capture Codex stderr");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .take((MAX_CODEX_OUTPUT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr
+            .take((MAX_CODEX_OUTPUT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+
+    let deadline = Instant::now() + CODEX_TIMEOUT;
+    loop {
+        if child.try_wait().expect("wait for the Codex CLI").is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            panic!("the live Codex request exceeded its timeout");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let status = child.wait().expect("finish the Codex CLI");
+    let stdout = stdout_reader
+        .join()
+        .expect("Codex stdout reader panicked")
+        .expect("collect Codex stdout");
+    let stderr = stderr_reader
+        .join()
+        .expect("Codex stderr reader panicked")
+        .expect("collect Codex stderr");
+    assert!(
+        stdout.len() <= MAX_CODEX_OUTPUT_BYTES && stderr.len() <= MAX_CODEX_OUTPUT_BYTES,
+        "the live Codex response exceeded its output bound"
+    );
+    if matches!(access, CodexRunAccess::WorkspaceWrite { .. }) {
+        remove_exact_generated_project_trust(codex_home, project_root);
+    }
+    assert_codex_home_has_no_sensitive_state(codex_home, &[]);
+    assert_process_home_has_no_sensitive_state(process_home, &[]);
+    let stderr_synopsis = codex_stderr_synopsis(&stderr);
+    let events = parse_codex_output_events(&stdout).unwrap_or_else(|reason| {
+        panic!("the live Codex response was invalid ({reason}); stderr: {stderr_synopsis}")
+    });
+    let event_synopsis = codex_event_synopsis(&events);
+    assert!(
+        status.success(),
+        "the live Codex request failed; events: {event_synopsis}; stderr: {stderr_synopsis}"
+    );
+    let thread_ids = events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("thread.started"))
+        .filter_map(|event| event.get("thread_id").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        thread_ids.len(),
+        1,
+        "Codex did not report exactly one started thread; events: {event_synopsis}; stderr: {stderr_synopsis}"
+    );
+    let provider_thread_id = thread_ids[0].to_string();
+    assert_rollout_provider(codex_home, &provider_thread_id);
+
+    let final_messages = events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("item.completed"))
+        .filter_map(|event| event.get("item"))
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("agent_message"))
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        final_messages.len() == 1 && final_messages[0] == expected_final_marker,
+        "live Codex output lacked its single exact final marker; events: {event_synopsis}; stderr: {stderr_synopsis}"
+    );
+
+    if matches!(access, CodexRunAccess::WorkspaceWrite { .. }) {
+        let completed_file_changes = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("item.completed"))
+            .filter_map(|event| event.get("item"))
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("file_change"))
+            .count();
+        assert_eq!(
+            completed_file_changes, 1,
+            "revision-1 Codex output lacked exactly one completed file-change item; events: {event_synopsis}; stderr: {stderr_synopsis}"
+        );
+        let rollout = rollout_lookup(codex_home, &provider_thread_id)
+            .unwrap_or_else(|_| {
+                panic!(
+                    "revision-1 rollout discovery failed; events: {event_synopsis}; stderr: {stderr_synopsis}"
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "revision-1 rollout was not materialized; events: {event_synopsis}; stderr: {stderr_synopsis}"
+                )
+            });
+        let rollout = read_bounded_file(
+            &rollout,
+            MAX_CONVERSATION_FILE_BYTES,
+            "revision-1 Codex rollout",
+        );
+        let patch_keys = try_patch_apply_change_keys(&rollout).unwrap_or_else(|reason| {
+            panic!(
+                "revision-1 patch evidence failed ({reason}); events: {event_synopsis}; stderr: {stderr_synopsis}"
+            )
+        });
+        assert!(
+            local_patch_change_key_candidates(
+                project_root,
+                match access {
+                    CodexRunAccess::WorkspaceWrite { additional_dir } => additional_dir,
+                    CodexRunAccess::ReadOnly => unreachable!(),
+                },
+            )
+            .iter()
+            .any(|expected| expected == &patch_keys),
+            "revision-1 patch keys did not exactly match the requested fixtures; events: {event_synopsis}; stderr: {stderr_synopsis}"
+        );
+    }
+
+    provider_thread_id
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum HistoryRole {
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct HistoryMarker {
+    role: HistoryRole,
+    marker: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MarkerPrefixError {
+    raw_marker_bytes: usize,
+    prefix_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TimelineHistoryError {
+    error_code: usize,
+    entry_index: usize,
+    detail_a: usize,
+    detail_b: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HistoryComparison {
+    expected_items: usize,
+    actual_items: usize,
+    first_mismatch_index: usize,
+    role_mismatches: usize,
+    marker_mismatches: usize,
+}
+
+#[derive(Clone)]
+struct HistoryBaseFixture {
+    thread_id: String,
+    end_ordinal_exclusive: u64,
+    end_byte_offset: u64,
+}
+
+#[derive(Clone)]
+struct GraphNode {
+    provider_thread_id: String,
+    path: PathBuf,
+    expected: Vec<HistoryMarker>,
+}
+
+struct PaginatedGraph {
+    nodes: BTreeMap<&'static str, GraphNode>,
+}
+
+fn marker(role: HistoryRole, value: &str) -> HistoryMarker {
+    HistoryMarker {
+        role,
+        marker: value.to_string(),
+    }
+}
+
+fn marker_turn(user: &str, assistant: &str) -> Vec<HistoryMarker> {
+    vec![
+        marker(HistoryRole::User, user),
+        marker(HistoryRole::Assistant, assistant),
+    ]
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct AimockScenarioDocument {
+    version: u64,
+    model: String,
+    expected_request_count: usize,
+    scenarios: Vec<AimockScenario>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct AimockScenario {
+    id: String,
+    prompt_marker: String,
+    expected_history: Vec<HistoryMarker>,
+    require_tool_result: bool,
+    expected_tool_call_id: Option<String>,
+    response: AimockResponse,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AimockResponse {
+    Text {
+        content: String,
+    },
+    ToolCall {
+        name: String,
+        call_id: String,
+        arguments: AimockToolArguments,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct AimockToolArguments {
+    cmd: String,
+    workdir: String,
+}
+
+fn aimock_text_scenario(
+    id: &str,
+    prompt_marker: &str,
+    expected_history: Vec<HistoryMarker>,
+    response_marker: &str,
+) -> AimockScenario {
+    validate_exact_marker(prompt_marker).expect("aimock prompt marker is invalid");
+    validate_exact_marker(response_marker).expect("aimock response marker is invalid");
+    AimockScenario {
+        id: id.to_string(),
+        prompt_marker: prompt_marker.to_string(),
+        expected_history,
+        require_tool_result: false,
+        expected_tool_call_id: None,
+        response: AimockResponse::Text {
+            content: response_marker.to_string(),
+        },
+    }
+}
+
+fn final_history_oracles() -> Vec<Vec<HistoryMarker>> {
+    let mut source_primary = marker_turn("LIVE_USER_R1", "MALLARD_BASE");
+    source_primary.extend(marker_turn("LIVE_USER_R2", "MALLARD_REMOTE_BRANCH"));
+    source_primary.extend(marker_turn("LIVE_USER_R4", "MALLARD_REVISION_FOUR"));
+    let mut source_preserved_a = marker_turn("LIVE_USER_R1", "MALLARD_BASE");
+    source_preserved_a.extend(marker_turn("LIVE_USER_R3", "MALLARD_LOCAL_BRANCH"));
+    let mut source_preserved_b = marker_turn("LIVE_USER_R1", "MALLARD_BASE");
+    source_preserved_b.extend(marker_turn("LIVE_USER_R2", "MALLARD_REMOTE_BRANCH"));
+    source_preserved_b.extend(marker_turn("LIVE_USER_R5", "MALLARD_SECOND_LOCAL_BRANCH"));
+    let p0 = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_BASE_2", "GRAPH_BASE_2"))
+        .chain(marker_turn("GRAPH_USER_B_ROOT_LOCAL", "GRAPH_B_ROOT_LOCAL"))
+        .collect();
+    let p1 = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+        .chain(marker_turn("GRAPH_USER_A_LOCAL_ONLY", "GRAPH_A_LOCAL_ONLY"))
+        .collect();
+    let p2 = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_BASE_2", "GRAPH_BASE_2"))
+        .chain(marker_turn("GRAPH_USER_RIGHT_PARENT", "GRAPH_RIGHT_PARENT"))
+        .chain(marker_turn("GRAPH_USER_B_CLOUD_ONLY", "GRAPH_B_CLOUD_ONLY"))
+        .collect();
+    let p3_primary = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+        .chain(marker_turn("GRAPH_USER_LEFT_LEAF", "GRAPH_LEFT_LEAF"))
+        .chain(marker_turn("GRAPH_USER_B_DIVERGENT", "GRAPH_B_DIVERGENT"))
+        .collect();
+    let p3_preserved = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+        .chain(marker_turn("GRAPH_USER_LEFT_LEAF", "GRAPH_LEFT_LEAF"))
+        .chain(marker_turn("GRAPH_USER_A_DIVERGENT", "GRAPH_A_DIVERGENT"))
+        .collect();
+    let p4_primary = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+        .chain(marker_turn("GRAPH_USER_A_REVERSE", "GRAPH_A_REVERSE"))
+        .collect();
+    let p4_preserved = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+        .chain(marker_turn("GRAPH_USER_B_REVERSE", "GRAPH_B_REVERSE"))
+        .collect();
+    vec![
+        source_primary,
+        source_preserved_a,
+        source_preserved_b,
+        p0,
+        p1,
+        p2,
+        p3_primary,
+        p3_preserved,
+        p4_primary,
+        p4_preserved,
+    ]
+}
+
+fn aimock_scenario_document(project_root: &Path, outside_root: &Path) -> AimockScenarioDocument {
+    let call_id = "call_mallard_r1";
+    let mut scenarios = vec![AimockScenario {
+        id: "source_r1_tool".to_string(),
+        prompt_marker: "LIVE_USER_R1".to_string(),
+        expected_history: Vec::new(),
+        require_tool_result: false,
+        expected_tool_call_id: None,
+        response: AimockResponse::ToolCall {
+            name: "exec_command".to_string(),
+            call_id: call_id.to_string(),
+            arguments: AimockToolArguments {
+                cmd: revision_one_patch_command(outside_root),
+                workdir: project_root.to_string_lossy().into_owned(),
+            },
+        },
+    }];
+    scenarios.push(AimockScenario {
+        id: "source_r1_final".to_string(),
+        prompt_marker: "LIVE_USER_R1".to_string(),
+        expected_history: Vec::new(),
+        require_tool_result: true,
+        expected_tool_call_id: Some(call_id.to_string()),
+        response: AimockResponse::Text {
+            content: "MALLARD_BASE".to_string(),
+        },
+    });
+    scenarios.extend([
+        aimock_text_scenario(
+            "source_r2",
+            "LIVE_USER_R2",
+            marker_turn("LIVE_USER_R1", "MALLARD_BASE"),
+            "MALLARD_REMOTE_BRANCH",
+        ),
+        aimock_text_scenario(
+            "source_r3",
+            "LIVE_USER_R3",
+            marker_turn("LIVE_USER_R1", "MALLARD_BASE"),
+            "MALLARD_LOCAL_BRANCH",
+        ),
+        aimock_text_scenario(
+            "source_r4",
+            "LIVE_USER_R4",
+            marker_turn("LIVE_USER_R1", "MALLARD_BASE")
+                .into_iter()
+                .chain(marker_turn("LIVE_USER_R2", "MALLARD_REMOTE_BRANCH"))
+                .collect(),
+            "MALLARD_REVISION_FOUR",
+        ),
+        aimock_text_scenario(
+            "source_r5",
+            "LIVE_USER_R5",
+            marker_turn("LIVE_USER_R1", "MALLARD_BASE")
+                .into_iter()
+                .chain(marker_turn("LIVE_USER_R2", "MALLARD_REMOTE_BRANCH"))
+                .collect(),
+            "MALLARD_SECOND_LOCAL_BRANCH",
+        ),
+        aimock_text_scenario("graph_base_1", "GRAPH_USER_BASE_1", vec![], "GRAPH_BASE_1"),
+        aimock_text_scenario(
+            "graph_base_2",
+            "GRAPH_USER_BASE_2",
+            marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1"),
+            "GRAPH_BASE_2",
+        ),
+        aimock_text_scenario(
+            "graph_left_parent",
+            "GRAPH_USER_LEFT_PARENT",
+            marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1"),
+            "GRAPH_LEFT_PARENT",
+        ),
+        aimock_text_scenario(
+            "graph_right_parent",
+            "GRAPH_USER_RIGHT_PARENT",
+            marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+                .into_iter()
+                .chain(marker_turn("GRAPH_USER_BASE_2", "GRAPH_BASE_2"))
+                .collect(),
+            "GRAPH_RIGHT_PARENT",
+        ),
+        aimock_text_scenario(
+            "graph_left_leaf",
+            "GRAPH_USER_LEFT_LEAF",
+            marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+                .into_iter()
+                .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+                .collect(),
+            "GRAPH_LEFT_LEAF",
+        ),
+        aimock_text_scenario(
+            "graph_a_local_only",
+            "GRAPH_USER_A_LOCAL_ONLY",
+            marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+                .into_iter()
+                .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+                .collect(),
+            "GRAPH_A_LOCAL_ONLY",
+        ),
+        aimock_text_scenario(
+            "graph_a_divergent",
+            "GRAPH_USER_A_DIVERGENT",
+            marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+                .into_iter()
+                .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+                .chain(marker_turn("GRAPH_USER_LEFT_LEAF", "GRAPH_LEFT_LEAF"))
+                .collect(),
+            "GRAPH_A_DIVERGENT",
+        ),
+        aimock_text_scenario(
+            "graph_b_cloud_only",
+            "GRAPH_USER_B_CLOUD_ONLY",
+            marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+                .into_iter()
+                .chain(marker_turn("GRAPH_USER_BASE_2", "GRAPH_BASE_2"))
+                .chain(marker_turn("GRAPH_USER_RIGHT_PARENT", "GRAPH_RIGHT_PARENT"))
+                .collect(),
+            "GRAPH_B_CLOUD_ONLY",
+        ),
+        aimock_text_scenario(
+            "graph_b_divergent",
+            "GRAPH_USER_B_DIVERGENT",
+            marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+                .into_iter()
+                .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+                .chain(marker_turn("GRAPH_USER_LEFT_LEAF", "GRAPH_LEFT_LEAF"))
+                .collect(),
+            "GRAPH_B_DIVERGENT",
+        ),
+        aimock_text_scenario(
+            "graph_a_reverse",
+            "GRAPH_USER_A_REVERSE",
+            marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+                .into_iter()
+                .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+                .collect(),
+            "GRAPH_A_REVERSE",
+        ),
+        aimock_text_scenario(
+            "graph_b_reverse",
+            "GRAPH_USER_B_REVERSE",
+            marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+                .into_iter()
+                .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+                .collect(),
+            "GRAPH_B_REVERSE",
+        ),
+        aimock_text_scenario(
+            "graph_b_root_local",
+            "GRAPH_USER_B_ROOT_LOCAL",
+            marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+                .into_iter()
+                .chain(marker_turn("GRAPH_USER_BASE_2", "GRAPH_BASE_2"))
+                .collect(),
+            "GRAPH_B_ROOT_LOCAL",
+        ),
+    ]);
+    let final_histories = final_history_oracles();
+    for replica_index in 0..2 {
+        for (history_index, history) in final_histories.iter().enumerate() {
+            scenarios.push(aimock_text_scenario(
+                &format!("verify_{replica_index}_{history_index}"),
+                &format!("MALLARD_USER_VERIFY_{replica_index}_{history_index}"),
+                history.clone(),
+                HEADLESS_REOPEN_ACK,
+            ));
+        }
+    }
+    assert_eq!(scenarios.len(), EXPECTED_AIMOCK_REQUESTS);
+    let ids = scenarios
+        .iter()
+        .map(|scenario| scenario.id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        ids.len(),
+        scenarios.len(),
+        "aimock scenario IDs are not unique"
+    );
+    AimockScenarioDocument {
+        version: 1,
+        model: MODEL.to_string(),
+        expected_request_count: EXPECTED_AIMOCK_REQUESTS,
+        scenarios,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AimockReadiness {
+    #[serde(rename = "type")]
+    kind: String,
+    version: u64,
+    port: u16,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AimockAudit {
+    version: u64,
+    expected_request_count: usize,
+    request_count: usize,
+    journal_saturated: bool,
+    post_only: bool,
+    responses_path_only: bool,
+    query_absent: bool,
+    content_type_json_only: bool,
+    content_encoding_absent: bool,
+    authorization_absent: bool,
+    unknown_request_count: usize,
+    strict_miss_count: usize,
+    history_mismatch_count: usize,
+    duplicate_request_count: usize,
+    unused_scenario_count: usize,
+    all_scenarios_consumed_once: bool,
+    scenarios: Vec<AimockScenarioAudit>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AimockScenarioAudit {
+    id: String,
+    request_count: usize,
+    method_ok: bool,
+    path_ok: bool,
+    query_absent: bool,
+    content_type_json: bool,
+    content_encoding_absent: bool,
+    authorization_absent: bool,
+    status_ok: bool,
+    model_ok: bool,
+    stream_ok: bool,
+    expected_prior_history_count: usize,
+    observed_prior_history_count: usize,
+    total_input_count: usize,
+    current_marker_position: i64,
+    history_match: bool,
+    tool_result_match: bool,
+    mismatch_code: usize,
+    mismatch_index: usize,
+}
+
+struct AimockProcess {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout_reader: Option<std::thread::JoinHandle<Result<(), ()>>>,
+    stderr_reader: Option<std::thread::JoinHandle<Result<(), ()>>>,
+    audit_path: PathBuf,
+}
+
+impl AimockProcess {
+    fn start(
+        temporary_root: &Path,
+        process_home: &Path,
+        document: &AimockScenarioDocument,
+    ) -> Result<(Self, LocalAimockProvider), &'static str> {
+        let temporary_metadata = std::fs::symlink_metadata(temporary_root)
+            .map_err(|_| "cannot inspect aimock control directory")?;
+        if !temporary_metadata.is_dir() || temporary_metadata.file_type().is_symlink() {
+            return Err("aimock control directory must be a no-follow directory");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if temporary_metadata.mode() & 0o7777 != 0o700 {
+                return Err("aimock control directory must have mode 0700");
+            }
+        }
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repository_root = manifest_dir
+            .parent()
+            .ok_or("Tauri manifest directory has no repository parent")?;
+        let harness = repository_root.join("scripts/live-codex-aimock-server.mjs");
+        let harness_metadata =
+            std::fs::symlink_metadata(&harness).map_err(|_| "aimock harness is unavailable")?;
+        if !harness_metadata.is_file() || harness_metadata.file_type().is_symlink() {
+            return Err("aimock harness must be a no-follow regular file");
+        }
+        let scenario_path = temporary_root.join("aimock-scenario.json");
+        let audit_path = temporary_root.join("aimock-audit.json");
+        if audit_path.exists() {
+            return Err("aimock audit destination already exists");
+        }
+        let scenario_bytes =
+            serde_json::to_vec(document).map_err(|_| "cannot serialize aimock scenarios")?;
+        if scenario_bytes.is_empty() || scenario_bytes.len() as u64 > MAX_AIMOCK_CONTROL_BYTES {
+            return Err("aimock scenario document exceeds its bound");
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut scenario_file = options
+            .open(&scenario_path)
+            .map_err(|_| "cannot create aimock scenario document")?;
+        scenario_file
+            .write_all(&scenario_bytes)
+            .and_then(|_| scenario_file.write_all(b"\n"))
+            .and_then(|_| scenario_file.flush())
+            .map_err(|_| "cannot write aimock scenario document")?;
+
+        let mut command = Command::new("node");
+        configure_local_codex_child(&mut command);
+        let mut child = command
+            .arg(&harness)
+            .arg("--scenario")
+            .arg(&scenario_path)
+            .arg("--audit")
+            .arg(&audit_path)
+            // The absolute harness URL resolves its pinned dependency from
+            // the repository. Keep the third-party process cwd inside the
+            // disposable home so conventional cwd-based config loaders can
+            // never discover a repository-local .env file.
+            .current_dir(process_home)
+            .env("HOME", process_home)
+            .env("USERPROFILE", process_home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| "cannot start local aimock harness")?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or("aimock harness stdin is unavailable")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("aimock harness stdout is unavailable")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("aimock harness stderr is unavailable")?;
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        let stdout_reader = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = Vec::new();
+            let readiness =
+                match read_bounded_jsonl_line(&mut reader, &mut line, MAX_APP_SERVER_LINE_BYTES) {
+                    Ok(0) | Err(_) => Err(()),
+                    Ok(_) => serde_json::from_slice::<AimockReadiness>(&line).map_err(|_| ()),
+                };
+            let _ = ready_sender.send(readiness);
+            let mut remainder = Vec::new();
+            reader
+                .take(MAX_AIMOCK_CONTROL_BYTES.saturating_add(1))
+                .read_to_end(&mut remainder)
+                .map_err(|_| ())?;
+            if remainder.len() as u64 > MAX_AIMOCK_CONTROL_BYTES {
+                return Err(());
+            }
+            Ok(())
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr
+                .take(MAX_AIMOCK_CONTROL_BYTES.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(|_| ())?;
+            if bytes.len() as u64 > MAX_AIMOCK_CONTROL_BYTES {
+                return Err(());
+            }
+            Ok(())
+        });
+        let readiness = match ready_receiver.recv_timeout(AIMOCK_START_TIMEOUT) {
+            Ok(Ok(readiness)) => readiness,
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err("aimock harness did not become ready");
+            }
+        };
+        if readiness.kind != "mallard_aimock_ready" || readiness.version != 1 || readiness.port == 0
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err("aimock harness emitted invalid readiness");
+        }
+        let provider = LocalAimockProvider::new(format!("http://127.0.0.1:{}/v1", readiness.port))?;
+        Ok((
+            Self {
+                child,
+                stdin: Some(stdin),
+                stdout_reader: Some(stdout_reader),
+                stderr_reader: Some(stderr_reader),
+                audit_path,
+            },
+            provider,
+        ))
+    }
+
+    fn finish(mut self) -> Result<(), &'static str> {
+        let stdin = self.stdin.as_mut().ok_or("aimock stdin is closed")?;
+        stdin
+            .write_all(b"{\"command\":\"shutdown\",\"version\":1}\n")
+            .and_then(|_| stdin.flush())
+            .map_err(|_| "cannot request aimock shutdown")?;
+        self.stdin.take();
+        let deadline = Instant::now() + CAPTURE_TIMEOUT;
+        let status = loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                _ => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    return Err("aimock harness did not stop cleanly");
+                }
+            }
+        };
+        let stdout_ok = self
+            .stdout_reader
+            .take()
+            .ok_or("aimock stdout reader is unavailable")?
+            .join()
+            .map_err(|_| "aimock stdout reader panicked")?
+            .is_ok();
+        let stderr_ok = self
+            .stderr_reader
+            .take()
+            .ok_or("aimock stderr reader is unavailable")?
+            .join()
+            .map_err(|_| "aimock stderr reader panicked")?
+            .is_ok();
+        if !status.success() || !stdout_ok || !stderr_ok {
+            return Err("aimock harness failed without exposing process output");
+        }
+        let audit_bytes = read_bounded_file(
+            &self.audit_path,
+            MAX_AIMOCK_CONTROL_BYTES,
+            "aimock safe audit",
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = std::fs::symlink_metadata(&self.audit_path)
+                .map_err(|_| "cannot inspect aimock audit")?;
+            if metadata.mode() & 0o7777 != 0o600 {
+                return Err("aimock audit has unsafe permissions");
+            }
+        }
+        let audit: AimockAudit =
+            serde_json::from_slice(&audit_bytes).map_err(|_| "aimock audit is malformed")?;
+        validate_aimock_audit(&audit)
+    }
+}
+
+impl Drop for AimockProcess {
+    fn drop(&mut self) {
+        self.stdin.take();
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        if let Some(reader) = self.stdout_reader.take() {
+            let _ = reader.join();
+        }
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+fn validate_aimock_audit(audit: &AimockAudit) -> Result<(), &'static str> {
+    if audit.version != 1
+        || audit.expected_request_count != EXPECTED_AIMOCK_REQUESTS
+        || audit.request_count != EXPECTED_AIMOCK_REQUESTS
+        || audit.journal_saturated
+        || !audit.post_only
+        || !audit.responses_path_only
+        || !audit.query_absent
+        || !audit.content_type_json_only
+        || !audit.content_encoding_absent
+        || !audit.authorization_absent
+        || audit.unknown_request_count != 0
+        || audit.strict_miss_count != 0
+        || audit.history_mismatch_count != 0
+        || audit.duplicate_request_count != 0
+        || audit.unused_scenario_count != 0
+        || !audit.all_scenarios_consumed_once
+        || audit.scenarios.len() != EXPECTED_AIMOCK_REQUESTS
+    {
+        return Err("aimock aggregate audit failed");
+    }
+    let mut ids = BTreeSet::new();
+    for scenario in &audit.scenarios {
+        if scenario.id.is_empty()
+            || !ids.insert(scenario.id.as_str())
+            || scenario.request_count != 1
+            || !scenario.method_ok
+            || !scenario.path_ok
+            || !scenario.query_absent
+            || !scenario.content_type_json
+            || !scenario.content_encoding_absent
+            || !scenario.authorization_absent
+            || !scenario.status_ok
+            || !scenario.model_ok
+            || !scenario.stream_ok
+            || scenario.expected_prior_history_count != scenario.observed_prior_history_count
+            || scenario.total_input_count <= scenario.observed_prior_history_count
+            || scenario.current_marker_position < 0
+            || usize::try_from(scenario.current_marker_position)
+                .ok()
+                .is_none_or(|position| position >= scenario.total_input_count)
+            || !scenario.history_match
+            || !scenario.tool_result_match
+            || scenario.mismatch_code != 0
+            || scenario.mismatch_index != 0
+        {
+            return Err("aimock per-scenario audit failed");
+        }
+    }
+    Ok(())
+}
+
+fn normalize_position_zero_marker(value: &str) -> Result<String, MarkerPrefixError> {
+    let raw_marker_bytes = value.len();
+    let prefix_bytes = value
+        .bytes()
+        .take_while(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+        .count();
+    if raw_marker_bytes == 0
+        || raw_marker_bytes > MAX_WRITE_PROMPT_BYTES
+        || prefix_bytes == 0
+        || prefix_bytes > 128
+    {
+        return Err(MarkerPrefixError {
+            raw_marker_bytes,
+            prefix_bytes,
+        });
+    }
+    Ok(value[..prefix_bytes].to_string())
+}
+
+fn validate_exact_marker(value: &str) -> Result<String, MarkerPrefixError> {
+    let raw_marker_bytes = value.len();
+    let prefix_bytes = value
+        .bytes()
+        .take_while(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+        .count();
+    if raw_marker_bytes == 0 || raw_marker_bytes > 128 || prefix_bytes != raw_marker_bytes {
+        return Err(MarkerPrefixError {
+            raw_marker_bytes,
+            prefix_bytes,
+        });
+    }
+    Ok(value.to_string())
+}
+
+fn is_single_exact_started_thread(started_thread_ids: &[String], expected: &str) -> bool {
+    started_thread_ids.len() == 1 && started_thread_ids[0] == expected
+}
+
+fn compare_ordered_history(
+    actual: &[HistoryMarker],
+    expected: &[HistoryMarker],
+) -> HistoryComparison {
+    HistoryComparison {
+        expected_items: expected.len(),
+        actual_items: actual.len(),
+        first_mismatch_index: actual
+            .iter()
+            .zip(expected)
+            .position(|(actual, expected)| actual != expected)
+            .unwrap_or_else(|| actual.len().min(expected.len())),
+        role_mismatches: actual
+            .iter()
+            .zip(expected)
+            .filter(|(actual, expected)| actual.role != expected.role)
+            .count(),
+        marker_mismatches: actual
+            .iter()
+            .zip(expected)
+            .filter(|(actual, expected)| actual.marker != expected.marker)
+            .count(),
+    }
+}
+
+fn fixture_uuid(value: u64) -> String {
+    format!("019f7800-0000-7000-8000-{value:012x}")
+}
+
+fn session_meta_record(
+    provider_thread_id: &str,
+    cwd: &Path,
+    history_base: Option<&HistoryBaseFixture>,
+) -> Value {
+    json!({
+        "timestamp": "2026-08-18T00:00:00Z",
+        "type": "session_meta",
+        "payload": {
+            "id": provider_thread_id,
+            "session_id": provider_thread_id,
+            "timestamp": "2026-08-18T00:00:00Z",
+            "cwd": cwd.to_string_lossy(),
+            "originator": "codex_exec",
+            "cli_version": "0.147.0",
+            "source": "exec",
+            "model_provider": PROVIDER_ID,
+            "base_instructions": null,
+            "history_mode": "paginated",
+            "history_base": history_base.map(|base| json!({
+                "thread_id": base.thread_id,
+                "end_ordinal_exclusive": base.end_ordinal_exclusive,
+                "end_byte_offset": base.end_byte_offset,
+            })),
+        },
+    })
+}
+
+fn turn_records(
+    provider_thread_id: &str,
+    turn_id: &str,
+    user_item_id: &str,
+    assistant_item_id: &str,
+    parent_message_id: Option<&str>,
+    user_marker: &str,
+    assistant_marker: &str,
+) -> Vec<Value> {
+    vec![
+        json!({
+            "timestamp": "2026-08-18T00:00:01Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_started",
+                "turn_id": turn_id,
+                "model_context_window": 114000,
+                "collaboration_mode_kind": "default",
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": user_item_id,
+                "parent_id": parent_message_id,
+                "role": "user",
+                "content": [{"type": "input_text", "text": user_marker}],
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": provider_thread_id,
+                "turn_id": turn_id,
+                "item": {
+                    "type": "UserMessage",
+                    "id": user_item_id,
+                    "content": [{"type": "text", "text": user_marker, "text_elements": []}],
+                },
+                "completed_at_ms": 1787011202000_i64,
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": assistant_item_id,
+                "parent_id": user_item_id,
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": assistant_marker}],
+                "phase": "final_answer",
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": provider_thread_id,
+                "turn_id": turn_id,
+                "item": {
+                    "type": "AgentMessage",
+                    "id": assistant_item_id,
+                    "content": [{"type": "Text", "text": assistant_marker}],
+                    "phase": "final_answer",
+                },
+                "completed_at_ms": 1787011203000_i64,
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:04Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": turn_id,
+                "last_agent_message": assistant_marker,
+            },
+        }),
+    ]
+}
+
+fn encode_rollout_records(mut records: Vec<Value>) -> Vec<u8> {
+    let start_ordinal = records
+        .first()
+        .and_then(|record| record["payload"]["history_base"]["end_ordinal_exclusive"].as_u64())
+        .unwrap_or(0);
+    let mut bytes = Vec::new();
+    for (offset, record) in records.iter_mut().enumerate() {
+        record
+            .as_object_mut()
+            .expect("rollout record must be an object")
+            .insert("ordinal".to_string(), json!(start_ordinal + offset as u64));
+        serde_json::to_writer(&mut bytes, record).expect("serialize paginated rollout record");
+        bytes.push(b'\n');
+    }
+    assert!(
+        bytes.len() as u64 <= MAX_CONVERSATION_FILE_BYTES,
+        "generated rollout exceeds the transcript safety bound"
+    );
+    bytes
+}
+
+fn rollout_path(codex_home: &Path, provider_thread_id: &str) -> PathBuf {
+    let suffix = format!("-{provider_thread_id}.jsonl");
+    let mut matches = Vec::new();
+    for root_name in ["sessions", "archived_sessions"] {
+        let root = codex_home.join(root_name);
+        if !root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(root).follow_links(false).max_depth(8) {
+            let entry = redacted(entry, "cannot inspect isolated Codex rollouts");
+            assert!(
+                !entry.file_type().is_symlink(),
+                "isolated Codex session tree contains a symlink"
+            );
+            if entry.file_type().is_file()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(&suffix))
+            {
+                matches.push(entry.path().to_path_buf());
+            }
+        }
+    }
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one rollout with the provider thread ID"
+    );
+    matches.pop().expect("checked one rollout match")
+}
+
+fn rollout_lookup(codex_home: &Path, thread_id: &str) -> Result<Option<PathBuf>, String> {
+    let suffix = format!("-{thread_id}.jsonl");
+    let mut match_path = None;
+    let mut visited = 0_usize;
+    for root_name in ["sessions", "archived_sessions"] {
+        let root = codex_home.join(root_name);
+        if !root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(root).follow_links(false).max_depth(8) {
+            let entry = entry.map_err(|_| "cannot inspect Codex rollout lookup".to_string())?;
+            visited += 1;
+            if visited > 4_096 {
+                return Err("Codex rollout lookup exceeded its entry bound".to_string());
+            }
+            if entry.file_type().is_symlink() {
+                return Err("Codex rollout lookup encountered a symlink".to_string());
+            }
+            if entry.file_type().is_file()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(&suffix))
+                && match_path.replace(entry.path().to_path_buf()).is_some()
+            {
+                return Err("Codex rollout lookup found duplicate identities".to_string());
+            }
+        }
+    }
+    Ok(match_path)
+}
+
+fn assert_rollout_provider(codex_home: &Path, provider_thread_id: &str) {
+    let path = rollout_lookup(codex_home, provider_thread_id)
+        .unwrap_or_else(|_| panic!("cannot inspect isolated Codex rollout provider"))
+        .unwrap_or_else(|| panic!("isolated Codex rollout is unavailable"));
+    let bytes = read_bounded_file(
+        &path,
+        MAX_CONVERSATION_FILE_BYTES,
+        "isolated Codex rollout provider",
+    );
+    let first = bytes
+        .split(|byte| *byte == b'\n')
+        .find(|line| !line.is_empty())
+        .expect("isolated Codex rollout is empty");
+    let first: Value =
+        serde_json::from_slice(first).expect("isolated Codex rollout metadata is malformed");
+    assert_eq!(
+        first["type"],
+        json!("session_meta"),
+        "isolated Codex rollout lacks leading session metadata"
+    );
+    assert_eq!(
+        first["payload"]["model_provider"],
+        json!(PROVIDER_ID),
+        "isolated Codex rollout used an unexpected model provider"
+    );
+}
+
+fn validate_paginated_rollout(
+    codex_home: &Path,
+    node: &GraphNode,
+    expected_segments: &[&str],
+    project_root: &Path,
+) {
+    let bytes = read_bounded_file(
+        &node.path,
+        MAX_CONVERSATION_FILE_BYTES,
+        "generated paginated rollout",
+    );
+    let structure = redacted(
+        analyze_codex_rollout_structure(&bytes, Some(&node.provider_thread_id)),
+        "generated paginated rollout has invalid structure",
+    );
+    assert_eq!(structure.current.id, node.provider_thread_id);
+    assert_eq!(structure.current.history_mode.as_deref(), Some("paginated"));
+    let lookup = |thread_id: &str| rollout_lookup(codex_home, thread_id);
+    let resolved = redacted(
+        resolve_codex_root(&node.path, &lookup),
+        "production graph resolver rejected generated paginated rollout",
+    );
+    assert_eq!(
+        resolved
+            .segments
+            .iter()
+            .map(|segment| segment.provider_thread_id.as_str())
+            .collect::<Vec<_>>(),
+        expected_segments
+    );
+    assert!(
+        resolved.chain.len() >= node.expected.len(),
+        "native graph lost durable conversation messages"
+    );
+    for pair in resolved.chain.windows(2) {
+        assert_eq!(
+            pair[1].parent_message_id.as_ref(),
+            Some(&pair[0].message_id),
+            "generated dependency graph broke message ancestry"
+        );
+    }
+    let seeded = redacted(
+        seed_codex_root(&resolved, &bytes, None),
+        "production root seeding rejected generated paginated rollout",
+    );
+    assert_eq!(
+        seeded.mapping.consumed_record_ordinal,
+        exact_cutoff(&node.provider_thread_id, &bytes).end_ordinal_exclusive
+    );
+    let artifact = redacted(
+        build_standalone_codex_root(
+            &resolved,
+            &StandaloneBuildMode::Encode {
+                root: project_root.to_string_lossy().into_owned(),
+                canonical_root: std::fs::canonicalize(project_root)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned()),
+            },
+            None,
+        ),
+        "standalone production builder rejected generated paginated rollout",
+    );
+    assert_eq!(artifact.message_count as usize, resolved.chain.len());
+    let visible_history = timeline_history_from_standalone(
+        &artifact.root_bytes,
+        project_root,
+        &artifact.root_provider_thread_id,
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "native graph timeline projection failed (error_code={}, entry_index={}, detail_a={}, detail_b={})",
+            error.error_code, error.entry_index, error.detail_a, error.detail_b,
+        )
+    });
+    let comparison = compare_ordered_history(&visible_history, &node.expected);
+    assert!(
+        visible_history == node.expected,
+        "native graph visible history is incorrect (expected_items={}, actual_items={}, first_mismatch_index={}, role_mismatches={}, marker_mismatches={})",
+        comparison.expected_items,
+        comparison.actual_items,
+        comparison.first_mismatch_index,
+        comparison.role_mismatches,
+        comparison.marker_mismatches,
+    );
+    let records = artifact
+        .root_bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice::<Value>(line).expect("parse standalone record"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| (index as u64, record["ordinal"].as_u64()))
+            .collect::<Vec<_>>(),
+        records
+            .iter()
+            .enumerate()
+            .map(|(index, _)| (index as u64, Some(index as u64)))
+            .collect::<Vec<_>>()
+    );
+    assert!(records[0]["payload"]["history_base"].is_null());
+    verify_projection_fixpoint(&records[1..], &node.provider_thread_id)
+        .expect("standalone paginated projection is not a fixpoint");
+}
+
+fn write_graph_node(
+    codex_home: &Path,
+    provider_thread_id: &str,
+    title: &str,
+    records: Vec<Value>,
+    expected: Vec<HistoryMarker>,
+) -> GraphNode {
+    let session_dir = codex_home.join("sessions/2026/08/18");
+    std::fs::create_dir_all(&session_dir).expect("create paginated session directory");
+    let path = session_dir.join(format!(
+        "rollout-2026-08-18T00-00-00-{provider_thread_id}.jsonl"
+    ));
+    assert!(!path.exists(), "generated rollout identity already exists");
+    std::fs::write(&path, encode_rollout_records(records)).expect("write paginated rollout");
+    let index_path = codex_home.join("session_index.jsonl");
+    let mut index = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(index_path)
+        .expect("open Codex session index");
+    serde_json::to_writer(
+        &mut index,
+        &json!({
+            "id": provider_thread_id,
+            "thread_name": title,
+            "updated_at": "2026-08-18T00:00:04Z",
+        }),
+    )
+    .expect("write Codex session index row");
+    index.write_all(b"\n").expect("finish Codex index row");
+    GraphNode {
+        provider_thread_id: provider_thread_id.to_string(),
+        path,
+        expected,
+    }
+}
+
+fn exact_cutoff(thread_id: &str, bytes: &[u8]) -> HistoryBaseFixture {
+    assert_eq!(bytes.last(), Some(&b'\n'));
+    let mut next_ordinal = None;
+    for raw in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|raw| !raw.is_empty())
+    {
+        let record: Value = serde_json::from_slice(raw).expect("parse rollout cutoff record");
+        let ordinal = record["ordinal"]
+            .as_u64()
+            .expect("rollout cutoff record lacks a global ordinal");
+        if let Some(expected) = next_ordinal {
+            assert_eq!(ordinal, expected, "rollout ordinals are not contiguous");
+        }
+        next_ordinal = Some(
+            ordinal
+                .checked_add(1)
+                .expect("rollout ordinal cannot advance"),
+        );
+    }
+    HistoryBaseFixture {
+        thread_id: thread_id.to_string(),
+        end_ordinal_exclusive: next_ordinal.expect("rollout cutoff has no records"),
+        end_byte_offset: bytes.len() as u64,
+    }
+}
+
+fn write_paginated_graph(codex_home: &Path, project_root: &Path) -> PaginatedGraph {
+    let mut nodes = BTreeMap::new();
+
+    let mut p0_turn1 = vec![session_meta_record(P0, project_root, None)];
+    p0_turn1.extend(turn_records(
+        P0,
+        &fixture_uuid(0x101),
+        &fixture_uuid(0x102),
+        &fixture_uuid(0x103),
+        None,
+        "GRAPH_USER_BASE_1",
+        "GRAPH_BASE_1",
+    ));
+    let p0_turn1_bytes = encode_rollout_records(p0_turn1.clone());
+    let p0_turn1_cutoff = exact_cutoff(P0, &p0_turn1_bytes);
+    let mut p0_records = p0_turn1;
+    p0_records.extend(turn_records(
+        P0,
+        &fixture_uuid(0x104),
+        &fixture_uuid(0x105),
+        &fixture_uuid(0x106),
+        Some(&fixture_uuid(0x103)),
+        "GRAPH_USER_BASE_2",
+        "GRAPH_BASE_2",
+    ));
+    let mut p0_expected = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1");
+    p0_expected.extend(marker_turn("GRAPH_USER_BASE_2", "GRAPH_BASE_2"));
+    let p0 = write_graph_node(
+        codex_home,
+        P0,
+        "Mallard graph shared root",
+        p0_records,
+        p0_expected,
+    );
+    let p0_complete_cutoff = exact_cutoff(
+        P0,
+        &read_bounded_file(&p0.path, MAX_CONVERSATION_FILE_BYTES, "P0 rollout"),
+    );
+
+    let mut p1_records = vec![session_meta_record(
+        P1,
+        project_root,
+        Some(&p0_turn1_cutoff),
+    )];
+    p1_records.extend(turn_records(
+        P1,
+        &fixture_uuid(0x111),
+        &fixture_uuid(0x112),
+        &fixture_uuid(0x113),
+        Some(&fixture_uuid(0x103)),
+        "GRAPH_USER_LEFT_PARENT",
+        "GRAPH_LEFT_PARENT",
+    ));
+    let mut p1_expected = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1");
+    p1_expected.extend(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"));
+    let p1 = write_graph_node(
+        codex_home,
+        P1,
+        "Mallard graph left parent",
+        p1_records,
+        p1_expected,
+    );
+    let p1_complete_cutoff = exact_cutoff(
+        P1,
+        &read_bounded_file(&p1.path, MAX_CONVERSATION_FILE_BYTES, "P1 rollout"),
+    );
+
+    let mut p2_records = vec![session_meta_record(
+        P2,
+        project_root,
+        Some(&p0_complete_cutoff),
+    )];
+    p2_records.extend(turn_records(
+        P2,
+        &fixture_uuid(0x121),
+        &fixture_uuid(0x122),
+        &fixture_uuid(0x123),
+        Some(&fixture_uuid(0x106)),
+        "GRAPH_USER_RIGHT_PARENT",
+        "GRAPH_RIGHT_PARENT",
+    ));
+    let mut p2_expected = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1");
+    p2_expected.extend(marker_turn("GRAPH_USER_BASE_2", "GRAPH_BASE_2"));
+    p2_expected.extend(marker_turn("GRAPH_USER_RIGHT_PARENT", "GRAPH_RIGHT_PARENT"));
+    let p2 = write_graph_node(
+        codex_home,
+        P2,
+        "Mallard graph right parent",
+        p2_records,
+        p2_expected,
+    );
+
+    let mut p3_records = vec![session_meta_record(
+        P3,
+        project_root,
+        Some(&p1_complete_cutoff),
+    )];
+    p3_records.extend(turn_records(
+        P3,
+        &fixture_uuid(0x131),
+        &fixture_uuid(0x132),
+        &fixture_uuid(0x133),
+        Some(&fixture_uuid(0x113)),
+        "GRAPH_USER_LEFT_LEAF",
+        "GRAPH_LEFT_LEAF",
+    ));
+    let mut p3_expected = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1");
+    p3_expected.extend(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"));
+    p3_expected.extend(marker_turn("GRAPH_USER_LEFT_LEAF", "GRAPH_LEFT_LEAF"));
+    let p3 = write_graph_node(
+        codex_home,
+        P3,
+        "Mallard graph left leaf",
+        p3_records,
+        p3_expected,
+    );
+
+    let p4_expected = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+        .collect();
+    let p4 = write_graph_node(
+        codex_home,
+        P4,
+        "Mallard graph inherited-only leaf",
+        vec![session_meta_record(
+            P4,
+            project_root,
+            Some(&p1_complete_cutoff),
+        )],
+        p4_expected,
+    );
+
+    nodes.insert("p0", p0);
+    nodes.insert("p1", p1);
+    nodes.insert("p2", p2);
+    nodes.insert("p3", p3);
+    nodes.insert("p4", p4);
+    let graph = PaginatedGraph { nodes };
+    for (name, segments) in [
+        ("p0", vec![P0]),
+        ("p1", vec![P0, P1]),
+        ("p2", vec![P0, P2]),
+        ("p3", vec![P0, P1, P3]),
+        ("p4", vec![P0, P1, P4]),
+    ] {
+        validate_paginated_rollout(
+            codex_home,
+            graph.nodes.get(name).expect("graph node"),
+            &segments,
+            project_root,
+        );
+    }
+    graph
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_paginated_turn(
+    codex_home: &Path,
+    project_root: &Path,
+    provider_thread_id: &str,
+    turn_id: &str,
+    user_item_id: &str,
+    assistant_item_id: &str,
+    user_marker: &str,
+    assistant_marker: &str,
+) {
+    let path = rollout_path(codex_home, provider_thread_id);
+    let lookup = |thread_id: &str| rollout_lookup(codex_home, thread_id);
+    let before = read_bounded_file(
+        &path,
+        MAX_CONVERSATION_FILE_BYTES,
+        "paginated rollout before append",
+    );
+    assert_eq!(before.last(), Some(&b'\n'));
+    let resolved =
+        resolve_codex_root(&path, &lookup).expect("cannot resolve paginated rollout before append");
+    let parent = resolved
+        .leaf_last_message_id
+        .as_ref()
+        .map(|message_id| message_id.as_str().to_string());
+    let start_ordinal = exact_cutoff(provider_thread_id, &before).end_ordinal_exclusive;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open paginated rollout for append");
+    let mut records = turn_records(
+        provider_thread_id,
+        turn_id,
+        user_item_id,
+        assistant_item_id,
+        parent.as_deref(),
+        user_marker,
+        assistant_marker,
+    );
+    for (offset, record) in records.iter_mut().enumerate() {
+        record
+            .as_object_mut()
+            .expect("appended rollout record must be an object")
+            .insert("ordinal".to_string(), json!(start_ordinal + offset as u64));
+        serde_json::to_writer(&mut file, record).expect("append paginated rollout record");
+        file.write_all(b"\n")
+            .expect("finish appended rollout record");
+    }
+    file.flush().expect("flush appended paginated rollout");
+    let after = read_bounded_file(
+        &path,
+        MAX_CONVERSATION_FILE_BYTES,
+        "paginated rollout after append",
+    );
+    assert!(
+        after.starts_with(&before),
+        "append changed the frozen prefix"
+    );
+    let refreshed = redacted(
+        resolve_codex_root(&path, &lookup),
+        "production graph resolver rejected appended paginated rollout",
+    );
+    let seeded = redacted(
+        seed_codex_root(&refreshed, &after, None),
+        "production root seeding rejected appended paginated rollout",
+    );
+    assert_eq!(
+        seeded.mapping.consumed_record_ordinal,
+        start_ordinal + records.len() as u64
+    );
+    redacted(
+        build_standalone_codex_root(
+            &refreshed,
+            &StandaloneBuildMode::Encode {
+                root: project_root.to_string_lossy().into_owned(),
+                canonical_root: std::fs::canonicalize(project_root)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned()),
+            },
+            None,
+        ),
+        "standalone production builder rejected appended paginated rollout",
+    );
+}
+
+fn assert_native_history_base(
+    label: &str,
+    codex_home: &Path,
+    provider_thread_id: &str,
+    expected_parent: Option<&str>,
+    expected_base: Option<&HistoryBaseFixture>,
+    project_root: &Path,
+) {
+    let path = rollout_path(codex_home, provider_thread_id);
+    let bytes = read_bounded_file(
+        &path,
+        MAX_CONVERSATION_FILE_BYTES,
+        "native paginated rollout metadata",
+    );
+    let structure = analyze_codex_rollout_structure(&bytes, Some(provider_thread_id))
+        .expect("native paginated rollout metadata is invalid");
+    assert_eq!(structure.current.history_mode.as_deref(), Some("paginated"));
+    assert_eq!(structure.current.forked_from_id.as_deref(), expected_parent);
+    assert_eq!(structure.current.cwd, project_root.to_string_lossy());
+    match (structure.current.history_base.as_ref(), expected_base) {
+        (None, None) => {}
+        (Some(actual), Some(expected)) => {
+            assert_eq!(
+                actual.thread_id, expected.thread_id,
+                "{label} base identity"
+            );
+            assert_eq!(
+                actual.end_ordinal_exclusive, expected.end_ordinal_exclusive,
+                "{label} base record cutoff"
+            );
+            assert_eq!(
+                actual.end_byte_offset, expected.end_byte_offset,
+                "{label} base byte cutoff"
+            );
+        }
+        _ => panic!("native paginated rollout has the wrong history base presence"),
+    }
+    assert_rollout_provider(codex_home, provider_thread_id);
+}
+
+fn write_native_paginated_graph(
+    provider: &LocalAimockProvider,
+    codex_home: &Path,
+    process_home: &Path,
+    project_root: &Path,
+) -> PaginatedGraph {
+    let mut app_server = CodexAppServer::start(provider, codex_home, process_home, project_root)
+        .expect("start native Codex graph app-server");
+    let p0_id = app_server
+        .thread_start_paginated(project_root)
+        .expect("start native paginated P0");
+    app_server
+        .turn_start_and_wait(&p0_id, "GRAPH_USER_BASE_1")
+        .expect("complete native P0 base-1 turn");
+    let p0_turn1_bytes = read_bounded_file(
+        &rollout_path(codex_home, &p0_id),
+        MAX_CONVERSATION_FILE_BYTES,
+        "native P0 base-1 rollout",
+    );
+    let p0_turn1_cutoff = exact_cutoff(&p0_id, &p0_turn1_bytes);
+    let p1_id = app_server
+        .thread_fork_excluding_turns(&p0_id, project_root)
+        .expect("fork native P1");
+
+    // Materialize the first fork's local turn before its source advances.
+    // Codex 0.147 hydrates a fork lazily when its first turn starts; keeping
+    // the source at the reviewed cutoff until that hydration completes makes
+    // the persisted history_base boundary stable and exact.
+    app_server
+        .turn_start_and_wait(&p1_id, "GRAPH_USER_LEFT_PARENT")
+        .expect("complete native P1 turn");
+    let p1_complete_bytes = read_bounded_file(
+        &rollout_path(codex_home, &p1_id),
+        MAX_CONVERSATION_FILE_BYTES,
+        "native complete P1 rollout",
+    );
+    let p3_id = app_server
+        .thread_fork_excluding_turns(&p1_id, project_root)
+        .expect("fork native P3");
+    let p4_id = app_server
+        .thread_fork_excluding_turns(&p1_id, project_root)
+        .expect("fork native P4");
+
+    app_server
+        .turn_start_and_wait(&p0_id, "GRAPH_USER_BASE_2")
+        .expect("complete native P0 base-2 turn");
+    let p0_complete_bytes = read_bounded_file(
+        &rollout_path(codex_home, &p0_id),
+        MAX_CONVERSATION_FILE_BYTES,
+        "native complete P0 rollout",
+    );
+    assert!(p0_complete_bytes.starts_with(&p0_turn1_bytes));
+    let p0_complete_cutoff = exact_cutoff(&p0_id, &p0_complete_bytes);
+    assert_ne!(
+        p0_turn1_cutoff.end_byte_offset, p0_complete_cutoff.end_byte_offset,
+        "native P1 and P2 would share the wrong P0 cutoff"
+    );
+    let p2_id = app_server
+        .thread_fork_excluding_turns(&p0_id, project_root)
+        .expect("fork native P2");
+
+    app_server
+        .turn_start_and_wait(&p2_id, "GRAPH_USER_RIGHT_PARENT")
+        .expect("complete native P2 turn");
+    app_server
+        .turn_start_and_wait(&p3_id, "GRAPH_USER_LEFT_LEAF")
+        .expect("complete native P3 turn");
+    app_server
+        .finish()
+        .expect("stop native Codex graph app-server");
+
+    // `turn/completed` precedes the final provider-rollout bookkeeping flush
+    // in Codex 0.147. Re-read after orderly app-server shutdown and pin fork
+    // assertions to the durable parent boundary, while proving the early
+    // completed-turn prefix was never rewritten.
+    let p1_durable_bytes = read_bounded_file(
+        &rollout_path(codex_home, &p1_id),
+        MAX_CONVERSATION_FILE_BYTES,
+        "durable native P1 rollout",
+    );
+    assert!(
+        p1_durable_bytes.starts_with(&p1_complete_bytes),
+        "native P1 bookkeeping rewrote its completed-turn prefix"
+    );
+    let p1_complete_cutoff = exact_cutoff(&p1_id, &p1_durable_bytes);
+
+    let identities = [&p0_id, &p1_id, &p2_id, &p3_id, &p4_id]
+        .into_iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(identities.len(), 5, "native graph reused a thread identity");
+    for identity in &identities {
+        validate_uuid_v7(identity).expect("native graph identity is not UUIDv7");
+    }
+    assert_native_history_base("P0", codex_home, &p0_id, None, None, project_root);
+    assert_native_history_base(
+        "P1",
+        codex_home,
+        &p1_id,
+        Some(&p0_id),
+        Some(&p0_turn1_cutoff),
+        project_root,
+    );
+    assert_native_history_base(
+        "P2",
+        codex_home,
+        &p2_id,
+        Some(&p0_id),
+        Some(&p0_complete_cutoff),
+        project_root,
+    );
+    assert_native_history_base(
+        "P3",
+        codex_home,
+        &p3_id,
+        Some(&p1_id),
+        Some(&p1_complete_cutoff),
+        project_root,
+    );
+    assert_native_history_base(
+        "P4",
+        codex_home,
+        &p4_id,
+        Some(&p1_id),
+        Some(&p1_complete_cutoff),
+        project_root,
+    );
+
+    let p0_expected = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_BASE_2", "GRAPH_BASE_2"))
+        .collect();
+    let p1_expected = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+        .collect();
+    let p2_expected = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_BASE_2", "GRAPH_BASE_2"))
+        .chain(marker_turn("GRAPH_USER_RIGHT_PARENT", "GRAPH_RIGHT_PARENT"))
+        .collect();
+    let p3_expected = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+        .chain(marker_turn("GRAPH_USER_LEFT_LEAF", "GRAPH_LEFT_LEAF"))
+        .collect();
+    let p4_expected = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+        .collect();
+    let mut nodes = BTreeMap::new();
+    for (name, provider_thread_id, expected) in [
+        ("p0", p0_id, p0_expected),
+        ("p1", p1_id, p1_expected),
+        ("p2", p2_id, p2_expected),
+        ("p3", p3_id, p3_expected),
+        ("p4", p4_id, p4_expected),
+    ] {
+        nodes.insert(
+            name,
+            GraphNode {
+                path: rollout_path(codex_home, &provider_thread_id),
+                provider_thread_id,
+                expected,
+            },
+        );
+    }
+    let graph = PaginatedGraph { nodes };
+    for (name, segments) in [
+        ("p0", vec![graph.nodes["p0"].provider_thread_id.as_str()]),
+        (
+            "p1",
+            vec![
+                graph.nodes["p0"].provider_thread_id.as_str(),
+                graph.nodes["p1"].provider_thread_id.as_str(),
+            ],
+        ),
+        (
+            "p2",
+            vec![
+                graph.nodes["p0"].provider_thread_id.as_str(),
+                graph.nodes["p2"].provider_thread_id.as_str(),
+            ],
+        ),
+        (
+            "p3",
+            vec![
+                graph.nodes["p0"].provider_thread_id.as_str(),
+                graph.nodes["p1"].provider_thread_id.as_str(),
+                graph.nodes["p3"].provider_thread_id.as_str(),
+            ],
+        ),
+        (
+            "p4",
+            vec![
+                graph.nodes["p0"].provider_thread_id.as_str(),
+                graph.nodes["p1"].provider_thread_id.as_str(),
+                graph.nodes["p4"].provider_thread_id.as_str(),
+            ],
+        ),
+    ] {
+        validate_paginated_rollout(codex_home, &graph.nodes[name], &segments, project_root);
+    }
+    graph
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_paginated_mutation(
+    codex_turn_count: &mut usize,
+    provider: &LocalAimockProvider,
+    codex_home: &Path,
+    process_home: &Path,
+    project_root: &Path,
+    provider_thread_id: &str,
+    user_marker: &str,
+    assistant_marker: &str,
+) {
+    let path = rollout_path(codex_home, provider_thread_id);
+    let before = read_bounded_file(
+        &path,
+        MAX_CONVERSATION_FILE_BYTES,
+        "native paginated rollout before CLI mutation",
+    );
+    let structure_before = analyze_codex_rollout_structure(&before, Some(provider_thread_id))
+        .expect("native paginated rollout is invalid before CLI mutation");
+    assert_eq!(
+        structure_before.current.history_mode.as_deref(),
+        Some("paginated")
+    );
+    let resumed = run_codex(
+        codex_turn_count,
+        provider,
+        codex_home,
+        process_home,
+        project_root,
+        CodexRunAccess::ReadOnly,
+        Some(provider_thread_id),
+        user_marker,
+        assistant_marker,
+    );
+    assert_eq!(resumed, provider_thread_id);
+    let after = read_bounded_file(
+        &path,
+        MAX_CONVERSATION_FILE_BYTES,
+        "native paginated rollout after CLI mutation",
+    );
+    assert!(
+        after.len() > before.len() && after.starts_with(&before),
+        "CLI mutation rewrote the native paginated prefix"
+    );
+    let structure_after = analyze_codex_rollout_structure(&after, Some(provider_thread_id))
+        .expect("native paginated rollout is invalid after CLI mutation");
+    assert_eq!(
+        structure_after.current.history_mode,
+        structure_before.current.history_mode
+    );
+    assert_eq!(
+        structure_after.current.history_base,
+        structure_before.current.history_base
+    );
+    assert_eq!(
+        structure_after.current.forked_from_id,
+        structure_before.current.forked_from_id
+    );
+    let lookup = |thread_id: &str| rollout_lookup(codex_home, thread_id);
+    let resolved = resolve_codex_root(&path, &lookup)
+        .expect("production resolver rejected CLI-mutated paginated rollout");
+    build_standalone_codex_root(
+        &resolved,
+        &StandaloneBuildMode::Encode {
+            root: project_root.to_string_lossy().into_owned(),
+            canonical_root: std::fs::canonicalize(project_root)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned()),
+        },
+        None,
+    )
+    .expect("standalone builder rejected CLI-mutated paginated rollout");
+}
+
+fn digest_inventory(codex_home: &Path) -> BTreeMap<PathBuf, [u8; 32]> {
+    let mut inventory = BTreeMap::new();
+    for root_name in ["sessions", "archived_sessions"] {
+        let root = codex_home.join(root_name);
+        if !root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&root).follow_links(false).max_depth(8) {
+            let entry = redacted(entry, "cannot inventory isolated Codex history");
+            assert!(
+                !entry.file_type().is_symlink(),
+                "isolated Codex history contains a symlink"
+            );
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(codex_home)
+                .expect("history entry remains below Codex home")
+                .to_path_buf();
+            let bytes = read_bounded_file(
+                entry.path(),
+                MAX_CONVERSATION_FILE_BYTES,
+                "isolated Codex history file",
+            );
+            inventory.insert(relative, Sha256::digest(bytes).into());
+            assert!(
+                inventory.len() <= MAX_SNAPSHOT_FILES,
+                "isolated Codex history inventory exceeds its file bound"
+            );
+        }
+    }
+    let index = codex_home.join("session_index.jsonl");
+    if index.exists() {
+        inventory.insert(
+            PathBuf::from("session_index.jsonl"),
+            Sha256::digest(read_bounded_file(
+                &index,
+                MAX_CONVERSATION_FILE_BYTES,
+                "isolated Codex session index",
+            ))
+            .into(),
+        );
+    }
+    inventory
+}
+
+fn copy_snapshot_tree(source_home: &Path, snapshot_home: &Path, root_name: &str) {
+    let source_root = source_home.join(root_name);
+    if !source_root.exists() {
+        return;
+    }
+    let mut entries_seen = 0_usize;
+    for entry in WalkDir::new(&source_root).follow_links(false).max_depth(8) {
+        let entry = redacted(entry, "cannot snapshot isolated Codex history");
+        entries_seen += 1;
+        assert!(
+            entries_seen <= MAX_SNAPSHOT_FILES,
+            "Codex snapshot exceeds its entry bound"
+        );
+        assert!(
+            !entry.file_type().is_symlink(),
+            "Codex snapshot source contains a symlink"
+        );
+        let relative = entry
+            .path()
+            .strip_prefix(source_home)
+            .expect("snapshot source remains below Codex home");
+        let destination = snapshot_home.join(relative);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&destination).expect("create Codex snapshot directory");
+        } else if entry.file_type().is_file() {
+            let bytes = read_bounded_file(
+                entry.path(),
+                MAX_CONVERSATION_FILE_BYTES,
+                "Codex snapshot source file",
+            );
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent).expect("create Codex snapshot file parent");
+            }
+            std::fs::write(&destination, bytes).expect("write Codex snapshot file");
+        } else {
+            panic!("Codex snapshot source contains a special file");
+        }
+    }
+}
+
+fn create_headless_snapshot(source_home: &Path, snapshot_home: &Path) {
+    assert!(
+        !source_home.join("auth.json").exists(),
+        "isolated Codex source home unexpectedly contains auth.json"
+    );
+    std::fs::create_dir_all(snapshot_home).expect("create headless Codex snapshot home");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(snapshot_home, std::fs::Permissions::from_mode(0o700))
+            .expect("secure headless Codex snapshot home");
+    }
+    copy_snapshot_tree(source_home, snapshot_home, "sessions");
+    copy_snapshot_tree(source_home, snapshot_home, "archived_sessions");
+    let index = source_home.join("session_index.jsonl");
+    if index.exists() {
+        let bytes = read_bounded_file(
+            &index,
+            MAX_CONVERSATION_FILE_BYTES,
+            "snapshot Codex session index",
+        );
+        std::fs::write(snapshot_home.join("session_index.jsonl"), bytes)
+            .expect("write snapshot Codex session index");
+    }
+    assert!(
+        !snapshot_home.join("auth.json").exists(),
+        "headless Codex snapshot unexpectedly contains auth.json"
+    );
+}
+
+fn timeline_history_from_standalone(
+    root_bytes: &[u8],
+    project_root: &Path,
+    provider_thread_id: &str,
+) -> Result<Vec<HistoryMarker>, TimelineHistoryError> {
+    let failure = |error_code, entry_index, detail_a, detail_b| TimelineHistoryError {
+        error_code,
+        entry_index,
+        detail_a,
+        detail_b,
+    };
+    if root_bytes.is_empty() || root_bytes.len() as u64 > MAX_CONVERSATION_FILE_BYTES {
+        return Err(failure(1, 0, root_bytes.len(), 0));
+    }
+
+    let temporary = tempfile::tempdir().map_err(|_| failure(2, 0, 0, 0))?;
+    let rollout = temporary.path().join("standalone-rollout.jsonl");
+    std::fs::write(&rollout, root_bytes).map_err(|_| failure(3, 0, 0, 0))?;
+
+    let canonical_project_root =
+        std::fs::canonicalize(project_root).map_err(|_| failure(4, 0, 0, 0))?;
+    let mut project_root_aliases = vec![project_root.to_path_buf(), canonical_project_root.clone()];
+    project_root_aliases.sort();
+    project_root_aliases.dedup();
+    let registry = ProviderRegistry::production();
+    let adapter = registry
+        .require_sessions(&codex_key())
+        .map_err(|_| failure(5, 0, 0, 0))?;
+    let context = SessionTimelineContext {
+        resource_id: "codex:conversation:live-history-oracle",
+        provider_session_id: provider_thread_id,
+        project_root: &canonical_project_root,
+        project_root_aliases: &project_root_aliases,
+    };
+    let index = adapter
+        .build_timeline_index(&rollout, &context)
+        .map_err(|_| failure(6, 0, 0, 0))?;
+    if index.truncated {
+        return Err(failure(7, 0, index.events.len(), index.warnings.len()));
+    }
+    // Native app-server turns include bounded provider-generated context
+    // messages in addition to the user/assistant marker exchange. The
+    // production timeline can conservatively estimate aggregate counts for
+    // that richer stream; this oracle verifies the exact ordered,
+    // marker-bearing Prompt/Response events themselves.
+    let display_count = index.events.len();
+    if display_count > MAX_SESSION_DETAIL_EVENTS {
+        return Err(failure(12, 0, display_count, MAX_SESSION_DETAIL_EVENTS));
+    }
+
+    let included_event_kinds = BTreeSet::from([
+        SessionTimelineEventKind::Prompt,
+        SessionTimelineEventKind::Response,
+    ]);
+    let mut start_index = None;
+    let mut page_count = 0usize;
+    let mut event_ids = BTreeSet::new();
+    let mut previous_ordinal = None;
+    let mut history = Vec::with_capacity(display_count);
+    loop {
+        page_count = page_count.saturating_add(1);
+        if page_count > MAX_SESSION_DETAIL_EVENTS {
+            return Err(failure(13, history.len(), page_count, history.len()));
+        }
+        let page = adapter
+            .read_timeline_page(
+                &rollout,
+                &index,
+                &SessionTimelineQuery {
+                    start_index,
+                    anchor_event_id: None,
+                    limit: HISTORY_TIMELINE_PAGE_LIMIT,
+                    included_event_kinds: included_event_kinds.clone(),
+                    included_tool_categories: BTreeSet::new(),
+                    turn_id: None,
+                },
+            )
+            .map_err(|_| failure(14, history.len(), page_count, 0))?;
+        let page_event_count = page.events.len();
+        if page_event_count > HISTORY_TIMELINE_PAGE_LIMIT {
+            return Err(failure(
+                15,
+                history.len(),
+                page_event_count,
+                HISTORY_TIMELINE_PAGE_LIMIT,
+            ));
+        }
+        for event in page.events {
+            let entry_index = history.len();
+            if history.len() >= MAX_SESSION_DETAIL_EVENTS {
+                return Err(failure(
+                    16,
+                    entry_index,
+                    history.len(),
+                    MAX_SESSION_DETAIL_EVENTS,
+                ));
+            }
+            if !event_ids.insert(event.event_id) {
+                return Err(failure(17, entry_index, 0, 0));
+            }
+            if previous_ordinal.is_some_and(|previous| event.ordinal <= previous) {
+                return Err(failure(
+                    18,
+                    entry_index,
+                    usize::try_from(event.ordinal).unwrap_or(usize::MAX),
+                    0,
+                ));
+            }
+            previous_ordinal = Some(event.ordinal);
+            let text = event.text.ok_or_else(|| failure(20, entry_index, 0, 0))?;
+            let candidate = match event.kind {
+                SessionTimelineEventKind::Prompt => normalize_position_zero_marker(&text)
+                    .ok()
+                    .filter(|marker| {
+                        marker.starts_with("LIVE_USER_") || marker.starts_with("GRAPH_USER_")
+                    })
+                    .map(|marker| (HistoryRole::User, marker)),
+                SessionTimelineEventKind::Response
+                    if text.starts_with("MALLARD_") || text.starts_with("GRAPH_") =>
+                {
+                    let marker = validate_exact_marker(&text).map_err(|error| {
+                        failure(22, entry_index, error.raw_marker_bytes, error.prefix_bytes)
+                    })?;
+                    Some((HistoryRole::Assistant, marker))
+                }
+                SessionTimelineEventKind::Response => None,
+                _ => return Err(failure(21, entry_index, 0, 0)),
+            };
+            let Some((role, marker)) = candidate else {
+                continue;
+            };
+            if !matches!(
+                event.quality,
+                SessionCountQuality::Exact | SessionCountQuality::Inferred
+            ) {
+                return Err(failure(19, entry_index, 0, 0));
+            }
+            history.push(HistoryMarker { role, marker });
+        }
+
+        let Some(next_index) = page.next_index else {
+            break;
+        };
+        let previous_start = start_index.unwrap_or(0);
+        if next_index <= previous_start || next_index > index.events.len() {
+            return Err(failure(23, history.len(), previous_start, next_index));
+        }
+        if page_event_count == 0 {
+            return Err(failure(24, history.len(), previous_start, next_index));
+        }
+        start_index = Some(next_index);
+    }
+
+    Ok(history)
+}
+
+fn resolved_local_alias_history(
+    codex_home: &Path,
+    project_root: &Path,
+    provider_thread_id: &str,
+    root_tail_layout: Option<&mallard_domain::RootTailLayout>,
+    replica_index: usize,
+    history_index: usize,
+) -> Vec<HistoryMarker> {
+    let path = redacted(
+        rollout_lookup(codex_home, provider_thread_id),
+        "cannot locate exact local history alias",
+    )
+    .unwrap_or_else(|| panic!("exact local history alias is unavailable"));
+    let lookup = |thread_id: &str| rollout_lookup(codex_home, thread_id);
+    let resolved = redacted(
+        resolve_codex_root(&path, &lookup),
+        "production resolver rejected exact local history alias",
+    );
+    let artifact = redacted(
+        build_standalone_codex_root(
+            &resolved,
+            &StandaloneBuildMode::Encode {
+                root: project_root.to_string_lossy().into_owned(),
+                canonical_root: std::fs::canonicalize(project_root)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned()),
+            },
+            root_tail_layout,
+        ),
+        "production standalone builder rejected exact local history alias",
+    );
+    timeline_history_from_standalone(
+        &artifact.root_bytes,
+        project_root,
+        &artifact.root_provider_thread_id,
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "exact local alias timeline projection failed (replica_index={replica_index}, history_index={history_index}, error_code={}, entry_index={}, detail_a={}, detail_b={})",
+            error.error_code, error.entry_index, error.detail_a, error.detail_b,
+        )
+    })
+}
+
+fn assert_resolved_local_alias_history(
+    codex_home: &Path,
+    project_root: &Path,
+    provider_thread_id: &str,
+    root_tail_layout: Option<&mallard_domain::RootTailLayout>,
+    expected: &[HistoryMarker],
+    replica_index: usize,
+    history_index: usize,
+) {
+    let actual = resolved_local_alias_history(
+        codex_home,
+        project_root,
+        provider_thread_id,
+        root_tail_layout,
+        replica_index,
+        history_index,
+    );
+    let comparison = compare_ordered_history(&actual, expected);
+    assert!(
+        actual == expected,
+        "resolved local alias history differs from its exact oracle (replica_index={replica_index}, history_index={history_index}, expected_items={}, actual_items={}, first_mismatch_index={}, role_mismatches={}, marker_mismatches={})",
+        comparison.expected_items,
+        comparison.actual_items,
+        comparison.first_mismatch_index,
+        comparison.role_mismatches,
+        comparison.marker_mismatches,
+    );
+}
+
+fn run_headless_history_verification(
+    codex_turn_count: &mut usize,
+    provider: &LocalAimockProvider,
+    sensitive_needles: &[Vec<u8>],
+    source_codex_home: &Path,
+    project_root: &Path,
+    provider_thread_id: &str,
+    expected: &[HistoryMarker],
+    replica_index: usize,
+    history_index: usize,
+) {
+    assert!(
+        provider_thread_id.len() <= 128
+            && !provider_thread_id.is_empty()
+            && !provider_thread_id.chars().any(char::is_control),
+        "headless resume ID violates the test argument bound"
+    );
+    let original_before = digest_inventory(source_codex_home);
+    let snapshot = tempfile::tempdir().expect("create disposable Codex verification snapshot");
+    let snapshot_home = snapshot.path().join("codex-home");
+    let snapshot_process_home = snapshot.path().join("process-home");
+    std::fs::create_dir_all(&snapshot_process_home).expect("create snapshot process home");
+    create_headless_snapshot(source_codex_home, &snapshot_home);
+    let snapshot_rollout = rollout_path(&snapshot_home, provider_thread_id);
+    assert_rollout_provider(&snapshot_home, provider_thread_id);
+    let rollout_before = read_bounded_file(
+        &snapshot_rollout,
+        MAX_CONVERSATION_FILE_BYTES,
+        "snapshot rollout before headless resume",
+    );
+    assert!(
+        !expected.is_empty(),
+        "headless history oracle must contain at least one display message"
+    );
+    let headless_reopen_prompt = format!("MALLARD_USER_VERIFY_{replica_index}_{history_index}");
+    assert!(
+        headless_reopen_prompt.len() <= MAX_PROMPT_BYTES
+            && !headless_reopen_prompt.chars().any(char::is_control),
+        "headless verification prompt violates the argument bound"
+    );
+    let mut arguments = vec![
+        OsString::from("--ask-for-approval"),
+        OsString::from("never"),
+        OsString::from("exec"),
+        OsString::from("--json"),
+        OsString::from("--ignore-user-config"),
+        OsString::from("--ignore-rules"),
+        OsString::from("--skip-git-repo-check"),
+        OsString::from("--sandbox"),
+        OsString::from("read-only"),
+        OsString::from("--model"),
+        OsString::from(MODEL),
+    ];
+    arguments.extend(provider.config_arguments());
+    arguments.extend([
+        OsString::from("--cd"),
+        project_root.as_os_str().to_owned(),
+        OsString::from("resume"),
+        OsString::from("--ephemeral"),
+        OsString::from(provider_thread_id),
+        OsString::from(headless_reopen_prompt),
+    ]);
+    assert!(
+        arguments.len() <= MAX_COMMAND_ARGUMENTS
+            && arguments
+                .iter()
+                .all(|argument| argument.as_encoded_bytes().len() <= MAX_COMMAND_ARGUMENT_BYTES),
+        "headless Codex command violates the argv safety bound"
+    );
+    for argument in &arguments {
+        assert_no_sensitive_bytes(
+            argument.as_encoded_bytes(),
+            sensitive_needles,
+            "headless Codex command argument",
+        );
+    }
+
+    let mut command = Command::new(codex_binary());
+    configure_local_codex_child(&mut command);
+    let mut child = command
+        .args(arguments)
+        .current_dir(project_root)
+        .env("CODEX_HOME", &snapshot_home)
+        .env("HOME", &snapshot_process_home)
+        .env("USERPROFILE", &snapshot_process_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|_| panic!("cannot start headless Codex history verification"));
+    *codex_turn_count = codex_turn_count.saturating_add(1);
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => panic!("cannot capture headless Codex stdout"),
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => panic!("cannot capture headless Codex stderr"),
+    };
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .take((MAX_CODEX_OUTPUT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr
+            .take((MAX_CODEX_OUTPUT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let deadline = Instant::now() + CODEX_TIMEOUT;
+    let mut wait_failed = false;
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(_) => {
+                wait_failed = true;
+                let _ = child.kill();
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let status = child.wait();
+    let stdout = stdout_reader.join();
+    let stderr = stderr_reader.join();
+    if timed_out {
+        panic!("headless Codex history verification exceeded its timeout");
+    }
+    if wait_failed {
+        panic!("cannot wait for headless Codex history verification");
+    }
+    let status = status.unwrap_or_else(|_| panic!("cannot finish headless Codex verification"));
+    let stdout = stdout
+        .unwrap_or_else(|_| panic!("headless stdout reader panicked"))
+        .unwrap_or_else(|_| panic!("cannot collect headless Codex stdout"));
+    let stderr = stderr
+        .unwrap_or_else(|_| panic!("headless stderr reader panicked"))
+        .unwrap_or_else(|_| panic!("cannot collect headless Codex stderr"));
+    assert!(
+        stdout.len() <= MAX_CODEX_OUTPUT_BYTES && stderr.len() <= MAX_CODEX_OUTPUT_BYTES,
+        "headless Codex verification output exceeds its bound"
+    );
+    assert_no_sensitive_bytes(&stdout, sensitive_needles, "headless Codex stdout");
+    assert_no_sensitive_bytes(&stderr, sensitive_needles, "headless Codex stderr");
+    assert_codex_home_has_no_sensitive_state(&snapshot_home, sensitive_needles);
+    assert_process_home_has_no_sensitive_state(&snapshot_process_home, sensitive_needles);
+    assert!(
+        status.success(),
+        "headless Codex verification failed without exposing captured content"
+    );
+
+    let stdout = redacted(
+        String::from_utf8(stdout),
+        "headless Codex JSON output was not UTF-8",
+    );
+    let mut started_thread_ids = Vec::new();
+    let mut final_messages = Vec::new();
+    for line in stdout.lines() {
+        let event: Value = redacted(
+            serde_json::from_str(line),
+            "headless Codex emitted malformed JSONL",
+        );
+        match event.get("type").and_then(Value::as_str) {
+            Some("thread.started") => {
+                started_thread_ids.push(
+                    event
+                        .get("thread_id")
+                        .and_then(Value::as_str)
+                        .expect("thread.started event lacks its thread identity")
+                        .to_string(),
+                );
+            }
+            Some("item.completed") => {
+                let item = event.get("item").expect("completed event lacks its item");
+                match item.get("type").and_then(Value::as_str) {
+                    Some("agent_message") => final_messages.push(
+                        item.get("text")
+                            .and_then(Value::as_str)
+                            .expect("agent message lacks text")
+                            .to_string(),
+                    ),
+                    Some("reasoning") => {}
+                    Some(_) => panic!("headless verification used a forbidden completed item"),
+                    None => panic!("headless verification item lacks its type"),
+                }
+            }
+            Some("item.started") => {
+                let kind = event
+                    .get("item")
+                    .and_then(|item| item.get("type"))
+                    .and_then(Value::as_str)
+                    .expect("started item lacks its type");
+                assert!(
+                    matches!(kind, "reasoning" | "agent_message"),
+                    "headless history verification started a forbidden item"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        is_single_exact_started_thread(&started_thread_ids, provider_thread_id),
+        "headless verification did not return exactly one matching thread identity"
+    );
+    assert_eq!(
+        final_messages.len(),
+        1,
+        "headless verification did not return exactly one final response"
+    );
+    assert_eq!(
+        final_messages[0], HEADLESS_REOPEN_ACK,
+        "headless verification did not emit the fixed loopback acknowledgement"
+    );
+
+    // Codex 0.147 appends to an existing rollout despite --ephemeral. Always
+    // use a fresh disposable snapshot, prove the exact target was resumed and
+    // extended there, and leave authoritative isolated history untouched.
+    let rollout_after = read_bounded_file(
+        &snapshot_rollout,
+        MAX_CONVERSATION_FILE_BYTES,
+        "snapshot rollout after headless resume",
+    );
+    assert!(
+        rollout_after.len() > rollout_before.len() && rollout_after.starts_with(&rollout_before),
+        "headless resume did not append its verification turn in the disposable snapshot"
+    );
+    assert_eq!(
+        digest_inventory(source_codex_home),
+        original_before,
+        "headless verification mutated the original isolated Codex history"
+    );
+}
+
+fn verify_all_histories(
+    codex_turn_count: &mut usize,
+    provider: &LocalAimockProvider,
+    sensitive_needles: &[Vec<u8>],
+    repositories: [(&LocalStateRepository, &LocalProjectId, &Path, &Path); 2],
+    histories: &[(ThreadId, Vec<HistoryMarker>)],
+) {
+    for (replica_index, (repository, project_id, codex_home, project_root)) in
+        repositories.into_iter().enumerate()
+    {
+        let before = digest_inventory(codex_home);
+        for (history_index, (logical_thread_id, expected)) in histories.iter().enumerate() {
+            let binding = conversation_binding(repository, project_id, logical_thread_id);
+            let provider_id = binding
+                .provider_thread_id
+                .as_deref()
+                .expect("logical history alias is not resumable");
+            assert_resolved_local_alias_history(
+                codex_home,
+                project_root,
+                provider_id,
+                binding.root_tail_layout.as_ref(),
+                expected,
+                replica_index,
+                history_index,
+            );
+            run_headless_history_verification(
+                codex_turn_count,
+                provider,
+                sensitive_needles,
+                codex_home,
+                project_root,
+                provider_id,
+                expected,
+                replica_index,
+                history_index,
+            );
+        }
+        assert_eq!(
+            digest_inventory(codex_home),
+            before,
+            "complete headless verification matrix mutated an isolated Codex home"
+        );
+    }
+}
+
+fn local_storage(storage_root: &Path) -> StorageConfig {
+    StorageConfig {
+        id: StorageId::parse("storage-live-codex-e2e").expect("static storage id"),
+        name: "Live Codex local storage".to_string(),
+        kind: StorageKind::Local,
+        bucket: String::new(),
+        access_key_id: String::new(),
+        secret_access_key: String::new(),
+        account_id: String::new(),
+        s3_endpoint: String::new(),
+        region: String::new(),
+        local_dir: storage_root.to_string_lossy().into_owned(),
+        supports_conditional_writes: None,
+    }
+}
+
+fn codex_key() -> ProviderKey {
+    ProviderKey::parse("codex").expect("static provider key")
+}
+
+fn finish_setup(
+    service: &ProjectSyncService<'_>,
+    project_root: &Path,
+    codex_home: &Path,
+    storage: StorageConfig,
+    repository_choice: DraftRepositoryChoice,
+) -> ProjectDetail {
+    let mut draft: ProjectSetupDraft = redacted(
+        service.create_setup_draft(project_root),
+        "cannot create project setup draft",
+    )
+    .draft;
+    draft.profiles.insert(
+        codex_key(),
+        DraftProfileSelection::Pending {
+            path: codex_home.to_string_lossy().into_owned(),
+            display_name: String::new(),
+        },
+    );
+    draft.storage = Some(DraftStorageSelection::Pending { storage });
+    draft.repository = repository_choice;
+    let draft = redacted(
+        service.update_setup_draft(draft),
+        "cannot save project setup choices",
+    );
+    let inspection = redacted(
+        service.inspect_setup_draft(&draft.draft_id),
+        "cannot inspect project setup",
+    );
+    assert!(inspection.can_finalize, "live project setup is not ready");
+    redacted(
+        service.finalize_project_setup(&draft.draft_id, draft.revision),
+        "cannot finalize project setup",
+    )
+}
+
+fn approved_pull_actions(plan: &RestorePlan) -> Vec<ActionId> {
+    plan.actions
+        .iter()
+        .filter(|action| !matches!(action.kind, RestoreActionKind::Manual { .. }))
+        .map(|action| action.action_id.clone())
+        .chain(
+            plan.conversation_actions
+                .iter()
+                .filter(|action| {
+                    matches!(
+                        action.action,
+                        ConversationPlanActionType::AdoptCloudMetadata
+                            | ConversationPlanActionType::MaterializeCloud
+                            | ConversationPlanActionType::KeepBoth
+                            | ConversationPlanActionType::CreateLocal
+                    )
+                })
+                .map(|action| action.action_id.clone()),
+        )
+        .collect()
+}
+
+fn pull_and_apply(
+    service: &ProjectSyncService<'_>,
+    storage_id: &StorageId,
+    bundle_id: &BundleId,
+    binding: &ProjectBinding,
+) -> (RestorePlan, RestoreResult) {
+    let plan = redacted(
+        service.plan_bundle_restore(storage_id, bundle_id, binding),
+        "cannot plan reviewed Pull",
+    );
+    let result = redacted(
+        service.apply_bundle_restore(&plan.plan_id, approved_pull_actions(&plan)),
+        "cannot apply reviewed Pull",
+    );
+    assert!(result.success, "reviewed Pull did not complete");
+    assert!(
+        result.failed_actions.is_empty(),
+        "reviewed Pull had failures"
+    );
+    assert_eq!(
+        result.reviewed_base_advanced,
+        Some(true),
+        "reviewed Pull did not advance its base"
+    );
+    (plan, result)
+}
+
+fn push(
+    service: &ProjectSyncService<'_>,
+    project_id: &LocalProjectId,
+    storage_id: &StorageId,
+) -> ProjectOperationResult {
+    let review = redacted(
+        service.prepare_push_review(project_id, storage_id),
+        "cannot prepare reviewed Push",
+    );
+    assert!(
+        matches!(
+            review.destination_status,
+            PushDestinationStatus::Ready { .. }
+        ),
+        "reviewed Push destination is not ready"
+    );
+    redacted(
+        service.push_reviewed(
+            project_id,
+            storage_id,
+            PushApproval::recommended(&review, storage_id),
+        ),
+        "cannot apply reviewed Push",
+    )
+}
+
+fn provider_thread_id(
+    repository: &LocalStateRepository,
+    project_id: &LocalProjectId,
+    logical_thread_id: &ThreadId,
+) -> String {
+    redacted(
+        repository.load_conversation_bindings(),
+        "cannot load conversation bindings",
+    )
+    .bindings
+    .into_iter()
+    .find(|binding| {
+        binding.local_project_id == *project_id && binding.thread_id == *logical_thread_id
+    })
+    .and_then(|binding| binding.provider_thread_id)
+    .expect("logical thread is not resumable")
+}
+
+fn conversation_binding(
+    repository: &LocalStateRepository,
+    project_id: &LocalProjectId,
+    logical_thread_id: &ThreadId,
+) -> LocalConversationBinding {
+    redacted(
+        repository.load_conversation_bindings(),
+        "cannot load conversation bindings",
+    )
+    .bindings
+    .into_iter()
+    .find(|binding| {
+        binding.local_project_id == *project_id && binding.thread_id == *logical_thread_id
+    })
+    .expect("logical thread has no local binding")
+}
+
+fn assert_rollout_cwd(codex_home: &Path, provider_thread_id: &str, expected_cwd: &Path) {
+    let mut matches = Vec::new();
+    for entry in WalkDir::new(codex_home.join("sessions")).follow_links(false) {
+        let entry = redacted(entry, "cannot inspect isolated Codex sessions");
+        if !entry.file_type().is_file()
+            || entry.path().extension().and_then(|value| value.to_str()) != Some("jsonl")
+        {
+            continue;
+        }
+        let bytes = read_bounded_file(
+            entry.path(),
+            MAX_CONVERSATION_FILE_BYTES,
+            "isolated Codex rollout",
+        );
+        if let Ok(structure) = analyze_codex_rollout_structure(&bytes, Some(provider_thread_id)) {
+            matches.push(structure);
+        }
+    }
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one rollout for the materialized Codex thread"
+    );
+    let expected = expected_cwd.to_string_lossy();
+    assert!(
+        matches[0].current.cwd == expected,
+        "materialized Codex rollout has the wrong cwd"
+    );
+    assert!(
+        matches[0]
+            .structural_cwds
+            .iter()
+            .all(|cwd| cwd == expected.as_ref()),
+        "materialized Codex rollout retained a foreign structural cwd"
+    );
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn assert_bytes_contain_path(bytes: &[u8], path: &Path, label: &str) {
+    let path = path
+        .to_str()
+        .expect("live path assertion requires a UTF-8 path");
+    assert!(
+        byte_slice_contains(bytes, path.as_bytes()),
+        "{label} does not contain an expected path"
+    );
+}
+
+fn assert_bytes_exclude_path(bytes: &[u8], path: &Path, label: &str) {
+    let path = path
+        .to_str()
+        .expect("live path assertion requires a UTF-8 path");
+    assert!(
+        !byte_slice_contains(bytes, path.as_bytes()),
+        "{label} retained a forbidden path"
+    );
+}
+
+fn try_patch_apply_change_keys(bytes: &[u8]) -> Result<BTreeSet<String>, &'static str> {
+    let mut patches = Vec::new();
+    for raw in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|raw| !raw.is_empty())
+    {
+        let record: Value = serde_json::from_slice(raw).map_err(|_| "malformed_rollout_jsonl")?;
+        let payload = record.get("payload").unwrap_or(&record);
+        if payload.get("type").and_then(Value::as_str) != Some("patch_apply_end") {
+            continue;
+        }
+        if payload.get("success").and_then(Value::as_bool) != Some(true) {
+            return Err("patch_not_successful");
+        }
+        let changes = payload
+            .get("changes")
+            .and_then(Value::as_object)
+            .ok_or("patch_changes_missing")?;
+        patches.push(changes.keys().cloned().collect::<BTreeSet<_>>());
+    }
+    if patches.len() != 1 {
+        return Err("patch_count_not_one");
+    }
+    patches.pop().ok_or("patch_count_not_one")
+}
+
+fn patch_apply_change_keys(bytes: &[u8]) -> BTreeSet<String> {
+    try_patch_apply_change_keys(bytes)
+        .unwrap_or_else(|reason| panic!("path-bearing rollout patch evidence failed: {reason}"))
+}
+
+fn local_patch_change_key_candidates(
+    project_root: &Path,
+    outside_root: &Path,
+) -> Vec<BTreeSet<String>> {
+    let canonical_project =
+        std::fs::canonicalize(project_root).expect("canonicalize patch-key project root");
+    let outside = canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES)
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<BTreeSet<_>>();
+    [project_root, canonical_project.as_path()]
+        .into_iter()
+        .map(|root| {
+            IN_PROJECT_FIXTURES
+                .iter()
+                .map(|(relative, _)| {
+                    root.join(clean_fixture_relative_path(relative))
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .chain(outside.iter().cloned())
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn assert_local_patch_change_keys(bytes: &[u8], project_root: &Path, outside_root: &Path) {
+    let actual = patch_apply_change_keys(bytes);
+    assert!(
+        local_patch_change_key_candidates(project_root, outside_root)
+            .iter()
+            .any(|expected| expected == &actual),
+        "materialized rollout patch keys do not exactly match the local and outside fixtures"
+    );
+}
+
+fn assert_portable_patch_change_keys(bytes: &[u8], outside_root: &Path) {
+    let expected = IN_PROJECT_FIXTURES
+        .iter()
+        .map(|(relative, _)| format!("/__mallard_root__/{relative}"))
+        .chain(
+            canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES)
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        )
+        .collect::<BTreeSet<_>>();
+    assert!(
+        patch_apply_change_keys(bytes) == expected,
+        "portable rollout patch keys did not tokenize only in-project fixtures"
+    );
+}
+
+fn assert_raw_rollout_paths(
+    codex_home: &Path,
+    provider_thread_id: &str,
+    expected_project_root: &Path,
+    outside_root: &Path,
+    forbidden_project_root: Option<&Path>,
+) {
+    let bytes = read_bounded_file(
+        &rollout_path(codex_home, provider_thread_id),
+        MAX_CONVERSATION_FILE_BYTES,
+        "live path rollout",
+    );
+    assert_local_patch_change_keys(&bytes, expected_project_root, outside_root);
+    for (relative, _) in IN_PROJECT_FIXTURES {
+        let spellings = fixture_path_spellings(expected_project_root, relative);
+        assert!(
+            spellings
+                .iter()
+                .any(|path| byte_slice_contains(&bytes, path.to_string_lossy().as_bytes())),
+            "provider rollout does not contain an expected project-path spelling"
+        );
+    }
+    for path in canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES) {
+        assert_bytes_contain_path(&bytes, &path, "provider rollout");
+    }
+    if let Some(forbidden_project_root) = forbidden_project_root {
+        for (relative, _) in IN_PROJECT_FIXTURES {
+            for path in fixture_path_spellings(forbidden_project_root, relative) {
+                assert_bytes_exclude_path(&bytes, &path, "remapped provider rollout");
+            }
+        }
+    }
+    assert!(
+        !byte_slice_contains(&bytes, b"/__mallard_root__"),
+        "materialized provider rollout retained the portable root token"
+    );
+    assert!(
+        !byte_slice_contains(&bytes, b"__mallard_path_map__"),
+        "materialized provider rollout retained the portable path-map marker"
+    );
+}
+
+fn portable_conversation_rollout(
+    service: &ProjectSyncService<'_>,
+    storage_id: &StorageId,
+    bundle_id: &BundleId,
+    storage_root: &Path,
+    logical_thread_id: &ThreadId,
+) -> Vec<u8> {
+    let snapshot = redacted(
+        service.inspect_bundle(storage_id, bundle_id),
+        "cannot inspect the path-bearing bundle",
+    );
+    let scope = snapshot
+        .manifest
+        .scopes
+        .get(&SyncScopeKey::provider(codex_key()))
+        .expect("published bundle lacks its Codex scope");
+    let conversation = scope
+        .conversations
+        .get(logical_thread_id)
+        .expect("published bundle lacks its path-bearing conversation");
+    let transcript = conversation
+        .files
+        .iter()
+        .find(|file| file.role == ConversationFileRole::Transcript)
+        .expect("path-bearing conversation lacks its transcript");
+    let entry = scope
+        .files
+        .get(&transcript.logical_path)
+        .expect("path-bearing transcript lacks a file entry");
+    assert_eq!(
+        entry.resource_id, conversation.resource_id,
+        "path-bearing transcript belongs to another resource"
+    );
+    let key = repository_object_key(bundle_id, &entry.object_key)
+        .expect("path-bearing transcript has an invalid object key");
+    let bytes = read_bounded_file(
+        &storage_root.join(key.as_str()),
+        MAX_CONVERSATION_FILE_BYTES,
+        "portable path-bearing rollout",
+    );
+    assert_eq!(bytes.len() as u64, entry.size);
+    assert_eq!(hex_sha256(&bytes), entry.sha256);
+    bytes
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_portable_rollout_paths(
+    service: &ProjectSyncService<'_>,
+    storage_id: &StorageId,
+    bundle_id: &BundleId,
+    storage_root: &Path,
+    logical_thread_id: &ThreadId,
+    source_project_root: &Path,
+    target_project_root: &Path,
+    outside_root: &Path,
+) {
+    let bytes = portable_conversation_rollout(
+        service,
+        storage_id,
+        bundle_id,
+        storage_root,
+        logical_thread_id,
+    );
+    assert_portable_patch_change_keys(&bytes, outside_root);
+    for (relative, _) in IN_PROJECT_FIXTURES {
+        let token_path = format!("/__mallard_root__/{relative}");
+        assert!(
+            byte_slice_contains(&bytes, token_path.as_bytes()),
+            "portable rollout lacks an expected tokenized project path"
+        );
+    }
+    for path in canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES) {
+        assert_bytes_contain_path(&bytes, &path, "portable rollout");
+    }
+    for root in [source_project_root, target_project_root] {
+        for (relative, _) in IN_PROJECT_FIXTURES {
+            for path in fixture_path_spellings(root, relative) {
+                assert_bytes_exclude_path(&bytes, &path, "portable rollout");
+            }
+        }
+    }
+}
+
+fn assert_clean_affected_path(path: &str) {
+    let path = Path::new(path);
+    assert!(
+        !path.as_os_str().is_empty()
+            && !path.is_absolute()
+            && path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "Session Details exposed an unsafe affected path"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_session_detail_paths(
+    service: &ProjectSyncService<'_>,
+    project_id: &LocalProjectId,
+    resource_id: &ResourceId,
+    project_root: &Path,
+    codex_home: &Path,
+    provider_thread_id: &str,
+    outside_root: &Path,
+) {
+    let header = service
+        .get_project_session_detail(project_id, resource_id)
+        .expect("cannot load path-bearing Session Details header");
+    assert_eq!(header.resource_id, resource_id.as_str());
+    assert_eq!(header.provider, codex_key());
+    assert_eq!(header.provider_session_id, provider_thread_id);
+    assert!(header.capabilities.tool_calls);
+    assert!(header.capabilities.event_detail);
+
+    let included_event_kinds = BTreeSet::from([SessionTimelineEventKind::ToolCall]);
+    let included_tool_categories = BTreeSet::from([
+        SessionToolCategory::FileEdit,
+        SessionToolCategory::Shell,
+        SessionToolCategory::Read,
+        SessionToolCategory::Other,
+    ]);
+    let required_paths = IN_PROJECT_FIXTURES
+        .iter()
+        .map(|(relative, _)| relative.to_string())
+        .collect::<BTreeSet<_>>();
+    let external_paths = canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES)
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let mut visible = serde_json::to_string(&header).expect("serialize Session Details header");
+    let mut cursor = None;
+    let mut seen_cursors = BTreeSet::new();
+    let mut seen_event_ids = BTreeSet::new();
+    let mut path_event_count = 0_usize;
+    let mut event_count = 0_usize;
+
+    loop {
+        let page = service
+            .get_project_session_timeline_page(
+                project_id,
+                resource_id,
+                ProjectSessionTimelineRequest {
+                    snapshot_id: header.snapshot_id.clone(),
+                    cursor: cursor.clone(),
+                    anchor_event_id: None,
+                    limit: Some(1),
+                    included_event_kinds: included_event_kinds.clone(),
+                    included_tool_categories: included_tool_categories.clone(),
+                    turn_id: None,
+                },
+            )
+            .expect("cannot load a path-bearing Session Details timeline page");
+        assert_eq!(page.resource_id, resource_id.as_str());
+        assert_eq!(page.snapshot_id, header.snapshot_id);
+        assert!(
+            page.events.len() <= 1,
+            "Session Details ignored limit-one pagination"
+        );
+        for event in page.events {
+            event_count = event_count.saturating_add(1);
+            assert!(
+                event_count <= MAX_SESSION_DETAIL_EVENTS,
+                "Session Details timeline exceeds the live-test event bound"
+            );
+            assert_eq!(event.kind, SessionTimelineEventKind::ToolCall);
+            assert!(
+                seen_event_ids.insert(event.event_id.clone()),
+                "Session Details pagination repeated an event"
+            );
+            let tool = event
+                .tool
+                .as_ref()
+                .expect("tool timeline event lacks its preview");
+            for path in &tool.affected_paths {
+                assert_clean_affected_path(path);
+                assert!(
+                    !external_paths.iter().any(|external| external == path),
+                    "outside path entered the Session Details Paths list"
+                );
+            }
+            let affected = tool.affected_paths.iter().cloned().collect::<BTreeSet<_>>();
+            if required_paths.is_subset(&affected) {
+                path_event_count = path_event_count.saturating_add(1);
+            }
+            if let Some(arguments) = &tool.argument_preview {
+                visible.push('\n');
+                visible.push_str(arguments);
+            }
+            if let Some(result) = &tool.result_preview {
+                visible.push('\n');
+                visible.push_str(result);
+            }
+
+            let detail = service
+                .get_project_session_event_detail(
+                    project_id,
+                    resource_id,
+                    &header.snapshot_id,
+                    &event.event_id,
+                )
+                .expect("cannot expand a path-bearing Session Details event");
+            assert_eq!(detail.event_id, event.event_id);
+            assert_eq!(detail.affected_paths, tool.affected_paths);
+            for path in &detail.affected_paths {
+                assert_clean_affected_path(path);
+            }
+            if let Some(arguments) = &detail.arguments {
+                visible.push('\n');
+                visible.push_str(arguments);
+            }
+            if let Some(result) = &detail.result {
+                visible.push('\n');
+                visible.push_str(result);
+            }
+        }
+
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        assert!(
+            seen_cursors.insert(next_cursor.clone()),
+            "Session Details pagination repeated a cursor"
+        );
+        assert!(
+            seen_cursors.len() <= MAX_SESSION_DETAIL_EVENTS,
+            "Session Details pagination exceeds the live-test page bound"
+        );
+        cursor = Some(next_cursor);
+    }
+
+    assert!(
+        event_count > 0,
+        "Session Details did not expose tool events"
+    );
+    assert_eq!(
+        header.event_counts.tool_calls.value,
+        Some(event_count as u64),
+        "Session Details pagination did not visit every counted tool event"
+    );
+    assert_eq!(
+        path_event_count, 1,
+        "Session Details did not expose exactly one file operation with both project-relative paths"
+    );
+    for (relative, _) in IN_PROJECT_FIXTURES {
+        assert!(
+            visible.contains(&format!("./{relative}")),
+            "Session Details did not display a normalized in-project path"
+        );
+    }
+    for external in &external_paths {
+        assert!(
+            visible.contains(external),
+            "Session Details did not display an unchanged outside path"
+        );
+    }
+    let transcript = rollout_path(codex_home, provider_thread_id);
+    let canonical_project =
+        std::fs::canonicalize(project_root).expect("canonicalize Session Details project root");
+    let canonical_home =
+        std::fs::canonicalize(codex_home).expect("canonicalize Session Details provider home");
+    let mut privacy_view = visible.clone();
+    for external in &external_paths {
+        privacy_view = privacy_view.replace(external, "<expected-outside-path>");
+    }
+    for forbidden in [
+        project_root.to_string_lossy(),
+        canonical_project.to_string_lossy(),
+        codex_home.to_string_lossy(),
+        canonical_home.to_string_lossy(),
+        transcript.to_string_lossy(),
+    ] {
+        assert!(
+            !privacy_view.contains(forbidden.as_ref()),
+            "Session Details leaked a protected path outside the expected outside fixtures"
+        );
+    }
+    assert!(
+        !visible.contains("/__mallard_root__"),
+        "Session Details exposed the portable root token"
+    );
+    assert!(
+        !visible.contains("__mallard_path_map__"),
+        "Session Details exposed the portable path-map marker"
+    );
+}
+
+fn logical_thread_id(
+    repository: &LocalStateRepository,
+    project_id: &LocalProjectId,
+    provider_thread_id: &str,
+) -> ThreadId {
+    redacted(
+        repository.load_conversation_bindings(),
+        "cannot load conversation bindings",
+    )
+    .bindings
+    .into_iter()
+    .find(|binding| {
+        binding.local_project_id == *project_id
+            && binding.provider_thread_id.as_deref() == Some(provider_thread_id)
+    })
+    .map(|binding| binding.thread_id)
+    .expect("Mallard did not bind the real Codex thread")
+}
+
+fn keep_both_for(plan: &RestorePlan, logical_thread_id: &ThreadId) -> KeepBothPlan {
+    plan.conversation_actions
+        .iter()
+        .find(|action| {
+            action.thread_id == *logical_thread_id
+                && action.action == ConversationPlanActionType::KeepBoth
+        })
+        .and_then(|action| action.keep_both.clone())
+        .expect("divergent Pull does not offer Keep Both")
+}
+
+fn assert_keep_both_result(
+    repository: &LocalStateRepository,
+    project_id: &LocalProjectId,
+    logical_thread_id: &ThreadId,
+    old_provider_thread_id: &str,
+    keep_both: &KeepBothPlan,
+    result: &RestoreResult,
+) {
+    assert_eq!(keep_both.preserved.preserved_from, *logical_thread_id);
+    assert!(keep_both.preserved.ordinal > 0);
+    assert!(keep_both.preserved_display_title.contains("Preserved "));
+    assert_eq!(result.preserved_threads.len(), 1);
+    let preserved = &result.preserved_threads[0];
+    assert_eq!(preserved.original_thread_id, *logical_thread_id);
+    assert_eq!(preserved.preserved_thread_id, keep_both.preserved_thread_id);
+    assert_eq!(
+        preserved.preserved_display_title,
+        keep_both.preserved_display_title
+    );
+    assert_eq!(
+        provider_thread_id(repository, project_id, logical_thread_id),
+        keep_both.remote_provider_thread_id
+    );
+    assert_ne!(
+        keep_both.remote_provider_thread_id, old_provider_thread_id,
+        "Keep Both reused the divergent provider thread for the cloud side"
+    );
+    assert_eq!(
+        provider_thread_id(repository, project_id, &keep_both.preserved_thread_id),
+        old_provider_thread_id,
+        "Keep Both did not retain the local provider thread on the preserved logical ID"
+    );
+    assert_eq!(
+        conversation_binding(repository, project_id, &keep_both.preserved_thread_id).preserved,
+        Some(keep_both.preserved.clone()),
+        "Keep Both did not persist preservation provenance"
+    );
+}
+
+fn assert_divergent_push_gate(
+    service: &ProjectSyncService<'_>,
+    project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    logical_thread_id: &ThreadId,
+    replica: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let comparison = redacted(
+            service.compare_threads(project_id, storage_id),
+            "cannot refresh the divergent thread comparison",
+        );
+        let matching = comparison
+            .entries
+            .iter()
+            .filter(|entry| entry.cloud_thread_id.as_ref() == Some(logical_thread_id))
+            .collect::<Vec<_>>();
+        let matching_entries = matching.len();
+        let state_code = matching
+            .first()
+            .map(|entry| match entry.state {
+                ThreadSyncState::Synced => 1,
+                ThreadSyncState::LocalOnly => 2,
+                ThreadSyncState::LocalAhead => 3,
+                ThreadSyncState::StorageOnly => 4,
+                ThreadSyncState::StorageAhead => 5,
+                ThreadSyncState::Diverged => 6,
+                ThreadSyncState::Unavailable => 7,
+                ThreadSyncState::Unknown => 8,
+            })
+            .unwrap_or(0);
+        if matching
+            .iter()
+            .any(|entry| entry.state == ThreadSyncState::Diverged)
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "{replica} did not observe the divergent Codex update before the watcher deadline: matching_entries={matching_entries},state_code={state_code}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let review = redacted(
+        service.prepare_push_review(project_id, storage_id),
+        "cannot prepare divergent Push review",
+    );
+    assert!(matches!(
+        review.destination_status,
+        PushDestinationStatus::RequiresPull {
+            reason: PushDestinationPullReason::RemoteAdvanced,
+            ..
+        }
+    ));
+    let comparison = review
+        .thread_comparison
+        .as_ref()
+        .expect("divergent Push review lacks thread comparison");
+    let entry = comparison
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.cloud_thread_id.as_ref() == Some(logical_thread_id)
+                && entry.state == ThreadSyncState::Diverged
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "{replica} Push review lacks the expected divergent logical conversation (diverged={}, rows={})",
+                comparison.counts.diverged,
+                comparison.entries.len()
+            )
+        });
+    assert_eq!(
+        entry.push_decision.action,
+        ConversationReviewAction::RequirePull
+    );
+    assert!(!entry.push_decision.selectable);
+    assert!(
+        service
+            .push_reviewed(
+                project_id,
+                storage_id,
+                PushApproval::recommended(&review, storage_id),
+            )
+            .is_err(),
+        "a stale replica unexpectedly pushed before Pull"
+    );
+}
+
+fn wait_for_thread_states(
+    service: &ProjectSyncService<'_>,
+    project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    expected: &[(&ThreadId, ThreadSyncState)],
+    replica: &str,
+) -> ThreadSyncComparison {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let comparison = redacted(
+            service.compare_threads(project_id, storage_id),
+            "cannot refresh paginated thread comparison",
+        );
+        let matches = expected.iter().all(|(thread_id, state)| {
+            comparison.entries.iter().any(|entry| {
+                entry.cloud_thread_id.as_ref() == Some(*thread_id) && entry.state == *state
+            })
+        });
+        if matches {
+            return comparison;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "{replica} did not observe expected paginated states (expected_rows={},rows={},synced={},local={},storage={},diverged={},unavailable={},unknown={})",
+                expected.len(),
+                comparison.entries.len(),
+                comparison.counts.synced,
+                comparison.counts.local,
+                comparison.counts.storage,
+                comparison.counts.diverged,
+                comparison.counts.unavailable,
+                comparison.counts.unknown,
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn assert_stale_push_rejected(
+    service: &ProjectSyncService<'_>,
+    project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    review: &tauri_app_lib::PushReviewContext,
+) {
+    assert!(
+        service
+            .push_reviewed(
+                project_id,
+                storage_id,
+                PushApproval::recommended(review, storage_id),
+            )
+            .is_err(),
+        "reviewed Push with a stale storage-head pin unexpectedly succeeded"
+    );
+}
+
+fn assert_pulled_standalone_rollout(
+    codex_home: &Path,
+    project_root: &Path,
+    provider_thread_id: &str,
+    expected: &[HistoryMarker],
+) {
+    let path = rollout_path(codex_home, provider_thread_id);
+    let bytes = read_bounded_file(
+        &path,
+        MAX_CONVERSATION_FILE_BYTES,
+        "pulled standalone paginated rollout",
+    );
+    let records = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice::<Value>(line).expect("parse pulled rollout record"))
+        .collect::<Vec<_>>();
+    assert!(!records.is_empty());
+    assert_eq!(records[0]["payload"]["model_provider"], json!(PROVIDER_ID));
+    assert_eq!(records[0]["payload"]["history_mode"], json!("paginated"));
+    assert!(records[0]["payload"]["history_base"].is_null());
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record["ordinal"].as_u64().expect("pulled ordinal"))
+            .collect::<Vec<_>>(),
+        (0..records.len() as u64).collect::<Vec<_>>()
+    );
+    assert_rollout_cwd(codex_home, provider_thread_id, project_root);
+    let lookup = |thread_id: &str| rollout_lookup(codex_home, thread_id);
+    let resolved = redacted(
+        resolve_codex_root(&path, &lookup),
+        "production graph resolver rejected pulled standalone rollout",
+    );
+    assert_eq!(resolved.segments.len(), 1);
+    assert!(
+        resolved.chain.len() >= expected.len(),
+        "pulled standalone rollout lost durable conversation messages"
+    );
+    let artifact = redacted(
+        build_standalone_codex_root(
+            &resolved,
+            &StandaloneBuildMode::Encode {
+                root: project_root.to_string_lossy().into_owned(),
+                canonical_root: std::fs::canonicalize(project_root)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned()),
+            },
+            None,
+        ),
+        "production standalone builder rejected pulled rollout",
+    );
+    let actual = timeline_history_from_standalone(
+        &artifact.root_bytes,
+        project_root,
+        &artifact.root_provider_thread_id,
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "pulled standalone timeline projection failed (error_code={}, entry_index={}, detail_a={}, detail_b={})",
+            error.error_code, error.entry_index, error.detail_a, error.detail_b,
+        )
+    });
+    let comparison = compare_ordered_history(&actual, expected);
+    assert!(
+        actual == expected,
+        "pulled standalone rollout history is incorrect (expected_items={}, actual_items={}, first_mismatch_index={}, role_mismatches={}, marker_mismatches={})",
+        comparison.expected_items,
+        comparison.actual_items,
+        comparison.first_mismatch_index,
+        comparison.role_mismatches,
+        comparison.marker_mismatches,
+    );
+}
+
+fn byte_slice_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn assert_no_sensitive_bytes(haystack: &[u8], sensitive: &[Vec<u8>], label: &str) {
+    assert!(
+        sensitive
+            .iter()
+            .all(|needle| !byte_slice_contains(haystack, needle)),
+        "{label} contains isolated credential or path material"
+    );
+}
+
+fn is_generated_plugin_cache(relative: &Path) -> bool {
+    let components = relative.components().collect::<Vec<_>>();
+    let normal = |index: usize, expected: &str| {
+        matches!(
+            components.get(index),
+            Some(std::path::Component::Normal(value)) if *value == std::ffi::OsStr::new(expected)
+        )
+    };
+    (normal(0, "plugins") && normal(1, "cache")) || (normal(0, ".tmp") && normal(1, "marketplaces"))
+}
+
+fn is_generated_arg0_wrapper(relative: &Path) -> bool {
+    let components = relative.components().collect::<Vec<_>>();
+    if components.len() != 4 {
+        return false;
+    }
+    let normal = |index: usize| match components.get(index) {
+        Some(std::path::Component::Normal(value)) => value.to_str(),
+        _ => None,
+    };
+    let directory_is_valid = normal(2).is_some_and(|value| {
+        value.starts_with("codex-arg0")
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    });
+    normal(0) == Some("tmp")
+        && normal(1) == Some("arg0")
+        && directory_is_valid
+        && matches!(
+            normal(3),
+            Some("apply_patch" | "applypatch" | "codex-execve-wrapper")
+        )
+}
+
+fn assert_generated_codex_symlink_is_safe(
+    canonical_root: &Path,
+    path: &Path,
+    relative: &Path,
+    sensitive: &[Vec<u8>],
+) {
+    let is_plugin_cache = is_generated_plugin_cache(relative);
+    let is_arg0_wrapper = is_generated_arg0_wrapper(relative);
+    assert!(
+        is_plugin_cache || is_arg0_wrapper,
+        "isolated provider state contains an unexpected symlink"
+    );
+    let target = std::fs::read_link(path).expect("inspect generated Codex symlink");
+    assert_no_sensitive_bytes(
+        target.as_os_str().as_encoded_bytes(),
+        sensitive,
+        "generated Codex symlink target",
+    );
+    let canonical_target = std::fs::canonicalize(path).expect("resolve generated Codex symlink");
+    if is_plugin_cache {
+        assert!(
+            canonical_target.starts_with(canonical_root),
+            "generated plugin-cache symlink escapes the isolated provider home"
+        );
+        let target_relative = canonical_target
+            .strip_prefix(canonical_root)
+            .expect("generated plugin-cache target remains below its home");
+        assert!(
+            is_generated_plugin_cache(target_relative),
+            "generated plugin-cache symlink targets another provider-state namespace"
+        );
+        assert_no_sensitive_bytes(
+            target_relative.as_os_str().as_encoded_bytes(),
+            sensitive,
+            "generated plugin-cache resolved target",
+        );
+    } else {
+        let expected_binary = std::fs::canonicalize(codex_binary())
+            .expect("canonicalize the installed Codex binary for wrapper validation");
+        assert!(
+            canonical_target == expected_binary,
+            "generated Codex wrapper targets an unexpected executable"
+        );
+    }
+}
+
+fn assert_sensitive_state_tree(
+    root: &Path,
+    sensitive: &[Vec<u8>],
+    allow_generated_cache_symlinks: bool,
+) {
+    let metadata = std::fs::symlink_metadata(root)
+        .expect("inspect isolated provider state during privacy scan");
+    assert!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "isolated provider state must be a no-follow directory"
+    );
+    let canonical_root =
+        std::fs::canonicalize(root).expect("canonicalize isolated provider-state root");
+    let mut entries = 0_usize;
+    let mut inspected_bytes = 0_u64;
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = redacted(entry, "cannot inspect isolated Codex provider state");
+        entries = entries.saturating_add(1);
+        assert!(
+            entries <= MAX_CODEX_HOME_PRIVACY_ENTRIES,
+            "isolated Codex provider state exceeds its entry bound"
+        );
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .expect("Codex provider state remains below its home");
+        assert_no_sensitive_bytes(
+            relative.as_os_str().as_encoded_bytes(),
+            sensitive,
+            "isolated Codex provider-state path",
+        );
+        assert!(
+            entry.file_name() != std::ffi::OsStr::new("auth.json"),
+            "isolated provider state unexpectedly contains auth.json"
+        );
+        if entry.file_type().is_symlink() {
+            assert!(
+                allow_generated_cache_symlinks,
+                "isolated provider state contains a symlink"
+            );
+            assert_generated_codex_symlink_is_safe(
+                &canonical_root,
+                entry.path(),
+                relative,
+                sensitive,
+            );
+            continue;
+        }
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        assert!(
+            entry.file_type().is_file(),
+            "isolated Codex provider state contains a special file"
+        );
+        let file_metadata =
+            std::fs::symlink_metadata(entry.path()).expect("inspect Codex provider-state file");
+        inspected_bytes = inspected_bytes.saturating_add(file_metadata.len());
+        assert!(
+            inspected_bytes <= MAX_CODEX_HOME_PRIVACY_BYTES,
+            "isolated Codex provider state exceeds its byte bound"
+        );
+        let bytes = read_bounded_file(
+            entry.path(),
+            MAX_STORAGE_OBJECT_BYTES,
+            "isolated Codex provider-state file",
+        );
+        assert_no_sensitive_bytes(&bytes, sensitive, "isolated Codex provider state");
+    }
+}
+
+fn assert_codex_home_has_no_sensitive_state(codex_home: &Path, sensitive: &[Vec<u8>]) {
+    assert!(
+        !codex_home.join("auth.json").exists(),
+        "isolated Codex home unexpectedly contains auth.json"
+    );
+    assert!(
+        !codex_home.join("config.toml").exists(),
+        "isolated Codex home unexpectedly contains config.toml"
+    );
+    assert_sensitive_state_tree(codex_home, sensitive, true);
+}
+
+fn assert_process_home_has_no_sensitive_state(process_home: &Path, sensitive: &[Vec<u8>]) {
+    assert_sensitive_state_tree(process_home, sensitive, false);
+}
+
+fn assert_portable_state_is_safe(
+    service: &ProjectSyncService<'_>,
+    storage_id: &StorageId,
+    bundle_id: &BundleId,
+    storage_root: &Path,
+    credential_needles: &[Vec<u8>],
+    path_needles: &[Vec<u8>],
+) {
+    let snapshot = redacted(
+        service.inspect_bundle(storage_id, bundle_id),
+        "cannot inspect published bundle",
+    );
+    let manifest = serde_json::to_vec(&snapshot.manifest).expect("serialize bundle manifest");
+    assert!(
+        !byte_slice_contains(&manifest, b"auth.json"),
+        "portable manifest names the authentication file"
+    );
+    assert_no_sensitive_bytes(&manifest, credential_needles, "portable manifest");
+    assert_no_sensitive_bytes(&manifest, path_needles, "portable manifest");
+
+    for entry in WalkDir::new(storage_root).follow_links(false) {
+        let entry = redacted(entry, "cannot inspect isolated local storage");
+        let metadata = redacted(entry.metadata(), "cannot inspect isolated storage entry");
+        assert!(
+            !metadata.file_type().is_symlink(),
+            "storage contains a symlink"
+        );
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        assert!(
+            name != "auth.json",
+            "storage contains an authentication file"
+        );
+        let object_key = entry
+            .path()
+            .strip_prefix(storage_root)
+            .expect("storage entry remains below its root")
+            .to_string_lossy();
+        assert_no_sensitive_bytes(
+            object_key.as_bytes(),
+            credential_needles,
+            "storage object key",
+        );
+        assert_no_sensitive_bytes(object_key.as_bytes(), path_needles, "storage object key");
+        if metadata.is_file() {
+            let bytes = read_bounded_file(
+                entry.path(),
+                MAX_STORAGE_OBJECT_BYTES,
+                "isolated storage object",
+            );
+            assert!(
+                !byte_slice_contains(&bytes, b"auth.json"),
+                "storage object contains an authentication filename"
+            );
+            assert_no_sensitive_bytes(&bytes, credential_needles, "storage object");
+        }
+    }
+}
+
+fn storage_digest_inventory(storage_root: &Path) -> BTreeMap<PathBuf, [u8; 32]> {
+    let mut inventory = BTreeMap::new();
+    for entry in WalkDir::new(storage_root).follow_links(false).max_depth(16) {
+        let entry = redacted(entry, "cannot inventory isolated local storage");
+        assert!(
+            !entry.file_type().is_symlink(),
+            "isolated local storage contains a symlink"
+        );
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(storage_root)
+            .expect("storage object remains below its root")
+            .to_path_buf();
+        let bytes = read_bounded_file(
+            entry.path(),
+            MAX_STORAGE_OBJECT_BYTES,
+            "isolated storage object",
+        );
+        inventory.insert(relative, Sha256::digest(bytes).into());
+        assert!(
+            inventory.len() <= 50_000,
+            "isolated storage inventory exceeds its file bound"
+        );
+    }
+    inventory
+}
+
+fn assert_fixed_point(comparison: &ThreadSyncComparison, revision: u64) {
+    assert_eq!(comparison.revision, Some(revision));
+    assert_eq!(comparison.base_revision, Some(revision));
+    assert!(
+        comparison
+            .entries
+            .iter()
+            .all(|entry| entry.state == ThreadSyncState::Synced),
+        "fixed-point comparison still has applicable thread work"
+    );
+    assert_eq!(comparison.counts.diverged, 0);
+    assert_eq!(comparison.counts.local, 0);
+    assert_eq!(comparison.counts.storage, 0);
+}
+
+fn assert_pull_is_no_op(
+    service: &ProjectSyncService<'_>,
+    storage_id: &StorageId,
+    bundle_id: &BundleId,
+    binding: &ProjectBinding,
+) {
+    let plan = redacted(
+        service.plan_bundle_restore(storage_id, bundle_id, binding),
+        "cannot plan fixed-point Pull",
+    );
+    assert!(
+        approved_pull_actions(&plan).is_empty(),
+        "fixed-point Pull still has applicable actions"
+    );
+}
+
+fn assert_offline_path_timeline(
+    rollout: &Path,
+    project_root: &Path,
+    expected_argument_root: &Path,
+    outside_root: &Path,
+    expected_provider_call_id: &str,
+) {
+    let adapter = ProviderRegistry::production()
+        .require_sessions(&codex_key())
+        .expect("Codex session adapter is unavailable");
+    let context = SessionTimelineContext {
+        resource_id: "codex:conversation:offline-path-fixture",
+        provider_session_id: "offline-path-fixture",
+        project_root,
+        project_root_aliases: &[],
+    };
+    let index = adapter
+        .build_timeline_index(rollout, &context)
+        .expect("current Codex path fixture did not index");
+    let tool_entry = index
+        .events
+        .iter()
+        .find(|event| event.kind == SessionTimelineEventKind::ToolCall)
+        .expect("current Codex path fixture lacks its durable tool event");
+    let tool = tool_entry
+        .tool
+        .as_ref()
+        .expect("current Codex path fixture tool lacks its index entry");
+    assert_eq!(
+        tool.provider_call_id, expected_provider_call_id,
+        "current Codex patch paths attached to the wrong durable tool"
+    );
+    assert_eq!(
+        tool.affected_paths.iter().cloned().collect::<BTreeSet<_>>(),
+        IN_PROJECT_FIXTURES
+            .iter()
+            .map(|(relative, _)| relative.to_string())
+            .collect::<BTreeSet<_>>()
+    );
+    assert!(tool.affected_paths.iter().all(|path| {
+        let path = Path::new(path);
+        !path.is_absolute()
+            && path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+    }));
+    let page = adapter
+        .read_timeline_page(
+            rollout,
+            &index,
+            &SessionTimelineQuery {
+                start_index: None,
+                anchor_event_id: None,
+                limit: 1,
+                included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
+                included_tool_categories: BTreeSet::from([
+                    SessionToolCategory::FileEdit,
+                    SessionToolCategory::Shell,
+                    SessionToolCategory::Read,
+                    SessionToolCategory::Other,
+                ]),
+                turn_id: None,
+            },
+        )
+        .expect("current Codex path fixture timeline did not load");
+    assert_eq!(page.events.len(), 1);
+    let detail = adapter
+        .read_event_detail(rollout, &index, &tool_entry.event_id)
+        .expect("current Codex path fixture event did not expand");
+    assert_eq!(detail.affected_paths, tool.affected_paths);
+    let arguments = detail
+        .arguments
+        .expect("current Codex path fixture lacks tool arguments");
+    for path in canonical_fixture_paths(expected_argument_root, &IN_PROJECT_FIXTURES) {
+        assert!(arguments.contains(path.to_string_lossy().as_ref()));
+    }
+    for path in canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES) {
+        assert!(arguments.contains(path.to_string_lossy().as_ref()));
+        assert!(!tool
+            .affected_paths
+            .iter()
+            .any(|affected| affected == path.to_string_lossy().as_ref()));
+    }
+}
+
+#[test]
+fn local_aimock_provider_builds_keyless_codex_overrides() {
+    let provider = LocalAimockProvider::new("http://127.0.0.1:41237/v1".to_string())
+        .expect("parse valid local aimock URL");
+    let arguments = provider.config_arguments();
+    assert!(arguments.len() <= MAX_COMMAND_ARGUMENTS);
+    let encoded = arguments
+        .iter()
+        .map(|value| value.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(encoded.contains("model_provider=\"mallard_aimock\""));
+    assert!(encoded.contains("model_reasoning_effort=\"low\""));
+    assert!(encoded.contains("features.plugins=false"));
+    assert!(encoded.contains("base_url=\"http://127.0.0.1:41237/v1\""));
+    assert!(!encoded.contains("env_key"));
+    assert!(encoded.contains("wire_api=\"responses\""));
+    assert!(encoded.contains("requires_openai_auth=false"));
+    assert!(encoded.contains("features.enable_request_compression=false"));
+
+    let metadata = session_meta_record(P0, Path::new("/tmp/project"), None);
+    assert_eq!(metadata["payload"]["model_provider"], json!(PROVIDER_ID));
+
+    for key in [
+        "AIMOCK_PROVIDER_OPENAI_KEY",
+        "AIMOCK_PROVIDER_ANTHROPIC_KEY",
+        "AIMOCK_PROVIDER_GEMINI_KEY",
+        "AIMOCK_PROVIDER_OPENROUTER_KEY",
+        "AIMOCK_PROVIDER_COHERE_KEY",
+        "AIMOCK_PROVIDER_GROK_KEY",
+        "AIMOCK_PROVIDER_OLLAMA_KEY",
+        "AIMOCK_PROVIDER_VEO_KEY",
+        "AIMOCK_PROVIDER_AZURE_KEY",
+        "AIMOCK_PROVIDER_ELEVENLABS_KEY",
+        "AIMOCK_PROVIDER_FAL_KEY",
+        "AIMOCK_DUMMY_KEY_MARKER",
+    ] {
+        assert!(
+            CREDENTIAL_ENV_KEYS.contains(&key),
+            "keyless Codex child retains an aimock upstream credential variable"
+        );
+    }
+    assert_eq!(
+        CREDENTIAL_ENV_KEYS.iter().collect::<BTreeSet<_>>().len(),
+        CREDENTIAL_ENV_KEYS.len(),
+        "credential environment denylist contains duplicates"
+    );
+}
+
+#[test]
+fn local_aimock_provider_rejects_non_loopback_or_unsafe_urls() {
+    assert_eq!(
+        validate_aimock_base_url("http://127.0.0.1:41237/v1"),
+        Ok(())
+    );
+    for url in [
+        "http://localhost:41237/v1",
+        "http://[::1]:41237/v1",
+        "http://127.0.0.1:0/v1",
+        "https://127.0.0.1:41237/v1",
+        "http://user@127.0.0.1:41237/v1",
+        "http://127.0.0.1:41237/v2",
+        "http://127.0.0.1:41237/v1/",
+        "http://127.0.0.1:41237/v1?key=value",
+        "http://127.0.0.1:41237/v1#fragment",
+    ] {
+        assert!(
+            validate_aimock_base_url(url).is_err(),
+            "accepted unsafe local aimock URL"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn provider_state_scan_covers_cache_bodies_and_validates_generated_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("create provider-state privacy fixture");
+    let codex_home = root.path().join("myconf");
+    create_secure_codex_home(&codex_home);
+    let version_root = codex_home.join("plugins/cache/openai-bundled/chrome/fixture-version");
+    std::fs::create_dir_all(&version_root).expect("create generated cache fixture");
+    let descriptor = version_root.join("descriptor.txt");
+    std::fs::write(&descriptor, b"generated cache fixture\n")
+        .expect("write generated cache fixture");
+    symlink(
+        &version_root,
+        codex_home.join("plugins/cache/openai-bundled/chrome/latest"),
+    )
+    .expect("create absolute generated cache symlink fixture");
+
+    let sensitive = vec![b"FAKE_LIVE_CREDENTIAL_SENTINEL".to_vec()];
+    assert_codex_home_has_no_sensitive_state(&codex_home, &sensitive);
+
+    std::fs::write(&descriptor, &sensitive[0]).expect("write cache leak fixture");
+    assert!(
+        std::panic::catch_unwind(|| {
+            assert_codex_home_has_no_sensitive_state(&codex_home, &sensitive)
+        })
+        .is_err(),
+        "provider-state scan skipped a generated cache file body"
+    );
+
+    let process_home = root.path().join("process-home");
+    std::fs::create_dir(&process_home).expect("create process-home privacy fixture");
+    std::fs::write(process_home.join("auth.json"), b"fixture")
+        .expect("write forbidden authentication fixture");
+    assert!(
+        std::panic::catch_unwind(|| {
+            assert_process_home_has_no_sensitive_state(&process_home, &sensitive)
+        })
+        .is_err(),
+        "process-home scan accepted an authentication file"
+    );
+}
+
+#[test]
+fn revision_one_prompt_and_diagnostics_preserve_only_safe_evidence() {
+    let selected_project = Path::new("/var/folders/mallard-live/project1");
+    let canonical_external = Path::new("/private/var/folders/mallard-live/project1_external");
+    let prompt = revision_one_file_prompt(selected_project, canonical_external);
+    let patch = revision_one_patch_body(canonical_external);
+    let command = revision_one_patch_command(canonical_external);
+    assert!(prompt.starts_with("LIVE_USER_R1 "));
+    assert!(command.starts_with("apply_patch <<'MALLARD_PATCH'\n"));
+    assert!(command.ends_with("*** End Patch\nMALLARD_PATCH\n"));
+    assert_eq!(command.matches("apply_patch").count(), 1);
+    assert_eq!(patch.matches("*** Begin Patch").count(), 1);
+    assert_eq!(patch.matches("*** End Patch").count(), 1);
+    assert_eq!(patch.matches("*** Add File:").count(), 4);
+    assert!(patch.contains("*** Add File: ./generated/session-paths/inside-alpha.txt\n"));
+    assert!(patch.contains("*** Add File: ./generated/session-paths/nested/inside-beta.json\n"));
+    assert!(patch.contains(
+        "*** Add File: /private/var/folders/mallard-live/project1_external/outside-alpha.txt\n"
+    ));
+    assert!(patch.contains(
+        "*** Add File: /private/var/folders/mallard-live/project1_external/nested/outside-beta.json\n"
+    ));
+    assert!(patch.contains("+MALLARD_IN_PROJECT_ALPHA\n"));
+    assert!(patch.contains("+{\"fixture\":\"MALLARD_IN_PROJECT_BETA\",\"version\":1}\n"));
+    assert!(patch.contains("+MALLARD_OUTSIDE_ALPHA\n"));
+    assert!(patch.contains("+{\"fixture\":\"MALLARD_OUTSIDE_BETA\",\"version\":1}\n"));
+    assert!(!patch.contains("/var/folders/mallard-live/project1/"));
+    for (relative, _) in IN_PROJECT_FIXTURES {
+        assert!(prompt.contains(selected_project.join(relative).to_string_lossy().as_ref()));
+        assert!(!prompt.contains(
+            Path::new("/private/var/folders/mallard-live/project1")
+                .join(relative)
+                .to_string_lossy()
+                .as_ref()
+        ));
+    }
+    for (relative, _) in OUTSIDE_PROJECT_FIXTURES {
+        assert!(prompt.contains(canonical_external.join(relative).to_string_lossy().as_ref()));
+    }
+
+    let stdout = br#"{"type":"thread.started","thread_id":"safe-thread"}
+{"type":"item.completed","item":{"type":"agent_message","text":"MALLARD_BASE /private/secret"}}
+"#;
+    let events = parse_codex_output_events(stdout).expect("parse diagnostic fixture JSONL");
+    let event_synopsis = codex_event_synopsis(&events);
+    assert!(event_synopsis.contains("type=thread.started"));
+    assert!(event_synopsis.contains("item=agent_message"));
+    assert!(!event_synopsis.contains("MALLARD_BASE"));
+    assert!(!event_synopsis.contains("/private/secret"));
+    let credential_shaped = parse_codex_output_events(
+        br#"{"type":"error","error":{"code":"sk-proj-private-token"}}
+"#,
+    )
+    .expect("parse credential-shaped diagnostic fixture");
+    let credential_synopsis = codex_event_synopsis(&credential_shaped);
+    assert!(credential_synopsis.contains("type=error"));
+    assert!(credential_synopsis.contains("code=other"));
+    assert!(!credential_synopsis.contains("sk-proj-private-token"));
+
+    let stderr_synopsis =
+        codex_stderr_synopsis(b"error: sandbox permission denied at /private/secret");
+    assert!(stderr_synopsis.contains("sandbox=true"));
+    assert!(stderr_synopsis.contains("permission_denied=true"));
+    assert!(!stderr_synopsis.contains("/private/secret"));
+    let malformed = parse_codex_output_events(b"{\"message\":\"/private/secret\"\n")
+        .expect_err("malformed diagnostic JSONL was accepted");
+    assert_eq!(malformed, "malformed_stdout_jsonl");
+    assert!(!malformed.contains("/private/secret"));
+    let overlong = "{}\n".repeat(MAX_CODEX_OUTPUT_EVENTS + 1);
+    assert_eq!(
+        parse_codex_output_events(overlong.as_bytes()),
+        Err("stdout_event_limit")
+    );
+}
+
+#[test]
+fn production_timeline_history_projection_is_exact_and_paginated() {
+    let root = tempfile::tempdir().expect("create timeline history fixture root");
+    let project_root = root.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("create timeline history fixture project");
+    let environment_context = format!(
+        "<environment_context>{}</environment_context>",
+        "x".repeat(1_536)
+    );
+    let mut fixture_records = vec![
+        session_meta_record(P0, &project_root, None),
+        json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": fixture_uuid(0x500),
+                "role": "user",
+                "content": [{"type": "input_text", "text": environment_context}],
+            },
+        }),
+        json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": fixture_uuid(0x501),
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "DEVELOPER_NON_CHAT"}],
+            },
+        }),
+        json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": fixture_uuid(0x502),
+                "role": "system",
+                "content": [{"type": "input_text", "text": "SYSTEM_NON_CHAT"}],
+            },
+        }),
+        json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": P0,
+                "turn_id": fixture_uuid(0x503),
+                "item": {
+                    "type": "UserMessage",
+                    "id": fixture_uuid(0x504),
+                    "content": [{"type": "text", "text": environment_context}],
+                },
+            },
+        }),
+    ];
+    fixture_records.extend(turn_records(
+        P0,
+        &fixture_uuid(0x505),
+        &fixture_uuid(0x506),
+        &fixture_uuid(0x507),
+        None,
+        "GRAPH_USER_BASE_1 with a live-like suffix",
+        "GRAPH_BASE_1",
+    ));
+    fixture_records.extend([
+        json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": P0,
+                "turn_id": fixture_uuid(0x505),
+                "item": {
+                    "type": "AgentMessage",
+                    "id": fixture_uuid(0x508),
+                    "phase": "commentary",
+                    "content": [{"type": "text", "text": "COMMENTARY_NOT_CHAT_HISTORY"}],
+                },
+            },
+        }),
+        json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": P0,
+                "turn_id": fixture_uuid(0x505),
+                "item": {
+                    "type": "CommandExecution",
+                    "id": fixture_uuid(0x509),
+                    "command": ["true"],
+                    "status": "completed",
+                    "stdout": "",
+                    "stderr": "",
+                },
+            },
+        }),
+    ]);
+    fixture_records.extend(turn_records(
+        P0,
+        &fixture_uuid(0x50a),
+        &fixture_uuid(0x50b),
+        &fixture_uuid(0x50c),
+        Some(&fixture_uuid(0x507)),
+        "GRAPH_USER_LEFT_PARENT continue",
+        "GRAPH_LEFT_PARENT",
+    ));
+    fixture_records.extend(turn_records(
+        P0,
+        &fixture_uuid(0x50d),
+        &fixture_uuid(0x50e),
+        &fixture_uuid(0x50f),
+        Some(&fixture_uuid(0x50c)),
+        "GRAPH_USER_A_LOCAL_ONLY and another suffix",
+        "GRAPH_A_LOCAL_ONLY",
+    ));
+    let expected = marker_turn("GRAPH_USER_BASE_1", "GRAPH_BASE_1")
+        .into_iter()
+        .chain(marker_turn("GRAPH_USER_LEFT_PARENT", "GRAPH_LEFT_PARENT"))
+        .chain(marker_turn("GRAPH_USER_A_LOCAL_ONLY", "GRAPH_A_LOCAL_ONLY"))
+        .collect::<Vec<_>>();
+    let fixture_bytes = encode_rollout_records(fixture_records.clone());
+    let actual = timeline_history_from_standalone(&fixture_bytes, &project_root, P0)
+        .expect("project production timeline history fixture");
+    assert_eq!(actual, expected);
+    assert_eq!(
+        compare_ordered_history(&actual, &expected),
+        HistoryComparison {
+            expected_items: 6,
+            actual_items: 6,
+            first_mismatch_index: 6,
+            role_mismatches: 0,
+            marker_mismatches: 0,
+        }
+    );
+
+    let mut extra_chat_records = fixture_records.clone();
+    extra_chat_records.push(json!({
+        "type": "event_msg",
+        "payload": {
+            "type": "item_completed",
+            "thread_id": P0,
+            "turn_id": fixture_uuid(0x510),
+            "item": {
+                "type": "UserMessage",
+                "id": fixture_uuid(0x511),
+                "content": [{"type": "text", "text": "GRAPH_USER_EXTRA remains visible"}],
+            },
+        },
+    }));
+    let extra_chat_bytes = encode_rollout_records(extra_chat_records);
+    let extra_chat = timeline_history_from_standalone(&extra_chat_bytes, &project_root, P0)
+        .expect("project extra production timeline user message");
+    assert_eq!(
+        compare_ordered_history(&extra_chat, &expected),
+        HistoryComparison {
+            expected_items: 6,
+            actual_items: 7,
+            first_mismatch_index: 6,
+            role_mismatches: 0,
+            marker_mismatches: 0,
+        }
+    );
+    assert_ne!(extra_chat, expected);
+
+    let mut assistant_suffix = vec![session_meta_record(P0, &project_root, None)];
+    assistant_suffix.extend(turn_records(
+        P0,
+        &fixture_uuid(0x512),
+        &fixture_uuid(0x513),
+        &fixture_uuid(0x514),
+        None,
+        "GRAPH_USER_BASE_1 with a live-like suffix",
+        "GRAPH_BASE_1.",
+    ));
+    let assistant_suffix_bytes = encode_rollout_records(assistant_suffix);
+    let error = timeline_history_from_standalone(&assistant_suffix_bytes, &project_root, P0)
+        .expect_err("stored assistant marker suffix was accepted");
+    assert_eq!(error.error_code, 22);
+    assert_eq!(error.entry_index, 1);
+    assert_eq!(error.detail_a, "GRAPH_BASE_1.".len());
+    assert_eq!(error.detail_b, "GRAPH_BASE_1".len());
+}
+
+#[test]
+fn current_codex_nested_file_edit_paths_survive_wire_projection() {
+    let root = tempfile::tempdir().expect("create current Codex path fixture root");
+    let project1 = root.path().join("project1");
+    let project1_copy = root.path().join("project1_copy");
+    let project1_external = root.path().join("project1_external");
+    for directory in [&project1, &project1_copy, &project1_external] {
+        std::fs::create_dir_all(directory).expect("create current Codex path fixture directory");
+    }
+    let project1 = std::fs::canonicalize(project1).expect("canonicalize source fixture project");
+    let project1_copy =
+        std::fs::canonicalize(project1_copy).expect("canonicalize target fixture project");
+    let project1_external =
+        std::fs::canonicalize(project1_external).expect("canonicalize outside fixture root");
+    let source_thread_id = fixture_uuid(0x401);
+    let target_thread_id = fixture_uuid(0x402);
+    let inside_paths = canonical_fixture_paths(&project1, &IN_PROJECT_FIXTURES);
+    let outside_paths = canonical_fixture_paths(&project1_external, &OUTSIDE_PROJECT_FIXTURES);
+    let input = inside_paths
+        .iter()
+        .chain(outside_paths.iter())
+        .map(|path| path.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let changes = json!({
+        (inside_paths[0].to_string_lossy().into_owned()): {"type": "add"},
+        (inside_paths[1].to_string_lossy().into_owned()): {"type": "add"},
+        (outside_paths[0].to_string_lossy().into_owned()): {"type": "add"},
+        (outside_paths[1].to_string_lossy().into_owned()): {"type": "add"},
+    });
+    let user_message_id = fixture_uuid(0x404);
+    let assistant_message_id = fixture_uuid(0x405);
+    let tool_message_id = fixture_uuid(0x406);
+    let tool_output_message_id = fixture_uuid(0x407);
+    let turn = [
+        json!({
+            "timestamp": "2026-08-18T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": user_message_id,
+                "parent_id": null,
+                "role": "user",
+                "content": [{"type": "input_text", "text": "LIVE_USER_R1"}],
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "id": tool_message_id,
+                "parent_id": user_message_id,
+                "call_id": "exec-path-fixture",
+                "name": "exec",
+                "input": input,
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "patch_apply_end",
+                "call_id": "nested-patch-path-fixture",
+                "success": true,
+                "status": "completed",
+                "changes": changes.clone(),
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "id": tool_output_message_id,
+                "parent_id": tool_message_id,
+                "call_id": "exec-path-fixture",
+                "output": "done",
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-18T00:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": assistant_message_id,
+                "parent_id": tool_output_message_id,
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "MALLARD_BASE"}],
+                "phase": "final_answer",
+            },
+        }),
+    ];
+    let mut records = vec![session_meta_record(&source_thread_id, &project1, None)];
+    records.extend(turn);
+    let source_bytes = encode_rollout_records(records);
+    assert_local_patch_change_keys(&source_bytes, &project1, &project1_external);
+    let source_rollout = root.path().join("source.jsonl");
+    std::fs::write(&source_rollout, &source_bytes).expect("write source path fixture rollout");
+    assert_offline_path_timeline(
+        &source_rollout,
+        &project1,
+        &project1,
+        &project1_external,
+        "exec-path-fixture",
+    );
+
+    let no_bases = |_: &str| Ok(None);
+    let source = resolve_codex_root(&source_rollout, &no_bases)
+        .expect("resolve source current Codex path fixture");
+    let wire = build_standalone_codex_root(
+        &source,
+        &StandaloneBuildMode::Encode {
+            root: project1.to_string_lossy().into_owned(),
+            canonical_root: Some(project1.to_string_lossy().into_owned()),
+        },
+        None,
+    )
+    .expect("encode current Codex path fixture");
+    assert_portable_patch_change_keys(&wire.root_bytes, &project1_external);
+    for (relative, _) in IN_PROJECT_FIXTURES {
+        assert!(byte_slice_contains(
+            &wire.root_bytes,
+            format!("/__mallard_root__/{relative}").as_bytes()
+        ));
+    }
+    for path in &inside_paths {
+        assert_bytes_exclude_path(&wire.root_bytes, path, "offline portable rollout");
+    }
+    for path in &outside_paths {
+        assert_bytes_contain_path(&wire.root_bytes, path, "offline portable rollout");
+    }
+
+    let wire_rollout = root.path().join("wire.jsonl");
+    std::fs::write(&wire_rollout, &wire.root_bytes).expect("write portable path fixture rollout");
+    let wire_root = resolve_codex_root(&wire_rollout, &no_bases)
+        .expect("resolve portable current Codex path fixture");
+    let target = build_standalone_codex_root(
+        &wire_root,
+        &StandaloneBuildMode::Decode {
+            root_provider_thread_id: target_thread_id,
+            target_root: project1_copy.to_string_lossy().into_owned(),
+            canonical_target_root: Some(project1_copy.to_string_lossy().into_owned()),
+        },
+        None,
+    )
+    .expect("decode current Codex path fixture");
+    assert_local_patch_change_keys(&target.root_bytes, &project1_copy, &project1_external);
+    let target_rollout = root.path().join("target.jsonl");
+    std::fs::write(&target_rollout, &target.root_bytes).expect("write target path fixture rollout");
+    for path in canonical_fixture_paths(&project1_copy, &IN_PROJECT_FIXTURES) {
+        assert_bytes_contain_path(&target.root_bytes, &path, "offline target rollout");
+    }
+    for path in &inside_paths {
+        assert_bytes_exclude_path(&target.root_bytes, path, "offline target rollout");
+    }
+    for path in &outside_paths {
+        assert_bytes_contain_path(&target.root_bytes, path, "offline target rollout");
+    }
+    assert!(!byte_slice_contains(
+        &target.root_bytes,
+        b"/__mallard_root__"
+    ));
+    assert!(!byte_slice_contains(
+        &target.root_bytes,
+        b"__mallard_path_map__"
+    ));
+    assert_offline_path_timeline(
+        &target_rollout,
+        &project1_copy,
+        &project1_copy,
+        &project1_external,
+        "nested-patch-path-fixture",
+    );
+}
+
+#[test]
+fn current_codex_paginated_graph_fixture_passes_production_validators() {
+    let root = tempfile::tempdir().expect("create paginated fixture test root");
+    let codex_home = root.path().join("codex-home");
+    let project_root = root.path().join("project");
+    std::fs::create_dir_all(&codex_home).expect("create fixture Codex home");
+    std::fs::create_dir_all(&project_root).expect("create fixture project");
+    let graph = write_paginated_graph(&codex_home, &project_root);
+    assert_eq!(graph.nodes.len(), 5);
+    assert_eq!(graph.nodes["p0"].expected.len(), 4);
+    assert_eq!(graph.nodes["p1"].expected.len(), 4);
+    assert_eq!(graph.nodes["p2"].expected.len(), 6);
+    assert_eq!(graph.nodes["p3"].expected.len(), 6);
+    assert_eq!(graph.nodes["p4"].expected.len(), 4);
+
+    // A remote update is materialized as a standalone paginated rollout. It
+    // intentionally retains the resolved history while no longer depending
+    // on the source machine's native base file.
+    let p2_path = graph.nodes["p2"].path.clone();
+    let lookup = |thread_id: &str| rollout_lookup(&codex_home, thread_id);
+    let resolved = resolve_codex_root(&p2_path, &lookup).expect("resolve native P2 fixture");
+    let wire = build_standalone_codex_root(
+        &resolved,
+        &StandaloneBuildMode::Encode {
+            root: project_root.to_string_lossy().into_owned(),
+            canonical_root: std::fs::canonicalize(&project_root)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned()),
+        },
+        None,
+    )
+    .expect("encode standalone P2 fixture");
+    std::fs::write(&p2_path, wire.root_bytes).expect("stage wire P2 fixture");
+    let wire_resolved = resolve_codex_root(&p2_path, &lookup).expect("resolve wire P2 fixture");
+    let local = build_standalone_codex_root(
+        &wire_resolved,
+        &StandaloneBuildMode::Decode {
+            root_provider_thread_id: P2.to_string(),
+            target_root: project_root.to_string_lossy().into_owned(),
+            canonical_target_root: std::fs::canonicalize(&project_root)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned()),
+        },
+        None,
+    )
+    .expect("decode standalone P2 fixture");
+    std::fs::write(&p2_path, local.root_bytes).expect("materialize standalone P2 fixture");
+    append_paginated_turn(
+        &codex_home,
+        &project_root,
+        P2,
+        &fixture_uuid(0x201),
+        &fixture_uuid(0x202),
+        &fixture_uuid(0x203),
+        "GRAPH_USER_REMOTE_UPDATE",
+        "GRAPH_REMOTE_UPDATE",
+    );
+    let mut standalone_node = graph.nodes["p2"].clone();
+    standalone_node.expected.extend(marker_turn(
+        "GRAPH_USER_REMOTE_UPDATE",
+        "GRAPH_REMOTE_UPDATE",
+    ));
+    validate_paginated_rollout(&codex_home, &standalone_node, &[P2], &project_root);
+}
+
+#[test]
+#[ignore = "runs a heavyweight deterministic local Codex/aimock integration flow; set MALLARD_RUN_LIVE_CODEX_AIMOCK_E2E=1"]
+fn live_codex_aimock_setup_push_pull_divergence() {
+    if std::env::var(LIVE_TEST_GATE).ok().as_deref() != Some("1") {
+        return;
+    }
+
+    // Fail before starting the local mock when the installed CLI no longer
+    // matches the one native rollout/app-server protocol this fixture tests.
+    assert_supported_codex_version();
+
+    let root = tempfile::tempdir().expect("create isolated live-test root");
+    let process_home = root.path().join("process-home");
+    let myconf1 = root.path().join("myconf1");
+    let myconf2 = root.path().join("myconf2");
+    let project1 = root.path().join("project1");
+    let project1_copy = root.path().join("project1_copy");
+    let project1_external = root.path().join("project1_external");
+    let mystorage1 = root.path().join("mystorage1");
+    let machine1_home = root.path().join("machine1");
+    let machine2_home = root.path().join("machine2");
+    let aimock_control = root.path().join("aimock");
+    for directory in [
+        &process_home,
+        &project1,
+        &project1_copy,
+        &project1_external,
+        &mystorage1,
+        &machine1_home,
+        &machine2_home,
+    ] {
+        std::fs::create_dir_all(directory).expect("create isolated live-test directory");
+    }
+    create_secure_codex_home(&myconf1);
+    create_secure_codex_home(&myconf2);
+    create_secure_codex_home(&aimock_control);
+    let project1 = std::fs::canonicalize(project1).expect("canonicalize source fixture project");
+    let project1_copy =
+        std::fs::canonicalize(project1_copy).expect("canonicalize target fixture project");
+    let project1_external =
+        std::fs::canonicalize(project1_external).expect("canonicalize external fixture root");
+    let canonical_live_root =
+        std::fs::canonicalize(root.path()).expect("canonicalize isolated live-test root");
+    let _home_guard = EnvironmentGuard::set("HOME", &process_home);
+    let _userprofile_guard = EnvironmentGuard::set("USERPROFILE", &process_home);
+    let scenario = aimock_scenario_document(&project1, &project1_external);
+    let (aimock, provider) = AimockProcess::start(&aimock_control, &process_home, &scenario)
+        .expect("start deterministic local aimock server");
+
+    let repository1 = redacted(
+        LocalStateRepository::from_home_dir(&machine1_home),
+        "cannot create first isolated Mallard repository",
+    );
+    let repository2 = redacted(
+        LocalStateRepository::from_home_dir(&machine2_home),
+        "cannot create second isolated Mallard repository",
+    );
+    let service1 = ProjectSyncService::new(&repository1);
+    let service2 = ProjectSyncService::new(&repository2);
+    let storage = local_storage(&mystorage1);
+    let storage_id = storage.id.clone();
+    let credentials: Vec<Vec<u8>> = Vec::new();
+    let mut path_needles = vec![root.path().to_string_lossy().as_bytes().to_vec()];
+    let canonical_live_root = canonical_live_root.to_string_lossy().as_bytes().to_vec();
+    if !path_needles.contains(&canonical_live_root) {
+        path_needles.push(canonical_live_root);
+    }
+    let mut codex_turn_count = 0;
+
+    // Replica A creates a real thread and publishes revision 1.
+    eprintln!("live Codex phase: conversation revisions 1-5");
+    let first = finish_setup(
+        &service1,
+        &project1,
+        &myconf1,
+        storage.clone(),
+        DraftRepositoryChoice::New,
+    );
+    let binding1 = first
+        .binding
+        .clone()
+        .expect("first setup created a binding");
+    let project_id1 = first.project.local_project_id.clone();
+    let bundle_id = first.project.bundle_id.clone();
+    prepare_fixture_parents(&project1, &IN_PROJECT_FIXTURES);
+    prepare_fixture_parents(&project1_external, &OUTSIDE_PROJECT_FIXTURES);
+    for path in canonical_fixture_paths(&project1, &IN_PROJECT_FIXTURES)
+        .into_iter()
+        .chain(canonical_fixture_paths(
+            &project1_external,
+            &OUTSIDE_PROJECT_FIXTURES,
+        ))
+    {
+        assert!(!path.exists(), "revision-1 fixture already exists");
+    }
+    let provider_thread1 = run_codex(
+        &mut codex_turn_count,
+        &provider,
+        &myconf1,
+        &machine1_home,
+        &project1,
+        CodexRunAccess::WorkspaceWrite {
+            additional_dir: &project1_external,
+        },
+        None,
+        &revision_one_file_prompt(&project1, &project1_external),
+        "MALLARD_BASE",
+    );
+    assert_exact_fixture_tree(&project1, &IN_PROJECT_FIXTURES);
+    assert_exact_fixture_tree(&project1_external, &OUTSIDE_PROJECT_FIXTURES);
+    let project1_fixture_states = fixture_file_states(&project1, &IN_PROJECT_FIXTURES);
+    let external_fixture_states =
+        fixture_file_states(&project1_external, &OUTSIDE_PROJECT_FIXTURES);
+    assert_raw_rollout_paths(
+        &myconf1,
+        &provider_thread1,
+        &project1,
+        &project1_external,
+        Some(&project1_copy),
+    );
+    copy_in_project_fixtures(&project1, &project1_copy);
+    let project1_copy_fixture_states = fixture_file_states(&project1_copy, &IN_PROJECT_FIXTURES);
+    assert_eq!(
+        fixture_file_states(&project1, &IN_PROJECT_FIXTURES),
+        project1_fixture_states,
+        "copying project fixtures changed their source files"
+    );
+    assert_eq!(
+        fixture_file_states(&project1_external, &OUTSIDE_PROJECT_FIXTURES),
+        external_fixture_states,
+        "copying project fixtures changed an outside file"
+    );
+    let first_push = push(&service1, &project_id1, &storage_id);
+    assert_eq!(first_push.revision, Some(1));
+    let logical_thread = logical_thread_id(&repository1, &project_id1, &provider_thread1);
+    let session_resource = mallard_domain::conversation_resource_id(&codex_key(), &logical_thread)
+        .expect("derive revision-1 conversation resource ID");
+    assert_portable_rollout_paths(
+        &service1,
+        &storage_id,
+        &bundle_id,
+        &mystorage1,
+        &logical_thread,
+        &project1,
+        &project1_copy,
+        &project1_external,
+    );
+    assert_session_detail_paths(
+        &service1,
+        &project_id1,
+        &session_resource,
+        &project1,
+        &myconf1,
+        &provider_thread1,
+        &project1_external,
+    );
+    assert_portable_state_is_safe(
+        &service1,
+        &storage_id,
+        &bundle_id,
+        &mystorage1,
+        &credentials,
+        &path_needles,
+    );
+
+    // Replica B links the existing repository, pulls revision 1, resumes the
+    // materialized task, and publishes its branch as revision 2.
+    let second = finish_setup(
+        &service2,
+        &project1_copy,
+        &myconf2,
+        storage.clone(),
+        DraftRepositoryChoice::Existing {
+            storage_id: storage_id.clone(),
+            bundle_id: bundle_id.clone(),
+            display_name: first.project.display_name.clone(),
+            repository_fingerprint: first.project.repository_fingerprint.clone(),
+            mismatch_acknowledged: true,
+        },
+    );
+    let binding2 = second
+        .binding
+        .clone()
+        .expect("second setup created a binding");
+    let project_id2 = second.project.local_project_id.clone();
+    let (_, initial_pull) = pull_and_apply(&service2, &storage_id, &bundle_id, &binding2);
+    assert!(initial_pull.preserved_threads.is_empty());
+    let provider_thread2 = provider_thread_id(&repository2, &project_id2, &logical_thread);
+    assert_ne!(provider_thread2, provider_thread1);
+    assert_rollout_cwd(&myconf2, &provider_thread2, &project1_copy);
+    assert_raw_rollout_paths(
+        &myconf2,
+        &provider_thread2,
+        &project1_copy,
+        &project1_external,
+        Some(&project1),
+    );
+    assert_session_detail_paths(
+        &service2,
+        &project_id2,
+        &session_resource,
+        &project1_copy,
+        &myconf2,
+        &provider_thread2,
+        &project1_external,
+    );
+    assert_exact_fixture_tree(&project1_copy, &IN_PROJECT_FIXTURES);
+    assert_eq!(
+        fixture_file_states(&project1_external, &OUTSIDE_PROJECT_FIXTURES),
+        external_fixture_states,
+        "initial Push/Pull changed an outside file"
+    );
+    assert_fixed_point(
+        &redacted(
+            service1.compare_threads(&project_id1, &storage_id),
+            "cannot compare replica A after initial Pull",
+        ),
+        1,
+    );
+    assert_fixed_point(
+        &redacted(
+            service2.compare_threads(&project_id2, &storage_id),
+            "cannot compare replica B after initial Pull",
+        ),
+        1,
+    );
+    let resumed2 = run_codex(
+        &mut codex_turn_count,
+        &provider,
+        &myconf2,
+        &machine2_home,
+        &project1_copy,
+        CodexRunAccess::ReadOnly,
+        Some(&provider_thread2),
+        "LIVE_USER_R2 Do not use tools. Reply with exactly: MALLARD_REMOTE_BRANCH",
+        "MALLARD_REMOTE_BRANCH",
+    );
+    assert_eq!(resumed2, provider_thread2);
+    let second_push = push(&service2, &project_id2, &storage_id);
+    assert_eq!(second_push.revision, Some(2));
+    assert_portable_rollout_paths(
+        &service2,
+        &storage_id,
+        &bundle_id,
+        &mystorage1,
+        &logical_thread,
+        &project1,
+        &project1_copy,
+        &project1_external,
+    );
+    assert_portable_state_is_safe(
+        &service2,
+        &storage_id,
+        &bundle_id,
+        &mystorage1,
+        &credentials,
+        &path_needles,
+    );
+
+    // Replica A advances from its revision-1 base. Push is gated until the
+    // divergent revision-2 Pull is reviewed with Keep Both, after which the
+    // retained local branch is published as revision 3.
+    let resumed1 = run_codex(
+        &mut codex_turn_count,
+        &provider,
+        &myconf1,
+        &machine1_home,
+        &project1,
+        CodexRunAccess::ReadOnly,
+        Some(&provider_thread1),
+        "LIVE_USER_R3 Do not use tools. Reply with exactly: MALLARD_LOCAL_BRANCH",
+        "MALLARD_LOCAL_BRANCH",
+    );
+    assert_eq!(resumed1, provider_thread1);
+    assert_divergent_push_gate(
+        &service1,
+        &project_id1,
+        &storage_id,
+        &logical_thread,
+        "replica A",
+    );
+    let divergent_plan1 = redacted(
+        service1.plan_bundle_restore(&storage_id, &bundle_id, &binding1),
+        "cannot plan first divergent Pull",
+    );
+    let first_keep_both = keep_both_for(&divergent_plan1, &logical_thread);
+    let divergent_apply1 = redacted(
+        service1.apply_bundle_restore(
+            &divergent_plan1.plan_id,
+            approved_pull_actions(&divergent_plan1),
+        ),
+        "cannot apply first Keep Both",
+    );
+    assert!(divergent_apply1.success);
+    assert_eq!(divergent_apply1.reviewed_base_advanced, Some(true));
+    assert_keep_both_result(
+        &repository1,
+        &project_id1,
+        &logical_thread,
+        &provider_thread1,
+        &first_keep_both,
+        &divergent_apply1,
+    );
+    assert_rollout_cwd(
+        &myconf1,
+        &first_keep_both.remote_provider_thread_id,
+        &project1,
+    );
+    let comparison1 = redacted(
+        service1.compare_threads(&project_id1, &storage_id),
+        "cannot compare after first Keep Both",
+    );
+    assert!(comparison1
+        .entries
+        .iter()
+        .all(|entry| entry.state != ThreadSyncState::Diverged));
+    let third_push = push(&service1, &project_id1, &storage_id);
+    assert_eq!(third_push.revision, Some(3));
+    assert_portable_state_is_safe(
+        &service1,
+        &storage_id,
+        &bundle_id,
+        &mystorage1,
+        &credentials,
+        &path_needles,
+    );
+
+    // Replica B pulls revision 3, retaining the stable logical primary ID
+    // and materializing A's first preserved branch.
+    let (_, third_pull) = pull_and_apply(&service2, &storage_id, &bundle_id, &binding2);
+    assert!(third_pull.preserved_threads.is_empty());
+    assert_eq!(
+        provider_thread_id(&repository2, &project_id2, &logical_thread),
+        provider_thread2
+    );
+    let first_preserved_on_b = provider_thread_id(
+        &repository2,
+        &project_id2,
+        &first_keep_both.preserved_thread_id,
+    );
+    assert_rollout_cwd(&myconf2, &first_preserved_on_b, &project1_copy);
+
+    // Starting from the shared revision-3 primary, A and B independently
+    // resume their provider aliases. A publishes first as revision 4; B is
+    // then correctly gated as divergent.
+    let first_remote_alias = first_keep_both.remote_provider_thread_id.clone();
+    let resumed4 = run_codex(
+        &mut codex_turn_count,
+        &provider,
+        &myconf1,
+        &machine1_home,
+        &project1,
+        CodexRunAccess::ReadOnly,
+        Some(&first_remote_alias),
+        "LIVE_USER_R4 Do not use tools. Reply with exactly: MALLARD_REVISION_FOUR",
+        "MALLARD_REVISION_FOUR",
+    );
+    assert_eq!(resumed4, first_remote_alias);
+    let resumed5 = run_codex(
+        &mut codex_turn_count,
+        &provider,
+        &myconf2,
+        &machine2_home,
+        &project1_copy,
+        CodexRunAccess::ReadOnly,
+        Some(&provider_thread2),
+        "LIVE_USER_R5 Do not use tools. Reply with exactly: MALLARD_SECOND_LOCAL_BRANCH",
+        "MALLARD_SECOND_LOCAL_BRANCH",
+    );
+    assert_eq!(resumed5, provider_thread2);
+    let fourth_push = push(&service1, &project_id1, &storage_id);
+    assert_eq!(fourth_push.revision, Some(4));
+    assert_portable_state_is_safe(
+        &service1,
+        &storage_id,
+        &bundle_id,
+        &mystorage1,
+        &credentials,
+        &path_needles,
+    );
+
+    // Replica B reviews the reverse-direction divergence with Keep Both. Its
+    // local branch moves to a fresh logical ID, A's revision-4 branch becomes
+    // the stable primary, and both are published as revision 5 without a
+    // sixth provider-backed Codex CLI turn.
+    assert_divergent_push_gate(
+        &service2,
+        &project_id2,
+        &storage_id,
+        &logical_thread,
+        "replica B",
+    );
+    let divergent_plan2 = redacted(
+        service2.plan_bundle_restore(&storage_id, &bundle_id, &binding2),
+        "cannot plan second divergent Pull",
+    );
+    let second_keep_both = keep_both_for(&divergent_plan2, &logical_thread);
+    let divergent_apply2 = redacted(
+        service2.apply_bundle_restore(
+            &divergent_plan2.plan_id,
+            approved_pull_actions(&divergent_plan2),
+        ),
+        "cannot apply second Keep Both",
+    );
+    assert!(divergent_apply2.success);
+    assert_eq!(divergent_apply2.reviewed_base_advanced, Some(true));
+    assert_keep_both_result(
+        &repository2,
+        &project_id2,
+        &logical_thread,
+        &provider_thread2,
+        &second_keep_both,
+        &divergent_apply2,
+    );
+    assert_rollout_cwd(
+        &myconf2,
+        &second_keep_both.remote_provider_thread_id,
+        &project1_copy,
+    );
+    assert_eq!(
+        provider_thread_id(
+            &repository2,
+            &project_id2,
+            &first_keep_both.preserved_thread_id
+        ),
+        first_preserved_on_b,
+        "the first preserved branch changed identity during the second Keep Both"
+    );
+    let fifth_push = push(&service2, &project_id2, &storage_id);
+    assert_eq!(fifth_push.revision, Some(5));
+    assert_portable_state_is_safe(
+        &service2,
+        &storage_id,
+        &bundle_id,
+        &mystorage1,
+        &credentials,
+        &path_needles,
+    );
+
+    // A accepts revision 5. Both replicas are now at the same fixed point,
+    // and a reviewed no-op Push from either replica must not create revision 6.
+    let (_, fifth_pull) = pull_and_apply(&service1, &storage_id, &bundle_id, &binding1);
+    assert!(fifth_pull.preserved_threads.is_empty());
+    let second_preserved_on_a = provider_thread_id(
+        &repository1,
+        &project_id1,
+        &second_keep_both.preserved_thread_id,
+    );
+    assert_rollout_cwd(&myconf1, &second_preserved_on_a, &project1);
+    assert_ne!(
+        first_keep_both.preserved_thread_id,
+        second_keep_both.preserved_thread_id
+    );
+    for (repository, project_id) in [(&repository1, &project_id1), (&repository2, &project_id2)] {
+        let provider_ids = [
+            provider_thread_id(repository, project_id, &logical_thread),
+            provider_thread_id(repository, project_id, &first_keep_both.preserved_thread_id),
+            provider_thread_id(
+                repository,
+                project_id,
+                &second_keep_both.preserved_thread_id,
+            ),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            provider_ids.len(),
+            3,
+            "fixed point collapsed distinct conversation provider identities"
+        );
+    }
+    assert_fixed_point(
+        &redacted(
+            service1.compare_threads(&project_id1, &storage_id),
+            "cannot compare replica A at fixed point",
+        ),
+        5,
+    );
+    assert_pull_is_no_op(&service1, &storage_id, &bundle_id, &binding1);
+    assert_pull_is_no_op(&service2, &storage_id, &bundle_id, &binding2);
+    assert_fixed_point(
+        &redacted(
+            service2.compare_threads(&project_id2, &storage_id),
+            "cannot compare replica B at fixed point",
+        ),
+        5,
+    );
+    for (service, project_id) in [(&service1, &project_id1), (&service2, &project_id2)] {
+        let no_op = push(service, project_id, &storage_id);
+        assert_eq!(no_op.revision, Some(5));
+        assert_eq!(no_op.resources_changed, Some(0));
+    }
+    assert_eq!(
+        redacted(
+            service1.inspect_bundle(&storage_id, &bundle_id),
+            "cannot inspect final bundle",
+        )
+        .head
+        .revision,
+        5
+    );
+    assert_portable_state_is_safe(
+        &service1,
+        &storage_id,
+        &bundle_id,
+        &mystorage1,
+        &credentials,
+        &path_needles,
+    );
+    assert_eq!(
+        codex_turn_count, EXPECTED_SOURCE_CODEX_TURNS,
+        "live source conversation phase changed its Codex CLI process budget"
+    );
+
+    // Revision 6: create a five-root native 0.147 paginated DAG on replica A
+    // through one bounded app-server. No rollout is directly written here.
+    eprintln!("live Codex phase: paginated graph revisions 6-10");
+    let graph = write_native_paginated_graph(&provider, &myconf1, &machine1_home, &project1);
+    let p1_initial_bytes = read_bounded_file(
+        &graph.nodes["p1"].path,
+        MAX_CONVERSATION_FILE_BYTES,
+        "initial P1 rollout",
+    );
+    let sixth_push = push(&service1, &project_id1, &storage_id);
+    assert_eq!(sixth_push.revision, Some(6));
+
+    let graph_threads = [
+        (
+            "p0",
+            logical_thread_id(
+                &repository1,
+                &project_id1,
+                &graph.nodes["p0"].provider_thread_id,
+            ),
+        ),
+        (
+            "p1",
+            logical_thread_id(
+                &repository1,
+                &project_id1,
+                &graph.nodes["p1"].provider_thread_id,
+            ),
+        ),
+        (
+            "p2",
+            logical_thread_id(
+                &repository1,
+                &project_id1,
+                &graph.nodes["p2"].provider_thread_id,
+            ),
+        ),
+        (
+            "p3",
+            logical_thread_id(
+                &repository1,
+                &project_id1,
+                &graph.nodes["p3"].provider_thread_id,
+            ),
+        ),
+        (
+            "p4",
+            logical_thread_id(
+                &repository1,
+                &project_id1,
+                &graph.nodes["p4"].provider_thread_id,
+            ),
+        ),
+    ]
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    let (_, sixth_pull) = pull_and_apply(&service2, &storage_id, &bundle_id, &binding2);
+    assert!(sixth_pull.preserved_threads.is_empty());
+    for name in ["p0", "p1", "p2", "p3", "p4"] {
+        let logical = &graph_threads[name];
+        let pulled_alias = provider_thread_id(&repository2, &project_id2, logical);
+        assert_ne!(
+            pulled_alias, graph.nodes[name].provider_thread_id,
+            "Pull reused a source provider identity"
+        );
+        assert_pulled_standalone_rollout(
+            &myconf2,
+            &project1_copy,
+            &pulled_alias,
+            &graph.nodes[name].expected,
+        );
+    }
+    assert_fixed_point(
+        &redacted(
+            service1.compare_threads(&project_id1, &storage_id),
+            "cannot compare replica A at revision 6",
+        ),
+        6,
+    );
+    assert_fixed_point(
+        &redacted(
+            service2.compare_threads(&project_id2, &storage_id),
+            "cannot compare replica B at revision 6",
+        ),
+        6,
+    );
+
+    // Revision 7: A has one local-only advance and one side of a divergence;
+    // B has one cloud-only advance and the other divergent side. A prepares
+    // before B publishes so the reviewed head pin itself is exercised.
+    run_paginated_mutation(
+        &mut codex_turn_count,
+        &provider,
+        &myconf1,
+        &machine1_home,
+        &project1,
+        &graph.nodes["p1"].provider_thread_id,
+        "GRAPH_USER_A_LOCAL_ONLY",
+        "GRAPH_A_LOCAL_ONLY",
+    );
+    run_paginated_mutation(
+        &mut codex_turn_count,
+        &provider,
+        &myconf1,
+        &machine1_home,
+        &project1,
+        &graph.nodes["p3"].provider_thread_id,
+        "GRAPH_USER_A_DIVERGENT",
+        "GRAPH_A_DIVERGENT",
+    );
+    let stale_a_review = redacted(
+        service1.prepare_push_review(&project_id1, &storage_id),
+        "cannot prepare replica A stale reviewed Push",
+    );
+    assert!(matches!(
+        stale_a_review.destination_status,
+        PushDestinationStatus::Ready { .. }
+    ));
+
+    let p2_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads["p2"]);
+    let p3_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads["p3"]);
+    run_paginated_mutation(
+        &mut codex_turn_count,
+        &provider,
+        &myconf2,
+        &machine2_home,
+        &project1_copy,
+        &p2_on_b,
+        "GRAPH_USER_B_CLOUD_ONLY",
+        "GRAPH_B_CLOUD_ONLY",
+    );
+    run_paginated_mutation(
+        &mut codex_turn_count,
+        &provider,
+        &myconf2,
+        &machine2_home,
+        &project1_copy,
+        &p3_on_b,
+        "GRAPH_USER_B_DIVERGENT",
+        "GRAPH_B_DIVERGENT",
+    );
+    let seventh_push = push(&service2, &project_id2, &storage_id);
+    assert_eq!(seventh_push.revision, Some(7));
+    assert_stale_push_rejected(&service1, &project_id1, &storage_id, &stale_a_review);
+    let mixed_a = wait_for_thread_states(
+        &service1,
+        &project_id1,
+        &storage_id,
+        &[
+            (&graph_threads["p1"], ThreadSyncState::LocalAhead),
+            (&graph_threads["p2"], ThreadSyncState::StorageAhead),
+            (&graph_threads["p3"], ThreadSyncState::Diverged),
+        ],
+        "replica A",
+    );
+    let p1_row = mixed_a
+        .entries
+        .iter()
+        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_threads["p1"]))
+        .expect("mixed comparison lacks P1");
+    assert_eq!(
+        p1_row.push_decision.action,
+        ConversationReviewAction::Publish
+    );
+    assert!(p1_row.push_decision.selectable);
+    let p2_row = mixed_a
+        .entries
+        .iter()
+        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_threads["p2"]))
+        .expect("mixed comparison lacks P2");
+    assert_eq!(
+        p2_row.pull_decision.action,
+        ConversationReviewAction::MaterializeCloud
+    );
+    assert!(p2_row.pull_decision.selectable);
+    let p3_row = mixed_a
+        .entries
+        .iter()
+        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_threads["p3"]))
+        .expect("mixed comparison lacks P3");
+    assert_eq!(
+        p3_row.push_decision.action,
+        ConversationReviewAction::RequirePull
+    );
+    assert!(!p3_row.push_decision.selectable);
+    assert_eq!(
+        p3_row.pull_decision.action,
+        ConversationReviewAction::KeepBoth
+    );
+
+    let p1_on_a_before_pull = provider_thread_id(&repository1, &project_id1, &graph_threads["p1"]);
+    let p2_on_a_before_pull = provider_thread_id(&repository1, &project_id1, &graph_threads["p2"]);
+    let p2_on_a_path_before_pull = rollout_path(&myconf1, &p2_on_a_before_pull);
+    let p2_on_a_bytes_before_pull = redacted(
+        std::fs::read(&p2_on_a_path_before_pull),
+        "cannot snapshot replica A P2 before copy-on-write Pull",
+    );
+    let p3_on_a_before_pull = provider_thread_id(&repository1, &project_id1, &graph_threads["p3"]);
+    let seventh_plan_a = redacted(
+        service1.plan_bundle_restore(&storage_id, &bundle_id, &binding1),
+        "cannot plan mixed paginated Pull on replica A",
+    );
+    let p3_keep_both = keep_both_for(&seventh_plan_a, &graph_threads["p3"]);
+    let seventh_apply_a = redacted(
+        service1.apply_bundle_restore(
+            &seventh_plan_a.plan_id,
+            approved_pull_actions(&seventh_plan_a),
+        ),
+        "cannot apply mixed paginated Pull on replica A",
+    );
+    assert!(seventh_apply_a.success);
+    assert_eq!(seventh_apply_a.reviewed_base_advanced, Some(true));
+    assert_keep_both_result(
+        &repository1,
+        &project_id1,
+        &graph_threads["p3"],
+        &p3_on_a_before_pull,
+        &p3_keep_both,
+        &seventh_apply_a,
+    );
+    assert_eq!(
+        provider_thread_id(&repository1, &project_id1, &graph_threads["p1"]),
+        p1_on_a_before_pull,
+        "mixed Pull overwrote the unrelated LocalAhead P1"
+    );
+    let p2_on_a_after_pull = provider_thread_id(&repository1, &project_id1, &graph_threads["p2"]);
+    assert_ne!(
+        p2_on_a_after_pull, p2_on_a_before_pull,
+        "Codex MaterializeCloud reused its old provider identity"
+    );
+    assert_eq!(
+        redacted(
+            std::fs::read(&p2_on_a_path_before_pull),
+            "cannot read displaced replica A P2 after copy-on-write Pull",
+        ),
+        p2_on_a_bytes_before_pull,
+        "Codex copy-on-write changed the displaced P2 rollout"
+    );
+    assert_rollout_cwd(&myconf1, &p2_on_a_after_pull, &project1);
+    let seventh_post_pull_a = redacted(
+        service1.compare_threads(&project_id1, &storage_id),
+        "cannot compare replica A after revision-7 copy-on-write Pull",
+    );
+    assert!(
+        seventh_post_pull_a
+            .entries
+            .iter()
+            .all(|entry| entry.provider_thread_id.as_deref() != Some(&p2_on_a_before_pull)),
+        "unchanged displaced P2 reappeared as publishable work"
+    );
+
+    // Revision 8 publishes A's surviving P1 advance and its preserved P3
+    // branch, then B materializes both without another provider-backed turn.
+    let eighth_push = push(&service1, &project_id1, &storage_id);
+    assert_eq!(eighth_push.revision, Some(8));
+    let (_, eighth_pull) = pull_and_apply(&service2, &storage_id, &bundle_id, &binding2);
+    assert!(eighth_pull.preserved_threads.is_empty());
+    let p3_preserved_on_b = provider_thread_id(
+        &repository2,
+        &project_id2,
+        &p3_keep_both.preserved_thread_id,
+    );
+    assert_rollout_cwd(&myconf2, &p3_preserved_on_b, &project1_copy);
+    assert_fixed_point(
+        &redacted(
+            service1.compare_threads(&project_id1, &storage_id),
+            "cannot compare replica A at revision 8",
+        ),
+        8,
+    );
+    assert_fixed_point(
+        &redacted(
+            service2.compare_threads(&project_id2, &storage_id),
+            "cannot compare replica B at revision 8",
+        ),
+        8,
+    );
+
+    // Revision 9 reverses the conflict direction. B also advances P0; its
+    // fresh review must keep that safe local work eligible while holding P4.
+    let p4_on_a = provider_thread_id(&repository1, &project_id1, &graph_threads["p4"]);
+    let p4_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads["p4"]);
+    let p0_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads["p0"]);
+    run_paginated_mutation(
+        &mut codex_turn_count,
+        &provider,
+        &myconf1,
+        &machine1_home,
+        &project1,
+        &p4_on_a,
+        "GRAPH_USER_A_REVERSE",
+        "GRAPH_A_REVERSE",
+    );
+    run_paginated_mutation(
+        &mut codex_turn_count,
+        &provider,
+        &myconf2,
+        &machine2_home,
+        &project1_copy,
+        &p4_on_b,
+        "GRAPH_USER_B_REVERSE",
+        "GRAPH_B_REVERSE",
+    );
+    run_paginated_mutation(
+        &mut codex_turn_count,
+        &provider,
+        &myconf2,
+        &machine2_home,
+        &project1_copy,
+        &p0_on_b,
+        "GRAPH_USER_B_ROOT_LOCAL",
+        "GRAPH_B_ROOT_LOCAL",
+    );
+    let stale_b_review = redacted(
+        service2.prepare_push_review(&project_id2, &storage_id),
+        "cannot prepare replica B stale reviewed Push",
+    );
+    assert!(matches!(
+        stale_b_review.destination_status,
+        PushDestinationStatus::Ready { .. }
+    ));
+    let ninth_push = push(&service1, &project_id1, &storage_id);
+    assert_eq!(ninth_push.revision, Some(9));
+    assert_stale_push_rejected(&service2, &project_id2, &storage_id, &stale_b_review);
+    let mixed_b = wait_for_thread_states(
+        &service2,
+        &project_id2,
+        &storage_id,
+        &[
+            (&graph_threads["p0"], ThreadSyncState::LocalAhead),
+            (&graph_threads["p4"], ThreadSyncState::Diverged),
+        ],
+        "replica B",
+    );
+    let p0_row = mixed_b
+        .entries
+        .iter()
+        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_threads["p0"]))
+        .expect("reverse comparison lacks P0");
+    assert_eq!(
+        p0_row.push_decision.action,
+        ConversationReviewAction::Publish
+    );
+    assert!(p0_row.push_decision.selectable);
+    let p4_row = mixed_b
+        .entries
+        .iter()
+        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_threads["p4"]))
+        .expect("reverse comparison lacks P4");
+    assert_eq!(
+        p4_row.push_decision.action,
+        ConversationReviewAction::RequirePull
+    );
+    assert!(!p4_row.push_decision.selectable);
+    assert_eq!(
+        p4_row.pull_decision.action,
+        ConversationReviewAction::KeepBoth
+    );
+
+    let ninth_plan_b = redacted(
+        service2.plan_bundle_restore(&storage_id, &bundle_id, &binding2),
+        "cannot plan reverse divergent paginated Pull",
+    );
+    let p4_keep_both = keep_both_for(&ninth_plan_b, &graph_threads["p4"]);
+    let ninth_apply_b = redacted(
+        service2.apply_bundle_restore(&ninth_plan_b.plan_id, approved_pull_actions(&ninth_plan_b)),
+        "cannot apply reverse Keep Both",
+    );
+    assert!(ninth_apply_b.success);
+    assert_eq!(ninth_apply_b.reviewed_base_advanced, Some(true));
+    assert_keep_both_result(
+        &repository2,
+        &project_id2,
+        &graph_threads["p4"],
+        &p4_on_b,
+        &p4_keep_both,
+        &ninth_apply_b,
+    );
+    assert_eq!(
+        provider_thread_id(&repository2, &project_id2, &graph_threads["p0"]),
+        p0_on_b,
+        "reverse divergent Pull overwrote the unrelated LocalAhead P0"
+    );
+
+    // Revision 10 publishes B's P0 and preserved P4 work; A pulls it and the
+    // complete project conversation set reaches a stable no-op fixed point.
+    let tenth_push = push(&service2, &project_id2, &storage_id);
+    assert_eq!(tenth_push.revision, Some(10));
+    let p0_on_a_before_pull = provider_thread_id(&repository1, &project_id1, &graph_threads["p0"]);
+    assert_eq!(
+        p0_on_a_before_pull, graph.nodes["p0"].provider_thread_id,
+        "replica A P0 binding drifted before the dependency-preserving Pull"
+    );
+    let p0_dependency_bytes_before = read_bounded_file(
+        &graph.nodes["p0"].path,
+        MAX_CONVERSATION_FILE_BYTES,
+        "native P0 dependency before revision-10 Pull",
+    );
+    let (_, tenth_pull) = pull_and_apply(&service1, &storage_id, &bundle_id, &binding1);
+    assert!(tenth_pull.preserved_threads.is_empty());
+    let p0_on_a_after_pull = provider_thread_id(&repository1, &project_id1, &graph_threads["p0"]);
+    assert_ne!(
+        p0_on_a_after_pull, p0_on_a_before_pull,
+        "revision-10 Pull overwrote a provider alias still used as history_base"
+    );
+    assert_eq!(
+        read_bounded_file(
+            &graph.nodes["p0"].path,
+            MAX_CONVERSATION_FILE_BYTES,
+            "native P0 dependency after revision-10 Pull",
+        ),
+        p0_dependency_bytes_before,
+        "revision-10 Pull changed the frozen physical ancestor"
+    );
+    let mut relocated_p0_history = graph.nodes["p0"].expected.clone();
+    relocated_p0_history.extend(marker_turn("GRAPH_USER_B_ROOT_LOCAL", "GRAPH_B_ROOT_LOCAL"));
+    assert_pulled_standalone_rollout(
+        &myconf1,
+        &project1,
+        &p0_on_a_after_pull,
+        &relocated_p0_history,
+    );
+    let final_comparison_a = redacted(
+        service1.compare_threads(&project_id1, &storage_id),
+        "cannot compare replica A at revision 10",
+    );
+    assert!(
+        final_comparison_a.entries.iter().all(|entry| {
+            !matches!(
+                entry.provider_thread_id.as_deref(),
+                Some(provider_id)
+                    if provider_id == p0_on_a_before_pull || provider_id == p2_on_a_before_pull
+            )
+        }),
+        "unchanged displaced native alias reappeared at the final fixed point"
+    );
+    assert_fixed_point(&final_comparison_a, 10);
+    assert_fixed_point(
+        &redacted(
+            service2.compare_threads(&project_id2, &storage_id),
+            "cannot compare replica B at revision 10",
+        ),
+        10,
+    );
+    let storage_before_fixed_point_noops = storage_digest_inventory(&mystorage1);
+    assert_pull_is_no_op(&service1, &storage_id, &bundle_id, &binding1);
+    assert_pull_is_no_op(&service2, &storage_id, &bundle_id, &binding2);
+    for (service, project_id) in [(&service1, &project_id1), (&service2, &project_id2)] {
+        let no_op = push(service, project_id, &storage_id);
+        assert_eq!(no_op.revision, Some(10));
+        assert_eq!(no_op.resources_changed, Some(0));
+    }
+    assert_eq!(
+        storage_digest_inventory(&mystorage1),
+        storage_before_fixed_point_noops,
+        "fixed-point project Push/Pull created or replaced storage objects"
+    );
+    let project_before_library = redacted(
+        service1.inspect_bundle(&storage_id, &bundle_id),
+        "cannot inspect revision-10 bundle",
+    );
+    assert_eq!(project_before_library.head.revision, 10);
+    let project_repository_root = mystorage1.join(".mallard/v1/repositories");
+    let project_objects_before_library = storage_snapshot(&project_repository_root);
+
+    // Exercise skills and both Codex pet formats through the production
+    // storage-Library service in the same two machine/provider homes and the
+    // same local-folder store. Library repositories are independent of the
+    // project bundle and must not advance its revision-10 head.
+    eprintln!("live Codex phase: storage Library skills and pets");
+    let catalog_user1 = root.path().join("catalog-user1");
+    let catalog_user2 = root.path().join("catalog-user2");
+    let mut catalog_privacy_needles = credentials.clone();
+    catalog_privacy_needles.extend(path_needles.clone());
+    catalog_privacy_needles.push(catalog_user1.to_string_lossy().as_bytes().to_vec());
+    catalog_privacy_needles.push(catalog_user2.to_string_lossy().as_bytes().to_vec());
+    let catalog_report = run_catalog_flow(CatalogFlowInputs {
+        machine_home_a: &machine1_home,
+        machine_home_b: &machine2_home,
+        user_home_a: &catalog_user1,
+        user_home_b: &catalog_user2,
+        codex_home_a: &myconf1,
+        codex_home_b: &myconf2,
+        storage: &storage,
+        privacy_needles: &catalog_privacy_needles,
+    });
+    assert_eq!(catalog_report.repository_count, 8);
+    assert_eq!(catalog_report.primary_revisions, vec![4, 4, 4, 4]);
+    assert_eq!(catalog_report.preserved_copy_revisions, vec![1, 1, 1, 1]);
+    assert_eq!(catalog_report.native_provider_process_calls, 0);
+    assert!(catalog_report.injected_inventory_calls > 0);
+    let project_after_library = redacted(
+        service1.inspect_bundle(&storage_id, &bundle_id),
+        "cannot inspect project bundle after Library flow",
+    );
+    assert_eq!(
+        project_after_library.head, project_before_library.head,
+        "storage-Library activity changed the project bundle head coordinate"
+    );
+    assert_eq!(
+        project_after_library.manifest, project_before_library.manifest,
+        "storage-Library activity changed the revision-10 project manifest"
+    );
+    assert_eq!(
+        storage_snapshot(&project_repository_root),
+        project_objects_before_library,
+        "storage-Library activity changed a project repository object"
+    );
+
+    // Native descendants remain pinned to their exact serialized prefix:
+    // the later P1 append must not leak into P3/P4 or invalidate their base.
+    // Revision 10 relocates the pulled P0 primary to a fresh provider alias,
+    // leaving this native P0 byte-for-byte intact as their physical base.
+    let p1_after = read_bounded_file(
+        &graph.nodes["p1"].path,
+        MAX_CONVERSATION_FILE_BYTES,
+        "final native P1 rollout",
+    );
+    assert!(p1_after.starts_with(&p1_initial_bytes));
+    for (name, segments) in [
+        ("p0", vec![graph.nodes["p0"].provider_thread_id.as_str()]),
+        (
+            "p1",
+            vec![
+                graph.nodes["p0"].provider_thread_id.as_str(),
+                graph.nodes["p1"].provider_thread_id.as_str(),
+            ],
+        ),
+        (
+            "p3",
+            vec![
+                graph.nodes["p0"].provider_thread_id.as_str(),
+                graph.nodes["p1"].provider_thread_id.as_str(),
+                graph.nodes["p3"].provider_thread_id.as_str(),
+            ],
+        ),
+        (
+            "p4",
+            vec![
+                graph.nodes["p0"].provider_thread_id.as_str(),
+                graph.nodes["p1"].provider_thread_id.as_str(),
+                graph.nodes["p4"].provider_thread_id.as_str(),
+            ],
+        ),
+    ] {
+        let mut node = graph.nodes[name].clone();
+        node.expected = match name {
+            "p0" => graph.nodes[name].expected.clone(),
+            "p1" => graph.nodes[name]
+                .expected
+                .iter()
+                .cloned()
+                .chain(marker_turn("GRAPH_USER_A_LOCAL_ONLY", "GRAPH_A_LOCAL_ONLY"))
+                .collect(),
+            "p3" => graph.nodes[name]
+                .expected
+                .iter()
+                .cloned()
+                .chain(marker_turn("GRAPH_USER_A_DIVERGENT", "GRAPH_A_DIVERGENT"))
+                .collect(),
+            "p4" => graph.nodes[name]
+                .expected
+                .iter()
+                .cloned()
+                .chain(marker_turn("GRAPH_USER_A_REVERSE", "GRAPH_A_REVERSE"))
+                .collect(),
+            _ => graph.nodes[name].expected.clone(),
+        };
+        validate_paginated_rollout(&myconf1, &node, &segments, &project1);
+    }
+    let mut p2_final_expected = graph.nodes["p2"].expected.clone();
+    p2_final_expected.extend(marker_turn("GRAPH_USER_B_CLOUD_ONLY", "GRAPH_B_CLOUD_ONLY"));
+    assert_pulled_standalone_rollout(&myconf1, &project1, &p2_on_a_after_pull, &p2_final_expected);
+
+    let mut existing_primary = marker_turn("LIVE_USER_R1", "MALLARD_BASE");
+    existing_primary.extend(marker_turn("LIVE_USER_R2", "MALLARD_REMOTE_BRANCH"));
+    existing_primary.extend(marker_turn("LIVE_USER_R4", "MALLARD_REVISION_FOUR"));
+    let mut first_preserved_history = marker_turn("LIVE_USER_R1", "MALLARD_BASE");
+    first_preserved_history.extend(marker_turn("LIVE_USER_R3", "MALLARD_LOCAL_BRANCH"));
+    let mut second_preserved_history = marker_turn("LIVE_USER_R1", "MALLARD_BASE");
+    second_preserved_history.extend(marker_turn("LIVE_USER_R2", "MALLARD_REMOTE_BRANCH"));
+    second_preserved_history.extend(marker_turn("LIVE_USER_R5", "MALLARD_SECOND_LOCAL_BRANCH"));
+    let mut p0_history = graph.nodes["p0"].expected.clone();
+    p0_history.extend(marker_turn("GRAPH_USER_B_ROOT_LOCAL", "GRAPH_B_ROOT_LOCAL"));
+    let mut p1_history = graph.nodes["p1"].expected.clone();
+    p1_history.extend(marker_turn("GRAPH_USER_A_LOCAL_ONLY", "GRAPH_A_LOCAL_ONLY"));
+    let p2_history = p2_final_expected;
+    let mut p3_primary_history = graph.nodes["p3"].expected.clone();
+    p3_primary_history.extend(marker_turn("GRAPH_USER_B_DIVERGENT", "GRAPH_B_DIVERGENT"));
+    let mut p3_preserved_history = graph.nodes["p3"].expected.clone();
+    p3_preserved_history.extend(marker_turn("GRAPH_USER_A_DIVERGENT", "GRAPH_A_DIVERGENT"));
+    let mut p4_primary_history = graph.nodes["p4"].expected.clone();
+    p4_primary_history.extend(marker_turn("GRAPH_USER_A_REVERSE", "GRAPH_A_REVERSE"));
+    let mut p4_preserved_history = graph.nodes["p4"].expected.clone();
+    p4_preserved_history.extend(marker_turn("GRAPH_USER_B_REVERSE", "GRAPH_B_REVERSE"));
+    assert_eq!(
+        p4_preserved_history,
+        vec![
+            marker(HistoryRole::User, "GRAPH_USER_BASE_1"),
+            marker(HistoryRole::Assistant, "GRAPH_BASE_1"),
+            marker(HistoryRole::User, "GRAPH_USER_LEFT_PARENT"),
+            marker(HistoryRole::Assistant, "GRAPH_LEFT_PARENT"),
+            marker(HistoryRole::User, "GRAPH_USER_B_REVERSE"),
+            marker(HistoryRole::Assistant, "GRAPH_B_REVERSE"),
+        ],
+        "replica B preserved P4 did not retain its exact six-message history"
+    );
+    let p4_preserved_on_b = provider_thread_id(
+        &repository2,
+        &project_id2,
+        &p4_keep_both.preserved_thread_id,
+    );
+    assert_pulled_standalone_rollout(
+        &myconf2,
+        &project1_copy,
+        &p4_preserved_on_b,
+        &p4_preserved_history,
+    );
+    let histories = vec![
+        (logical_thread.clone(), existing_primary),
+        (
+            first_keep_both.preserved_thread_id.clone(),
+            first_preserved_history,
+        ),
+        (
+            second_keep_both.preserved_thread_id.clone(),
+            second_preserved_history,
+        ),
+        (graph_threads["p0"].clone(), p0_history),
+        (graph_threads["p1"].clone(), p1_history),
+        (graph_threads["p2"].clone(), p2_history),
+        (graph_threads["p3"].clone(), p3_primary_history),
+        (
+            p3_keep_both.preserved_thread_id.clone(),
+            p3_preserved_history,
+        ),
+        (graph_threads["p4"].clone(), p4_primary_history),
+        (
+            p4_keep_both.preserved_thread_id.clone(),
+            p4_preserved_history,
+        ),
+    ];
+    assert_eq!(histories.len(), 10);
+    assert_eq!(
+        histories
+            .iter()
+            .map(|(_, history)| history.clone())
+            .collect::<Vec<_>>(),
+        final_history_oracles(),
+        "live final histories drifted from the deterministic aimock scenario table"
+    );
+    let expected_final_threads = histories
+        .iter()
+        .map(|(thread_id, _)| thread_id.clone())
+        .collect::<BTreeSet<_>>();
+    for (service, repository, project_id) in [
+        (&service1, &repository1, &project_id1),
+        (&service2, &repository2, &project_id2),
+    ] {
+        let comparison = redacted(
+            service.compare_threads(project_id, &storage_id),
+            "cannot verify the exact final conversation identity set",
+        );
+        let compared_threads = comparison
+            .entries
+            .iter()
+            .map(|entry| {
+                mallard_domain::parse_conversation_resource_id(
+                    entry.conversation_resource_id.as_str(),
+                )
+                .expect("final comparison contains a canonical conversation resource")
+                .1
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            compared_threads, expected_final_threads,
+            "final comparison contains a missing or unexpected logical conversation"
+        );
+        let bound_threads = repository
+            .load_conversation_bindings()
+            .expect("read final conversation bindings")
+            .bindings
+            .into_iter()
+            .filter(|binding| &binding.local_project_id == project_id)
+            .map(|binding| binding.thread_id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            bound_threads, expected_final_threads,
+            "final machine binding set contains a missing or unexpected logical conversation"
+        );
+    }
+    let r1_derived_threads = [
+        logical_thread.clone(),
+        first_keep_both.preserved_thread_id.clone(),
+        second_keep_both.preserved_thread_id.clone(),
+    ];
+    for (service, repository, project_id, codex_home, project_root, forbidden_root) in [
+        (
+            &service1,
+            &repository1,
+            &project_id1,
+            myconf1.as_path(),
+            project1.as_path(),
+            project1_copy.as_path(),
+        ),
+        (
+            &service2,
+            &repository2,
+            &project_id2,
+            myconf2.as_path(),
+            project1_copy.as_path(),
+            project1.as_path(),
+        ),
+    ] {
+        for logical in &r1_derived_threads {
+            let provider_id = provider_thread_id(repository, project_id, logical);
+            let resource_id = mallard_domain::conversation_resource_id(&codex_key(), logical)
+                .expect("derive final R1-derived resource ID");
+            assert_raw_rollout_paths(
+                codex_home,
+                &provider_id,
+                project_root,
+                &project1_external,
+                Some(forbidden_root),
+            );
+            assert_session_detail_paths(
+                service,
+                project_id,
+                &resource_id,
+                project_root,
+                codex_home,
+                &provider_id,
+                &project1_external,
+            );
+        }
+    }
+    assert_eq!(
+        codex_turn_count,
+        EXPECTED_SOURCE_CODEX_TURNS + EXPECTED_GRAPH_MUTATION_TURNS,
+        "live scenario changed its deterministic source/mutation Codex CLI turn budget"
+    );
+    let headless_turns_before = codex_turn_count;
+    eprintln!("live Codex phase: twenty disposable loopback history resumes");
+    verify_all_histories(
+        &mut codex_turn_count,
+        &provider,
+        &credentials,
+        [
+            (&repository1, &project_id1, &myconf1, &project1),
+            (&repository2, &project_id2, &myconf2, &project1_copy),
+        ],
+        &histories,
+    );
+    assert_eq!(
+        codex_turn_count.saturating_sub(headless_turns_before),
+        EXPECTED_HEADLESS_RESUMES,
+        "live scenario changed its loopback headless-resume budget"
+    );
+    assert_eq!(
+        codex_turn_count, EXPECTED_CODEX_CLI_TURNS,
+        "live scenario changed its total Codex CLI turn budget"
+    );
+    assert_exact_fixture_tree(&project1, &IN_PROJECT_FIXTURES);
+    assert_exact_fixture_tree(&project1_copy, &IN_PROJECT_FIXTURES);
+    assert_exact_fixture_tree(&project1_external, &OUTSIDE_PROJECT_FIXTURES);
+    assert_eq!(
+        fixture_file_states(&project1, &IN_PROJECT_FIXTURES),
+        project1_fixture_states,
+        "the completed live flow changed source project fixtures"
+    );
+    assert_eq!(
+        fixture_file_states(&project1_copy, &IN_PROJECT_FIXTURES),
+        project1_copy_fixture_states,
+        "the completed live flow changed copied project fixtures"
+    );
+    assert_eq!(
+        fixture_file_states(&project1_external, &OUTSIDE_PROJECT_FIXTURES),
+        external_fixture_states,
+        "the completed live flow changed outside project fixtures"
+    );
+    eprintln!(
+        "live Codex phase: complete ({EXPECTED_SOURCE_CODEX_TURNS} source turns, {EXPECTED_GRAPH_APP_SERVER_TURNS} app-server graph turns, {EXPECTED_GRAPH_MUTATION_TURNS} graph mutations, {EXPECTED_HEADLESS_RESUMES} history resumes)"
+    );
+    assert_portable_state_is_safe(
+        &service1,
+        &storage_id,
+        &bundle_id,
+        &mystorage1,
+        &credentials,
+        &path_needles,
+    );
+
+    assert_codex_home_has_no_sensitive_state(&myconf1, &credentials);
+    assert_codex_home_has_no_sensitive_state(&myconf2, &credentials);
+    assert_process_home_has_no_sensitive_state(&process_home, &credentials);
+    assert_process_home_has_no_sensitive_state(&machine1_home, &credentials);
+    assert_process_home_has_no_sensitive_state(&machine2_home, &credentials);
+    aimock
+        .finish()
+        .expect("deterministic local aimock audit failed");
+}

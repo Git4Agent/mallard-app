@@ -222,7 +222,10 @@ npm run dev          # frontend only at http://localhost:1420
 npm run tauri dev    # complete desktop app
 ```
 
-Configuration is created through the app; no `.env` file is required.
+Application configuration is created through the app; normal development does
+not require an `.env` file. The opt-in paid live test has a separate local
+connection input described below. The additional aimock live test is entirely
+local and does not use that connection file.
 
 ## Verify
 
@@ -238,14 +241,43 @@ npm run test:cli
 The Rust suite includes tests that bind localhost for the stub S3 transport;
 restricted environments may require permission for that test server.
 
-### Live Codex end-to-end test
+### Live Codex API end-to-end test
 
-The live Codex test is deliberately separate from `npm run test:integration`.
-It makes authenticated, paid Codex calls and requires an existing profile with
-`auth.json`. Each run copies that authentication into isolated temporary
-provider homes, creates temporary projects and local-folder storage, and
-removes those fixtures after the test. It does not run against the source
-profile or Mallard's real local state.
+The API-backed live Codex test is deliberately separate from
+`npm run test:integration`. Its five source-conversation turns use an
+OpenAI-compatible Responses provider; its twenty final-history reopen checks
+use a bounded loopback Responses recorder and make no remote model request.
+Every phase uses only fresh temporary Codex homes, projects, Mallard
+repositories, and local-folder storage. The test never reads a user Codex
+home, requires a Codex login, or reads, copies, or creates `auth.json` or
+another legacy credential file. The ignored `.env.local` described below is
+the one intentional credential input.
+
+Create an ignored `.env.local` at the repository root with the provider
+connection document:
+
+```json
+{
+  "_type": "newapi_channel_conn",
+  "key": "<provider-api-key>",
+  "url": "<https-provider-base-url>"
+}
+```
+
+On Unix, restrict it to the current user before running the test:
+
+```sh
+chmod 600 .env.local
+```
+
+The runner accepts exactly those three JSON fields, validates the HTTPS base
+URL, and fails closed for a missing, malformed, symlinked, oversized, or
+over-permissive file. `.env.local` is covered by the repository's `*.local`
+ignore rule and must never be committed.
+
+The current rollout fixtures have a hard `codex-cli 0.147.x` prerequisite. The
+test rejects another CLI version before making a model request; update the
+current-format fixture in place before moving the gate to another version.
 
 Run it only when you intend to spend API tokens:
 
@@ -253,32 +285,132 @@ Run it only when you intend to spend API tokens:
 MALLARD_RUN_LIVE_CODEX_E2E=1 npm run test:live-codex-e2e
 ```
 
-The source profile defaults to `~/.codex`. To use another profile without
-changing it, set `MALLARD_LIVE_CODEX_SOURCE_HOME`:
+The explicit paid-use gate remains required even when `.env.local` is valid.
+For each of the five provider-backed conversation processes, the harness keeps
+user configuration disabled, passes a closed set of non-secret custom-provider
+settings through repeated Codex CLI configuration overrides, and exposes the
+API key only in that child process's dedicated environment variable. It does
+not write the key into a Codex config, prompt, command argument, rollout,
+snapshot, Mallard object, or test log. The twenty loopback children receive no
+real provider URL or credential. All command shapes set
+`features.plugins=false`: Codex marketplace synchronization is outside this
+scenario, while the skill and pet phases use Mallard's isolated filesystem
+fixtures directly.
 
-```sh
-MALLARD_RUN_LIVE_CODEX_E2E=1 \
-  MALLARD_LIVE_CODEX_SOURCE_HOME=/path/to/codex-home \
-  npm run test:live-codex-e2e
-```
+The test runs exactly 25 Codex CLI turns with no retry path: five real,
+provider-backed `gpt-5.6-luna` conversation turns at low reasoning effort and
+twenty deterministic loopback headless resumes. The count is deliberately a
+CLI-turn count; the revision-1 tool-using turn can require more than one
+provider HTTP exchange. The scenario exercises two isolated machine homes
+through project revision 10, including paginated dependency histories,
+reviewed Push/Pull, stale-plan rejection, divergence in both directions, Keep
+Both, and a no-op fixed point. The same topology also shares and updates nested
+Codex skills and fake v1/v2 pets through the storage Library without additional
+provider-backed turns.
 
-The test makes exactly 25 `gpt-5.6-luna` requests with low reasoning effort:
-five conversation turns and twenty headless old-history checks over disposable
-Codex-home snapshots. It exercises two isolated machine homes through project
-revision 10, including paginated dependency histories, reviewed Push/Pull,
-stale-plan rejection, divergence in both directions, Keep Both, and a no-op
-fixed point. The same topology also shares and updates nested Codex skills and
-fake v1/v2 pets through the storage Library without additional model calls.
+For all ten final aliases in both homes, the test first resolves and pages the
+exact history through the production Codex history and Session Detail paths.
+It then runs public `codex exec --json resume --ephemeral` against a one-request
+HTTP server bound to literal `127.0.0.1`. The recorder validates the complete
+ordered history Codex sent for that exact alias before returning a fixed SSE
+response. Each verifier operates on a disposable snapshot because Codex 0.147
+appends a turn even with `--ephemeral`; both authoritative homes must remain
+byte-identical.
 
-The old-history checks use public `codex exec resume` rather than a terminal
-UI. Codex 0.147 appends a turn even with `--ephemeral`, so each check runs
-against a fresh disposable snapshot and the test proves that the authoritative
-temporary homes remain byte-identical. It also verifies that credentials do
-not enter stored objects, machine-local paths do not enter portable manifests
-or object keys, and Library activity cannot mutate the project repository.
+The exact API gate passed on August 19, 2026: all five provider-backed turns
+and twenty loopback resumes completed in one 75.91-second Rust test run.
 
 See [`docs/PLAN_LIVE_CODEX_INTEGRATION_TEST.md`](./docs/PLAN_LIVE_CODEX_INTEGRATION_TEST.md)
-for the topology, POC evidence, revision matrix, and safety assertions.
+for the API topology, POC evidence, revision matrix, and safety assertions.
+
+### Keyless aimock Codex end-to-end test
+
+The additional aimock suite drives the same installed Codex CLI and Mallard
+two-replica behavior against a deterministic
+[CopilotKit/aimock](https://github.com/CopilotKit/aimock) server on an
+ephemeral literal-IPv4 loopback port. It does not open `.env.local`, needs no
+API account, key, Codex login, GPU, or local model, and makes no external model
+request. It is a separate test transport, not a fallback or compatibility path
+inside Mallard.
+
+Install dependencies and run it with its independent heavyweight-test gate:
+
+```sh
+npm install
+MALLARD_RUN_LIVE_CODEX_AIMOCK_E2E=1 npm run test:live-codex-aimock-e2e
+```
+
+Run the gate from an ordinary Terminal. A development agent already enclosed
+by macOS Seatbelt may need permission for the outer test process so Codex can
+initialize its nested sandbox; the test still keeps Codex itself at
+`workspace-write` with only the reviewed additional directory. The runner
+detects the known nested-Seatbelt failure with a bounded, no-provider preflight
+before starting Cargo and prints a fixed ordinary-Terminal instruction.
+Implementation, protocol POCs, and the complete ignored live gate are verified.
+The exact keyless gate passed on August 19, 2026 with `1 passed, 0 failed, 7
+filtered` in 90.48 seconds. Every model-shaped response came from the one local
+aimock child; the run used no provider account, credential, remote model, GPU,
+or external model request.
+
+The Rust test owns the mock lifecycle, supplies a keyless custom provider with
+`requires_openai_auth=false`, strips inherited provider/proxy state, disables
+plugins and request compression, and permits no retries or Authorization
+header. Strict fixture matching rejects unknown, repeated, reordered, or
+history-incomplete requests; no proxy, recorder, remote fixture, or upstream
+is configured.
+
+The aimock scenario adds native Codex pagination coverage. One bounded
+`codex app-server --stdio` process creates P0-P4 with paginated
+`thread/start`/`thread/fork` operations, which must consume no Responses
+request. Five source turns, five native app-server graph turns, seven later
+graph-mutation turns, and twenty final history-resume turns make 37
+deterministic turns and exactly 38 local `/v1/responses` requests. R1 uses two
+intentional scenario legs with the same prompt marker: an ordinary
+`exec_command` function call invokes the reviewed `apply_patch` command, then
+an exact tool-result call ID selects the fixed final response. Every other
+prompt marker is unique, and every fixed response is selected only after the
+mock validates the complete ordered marker history.
+Mallard planning may additionally start bounded, ephemeral Codex app-server
+children only to allocate native UUIDv7 thread IDs. Those children perform no
+turn, disable plugins, run under disposable provider/process homes, inherit no
+provider or proxy credentials, and are excluded from deterministic turn and
+Responses-request accounting.
+
+Codex `MaterializeCloud` is always copy-on-write. A native fork can begin
+referencing an unchanged parent between review and apply, so neither a digest
+pin nor a dependency rescan can make replacement of that parent atomic with
+Codex's external writer. Pull instead assigns the standalone history a fresh,
+reviewed-absent alias, preserves the prior rollout bytes, and inserts the new
+index entry without clobbering the old one. Binding/receipt history suppresses
+no content by itself: it derives a domain-separated retained-branch identity,
+and an immutable whole-file checkpoint hides the displaced physical alias only
+while its exact bytes still match the reviewed source. Missing evidence, a
+read failure, or any later append fails open and surfaces that retained branch
+in review, Activity, and Session Detail; publishing it creates a direct
+binding. Revision 10 proves this for a referenced root, revision 7 proves the
+same copy-on-write rule for an unreferenced P2 control, and a focused backend
+regression exercises a changed retained branch plus repeated R1-to-R2
+displacement. Providers without Codex's physical rollout graph retain their
+existing in-place update behavior.
+
+The native POC also proved that
+`history_base.end_ordinal_exclusive` is a global top-level rollout boundary,
+not a physical JSONL row count: the child `session_meta` starts at that ordinal
+and subsequent rows are contiguous. Mallard now enforces those current
+paginated ordinals and decodes portable Codex display titles on Pull in the
+single schema-1 path. Neither correction adds a fallback, migration, old-format
+path, acceptance of ordinal-less paginated data, or schema change. Codex's
+upstream `history_mode: "legacy"` remains its separate current ordinal-less
+source mode, not a Mallard legacy execution path.
+
+Both suites exercise the current schema-1 product path. Adding the local mock
+does not add a migration, legacy execution branch, or provider fallback to the
+application. Copy-on-write materialization likewise changes only the current
+execution path: schema 1 remains unchanged, with no migration or compatibility
+path.
+
+See [`docs/PLAN_LIVE_CODEX_AIMOCK_INTEGRATION_TEST.md`](./docs/PLAN_LIVE_CODEX_AIMOCK_INTEGRATION_TEST.md)
+for the aimock topology, protocol POCs, exact accounting, and safety contract.
 
 ## Code map
 

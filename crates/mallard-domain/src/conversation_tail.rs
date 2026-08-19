@@ -372,9 +372,9 @@ impl RootPhysicalMapping {
         if self.consumed_byte_offset > self.source_file_size {
             return Err("conversation mapping cursor exceeds its source size".to_string());
         }
-        if self.consumed_record_ordinal > self.consumed_byte_offset {
-            return Err("conversation mapping ordinal exceeds its byte cursor".to_string());
-        }
+        // The cursor ordinal is global across a native paginated lineage,
+        // while the byte cursor is local to the append-bearing segment. They
+        // are different coordinate spaces and cannot be ordered here.
         if self.probe_window_len > self.consumed_byte_offset {
             return Err("conversation mapping probe window exceeds its cursor".to_string());
         }

@@ -2,11 +2,12 @@
 //!
 //! All IDs are minted during planning and persisted in the plan; apply and
 //! recovery never mint or invoke Codex. The preferred path asks one bounded
-//! headless CLI session — disposable `CODEX_HOME` and CWD, `initialize`/
-//! `initialized`, `thread/start` with `ephemeral: true`, no `turn/start` —
-//! and accepts only a canonical lowercase RFC 9562 UUIDv7. On any failure it
-//! generates cryptographically random UUIDv7 values locally under the same
-//! validation. Both paths collision-check against the caller's inventory.
+//! headless CLI session — disposable provider home, operating-system home,
+//! and CWD, plugins disabled, `initialize`/`initialized`, `thread/start` with
+//! `ephemeral: true`, no `turn/start` — and accepts only a canonical lowercase
+//! RFC 9562 UUIDv7. On any failure it generates cryptographically random
+//! UUIDv7 values locally under the same validation. Both paths collision-check
+//! against the caller's inventory.
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -21,6 +22,53 @@ const MAX_APP_SERVER_LINE_BYTES: usize = 1024 * 1024;
 const MAX_APP_SERVER_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_APP_SERVER_MESSAGES: usize = 4_096;
 const MAX_COLLISION_RETRIES: usize = 16;
+const APP_SERVER_REMOVED_ENV_KEYS: &[&str] = &[
+    "AIMOCK_DUMMY_KEY_MARKER",
+    "AIMOCK_PROVIDER_ANTHROPIC_KEY",
+    "AIMOCK_PROVIDER_AZURE_KEY",
+    "AIMOCK_PROVIDER_COHERE_KEY",
+    "AIMOCK_PROVIDER_ELEVENLABS_KEY",
+    "AIMOCK_PROVIDER_FAL_KEY",
+    "AIMOCK_PROVIDER_GEMINI_KEY",
+    "AIMOCK_PROVIDER_GROK_KEY",
+    "AIMOCK_PROVIDER_OLLAMA_KEY",
+    "AIMOCK_PROVIDER_OPENAI_KEY",
+    "AIMOCK_PROVIDER_OPENROUTER_KEY",
+    "AIMOCK_PROVIDER_VEO_KEY",
+    "ALL_PROXY",
+    "ANTHROPIC_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_API_KEY",
+    "CODEX_HOME",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "MALLARD_CODEX_PROVIDER_API_KEY",
+    "MALLARD_CODEX_PROVIDER_URL",
+    "MALLARD_LIVE_CODEX_PROVIDER_KEY",
+    "MALLARD_LIVE_CODEX_PROVIDER_URL",
+    "MALLARD_LIVE_CODEX_SOURCE_HOME",
+    "MALLARD_RUN_LIVE_CODEX_AIMOCK_E2E",
+    "MALLARD_RUN_LIVE_CODEX_E2E",
+    "MALLARD_TUZI_POC_KEY",
+    "NO_PROXY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORGANIZATION",
+    "OPENAI_ORG_ID",
+    "OPENAI_PROJECT_ID",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+];
 
 /// Validate one canonical lowercase RFC 9562 UUIDv7.
 pub fn validate_uuid_v7(value: &str) -> Result<(), String> {
@@ -128,6 +176,7 @@ fn allocate_with(
 struct CliAllocator {
     client: AppServerClient,
     _home: tempfile::TempDir,
+    _process_home: tempfile::TempDir,
     _cwd: tempfile::TempDir,
 }
 
@@ -136,12 +185,16 @@ impl CliAllocator {
         let executable = crate::codex_binary::find_binary("codex")?;
         let home = tempfile::tempdir()
             .map_err(|error| format!("create disposable Codex home: {}", error))?;
+        let process_home = tempfile::tempdir()
+            .map_err(|error| format!("create disposable process home: {}", error))?;
         let cwd = tempfile::tempdir()
             .map_err(|error| format!("create disposable Codex cwd: {}", error))?;
-        let client = AppServerClient::start(&executable, home.path(), cwd.path())?;
+        let client =
+            AppServerClient::start(&executable, home.path(), process_home.path(), cwd.path())?;
         Ok(Self {
             client,
             _home: home,
+            _process_home: process_home,
             _cwd: cwd,
         })
     }
@@ -182,12 +235,13 @@ struct AppServerClient {
 }
 
 impl AppServerClient {
-    fn start(executable: &Path, codex_home: &Path, project: &Path) -> Result<Self, String> {
-        let mut child = Command::new(executable)
-            .arg("app-server")
-            .arg("--stdio")
-            .current_dir(project)
-            .env("CODEX_HOME", codex_home)
+    fn start(
+        executable: &Path,
+        codex_home: &Path,
+        process_home: &Path,
+        project: &Path,
+    ) -> Result<Self, String> {
+        let mut child = app_server_command(executable, codex_home, process_home, project)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -353,6 +407,29 @@ impl AppServerClient {
     }
 }
 
+fn app_server_command(
+    executable: &Path,
+    codex_home: &Path,
+    process_home: &Path,
+    project: &Path,
+) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .arg("app-server")
+        .arg("--stdio")
+        .arg("--config")
+        .arg("features.plugins=false")
+        .current_dir(project);
+    for key in APP_SERVER_REMOVED_ENV_KEYS {
+        command.env_remove(key);
+    }
+    command
+        .env("CODEX_HOME", codex_home)
+        .env("HOME", process_home)
+        .env("USERPROFILE", process_home);
+    command
+}
+
 impl Drop for AppServerClient {
     fn drop(&mut self) {
         self.stdin.take();
@@ -428,7 +505,7 @@ mod tests {
     fn fake_app_server(directory: &Path, capture: &Path, body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let script = format!(
-            "#!/bin/sh\nCAPTURE={capture}\nprintf 'HOME=%s\\nCWD=%s\\n' \"$CODEX_HOME\" \"$(pwd)\" >> \"$CAPTURE\"\nN=1\nwhile IFS= read -r line; do\n  printf 'REQ %s\\n' \"$line\" >> \"$CAPTURE\"\n{body}\ndone\n",
+            "#!/bin/sh\nCAPTURE={capture}\nprintf 'CODEX_HOME=%s\\nHOME=%s\\nUSERPROFILE=%s\\nCWD=%s\\nARGS=%s\\n' \"$CODEX_HOME\" \"$HOME\" \"$USERPROFILE\" \"$(pwd)\" \"$*\" >> \"$CAPTURE\"\nN=1\nwhile IFS= read -r line; do\n  printf 'REQ %s\\n' \"$line\" >> \"$CAPTURE\"\n{body}\ndone\n",
             capture = capture.display(),
             body = body,
         );
@@ -449,13 +526,67 @@ mod tests {
     #[cfg(unix)]
     fn fake_allocator(executable: &Path) -> Result<CliAllocator, String> {
         let home = tempfile::tempdir().unwrap();
+        let process_home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        let client = AppServerClient::start(executable, home.path(), cwd.path())?;
+        let client =
+            AppServerClient::start(executable, home.path(), process_home.path(), cwd.path())?;
         Ok(CliAllocator {
             client,
             _home: home,
+            _process_home: process_home,
             _cwd: cwd,
         })
+    }
+
+    #[test]
+    fn app_server_command_is_plugin_free_and_environment_isolated() {
+        use std::collections::BTreeMap;
+        use std::ffi::OsString;
+
+        let parent = tempfile::tempdir().unwrap();
+        let executable = parent.path().join("codex");
+        let codex_home = parent.path().join("codex-home");
+        let process_home = parent.path().join("process-home");
+        let project = parent.path().join("project");
+        let command = app_server_command(&executable, &codex_home, &process_home, &project);
+
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "app-server",
+                "--stdio",
+                "--config",
+                "features.plugins=false"
+            ]
+            .map(std::ffi::OsStr::new)
+        );
+        assert_eq!(command.get_current_dir(), Some(project.as_path()));
+
+        let environment = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(ToOwned::to_owned)))
+            .collect::<BTreeMap<OsString, Option<OsString>>>();
+        assert_eq!(
+            environment.get(&OsString::from("CODEX_HOME")),
+            Some(&Some(codex_home.into_os_string()))
+        );
+        assert_eq!(
+            environment.get(&OsString::from("HOME")),
+            Some(&Some(process_home.clone().into_os_string()))
+        );
+        assert_eq!(
+            environment.get(&OsString::from("USERPROFILE")),
+            Some(&Some(process_home.into_os_string()))
+        );
+        for key in APP_SERVER_REMOVED_ENV_KEYS {
+            if *key != "CODEX_HOME" {
+                assert_eq!(
+                    environment.get(&OsString::from(*key)),
+                    Some(&None),
+                    "allocator command must remove inherited {key}"
+                );
+            }
+        }
     }
 
     /// The successful CLI path: initialize/initialized handshake, bounded
@@ -475,6 +606,7 @@ mod tests {
         let executable = fake_app_server(directory.path(), &capture, body);
         let cli = fake_allocator(&executable).unwrap();
         let disposable_home = cli._home.path().to_path_buf();
+        let disposable_process_home = cli._process_home.path().to_path_buf();
         let disposable_cwd = cli._cwd.path().to_path_buf();
         let none_taken = |_: &str| false;
         let batch = allocate_with(2, &none_taken, Some(cli)).unwrap();
@@ -487,8 +619,16 @@ mod tests {
         );
 
         let log = std::fs::read_to_string(&capture).unwrap();
-        let home_line = format!("HOME={}", disposable_home.display());
+        let home_line = format!("CODEX_HOME={}", disposable_home.display());
         assert!(log.contains(&home_line), "{log}");
+        let process_home_line = format!("HOME={}", disposable_process_home.display());
+        assert!(log.contains(&process_home_line), "{log}");
+        let userprofile_line = format!("USERPROFILE={}", disposable_process_home.display());
+        assert!(log.contains(&userprofile_line), "{log}");
+        assert!(
+            log.contains("ARGS=app-server --stdio --config features.plugins=false"),
+            "{log}"
+        );
         assert!(!log.contains("turn/start"), "{log}");
         assert!(log.contains("\"initialize\""), "{log}");
         assert!(log.contains("\"initialized\""), "{log}");
@@ -497,6 +637,13 @@ mod tests {
         if let Ok(real_home) = std::env::var("CODEX_HOME") {
             assert_ne!(disposable_home.to_string_lossy(), real_home);
         }
+        if let Ok(real_home) = std::env::var("HOME") {
+            assert_ne!(disposable_process_home.to_string_lossy(), real_home);
+        }
+        assert_ne!(
+            disposable_home, disposable_process_home,
+            "provider and process homes must be separate"
+        );
         assert_ne!(
             disposable_cwd,
             std::env::current_dir().unwrap(),

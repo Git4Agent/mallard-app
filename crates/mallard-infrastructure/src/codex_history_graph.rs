@@ -20,9 +20,10 @@ use crate::codex_rollout::{
 use crate::conversation_codec::{CanonicalChainBuilder, ChainFeedOutcome};
 use mallard_domain::{
     compute_portable_conversation_tail, conversation_chain_digests, conversation_prefix_witness,
-    validate_conversation_chain, CanonicalConversationMessage, ConversationPrefixWitness,
-    MessageId, PortableConversationTail, RootPhysicalMapping, RootTailLayout, TailAccumulator,
-    TailPartitionKind, MAX_CONVERSATION_FILE_BYTES, PORTABLE_TAIL_CODEC_V1,
+    validate_conversation_chain, CanonicalConversationMessage, ConversationCheckpoint,
+    ConversationPrefixWitness, MessageId, PhysicalMappingState, PortableConversationTail,
+    RootPhysicalMapping, RootTailLayout, TailAccumulator, TailPartitionKind,
+    MAX_CONVERSATION_FILE_BYTES, PORTABLE_TAIL_CODEC_V1,
 };
 
 pub const PROBE_WINDOW_BYTES: u64 = 4_096;
@@ -101,24 +102,100 @@ pub enum CodexTailInvalidReason {
 /// Read one rollout with the module's safety contract: a canonical no-follow
 /// regular file within the bounded transcript limit.
 pub fn read_rollout_bounded(path: &Path) -> Result<Vec<u8>, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("stat Codex rollout '{}': {}", path.display(), error))?;
-    if !metadata.is_file() {
+    use std::io::Read;
+
+    let mut file = open_rollout_no_follow(path)?;
+    let before = file
+        .metadata()
+        .map_err(|error| format!("inspect Codex rollout '{}': {}", path.display(), error))?;
+    if !before.is_file() {
         return Err(format!(
             "Codex rollout '{}' is not a regular file",
             path.display()
         ));
     }
-    if metadata.len() > MAX_CONVERSATION_FILE_BYTES {
+    if before.len() > MAX_CONVERSATION_FILE_BYTES {
         return Err(format!(
             "Codex rollout '{}' exceeds the bounded transcript limit",
             path.display()
         ));
     }
-    let bytes = fs::read(path)
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    file.by_ref()
+        .take(MAX_CONVERSATION_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|error| format!("read Codex rollout '{}': {}", path.display(), error))?;
+    let after = file
+        .metadata()
+        .map_err(|error| format!("reinspect Codex rollout '{}': {}", path.display(), error))?;
+    if bytes.len() as u64 > MAX_CONVERSATION_FILE_BYTES {
+        return Err(format!(
+            "Codex rollout '{}' exceeds the bounded transcript limit",
+            path.display()
+        ));
+    }
+    if after.len() != before.len() || bytes.len() as u64 != before.len() {
+        return Err(format!(
+            "Codex rollout '{}' changed while it was read",
+            path.display()
+        ));
+    }
     crate::sync_metrics::record_transcript_bytes_read(path, bytes.len() as u64);
     Ok(bytes)
+}
+
+/// Prove that a retained copy-on-write source still contains exactly the
+/// bytes pinned when its binding moved. Only checkpoints whose raw pin spans
+/// the complete physical file qualify; partial trailing records and older
+/// cursor-only pins deliberately return `false` so later provider work can
+/// never be hidden on incomplete evidence.
+pub fn retained_root_is_byte_identical(
+    path: &Path,
+    checkpoint: &ConversationCheckpoint,
+) -> Result<bool, String> {
+    use std::io::Read;
+
+    let PhysicalMappingState::Ready {
+        root_mapping,
+        raw_range_pin,
+    } = &checkpoint.physical
+    else {
+        return Ok(false);
+    };
+    if Path::new(&root_mapping.root_path) != path
+        || root_mapping.consumed_byte_offset != root_mapping.source_file_size
+        || raw_range_pin.start_byte_offset != 0
+        || raw_range_pin.end_byte_offset != root_mapping.source_file_size
+    {
+        return Ok(false);
+    }
+    let mut file = open_rollout_no_follow(path)?;
+    let before = file
+        .metadata()
+        .map_err(|error| format!("inspect retained Codex rollout: {error}"))?;
+    if !before.is_file()
+        || before.len() != root_mapping.source_file_size
+        || before.len() > MAX_CONVERSATION_FILE_BYTES
+    {
+        return Ok(false);
+    }
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    file.by_ref()
+        .take(root_mapping.source_file_size.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read retained Codex rollout: {error}"))?;
+    let after = file
+        .metadata()
+        .map_err(|error| format!("reinspect retained Codex rollout: {error}"))?;
+    if after.len() != before.len() || bytes.len() as u64 != before.len() {
+        return Ok(false);
+    }
+    crate::sync_metrics::record_transcript_bytes_read(path, bytes.len() as u64);
+    let digest = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(digest == raw_range_pin.range_sha256)
 }
 
 /// One bounded read of a rollout tail: the saved probe window plus every
@@ -273,7 +350,7 @@ struct SegmentSource {
     path: PathBuf,
     bytes: Vec<u8>,
     consumed_byte_len: u64,
-    declared_record_count: Option<u64>,
+    declared_end_ordinal_exclusive: Option<u64>,
     meta: CodexSessionMetaRecord,
 }
 
@@ -305,7 +382,7 @@ pub fn resolve_codex_root(
     segments.push(SegmentSource {
         path: leaf_path.to_path_buf(),
         consumed_byte_len: leaf_safe_end,
-        declared_record_count: None,
+        declared_end_ordinal_exclusive: None,
         meta: leaf_meta.clone(),
         bytes: {
             let mut bytes = leaf_bytes;
@@ -353,7 +430,7 @@ pub fn resolve_codex_root(
         segments.push(SegmentSource {
             path,
             consumed_byte_len: reference.end_byte_offset,
-            declared_record_count: Some(reference.end_ordinal_exclusive),
+            declared_end_ordinal_exclusive: Some(reference.end_ordinal_exclusive),
             meta,
             bytes: slice,
         });
@@ -369,18 +446,57 @@ pub fn resolve_codex_root(
         let mut structure = CodexStructureAccumulator::new(Some(&segment.meta.id));
         let appended_before = builder.appended_len() as u64;
         let mut record_count = 0_u64;
+        let paginated = segment.meta.history_mode.as_deref() == Some("paginated");
+        if (segment.meta.history_base.is_some() || segment.declared_end_ordinal_exclusive.is_some())
+            && !paginated
+        {
+            return Err(format!(
+                "Codex history segment '{}' is outside paginated mode",
+                segment.meta.id
+            ));
+        }
+        let start_ordinal = segment
+            .meta
+            .history_base
+            .as_ref()
+            .map_or(0, |base| base.end_ordinal_exclusive);
         for raw in segment.bytes.split(|byte| *byte == b'\n') {
             let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
             if raw.is_empty() {
                 continue;
             }
-            record_count += 1;
             let value: serde_json::Value = serde_json::from_slice(raw).map_err(|_| {
                 format!(
                     "Codex segment '{}' contains malformed JSON",
                     segment.meta.id
                 )
             })?;
+            if paginated {
+                let expected_ordinal =
+                    start_ordinal.checked_add(record_count).ok_or_else(|| {
+                        format!("Codex segment '{}' ordinal overflow", segment.meta.id)
+                    })?;
+                let actual_ordinal = value
+                    .get("ordinal")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        format!(
+                            "Codex paginated segment '{}' record {} has no ordinal",
+                            segment.meta.id,
+                            record_count + 1
+                        )
+                    })?;
+                if actual_ordinal != expected_ordinal {
+                    return Err(format!(
+                        "Codex paginated segment '{}' record {} expected ordinal {}, found {}",
+                        segment.meta.id,
+                        record_count + 1,
+                        expected_ordinal,
+                        actual_ordinal
+                    ));
+                }
+            }
+            record_count += 1;
             structure
                 .feed(&value)
                 .map_err(|error| format!("Codex segment '{}': {}", segment.meta.id, error))?;
@@ -391,11 +507,14 @@ pub fn resolve_codex_root(
         structure
             .finalize()
             .map_err(|error| format!("Codex segment '{}': {}", segment.meta.id, error))?;
-        if let Some(declared) = segment.declared_record_count {
-            if declared != record_count {
+        let end_ordinal_exclusive = start_ordinal
+            .checked_add(record_count)
+            .ok_or_else(|| format!("Codex segment '{}' ordinal overflow", segment.meta.id))?;
+        if let Some(declared) = segment.declared_end_ordinal_exclusive {
+            if declared != end_ordinal_exclusive {
                 return Err(format!(
-                    "Codex history base '{}' cutoffs disagree: declared {} records, found {}",
-                    segment.meta.id, declared, record_count
+                    "Codex history base '{}' cutoffs disagree: declared end ordinal {}, computed {} from {} physical records",
+                    segment.meta.id, declared, end_ordinal_exclusive, record_count
                 ));
             }
         }
@@ -492,6 +611,18 @@ pub fn seed_codex_root(
         .last()
         .ok_or_else(|| "resolved Codex root has no segments".to_string())?;
     let consumed = resolved.leaf_safe_end;
+    let consumed_record_ordinal = if resolved.leaf_meta.history_mode.as_deref() == Some("paginated")
+    {
+        resolved
+            .leaf_meta
+            .history_base
+            .as_ref()
+            .map_or(0, |base| base.end_ordinal_exclusive)
+            .checked_add(leaf.consumed_record_count)
+            .ok_or_else(|| "Codex leaf ordinal overflow".to_string())?
+    } else {
+        leaf.consumed_record_count
+    };
     let probe_window_len = consumed.min(PROBE_WINDOW_BYTES);
     let window_start = (consumed - probe_window_len) as usize;
     let probe_window_sha256 = hex_sha256(&leaf_bytes[window_start..consumed as usize]);
@@ -504,7 +635,7 @@ pub fn seed_codex_root(
             .to_string(),
         source_file_size: resolved.leaf_file_size,
         consumed_byte_offset: consumed,
-        consumed_record_ordinal: leaf.consumed_record_count,
+        consumed_record_ordinal,
         probe_window_len,
         probe_window_sha256,
         last_canonical_message_id: resolved
@@ -591,17 +722,42 @@ pub fn refresh_codex_tail(
     )?;
     let relative = |absolute: u64| (absolute - tail.window_offset) as usize;
     let mut appended_records = 0_u64;
+    let mut next_record_ordinal = mapping.consumed_record_ordinal;
     for raw in tail.bytes[window..relative(safe_end)].split(|byte| *byte == b'\n') {
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         if raw.is_empty() {
             continue;
         }
-        appended_records += 1;
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(raw) else {
             return Ok(CodexTailRefresh::Invalid {
                 reason: CodexTailInvalidReason::MalformedAppend,
             });
         };
+        let Some(actual_ordinal) = value.get("ordinal").and_then(serde_json::Value::as_u64) else {
+            if appended_records == 0 {
+                // Codex 0.147 emits both legacy and paginated histories. An
+                // ordinal-less first append must be re-read with its session
+                // metadata so the authoritative history mode chooses the
+                // validation path. Once an ordinal sequence has started,
+                // every later row must continue it.
+                return Ok(CodexTailRefresh::NeedsFullResolve);
+            }
+            return Ok(CodexTailRefresh::Invalid {
+                reason: CodexTailInvalidReason::MalformedAppend,
+            });
+        };
+        if actual_ordinal != next_record_ordinal {
+            return Ok(CodexTailRefresh::Invalid {
+                reason: CodexTailInvalidReason::MalformedAppend,
+            });
+        }
+        let Some(next_ordinal) = next_record_ordinal.checked_add(1) else {
+            return Ok(CodexTailRefresh::Invalid {
+                reason: CodexTailInvalidReason::MalformedAppend,
+            });
+        };
+        next_record_ordinal = next_ordinal;
+        appended_records += 1;
         // Codex can repeat the active session metadata when a task resumes.
         // The cursor does not retain the full ancestry/cwd structure needed
         // to validate it, so defer to the bounded whole-root parser. That
@@ -635,7 +791,7 @@ pub fn refresh_codex_tail(
         root_path: mapping.root_path.clone(),
         source_file_size: current_len,
         consumed_byte_offset: safe_end,
-        consumed_record_ordinal: mapping.consumed_record_ordinal + appended_records,
+        consumed_record_ordinal: next_record_ordinal,
         probe_window_len,
         probe_window_sha256: hex_sha256(&tail.bytes[relative(window_start)..relative(safe_end)]),
         last_canonical_message_id: builder
@@ -682,8 +838,76 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mallard_domain::RawRangePin;
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    fn retained_checkpoint(path: &Path, bytes: &[u8]) -> ConversationCheckpoint {
+        ConversationCheckpoint {
+            generation: 1,
+            accepted: None,
+            accepted_local_tail: None,
+            observed_tail: PortableConversationTail {
+                codec: PORTABLE_TAIL_CODEC_V1.to_string(),
+                partition_kind: TailPartitionKind::WholeThread,
+                start_record_count: 0,
+                accepted_end_record_count: 0,
+                accepted_tail_state: "0".repeat(64),
+            },
+            physical: PhysicalMappingState::Ready {
+                root_mapping: RootPhysicalMapping {
+                    provider_thread_id: "019f7500-0000-7000-8000-00000000ce01".to_string(),
+                    root_path: path.to_string_lossy().into_owned(),
+                    source_file_size: bytes.len() as u64,
+                    consumed_byte_offset: bytes.len() as u64,
+                    consumed_record_ordinal: 1,
+                    probe_window_len: bytes.len() as u64,
+                    probe_window_sha256: hex_sha256(bytes),
+                    last_canonical_message_id: None,
+                    last_synthetic_turn_id: None,
+                    next_synthetic_turn_ordinal: 0,
+                },
+                raw_range_pin: RawRangePin {
+                    start_byte_offset: 0,
+                    end_byte_offset: bytes.len() as u64,
+                    range_sha256: hex_sha256(bytes),
+                },
+            },
+            prefix_witness: None,
+            binding_revision: 0,
+        }
+    }
+
+    #[test]
+    fn retained_source_witness_hides_only_exact_complete_no_follow_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("retained.jsonl");
+        let bytes = b"{}\n";
+        fs::write(&path, bytes).unwrap();
+        let path = fs::canonicalize(path).unwrap();
+        let checkpoint = retained_checkpoint(&path, bytes);
+        assert!(retained_root_is_byte_identical(&path, &checkpoint).unwrap());
+
+        fs::write(&path, b"{}\n{}\n").unwrap();
+        assert!(!retained_root_is_byte_identical(&path, &checkpoint).unwrap());
+
+        fs::write(&path, bytes).unwrap();
+        let mut partial = checkpoint.clone();
+        let PhysicalMappingState::Ready { raw_range_pin, .. } = &mut partial.physical else {
+            unreachable!()
+        };
+        raw_range_pin.start_byte_offset = 1;
+        assert!(!retained_root_is_byte_identical(&path, &partial).unwrap());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let linked = temp.path().join("retained-link.jsonl");
+            symlink(&path, &linked).unwrap();
+            let linked_checkpoint = retained_checkpoint(&linked, bytes);
+            assert!(retained_root_is_byte_identical(&linked, &linked_checkpoint).is_err());
+        }
+    }
 
     fn meta_line(id: &str, base: Option<(&str, u64, u64)>) -> String {
         let mut payload = json!({"id": id, "cwd": "/tmp/project", "history_mode": "paginated"});
@@ -705,6 +929,47 @@ mod tests {
         .unwrap()
     }
 
+    fn encode_paginated_lines(lines: &[String]) -> Vec<u8> {
+        let mut values = lines
+            .iter()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let mut ordinal = values
+            .first()
+            .and_then(|value| value.get("payload"))
+            .and_then(|payload| payload.get("history_base"))
+            .and_then(|base| base.get("end_ordinal_exclusive"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let mut bytes = Vec::new();
+        for value in &mut values {
+            value["ordinal"] = json!(ordinal);
+            ordinal = ordinal.checked_add(1).unwrap();
+            serde_json::to_writer(&mut bytes, value).unwrap();
+            bytes.push(b'\n');
+        }
+        bytes
+    }
+
+    fn next_paginated_ordinal(bytes: &[u8]) -> u64 {
+        bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| serde_json::from_slice::<serde_json::Value>(raw).unwrap())
+            .last()
+            .and_then(|value| value.get("ordinal").and_then(serde_json::Value::as_u64))
+            .unwrap()
+            .checked_add(1)
+            .unwrap()
+    }
+
+    fn append_paginated_line(bytes: &mut Vec<u8>, line: &str) {
+        let mut value = serde_json::from_str::<serde_json::Value>(line).unwrap();
+        value["ordinal"] = json!(next_paginated_ordinal(bytes));
+        serde_json::to_writer(&mut *bytes, &value).unwrap();
+        bytes.push(b'\n');
+    }
+
     struct Graph {
         directory: tempfile::TempDir,
         files: BTreeMap<String, PathBuf>,
@@ -713,7 +978,7 @@ mod tests {
     impl Graph {
         fn write(&mut self, thread: &str, lines: &[String]) -> PathBuf {
             let path = self.directory.path().join(format!("{thread}.jsonl"));
-            fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+            fs::write(&path, encode_paginated_lines(lines)).unwrap();
             self.files.insert(thread.to_string(), path.clone());
             path
         }
@@ -747,7 +1012,7 @@ mod tests {
         let p1 = graph.write("p1", &p1_lines);
         let p1_len = fs::metadata(&p1).unwrap().len();
         let p2_lines = vec![
-            meta_line("p2", Some(("p1", 2, p1_len))),
+            meta_line("p2", Some(("p1", 5, p1_len))),
             message_line("m4", "four"),
             message_line("m5", "five"),
         ];
@@ -773,6 +1038,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["p0", "p1", "p2"]
         );
+        assert_eq!(
+            resolved
+                .segments
+                .iter()
+                .map(|segment| segment.consumed_record_count)
+                .collect::<Vec<_>>(),
+            vec![3, 2, 3]
+        );
 
         // Seeding derives the same tail the domain one-shot computes, and a
         // witness over exactly the ancestor prefix.
@@ -791,6 +1064,7 @@ mod tests {
         assert_eq!(witness.semantic_digest, semantic);
         assert_eq!(seeded.layout.start_record_count, 3);
         assert_eq!(seeded.mapping.consumed_byte_offset, resolved.leaf_safe_end);
+        assert_eq!(seeded.mapping.consumed_record_ordinal, 8);
     }
 
     #[test]
@@ -820,6 +1094,72 @@ mod tests {
         let leaf = graph.write("orphan", &[meta_line("orphan", Some(("gone", 1, 10)))]);
         let error = resolve_codex_root(&leaf, &graph.lookup()).unwrap_err();
         assert!(error.contains("no resolvable rollout"), "{error}");
+
+        // A referenced physical segment is part of paginated history even
+        // when it has no base of its own; a legacy-mode parent is not an
+        // ordinal-less compatibility path.
+        let legacy_meta = serde_json::to_string(&json!({
+            "type": "session_meta",
+            "payload": {
+                "id": "legacy-parent",
+                "cwd": "/tmp/project",
+                "history_mode": "legacy",
+            },
+        }))
+        .unwrap();
+        let legacy = graph.write(
+            "legacy-parent",
+            &[legacy_meta, message_line("legacy-m1", "one")],
+        );
+        let legacy_len = fs::metadata(&legacy).unwrap().len();
+        let leaf = graph.write(
+            "legacy-child",
+            &[meta_line(
+                "legacy-child",
+                Some(("legacy-parent", 2, legacy_len)),
+            )],
+        );
+        let error = resolve_codex_root(&leaf, &graph.lookup()).unwrap_err();
+        assert!(error.contains("outside paginated mode"), "{error}");
+    }
+
+    #[test]
+    fn paginated_segment_ordinals_must_be_present_and_contiguous() {
+        let mut graph = graph();
+        let leaf = graph.write(
+            "solo",
+            &[
+                meta_line("solo", None),
+                message_line("m1", "one"),
+                message_line("m2", "two"),
+            ],
+        );
+        let original = fs::read(&leaf).unwrap();
+        let values = original
+            .split(|byte| *byte == b'\n')
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| serde_json::from_slice::<serde_json::Value>(raw).unwrap())
+            .collect::<Vec<_>>();
+        let write_values = |values: &[serde_json::Value]| {
+            let mut bytes = Vec::new();
+            for value in values {
+                serde_json::to_writer(&mut bytes, value).unwrap();
+                bytes.push(b'\n');
+            }
+            fs::write(&leaf, bytes).unwrap();
+        };
+
+        let mut missing = values.clone();
+        missing[1].as_object_mut().unwrap().remove("ordinal");
+        write_values(&missing);
+        let error = resolve_codex_root(&leaf, &graph.lookup()).unwrap_err();
+        assert!(error.contains("has no ordinal"), "{error}");
+
+        let mut gap = values;
+        gap[1]["ordinal"] = json!(2);
+        write_values(&gap);
+        let error = resolve_codex_root(&leaf, &graph.lookup()).unwrap_err();
+        assert!(error.contains("expected ordinal 1, found 2"), "{error}");
     }
 
     #[test]
@@ -837,6 +1177,37 @@ mod tests {
         assert_eq!(resolved.partition_kind, TailPartitionKind::WholeThread);
         assert_eq!(resolved.start_record_count, 0);
         assert_eq!(resolved.chain.len(), 2);
+    }
+
+    #[test]
+    fn current_legacy_leaf_accepts_ordinal_less_records() {
+        let graph = graph();
+        let leaf = graph.directory.path().join("legacy.jsonl");
+        let metadata = serde_json::to_string(&json!({
+            "type": "session_meta",
+            "payload": {
+                "id": "legacy",
+                "cwd": "/tmp/project",
+                "history_mode": "legacy",
+            },
+        }))
+        .unwrap();
+        fs::write(
+            &leaf,
+            format!(
+                "{metadata}\n{}\n{}\n",
+                message_line("m1", "one"),
+                message_line("m2", "two"),
+            ),
+        )
+        .unwrap();
+
+        let resolved = resolve_codex_root(&leaf, &graph.lookup()).unwrap();
+        assert_eq!(resolved.partition_kind, TailPartitionKind::WholeThread);
+        assert_eq!(resolved.chain.len(), 2);
+        let bytes = fs::read(&leaf).unwrap();
+        let seeded = seed_codex_root(&resolved, &bytes, None).unwrap();
+        assert_eq!(seeded.mapping.consumed_record_ordinal, 3);
     }
 
     /// A tail window equivalent to handing the whole buffer to the old
@@ -879,11 +1250,62 @@ mod tests {
         .then_some(())
         .unwrap();
 
+        // An ordinal-less first append could belong to Codex's current
+        // legacy history mode, so refresh defers to a full metadata-aware
+        // resolve. A started ordinal sequence remains strict: a later
+        // missing or skipped ordinal is malformed.
+        let mut missing_ordinal = leaf_bytes.clone();
+        missing_ordinal.extend_from_slice(message_line("bad-missing", "bad").as_bytes());
+        missing_ordinal.push(b'\n');
+        assert!(matches!(
+            refresh_codex_tail(
+                &seeded.layout,
+                &seeded.observed_tail,
+                &seeded.mapping,
+                &tail_window_from(&seeded.mapping, &missing_ordinal),
+            )
+            .unwrap(),
+            CodexTailRefresh::NeedsFullResolve
+        ));
+        let mut mixed_missing = leaf_bytes.clone();
+        append_paginated_line(&mut mixed_missing, &message_line("valid-first", "valid"));
+        mixed_missing.extend_from_slice(message_line("bad-second", "bad").as_bytes());
+        mixed_missing.push(b'\n');
+        assert!(matches!(
+            refresh_codex_tail(
+                &seeded.layout,
+                &seeded.observed_tail,
+                &seeded.mapping,
+                &tail_window_from(&seeded.mapping, &mixed_missing),
+            )
+            .unwrap(),
+            CodexTailRefresh::Invalid {
+                reason: CodexTailInvalidReason::MalformedAppend
+            }
+        ));
+        let mut skipped_ordinal = leaf_bytes.clone();
+        let mut skipped =
+            serde_json::from_str::<serde_json::Value>(&message_line("bad-skipped", "bad")).unwrap();
+        skipped["ordinal"] = json!(seeded.mapping.consumed_record_ordinal + 1);
+        serde_json::to_writer(&mut skipped_ordinal, &skipped).unwrap();
+        skipped_ordinal.push(b'\n');
+        assert!(matches!(
+            refresh_codex_tail(
+                &seeded.layout,
+                &seeded.observed_tail,
+                &seeded.mapping,
+                &tail_window_from(&seeded.mapping, &skipped_ordinal),
+            )
+            .unwrap(),
+            CodexTailRefresh::Invalid {
+                reason: CodexTailInvalidReason::MalformedAppend
+            }
+        ));
+
         // Append m6 and refresh: the incremental state equals the one-shot
         // over the re-resolved chain.
         let mut appended = leaf_bytes.clone();
-        appended.extend_from_slice(message_line("m6", "six").as_bytes());
-        appended.push(b'\n');
+        append_paginated_line(&mut appended, &message_line("m6", "six"));
         fs::write(&leaf, &appended).unwrap();
         let CodexTailRefresh::Extended {
             observed_tail,
@@ -945,8 +1367,7 @@ mod tests {
 
         // Structural metadata cannot be decided from the cursor alone.
         let mut meta_appended = leaf_bytes.clone();
-        meta_appended.extend_from_slice(meta_line("p2-reborn", None).as_bytes());
-        meta_appended.push(b'\n');
+        append_paginated_line(&mut meta_appended, &meta_line("p2-reborn", None));
         matches!(
             refresh_codex_tail(
                 &seeded.layout,
@@ -974,9 +1395,9 @@ mod tests {
         // The cursor requests a full resolve, whose structural validator
         // accepts the repeated identity and derives the advanced tail.
         let mut resumed = leaf_bytes.clone();
-        resumed.extend_from_slice(&leaf_bytes[..first_record_end]);
-        resumed.extend_from_slice(message_line("m6", "six").as_bytes());
-        resumed.push(b'\n');
+        let repeated_meta = std::str::from_utf8(&leaf_bytes[..first_record_end - 1]).unwrap();
+        append_paginated_line(&mut resumed, repeated_meta);
+        append_paginated_line(&mut resumed, &message_line("m6", "six"));
         assert!(matches!(
             refresh_codex_tail(
                 &seeded.layout,
@@ -996,8 +1417,7 @@ mod tests {
         // A different identity takes the same full-resolve path but fails
         // structural validation instead of being accepted as continuation.
         let mut replaced = leaf_bytes.clone();
-        replaced.extend_from_slice(meta_line("unrelated", None).as_bytes());
-        replaced.push(b'\n');
+        append_paginated_line(&mut replaced, &meta_line("unrelated", None));
         assert!(matches!(
             refresh_codex_tail(
                 &seeded.layout,
@@ -1028,8 +1448,8 @@ mod tests {
         let metrics = crate::sync_metrics::register_root(graph.directory.path());
         let complete = message_line("m6", "six");
         let mut appended = leaf_bytes.clone();
-        appended.extend_from_slice(complete.as_bytes());
-        appended.push(b'\n');
+        append_paginated_line(&mut appended, &complete);
+        let complete_len = appended.len() - leaf_bytes.len();
         appended.extend_from_slice(b"{\"type\":\"response_item\",\"payload\"");
         fs::write(&leaf, &appended).unwrap();
 
@@ -1061,7 +1481,7 @@ mod tests {
         // inside the dirty suffix.
         assert_eq!(
             mapping.consumed_byte_offset,
-            (leaf_bytes.len() + complete.len() + 1) as u64
+            (leaf_bytes.len() + complete_len) as u64
         );
         assert!(mapping.consumed_byte_offset < appended.len() as u64);
 
@@ -1139,8 +1559,7 @@ mod tests {
         };
         let append = |path: &PathBuf, id: &str, body: &str| {
             let mut bytes = fs::read(path).unwrap();
-            bytes.extend_from_slice(message_line(id, body).as_bytes());
-            bytes.push(b'\n');
+            append_paginated_line(&mut bytes, &message_line(id, body));
             fs::write(path, &bytes).unwrap();
         };
 

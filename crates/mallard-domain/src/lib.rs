@@ -3636,6 +3636,36 @@ pub fn initial_conversation_thread_id(
     )?)
 }
 
+/// Derive the stable local identity used when copy-on-write retains a
+/// provider-native conversation after its portable thread moves to a fresh
+/// provider alias. While the retained bytes remain unchanged this identity
+/// stays hidden as accepted physical history; if the provider app later
+/// appends to those bytes, the same identity makes that work reappear as a
+/// distinct local branch instead of colliding with the moved thread.
+pub fn retained_conversation_thread_id(
+    bundle_id: &BundleId,
+    provider: &ProviderKey,
+    displaced_thread_id: &ThreadId,
+    provider_thread_id: &str,
+) -> Result<ThreadId, String> {
+    if provider_thread_id.is_empty()
+        || provider_thread_id.len() > 512
+        || provider_thread_id.chars().any(char::is_control)
+    {
+        return Err("provider thread id must be 1-512 non-control characters".to_string());
+    }
+    ThreadId::parse(stable_conversation_id(
+        "thread",
+        "mallard-retained-conversation-thread-v1",
+        &[
+            bundle_id.as_str().as_bytes(),
+            provider.as_str().as_bytes(),
+            displaced_thread_id.as_str().as_bytes(),
+            provider_thread_id.as_bytes(),
+        ],
+    )?)
+}
+
 pub fn conversation_resource_id(
     provider: &ProviderKey,
     thread_id: &ThreadId,

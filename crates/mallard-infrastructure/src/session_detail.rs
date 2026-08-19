@@ -17,9 +17,7 @@ use crate::providers::{
     SessionTimelineEventKind, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
     SessionToolCategory,
 };
-use mallard_domain::{
-    initial_conversation_thread_id, parse_conversation_resource_id, LocalProjectId, ProviderKey,
-};
+use mallard_domain::{parse_conversation_resource_id, LocalProjectId, ProviderKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -722,15 +720,23 @@ fn resolve_local_session(
         let identity_matches = session_for_thread
             .as_ref()
             .map(|expected| expected == &session.provider_thread_id)
+            .map(Ok)
             .unwrap_or_else(|| {
-                initial_conversation_thread_id(
-                    &resolved.bundle_id,
+                crate::project_activity::resolve_local_provider_alias_thread(
+                    repository,
+                    &resolved,
                     &provider,
                     &session.provider_thread_id,
+                    &session.source_path,
                 )
-                .map(|derived| derived == thread_id)
-                .unwrap_or(false)
-            });
+                .map(|derived| derived.as_ref() == Some(&thread_id))
+                .map_err(|_| {
+                    SessionDetailError::new(
+                        SessionDetailErrorCode::OwnershipChanged,
+                        "Mallard could not revalidate this session's local ownership.",
+                    )
+                })
+            })?;
         if !identity_matches {
             continue;
         }

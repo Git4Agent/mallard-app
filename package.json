@@ -14,6 +14,7 @@
     "test:backend-integration": "cargo test --manifest-path src-tauri/Cargo.toml --lib && npm run test:storage-catalog-e2e",
     "test:storage-catalog-e2e": "cargo test --manifest-path src-tauri/Cargo.toml --test storage_catalog_e2e",
     "test:cli": "cargo test -p mallard-cli",
+    "test:live-codex-aimock-e2e": "node scripts/run-live-codex-aimock-e2e.mjs",
     "test:live-codex-e2e": "node scripts/run-live-codex-e2e.mjs",
     "test:integration": "npm run test:frontend-integration && npm run test:release-config && npm run test:backend-integration && npm run test:cli",
     "tauri": "node scripts/tauri-build.mjs"
@@ -29,6 +30,7 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@copilotkit/aimock": "1.39.0",
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

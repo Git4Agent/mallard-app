@@ -214,6 +214,20 @@ struct DiscoveredResource {
     conversation: Option<DiscoveredConversationMeta>,
 }
 
+/// Profile-wide provider-native identities collected by the adapter's
+/// existing bounded metadata discovery. This is deliberately retained once
+/// per provider rather than cloned into every project-owned session view.
+#[derive(Clone, Debug, Default)]
+pub struct ProviderSessionInventory {
+    provider_session_ids: BTreeSet<String>,
+}
+
+impl ProviderSessionInventory {
+    pub fn provider_session_ids(&self) -> &BTreeSet<String> {
+        &self.provider_session_ids
+    }
+}
+
 /// One full provider walk. Fields stay private to this module: callers hold
 /// a Discovery opaquely and feed it back into the inventory/capture views,
 /// sharing the walk (and derived candidates such as the filtered session
@@ -222,6 +236,7 @@ struct DiscoveredResource {
 pub struct Discovery {
     resources: BTreeMap<String, DiscoveredResource>,
     directories: BTreeMap<String, SourceDirectory>,
+    provider_session_inventories: BTreeMap<domain::ProviderKey, ProviderSessionInventory>,
     warnings: Vec<String>,
     ignored_count: usize,
     blocked_count: usize,
@@ -258,6 +273,15 @@ impl Discovery {
                         logical_path
                     ));
                 }
+            }
+            for (provider, inventory) in discovery.provider_session_inventories {
+                let combined_inventory = combined
+                    .provider_session_inventories
+                    .entry(provider)
+                    .or_default();
+                combined_inventory
+                    .provider_session_ids
+                    .extend(inventory.provider_session_ids);
             }
             combined.warnings.extend(discovery.warnings);
             combined.ignored_count = combined
@@ -297,6 +321,13 @@ impl Discovery {
 
     pub fn excluded_subagent_resource_ids(&self) -> &BTreeSet<String> {
         &self.excluded_subagent_resource_ids
+    }
+
+    pub fn provider_session_inventory(
+        &self,
+        provider: &domain::ProviderKey,
+    ) -> Option<&ProviderSessionInventory> {
+        self.provider_session_inventories.get(provider)
     }
 }
 
@@ -960,6 +991,7 @@ pub fn discover_full(
     let mut discovery = Discovery {
         resources: BTreeMap::new(),
         directories: BTreeMap::new(),
+        provider_session_inventories: BTreeMap::new(),
         warnings: Vec::new(),
         ignored_count: 0,
         blocked_count: 0,
@@ -1002,6 +1034,13 @@ fn install_provider_discovery(
     provider: &domain::ProviderKey,
     result: crate::providers::SessionDiscovery,
 ) -> Result<(), String> {
+    let inventory = discovery
+        .provider_session_inventories
+        .entry(provider.clone())
+        .or_default();
+    inventory
+        .provider_session_ids
+        .extend(result.profile_session_ids.iter().cloned());
     discovery.warnings.extend(result.warnings);
     for excluded in result.excluded_subagent_session_ids {
         let resource_id = format!("{}:session:{}", provider, resource_id_component(&excluded));
@@ -1974,7 +2013,9 @@ pub(crate) fn collect_regular_tree_files(
         }
     }
     result.sort();
-    inspect_candidate_files(approved_root, &result)?;
+    if !result.is_empty() {
+        inspect_candidate_files(approved_root, &result)?;
+    }
     Ok(result)
 }
 
@@ -2340,6 +2381,45 @@ mod tests {
     }
 
     #[test]
+    fn codex_discovery_retains_profile_wide_ids_and_unions_duplicate_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let outside = temp.path().join("outside-project");
+        let codex = temp.path().join("codex");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let outside_cwd = serde_json::to_string(outside.to_str().unwrap()).unwrap();
+        let child = "019f7900-0000-7000-8000-000000000001";
+        for directory in ["sessions", "archived_sessions"] {
+            write(
+                &codex.join(format!("{directory}/2026/08/19/rollout-{child}.jsonl")),
+                format!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{child}\",\"cwd\":{outside_cwd}}}}}\n"
+                )
+                .as_bytes(),
+            );
+        }
+
+        let request = CaptureRequest {
+            project_root: project,
+            provider_homes: BTreeMap::from([(codex_key(), codex)]),
+            excluded_project_roots: Vec::new(),
+            include_project_content: false,
+            excluded_content_roots: Vec::new(),
+        };
+        let discovery = discover_full(registry(), &request).unwrap();
+        assert!(
+            discovery.project_inventory().resources.is_empty(),
+            "the fixture is intentionally outside the selected project"
+        );
+        let inventory = discovery.provider_session_inventory(&codex_key()).unwrap();
+        assert_eq!(
+            inventory.provider_session_ids(),
+            &BTreeSet::from([child.to_string()])
+        );
+    }
+
+    #[test]
     fn capture_from_discovery_matches_capture_selected_and_unions_disjoint_sets() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("repo");
@@ -2407,7 +2487,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_and_claude_membership_uses_cwd_and_relative_mapping() {
+    fn codex_and_claude_membership_handles_empty_memory_and_relative_mapping() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("repo");
         let child = project.join("apps/web");
@@ -2437,11 +2517,21 @@ mod tests {
         write(
             &claude.join("projects/source/session-a.jsonl"),
             format!(
-                "{{\"type\":\"system\",\"sessionId\":\"session-a\",\"cwd\":{}}}\n",
-                serde_json::to_string(project.to_str().unwrap()).unwrap()
+                concat!(
+                    "{{\"type\":\"attachment\",\"uuid\":\"attachment-a\",",
+                    "\"parentUuid\":null,\"sessionId\":\"session-a\",\"cwd\":{},",
+                    "\"attachment\":{{\"type\":\"hook_success\"}}}}\n",
+                    "{{\"type\":\"user\",\"uuid\":\"user-a\",",
+                    "\"parentUuid\":\"attachment-a\",\"sessionId\":\"session-a\",",
+                    "\"cwd\":{},\"message\":{{\"role\":\"user\",",
+                    "\"content\":\"test request\"}}}}\n"
+                ),
+                serde_json::to_string(project.to_str().unwrap()).unwrap(),
+                serde_json::to_string(project.to_str().unwrap()).unwrap(),
             )
             .as_bytes(),
         );
+        fs::create_dir_all(claude.join("projects/source/memory")).unwrap();
 
         let request = CaptureRequest {
             project_root: project,
@@ -2471,6 +2561,15 @@ mod tests {
             claude.logical_paths[0],
             "state/providers/claude/sessions/session-a/transcript.jsonl"
         );
+
+        let selected = BTreeSet::from([claude.resource_id.clone()]);
+        let captured = capture_selected(registry(), &request, &selected).unwrap();
+        let conversation = captured
+            .conversations
+            .get("claude:session:session-a")
+            .unwrap();
+        assert_eq!(conversation.record_count, 2);
+        assert_eq!(conversation.lineage.chain().unwrap().len(), 2);
     }
 
     #[test]
@@ -2915,6 +3014,7 @@ mod tests {
                 })
                 .collect(),
             directories: BTreeMap::new(),
+            provider_session_inventories: BTreeMap::new(),
             warnings: Vec::new(),
             ignored_count: 0,
             blocked_count: 0,

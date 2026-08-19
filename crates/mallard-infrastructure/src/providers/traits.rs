@@ -144,6 +144,9 @@ pub struct SessionDiscovery {
     pub state_resources: Vec<DiscoveredProviderState>,
     pub warnings: Vec<String>,
     pub excluded_subagent_session_ids: BTreeSet<String>,
+    /// Provider-native session identities observed by the adapter's one
+    /// profile-wide discovery walk, before project ownership filtering.
+    pub profile_session_ids: BTreeSet<String>,
 }
 
 /// Bounded per-file summary for Activity. Fields default to unknown; the

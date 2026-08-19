@@ -140,6 +140,44 @@ fn initial_conversation_ids_are_stable_and_bundle_scoped() {
 }
 
 #[test]
+fn retained_conversation_ids_are_stable_and_domain_separated() {
+    let native_id = "019f742a-a206-7932-876c-9db8d8ce575a";
+    let displaced = ThreadId::parse("thread-displaced").unwrap();
+    let retained =
+        retained_conversation_thread_id(&bundle_id(), &provider("codex"), &displaced, native_id)
+            .unwrap();
+    assert_eq!(
+        retained,
+        retained_conversation_thread_id(&bundle_id(), &provider("codex"), &displaced, native_id,)
+            .unwrap()
+    );
+    assert_ne!(
+        retained,
+        initial_conversation_thread_id(&bundle_id(), &provider("codex"), native_id).unwrap()
+    );
+    assert_ne!(
+        retained,
+        retained_conversation_thread_id(
+            &BundleId::parse("11111111111111111111111111111111").unwrap(),
+            &provider("codex"),
+            &displaced,
+            native_id,
+        )
+        .unwrap()
+    );
+    assert_ne!(
+        retained,
+        retained_conversation_thread_id(
+            &bundle_id(),
+            &provider("codex"),
+            &ThreadId::parse("thread-other-owner").unwrap(),
+            native_id,
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn machine_local_recipes_reject_portable_conversation_identities() {
     let thread_id = ThreadId::parse("thread-local-recipe-boundary").unwrap();
     let portable_id = conversation_resource_id(&provider("codex"), &thread_id).unwrap();
@@ -2171,6 +2209,15 @@ fn conversation_checkpoints_validate_layout_witness_and_mapping() {
         root_mapping.probe_window_len = 0;
     }
     assert!(empty_probe.validate().is_err());
+
+    // Native paginated ordinals are global across the resolved lineage, so
+    // a small append-bearing segment can have a next ordinal greater than
+    // its local byte cursor.
+    let mut global_ordinal = checkpoint.clone();
+    if let PhysicalMappingState::Ready { root_mapping, .. } = &mut global_ordinal.physical {
+        root_mapping.consumed_record_ordinal = root_mapping.consumed_byte_offset + 1;
+    }
+    global_ordinal.validate().unwrap();
 
     // Detached preserves accepted evidence and the witness rule.
     let mut detached = checkpoint.clone();

@@ -9,6 +9,9 @@ use crate::providers::traits::{DiscoveredSession, SessionDiscovery, SessionDisco
 use std::collections::{BTreeMap, BTreeSet};
 use walkdir::WalkDir;
 
+const MAX_PROFILE_SESSION_FILES: usize = 20_000;
+const MAX_PROFILE_SESSION_ENTRIES: usize = 80_000;
+
 pub(super) fn discover(
     context: &SessionDiscoveryContext<'_>,
     scan_metadata: impl Fn(
@@ -19,6 +22,8 @@ pub(super) fn discover(
     let mut discovery = SessionDiscovery::default();
     let mut selected_thread_ids = BTreeSet::new();
     let mut by_session: BTreeMap<String, usize> = BTreeMap::new();
+    let mut visited_entries = 0_usize;
+    let mut visited_files = 0_usize;
     for directory in ["sessions", "archived_sessions"] {
         let state_root = canonical_home.join(directory);
         if !state_root.exists() {
@@ -31,10 +36,21 @@ pub(super) fn discover(
             .filter_entry(provider_walk_entry)
         {
             let entry = entry.map_err(|e| format!("walk Codex {}: {}", directory, e))?;
+            visited_entries = visited_entries.saturating_add(1);
+            if visited_entries > MAX_PROFILE_SESSION_ENTRIES {
+                return Err("Codex profile session inventory exceeds its entry bound".to_string());
+            }
             if !entry.file_type().is_file()
                 || entry.path().extension().and_then(|value| value.to_str()) != Some("jsonl")
             {
                 continue;
+            }
+            visited_files = visited_files.saturating_add(1);
+            if visited_files > MAX_PROFILE_SESSION_FILES {
+                return Err(format!(
+                    "Codex profile contains more than {} session files",
+                    MAX_PROFILE_SESSION_FILES
+                ));
             }
             let meta = match scan_metadata(entry.path()) {
                 Ok(meta) => meta,
@@ -47,6 +63,9 @@ pub(super) fn discover(
                     continue;
                 }
             };
+            discovery
+                .profile_session_ids
+                .insert(meta.session_id.clone());
             let Some(relative_cwd) =
                 owned_relative_cwd(context.project_root, &meta.cwd, context.excluded_roots)?
             else {
