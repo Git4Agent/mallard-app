@@ -118,6 +118,10 @@ impl SessionAdapter for ClaudeAdapter {
         ProviderCapabilityLevel::ResumableWithConflictPreservation
     }
 
+    fn supports_tail_cursor(&self) -> bool {
+        true
+    }
+
     fn discover(&self, context: &SessionDiscoveryContext<'_>) -> Result<SessionDiscovery, String> {
         discovery::discover(context, |path| self.scan_metadata(path))
     }

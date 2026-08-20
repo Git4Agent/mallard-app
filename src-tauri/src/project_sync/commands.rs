@@ -9,6 +9,7 @@ use super::bundle_engine::{
     CapturedBundleFile, FetchProgress, ObjectCache, PublishBundleRequest, PublishExpectation,
     RemoteBundlePage, ScopePublishInput,
 };
+use super::claude_history_tail;
 use super::codex_app_refresh::{
     refresh_offer as codex_app_refresh_offer, restart_after_pull, CodexAppKind,
     CodexAppRefreshOffer, CodexAppRefreshState, CodexAppRestartResult,
@@ -63,6 +64,7 @@ use super::domain::{
     TargetExpectation, ThreadId, TombstoneTarget, VerifiedTailEvidence,
     MAX_CONVERSATION_FILE_BYTES, PUSH_PLAN_SCHEMA, SETUP_DRAFT_SCHEMA, SETUP_TRANSACTION_SCHEMA,
 };
+use super::jsonl_tail_io;
 use super::persistence::{
     LocalStateRepository, ProjectSyncMetadataResetResult, StorageSyncMetadataResetResult,
 };
@@ -122,6 +124,15 @@ fn codex_key() -> ProviderKey {
 
 fn provider_registry() -> &'static ProviderRegistry {
     ProviderRegistry::production()
+}
+
+/// Whether a provider's sessions ride the checkpoint cursor (metadata-only
+/// review rows, captured only as byte-pinning candidates) instead of being
+/// captured up front.
+fn provider_supports_tail_cursor(provider: &ProviderKey) -> bool {
+    provider_registry()
+        .sessions(provider)
+        .is_some_and(|adapter| adapter.supports_tail_cursor())
 }
 
 fn claim_history_scan_log_at(
@@ -1585,7 +1596,7 @@ fn load_project_session_views(
                 "Mallard could not revalidate this session's local ownership.",
             )
         })?;
-    let (_, views) = super::codex_watch_service::session_watch_service()
+    let (_, views) = super::session_watch_service::session_watch_service()
         .discovery_for(provider_registry(), local_project_id, &capture_request)
         .map_err(|_| {
             session_detail_error(
@@ -4850,7 +4861,7 @@ fn synthesized_whole_thread_tail(
 }
 
 /// A worker's complete observation outcome.
-pub(crate) struct CodexLocalObservation {
+pub(crate) struct ProviderLocalObservation {
     observation: LocalTailObservation,
     seeded: Option<CodexSeededRoot>,
     /// Physical files the derivation read; empty when the outcome must not
@@ -4859,7 +4870,7 @@ pub(crate) struct CodexLocalObservation {
 }
 
 /// A parallel observation worker's slot value.
-type ObservationOutcome = Result<CodexLocalObservation, String>;
+type ObservationOutcome = Result<ProviderLocalObservation, String>;
 
 fn take_observation_outcome(
     thread_id: &ThreadId,
@@ -4989,9 +5000,9 @@ fn observe_codex_local(
     adoption_probe: Option<&PortableConversationTail>,
     project_root: &str,
     canonical_project_root: &str,
-) -> Result<CodexLocalObservation, String> {
+) -> Result<ProviderLocalObservation, String> {
     let Some(local) = local else {
-        return Ok(CodexLocalObservation {
+        return Ok(ProviderLocalObservation {
             observation: LocalTailObservation {
                 evidence: TailSideEvidence::ConfirmedAbsent,
                 raw_range_pin: None,
@@ -5016,21 +5027,20 @@ fn observe_codex_local(
             if layout.matches(&checkpoint.observed_tail)
                 && root_mapping.root_path == source.to_string_lossy()
             {
-                let tail =
-                    match codex_history_graph::read_rollout_tail_window(&source, root_mapping) {
-                        Ok(tail) => tail,
-                        Err(_) => {
-                            return Ok(CodexLocalObservation {
-                                observation: LocalTailObservation {
-                                    evidence: TailSideEvidence::Invalid,
-                                    raw_range_pin: None,
-                                    verified_acceptance: None,
-                                },
-                                seeded: None,
-                                depends_on: Vec::new(),
-                            })
-                        }
-                    };
+                let tail = match jsonl_tail_io::read_tail_window(&source, root_mapping) {
+                    Ok(tail) => tail,
+                    Err(_) => {
+                        return Ok(ProviderLocalObservation {
+                            observation: LocalTailObservation {
+                                evidence: TailSideEvidence::Invalid,
+                                raw_range_pin: None,
+                                verified_acceptance: None,
+                            },
+                            seeded: None,
+                            depends_on: Vec::new(),
+                        })
+                    }
+                };
                 match codex_history_graph::refresh_codex_tail(
                     layout,
                     &checkpoint.observed_tail,
@@ -5038,7 +5048,7 @@ fn observe_codex_local(
                     &tail,
                 )? {
                     codex_history_graph::CodexTailRefresh::Unchanged => {
-                        return Ok(CodexLocalObservation {
+                        return Ok(ProviderLocalObservation {
                             observation: LocalTailObservation {
                                 evidence: TailSideEvidence::Present(
                                     checkpoint.observed_tail.clone(),
@@ -5068,14 +5078,14 @@ fn observe_codex_local(
                                 ..(mapping.consumed_byte_offset - tail.window_offset) as usize]
                                 .to_vec()
                         } else {
-                            let range = match codex_history_graph::read_rollout_range(
+                            let range = match jsonl_tail_io::read_range(
                                 &source,
                                 range_start,
                                 mapping.consumed_byte_offset,
                             ) {
                                 Ok(range) => range,
                                 Err(_) => {
-                                    return Ok(CodexLocalObservation {
+                                    return Ok(ProviderLocalObservation {
                                         observation: LocalTailObservation {
                                             evidence: TailSideEvidence::Invalid,
                                             raw_range_pin: None,
@@ -5090,7 +5100,7 @@ fn observe_codex_local(
                             let trusted = &tail.bytes
                                 [..(mapping.consumed_byte_offset - tail.window_offset) as usize];
                             if &range[overlap_from..] != trusted {
-                                return Ok(CodexLocalObservation {
+                                return Ok(ProviderLocalObservation {
                                     observation: LocalTailObservation {
                                         evidence: TailSideEvidence::Invalid,
                                         raw_range_pin: None,
@@ -5108,7 +5118,7 @@ fn observe_codex_local(
                             end_byte_offset: mapping.consumed_byte_offset,
                             range_sha256: hex_digest(Sha256::digest(&range_bytes).as_slice()),
                         };
-                        return Ok(CodexLocalObservation {
+                        return Ok(ProviderLocalObservation {
                             observation: LocalTailObservation {
                                 evidence: TailSideEvidence::Present(observed_tail.clone()),
                                 raw_range_pin: Some(pin.clone()),
@@ -5127,7 +5137,7 @@ fn observe_codex_local(
                     }
                     codex_history_graph::CodexTailRefresh::NeedsFullResolve => {}
                     codex_history_graph::CodexTailRefresh::Invalid { .. } => {
-                        return Ok(CodexLocalObservation {
+                        return Ok(ProviderLocalObservation {
                             observation: LocalTailObservation {
                                 evidence: TailSideEvidence::Invalid,
                                 raw_range_pin: None,
@@ -5146,7 +5156,7 @@ fn observe_codex_local(
     let resolved = match codex_history_graph::resolve_codex_root(&source, &lookup) {
         Ok(resolved) => resolved,
         Err(_) => {
-            return Ok(CodexLocalObservation {
+            return Ok(ProviderLocalObservation {
                 observation: LocalTailObservation {
                     evidence: TailSideEvidence::Invalid,
                     raw_range_pin: None,
@@ -5163,7 +5173,7 @@ fn observe_codex_local(
     let Ok((effective_kind, effective_start)) =
         codex_history_graph::effective_tail_partition(layout, &resolved)
     else {
-        return Ok(CodexLocalObservation {
+        return Ok(ProviderLocalObservation {
             observation: LocalTailObservation {
                 evidence: TailSideEvidence::Invalid,
                 raw_range_pin: None,
@@ -5190,13 +5200,13 @@ fn observe_codex_local(
             canonical_project_root,
         )
     });
-    let leaf_bytes = codex_history_graph::read_rollout_bounded(&source)?;
+    let leaf_bytes = jsonl_tail_io::read_bounded(&source)?;
     let seeded = codex_history_graph::seed_codex_root(&resolved, &leaf_bytes, layout)?;
     if checkpoint
         .and_then(|checkpoint| checkpoint.prefix_witness.as_ref())
         .is_some_and(|stored| seeded.prefix_witness.as_ref() != Some(stored))
     {
-        return Ok(CodexLocalObservation {
+        return Ok(ProviderLocalObservation {
             observation: LocalTailObservation {
                 evidence: TailSideEvidence::Invalid,
                 raw_range_pin: None,
@@ -5225,7 +5235,7 @@ fn observe_codex_local(
             .as_slice(),
         ),
     };
-    Ok(CodexLocalObservation {
+    Ok(ProviderLocalObservation {
         observation: LocalTailObservation {
             evidence: TailSideEvidence::Present(seeded.observed_tail.clone()),
             raw_range_pin: Some(pin),
@@ -5237,6 +5247,259 @@ fn observe_codex_local(
             .iter()
             .map(|segment| segment.path.clone())
             .collect(),
+    })
+}
+
+/// The Claude adoption refold: Claude publishes transcripts verbatim and its
+/// semantic fingerprints exclude the rewritten structural fields, so the
+/// wire fold of a cloud pin must equal the local chain's fold at the pin's
+/// recorded end. Equality proves the cloud version is a prefix of local and
+/// re-establishes the dual acceptance pins.
+fn adopt_claude_acceptance(
+    chain: &[mallard_domain::CanonicalConversationMessage],
+    probe: &PortableConversationTail,
+) -> Option<VerifiedAdoption> {
+    if probe.codec != mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1
+        || probe.partition_kind != TailPartitionKind::WholeThread
+        || probe.start_record_count != 0
+        || probe.accepted_end_record_count > chain.len() as u64
+    {
+        return None;
+    }
+    let state = mallard_domain::compute_conversation_tail_state(
+        TailPartitionKind::WholeThread,
+        0,
+        probe.accepted_end_record_count,
+        chain,
+    )
+    .ok()?;
+    if state != probe.accepted_tail_state {
+        return None;
+    }
+    let local_tail = PortableConversationTail {
+        codec: mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string(),
+        partition_kind: TailPartitionKind::WholeThread,
+        start_record_count: 0,
+        accepted_end_record_count: probe.accepted_end_record_count,
+        accepted_tail_state: state,
+    };
+    local_tail.validate().ok()?;
+    Some(VerifiedAdoption {
+        wire_tail: probe.clone(),
+        local_tail,
+    })
+}
+
+/// Derive local Claude evidence: ride the checkpoint cursor when it is
+/// valid, degrade every non-fast-path outcome to one bounded full
+/// re-analyze, and seed first-contact state. Unlike Codex — whose paginated
+/// rollouts are contractually append-only, making a violated cursor
+/// contract evidence of corruption — Claude files legitimately rewind,
+/// re-root mid-file, and re-emit records, so `NeedsFullResolve` and
+/// `Invalid` cursor outcomes both take the full path, whose conclusion is
+/// exactly what an authoritative full capture would produce.
+fn observe_claude_local(
+    local: Option<&LocalThreadReview>,
+    checkpoint: Option<&ConversationCheckpoint>,
+    layout: Option<&RootTailLayout>,
+    adoption_probe: Option<&PortableConversationTail>,
+) -> Result<ProviderLocalObservation, String> {
+    let invalid = || ProviderLocalObservation {
+        observation: LocalTailObservation {
+            evidence: TailSideEvidence::Invalid,
+            raw_range_pin: None,
+            verified_acceptance: None,
+        },
+        seeded: None,
+        depends_on: Vec::new(),
+    };
+    let Some(local) = local else {
+        return Ok(ProviderLocalObservation {
+            observation: LocalTailObservation {
+                evidence: TailSideEvidence::ConfirmedAbsent,
+                raw_range_pin: None,
+                verified_acceptance: None,
+            },
+            seeded: None,
+            depends_on: Vec::new(),
+        });
+    };
+    let source = local.source_path.clone();
+
+    // A valid Ready checkpoint under a matching layout rides the cursor; an
+    // adoption probe needs the canonical chain and takes the full path.
+    if let (Some(checkpoint), Some(layout), None) = (checkpoint, layout, adoption_probe) {
+        if let PhysicalMappingState::Ready {
+            root_mapping,
+            raw_range_pin,
+        } = &checkpoint.physical
+        {
+            if layout.matches(&checkpoint.observed_tail)
+                && root_mapping.root_path == source.to_string_lossy()
+            {
+                // Any failed read or non-linear outcome falls through to the
+                // bounded full re-analyze below instead of reporting Invalid
+                // evidence (D3a).
+                if let Ok(tail) = jsonl_tail_io::read_tail_window(&source, root_mapping) {
+                    match claude_history_tail::refresh_claude_tail(
+                        layout,
+                        &checkpoint.observed_tail,
+                        root_mapping,
+                        &tail,
+                    )? {
+                        claude_history_tail::ClaudeTailRefresh::Unchanged => {
+                            return Ok(ProviderLocalObservation {
+                                observation: LocalTailObservation {
+                                    evidence: TailSideEvidence::Present(
+                                        checkpoint.observed_tail.clone(),
+                                    ),
+                                    raw_range_pin: Some(raw_range_pin.clone()),
+                                    verified_acceptance: None,
+                                },
+                                seeded: None,
+                                depends_on: vec![source.clone()],
+                            });
+                        }
+                        claude_history_tail::ClaudeTailRefresh::Extended {
+                            observed_tail,
+                            mapping,
+                        } => {
+                            // Re-prove the accepted-to-current interval,
+                            // exactly as the Codex cursor does; a raced
+                            // range read degrades to the full path.
+                            let range_start = raw_range_pin
+                                .start_byte_offset
+                                .min(mapping.consumed_byte_offset);
+                            let range_bytes = if range_start >= tail.window_offset {
+                                Some(
+                                    tail.bytes[(range_start - tail.window_offset) as usize
+                                        ..(mapping.consumed_byte_offset - tail.window_offset)
+                                            as usize]
+                                        .to_vec(),
+                                )
+                            } else {
+                                match jsonl_tail_io::read_range(
+                                    &source,
+                                    range_start,
+                                    mapping.consumed_byte_offset,
+                                ) {
+                                    Ok(range) => {
+                                        let overlap_from =
+                                            (tail.window_offset - range_start) as usize;
+                                        let trusted = &tail.bytes[..(mapping.consumed_byte_offset
+                                            - tail.window_offset)
+                                            as usize];
+                                        (&range[overlap_from..] == trusted).then_some(range)
+                                    }
+                                    Err(_) => None,
+                                }
+                            };
+                            if let Some(range_bytes) = range_bytes {
+                                super::sync_metrics::record_bytes_hashed(
+                                    &source,
+                                    range_bytes.len() as u64,
+                                );
+                                let pin = RawRangePin {
+                                    start_byte_offset: range_start,
+                                    end_byte_offset: mapping.consumed_byte_offset,
+                                    range_sha256: hex_digest(
+                                        Sha256::digest(&range_bytes).as_slice(),
+                                    ),
+                                };
+                                return Ok(ProviderLocalObservation {
+                                    observation: LocalTailObservation {
+                                        evidence: TailSideEvidence::Present(observed_tail.clone()),
+                                        raw_range_pin: Some(pin),
+                                        verified_acceptance: None,
+                                    },
+                                    seeded: Some(CodexSeededRoot {
+                                        layout: layout.clone(),
+                                        observed_tail,
+                                        prefix_witness: None,
+                                        mapping,
+                                        lineage_digest: String::new(),
+                                        semantic_digest: String::new(),
+                                    }),
+                                    depends_on: vec![source.clone()],
+                                });
+                            }
+                        }
+                        claude_history_tail::ClaudeTailRefresh::NeedsFullResolve
+                        | claude_history_tail::ClaudeTailRefresh::Invalid { .. } => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // Full path: one bounded read plus one full analyze of the complete
+    // records — one Claude file is the whole root, so there is no graph to
+    // resolve.
+    super::sync_metrics::record_full_graph_resolve(&source);
+    let Ok(bytes) = jsonl_tail_io::read_bounded(&source) else {
+        return Ok(invalid());
+    };
+    let consumed = jsonl_tail_io::safe_record_end(&bytes) as usize;
+    if consumed == 0 {
+        return Ok(invalid());
+    }
+    let analysis = super::providers::claude::analyze_claude_transcript(&bytes[..consumed]);
+    let CodecLineage::Complete { chain, .. } = &analysis.lineage else {
+        return Ok(invalid());
+    };
+    // A stored layout must equal the native Claude derivation (WholeThread
+    // at zero under the Claude local codec); any other stored layout is
+    // corruption, never a reseed.
+    if layout.is_some_and(|layout| {
+        layout.codec != mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_V1
+            || layout.partition_kind != TailPartitionKind::WholeThread
+            || layout.start_record_count != 0
+    }) {
+        return Ok(invalid());
+    }
+    let verified_acceptance =
+        adoption_probe.and_then(|probe| adopt_claude_acceptance(chain, probe));
+    let Some(seeded) =
+        claude_history_tail::seed_claude_root(&source, &bytes[..consumed], &analysis)?
+    else {
+        // Unreachable in practice: the analyzed slice ends at a record
+        // boundary by construction.
+        return Ok(invalid());
+    };
+    let accepted_start = checkpoint
+        .and_then(|checkpoint| match &checkpoint.physical {
+            PhysicalMappingState::Ready { raw_range_pin, .. } => {
+                Some(raw_range_pin.start_byte_offset)
+            }
+            PhysicalMappingState::Detached { .. } => None,
+        })
+        .unwrap_or(0)
+        .min(seeded.mapping.consumed_byte_offset);
+    let pin = RawRangePin {
+        start_byte_offset: accepted_start,
+        end_byte_offset: seeded.mapping.consumed_byte_offset,
+        range_sha256: hex_digest(
+            Sha256::digest(
+                &bytes[accepted_start as usize..seeded.mapping.consumed_byte_offset as usize],
+            )
+            .as_slice(),
+        ),
+    };
+    Ok(ProviderLocalObservation {
+        observation: LocalTailObservation {
+            evidence: TailSideEvidence::Present(seeded.observed_tail.clone()),
+            raw_range_pin: Some(pin),
+            verified_acceptance,
+        },
+        seeded: Some(CodexSeededRoot {
+            layout: seeded.layout,
+            observed_tail: seeded.observed_tail,
+            prefix_witness: None,
+            mapping: seeded.mapping,
+            lineage_digest: seeded.lineage_digest,
+            semantic_digest: seeded.semantic_digest,
+        }),
+        depends_on: vec![source.clone()],
     })
 }
 
@@ -5269,6 +5532,7 @@ fn provider_thread_review(
         )
     })?;
     let is_codex = provider.as_str() == "codex";
+    let supports_cursor = adapter.supports_tail_cursor();
     let historical_alias_owners = if is_codex {
         applied_provider_alias_owners(repository, binding, provider, &profile_id)?
     } else {
@@ -5456,11 +5720,12 @@ fn provider_thread_review(
         Ok((local_threads, suppressed_provider_ids))
     };
 
-    // Phase A: first-contact seeding. Bound Codex tasks without a layout are
-    // fully parsed once; the immutable layout lands on the binding and the
-    // first checkpoint lands on the destination link. Observation-class
-    // work: nothing here builds artifacts or touches cloud state.
-    if is_codex {
+    // Phase A: first-contact seeding. Bound cursor-provider tasks without a
+    // layout are fully parsed once; the immutable layout lands on the
+    // binding and the first checkpoint lands on the destination link.
+    // Observation-class work: nothing here builds artifacts or touches
+    // cloud state.
+    if supports_cursor {
         let document = repository.load_conversation_bindings()?;
         let (local_threads, _) = build_local_threads(&document)?;
         for (thread_id, local) in &local_threads {
@@ -5471,18 +5736,57 @@ fn provider_thread_review(
                 continue;
             }
             let source = local.source_path.clone();
-            let lookup = codex_rollout_lookup(provider_home);
-            let Ok(resolved_root) = codex_history_graph::resolve_codex_root(&source, &lookup)
-            else {
-                continue;
-            };
-            let Ok(leaf_bytes) = codex_history_graph::read_rollout_bounded(&source) else {
-                continue;
-            };
-            let Ok(seeded) =
-                codex_history_graph::seed_codex_root(&resolved_root, &leaf_bytes, None)
-            else {
-                continue;
+            let (seeded, raw_range_pin) = if is_codex {
+                let lookup = codex_rollout_lookup(provider_home);
+                let Ok(resolved_root) = codex_history_graph::resolve_codex_root(&source, &lookup)
+                else {
+                    continue;
+                };
+                let Ok(leaf_bytes) = jsonl_tail_io::read_bounded(&source) else {
+                    continue;
+                };
+                let Ok(seeded) =
+                    codex_history_graph::seed_codex_root(&resolved_root, &leaf_bytes, None)
+                else {
+                    continue;
+                };
+                let consumed = seeded.mapping.consumed_byte_offset;
+                let pin = RawRangePin {
+                    start_byte_offset: 0,
+                    end_byte_offset: consumed,
+                    range_sha256: hex_digest(
+                        Sha256::digest(&leaf_bytes[..consumed as usize]).as_slice(),
+                    ),
+                };
+                (seeded, pin)
+            } else {
+                // Claude: one file is the whole root; analyze the complete
+                // records and seed from that analysis.
+                let Ok(bytes) = jsonl_tail_io::read_bounded(&source) else {
+                    continue;
+                };
+                let consumed = jsonl_tail_io::safe_record_end(&bytes) as usize;
+                if consumed == 0 {
+                    continue;
+                }
+                let analysis =
+                    super::providers::claude::analyze_claude_transcript(&bytes[..consumed]);
+                let Ok(Some(seeded)) =
+                    claude_history_tail::seed_claude_root(&source, &bytes[..consumed], &analysis)
+                else {
+                    continue;
+                };
+                (
+                    CodexSeededRoot {
+                        layout: seeded.layout,
+                        observed_tail: seeded.observed_tail,
+                        prefix_witness: None,
+                        mapping: seeded.mapping,
+                        lineage_digest: seeded.lineage_digest,
+                        semantic_digest: seeded.semantic_digest,
+                    },
+                    seeded.raw_range_pin,
+                )
             };
             let target_thread = local_binding.thread_id.clone();
             let seeded_layout = seeded.layout.clone();
@@ -5506,7 +5810,6 @@ fn provider_thread_review(
                 Ok(row.revision)
             })?;
             if let Some(storage_id) = storage_id {
-                let consumed = seeded.mapping.consumed_byte_offset;
                 let checkpoint = ConversationCheckpoint {
                     generation: 0,
                     accepted: None,
@@ -5514,13 +5817,7 @@ fn provider_thread_review(
                     observed_tail: seeded.observed_tail.clone(),
                     physical: PhysicalMappingState::Ready {
                         root_mapping: seeded.mapping.clone(),
-                        raw_range_pin: RawRangePin {
-                            start_byte_offset: 0,
-                            end_byte_offset: consumed,
-                            range_sha256: hex_digest(
-                                Sha256::digest(&leaf_bytes[..consumed as usize]).as_slice(),
-                            ),
-                        },
+                        raw_range_pin,
                     },
                     prefix_witness: seeded.prefix_witness.clone(),
                     binding_revision,
@@ -5678,8 +5975,8 @@ fn provider_thread_review(
         })
         .unwrap_or_else(absent_bundle_head_pin);
 
-    // Codex local observation is the one expensive Phase B stage — full
-    // resolves on first contact, adoption probes, and imported layouts. It
+    // Cursor-provider local observation is the one expensive Phase B stage —
+    // full resolves on first contact, adoption probes, and imported layouts. It
     // is pure per-thread filesystem work, so it runs through the bounded
     // worker pool; everything consuming the results below (evidence
     // upgrades, classification, decisions, plan pins) stays serial and
@@ -5688,10 +5985,10 @@ fn provider_thread_review(
     // error at task k proves every earlier task was already dispatched and
     // completes, so the earliest failing thread's error is reported at
     // every worker count, exactly like the serial loop this replaces.
-    let mut codex_observations: BTreeMap<ThreadId, LocalTailObservation> = BTreeMap::new();
-    let mut codex_refreshed: BTreeMap<ThreadId, CodexSeededRoot> = BTreeMap::new();
-    let mut codex_deps: BTreeMap<ThreadId, Vec<PathBuf>> = BTreeMap::new();
-    if is_codex {
+    let mut cursor_observations: BTreeMap<ThreadId, LocalTailObservation> = BTreeMap::new();
+    let mut cursor_refreshed: BTreeMap<ThreadId, CodexSeededRoot> = BTreeMap::new();
+    let mut cursor_deps: BTreeMap<ThreadId, Vec<PathBuf>> = BTreeMap::new();
+    if supports_cursor {
         let observation_tasks: Vec<_> = local_unit_ids
             .iter()
             .filter_map(|thread_id| {
@@ -5742,7 +6039,7 @@ fn provider_thread_review(
                     .iter()
                     .filter(|(_, local, _, _, probe, _)| local.is_some() && probe.is_none())
                     .map(|(thread_id, _, checkpoint, _, _, binding_revision)| {
-                        super::codex_watch_service::ObservationQuery {
+                        super::session_watch_service::ObservationQuery {
                             thread_id: (**thread_id).clone(),
                             checkpoint_generation: checkpoint
                                 .map(|checkpoint| checkpoint.generation),
@@ -5750,7 +6047,8 @@ fn provider_thread_review(
                         }
                     })
                     .collect();
-                super::codex_watch_service::session_watch_service().take_reusable_observations(
+                super::session_watch_service::session_watch_service().take_reusable_observations(
+                    provider,
                     provider_home,
                     &binding.local_project_id,
                     storage_id,
@@ -5763,7 +6061,7 @@ fn provider_thread_review(
             .into_iter()
             .filter(|(thread_id, ..)| !cached.contains_key(*thread_id))
             .collect();
-        codex_observations.extend(cached);
+        cursor_observations.extend(cached);
         let mut slots: Vec<std::sync::OnceLock<ObservationOutcome>> = observation_tasks
             .iter()
             .map(|_| std::sync::OnceLock::new())
@@ -5785,15 +6083,19 @@ fn provider_thread_review(
                         else {
                             break;
                         };
-                        let outcome = observe_codex_local(
-                            *local,
-                            *checkpoint,
-                            *layout,
-                            provider_home,
-                            *probe,
-                            &binding.project_root,
-                            &binding.canonical_project_root,
-                        );
+                        let outcome = if is_codex {
+                            observe_codex_local(
+                                *local,
+                                *checkpoint,
+                                *layout,
+                                provider_home,
+                                *probe,
+                                &binding.project_root,
+                                &binding.canonical_project_root,
+                            )
+                        } else {
+                            observe_claude_local(*local, *checkpoint, *layout, *probe)
+                        };
                         if outcome.is_err() {
                             failed.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
@@ -5805,18 +6107,18 @@ fn provider_thread_review(
         // Ordered merge preserves the earliest real observation error. An
         // unexpectedly unset slot is a controlled stage error, never a panic.
         for ((thread_id, ..), slot) in observation_tasks.iter().zip(slots.iter_mut()) {
-            let CodexLocalObservation {
+            let ProviderLocalObservation {
                 observation,
                 seeded,
                 depends_on,
             } = take_observation_outcome(thread_id, slot)?;
             if let Some(seeded) = seeded {
-                codex_refreshed.insert((*thread_id).clone(), seeded);
+                cursor_refreshed.insert((*thread_id).clone(), seeded);
             }
             if !depends_on.is_empty() {
-                codex_deps.insert((*thread_id).clone(), depends_on);
+                cursor_deps.insert((*thread_id).clone(), depends_on);
             }
-            codex_observations.insert((*thread_id).clone(), observation);
+            cursor_observations.insert((*thread_id).clone(), observation);
         }
     }
 
@@ -5828,8 +6130,8 @@ fn provider_thread_review(
     // never changes here.
     let mut maintained: BTreeMap<ThreadId, u64> = BTreeMap::new();
     if let Some(storage_id) = storage_id {
-        for (thread_id, seeded) in &codex_refreshed {
-            let Some(pin) = codex_observations
+        for (thread_id, seeded) in &cursor_refreshed {
+            let Some(pin) = cursor_observations
                 .get(thread_id)
                 .and_then(|observation| observation.raw_range_pin.clone())
             else {
@@ -5911,11 +6213,11 @@ fn provider_thread_review(
     // thread without accepted evidence re-proves its refold every review
     // while a cloud tail exists for it.
     if let Some(storage_id) = storage_id {
-        if is_codex && !codex_deps.is_empty() {
-            let stored: Vec<_> = codex_deps
+        if supports_cursor && !cursor_deps.is_empty() {
+            let stored: Vec<_> = cursor_deps
                 .iter()
                 .filter_map(|(thread_id, depends_on)| {
-                    let observation = codex_observations.get(thread_id)?;
+                    let observation = cursor_observations.get(thread_id)?;
                     if !matches!(observation.evidence, TailSideEvidence::Present(_)) {
                         return None;
                     }
@@ -5943,7 +6245,7 @@ fn provider_thread_review(
                         Some(generation) => Some(*generation),
                         None => checkpoint.map(|checkpoint| checkpoint.generation),
                     };
-                    Some(super::codex_watch_service::StoredObservation {
+                    Some(super::session_watch_service::StoredObservation {
                         thread_id: thread_id.clone(),
                         source_path: local.source_path.clone(),
                         depends_on: depends_on.clone(),
@@ -5954,7 +6256,7 @@ fn provider_thread_review(
                 })
                 .collect();
             if !stored.is_empty() {
-                super::codex_watch_service::session_watch_service().store_observations(
+                super::session_watch_service::session_watch_service().store_observations(
                     provider_home,
                     &binding.local_project_id,
                     storage_id,
@@ -6003,7 +6305,7 @@ fn provider_thread_review(
             };
         // Cloud side.
         let cloud_evidence = match thread {
-            Some(thread) => match (&thread.portable_tail, is_codex) {
+            Some(thread) => match (&thread.portable_tail, supports_cursor) {
                 (Some(tail), _) => TailSideEvidence::Present(tail.clone()),
                 (None, true) => TailSideEvidence::Invalid,
                 (None, false) => TailSideEvidence::Present(synthesized_whole_thread_tail(
@@ -6032,11 +6334,11 @@ fn provider_thread_review(
                 raw_range_pin: None,
                 verified_acceptance: None,
             }
-        } else if is_codex {
+        } else if supports_cursor {
             unit_local_id
                 .as_ref()
-                .and_then(|thread_id| codex_observations.remove(thread_id))
-                .ok_or_else(|| "codex local observation missing for reviewed thread".to_string())?
+                .and_then(|thread_id| cursor_observations.remove(thread_id))
+                .ok_or_else(|| "local observation missing for reviewed thread".to_string())?
         } else {
             // Providers without a cursor codec prove their tail from
             // captured bytes; a local row without them cannot happen in a
@@ -6109,12 +6411,13 @@ fn provider_thread_review(
         } else {
             TailClassification::Unknown
         };
-        // Codex capturability is proven by the resolved logical root, not by
-        // the append-bearing leaf in isolation. A valid paginated thread can
-        // have an empty leaf while all of its messages live in history_base.
-        // `observe_codex_local` validates that complete chain (or a trusted
-        // checkpoint continuation) before returning Present evidence.
-        let local_capturable = if is_codex {
+        // Cursor-provider capturability is proven by the resolved logical
+        // root, not by the append-bearing leaf in isolation. A valid
+        // paginated Codex thread can have an empty leaf while all of its
+        // messages live in history_base. The observation functions validate
+        // that complete chain (or a trusted checkpoint continuation) before
+        // returning Present evidence.
+        let local_capturable = if supports_cursor {
             local.is_some() && matches!(&local_observation.evidence, TailSideEvidence::Present(_))
         } else {
             local.is_some_and(|local| {
@@ -6757,7 +7060,7 @@ fn load_project_local_read(
             .collect(),
     };
     let capture_request = capture_request_for_resolved_binding(repository, &resolved)?;
-    let (discovery, views) = super::codex_watch_service::session_watch_service().discovery_for(
+    let (discovery, views) = super::session_watch_service::session_watch_service().discovery_for(
         provider_registry(),
         local_project_id,
         &capture_request,
@@ -6877,7 +7180,8 @@ struct ThreadComparisonBuild {
 }
 
 /// Split reviewed candidates into watcher-served byte pins and the set that
-/// still needs authoritative capture. Non-Codex candidates always capture.
+/// still needs authoritative capture. Candidates of cursor-less providers
+/// always capture.
 fn reuse_candidate_pins(
     capture_request: &CaptureRequest,
     local_project_id: &LocalProjectId,
@@ -6885,24 +7189,27 @@ fn reuse_candidate_pins(
     base_selection: &BTreeSet<String>,
     selection: BTreeSet<String>,
 ) -> (BTreeSet<String>, BTreeMap<String, TargetExpectation>) {
-    let Some(home) = codex_home_of(capture_request) else {
-        return (selection, BTreeMap::new());
-    };
-    let codex_candidates: BTreeSet<String> = selection
-        .iter()
-        .filter(|resource_id| !base_selection.contains(*resource_id))
-        .filter(|resource_id| {
-            views.iter().any(|view| {
-                view.descriptor.resource_id == **resource_id && view.provider.as_str() == "codex"
+    let mut served: BTreeMap<String, TargetExpectation> = BTreeMap::new();
+    for (provider, home) in cursor_provider_homes(capture_request) {
+        let candidates: BTreeSet<String> = selection
+            .iter()
+            .filter(|resource_id| !base_selection.contains(*resource_id))
+            .filter(|resource_id| {
+                views.iter().any(|view| {
+                    view.descriptor.resource_id == **resource_id && view.provider == provider
+                })
             })
-        })
-        .cloned()
-        .collect();
-    let served = super::codex_watch_service::session_watch_service().take_reusable_candidate_pins(
-        &home,
-        local_project_id,
-        &codex_candidates,
-    );
+            .cloned()
+            .collect();
+        served.extend(
+            super::session_watch_service::session_watch_service().take_reusable_candidate_pins(
+                &provider,
+                &home,
+                local_project_id,
+                &candidates,
+            ),
+        );
+    }
     let remaining = selection
         .into_iter()
         .filter(|resource_id| !served.contains_key(resource_id))
@@ -6910,8 +7217,8 @@ fn reuse_candidate_pins(
     (remaining, served)
 }
 
-/// Freeze the byte pins of every freshly captured Codex candidate for the
-/// next quiet review.
+/// Freeze the byte pins of every freshly captured cursor-provider candidate
+/// for the next quiet review.
 fn store_candidate_pins_from_capture(
     capture_request: &CaptureRequest,
     local_project_id: &LocalProjectId,
@@ -6919,46 +7226,46 @@ fn store_candidate_pins_from_capture(
     base_selection: &BTreeSet<String>,
     captured: &provider_capture::CapturedResources,
 ) {
-    let Some(home) = codex_home_of(capture_request) else {
-        return;
-    };
-    let stored: Vec<_> = captured
-        .conversations
-        .iter()
-        .filter(|(resource_id, conversation)| {
-            conversation.provider.as_str() == "codex" && !base_selection.contains(*resource_id)
-        })
-        .filter_map(|(resource_id, conversation)| {
-            let transcript = captured.files.get(&conversation.transcript_logical_path)?;
-            let source_path = views
-                .iter()
-                .find(|view| view.descriptor.resource_id == *resource_id)
-                .map(|view| view.source_path.clone())?;
-            Some(super::codex_watch_service::StoredCandidatePin {
-                resource_id: resource_id.clone(),
-                depends_on: vec![source_path],
-                expected_local_target: TargetExpectation::Sha256(hex_digest(
-                    Sha256::digest(&transcript.bytes).as_slice(),
-                )),
+    for (provider, home) in cursor_provider_homes(capture_request) {
+        let stored: Vec<_> = captured
+            .conversations
+            .iter()
+            .filter(|(resource_id, conversation)| {
+                conversation.provider == provider && !base_selection.contains(*resource_id)
             })
-        })
-        .collect();
-    if !stored.is_empty() {
-        super::codex_watch_service::session_watch_service().store_candidate_pins(
-            &home,
-            local_project_id,
-            stored,
-        );
+            .filter_map(|(resource_id, conversation)| {
+                let transcript = captured.files.get(&conversation.transcript_logical_path)?;
+                let source_path = views
+                    .iter()
+                    .find(|view| view.descriptor.resource_id == *resource_id)
+                    .map(|view| view.source_path.clone())?;
+                Some(super::session_watch_service::StoredCandidatePin {
+                    resource_id: resource_id.clone(),
+                    depends_on: vec![source_path],
+                    expected_local_target: TargetExpectation::Sha256(hex_digest(
+                        Sha256::digest(&transcript.bytes).as_slice(),
+                    )),
+                })
+            })
+            .collect();
+        if !stored.is_empty() {
+            super::session_watch_service::session_watch_service().store_candidate_pins(
+                &home,
+                local_project_id,
+                stored,
+            );
+        }
     }
 }
 
-/// The bound Codex home of a capture request, when one is bound.
-fn codex_home_of(capture_request: &CaptureRequest) -> Option<PathBuf> {
+/// The bound homes of every cursor-capable provider in a capture request.
+fn cursor_provider_homes(capture_request: &CaptureRequest) -> Vec<(ProviderKey, PathBuf)> {
     capture_request
         .provider_homes
         .iter()
-        .find(|(provider, _)| provider.as_str() == "codex")
-        .map(|(_, home)| home.clone())
+        .filter(|(provider, _)| provider_supports_tail_cursor(provider))
+        .map(|(provider, home)| (provider.clone(), home.clone()))
+        .collect()
 }
 
 /// Thread-comparison section over a shared Discovery and one already-read
@@ -6985,15 +7292,11 @@ fn build_thread_sync_comparison(
     let discovered = discovery.project_inventory();
     let mut warnings = discovered.warnings.clone();
     // Every bound provider's conversations enter the typed pipeline; no
-    // provider filter and no generic fallback. Codex status rows classify
+    // provider filter and no generic fallback. Cursor-provider rows classify
     // from bounded metadata plus checkpoint observation, so a plain
-    // comparison reads no Codex transcript; providers without a cursor
-    // codec still prove their tail from captured bytes, and action-building
+    // comparison reads no transcript for them; providers without a cursor
+    // codec always prove their tail from captured bytes, and action-building
     // reviews capture everything their byte pins require.
-    // Providers without a cursor codec always prove their tail from
-    // captured bytes; Codex rows classify from bounded metadata plus
-    // checkpoint observation and are captured only as byte-pinning
-    // candidates below.
     let base_selection = discovered
         .resources
         .iter()
@@ -7002,8 +7305,7 @@ fn build_thread_sync_comparison(
             candidate
                 .provider
                 .as_ref()
-                .map(|provider| provider.as_str())
-                != Some("codex")
+                .is_none_or(|provider| !provider_supports_tail_cursor(provider))
         })
         .map(|candidate| candidate.resource_id.clone())
         .collect::<BTreeSet<_>>();
@@ -7863,7 +8165,7 @@ pub(super) fn prepare_push_review_with_progress(
     // storage-side inventory below without any local content walk.
     let eligibility = project_file_sync_eligibility(&binding);
     let capture_request = capture_request_for_binding(repository, &binding)?;
-    let (discovery, views) = super::codex_watch_service::session_watch_service().discovery_for(
+    let (discovery, views) = super::session_watch_service::session_watch_service().discovery_for(
         provider_registry(),
         local_project_id,
         &capture_request,
@@ -8389,6 +8691,7 @@ fn conversation_thread_from_capture(
     descriptor: &ResourceDescriptor,
     conversation: &provider_capture::CapturedConversation,
     artifact: Option<&StandaloneConversationArtifact>,
+    wire_tail: Option<&PortableConversationTail>,
     published_bytes: &[u8],
     published_by: &PortableOrigin,
     updated_at: u64,
@@ -8505,7 +8808,9 @@ fn conversation_thread_from_capture(
         message_count,
         lineage_digest,
         semantic_digest,
-        portable_tail: artifact.map(|artifact| artifact.portable_tail.clone()),
+        portable_tail: artifact
+            .map(|artifact| artifact.portable_tail.clone())
+            .or_else(|| wire_tail.cloned()),
         forked_from,
         preserved,
         source_thread_id: conversation.source_thread_id.clone(),
@@ -8911,6 +9216,28 @@ fn build_publish_request(
         // logical graph becomes one verified standalone artifact whose
         // cumulative tail must equal the planned local value.
         let is_codex = action.provider.as_str() == "codex";
+        let supports_cursor = provider_supports_tail_cursor(&action.provider);
+        // The stale check for cursor providers is pin-vs-checkpoint
+        // equality: any checkpoint advance between review and apply is a
+        // typed stale error, so nothing below trusts state the review did
+        // not pin.
+        let stored_checkpoint = reviewed_config
+            .links
+            .iter()
+            .find(|link| {
+                link.local_project_id == project.local_project_id && &link.storage_id == storage_id
+            })
+            .and_then(|link| link.conversation_checkpoints.get(&scope_key))
+            .and_then(|threads| threads.get(&local_thread_id));
+        if supports_cursor
+            && stored_checkpoint.map(|checkpoint| checkpoint.generation)
+                != action.pins.tail.checkpoint_generation
+        {
+            return Err(format!(
+                "conversation '{}' checkpoint advanced after review; refresh and push again",
+                result_thread_id
+            ));
+        }
         let (artifact, seeded) = if is_codex {
             // Operation-level Windows gate: the path-map root grammar is
             // checked before any rollout bytes are parsed.
@@ -8924,34 +9251,13 @@ fn build_publish_request(
             let source = captured_transcript_source(conversation)?;
             let lookup = codex_rollout_lookup(Path::new(provider_home));
             let resolved_root = codex_history_graph::resolve_codex_root(&source, &lookup)?;
-            let leaf_bytes = codex_history_graph::read_rollout_bounded(&source)?;
+            let leaf_bytes = jsonl_tail_io::read_bounded(&source)?;
             let stored_layout = local_binding.and_then(|binding| binding.root_tail_layout.as_ref());
             let seeded =
                 codex_history_graph::seed_codex_root(&resolved_root, &leaf_bytes, stored_layout)?;
             if Some(&seeded.observed_tail) != action.pins.tail.local.as_ref() {
                 return Err(format!(
                     "conversation '{}' changed after review; refresh and push again",
-                    result_thread_id
-                ));
-            }
-            // The stale check is pin-vs-checkpoint equality: any checkpoint
-            // advance between review and apply is a typed stale error, so
-            // the witness read below never trusts state the review did not
-            // pin.
-            let stored_checkpoint = reviewed_config
-                .links
-                .iter()
-                .find(|link| {
-                    link.local_project_id == project.local_project_id
-                        && &link.storage_id == storage_id
-                })
-                .and_then(|link| link.conversation_checkpoints.get(&scope_key))
-                .and_then(|threads| threads.get(&local_thread_id));
-            if stored_checkpoint.map(|checkpoint| checkpoint.generation)
-                != action.pins.tail.checkpoint_generation
-            {
-                return Err(format!(
-                    "conversation '{}' checkpoint advanced after review; refresh and push again",
                     result_thread_id
                 ));
             }
@@ -8981,6 +9287,44 @@ fn build_publish_request(
                 stored_layout,
             )?;
             (Some(artifact), Some(seeded))
+        } else if supports_cursor {
+            // Claude publishes the captured transcript verbatim; apply
+            // re-derives the observed tail from those exact bytes and seeds
+            // the real cursor the written checkpoint carries.
+            let source = captured_transcript_source(conversation)?;
+            let analysis = super::providers::SessionAnalysis {
+                source_provider_session_id: conversation.source_thread_id.clone(),
+                source_cwd: conversation.source_cwd.clone(),
+                is_internal_subagent: false,
+                record_count: conversation.record_count,
+                lineage: conversation.lineage.clone(),
+            };
+            let seeded =
+                claude_history_tail::seed_claude_root(&source, &transcript.bytes, &analysis)?
+                    .ok_or_else(|| {
+                        format!(
+                            "conversation '{}' does not end at a record boundary; \
+                             refresh and push again",
+                            result_thread_id
+                        )
+                    })?;
+            if Some(&seeded.observed_tail) != action.pins.tail.local.as_ref() {
+                return Err(format!(
+                    "conversation '{}' changed after review; refresh and push again",
+                    result_thread_id
+                ));
+            }
+            (
+                None,
+                Some(CodexSeededRoot {
+                    layout: seeded.layout,
+                    observed_tail: seeded.observed_tail,
+                    prefix_witness: None,
+                    mapping: seeded.mapping,
+                    lineage_digest: seeded.lineage_digest,
+                    semantic_digest: seeded.semantic_digest,
+                }),
+            )
         } else {
             (None, None)
         };
@@ -8988,6 +9332,20 @@ fn build_publish_request(
             .as_ref()
             .map(|artifact| artifact.root_bytes.clone())
             .unwrap_or_else(|| transcript.bytes.clone());
+        // Claude's wire tail is the local fold relabeled: verbatim bytes and
+        // structural-field-free fingerprints make the two forms carry one
+        // state, and the twin label keeps the columns structurally
+        // incomparable, exactly as for Codex.
+        let claude_wire_tail = (!is_codex && supports_cursor)
+            .then_some(seeded.as_ref())
+            .flatten()
+            .map(|seeded| PortableConversationTail {
+                codec: mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1.to_string(),
+                partition_kind: seeded.observed_tail.partition_kind,
+                start_record_count: seeded.observed_tail.start_record_count,
+                accepted_end_record_count: seeded.observed_tail.accepted_end_record_count,
+                accepted_tail_state: seeded.observed_tail.accepted_tail_state.clone(),
+            });
         let (thread, descriptor, logical_path) = conversation_thread_from_capture(
             previous_thread.as_ref(),
             action,
@@ -8996,6 +9354,7 @@ fn build_publish_request(
             descriptor,
             conversation,
             artifact.as_ref(),
+            claude_wire_tail.as_ref(),
             &published_bytes,
             &published_by,
             updated_at,
@@ -9086,6 +9445,7 @@ fn build_publish_request(
         let published_tail = artifact
             .as_ref()
             .map(|artifact| artifact.portable_tail.clone())
+            .or_else(|| claude_wire_tail.clone())
             .or_else(|| action.pins.tail.local.clone())
             .ok_or_else(|| {
                 format!(
@@ -9540,7 +9900,7 @@ fn publish_reviewed(
         let raw_range = match &action.pins.tail.raw_range {
             Some(pin) => {
                 let source = captured_transcript_source(conversation)?;
-                let bytes = codex_history_graph::read_rollout_bounded(&source)
+                let bytes = jsonl_tail_io::read_bounded(&source)
                     .unwrap_or_else(|_| conversation_raw_fallback(transcript));
                 if pin.end_byte_offset > bytes.len() as u64 {
                     None
@@ -10298,15 +10658,15 @@ pub(super) fn plan_bundle_restore_with_progress(
         let mut byte_source =
             engine.byte_source(&snapshot, Some(object_cache()), Some(on_progress));
         let capture_request = capture_request_for_binding(repository, &binding)?;
-        let (discovery, views) = super::codex_watch_service::session_watch_service()
+        let (discovery, views) = super::session_watch_service::session_watch_service()
             .discovery_for(
                 provider_registry(),
                 &binding.local_project_id,
                 &capture_request,
             )?;
-        // Providers without a cursor codec capture up front; Codex rows are
-        // captured only when one classification pass (cache-served when
-        // quiet) marks them byte-pinning Pull candidates. Adopting cloud
+        // Providers without a cursor codec capture up front; cursor-provider
+        // rows are captured only when one classification pass (cache-served
+        // when quiet) marks them byte-pinning Pull candidates. Adopting cloud
         // metadata pins no local bytes and CreateLocal has none, so
         // storage-only, synced, and unrelated sessions read nothing.
         let base_selection = discovery
@@ -10318,8 +10678,7 @@ pub(super) fn plan_bundle_restore_with_progress(
                 candidate
                     .provider
                     .as_ref()
-                    .map(|provider| provider.as_str())
-                    != Some("codex")
+                    .is_none_or(|provider| !provider_supports_tail_cursor(provider))
             })
             .map(|candidate| candidate.resource_id)
             .collect::<BTreeSet<_>>();
@@ -11185,6 +11544,77 @@ fn apply_prepared_pull_conversation(
                 artifact.next_synthetic_turn_ordinal,
             ),
         )
+    } else if provider_supports_tail_cursor(&action.provider) {
+        // Claude: the rewritten transcript is the installed root; its
+        // re-analysis must refold to the accepted cloud pin (verbatim bytes
+        // and structural-field-free fingerprints keep the wire and local
+        // folds equal), and the checkpoint seeds the real cursor from the
+        // installed bytes.
+        let rewritten = adapter.rewrite(&super::providers::SessionRewriteRequest {
+            bytes: &prepared.cloud_transcript,
+            expected_source_session_id: Some(&prepared.cloud_provider_thread_id),
+            destination_session_id: &destination_provider_thread_id,
+            expected_source_cwd: Some(&prepared.cloud_cwd),
+            destination_cwd: &binding.project_root,
+        })?;
+        if cloud_tail.codec != super::domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1
+            || cloud_tail.partition_kind != TailPartitionKind::WholeThread
+            || cloud_tail.start_record_count != 0
+        {
+            return Err("accepted cloud tail is not a Claude wire value".to_string());
+        }
+        let staged = super::providers::claude::analyze_claude_transcript(&rewritten);
+        let CodecLineage::Complete {
+            chain,
+            lineage_digest,
+            semantic_digest,
+        } = &staged.lineage
+        else {
+            return Err("rewritten conversation failed its Claude re-analysis".to_string());
+        };
+        let refolded = super::domain::compute_conversation_tail_state(
+            TailPartitionKind::WholeThread,
+            0,
+            cloud_tail.accepted_end_record_count,
+            chain,
+        )?;
+        if refolded != cloud_tail.accepted_tail_state
+            || cloud_tail.accepted_end_record_count != chain.len() as u64
+        {
+            return Err(
+                "reconstructed conversation does not refold to the accepted cloud tail".to_string(),
+            );
+        }
+        let layout = RootTailLayout {
+            codec: super::domain::CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string(),
+            partition_kind: TailPartitionKind::WholeThread,
+            start_record_count: 0,
+        };
+        let accepted_local_tail = PortableConversationTail {
+            codec: super::domain::CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string(),
+            partition_kind: TailPartitionKind::WholeThread,
+            start_record_count: 0,
+            accepted_end_record_count: cloud_tail.accepted_end_record_count,
+            accepted_tail_state: cloud_tail.accepted_tail_state.clone(),
+        };
+        let sha = hex_digest(Sha256::digest(&rewritten).as_slice());
+        let leaf = chain
+            .last()
+            .map(|message| message.message_id.as_str().to_string());
+        (
+            rewritten,
+            layout,
+            (
+                None,
+                sha,
+                accepted_local_tail,
+                lineage_digest.clone(),
+                semantic_digest.clone(),
+                leaf,
+                None,
+                0,
+            ),
+        )
     } else {
         let rewritten = adapter.rewrite(&super::providers::SessionRewriteRequest {
             bytes: &prepared.cloud_transcript,
@@ -11435,7 +11865,7 @@ fn apply_prepared_pull_conversation(
             );
         }
         let source_path = Path::new(&root_mapping.root_path);
-        let source_bytes = codex_history_graph::read_rollout_bounded(source_path)?;
+        let source_bytes = jsonl_tail_io::read_bounded(source_path)?;
         let source_sha256 = hex_digest(Sha256::digest(&source_bytes).as_slice());
         if action.pins.target.local != TargetExpectation::Sha256(source_sha256.clone()) {
             return Err("conversation relocation source bytes changed after review".to_string());
@@ -12652,7 +13082,7 @@ pub(super) fn rebaseline_project_provider_caches(
         })?;
     let resolved = resolve_project_binding(repository, &binding)?;
     for home in resolved.homes.values() {
-        super::codex_watch_service::session_watch_service().force_rebaseline(Path::new(home));
+        super::session_watch_service::session_watch_service().force_rebaseline(Path::new(home));
     }
     Ok(())
 }
@@ -15778,7 +16208,7 @@ fn repair_codex_conversation_paths_with_repository(
         let lookup = codex_rollout_lookup(&canonical_codex_home);
         let derived = codex_history_graph::resolve_codex_root(&repair.path, &lookup).and_then(
             |resolved_root| {
-                let leaf_bytes = codex_history_graph::read_rollout_bounded(&repair.path)?;
+                let leaf_bytes = jsonl_tail_io::read_bounded(&repair.path)?;
                 let seeded = codex_history_graph::seed_codex_root(
                     &resolved_root,
                     &leaf_bytes,
@@ -17204,7 +17634,7 @@ mod tests {
                 .unwrap();
         let resource_id = conversation_resource_id(&codex_key(), &thread_id).unwrap();
         let capture_request = capture_request_for_binding(&repo, &binding).unwrap();
-        let (_, empty_views) = super::super::codex_watch_service::session_watch_service()
+        let (_, empty_views) = super::super::session_watch_service::session_watch_service()
             .discovery_for(
                 provider_registry(),
                 &project.local_project_id,
@@ -17233,7 +17663,7 @@ mod tests {
         // this profile. Its fresh inventory makes the profile clean while the
         // original project's empty inventory remains cached.
         let cache_consumer = LocalProjectId::parse("session-detail-cache-consumer").unwrap();
-        let (_, refreshed_views) = super::super::codex_watch_service::session_watch_service()
+        let (_, refreshed_views) = super::super::session_watch_service::session_watch_service()
             .discovery_for(provider_registry(), &cache_consumer, &capture_request)
             .unwrap();
         assert_eq!(refreshed_views.len(), 1);
@@ -18725,7 +19155,7 @@ mod tests {
         let no_bases = |_: &str| Ok(None);
         let resolved_stale =
             codex_history_graph::resolve_codex_root(&stale_path, &no_bases).unwrap();
-        let stale_leaf_bytes = codex_history_graph::read_rollout_bounded(&stale_path).unwrap();
+        let stale_leaf_bytes = jsonl_tail_io::read_bounded(&stale_path).unwrap();
         let seeded_stale =
             codex_history_graph::seed_codex_root(&resolved_stale, &stale_leaf_bytes, None).unwrap();
         let published = build_standalone_codex_root(
@@ -20971,7 +21401,7 @@ mod tests {
         )
         .unwrap();
         let canonical_home = std::fs::canonicalize(&codex_home).unwrap();
-        super::super::codex_watch_service::session_watch_service()
+        super::super::session_watch_service::session_watch_service()
             .force_rebaseline(&canonical_home);
         let rediscovered = get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -21392,7 +21822,7 @@ mod tests {
         // A forced rebaseline (the reliability-signal path) runs the
         // bounded pipeline and produces identical rows.
         let canonical = std::fs::canonicalize(&codex_home).unwrap();
-        super::super::codex_watch_service::session_watch_service().force_rebaseline(&canonical);
+        super::super::session_watch_service::session_watch_service().force_rebaseline(&canonical);
         let before_cold = metrics.snapshot();
         let rebaselined = get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -21409,6 +21839,403 @@ mod tests {
             serde_json::to_value(&rebaselined.entries).unwrap(),
             "cached and rebaselined comparisons produce identical rows"
         );
+    }
+
+    fn claude_test_transcript(
+        session_id: &str,
+        cwd: &Path,
+        messages: &[(&str, Option<&str>, &str, &str)],
+    ) -> Vec<u8> {
+        let cwd = cwd.to_string_lossy().into_owned();
+        let mut bytes = Vec::new();
+        for (uuid, parent, role, text) in messages {
+            serde_json::to_writer(
+                &mut bytes,
+                &serde_json::json!({
+                    "type": role,
+                    "uuid": uuid,
+                    "parentUuid": parent.map(str::to_string),
+                    "sessionId": session_id,
+                    "cwd": cwd,
+                    "message": {"role": role, "content": [{"type": "text", "text": text}]}
+                }),
+            )
+            .unwrap();
+            bytes.push(b'\n');
+        }
+        bytes
+    }
+
+    fn bind_and_link_claude_replica(
+        repo: &LocalStateRepository,
+        project: &LocalProjectRegistration,
+        storage_id: &StorageId,
+        project_root: &Path,
+        claude_home: &Path,
+    ) {
+        std::fs::create_dir_all(project_root).unwrap();
+        std::fs::create_dir_all(claude_home.join("projects/source")).unwrap();
+        let claude = ProviderKey::parse("claude").unwrap();
+        let profile_id = add_profile(repo, &claude, claude_home);
+        save_project_binding_with_repository(
+            repo,
+            SaveProjectBindingRequest {
+                local_project_id: project.local_project_id.clone(),
+                project_root: project_root.to_string_lossy().into_owned(),
+                profile_ids: BTreeMap::from([(claude, profile_id)]),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        save_project_link_with_repository(
+            repo,
+            SaveProjectLinkRequest {
+                local_project_id: project.local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+    }
+
+    /// The Claude twin of the Codex probe-window proof: after a push, a
+    /// comparison reads no Claude transcript bytes beyond the bounded probe
+    /// window, an append reads exactly the appended bytes, the quiet watcher
+    /// serves everything from the caches, and the persisted checkpoint
+    /// carries the real cursor.
+    #[test]
+    fn a_comparison_reads_no_claude_transcript_bytes_beyond_the_probe_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("claude-metadata-refresh-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let claude_home = temp.path().join("claude-home");
+        bind_and_link_claude_replica(&repo, &project, &storage_id, &project_root, &claude_home);
+        let session_id = "claude-cursor-session";
+        let base = claude_test_transcript(
+            session_id,
+            &project_root,
+            &[
+                ("m-1", None, "user", "hello"),
+                ("m-2", Some("m-1"), "assistant", "answer"),
+            ],
+        );
+        let session_path = claude_home
+            .join("projects/source")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::write(&session_path, &base).unwrap();
+
+        let review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let comparison = review.thread_comparison.as_ref().unwrap();
+        let entry = comparison
+            .entries
+            .iter()
+            .find(|entry| entry.provider_thread_id.as_deref() == Some(session_id))
+            .unwrap();
+        let action_id = review.conversation_action_ids[&entry.resource_id].clone();
+        push_bundle_reviewed_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            recommended_review_recipe(&review, &storage_id),
+            empty_project_content_review(),
+            review.conversation_push_plan_id.clone(),
+            vec![action_id],
+            &mut |_| {},
+        )
+        .unwrap();
+
+        // The push-applied checkpoint carries a real cursor, not the old
+        // degenerate hand-roll.
+        let scope = SyncScopeKey::Provider(ProviderKey::parse("claude").unwrap());
+        let applied_checkpoint = repo
+            .load_config()
+            .unwrap()
+            .links
+            .iter()
+            .find(|link| link.storage_id == storage_id)
+            .and_then(|link| link.conversation_checkpoints.get(&scope).cloned())
+            .and_then(|threads| threads.into_values().next())
+            .unwrap();
+        let PhysicalMappingState::Ready { root_mapping, .. } = &applied_checkpoint.physical else {
+            panic!("applied Claude checkpoint must carry a Ready mapping");
+        };
+        assert_eq!(
+            root_mapping.last_canonical_message_id.as_deref(),
+            Some("m-2")
+        );
+        assert_eq!(root_mapping.consumed_byte_offset, base.len() as u64);
+        assert_eq!(
+            applied_checkpoint.observed_tail.codec,
+            super::super::domain::CLAUDE_PORTABLE_TAIL_CODEC_V1
+        );
+        assert_eq!(
+            applied_checkpoint
+                .accepted
+                .as_ref()
+                .map(|accepted| accepted.portable_tail.codec.as_str()),
+            Some(super::super::domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1)
+        );
+
+        // Warm no-change comparison: no capture, no full resolve, no
+        // transcript bytes, and the push review's inventory is reused so no
+        // head scan runs either. The applied push moved the checkpoint
+        // generation, so the cursor revalidates through one probe window.
+        let canonical_home = std::fs::canonicalize(&claude_home).unwrap();
+        let metrics = super::super::sync_metrics::register_root(&canonical_home);
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(comparison.entries.len(), 1);
+        let counted = metrics.snapshot();
+        assert_eq!(counted.selected_captures, 0, "no claude capture on refresh");
+        assert_eq!(counted.transcript_bytes_read, 0, "no whole-file reads");
+        assert_eq!(counted.full_graph_resolves, 0, "cursor rides the probe");
+        assert_eq!(
+            counted.files_head_read, 0,
+            "push review's inventory is reused"
+        );
+        assert!(counted.probe_bytes_read > 0);
+        assert_eq!(counted.append_bytes_read, 0);
+
+        // One appended record: the refresh reads the probe plus exactly the
+        // appended bytes and nothing else, and maintenance persists the
+        // advanced cursor.
+        let extended = claude_test_transcript(
+            session_id,
+            &project_root,
+            &[
+                ("m-1", None, "user", "hello"),
+                ("m-2", Some("m-1"), "assistant", "answer"),
+                ("m-3", Some("m-2"), "user", "appended"),
+            ],
+        );
+        assert_eq!(&extended[..base.len()], &base[..]);
+        std::fs::write(&session_path, &extended).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&session_path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000))
+            .unwrap();
+        let before_append = metrics.snapshot();
+        get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        let delta = metrics.snapshot().delta_since(&before_append);
+        assert_eq!(delta.selected_captures, 0);
+        assert_eq!(delta.transcript_bytes_read, 0);
+        assert_eq!(delta.full_graph_resolves, 0);
+        assert_eq!(
+            delta.append_bytes_read,
+            (extended.len() - base.len()) as u64,
+            "the append is the only content read"
+        );
+        assert_eq!(delta.records_parsed, 1);
+        let advanced_checkpoint = repo
+            .load_config()
+            .unwrap()
+            .links
+            .iter()
+            .find(|link| link.storage_id == storage_id)
+            .and_then(|link| link.conversation_checkpoints.get(&scope).cloned())
+            .and_then(|threads| threads.into_values().next())
+            .unwrap();
+        let PhysicalMappingState::Ready { root_mapping, .. } = &advanced_checkpoint.physical else {
+            panic!("maintained Claude checkpoint must stay Ready");
+        };
+        assert_eq!(
+            root_mapping.last_canonical_message_id.as_deref(),
+            Some("m-3")
+        );
+        assert_eq!(root_mapping.consumed_byte_offset, extended.len() as u64);
+        assert_eq!(
+            advanced_checkpoint.accepted, applied_checkpoint.accepted,
+            "observation maintenance never touches accepted evidence"
+        );
+
+        let appended_row = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            appended_row.entries[0].local_updated_at,
+            Some(1_800_000_000),
+            "a dirty root's presentation stamp is fresh even under reuse"
+        );
+
+        // Quiet watcher: the next comparison serves inventory and
+        // observation from the caches with zero local filesystem work.
+        let before_quiet = metrics.snapshot();
+        let quiet = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        let delta = metrics.snapshot().delta_since(&before_quiet);
+        assert_eq!(delta.files_head_read, 0, "inventory reused, no head scan");
+        assert_eq!(delta.directories_visited, 0, "no tree walk");
+        assert_eq!(delta.probe_bytes_read, 0, "observation reused, no probe");
+        assert_eq!(delta.append_bytes_read, 0);
+        assert_eq!(delta.transcript_bytes_read, 0);
+        assert_eq!(delta.inventory_reuse_hits, 1);
+        assert_eq!(delta.observation_reuse_hits, 1);
+
+        // The append invalidated the frozen candidate pin, so the next push
+        // review re-captures the candidate authoritatively exactly once —
+        // and the review after that, still quiet, serves the refrozen pin
+        // with no capture and no transcript read.
+        let before_review = metrics.snapshot();
+        let second_review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let delta = metrics.snapshot().delta_since(&before_review);
+        assert!(second_review.thread_comparison.is_some());
+        assert_eq!(delta.selected_captures, 1, "changed candidate re-captures");
+        let before_review = metrics.snapshot();
+        let third_review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let delta = metrics.snapshot().delta_since(&before_review);
+        assert!(third_review.thread_comparison.is_some());
+        assert_eq!(delta.selected_captures, 0, "candidate pin served frozen");
+        assert_eq!(delta.transcript_bytes_read, 0);
+
+        // A forced rebaseline (the reliability-signal path) runs the
+        // bounded pipeline and produces identical rows.
+        super::super::session_watch_service::session_watch_service()
+            .force_rebaseline(&canonical_home);
+        let before_cold = metrics.snapshot();
+        let rebaselined = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        let delta = metrics.snapshot().delta_since(&before_cold);
+        assert_eq!(delta.inventory_reuse_hits, 0);
+        assert_eq!(delta.observation_reuse_hits, 0);
+        assert!(delta.files_head_read > 0, "rebaseline rediscovers");
+        assert_eq!(
+            serde_json::to_value(&quiet.entries).unwrap(),
+            serde_json::to_value(&rebaselined.entries).unwrap(),
+            "cached and rebaselined comparisons produce identical rows"
+        );
+    }
+
+    /// A rewind append changes the canonical chain's shape: the cursor
+    /// cannot ride it, so the observation degrades to exactly one bounded
+    /// full re-analyze (never a blocked row), classifies the genuine
+    /// divergence, and re-seeds the cursor for the next quiet refresh.
+    #[test]
+    fn a_claude_rewind_degrades_to_one_full_reanalyze_and_stays_syncable() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("claude-rewind-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let claude_home = temp.path().join("claude-home");
+        bind_and_link_claude_replica(&repo, &project, &storage_id, &project_root, &claude_home);
+        let session_id = "claude-rewind-session";
+        let base = claude_test_transcript(
+            session_id,
+            &project_root,
+            &[
+                ("m-1", None, "user", "hello"),
+                ("m-2", Some("m-1"), "assistant", "answer"),
+            ],
+        );
+        let session_path = claude_home
+            .join("projects/source")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::write(&session_path, &base).unwrap();
+        let review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let entry_id = review
+            .thread_comparison
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .find(|entry| entry.provider_thread_id.as_deref() == Some(session_id))
+            .map(|entry| entry.resource_id.clone())
+            .unwrap();
+        let action_id = review.conversation_action_ids[&entry_id].clone();
+        push_bundle_reviewed_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            recommended_review_recipe(&review, &storage_id),
+            empty_project_content_review(),
+            review.conversation_push_plan_id.clone(),
+            vec![action_id],
+            &mut |_| {},
+        )
+        .unwrap();
+
+        // Rewind: the user re-asks from m-1; the file stays append-only but
+        // the active chain switches branch, abandoning m-2.
+        let rewound = claude_test_transcript(
+            session_id,
+            &project_root,
+            &[
+                ("m-1", None, "user", "hello"),
+                ("m-2", Some("m-1"), "assistant", "answer"),
+                ("m-3", Some("m-1"), "user", "re-asked"),
+            ],
+        );
+        assert_eq!(&rewound[..base.len()], &base[..]);
+        std::fs::write(&session_path, &rewound).unwrap();
+
+        let canonical_home = std::fs::canonicalize(&claude_home).unwrap();
+        let metrics = super::super::sync_metrics::register_root(&canonical_home);
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        let counted = metrics.snapshot();
+        assert_eq!(counted.full_graph_resolves, 1, "one full re-analyze");
+        assert_eq!(
+            counted.transcript_bytes_read,
+            rewound.len() as u64,
+            "the full path reads the file once"
+        );
+        assert_eq!(comparison.entries.len(), 1);
+        assert_eq!(
+            comparison.entries[0].state,
+            ThreadSyncState::Diverged,
+            "a rewind after push is a genuine divergence"
+        );
+
+        // The re-seeded cursor rides the next quiet refresh with no reads
+        // beyond the probe.
+        let before_quiet = metrics.snapshot();
+        get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        let delta = metrics.snapshot().delta_since(&before_quiet);
+        assert_eq!(delta.transcript_bytes_read, 0);
+        assert_eq!(delta.full_graph_resolves, 0);
     }
 
     #[test]

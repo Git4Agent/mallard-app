@@ -22,7 +22,7 @@
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::codex_history_graph::{read_rollout_bounded, ResolvedCodexRoot};
+use crate::codex_history_graph::ResolvedCodexRoot;
 use crate::codex_paginated_projection::{
     complete_paginated_item_projection, verify_projection_fixpoint,
 };
@@ -31,6 +31,7 @@ use crate::codex_path_map::{
 };
 use crate::codex_rollout::{session_meta_id, structural_record_type};
 use crate::conversation_codec::{analyze_codex_transcript, CodecLineage};
+use crate::jsonl_tail_io::read_bounded;
 use mallard_domain::{
     compute_portable_conversation_tail_with_codec, conversation_prefix_witness,
     ConversationPrefixWitness, PortableConversationTail, MAX_CONVERSATION_FILE_BYTES,
@@ -296,7 +297,7 @@ fn collect_flattened_non_metadata_records(
 ) -> Result<Vec<Value>, String> {
     let mut records = Vec::new();
     for segment in &resolved.segments {
-        let bytes = read_rollout_bounded(&segment.path)?;
+        let bytes = read_bounded(&segment.path)?;
         if (bytes.len() as u64) < segment.consumed_byte_len {
             return Err(format!(
                 "Codex segment '{}' shrank below its resolved cutoff",
@@ -408,7 +409,7 @@ fn effective_authoritative_meta(resolved: &ResolvedCodexRoot) -> Result<Value, S
         .segments
         .last()
         .ok_or_else(|| "resolved Codex root has no segments".to_string())?;
-    let bytes = read_rollout_bounded(&leaf.path)?;
+    let bytes = read_bounded(&leaf.path)?;
     if (bytes.len() as u64) < leaf.consumed_byte_len {
         return Err(format!(
             "Codex segment '{}' shrank below its resolved cutoff",

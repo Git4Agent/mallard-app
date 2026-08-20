@@ -407,6 +407,20 @@ test("local storage keeps browse in the path row and save in the footer", () => 
   assert.doesNotMatch(html, /sync-storage-primary-action/);
 });
 
+test("a hoisted tally leaves the cloud editor with no footer band", () => {
+  const html = renderToStaticMarkup(
+    <StorageEditor
+      storage={r2Storage()}
+      disabled={false}
+      onChange={() => undefined}
+      showProgress={false}
+    />,
+  );
+
+  assert.doesNotMatch(html, /of 5 set/);
+  assert.doesNotMatch(html, /sync-storage-editor-footer/);
+});
+
 test("configured storage can move name editing into its page heading", () => {
   const html = renderToStaticMarkup(
     <StorageEditor
@@ -636,6 +650,16 @@ test("the storage page is a rooted trail; the sidebar opens it and removes direc
   assert.match(workspace, /setStorageDetailsExpanded\(false\);\s*await loadStorageBundles/);
   assert.match(workspace, /primaryAction=\{creatingStorage \? undefined : \(/);
   assert.match(workspace, /"Creating…" : "Create storage"/);
+
+  // A draft commits from the bar under its own fields, the way the project
+  // setup page finishes: the trail holds no action at all while creating, and
+  // the R2 tally moves out of the card so it has one band, not two.
+  assert.match(workspace, /const storagePathActions = creatingStorage \? undefined : \(/);
+  assert.match(workspace, /showProgress=\{!creatingStorage\}/);
+  assert.match(workspace, /\{creatingStorage && \(\s*<footer className="sync-storage-setup-footer">/);
+  assert.match(workspace, /\{r2FieldsSet\(storageDraft\)\} of 5 set/);
+  assert.match(workspace, /className="btn btn-ghost"\s*disabled=\{busy\}\s*onClick=\{onOpenStorageIndex\}\s*>\s*Cancel/);
+  assert.doesNotMatch(workspace, /sync-path-sync-label">\s*\{runningAction === `storage:/);
 
   // The header block the trail replaced stays gone.
   assert.doesNotMatch(workspace, /sync-project-heading/);

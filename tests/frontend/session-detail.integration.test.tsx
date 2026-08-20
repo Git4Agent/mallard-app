@@ -21,7 +21,9 @@ import {
   formatSessionCount,
   formatSessionDuration,
   formatSessionGap,
-  formatSessionRange,
+  formatSessionLengthDetail,
+  formatSessionStart,
+  formatSessionStartDetail,
   groupSessionEventsByDay,
   includedSessionEventKinds,
   mergeSessionTimelinePages,
@@ -39,7 +41,7 @@ import {
 
 const exact = (value: number) => ({ value, quality: "exact" as const });
 
-// 2026-08-13T11:10:00Z and onward, so the day divider and the card clock have
+// 2026-08-06T07:06:40Z and onward, so the day divider and the card clock have
 // a real day boundary to work with.
 const START = 1_786_000_000;
 
@@ -275,9 +277,28 @@ test("the header is one strip: hidden h1, facts as chips, verbs on the right", (
   assert.match(html, /data-icon="git-commit"/);
   assert.match(html, new RegExp(`title="${"a".repeat(40)}"`));
   assert.match(html, />aaaaaaa</);
-  assert.match(html, />11m</);
   assert.match(html, />1\.06M\+<\/code> tokens/);
   assert.doesNotMatch(html, />Started<|>Ended<|>Branch<|>Commit<|>Ran<|>Tokens</);
+
+  // The stamp is two chips: when it began, and how long it took. Neither the
+  // end time nor the arrow that pointed at it appears on the strip.
+  assert.match(html, /<time [^>]*="2026-08-06T[\d:.]+Z">\w+ \d+ · \d{2}:\d{2}<\/time><\/span>/);
+  assert.match(html, /class="session-detail-chip" title="Ran 11m, ending \d{2}:\d{2}"><svg[^>]*data-icon="clock"[\s\S]*?<b>11m<\/b>/);
+  assert.doesNotMatch(html, /→/);
+
+  // A live session has no end and therefore no length: it says so, and wears
+  // the activity glyph the rows use for the same state.
+  const active = renderToStaticMarkup(
+    <SessionDetailHeader
+      detail={{ ...detail, is_active: true }}
+      headingRef={{ current: null }}
+      actionBusyId={null}
+      actionError={null}
+      onAction={() => undefined}
+    />,
+  );
+  assert.match(active, /title="Still running · 11m so far"><svg[^>]*data-icon="activity"[\s\S]*?<b>running<\/b>/);
+  assert.doesNotMatch(active, /<b>11m<\/b>/);
 
   // Provider identity is the mark on the leaf crumb and on the launch button
   // itself; the text chip, the Active chip and the second refresh glyph are
@@ -354,7 +375,24 @@ test("the wait between turns is a chip on the rail, and ticks never carry one", 
   assert.equal(formatSessionDuration(START, START + 45), "45s");
   assert.equal(formatSessionDuration(START, START + 3_900), "1h 5m");
   assert.equal(formatSessionDuration(START, null), null);
-  assert.match(formatSessionRange(START, START + 660) ?? "", /·.*→/);
+  // The stamp is a start, and only a start — no end, no arrow. The year shows
+  // itself exactly when it is not the current one; the old range stripped it
+  // unconditionally, so these two sessions printed the same string.
+  const thisYear = Date.UTC(2026, 7, 20);
+  assert.equal(formatSessionStart(null, thisYear), null);
+  assert.doesNotMatch(formatSessionStart(START, thisYear) ?? "", /→|2026/);
+  assert.match(formatSessionStart(START, thisYear) ?? "", /^\w+ \d+ · \d{2}:\d{2}$/);
+  assert.match(formatSessionStart(START, Date.UTC(2028, 0, 1)) ?? "", /2026 · \d{2}:\d{2}$/);
+
+  // The end time is off the chip faces, so the tooltips are where it survives.
+  assert.match(formatSessionStartDetail(START) ?? "", /^Started \w+ \d+, 2026 · \d{2}:\d{2}$/);
+  assert.match(formatSessionLengthDetail(START, START + 660) ?? "", /^Ran 11m, ending \d{2}:\d{2}$/);
+  // A day boundary in the middle makes the end's own date load-bearing.
+  assert.match(formatSessionLengthDetail(START, START + 86_400) ?? "", /ending \w+ \d+, 2026 · \d{2}:\d{2}$/);
+  // Running: a distance so far, never an end.
+  assert.equal(formatSessionLengthDetail(START, START + 660, true), "Still running · 11m so far");
+  assert.equal(formatSessionLengthDetail(START, null, true), "Still running");
+  assert.equal(formatSessionLengthDetail(START, null), null);
 });
 
 test("a turn's duration is measured from its loaded extent, never promised", () => {

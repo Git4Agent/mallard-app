@@ -17,12 +17,12 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
 const TITLE_CHARS: usize = 120;
-const MAX_LINE_BYTES: usize = 1024 * 1024;
+const MAX_LINE_BYTES: usize = MAX_CONVERSATION_FILE_BYTES as usize;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_CLAUDE_RECORDS: usize = 100_000;
 const TIMELINE_MESSAGE_PREVIEW_BYTES: usize = 16 * 1024;
 const TIMELINE_DETAIL_BYTES: usize = 64 * 1024;
-pub(crate) const TIMELINE_PARSER_VERSION: u32 = 2;
+pub(crate) const TIMELINE_PARSER_VERSION: u32 = 1;
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     let meta = fs::metadata(path).map_err(|e| format!("inspect '{}': {}", path.display(), e))?;
@@ -208,6 +208,10 @@ struct AssistantGroup {
     has_tool_use: bool,
 }
 
+fn is_terminal_response_stop_reason(stop_reason: &str) -> bool {
+    matches!(stop_reason, "endturn" | "stopsequence")
+}
+
 #[derive(Default)]
 struct ClaudeTimelineBuilder {
     events: Vec<PendingTimelineEvent>,
@@ -308,7 +312,7 @@ impl ClaudeTimelineBuilder {
             .clone()
             .unwrap_or_else(|| "claude:turn:orphan".to_string());
         let score = (
-            u8::from(stop_reason == "endturn"),
+            u8::from(is_terminal_response_stop_reason(&stop_reason)),
             content_count,
             text.as_ref().map_or(0, String::len),
             output_tokens,
@@ -465,7 +469,7 @@ impl ClaudeTimelineBuilder {
                 );
                 break;
             }
-            let (kind, mut quality) = if group.stop_reason == "endturn" {
+            let (kind, mut quality) = if is_terminal_response_stop_reason(&group.stop_reason) {
                 (
                     SessionTimelineEventKind::Response,
                     SessionCountQuality::Exact,
@@ -1145,7 +1149,7 @@ pub(crate) fn build_timeline_index(
         if line == BoundedLine::Oversized {
             builder.mark_all_lower_bound(
                 "oversized_record",
-                "At least one Claude record exceeded the one-MiB timeline parsing limit.",
+                "At least one Claude record exceeded the bounded session timeline parsing limit.",
             );
             continue;
         }
@@ -1190,11 +1194,31 @@ fn read_source_value(file: &mut File, span: SessionSourceSpan) -> Result<Value, 
     serde_json::from_slice(&bytes).map_err(|_| "timeline source record is malformed".to_string())
 }
 
-fn value_as_preview(value: &Value) -> Option<String> {
+const BINARY_PREVIEW_OMISSION: &str = "[binary or base64 content omitted]";
+
+fn redact_binary_preview_content(value: &Value) -> Value {
     match value {
+        Value::String(text) if looks_like_binary_or_base64(text) => {
+            Value::String(BINARY_PREVIEW_OMISSION.to_string())
+        }
+        Value::Array(values) => {
+            Value::Array(values.iter().map(redact_binary_preview_content).collect())
+        }
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), redact_binary_preview_content(value)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn value_as_preview(value: &Value) -> Option<String> {
+    match redact_binary_preview_content(value) {
         Value::Null => None,
-        Value::String(text) => Some(text.clone()),
-        other => serde_json::to_string_pretty(other).ok(),
+        Value::String(text) => Some(text),
+        other => serde_json::to_string_pretty(&other).ok(),
     }
 }
 
@@ -1212,15 +1236,16 @@ fn find_tool_block<'a>(value: &'a Value, call_id: &str) -> Option<&'a Value> {
 fn tool_payloads(
     file: &mut File,
     entry: &SessionTimelineIndexEntry,
-) -> Result<(Option<String>, Option<String>), String> {
+) -> Result<(Option<String>, Option<String>, String), String> {
     let tool = entry
         .tool
         .as_ref()
         .ok_or_else(|| "timeline event is not a tool call".to_string())?;
     let call_value = read_source_value(file, entry.source)?;
-    let arguments = find_tool_block(&call_value, &tool.provider_call_id)
-        .and_then(|block| block.get("input"))
-        .and_then(value_as_preview);
+    let input =
+        find_tool_block(&call_value, &tool.provider_call_id).and_then(|block| block.get("input"));
+    let arguments = input.and_then(value_as_preview);
+    let summary = tool_summary(tool, input);
     let result = if let Some(result_source) = tool.result_source {
         let result_value = if result_source == entry.source {
             call_value
@@ -1233,7 +1258,7 @@ fn tool_payloads(
     } else {
         None
     };
-    Ok((arguments, result))
+    Ok((arguments, result, summary))
 }
 
 fn looks_like_binary_or_base64(value: &str) -> bool {
@@ -1253,7 +1278,7 @@ fn bounded_text(value: Option<String>, limit: usize) -> (Option<String>, bool) {
         return (None, false);
     };
     if looks_like_binary_or_base64(&value) {
-        return (Some("[binary or base64 content omitted]".to_string()), true);
+        return (Some(BINARY_PREVIEW_OMISSION.to_string()), true);
     }
     if value.len() <= limit {
         return (Some(value), false);
@@ -1286,14 +1311,69 @@ fn matching_entry(entry: &SessionTimelineIndexEntry, query: &SessionTimelineQuer
     }
 }
 
-fn tool_summary(tool: &SessionToolIndexEntry, argument_preview: Option<&str>) -> String {
+const TOOL_SUMMARY_KEYS: &[&str] = &[
+    "command",
+    "file_path",
+    "filePath",
+    "notebook_path",
+    "notebookPath",
+    "path",
+    "query",
+    "url",
+    "pattern",
+    "glob",
+    "subject",
+    "title",
+    "summary",
+    "description",
+    "reason",
+    "message",
+    "script",
+    "code",
+    "text",
+    "prompt",
+    "question",
+    "skill",
+    "action",
+    "preset",
+    "caption",
+    "planFilePath",
+    "task_id",
+    "taskId",
+    "serverId",
+    "name",
+    "content",
+    "activeForm",
+    "questions",
+    "todos",
+    "files",
+    "__unparsedToolInput",
+    "status",
+];
+
+fn tool_summary_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty() && !looks_like_binary_or_base64(text))
+                .then(|| truncate_chars(text, 160))
+        }
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(boolean) => Some(boolean.to_string()),
+        Value::Array(values) => values.iter().find_map(tool_summary_value),
+        Value::Object(object) => TOOL_SUMMARY_KEYS
+            .iter()
+            .find_map(|key| object.get(*key).and_then(tool_summary_value)),
+        Value::Null => None,
+    }
+}
+
+fn tool_summary(tool: &SessionToolIndexEntry, input: Option<&Value>) -> String {
     if let Some(path) = tool.affected_paths.first() {
         return path.clone();
     }
-    argument_preview
-        .and_then(|preview| preview.lines().next())
-        .map(|line| truncate_chars(line, 160))
-        .filter(|line| !line.is_empty())
+    input
+        .and_then(tool_summary_value)
         .unwrap_or_else(|| tool.native_name.clone())
 }
 
@@ -1345,12 +1425,11 @@ pub(crate) fn read_timeline_page(
             bounded_text(record_text(&value), TIMELINE_MESSAGE_PREVIEW_BYTES).0
         };
         let tool = if let Some(tool_index) = &entry.tool {
-            let (arguments, result) = tool_payloads(&mut file, entry)?;
+            let (arguments, result, summary) = tool_payloads(&mut file, entry)?;
             let (argument_preview, argument_truncated) =
                 bounded_text(arguments, TIMELINE_TOOL_PREVIEW_BYTES);
             let (result_preview, result_truncated) =
                 bounded_text(result, TIMELINE_TOOL_PREVIEW_BYTES);
-            let summary = tool_summary(tool_index, argument_preview.as_deref());
             Some(SessionToolCallPreview {
                 provider_call_id: tool_index.provider_call_id.clone(),
                 native_name: tool_index.native_name.clone(),
@@ -1414,7 +1493,7 @@ pub(crate) fn read_event_detail(
         .ok_or_else(|| "only tool-call events have expandable detail".to_string())?;
     let mut file =
         File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
-    let (arguments, result) = tool_payloads(&mut file, entry)?;
+    let (arguments, result, _) = tool_payloads(&mut file, entry)?;
     let argument_budget = TIMELINE_DETAIL_BYTES / 2;
     let (arguments, arguments_truncated) = bounded_text(arguments, argument_budget);
     let used = arguments.as_ref().map_or(0, String::len);
@@ -1593,6 +1672,263 @@ mod tests {
     }
 
     #[test]
+    fn structured_tool_summaries_use_distinct_native_arguments() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        let first_command = "qlmanage -t first.svg";
+        let second_command = "qlmanage -t second.svg";
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"user","uuid":"u-1","sessionId":"session-1","cwd":project_root,"message":{"role":"user","content":"Render both files"}}),
+                json!({"type":"assistant","uuid":"a-1","sessionId":"session-1","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[
+                    {"type":"tool_use","id":"bash-1","name":"Bash","input":{"command":first_command,"description":"Render the first file"}},
+                    {"type":"tool_use","id":"bash-2","name":"Bash","input":{"command":second_command,"description":"Render the second file"}},
+                    {"type":"tool_use","id":"read-1","name":"Read","input":{"file_path":"./pelican.png"}}
+                ]}}),
+                json!({"type":"user","uuid":"r-1","sessionId":"session-1","message":{"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"bash-1","content":"first result"},
+                    {"type":"tool_result","tool_use_id":"bash-2","content":"second result"},
+                    {"type":"tool_result","tool_use_id":"read-1","content":"image result"}
+                ]}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        let query = SessionTimelineQuery {
+            start_index: None,
+            anchor_event_id: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
+            included_tool_categories: BTreeSet::from([
+                SessionToolCategory::Shell,
+                SessionToolCategory::Read,
+            ]),
+            turn_id: None,
+        };
+        let page = read_timeline_page(&transcript, &index, &query).unwrap();
+        assert_eq!(page.events.len(), 3);
+        let tools = page
+            .events
+            .iter()
+            .map(|event| event.tool.as_ref().unwrap())
+            .collect::<Vec<_>>();
+        assert_ne!(tools[0].provider_call_id, tools[1].provider_call_id);
+        assert_eq!(tools[0].summary, first_command);
+        assert_eq!(tools[1].summary, second_command);
+        assert_eq!(tools[2].summary, "./pelican.png");
+        assert_eq!(tools[0].status, SessionToolCallStatus::Completed);
+        assert_eq!(tools[1].status, SessionToolCallStatus::Completed);
+        assert_eq!(tools[2].status, SessionToolCallStatus::Completed);
+        assert!(tools[0]
+            .argument_preview
+            .as_deref()
+            .is_some_and(|arguments| arguments.contains(first_command)));
+        assert!(tools[1]
+            .argument_preview
+            .as_deref()
+            .is_some_and(|arguments| arguments.contains(second_command)));
+        assert_eq!(tools[0].result_preview.as_deref(), Some("first result"));
+        assert_eq!(tools[1].result_preview.as_deref(), Some("second result"));
+        assert!(tools[2]
+            .argument_preview
+            .as_deref()
+            .is_some_and(|arguments| arguments.contains("./pelican.png")));
+        assert_eq!(tools[2].result_preview.as_deref(), Some("image result"));
+    }
+
+    #[test]
+    fn structured_tool_summaries_cover_claude_input_shapes() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        let cases = vec![
+            (
+                "workflow-1",
+                "Workflow",
+                json!({"script":"export const meta = {\n  name: 'demo'\n};"}),
+                "export const meta = { name: 'demo' };",
+            ),
+            (
+                "search-1",
+                "ToolSearch",
+                json!({"max_results":5,"query":"select:Read"}),
+                "select:Read",
+            ),
+            (
+                "web-1",
+                "WebSearch",
+                json!({"allowed_domains":["example.com"],"query":"release notes"}),
+                "release notes",
+            ),
+            (
+                "agent-1",
+                "Agent",
+                json!({"description":"Inspect the renderer","prompt":"A much longer delegated prompt"}),
+                "Inspect the renderer",
+            ),
+            (
+                "question-1",
+                "AskUserQuestion",
+                json!({"questions":[{"header":"Target","question":"Which target?","options":[]}]}),
+                "Which target?",
+            ),
+            (
+                "task-1",
+                "TaskCreate",
+                json!({"activeForm":"Adding tests","description":"Detailed task body","subject":"Add tests"}),
+                "Add tests",
+            ),
+            (
+                "wake-1",
+                "ScheduleWakeup",
+                json!({"delaySeconds":30,"prompt":"Check again later","reason":"Wait for render"}),
+                "Wait for render",
+            ),
+            (
+                "notify-1",
+                "PushNotification",
+                json!({"message":"Render complete","status":"success"}),
+                "Render complete",
+            ),
+            (
+                "file-1",
+                "SendUserFile",
+                json!({"files":["./build/report.txt"],"status":"ready"}),
+                "./build/report.txt",
+            ),
+            (
+                "browser-1",
+                "mcp__Claude_Browser__navigate",
+                json!({"force":true,"url":"https://example.com/docs"}),
+                "https://example.com/docs",
+            ),
+            (
+                "todo-1",
+                "TodoWrite",
+                json!({"todos":[{"activeForm":"Checking output","content":"Check output","status":"pending"}]}),
+                "Check output",
+            ),
+            (
+                "unknown-1",
+                "ResizeWindow",
+                json!({"height":768,"width":1024}),
+                "ResizeWindow",
+            ),
+        ];
+        let tools = cases
+            .iter()
+            .map(
+                |(id, name, input, _)| json!({"type":"tool_use","id":id,"name":name,"input":input}),
+            )
+            .collect::<Vec<_>>();
+        let results = cases
+            .iter()
+            .map(|(id, _, _, _)| json!({"type":"tool_result","tool_use_id":id,"content":"ok"}))
+            .collect::<Vec<_>>();
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"user","uuid":"u-1","sessionId":"session-1","cwd":project_root,"message":{"role":"user","content":"Run the tools"}}),
+                json!({"type":"assistant","uuid":"a-1","sessionId":"session-1","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":tools}}),
+                json!({"type":"user","uuid":"r-1","sessionId":"session-1","message":{"role":"user","content":results}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        let query = SessionTimelineQuery {
+            start_index: None,
+            anchor_event_id: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
+            included_tool_categories: BTreeSet::from([SessionToolCategory::Other]),
+            turn_id: None,
+        };
+        let page = read_timeline_page(&transcript, &index, &query).unwrap();
+        assert_eq!(page.events.len(), cases.len());
+        let summaries = page
+            .events
+            .iter()
+            .map(|event| {
+                let tool = event.tool.as_ref().unwrap();
+                assert_eq!(tool.status, SessionToolCallStatus::Completed);
+                (tool.native_name.as_str(), tool.summary.as_str())
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (_, name, _, expected) in &cases {
+            assert_eq!(summaries.get(name).copied(), Some(*expected));
+        }
+    }
+
+    #[test]
+    fn timeline_indexes_multi_mib_image_results_without_exposing_base64() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        let image_data = "A".repeat(2 * 1024 * 1024);
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"user","uuid":"u-1","sessionId":"session-1","cwd":project_root,"message":{"role":"user","content":"Inspect the image"}}),
+                json!({"type":"assistant","uuid":"a-1","sessionId":"session-1","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[
+                    {"type":"tool_use","id":"read-1","name":"Read","input":{"file_path":"./preview.png"}}
+                ]}}),
+                json!({"type":"user","uuid":"r-1","sessionId":"session-1","message":{"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"read-1","content":[
+                        {"type":"image","source":{"type":"base64","media_type":"image/png","data":image_data}}
+                    ]}
+                ]}}),
+            ],
+        );
+
+        assert_eq!(MAX_LINE_BYTES as u64, MAX_CONVERSATION_FILE_BYTES);
+        assert!(fs::metadata(&transcript).unwrap().len() > 2 * 1024 * 1024);
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        assert_eq!(index.parser_version, 1);
+        assert!(!index.truncated);
+        assert!(index.warnings.is_empty(), "{:?}", index.warnings);
+        assert_eq!(index.counts.tool_calls.quality, SessionCountQuality::Exact);
+        let tool_entry = index
+            .events
+            .iter()
+            .find(|entry| entry.tool.is_some())
+            .unwrap();
+        assert_eq!(
+            tool_entry.tool.as_ref().unwrap().status,
+            SessionToolCallStatus::Completed
+        );
+
+        let query = SessionTimelineQuery {
+            start_index: None,
+            anchor_event_id: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
+            included_tool_categories: BTreeSet::from([SessionToolCategory::Read]),
+            turn_id: None,
+        };
+        let page = read_timeline_page(&transcript, &index, &query).unwrap();
+        let preview = page.events[0]
+            .tool
+            .as_ref()
+            .and_then(|tool| tool.result_preview.as_ref())
+            .unwrap();
+        assert!(preview.contains(BINARY_PREVIEW_OMISSION));
+        assert!(preview.contains("image/png"));
+        assert!(!preview.contains(&"A".repeat(512)));
+        assert!(preview.len() <= TIMELINE_TOOL_PREVIEW_BYTES);
+
+        let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
+        let result = detail.result.unwrap();
+        assert!(result.contains(BINARY_PREVIEW_OMISSION));
+        assert!(result.contains("image/png"));
+        assert!(!result.contains(&"A".repeat(512)));
+    }
+
+    #[test]
     fn edit_paths_choose_the_most_specific_root_alias_and_reject_a_prefix_sibling() {
         let temp = tempfile::tempdir().unwrap();
         let transcript = temp.path().join("session.jsonl");
@@ -1623,7 +1959,7 @@ mod tests {
         };
 
         let index = build_timeline_index(&transcript, &context).unwrap();
-        assert_eq!(index.parser_version, 2);
+        assert_eq!(index.parser_version, 1);
         let tools = index
             .events
             .iter()
@@ -1677,6 +2013,31 @@ mod tests {
             .find(|entry| entry.kind == SessionTimelineEventKind::Prompt)
             .unwrap();
         assert_eq!(prompt.quality, SessionCountQuality::LowerBound);
+    }
+
+    #[test]
+    fn stop_sequence_is_an_authoritative_response() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"user","uuid":"u-1","sessionId":"session-1","cwd":project_root,"message":{"role":"user","content":"Continue"}}),
+                json!({"type":"assistant","uuid":"a-1","sessionId":"session-1","isApiErrorMessage":true,"error":"authentication_failed","message":{"id":"msg-1","type":"message","role":"assistant","model":"<synthetic>","stop_reason":"stop_sequence","stop_sequence":"","usage":{"input_tokens":0,"output_tokens":0},"content":[{"type":"text","text":"Authentication failed"}]}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        assert_eq!(count_value(&index.counts.responses), 1);
+        assert_eq!(index.counts.responses.quality, SessionCountQuality::Exact);
+        assert_eq!(index.events[1].kind, SessionTimelineEventKind::Response);
+        assert_eq!(index.events[1].quality, SessionCountQuality::Exact);
+        assert!(!index
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "message_phase_inferred"));
     }
 
     #[test]

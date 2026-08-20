@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import type { ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import Icon from "../../src/components/Icons";
 import ProjectActivityPage, {
@@ -1602,13 +1603,22 @@ test("mixed-provider rows sort deterministically and never collide on native ids
     provider_session_id: nativeId,
     logical_thread_id: nativeId,
     title: "Claude twin",
-    actions: [{
-      action_id: "claude.open_in_terminal",
-      kind: "open_in_terminal" as const,
-      label: "Open in Terminal",
-      enabled: true,
-      disabled_reason: null,
-    }],
+    actions: [
+      {
+        action_id: "claude.open_in_app",
+        kind: "open_in_app" as const,
+        label: "Open in Claude",
+        enabled: true,
+        disabled_reason: null,
+      },
+      {
+        action_id: "claude.open_in_terminal",
+        kind: "open_in_terminal" as const,
+        label: "Open in Terminal",
+        enabled: true,
+        disabled_reason: null,
+      },
+    ],
   };
   const mixedActivity = {
     ...activity,
@@ -1678,15 +1688,10 @@ test("mixed-provider rows sort deterministically and never collide on native ids
 
   // Same ended_at, so the provider key breaks the tie: claude before codex.
   assert.ok(html.indexOf("Claude twin") < html.indexOf("Codex twin"), "provider key orders equal timestamps");
-  // Each row wears its own provider's mark. Codex reuses the ChatGPT knot
-  // already in the sheet; Claude Code has no canonical crisp-edge geometry yet
-  // and ships a placeholder burst. The Claude twin offers no open action, so
-  // its mark renders inert rather than vanishing — identity does not disable.
+  // Each row wears its own provider's mark, and both provider marks launch the
+  // corresponding desktop app.
   assert.match(html, /aria-label="Open in Codex"><svg[^>]*data-icon="openai"/);
-  assert.match(
-    html,
-    /class="sync-history-launch-action sync-history-provider-inert"[^>]*title="Claude session"[^>]*><svg[^>]*data-icon="claude"/,
-  );
+  assert.match(html, /aria-label="Open in Claude"><svg[^>]*data-icon="claude"/);
   assert.equal((html.match(/type="checkbox"/g) ?? []).length, 2);
   // Selection is keyed by resource id, so ticking the Claude twin cannot
   // leak onto the Codex twin that shares its native id.
@@ -2315,6 +2320,67 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
   assert.match(pane, /sidebar-profile-item active[^]*?Skills · conf2/);
   assert.match(pane, /aria-label="Remove the Skills · conf2 row"/);
   assert.doesNotMatch(pane, /Add your first resource/);
+});
+
+test("an empty Storages pane prompts the way Projects and Catalog do", () => {
+  const render = (storages: ComponentProps<typeof ProjectSidebar>["storages"]) =>
+    renderToStaticMarkup(
+      <ProjectSidebar
+        projects={[project]}
+        drafts={[]}
+        activeDraftId={null}
+        storages={storages}
+        storageUsage={{}}
+        activeProjectId={null}
+        activeStorageId={null}
+        catalogScopes={[]}
+        activeCatalogScopeId={null}
+        addingCatalogScope={false}
+        loading={false}
+        busy={false}
+        activityOpen={false}
+        unreadLogs={0}
+        onSelectProject={() => undefined}
+        onRemoveProject={() => undefined}
+        onSelectDraft={() => undefined}
+        onDiscardDraft={() => undefined}
+        onToggleActivity={() => undefined}
+        onAddProject={() => undefined}
+        onOpenStorage={() => undefined}
+        onRemoveStorage={() => undefined}
+        onAddStorage={() => undefined}
+        onOpenCatalogMenu={() => undefined}
+        onOpenCatalogScope={() => undefined}
+        onAddCatalogScope={() => undefined}
+        onRemoveCatalogScope={() => undefined}
+      />,
+    );
+
+  const storagePane = (html: string) => html.slice(
+    html.indexOf('aria-label="Storages"'),
+    html.indexOf('aria-label="Catalog"'),
+  );
+
+  // The three panes say the same thing when they are empty, in the same row.
+  const empty = storagePane(render([]));
+  assert.match(empty, /class="sync-sidebar-empty"/);
+  assert.match(empty, /Add your first storage/);
+
+  // And it is a first-run prompt, not a permanent Add row.
+  const settled = storagePane(render([{
+    id: "storage-1",
+    name: "Local storage 1",
+    kind: "local",
+    bucket: "",
+    access_key_id: "",
+    secret_access_key: "",
+    account_id: "",
+    s3_endpoint: "",
+    region: "",
+    local_dir: "/tmp/storage",
+  }]));
+  assert.match(settled, /<span>Local storage 1<\/span>/);
+  assert.doesNotMatch(settled, /Add your first storage/);
 });
 
 test("the sidebar locks project and storage navigation during a sync workflow", () => {

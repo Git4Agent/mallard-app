@@ -1959,10 +1959,12 @@ fn interrupted_create_local_retry_cannot_journal_a_second_identity() {
     let mut first = fixture.request();
     first.operation.plan_action_id = Some(plan_action_id.clone());
     let mut fail_after_journal = FailOnce::new(ConversationFailpoint::AfterJournal);
-    assert!(
-        apply_conversation_materialization(&fixture.repository, first, &mut fail_after_journal)
-            .is_err()
-    );
+    assert!(apply_conversation_materialization(
+        &fixture.repository,
+        first,
+        &mut fail_after_journal
+    )
+    .is_err());
     let journal = fixture.repository.load_conversation_sync_journal().unwrap();
     assert_eq!(journal.operations.len(), 1);
 
@@ -1995,15 +1997,17 @@ fn interrupted_create_local_retry_cannot_journal_a_second_identity() {
     same_action.operation.thread_id = ThreadId::parse("thread-materialize-retry2").unwrap();
     same_action.operation.provider_thread_id = Some("destination-thread-retry2".to_string());
     same_action.operation.cloud_thread_id =
-        crate::project_sync::domain::CloudThreadId::parse("cloudthread-materialize-retry")
-            .unwrap();
+        crate::project_sync::domain::CloudThreadId::parse("cloudthread-materialize-retry").unwrap();
     let error = apply_conversation_materialization(
         &fixture.repository,
         same_action,
         &mut NoConversationFailpoints,
     )
     .unwrap_err();
-    assert!(error.contains("already has a journaled operation"), "{error}");
+    assert!(
+        error.contains("already has a journaled operation"),
+        "{error}"
+    );
 
     // No second identity was ever journaled; recovery settles the original.
     let journal = fixture.repository.load_conversation_sync_journal().unwrap();

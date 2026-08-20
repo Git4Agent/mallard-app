@@ -2885,10 +2885,16 @@ summary:focus-visible {
    below the bar rather than 6px above its own edge. */
 .sync-path-item {
   position: relative;
-  /* Without this the item's automatic min-content floor is its whole label,
-     and `flex-shrink` on it does nothing at all. The floors that matter are
-     the ones on the labels inside. */
-  min-width: 0;
+  /* Neither `auto` nor `0`. `auto` floors the item at its whole label, and
+     `flex-shrink` on it then does nothing at all. `0` lets the item shrink
+     past its own chrome, and the icon and the chevron do not shrink with it:
+     they carry on painting where the box has already ended, over the crumb
+     beside them. Measured on an 892px bar, the storage icon and its chevron
+     sat 45px inside the project's name. The floor is that chrome — a crumb
+     may lose its whole label, never the mark that still opens its menu. The
+     figure is the widest chrome on the row: the split crumb's icon, its
+     chevron in its own half, and the separator ahead of both. */
+  min-width: 4rem;
   flex: 0 1 auto;
   display: flex;
   align-items: center;
@@ -2900,8 +2906,11 @@ summary:focus-visible {
 }
 
 /* Outermost first: the storage is the crumb whose name the root icon already
-   stands for, so it is the cheapest label on the row to lose. */
+   stands for, so it is the cheapest label on the row to lose. It is one
+   button rather than two, so its chrome — and its floor — is the narrower
+   one, and the row's last few pixels at the 580px minimum come from here. */
 .sync-path-item:first-child {
+  min-width: 3.5rem;
   flex-shrink: 6;
 }
 
@@ -2930,15 +2939,15 @@ summary:focus-visible {
   min-width: 5ch;
 }
 
-/* The project keeps enough to be recognised; the storage may fall back to its
-   icon alone, which still opens the same switcher. */
-.sync-path-crumb-link > span {
-  min-width: 4ch;
-}
-
 .sync-path-crumb {
   min-width: 0;
-  max-width: 30vw;
+  /* Against the bar, not the window — the bar is the window less the sidebar,
+     so a viewport share is a far bigger share of the row than it reads as. A
+     capped label is rigid: the cap is the leaf's floor as well as its ceiling.
+     At 30vw a 1280px window floored the leaf at 384px inside an 892px bar,
+     which is more than the two ancestors had between them, so the whole
+     squeeze landed on them and the root collapsed out of its own box. */
+  max-width: 30cqi;
   min-height: 1.75rem;
   display: inline-flex;
   align-items: center;
@@ -3010,14 +3019,22 @@ button.sync-path-crumb:disabled {
   cursor: pointer;
 }
 
+/* The link half carries the name and gives it up; the chevron half is chrome
+   and has nothing to give, so it holds its size instead of squeezing an 11px
+   glyph into a 12px button and painting the rest past its own edge. */
 .sync-path-crumb-link {
+  min-width: 1.75rem;
   padding: 0 5px 0 6px;
 }
 
 .sync-path-crumb-toggle {
+  flex: 0 0 auto;
   padding: 0 5px;
 }
 
+/* The project name ellipsizes away under pressure and its icon and chevron
+   stay, the same fallback the storage has. The ladder in the container
+   queries is what spends that width in order, so it is reached last. */
 .sync-path-crumb-link > span {
   min-width: 0;
   overflow: hidden;
@@ -3327,6 +3344,10 @@ span.sync-path-crumb {
   .sync-path-crumb.section > span:last-child {
     max-width: 9ch;
   }
+
+  .sync-pathbar .sync-history-branch-trigger {
+    max-width: 128px;
+  }
 }
 
 /* Near the floor — 580px, an 800px minimum window less a 220px minimum sidebar
@@ -3341,6 +3362,12 @@ span.sync-path-crumb {
   .sync-path-crumb.leaf > span:last-child,
   .sync-path-crumb.section > span:last-child {
     max-width: 6ch;
+  }
+
+  /* Down to a few characters and the ellipsis. The whole name stays in the
+     pill's tooltip and in its aria-label, and one row below in its menu. */
+  .sync-pathbar .sync-history-branch-trigger {
+    max-width: 80px;
   }
 }
 
@@ -3527,9 +3554,6 @@ span.sync-path-crumb {
 /* The root gives up its name before anything else does — unless it is also
    the leaf, as on the Storages index, where it is the page's only name. */
 @media (max-width: 900px) {
-  .sync-path-crumb {
-    max-width: 34vw;
-  }
   .sync-path-item:first-child .sync-path-crumb.root:not(.leaf) > span {
     display: none;
   }
@@ -4366,6 +4390,25 @@ span.sync-path-crumb {
 
 .sync-storage-settings-dedicated {
   margin-top: 26px;
+}
+
+/* The commit bar closes the draft's column the way the project setup page's
+   footer closes its own: the page's verb sits under the fields it commits,
+   parted from them by the same hairline that separates the bands above. */
+.sync-storage-setup-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 0 0;
+  border-top: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: var(--type-xs);
+}
+
+.sync-storage-setup-footer > div {
+  margin-left: auto;
+  display: flex;
+  gap: 7px;
 }
 
 .sync-storage-details-panel {
@@ -5343,7 +5386,12 @@ span.sync-path-crumb {
 
 .sync-history-branch-trigger {
   min-width: 0;
-  max-width: 200px;
+  /* 200px is what a branch name is worth when the row can spare it. The pill
+     never shrinks — its wrapper above is `flex: 0 0 auto` — so on a narrow
+     bar a long name held the whole trail open and the pill crossed into Pull
+     and Push. A share of the bar keeps that from happening, and the container
+     steps in the path-bar ladder take it further. */
+  max-width: min(200px, 21cqi);
   height: 26px;
   display: inline-flex;
   align-items: center;
@@ -7557,7 +7605,8 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   font-variant-numeric: tabular-nums;
 }
 
-/* The duration: the one number the row states in the body colour. */
+/* The length chip's value — a duration, or the word `running` when there is no
+   end to measure to. The one thing on the strip stated in the body colour. */
 .session-detail-chip b {
   color: var(--text-0);
   font-weight: var(--weight-semibold);
@@ -7978,6 +8027,10 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   background: var(--surface-muted);
   font-family: var(--font-mono);
   font-size: 0.88em;
+  /* A span that wraps must paint every line fragment as a complete chip;
+     the default (slice) tears the border open at the line break. */
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 .session-detail-event-copy pre {

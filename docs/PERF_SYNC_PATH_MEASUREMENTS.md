@@ -656,3 +656,39 @@ Recorded so the reasoning can be audited:
   numbers; its direction held, its precision did not. See section 0.
 - A claim that D7 regressed analysis by 11% was withdrawn: it compared single
   runs across sessions. Measured properly, D7 is a 36–60% improvement.
+
+## Claude cursor parity — measured (2026-08-20)
+
+Measured after `docs/PLAN_CLAUDE_SESSION_CURSOR_PARITY.md` landed (branch-tolerant
+`claude.lineage.v1` + checkpoint-cursor observation for Claude).
+
+**Method.** One temporary `#[test] #[ignore]` in
+`mallard-infrastructure::claude_history_tail` (removed after this recording, per
+this document's convention), run in **release** mode over the machine's real
+`~/.claude/projects` corpus, read-only. For every `.jsonl` file it timed one
+`analyze_claude_transcript`; for every `Complete` file it then ran
+`seed_claude_root` followed by `read_tail_window` + `refresh_claude_tail` on the
+unchanged file and asserted `Unchanged`. Single run, cache-warm; treat timings as
+indicative, byte counts as exact.
+
+**Corpus at measurement time:** 420 files, 887.8 MB; 105 `Complete`
+(592.1 MB) — and all 105 seeded and probe-refreshed to `Unchanged` through the
+production code, independently confirming the corpus-gate acceptance
+(the one excluded main session is the corrupt 53.2 MB dangling-parent file).
+
+| Work | Time | Bytes read |
+|---|---|---|
+| One full `analyze` of every file (the parse the old path ran per comparison) | 4.587 s | 887.8 MB |
+| One `Unchanged` probe refresh of every `Complete` file (the new warm path) | **0.0131 s** | **425,602 B** (probe windows) |
+
+The 4.587 s is the parse alone; the replaced full-capture path additionally did a
+second full parse (`summarize_bytes`), a full-buffer lowercase secret-scan copy,
+and three SHA-256 passes over the same bytes on every comparison. The slowest
+single analyzes were the large sessions (36.3 MB → 0.261 s, 42.0 MB → 0.201 s).
+Net: for bound Claude threads a warm comparison drops from ~888 MB read + double
+parse to ≤4 KiB per thread (~416 KiB corpus-wide), and to zero filesystem work
+when the watcher proves the profile quiet — the same shape the Codex cursor
+already had. The lib tests
+`a_comparison_reads_no_claude_transcript_bytes_beyond_the_probe_window` and
+`a_claude_rewind_degrades_to_one_full_reanalyze_and_stays_syncable` pin the byte
+accounting; the extended live aimock e2e pins it over a real resumed CLI turn.

@@ -10,7 +10,6 @@
 //! disagreement is a typed invalid outcome, never an empty tail.
 
 use sha2::{Digest, Sha256};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::codex_rollout::{
@@ -18,6 +17,9 @@ use crate::codex_rollout::{
     CodexStructureAccumulator, MAX_CODEX_FORK_DEPTH,
 };
 use crate::conversation_codec::{CanonicalChainBuilder, ChainFeedOutcome};
+use crate::jsonl_tail_io::{
+    hex_sha256, open_no_follow, read_bounded, safe_record_end, TailWindow, PROBE_WINDOW_BYTES,
+};
 use mallard_domain::{
     compute_portable_conversation_tail, conversation_chain_digests, conversation_prefix_witness,
     validate_conversation_chain, CanonicalConversationMessage, ConversationCheckpoint,
@@ -25,8 +27,6 @@ use mallard_domain::{
     RootPhysicalMapping, RootTailLayout, TailAccumulator, TailPartitionKind,
     MAX_CONVERSATION_FILE_BYTES, PORTABLE_TAIL_CODEC_V1,
 };
-
-pub const PROBE_WINDOW_BYTES: u64 = 4_096;
 
 /// One physical segment of a resolved logical root, base-most first.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,51 +99,6 @@ pub enum CodexTailInvalidReason {
     MalformedAppend,
 }
 
-/// Read one rollout with the module's safety contract: a canonical no-follow
-/// regular file within the bounded transcript limit.
-pub fn read_rollout_bounded(path: &Path) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-
-    let mut file = open_rollout_no_follow(path)?;
-    let before = file
-        .metadata()
-        .map_err(|error| format!("inspect Codex rollout '{}': {}", path.display(), error))?;
-    if !before.is_file() {
-        return Err(format!(
-            "Codex rollout '{}' is not a regular file",
-            path.display()
-        ));
-    }
-    if before.len() > MAX_CONVERSATION_FILE_BYTES {
-        return Err(format!(
-            "Codex rollout '{}' exceeds the bounded transcript limit",
-            path.display()
-        ));
-    }
-    let mut bytes = Vec::with_capacity(before.len() as usize);
-    file.by_ref()
-        .take(MAX_CONVERSATION_FILE_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("read Codex rollout '{}': {}", path.display(), error))?;
-    let after = file
-        .metadata()
-        .map_err(|error| format!("reinspect Codex rollout '{}': {}", path.display(), error))?;
-    if bytes.len() as u64 > MAX_CONVERSATION_FILE_BYTES {
-        return Err(format!(
-            "Codex rollout '{}' exceeds the bounded transcript limit",
-            path.display()
-        ));
-    }
-    if after.len() != before.len() || bytes.len() as u64 != before.len() {
-        return Err(format!(
-            "Codex rollout '{}' changed while it was read",
-            path.display()
-        ));
-    }
-    crate::sync_metrics::record_transcript_bytes_read(path, bytes.len() as u64);
-    Ok(bytes)
-}
-
 /// Prove that a retained copy-on-write source still contains exactly the
 /// bytes pinned when its binding moved. Only checkpoints whose raw pin spans
 /// the complete physical file qualify; partial trailing records and older
@@ -169,7 +124,7 @@ pub fn retained_root_is_byte_identical(
     {
         return Ok(false);
     }
-    let mut file = open_rollout_no_follow(path)?;
+    let mut file = open_no_follow(path)?;
     let before = file
         .metadata()
         .map_err(|error| format!("inspect retained Codex rollout: {error}"))?;
@@ -198,154 +153,6 @@ pub fn retained_root_is_byte_identical(
     Ok(digest == raw_range_pin.range_sha256)
 }
 
-/// One bounded read of a rollout tail: the saved probe window plus every
-/// byte from the consumed cursor through the bounded EOF, addressed by the
-/// absolute file offset the slice starts at.
-#[derive(Clone, Debug)]
-pub struct RolloutTailWindow {
-    pub file_len: u64,
-    pub window_offset: u64,
-    pub bytes: Vec<u8>,
-}
-
-/// How many times a moving-EOF read retries before failing closed.
-const TAIL_WINDOW_READ_RETRIES: usize = 3;
-
-fn open_rollout_no_follow(path: &Path) -> Result<fs::File, String> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    options
-        .open(path)
-        .map_err(|error| format!("open Codex rollout '{}': {}", path.display(), error))
-}
-
-/// Read a saved cursor's probe window and appended tail without reading the
-/// consumed prefix: open the exact path without following a final symlink,
-/// require a regular file within the transcript bound, read from the probe
-/// window's start through EOF, and re-stat the open handle afterwards,
-/// retrying a bounded number of times while the EOF is moving. A file
-/// already shorter than the cursor returns an empty window whose `file_len`
-/// lets `refresh_codex_tail` classify the truncation.
-pub fn read_rollout_tail_window(
-    path: &Path,
-    mapping: &RootPhysicalMapping,
-) -> Result<RolloutTailWindow, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let window_offset = mapping.consumed_byte_offset - mapping.probe_window_len;
-    let file = open_rollout_no_follow(path)?;
-    let handle_meta = file
-        .metadata()
-        .map_err(|error| format!("stat Codex rollout '{}': {}", path.display(), error))?;
-    if !handle_meta.is_file() {
-        return Err(format!(
-            "Codex rollout '{}' is not a regular file",
-            path.display()
-        ));
-    }
-    let mut file = file;
-    let mut attempts = 0;
-    loop {
-        let len_before = file
-            .metadata()
-            .map_err(|error| format!("stat Codex rollout '{}': {}", path.display(), error))?
-            .len();
-        if len_before > MAX_CONVERSATION_FILE_BYTES {
-            return Err(format!(
-                "Codex rollout '{}' exceeds the bounded transcript limit",
-                path.display()
-            ));
-        }
-        if len_before < mapping.consumed_byte_offset {
-            return Ok(RolloutTailWindow {
-                file_len: len_before,
-                window_offset,
-                bytes: Vec::new(),
-            });
-        }
-        file.seek(SeekFrom::Start(window_offset))
-            .map_err(|error| format!("seek Codex rollout '{}': {}", path.display(), error))?;
-        let expected = len_before - window_offset;
-        let mut bytes = Vec::with_capacity(expected as usize);
-        (&file)
-            .take(expected)
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("read Codex rollout '{}': {}", path.display(), error))?;
-        let len_after = file
-            .metadata()
-            .map_err(|error| format!("stat Codex rollout '{}': {}", path.display(), error))?
-            .len();
-        if len_after == len_before && bytes.len() as u64 == expected {
-            crate::sync_metrics::record_probe_bytes_read(path, mapping.probe_window_len);
-            crate::sync_metrics::record_append_bytes_read(
-                path,
-                expected.saturating_sub(mapping.probe_window_len),
-            );
-            return Ok(RolloutTailWindow {
-                file_len: len_before,
-                window_offset,
-                bytes,
-            });
-        }
-        attempts += 1;
-        if attempts > TAIL_WINDOW_READ_RETRIES {
-            return Err(format!(
-                "Codex rollout '{}' kept changing during the bounded tail read",
-                path.display()
-            ));
-        }
-    }
-}
-
-/// Read one absolute byte range of a rollout under the same no-follow
-/// contract, for re-proving an accepted-to-current raw interval after the
-/// cursor advanced. The caller must verify the overlap with bytes it
-/// already trusts.
-pub fn read_rollout_range(path: &Path, start: u64, end: u64) -> Result<Vec<u8>, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    if end < start || end > MAX_CONVERSATION_FILE_BYTES {
-        return Err(format!(
-            "Codex rollout '{}' range request is out of bounds",
-            path.display()
-        ));
-    }
-    let mut file = open_rollout_no_follow(path)?;
-    let handle_meta = file
-        .metadata()
-        .map_err(|error| format!("stat Codex rollout '{}': {}", path.display(), error))?;
-    if !handle_meta.is_file() {
-        return Err(format!(
-            "Codex rollout '{}' is not a regular file",
-            path.display()
-        ));
-    }
-    if handle_meta.len() < end {
-        return Err(format!(
-            "Codex rollout '{}' is shorter than the pinned range",
-            path.display()
-        ));
-    }
-    file.seek(SeekFrom::Start(start))
-        .map_err(|error| format!("seek Codex rollout '{}': {}", path.display(), error))?;
-    let mut bytes = Vec::with_capacity((end - start) as usize);
-    (&file)
-        .take(end - start)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("read Codex rollout '{}': {}", path.display(), error))?;
-    if bytes.len() as u64 != end - start {
-        return Err(format!(
-            "Codex rollout '{}' raced the pinned range read",
-            path.display()
-        ));
-    }
-    crate::sync_metrics::record_append_bytes_read(path, end - start);
-    Ok(bytes)
-}
-
 struct SegmentSource {
     path: PathBuf,
     bytes: Vec<u8>,
@@ -363,7 +170,7 @@ pub fn resolve_codex_root(
     base_lookup: &dyn Fn(&str) -> Result<Option<PathBuf>, String>,
 ) -> Result<ResolvedCodexRoot, String> {
     crate::sync_metrics::record_full_graph_resolve(leaf_path);
-    let leaf_bytes = read_rollout_bounded(leaf_path)?;
+    let leaf_bytes = read_bounded(leaf_path)?;
     let leaf_file_size = leaf_bytes.len() as u64;
     let leaf_safe_end = safe_record_end(&leaf_bytes);
     if leaf_safe_end == 0 {
@@ -403,7 +210,7 @@ pub fn resolve_codex_root(
                 reference.thread_id
             )
         })?;
-        let bytes = read_rollout_bounded(&path)?;
+        let bytes = read_bounded(&path)?;
         if reference.end_byte_offset > bytes.len() as u64 {
             return Err(format!(
                 "Codex history base '{}' is shorter than its declared cutoff",
@@ -675,7 +482,7 @@ pub fn refresh_codex_tail(
     layout: &RootTailLayout,
     observed_tail: &PortableConversationTail,
     mapping: &RootPhysicalMapping,
-    tail: &RolloutTailWindow,
+    tail: &TailWindow,
 ) -> Result<CodexTailRefresh, String> {
     if tail.window_offset != mapping.consumed_byte_offset - mapping.probe_window_len {
         return Err("Codex tail window does not start at the mapping's probe window".to_string());
@@ -821,26 +628,13 @@ pub fn refresh_codex_tail(
     })
 }
 
-/// Position immediately after the final newline: the safe record end.
-fn safe_record_end(bytes: &[u8]) -> u64 {
-    bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map(|position| position as u64 + 1)
-        .unwrap_or(0)
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use mallard_domain::RawRangePin;
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::fs;
 
     fn retained_checkpoint(path: &Path, bytes: &[u8]) -> ConversationCheckpoint {
         ConversationCheckpoint {
@@ -1212,16 +1006,16 @@ mod tests {
 
     /// A tail window equivalent to handing the whole buffer to the old
     /// whole-file cursor path, for equivalence tests.
-    fn tail_window_from(mapping: &RootPhysicalMapping, full: &[u8]) -> RolloutTailWindow {
+    fn tail_window_from(mapping: &RootPhysicalMapping, full: &[u8]) -> TailWindow {
         let window_offset = mapping.consumed_byte_offset - mapping.probe_window_len;
         if (full.len() as u64) < mapping.consumed_byte_offset {
-            return RolloutTailWindow {
+            return TailWindow {
                 file_len: full.len() as u64,
                 window_offset,
                 bytes: Vec::new(),
             };
         }
-        RolloutTailWindow {
+        TailWindow {
             file_len: full.len() as u64,
             window_offset,
             bytes: full[window_offset as usize..].to_vec(),
@@ -1453,7 +1247,7 @@ mod tests {
         appended.extend_from_slice(b"{\"type\":\"response_item\",\"payload\"");
         fs::write(&leaf, &appended).unwrap();
 
-        let window = read_rollout_tail_window(&leaf, &seeded.mapping).unwrap();
+        let window = crate::jsonl_tail_io::read_tail_window(&leaf, &seeded.mapping).unwrap();
         assert_eq!(window.file_len, appended.len() as u64);
         assert_eq!(
             window.window_offset,
@@ -1487,7 +1281,7 @@ mod tests {
 
         // Truncation beneath the cursor is typed by refresh, not the reader.
         fs::write(&leaf, &leaf_bytes[..leaf_bytes.len() - 10]).unwrap();
-        let truncated = read_rollout_tail_window(&leaf, &seeded.mapping).unwrap();
+        let truncated = crate::jsonl_tail_io::read_tail_window(&leaf, &seeded.mapping).unwrap();
         assert_eq!(truncated.file_len, leaf_bytes.len() as u64 - 10);
         assert!(truncated.bytes.is_empty());
         assert!(matches!(
@@ -1508,8 +1302,9 @@ mod tests {
         {
             let alias = graph.directory.path().join("alias.jsonl");
             std::os::unix::fs::symlink(&leaf, &alias).unwrap();
-            let error = read_rollout_tail_window(&alias, &seeded.mapping).unwrap_err();
-            assert!(error.contains("open Codex rollout"), "{error}");
+            let error =
+                crate::jsonl_tail_io::read_tail_window(&alias, &seeded.mapping).unwrap_err();
+            assert!(error.contains("open session transcript"), "{error}");
         }
     }
 

@@ -2142,22 +2142,31 @@ impl ConversationBindings {
             {
                 return Err("conversation binding project/profile scope is stale".to_string());
             }
-            // A materialized Codex task must carry its immutable portable
-            // partition under the v1 codec; a missing or foreign layout is
-            // corruption, never a default.
-            if binding.provider_thread_id.is_some()
-                && profiles
-                    .get(&binding.provider_profile_id)
-                    .is_some_and(|profile| profile.provider.as_str() == "codex")
-                && binding
-                    .root_tail_layout
-                    .as_ref()
-                    .is_none_or(|layout| layout.codec != PORTABLE_TAIL_CODEC_V1)
-            {
-                return Err(format!(
-                    "conversation thread '{}' is bound to codex without a v1 root tail layout",
-                    binding.thread_id
-                ));
+            // A materialized cursor-provider task must carry its immutable
+            // portable partition under that provider's local codec; a missing
+            // or foreign layout is corruption, never a default.
+            if binding.provider_thread_id.is_some() {
+                let expected_layout_codec =
+                    profiles
+                        .get(&binding.provider_profile_id)
+                        .and_then(|profile| match profile.provider.as_str() {
+                            "codex" => Some(PORTABLE_TAIL_CODEC_V1),
+                            "claude" => Some(CLAUDE_PORTABLE_TAIL_CODEC_V1),
+                            _ => None,
+                        });
+                if let Some(expected_codec) = expected_layout_codec {
+                    if binding
+                        .root_tail_layout
+                        .as_ref()
+                        .is_none_or(|layout| layout.codec != expected_codec)
+                    {
+                        return Err(format!(
+                            "conversation thread '{}' is bound without its provider's root tail \
+                             layout",
+                            binding.thread_id
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -3140,6 +3149,8 @@ impl ConversationThread {
             Some(tail) => {
                 if self.provider.as_str() == "codex" {
                     tail.validate_codex_wire()?;
+                } else if self.provider.as_str() == "claude" {
+                    tail.validate_claude_wire()?;
                 } else {
                     tail.validate()?;
                 }
@@ -3153,10 +3164,10 @@ impl ConversationThread {
                 }
             }
             None => {
-                if self.provider.as_str() == "codex" {
+                if matches!(self.provider.as_str(), "codex" | "claude") {
                     return Err(format!(
-                        "conversation thread '{}' requires a portable tail for codex",
-                        self.thread_id
+                        "conversation thread '{}' requires a portable tail for {}",
+                        self.thread_id, self.provider
                     ));
                 }
             }
@@ -5451,8 +5462,8 @@ pub use conversation_tail::{
     compute_portable_conversation_tail_with_codec, conversation_prefix_witness,
     AcceptedConversationVersion, ConversationCheckpoint, ConversationPrefixWitness,
     PhysicalMappingState, PortableConversationTail, RawRangePin, RootPhysicalMapping,
-    RootTailLayout, TailAccumulator, TailPartitionKind, PORTABLE_TAIL_CODEC_V1,
-    PORTABLE_TAIL_CODEC_WIRE_V1,
+    RootTailLayout, TailAccumulator, TailPartitionKind, CLAUDE_PORTABLE_TAIL_CODEC_V1,
+    CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1, PORTABLE_TAIL_CODEC_V1, PORTABLE_TAIL_CODEC_WIRE_V1,
 };
 pub use conversation_tail_relation::{
     compare_conversation_tail, SyncCurrency, TailClassification, TailEvidenceBlocker,

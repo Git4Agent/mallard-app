@@ -1,5 +1,5 @@
-//! Watcher-backed reuse of provider session inventory and Codex tail
-//! observations.
+//! Watcher-backed reuse of provider session inventory and cursor-provider
+//! tail observations.
 //!
 //! One watcher per exact canonical provider home, armed lazily on the first
 //! operation that consults it and shared by every project bound to that
@@ -286,10 +286,6 @@ fn canonical_home_of(home: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(home).ok()
 }
 
-fn codex_provider() -> ProviderKey {
-    ProviderKey::parse("codex").expect("static provider key")
-}
-
 /// Canonicalize every stored dependency path; an entry whose sources
 /// cannot be canonicalized is simply not retained.
 fn canonical_paths(paths: &[PathBuf]) -> Option<Vec<PathBuf>> {
@@ -429,8 +425,7 @@ impl ProfileWatch {
                 self.dirty_roots.insert(path.to_path_buf());
                 let membership_change =
                     matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_))
-                        || !self.known_roots.contains(path)
-                        || self.provider.as_str() != "codex";
+                        || !self.known_roots.contains(path);
                 if membership_change {
                     self.inventory_dirty = true;
                 }
@@ -723,6 +718,7 @@ impl SessionWatchService {
     /// thread performs no filesystem work at all.
     pub(crate) fn take_reusable_observations(
         &self,
+        provider: &ProviderKey,
         canonical_home: &Path,
         local_project_id: &LocalProjectId,
         storage_id: &StorageId,
@@ -734,7 +730,7 @@ impl SessionWatchService {
         };
         let canonical_home = canonical_home.as_path();
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if !inner.ensure_profile(&codex_provider(), canonical_home) {
+        if !inner.ensure_profile(provider, canonical_home) {
             return served;
         }
         let Some(profile) = inner.profiles.get(canonical_home) else {
@@ -780,6 +776,7 @@ impl SessionWatchService {
     /// candidates skip review-time capture entirely.
     pub(crate) fn take_reusable_candidate_pins(
         &self,
+        provider: &ProviderKey,
         canonical_home: &Path,
         local_project_id: &LocalProjectId,
         resource_ids: &BTreeSet<String>,
@@ -790,7 +787,7 @@ impl SessionWatchService {
         };
         let canonical_home = canonical_home.as_path();
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if !inner.ensure_profile(&codex_provider(), canonical_home) {
+        if !inner.ensure_profile(provider, canonical_home) {
             return served;
         }
         let Some(profile) = inner.profiles.get(canonical_home) else {
@@ -955,6 +952,10 @@ mod tests {
         LocalTailObservation::for_watch_service_tests(TailSideEvidence::ConfirmedAbsent)
     }
 
+    fn codex_provider() -> ProviderKey {
+        ProviderKey::parse("codex").unwrap()
+    }
+
     fn ids() -> (LocalProjectId, StorageId, ThreadId) {
         (
             LocalProjectId::parse("watch-test-project").unwrap(),
@@ -1075,7 +1076,7 @@ mod tests {
         };
         // Cold: nothing cached.
         assert!(service
-            .take_reusable_observations(&home, &project, &storage, &query())
+            .take_reusable_observations(&codex_provider(), &home, &project, &storage, &query())
             .is_empty());
         service.store_observations(
             &home,
@@ -1093,7 +1094,7 @@ mod tests {
         // Quiet watcher: served with no filesystem work.
         assert_eq!(
             service
-                .take_reusable_observations(&home, &project, &storage, &query())
+                .take_reusable_observations(&codex_provider(), &home, &project, &storage, &query())
                 .len(),
             1
         );
@@ -1102,7 +1103,7 @@ mod tests {
         std::fs::write(&rollout, b"{\"a\":2}\n").unwrap();
         assert!(
             service
-                .take_reusable_observations(&home, &project, &storage, &query())
+                .take_reusable_observations(&codex_provider(), &home, &project, &storage, &query())
                 .is_empty(),
             "a mutated source must never be served"
         );
@@ -1126,7 +1127,13 @@ mod tests {
             binding_revision: Some(1),
         }];
         assert!(service
-            .take_reusable_observations(&home, &project, &storage, &stale_generation)
+            .take_reusable_observations(
+                &codex_provider(),
+                &home,
+                &project,
+                &storage,
+                &stale_generation
+            )
             .is_empty());
     }
 
@@ -1141,7 +1148,7 @@ mod tests {
         let (project, storage, _) = ids();
 
         // Arm.
-        service.take_reusable_observations(&home, &project, &storage, &[]);
+        service.take_reusable_observations(&codex_provider(), &home, &project, &storage, &[]);
         {
             let mut inner = service.inner.lock().unwrap();
             assert!(inner.ensure_profile(&codex_provider(), &canonical_home));

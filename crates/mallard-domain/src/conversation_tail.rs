@@ -25,6 +25,18 @@ pub const PORTABLE_TAIL_CODEC_V1: &str = "mallard-codex-portable-tail-v1";
 /// (codec inequality ⇒ Unknown ⇒ Blocked) instead of silently mis-comparing.
 pub const PORTABLE_TAIL_CODEC_WIRE_V1: &str = "mallard-codex-portable-tail-wire-v1";
 
+/// Claude's local-form tail codec: the same fold over `claude.lineage.v1`
+/// canonical chains. Claude publishes transcripts verbatim, so its local and
+/// wire folds carry identical states; the twin labels exist to keep the
+/// local/wire columns structurally incomparable, exactly as for Codex.
+pub const CLAUDE_PORTABLE_TAIL_CODEC_V1: &str = "mallard-claude-portable-tail-v1";
+/// The wire-form twin of [`CLAUDE_PORTABLE_TAIL_CODEC_V1`], mandatory on
+/// every Claude `ConversationThread`.
+pub const CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1: &str = "mallard-claude-portable-tail-wire-v1";
+
+// The hash domains are shared by every provider's fold; the historical
+// "codex" in the byte strings is a frozen misnomer (renaming them would
+// change every existing tail state for zero semantic gain).
 const TAIL_START_DOMAIN_V1: &[u8] = b"mallard-codex-tail-start-v1";
 const TAIL_RECORD_DOMAIN_V1: &[u8] = b"mallard-codex-tail-record-v1";
 
@@ -65,10 +77,12 @@ pub struct PortableConversationTail {
 
 impl PortableConversationTail {
     /// Structural validity for any provider's five-field evidence.  Codex
-    /// wire values are additionally pinned to [`PORTABLE_TAIL_CODEC_V1`] by
-    /// [`Self::validate_codex_wire`]; non-Codex providers supply
-    /// `WholeThread`-equivalent evidence under their own codec string, and
-    /// classification equality remains field-wise, codec included.
+    /// wire values are additionally pinned to [`PORTABLE_TAIL_CODEC_WIRE_V1`]
+    /// by [`Self::validate_codex_wire`] and Claude wire values to
+    /// [`CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1`] by [`Self::validate_claude_wire`];
+    /// cursor-less providers supply `WholeThread`-equivalent evidence under
+    /// their own codec string, and classification equality remains
+    /// field-wise, codec included.
     pub fn validate(&self) -> Result<(), String> {
         validate_tail_codec(&self.codec)?;
         validate_tail_start(self.partition_kind, self.start_record_count)?;
@@ -89,6 +103,19 @@ impl PortableConversationTail {
         if self.codec != PORTABLE_TAIL_CODEC_WIRE_V1 {
             return Err(format!(
                 "unknown codex portable tail wire codec '{}'",
+                self.codec.escape_debug()
+            ));
+        }
+        Ok(())
+    }
+
+    /// The claude wire pin: schema-1 `ConversationThread` values for
+    /// `provider == claude` must carry exactly the Claude wire-form codec.
+    pub fn validate_claude_wire(&self) -> Result<(), String> {
+        self.validate()?;
+        if self.codec != CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1 {
+            return Err(format!(
+                "unknown claude portable tail wire codec '{}'",
                 self.codec.escape_debug()
             ));
         }

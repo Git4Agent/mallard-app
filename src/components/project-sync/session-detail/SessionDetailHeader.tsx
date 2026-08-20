@@ -6,7 +6,10 @@ import {
   formatCompactCount,
   formatSessionCount,
   formatSessionDuration,
-  formatSessionRange,
+  formatSessionLengthDetail,
+  formatSessionStart,
+  formatSessionStartDetail,
+  sessionDetailDateTime,
 } from "./sessionDetailModel";
 
 // The activity rows' vocabulary, reused verbatim: opening the provider wears
@@ -44,8 +47,8 @@ export default function SessionDetailHeader({
   const summary = detail.summary && detail.summary.trim() !== title.trim()
     ? detail.summary
     : null;
-  const range = formatSessionRange(detail.started_at, detail.ended_at);
-  const duration = formatSessionDuration(detail.started_at, detail.ended_at);
+  const start = formatSessionStart(detail.started_at);
+  const length = formatSessionDuration(detail.started_at, detail.ended_at);
   const tokensKnown = detail.tokens.quality !== "unsupported" && detail.tokens.value != null;
 
   return (
@@ -73,10 +76,23 @@ export default function SessionDetailHeader({
               <code>{detail.recorded_sha.slice(0, 7)}</code>
             </FactChip>
           )}
-          {range && (
-            <FactChip>
-              <time dateTime={detail.started_at != null ? String(detail.started_at) : undefined}>{range}</time>
-              {duration && <b>{duration}</b>}
+          {/* Two chips, not one. Every other chip on this strip carries a single
+              fact; the stamp was the only one carrying three — a start, an end
+              and a length, where any two of them give the third. What is left
+              is when it began and how long it took, each in its own box. The
+              end time moves to the length chip's tooltip. */}
+          {start && (
+            <FactChip title={formatSessionStartDetail(detail.started_at) ?? undefined}>
+              <time dateTime={sessionDetailDateTime(detail.started_at)}>{start}</time>
+            </FactChip>
+          )}
+          {/* A live session has no end, so it cannot have a length. `is_active`
+              has been on the DTO all along and this header never read it: a
+              running session drew an arrow at an end that had not happened. */}
+          {(detail.is_active || length) && (
+            <FactChip title={formatSessionLengthDetail(detail.started_at, detail.ended_at, detail.is_active) ?? undefined}>
+              <Icon name={detail.is_active ? "activity" : "clock"} size={12} />
+              <b>{detail.is_active ? "running" : length}</b>
             </FactChip>
           )}
           <FactChip title={detail.tokens.explanation ?? formatSessionCount(detail.tokens)}>

@@ -527,6 +527,13 @@ pub trait SessionAdapter: Send + Sync {
     fn index_fragment_limit(&self) -> usize {
         0
     }
+    /// Whether this provider's transcripts support checkpoint-cursor
+    /// observation (probe-window plus append-only incremental fold).
+    /// Cursor-less providers are captured up front and their tail evidence
+    /// is synthesized from the captured lineage.
+    fn supports_tail_cursor(&self) -> bool {
+        false
+    }
     /// Discover project-owned sessions, sidecars, and provider state under
     /// one provider home. Ownership is proven through each session's
     /// recorded cwd; the adapter must not scan outside `provider_home`.

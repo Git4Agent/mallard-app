@@ -38,7 +38,7 @@ import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
 import { syncOutcomeView } from "./syncOutcome";
 import { isIrrecoverableSyncError } from "./syncError";
 import type { SyncOutcome } from "./syncOutcome";
-import { newStorage, storageConfigReady, StorageEditor } from "./StorageSettings";
+import { newStorage, r2FieldsSet, storageConfigReady, StorageEditor } from "./StorageSettings";
 import { projectSyncApi } from "./api";
 import {
   compactProjectPath,
@@ -1108,21 +1108,10 @@ export default function ProjectLinksWorkspace({
       ...appActions,
     ];
 
-    // Creating, the page's one verb is the save; settled, it is the refresh
-    // that the repositories card no longer duplicates.
-    const storagePathActions = creatingStorage ? (
-      <button
-        type="button"
-        className="sync-path-sync"
-        disabled={busy || !!storageConflict || !storageReady}
-        onClick={() => void saveEditedStorage()}
-      >
-        <Icon name="check-circle" size={14} />
-        <span className="sync-path-sync-label">
-          {runningAction === `storage:${editedStorageConfig.id}` ? "Creating…" : "Create storage"}
-        </span>
-      </button>
-    ) : (
+    // Creating, the page's verb is the commit bar under the form it commits —
+    // the trail carries no action at all; settled, it is the refresh that the
+    // repositories card no longer duplicates.
+    const storagePathActions = creatingStorage ? undefined : (
       <button
         type="button"
         className="sync-path-sync"
@@ -1243,9 +1232,10 @@ export default function ProjectLinksWorkspace({
                       setStorageDraft(nextDraft);
                     }}
                     showNameField={creatingStorage}
-                    // A draft's save is the page's verb and lives in the path
-                    // bar; a settled storage's save belongs to the drawer it
-                    // commits.
+                    showProgress={!creatingStorage}
+                    // A draft's create is the page's verb and lives in the
+                    // commit bar below; a settled storage's save belongs to the
+                    // drawer it commits.
                     primaryAction={creatingStorage ? undefined : (
                       <button
                         type="button"
@@ -1290,6 +1280,37 @@ export default function ProjectLinksWorkspace({
 
             {error && !renamingStorage && (
               <div className="sync-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>
+            )}
+
+            {/* The draft's verbs close its column, under the fields they act
+                on. Cancel is the crumb's way back said plainly beside the
+                commit, and leaving drops the draft — it was never saved. */}
+            {creatingStorage && (
+              <footer className="sync-storage-setup-footer">
+                {storageDraft.kind !== "local" && (
+                  <span className="sync-storage-editor-progress" aria-live="polite">
+                    {r2FieldsSet(storageDraft)} of 5 set
+                  </span>
+                )}
+                <div>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    disabled={busy}
+                    onClick={onOpenStorageIndex}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={busy || !!storageConflict || !storageReady}
+                    onClick={() => void saveEditedStorage()}
+                  >
+                    {runningAction === `storage:${editedStorageConfig.id}` ? "Creating…" : "Create storage"}
+                  </button>
+                </div>
+              </footer>
             )}
           </div>
         </section>

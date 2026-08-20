@@ -740,17 +740,29 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
         message_count: 2,
         lineage_digest,
         semantic_digest,
-        portable_tail: (provider_key == "codex").then(|| {
-            // Cloud thread docs carry the wire-form tail: token-form bytes
-            // fold under the wire codec label.
-            compute_portable_conversation_tail_with_codec(
-                PORTABLE_TAIL_CODEC_WIRE_V1,
-                TailPartitionKind::WholeThread,
-                0,
-                &chain,
-            )
-            .unwrap()
-        }),
+        portable_tail: match provider_key {
+            // Cloud thread docs carry the wire-form tail: cursor providers
+            // fold under their wire codec labels.
+            "codex" => Some(
+                compute_portable_conversation_tail_with_codec(
+                    PORTABLE_TAIL_CODEC_WIRE_V1,
+                    TailPartitionKind::WholeThread,
+                    0,
+                    &chain,
+                )
+                .unwrap(),
+            ),
+            "claude" => Some(
+                compute_portable_conversation_tail_with_codec(
+                    CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1,
+                    TailPartitionKind::WholeThread,
+                    0,
+                    &chain,
+                )
+                .unwrap(),
+            ),
+            _ => None,
+        },
         forked_from: None,
         preserved: None,
         source_thread_id: Some("provider-native-thread".to_string()),
@@ -946,7 +958,15 @@ fn duplicate_threads_across_scopes_are_rejected() {
         message_count: 1,
         lineage_digest,
         semantic_digest,
-        portable_tail: None,
+        portable_tail: Some(
+            compute_portable_conversation_tail_with_codec(
+                CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1,
+                TailPartitionKind::WholeThread,
+                0,
+                &chain,
+            )
+            .unwrap(),
+        ),
         forked_from: None,
         preserved: None,
         source_thread_id: None,
@@ -1712,17 +1732,27 @@ fn portable_tail_validation_fails_closed() {
     .validate()
     .unwrap();
 
-    // Structural validation accepts a foreign provider codec string; the
-    // codex wire pin accepts only the wire-form codec — the local codec is
-    // itself foreign to the wire column.
+    // Structural validation accepts a foreign provider codec string; each
+    // provider's wire pin accepts only its own wire-form codec — the local
+    // codecs are themselves foreign to the wire columns.
     let mut foreign_codec = valid.clone();
-    foreign_codec.codec = "claude.lineage.v1".to_string();
+    foreign_codec.codec = "example.foreign.codec.v1".to_string();
     foreign_codec.validate().unwrap();
     assert!(foreign_codec.validate_codex_wire().is_err());
+    assert!(foreign_codec.validate_claude_wire().is_err());
     assert!(valid.validate_codex_wire().is_err());
     let mut wire = valid.clone();
     wire.codec = PORTABLE_TAIL_CODEC_WIRE_V1.to_string();
     wire.validate_codex_wire().unwrap();
+    assert!(wire.validate_claude_wire().is_err());
+    let mut claude_local = valid.clone();
+    claude_local.codec = CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string();
+    claude_local.validate().unwrap();
+    assert!(claude_local.validate_claude_wire().is_err());
+    let mut claude_wire = valid.clone();
+    claude_wire.codec = CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1.to_string();
+    claude_wire.validate_claude_wire().unwrap();
+    assert!(claude_wire.validate_codex_wire().is_err());
 
     let mut malformed_codec = valid.clone();
     malformed_codec.codec = "not a codec".to_string();
@@ -3015,7 +3045,10 @@ fn pre_cutover_documents_fail_closed_on_missing_identity_keys() {
     assert!(serde_json::from_value::<LocalConversationBinding>(value).is_err());
     // The mapped row always serializes the key.
     let serialized = serde_json::to_value(&binding).unwrap();
-    assert!(serialized.as_object().unwrap().contains_key("cloud_thread_id"));
+    assert!(serialized
+        .as_object()
+        .unwrap()
+        .contains_key("cloud_thread_id"));
 
     // A pre-cutover CreateCloud action: old `thread_id` string, no
     // `cloud_thread_id` key, retired keys omitted-when-None. This is the
@@ -3092,8 +3125,12 @@ fn bindings_reject_duplicate_cloud_claims_per_scope() {
         updated_at: 1,
     };
     let mut document = ConversationBindings::empty(host.clone());
-    document.bindings.push(row("thread-a", "replica-a", Some("cloudthread-shared")));
-    document.bindings.push(row("thread-b", "replica-a", Some("cloudthread-shared")));
+    document
+        .bindings
+        .push(row("thread-a", "replica-a", Some("cloudthread-shared")));
+    document
+        .bindings
+        .push(row("thread-b", "replica-a", Some("cloudthread-shared")));
     assert!(document
         .validate_structure()
         .unwrap_err()
@@ -3102,8 +3139,12 @@ fn bindings_reject_duplicate_cloud_claims_per_scope() {
     // The same cloud id across scopes (different replicas) is legal, as are
     // any number of unmapped rows.
     let mut document = ConversationBindings::empty(host.clone());
-    document.bindings.push(row("thread-a", "replica-a", Some("cloudthread-shared")));
-    document.bindings.push(row("thread-b", "replica-b", Some("cloudthread-shared")));
+    document
+        .bindings
+        .push(row("thread-a", "replica-a", Some("cloudthread-shared")));
+    document
+        .bindings
+        .push(row("thread-b", "replica-b", Some("cloudthread-shared")));
     document.bindings.push(row("thread-c", "replica-a", None));
     document.bindings.push(row("thread-d", "replica-a", None));
     document.validate_structure().unwrap();
@@ -3140,10 +3181,7 @@ fn journal_documents_enforce_per_space_pending_uniqueness() {
     second.cloud_thread_id = CloudThreadId::parse("cloudthread-2").unwrap();
     second.plan_action_id = base.plan_action_id.clone();
     journal.operations = vec![base.clone(), second.clone()];
-    assert!(journal
-        .validate()
-        .unwrap_err()
-        .contains("one plan action"));
+    assert!(journal.validate().unwrap_err().contains("one plan action"));
 
     // Fully distinct identities coexist.
     second.plan_action_id = Some(ActionId::parse("action-2").unwrap());
@@ -3174,14 +3212,12 @@ fn push_plans_reject_duplicate_cloud_claims() {
         actions: vec![
             {
                 let mut action = push_action("action-1", "codex", "profile-codex", "1");
-                action.cloud_thread_id =
-                    Some(CloudThreadId::parse("cloudthread-shared").unwrap());
+                action.cloud_thread_id = Some(CloudThreadId::parse("cloudthread-shared").unwrap());
                 action
             },
             {
                 let mut action = push_action("action-2", "codex", "profile-codex", "2");
-                action.cloud_thread_id =
-                    Some(CloudThreadId::parse("cloudthread-shared").unwrap());
+                action.cloud_thread_id = Some(CloudThreadId::parse("cloudthread-shared").unwrap());
                 action
             },
         ],

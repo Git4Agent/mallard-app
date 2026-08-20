@@ -135,6 +135,22 @@ export function storageNameForKind(name: string, kind: "s3" | "local"): string {
   return `${kind === "local" ? "Local storage" : "R2 storage"} ${defaultName[1]}`;
 }
 
+/**
+ * Counts the five rendered fields, not the four stored ones: the URL flips to
+ * set exactly when account and bucket both exist, so pasting it moves the
+ * counter by three — which is the coupling, stated honestly. Exported because
+ * the storage setup page shows the tally in its own commit bar.
+ */
+export function r2FieldsSet(storage: StorageConfig): number {
+  return [
+    r2S3ApiUrl(storage.account_id ?? "", storage.bucket ?? "", storage.s3_endpoint ?? ""),
+    storage.bucket,
+    storage.account_id,
+    storage.access_key_id,
+    storage.secret_access_key,
+  ].filter((value) => !!value?.trim()).length;
+}
+
 export function StorageEditor({
   storage,
   disabled,
@@ -142,6 +158,7 @@ export function StorageEditor({
   onRemove,
   primaryAction,
   showNameField = true,
+  showProgress = true,
 }: {
   storage: StorageConfig;
   disabled: boolean;
@@ -149,6 +166,9 @@ export function StorageEditor({
   onRemove?: () => void;
   primaryAction?: ReactNode;
   showNameField?: boolean;
+  /** False when the page hoists the R2 tally into its own commit bar, so the
+   *  card does not end in a band holding a lone readout. */
+  showProgress?: boolean;
 }) {
   const set = (patch: Partial<StorageConfig>) => onChange({ ...storage, ...patch });
   const derivedS3ApiUrl = r2S3ApiUrl(
@@ -194,16 +214,6 @@ export function StorageEditor({
     const picked = await open({ directory: true, multiple: false });
     if (typeof picked === "string" && picked) set({ local_dir: picked });
   };
-  // Counts the five rendered fields, not the four stored ones: the URL flips to
-  // set exactly when account and bucket both exist, so pasting it moves the
-  // counter by three — which is the coupling, stated honestly.
-  const r2FieldsSet = [
-    derivedS3ApiUrl,
-    storage.bucket,
-    storage.account_id,
-    storage.access_key_id,
-    storage.secret_access_key,
-  ].filter((value) => !!value?.trim()).length;
 
   return (
     <article className="sync-storage-card">
@@ -397,11 +407,11 @@ export function StorageEditor({
           </div>
         </>
       )}
-      {(primaryAction || storage.kind !== "local") && (
+      {(primaryAction || (storage.kind !== "local" && showProgress)) && (
         <footer className="sync-storage-editor-footer">
-          {storage.kind !== "local" && (
+          {storage.kind !== "local" && showProgress && (
             <span className="sync-storage-editor-progress" aria-live="polite">
-              {r2FieldsSet} of 5 set
+              {r2FieldsSet(storage)} of 5 set
             </span>
           )}
           {primaryAction}

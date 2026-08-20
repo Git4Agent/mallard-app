@@ -195,6 +195,40 @@ test("the sidebar rail is sized by its own width, never by the window", () => {
   }
 });
 
+test("the path bar's trail is sized by the bar, never by the window", () => {
+  const css = readFileSync("src/App.css", "utf8");
+  // Declared once, so no later block can quietly re-cap the same box: a second
+  // rule in a window-sized @media is how the viewport got back in last time.
+  const rule = (selector: string) => {
+    const parts = css.split(`\n${selector} {`);
+    assert.equal(parts.length, 2, `${selector} must be declared in exactly one App.css rule`);
+    return parts[1].slice(0, parts[1].indexOf("}"));
+  };
+
+  // The bar is the window less the sidebar, so a viewport share is a far
+  // bigger share of the row than it reads as. At `max-width: 30vw` the session
+  // title's floor came out wider than both ancestors had between them: the
+  // storage crumb was squeezed out of its own box and its icon carried on
+  // painting over the project's name.
+  for (const selector of [".sync-path-crumb", ".sync-history-branch-trigger"]) {
+    const declarations = rule(selector);
+    assert.match(declarations, /max-width:[^;]*cqi/, `${selector} must cap against the bar`);
+    assert.doesNotMatch(declarations, /max-width:[^;]*\dvw/, `${selector} must not cap against the window`);
+  }
+
+  // A crumb may give up its whole label; it may never be squeezed under the
+  // icon and the chevron, which do not shrink and so carry on painting where
+  // the box has already ended — over the crumb beside them.
+  for (const selector of [".sync-path-item", ".sync-path-item:first-child", ".sync-path-crumb-link"]) {
+    assert.match(
+      rule(selector),
+      /min-width: \d+(?:\.\d+)?rem;/,
+      `${selector} must floor at its own chrome`,
+    );
+  }
+  assert.match(css, /\n\.sync-path-crumb-toggle \{[^}]*flex: 0 0 auto;/);
+});
+
 test("the retro skin stays presentation-only and preserves the shell controls", () => {
   const app = readFileSync("src/App.tsx", "utf8");
   const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");

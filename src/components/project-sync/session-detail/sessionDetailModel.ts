@@ -278,7 +278,10 @@ export function formatSessionDetailClock(value?: number | null): string {
   return new Date(toMilliseconds(value)).toLocaleTimeString(undefined, {
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false,
+    // `hourCycle`, not `hour12: false`. The two are not synonyms: under en-US
+    // the flag selects the h24 cycle on some ICU builds, which renders midnight
+    // as `24:06`. h23 names the cycle outright and reads the same everywhere.
+    hourCycle: "h23",
   });
 }
 
@@ -348,22 +351,48 @@ export function sessionTurnDurationLabel(span: SessionTurnSpan | undefined): str
 }
 
 /**
- * One field instead of two. `Started` and `Ended` spelled the same date twice
- * and still left the reader to subtract; the range states the day once and the
- * duration outright.
+ * When the session began. One fact, because the strip states one fact per chip
+ * — the length is the chip beside this one, and the end is the two of them
+ * added, which is arithmetic nobody asked the header to show.
+ *
+ * The year is a fact, not decoration: it prints exactly when it is not the
+ * current one. The range this replaced stripped it unconditionally, so a 2024
+ * session and a 2026 session came out as the very same string. `now` is a
+ * parameter so a test can pin the comparison instead of racing the calendar.
  */
-export function formatSessionRange(
+export function formatSessionStart(value?: number | null, now: number = Date.now()): string | null {
+  if (value == null) return null;
+  const when = new Date(toMilliseconds(value));
+  const day = when.getFullYear() === new Date(now).getFullYear()
+    ? when.toLocaleDateString(undefined, { month: "short", day: "numeric" })
+    : formatSessionDetailDay(value);
+  return `${day} · ${formatSessionDetailClock(value)}`;
+}
+
+/** The start chip hovered: the same moment with the year always spelled out. */
+export function formatSessionStartDetail(value?: number | null): string | null {
+  if (value == null) return null;
+  return `Started ${formatSessionDetailDay(value)} · ${formatSessionDetailClock(value)}`;
+}
+
+/**
+ * The length chip hovered. The end time is off the chip faces now, so this is
+ * where it lives — dropped from the strip, not dropped from the page. An
+ * active session has no end to name, only a distance travelled so far.
+ */
+export function formatSessionLengthDetail(
   started?: number | null,
   ended?: number | null,
+  isActive = false,
 ): string | null {
-  if (started == null) return null;
-  const startDay = formatSessionDetailDay(started).replace(/,\s*\d{4}$/, "");
-  const startClock = formatSessionDetailClock(started);
-  if (ended == null) return `${startDay} · ${startClock}`;
+  const length = formatSessionDuration(started, ended);
+  if (isActive) return length ? `Still running · ${length} so far` : "Still running";
+  if (length == null || ended == null) return null;
   const sameDay = sessionDetailDayKey(started) === sessionDetailDayKey(ended);
-  if (sameDay) return `${startDay} · ${startClock} → ${formatSessionDetailClock(ended)}`;
-  const endDay = formatSessionDetailDay(ended).replace(/,\s*\d{4}$/, "");
-  return `${startDay} ${startClock} → ${endDay} ${formatSessionDetailClock(ended)}`;
+  const end = sameDay
+    ? formatSessionDetailClock(ended)
+    : `${formatSessionDetailDay(ended)} · ${formatSessionDetailClock(ended)}`;
+  return `Ran ${length}, ending ${end}`;
 }
 
 /**

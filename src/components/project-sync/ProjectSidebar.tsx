@@ -601,7 +601,11 @@ export default function ProjectSidebar({
             </button>
           </div>
           <div className="sidebar-links-list">
-            {storages.map((storage) => {
+            {storages.length === 0 ? (
+              <button type="button" className="sync-sidebar-empty" onClick={onAddStorage} disabled={busy}>
+                <Icon name="plus" size={15} /> Add your first storage
+              </button>
+            ) : storages.map((storage) => {
               const usage = storageUsage[storage.id] ?? 0;
               const storageName = storage.name || "storage";
               const storageIssue = storageIssues[storage.id] ?? null;

@@ -239,6 +239,11 @@ the local `thread_id`: the accepted five-field portable tail with its
 commit/manifest witness, the replaceable observed tail, the physical mapping
 cursor with a raw-range pin and trailing probe window, the machine-local
 prefix witness over the fixed prefix, and generation/binding-revision fences.
+Both cursor providers carry real cursors here: Codex under
+`mallard-codex-portable-tail-{v1,wire-v1}` with graph-resume fields, Claude
+under `mallard-claude-portable-tail-{v1,wire-v1}` with
+`last_canonical_message_id` = the canonical leaf uuid (synthetic-turn fields
+always empty, partition always `WholeThread` at zero).
 Removing a project removes its links and checkpoints; bindings — and with
 them the cloud mappings — survive, and a re-registered project re-proves
 acceptance mapping-driven: the adoption probe refolds local bytes against the
@@ -679,7 +684,9 @@ optional head_message_id, message_count
 optional lineage_digest, semantic_digest
 portable_tail                 # codec, partition_kind, start_record_count,
                               # accepted_end_record_count, accepted_tail_state;
-                              # required for Codex entries, end == message_count
+                              # required for Codex entries (codex wire codec)
+                              # and Claude entries (claude wire codec),
+                              # end == message_count
 optional forked_from          # cloud id space
 optional preserved            # keep-both provenance: preserved_from (cloud
                               # id space) + ordinal

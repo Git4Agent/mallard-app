@@ -9,6 +9,7 @@ mod path_text_boundary;
 
 pub mod activity_log;
 pub mod bundle_engine;
+pub mod claude_history_tail;
 pub mod codex_app_refresh;
 pub mod codex_binary;
 pub mod codex_history_graph;
@@ -20,6 +21,7 @@ pub mod codex_thread_allocator;
 pub mod conversation_codec;
 pub mod conversation_materialization;
 pub mod conversation_sync;
+pub mod jsonl_tail_io;
 pub mod persistence;
 pub mod project_activity;
 pub mod provider_capture;

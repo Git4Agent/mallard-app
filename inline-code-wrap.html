@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Inline code wrap — slice vs clone</title>
+<style>
+  :root {
+    --font-mono: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Roboto Mono", monospace;
+  }
+  .light {
+    --border: #d8cec4;
+    --surface-muted: rgba(82, 58, 43, 0.045);
+    --surface-card: #fcf7f0;
+    --text-0: #1e1817;
+    --text-2: #6f6159;
+  }
+  .dark {
+    --border: #2e2925;
+    --surface-muted: rgba(0, 0, 0, 0.24);
+    --surface-card: #211d1a;
+    --text-0: #ece4da;
+    --text-2: #a3968b;
+  }
+  body { margin: 0; display: flex; min-height: 100vh; font: 13px/1.55 -apple-system, sans-serif; }
+  .pane { flex: 1; padding: 36px 40px; background: var(--surface-card); color: var(--text-0); }
+  h2 { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-2); margin: 26px 0 8px; }
+  h2:first-child { margin-top: 0; }
+  /* The transcript column, forced narrow so the span must wrap. */
+  .copy { max-width: 34ch; }
+  .copy code {
+    padding: 1px 4px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--surface-muted);
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+  }
+  /* The fix under review. */
+  .fixed code {
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+  /* Candidate: also refuse breaks at hyphens (does hyphens:none help?). */
+  .nohyph code { hyphens: none; -webkit-hyphens: none; }
+  /* Candidate: refuse all intra-chip breaks; long tokens overflow instead. */
+  .nowrap code { white-space: nowrap; }
+</style>
+</head>
+<body>
+  <div class="pane light">
+    <h2>Shipped (slice)</h2>
+    <p class="copy">Decision on Blender MCP: I'll do the asset generation <strong>headless</strong> (<code>blender --background --python</code>), because the MCP add-on hard-refuses to start in background mode.</p>
+    <h2>Fixed (clone)</h2>
+    <p class="copy fixed">Decision on Blender MCP: I'll do the asset generation <strong>headless</strong> (<code>blender --background --python</code>), because the MCP add-on hard-refuses to start in background mode.</p>
+    <h2>Clone + hyphens:none</h2>
+    <p class="copy fixed nohyph">Decision on Blender MCP: I'll do the asset generation <strong>headless</strong> (<code>blender --background --python</code>), because the MCP add-on hard-refuses to start in background mode.</p>
+    <h2>Clone + nowrap (overflow probe)</h2>
+    <p class="copy fixed nowrap">Decision on Blender MCP: I'll do the asset generation <strong>headless</strong> (<code>blender --background --python</code>), see <code>/Users/hequ/Library/Application Support/Blender/4.2/scripts/addons/mcp_bridge/server_entrypoint.py</code> for the add-on.</p>
+  </div>
+  <div class="pane dark">
+    <h2>Shipped (slice)</h2>
+    <p class="copy">Decision on Blender MCP: I'll do the asset generation <strong>headless</strong> (<code>blender --background --python</code>), because the MCP add-on hard-refuses to start in background mode.</p>
+    <h2>Fixed (clone)</h2>
+    <p class="copy fixed">Decision on Blender MCP: I'll do the asset generation <strong>headless</strong> (<code>blender --background --python</code>), because the MCP add-on hard-refuses to start in background mode.</p>
+  </div>
+</body>
+</html>

@@ -58,9 +58,12 @@ const FINAL_REOPEN_ACK: &str = "MALLARD_CLAUDE_REOPEN_CAPTURED";
 const EXPECTED_SOURCE_PROCESSES: usize = 5;
 const EXPECTED_REOPEN_PROCESSES: usize = 6;
 const EXPECTED_MODEL_TURN_PROCESSES: usize = EXPECTED_SOURCE_PROCESSES + EXPECTED_REOPEN_PROCESSES;
-const EXPECTED_AIMOCK_REQUESTS: usize = 12;
+/// One more real resumed turn proves the checkpoint cursor extends over a
+/// live CLI append.
+const EXPECTED_CURSOR_APPEND_PROCESSES: usize = EXPECTED_MODEL_TURN_PROCESSES + 1;
+const EXPECTED_AIMOCK_REQUESTS: usize = 13;
 const EXPECTED_AIMOCK_RAW_REQUESTS: usize =
-    EXPECTED_AIMOCK_REQUESTS + EXPECTED_MODEL_TURN_PROCESSES;
+    EXPECTED_AIMOCK_REQUESTS + EXPECTED_CURSOR_APPEND_PROCESSES;
 
 const MAX_COMMAND_ARGUMENTS: usize = 32;
 const MAX_COMMAND_ARGUMENT_BYTES: usize = 4096;
@@ -678,6 +681,15 @@ fn aimock_scenario_document(read_marker_path: &Path) -> AimockScenarioDocument {
             ));
         }
     }
+    scenarios.push(text_scenario(
+        "cursor_append",
+        "MALLARD_CLAUDE_USER_CURSOR_APPEND",
+        final_history_oracles()
+            .into_iter()
+            .next()
+            .expect("primary final history oracle"),
+        "MALLARD_CLAUDE_CURSOR_EXTENDED",
+    ));
     assert_eq!(scenarios.len(), EXPECTED_AIMOCK_REQUESTS);
     assert_eq!(
         scenarios
@@ -692,7 +704,7 @@ fn aimock_scenario_document(read_marker_path: &Path) -> AimockScenarioDocument {
         version: 1,
         model: MODEL.to_string(),
         expected_request_count: EXPECTED_AIMOCK_REQUESTS,
-        expected_probe_request_count: EXPECTED_MODEL_TURN_PROCESSES,
+        expected_probe_request_count: EXPECTED_CURSOR_APPEND_PROCESSES,
         scenarios,
     }
 }
@@ -844,9 +856,9 @@ impl AimockProcess {
         let stdout_reader = std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut line = Vec::new();
-            let mut bounded_line = (&mut reader).take(MAX_CONTROL_BYTES.saturating_add(1));
-            let read_result = bounded_line.read_until(b'\n', &mut line);
-            drop(bounded_line);
+            let read_result = (&mut reader)
+                .take(MAX_CONTROL_BYTES.saturating_add(1))
+                .read_until(b'\n', &mut line);
             let result = match read_result {
                 Ok(count)
                     if count > 0
@@ -983,7 +995,7 @@ fn validate_aimock_audit(bytes: &[u8]) -> Result<(), &'static str> {
     if audit.raw_request_count != EXPECTED_AIMOCK_RAW_REQUESTS
         || audit.raw_expected_request_count != EXPECTED_AIMOCK_RAW_REQUESTS
         || audit.raw_model_request_count != EXPECTED_AIMOCK_REQUESTS
-        || audit.raw_probe_request_count != EXPECTED_MODEL_TURN_PROCESSES
+        || audit.raw_probe_request_count != EXPECTED_CURSOR_APPEND_PROCESSES
         || audit.raw_unexpected_request_count != 0
         || audit.raw_wrong_method_count != 0
         || audit.raw_wrong_path_count != 0
@@ -1014,7 +1026,7 @@ fn validate_aimock_audit(bytes: &[u8]) -> Result<(), &'static str> {
             "Claude aimock expected request count failed",
         ),
         (
-            audit.expected_probe_request_count == EXPECTED_MODEL_TURN_PROCESSES,
+            audit.expected_probe_request_count == EXPECTED_CURSOR_APPEND_PROCESSES,
             "Claude aimock expected probe request count failed",
         ),
         (
@@ -1104,7 +1116,7 @@ fn validate_aimock_audit(bytes: &[u8]) -> Result<(), &'static str> {
             "Claude aimock raw model request count failed",
         ),
         (
-            audit.raw_probe_request_count == EXPECTED_MODEL_TURN_PROCESSES,
+            audit.raw_probe_request_count == EXPECTED_CURSOR_APPEND_PROCESSES,
             "Claude aimock raw probe request count failed",
         ),
         (
@@ -1161,6 +1173,7 @@ fn validate_aimock_audit(bytes: &[u8]) -> Result<(), &'static str> {
         "source_r3".to_string(),
         "source_r4".to_string(),
         "source_r5".to_string(),
+        "cursor_append".to_string(),
     ]
     .into_iter()
     .chain(
@@ -3875,6 +3888,121 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     assert_eq!(
         process_count, EXPECTED_MODEL_TURN_PROCESSES,
         "Claude model-turn process budget changed"
+    );
+
+    // Cursor parity: a warm comparison reads zero Claude transcript bytes,
+    // a real resumed CLI turn extends the checkpoint cursor through the
+    // probe window plus the appended bytes only, and the extended
+    // observation agrees with a from-scratch analysis of the final bytes.
+    let canonical_home_a =
+        std::fs::canonicalize(&claude_home_a).expect("canonicalize replica-A Claude home");
+    let _ = redacted(
+        service_a.compare_threads(&project_id_a, &storage_id),
+        "cannot warm the replica-A comparison caches",
+    );
+    let metrics = mallard_infrastructure::sync_metrics::register_root(&canonical_home_a);
+    let warm = redacted(
+        service_a.compare_threads(&project_id_a, &storage_id),
+        "cannot run the warm replica-A comparison",
+    );
+    assert_eq!(warm.entries.len(), 3, "replica-A final row count changed");
+    let counted = metrics.snapshot();
+    assert_eq!(
+        counted.transcript_bytes_read, 0,
+        "a warm Claude comparison reads no transcript bytes"
+    );
+    assert_eq!(counted.full_graph_resolves, 0, "the cursor rides the probe");
+    assert_eq!(counted.selected_captures, 0, "no capture on a warm refresh");
+
+    let primary_local_a = local_thread_of_cloud(&repository_a, &project_id_a, &cloud_primary);
+    let primary_provider_id_a = provider_thread_id(&repository_a, &project_id_a, &primary_local_a);
+    let base_transcript = transcript_bytes(&claude_home_a, &project_a, &primary_provider_id_a);
+    let base_chain_len = match lineage_of(&base_transcript) {
+        mallard_infrastructure::conversation_codec::CodecLineage::Complete { chain, .. } => {
+            chain.len()
+        }
+        other => panic!("primary transcript lineage is not complete: {other:?}"),
+    };
+    run_claude(
+        &mut process_count,
+        &provider,
+        &claude_home_a,
+        &process_home,
+        &project_a,
+        &primary_provider_id_a,
+        false,
+        "MALLARD_CLAUDE_USER_CURSOR_APPEND",
+        "MALLARD_CLAUDE_CURSOR_EXTENDED",
+    );
+    wait_for_transcript_marker(
+        &claude_home_a,
+        &project_a,
+        &primary_provider_id_a,
+        "MALLARD_CLAUDE_CURSOR_EXTENDED",
+    );
+    let extended_transcript = transcript_bytes(&claude_home_a, &project_a, &primary_provider_id_a);
+    assert_eq!(
+        &extended_transcript[..base_transcript.len()],
+        &base_transcript[..],
+        "the resumed turn must append, never rewrite"
+    );
+    let before_extension = metrics.snapshot();
+    let extended = redacted(
+        service_a.compare_threads(&project_id_a, &storage_id),
+        "cannot compare after the appended Claude turn",
+    );
+    let delta = metrics.snapshot().delta_since(&before_extension);
+    assert_eq!(
+        delta.transcript_bytes_read, 0,
+        "the appended turn rides the cursor, never a whole-file read"
+    );
+    assert_eq!(delta.full_graph_resolves, 0);
+    assert!(
+        delta.append_bytes_read >= (extended_transcript.len() - base_transcript.len()) as u64,
+        "the cursor reads the appended bytes"
+    );
+    let primary_row = extended
+        .entries
+        .iter()
+        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&cloud_primary))
+        .expect("primary row after the appended turn");
+    assert_eq!(
+        primary_row.state,
+        ThreadSyncState::LocalAhead,
+        "a resumed turn is locally outstanding"
+    );
+    match lineage_of(&extended_transcript) {
+        mallard_infrastructure::conversation_codec::CodecLineage::Complete { chain, .. } => {
+            assert_eq!(
+                chain.len(),
+                base_chain_len + 2,
+                "one resumed turn appends exactly one user and one assistant record"
+            );
+        }
+        other => panic!("extended transcript lineage is not complete: {other:?}"),
+    }
+    // The persisted cursor serves the next comparison with zero reads and
+    // identical rows — incremental and from-scratch agree.
+    let before_settled = metrics.snapshot();
+    let settled = redacted(
+        service_a.compare_threads(&project_id_a, &storage_id),
+        "cannot re-compare the settled replica-A state",
+    );
+    let delta = metrics.snapshot().delta_since(&before_settled);
+    assert_eq!(delta.transcript_bytes_read, 0);
+    assert_eq!(
+        delta.append_bytes_read, 0,
+        "the advanced cursor is persisted"
+    );
+    assert_eq!(delta.full_graph_resolves, 0);
+    assert_eq!(
+        serde_json::to_value(&settled.entries).expect("serialize settled rows"),
+        serde_json::to_value(&extended.entries).expect("serialize extended rows"),
+        "cursor-extended and settled comparisons produce identical rows"
+    );
+    assert_eq!(
+        process_count, EXPECTED_CURSOR_APPEND_PROCESSES,
+        "Claude cursor-append process budget changed"
     );
 
     let mut final_machine_identity_needles = identity_needles([
