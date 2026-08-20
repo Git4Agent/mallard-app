@@ -157,8 +157,14 @@ enum ConversationFileRole {
 ```
 
 - Logical path: `state/conversations/{provider}/{thread_id}/subagents/{original_basename}`,
-  where the basename is the source rollout filename (it embeds the child
+  where `{thread_id}` is the parent row's manifest key — since the cloud
+  thread id decoupling (PLAN_CLOUD_THREAD_ID_DECOUPLING.md) that key is the
+  parent's **cloud** id (`cloudthread-…`), never a machine-local id — and
+  the basename is the source rollout filename (it embeds the child
   uuid; validation requires the `-{provider_thread_id}.jsonl` suffix).
+  `pinned_subagent_sources` remains a plan-time pin of **existing local
+  files**, which stays legal under that plan's D2 (apply-time minting bans
+  minting fresh identities at plan time, not pinning existing state).
   `ConversationThread::validate` gains this one namespace rule; the
   exactly-one-transcript rule and every other rule are unchanged.
 - Per-file sha256/size stay on `BundleFileEntry`, joined by logical path, as

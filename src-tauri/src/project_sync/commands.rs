@@ -33,27 +33,27 @@ use super::conversation_sync::{
 };
 use super::domain::{
     absent_bundle_head_pin, classify_remote_continuity, classify_scope_continuity,
-    compare_conversation_tail, compose_preserved_title, conversation_resource_id,
-    conversation_transcript_path, fallback_origin_host_label, generated_named_id,
-    generated_uuid_v4, initial_conversation_thread_id, parse_conversation_resource_id,
-    retained_conversation_thread_id, validate_absolute_clean_path, ActionId, ActionStatus,
-    ApplyPolicy, ApplyReceipt, BindingResolution, BindingState, BundleDirectoryEntry, BundleId,
-    BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleSnapshot, CapturedWith,
-    ClassifiedThread, ConversationActionPins, ConversationBlocker, ConversationCapabilities,
-    ConversationCheckpoint, ConversationCloudAnchor, ConversationContextPins, ConversationDecision,
-    ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
-    ConversationMaterializationOperation, ConversationMaterializationState,
-    ConversationOperationId, ConversationOperationState, ConversationPlanAction,
-    ConversationPlanActionType, ConversationPlanDirection, ConversationPublicationOperation,
-    ConversationPushPlan, ConversationReviewAction, ConversationReviewRow,
-    ConversationRevisionPins, ConversationSyncOperation, ConversationSyncOperationKind,
-    ConversationTailPins, ConversationTargetPins, ConversationThread, DraftProfileSelection,
-    DraftRepositoryChoice, DraftStorageSelection, HostId, KeepBothJournal, KeepBothPlan,
-    LocalConversationBinding, LocalProjectId, LocalProjectRegistration, LocalProviderProfileId,
-    LogicalPath, MachineProjectState, MaterializationId, MaterializationRecord,
-    MaterializationStatus, OriginHostAlias, OriginHostToken, PhysicalMappingState, PlanId,
-    PortableConversationTail, PortableOrigin, PreservedProvenance, ProjectBinding,
-    ProjectFileSyncEligibility, ProjectFileSyncEligibilityState, ProjectSetupDraft,
+    cloud_conversation_resource_id, cloud_conversation_transcript_path, compare_conversation_tail,
+    compose_preserved_title, conversation_resource_id, fallback_origin_host_label,
+    generated_named_id, generated_uuid_v4, initial_conversation_thread_id,
+    is_conversation_resource_id, parse_conversation_resource_id, retained_conversation_thread_id,
+    validate_absolute_clean_path, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt,
+    BindingResolution, BindingState, BundleDirectoryEntry, BundleId, BundleIdentity, BundleKind,
+    BundleManifest, BundleRecipe, BundleSnapshot, CapturedWith, ClassifiedThread, CloudThreadId,
+    ConversationActionPins, ConversationBlocker, ConversationCapabilities, ConversationCheckpoint,
+    ConversationCloudAnchor, ConversationContextPins, ConversationDecision, ConversationFileRef,
+    ConversationFileRole, ConversationLineageStatus, ConversationMaterializationOperation,
+    ConversationMaterializationState, ConversationOperationId, ConversationOperationState,
+    ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
+    ConversationPublicationOperation, ConversationPushPlan, ConversationReviewAction,
+    ConversationReviewRow, ConversationRevisionPins, ConversationSyncOperation,
+    ConversationSyncOperationKind, ConversationTailPins, ConversationTargetPins,
+    ConversationThread, DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection,
+    HostId, KeepBothJournal, LocalConversationBinding, LocalProjectId, LocalProjectRegistration,
+    LocalProviderProfileId, LogicalPath, MachineProjectState, MaterializationId,
+    MaterializationRecord, MaterializationStatus, OriginHostAlias, OriginHostToken,
+    PhysicalMappingState, PlanId, PortableConversationTail, PortableOrigin, PreservedProvenance,
+    ProjectBinding, ProjectFileSyncEligibility, ProjectFileSyncEligibilityState, ProjectSetupDraft,
     ProjectStorageLink, Provenance, ProviderKey, ProviderProfile, ProviderStateExpectation,
     PullJournalPhase, PushJournalPhase, RawRangePin, RecipeEntry, RemoteContinuity, ReplicaId,
     RepositoryBase, ResourceDescriptor, ResourceId, ResourceKind, RestoreActionKind,
@@ -506,10 +506,17 @@ pub struct ThreadSyncEntry {
     pub local_updated_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_updated_at: Option<u64>,
+    /// The thread's honest cloud mapping (or the cloud row's own id for a
+    /// storage-only row); `None` for a local-only thread. No longer a
+    /// presence proxy for "this row came from a storage comparison" — that
+    /// is `compared_against_storage`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cloud_thread_id: Option<ThreadId>,
+    pub cloud_thread_id: Option<CloudThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forked_from: Option<ThreadId>,
+    pub forked_from: Option<CloudThreadId>,
+    /// True for rows produced by a storage comparison (sync review); false
+    /// for the storage-less local view fill.
+    pub compared_against_storage: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
     pub push_decision: ThreadSyncDecision,
@@ -2639,6 +2646,22 @@ fn pull_plan_action_counts(plan: &RestorePlan) -> (usize, usize) {
     (ordinary, conversations)
 }
 
+/// The review row key for one conversation action: its recorded source
+/// resource id when review captured one, else the shared row-key rule —
+/// the local resource id when the action names a local thread, the cloud
+/// resource id for a cloud-only action (CreateLocal).
+fn conversation_action_row_key(action: &ConversationPlanAction) -> Option<ResourceId> {
+    action.source_resource_id.clone().or_else(|| {
+        match (&action.thread_id, &action.cloud_thread_id) {
+            (Some(thread_id), _) => conversation_resource_id(&action.provider, thread_id).ok(),
+            (None, Some(cloud_thread_id)) => {
+                cloud_conversation_resource_id(&action.provider, cloud_thread_id).ok()
+            }
+            (None, None) => None,
+        }
+    })
+}
+
 fn pull_action_resource_label(plan: &RestorePlan, action_id: &ActionId) -> Option<String> {
     if let Some(action) = plan
         .actions
@@ -2650,12 +2673,7 @@ fn pull_action_resource_label(plan: &RestorePlan, action_id: &ActionId) -> Optio
     plan.conversation_actions
         .iter()
         .find(|action| &action.action_id == action_id)
-        .and_then(|action| {
-            action
-                .source_resource_id
-                .clone()
-                .or_else(|| conversation_resource_id(&action.provider, &action.thread_id).ok())
-        })
+        .and_then(conversation_action_row_key)
         .map(|resource_id| resource_id.to_string())
 }
 
@@ -2669,12 +2687,7 @@ fn pull_review_resource_labels(plan: &RestorePlan) -> Vec<String> {
         .conversation_actions
         .iter()
         .filter(|action| is_selectable_pull_conversation_action(action))
-        .filter_map(|action| {
-            action
-                .source_resource_id
-                .clone()
-                .or_else(|| conversation_resource_id(&action.provider, &action.thread_id).ok())
-        })
+        .filter_map(conversation_action_row_key)
         .map(|resource_id| resource_id.to_string());
     ordinary
         .chain(conversations)
@@ -4105,7 +4118,7 @@ fn machine_local_recipe_from_manifest(manifest: &BundleManifest) -> Result<Bundl
     let mut recipe = BundleRecipe::default();
     for scope in manifest.scopes.values() {
         for (resource_id, entry) in &scope.recipe.entries {
-            if parse_conversation_resource_id(resource_id.as_str()).is_err() {
+            if !is_conversation_resource_id(resource_id.as_str()) {
                 recipe.entries.insert(resource_id.clone(), entry.clone());
             }
         }
@@ -4603,7 +4616,6 @@ fn thread_review(
     snapshot: Option<&BundleSnapshot>,
     bytes: &mut dyn BundleBytes,
     views: &[provider_capture::LocalSessionView],
-    discovery: Option<&provider_capture::Discovery>,
     captured: &provider_capture::CapturedResources,
     candidate_pins: &BTreeMap<String, TargetExpectation>,
     resolved: &ResolvedBinding,
@@ -4635,7 +4647,6 @@ fn thread_review(
                 snapshot,
                 bytes,
                 views,
-                discovery,
                 captured,
                 candidate_pins,
                 resolved,
@@ -5235,7 +5246,6 @@ fn provider_thread_review(
     snapshot: Option<&BundleSnapshot>,
     bytes: &mut dyn BundleBytes,
     views: &[provider_capture::LocalSessionView],
-    discovery: Option<&provider_capture::Discovery>,
     captured: &provider_capture::CapturedResources,
     candidate_pins: &BTreeMap<String, TargetExpectation>,
     resolved: &ResolvedBinding,
@@ -5259,9 +5269,6 @@ fn provider_thread_review(
         )
     })?;
     let is_codex = provider.as_str() == "codex";
-    let codex_inventory = is_codex
-        .then(|| discovery.and_then(|discovery| discovery.provider_session_inventory(provider)))
-        .flatten();
     let historical_alias_owners = if is_codex {
         applied_provider_alias_owners(repository, binding, provider, &profile_id)?
     } else {
@@ -5273,10 +5280,16 @@ fn provider_thread_review(
     let provider_scope = snapshot.and_then(|snapshot| snapshot.manifest.provider_scope(provider));
 
     // Threads owned by a journaled sync operation are review-blocked in both
-    // directions until that operation reaches a terminal phase.
-    let pending_resolution_threads = repository
-        .load_conversation_sync_journal()?
-        .operations
+    // directions until that operation reaches a terminal phase. The block is
+    // typed per identity space: pending local ids only ever match a unit's
+    // local id, pending cloud ids only its cloud id, so a string coincidence
+    // across spaces can never cross-block (and is unconstructible anyway —
+    // the namespaces are prefix-disjoint). The cloud set is deliberately not
+    // provider-qualified: cloud ids are bundle-global, and a pending
+    // CreateLocal must keep blocking the cloud-only row a fresh review would
+    // re-offer.
+    let journal_operations = repository.load_conversation_sync_journal()?.operations;
+    let pending_local_threads = journal_operations
         .iter()
         .filter(|operation| {
             operation.local_project_id == binding.local_project_id
@@ -5284,6 +5297,12 @@ fn provider_thread_review(
         })
         .map(|operation| operation.thread_id.clone())
         .collect::<BTreeSet<_>>();
+    let pending_cloud_threads = journal_operations
+        .iter()
+        .filter(|operation| operation.local_project_id == binding.local_project_id)
+        .map(|operation| operation.cloud_thread_id.clone())
+        .collect::<BTreeSet<_>>();
+    drop(journal_operations);
 
     let build_local_threads = |document: &mallard_domain::ConversationBindings| -> Result<
         (BTreeMap<ThreadId, LocalThreadReview>, BTreeSet<String>),
@@ -5566,13 +5585,47 @@ fn provider_thread_review(
         .map(|conversation| (conversation.thread_id.clone(), conversation.clone()))
         .collect::<BTreeMap<_, _>>();
 
-    let thread_ids = provider_scope
-        .into_iter()
-        .flat_map(|scope| scope.conversations.iter())
-        .map(|(thread_id, _)| thread_id.clone())
-        .chain(bindings_by_thread.keys().cloned())
+    // Review units pair each local row with the cloud row its mapping names;
+    // the id-equality union across spaces is gone. Unbound local sessions
+    // never match a cloud row — the derived-id rendezvous is deleted, not
+    // just unused — and unclaimed cloud rows review as cloud-only units
+    // keyed by their own cloud id.
+    let local_unit_ids = bindings_by_thread
+        .keys()
+        .cloned()
         .chain(local_threads.keys().cloned())
         .collect::<BTreeSet<_>>();
+    let mut claimed = BTreeSet::new();
+    for row in bindings_by_thread.values() {
+        if let Some(cloud_thread_id) = &row.cloud_thread_id {
+            // Document validation makes a duplicate claim unreachable; this
+            // is a defensive review error, never a silent fold.
+            if !claimed.insert(cloud_thread_id.clone()) {
+                return Err(format!(
+                    "cloud thread '{}' is claimed by multiple local conversations",
+                    cloud_thread_id
+                ));
+            }
+        }
+    }
+    let units = local_unit_ids
+        .iter()
+        .map(|thread_id| {
+            (
+                Some(thread_id.clone()),
+                bindings_by_thread
+                    .get(thread_id)
+                    .and_then(|row| row.cloud_thread_id.clone()),
+            )
+        })
+        .chain(
+            provider_scope
+                .into_iter()
+                .flat_map(|scope| scope.conversations.keys())
+                .filter(|cloud_thread_id| !claimed.contains(*cloud_thread_id))
+                .map(|cloud_thread_id| (None, Some(cloud_thread_id.clone()))),
+        )
+        .collect::<Vec<(Option<ThreadId>, Option<CloudThreadId>)>>();
 
     // The only payload reads planning performs: Pull opens the transcripts
     // of threads it could offer to materialize locally in one batched
@@ -5582,7 +5635,7 @@ fn provider_thread_review(
         for (thread_id, thread) in provider_scope
             .into_iter()
             .flat_map(|scope| scope.conversations.iter())
-            .filter(|(thread_id, _)| !local_threads.contains_key(*thread_id))
+            .filter(|(thread_id, _)| !claimed.contains(*thread_id))
         {
             let Some(entry) = thread
                 .files
@@ -5611,14 +5664,6 @@ fn provider_thread_review(
         (true, Some(path)) => Some(bounded_file_expectation(path)?),
         _ => None,
     };
-    let mut occupied_provider_ids = codex_inventory
-        .map(|inventory| inventory.provider_session_ids().clone())
-        .unwrap_or_else(|| {
-            local_threads
-                .values()
-                .map(|local| local.provider_thread_id.clone())
-                .collect()
-        });
     let mut entries = Vec::new();
     let mut push_actions = Vec::new();
     let mut pull_actions = Vec::new();
@@ -5647,7 +5692,7 @@ fn provider_thread_review(
     let mut codex_refreshed: BTreeMap<ThreadId, CodexSeededRoot> = BTreeMap::new();
     let mut codex_deps: BTreeMap<ThreadId, Vec<PathBuf>> = BTreeMap::new();
     if is_codex {
-        let observation_tasks: Vec<_> = thread_ids
+        let observation_tasks: Vec<_> = local_unit_ids
             .iter()
             .filter_map(|thread_id| {
                 let local = local_threads.get(thread_id);
@@ -5661,12 +5706,19 @@ fn provider_thread_review(
                 }
                 let checkpoint = checkpoints.get(thread_id);
                 let layout = local_binding.and_then(|binding| binding.root_tail_layout.as_ref());
+                // The adoption probe is mapping-driven: the cloud tail it
+                // refolds against is the row this thread's binding names,
+                // never an id-equality lookup.
                 let adoption_probe = checkpoint
                     .and_then(|checkpoint| checkpoint.accepted.as_ref())
                     .is_none()
                     .then(|| {
-                        provider_scope
-                            .and_then(|scope| scope.conversations.get(thread_id))
+                        local_binding
+                            .and_then(|binding| binding.cloud_thread_id.as_ref())
+                            .and_then(|cloud_thread_id| {
+                                provider_scope
+                                    .and_then(|scope| scope.conversations.get(cloud_thread_id))
+                            })
                             .and_then(|thread| thread.portable_tail.as_ref())
                     })
                     .flatten();
@@ -5869,20 +5921,24 @@ fn provider_thread_review(
                     }
                     let local = local_threads.get(thread_id)?;
                     let checkpoint = checkpoints.get(thread_id);
+                    let local_binding = local
+                        .binding
+                        .as_ref()
+                        .or_else(|| bindings_by_thread.get(thread_id));
                     let probe_active = checkpoint
                         .and_then(|checkpoint| checkpoint.accepted.as_ref())
                         .is_none()
-                        && provider_scope
-                            .and_then(|scope| scope.conversations.get(thread_id))
+                        && local_binding
+                            .and_then(|binding| binding.cloud_thread_id.as_ref())
+                            .and_then(|cloud_thread_id| {
+                                provider_scope
+                                    .and_then(|scope| scope.conversations.get(cloud_thread_id))
+                            })
                             .and_then(|thread| thread.portable_tail.as_ref())
                             .is_some();
                     if probe_active {
                         return None;
                     }
-                    let local_binding = local
-                        .binding
-                        .as_ref()
-                        .or_else(|| bindings_by_thread.get(thread_id));
                     let checkpoint_generation = match maintained.get(thread_id) {
                         Some(generation) => Some(*generation),
                         None => checkpoint.map(|checkpoint| checkpoint.generation),
@@ -5908,13 +5964,24 @@ fn provider_thread_review(
         }
     }
 
-    for thread_id in thread_ids {
-        let thread = provider_scope.and_then(|scope| scope.conversations.get(&thread_id));
-        let local = local_threads.get(&thread_id);
-        let local_binding = local
-            .and_then(|local| local.binding.as_ref())
-            .or_else(|| bindings_by_thread.get(&thread_id));
-        let checkpoint = checkpoints.get(&thread_id);
+    for (unit_local_id, unit_cloud_id) in units {
+        // Everything cloud-sided resolves through the unit's cloud id (the
+        // mapping, or the cloud-only row key); everything local-sided stays
+        // on the local id. There is no cross-space lookup left to miss.
+        let thread = unit_cloud_id.as_ref().and_then(|cloud_thread_id| {
+            provider_scope.and_then(|scope| scope.conversations.get(cloud_thread_id))
+        });
+        let local = unit_local_id
+            .as_ref()
+            .and_then(|thread_id| local_threads.get(thread_id));
+        let local_binding = local.and_then(|local| local.binding.as_ref()).or_else(|| {
+            unit_local_id
+                .as_ref()
+                .and_then(|thread_id| bindings_by_thread.get(thread_id))
+        });
+        let checkpoint = unit_local_id
+            .as_ref()
+            .and_then(|thread_id| checkpoints.get(thread_id));
         let cloud_descriptor = thread.and_then(|thread| {
             provider_scope.and_then(|scope| scope.resources.get(&thread.resource_id))
         });
@@ -5958,9 +6025,17 @@ fn provider_thread_review(
                 raw_range_pin: None,
                 verified_acceptance: None,
             }
+        } else if unit_local_id.is_none() {
+            // Cloud-only unit: there is no local side to observe.
+            LocalTailObservation {
+                evidence: TailSideEvidence::ConfirmedAbsent,
+                raw_range_pin: None,
+                verified_acceptance: None,
+            }
         } else if is_codex {
-            codex_observations
-                .remove(&thread_id)
+            unit_local_id
+                .as_ref()
+                .and_then(|thread_id| codex_observations.remove(thread_id))
                 .ok_or_else(|| "codex local observation missing for reviewed thread".to_string())?
         } else {
             // Providers without a cursor codec prove their tail from
@@ -6062,7 +6137,13 @@ fn provider_thread_review(
             },
             local_safely_capturable: local_capturable && local_observation.raw_range_pin.is_some(),
             cloud_materializable: cloud_readable,
-            operation_state: if pending_resolution_threads.contains(&thread_id) {
+            operation_state: if unit_local_id
+                .as_ref()
+                .is_some_and(|thread_id| pending_local_threads.contains(thread_id))
+                || unit_cloud_id
+                    .as_ref()
+                    .is_some_and(|cloud_thread_id| pending_cloud_threads.contains(cloud_thread_id))
+            {
                 ConversationOperationState::Pending
             } else if physical_detached {
                 ConversationOperationState::Detached
@@ -6082,7 +6163,9 @@ fn provider_thread_review(
 
         // Stored internal-subagent rollouts are never offered by Pull.
         if purpose.builds_pull_plan() && pull.action == ConversationReviewAction::CreateLocal {
-            if let Some((logical_path, sha256, size)) = offerable_cloud_transcripts.get(&thread_id)
+            if let Some((logical_path, sha256, size)) = unit_cloud_id
+                .as_ref()
+                .and_then(|cloud_thread_id| offerable_cloud_transcripts.get(cloud_thread_id))
             {
                 if cached_transcript_analysis(sha256, *size, bytes, logical_path)?
                     .is_internal_subagent
@@ -6116,11 +6199,25 @@ fn provider_thread_review(
                     .map(|(label, _)| label)
             })
             .transpose()?;
+        // The shared row-key rule: the local id keys any unit with a local
+        // side; a cloud-only unit keys by its cloud id. The namespaces are
+        // prefix-disjoint, so the two key forms can never collide.
+        let unit_display_id = match (&unit_local_id, &unit_cloud_id) {
+            (Some(thread_id), _) => thread_id.to_string(),
+            (None, Some(cloud_thread_id)) => cloud_thread_id.to_string(),
+            (None, None) => unreachable!("review unit names at least one identity"),
+        };
         let display_name = thread
             .and_then(|thread| thread.display_title.clone())
             .or_else(|| descriptor.map(|descriptor| descriptor.display_name.clone()))
-            .unwrap_or_else(|| thread_id.to_string());
-        let conversation_id = conversation_resource_id(provider, &thread_id)?;
+            .unwrap_or_else(|| unit_display_id.clone());
+        let conversation_id = match (&unit_local_id, &unit_cloud_id) {
+            (Some(thread_id), _) => conversation_resource_id(provider, thread_id)?,
+            (None, Some(cloud_thread_id)) => {
+                cloud_conversation_resource_id(provider, cloud_thread_id)?
+            }
+            (None, None) => unreachable!("review unit names at least one identity"),
+        };
         let review_resource_id = match source_resource_id
             .clone()
             .or_else(|| descriptor.map(|descriptor| descriptor.resource_id.clone()))
@@ -6136,7 +6233,7 @@ fn provider_thread_review(
             thread_id: provider_thread_id
                 .clone()
                 .or_else(|| thread.and_then(|thread| thread.source_thread_id.clone()))
-                .unwrap_or_else(|| thread_id.to_string()),
+                .unwrap_or_else(|| unit_display_id.clone()),
             conversation_resource_id: conversation_id,
             resource_id: review_resource_id.clone(),
             display_name,
@@ -6167,10 +6264,13 @@ fn provider_thread_review(
                 }),
             local_updated_at: local.map(|local| local.source_mtime),
             storage_updated_at: thread.map(|thread| thread.updated_at),
-            cloud_thread_id: Some(thread_id.clone()),
+            // The unit's honest mapping: `None` for local-only rows, which
+            // previously reported their own local id here.
+            cloud_thread_id: unit_cloud_id.clone(),
             forked_from: thread
                 .and_then(|thread| thread.forked_from.clone())
                 .or_else(|| local_binding.and_then(|binding| binding.forked_from.clone())),
+            compared_against_storage: true,
             provider_thread_id: provider_thread_id.clone(),
             push_decision: push.clone().into(),
             pull_decision: pull.clone().into(),
@@ -6222,8 +6322,9 @@ fn provider_thread_review(
         };
         // The post-maintenance checkpoint generation this review saw; apply
         // requires the live checkpoint to still carry exactly this value.
-        let checkpoint_generation_pin = maintained
-            .get(&thread_id)
+        let checkpoint_generation_pin = unit_local_id
+            .as_ref()
+            .and_then(|thread_id| maintained.get(thread_id))
             .copied()
             .or_else(|| checkpoint.map(|checkpoint| checkpoint.generation));
 
@@ -6236,15 +6337,17 @@ fn provider_thread_review(
                 push.action,
                 ConversationReviewAction::Publish | ConversationReviewAction::CreateCloud
             );
+            // The mapping travels verbatim: `None` is legal only for an
+            // unmapped CreateCloud (the cloud id is minted at push apply);
+            // action validation rejects an unmapped Publish.
             let push_action = build_conversation_plan_action(ConversationPlanActionRequest {
                 action_id: ActionId::parse(generated_named_id("action")?)?,
                 direction: ConversationPlanDirection::Push,
                 classified,
                 provider: provider.clone(),
-                thread_id: thread_id.clone(),
+                thread_id: unit_local_id.clone(),
+                cloud_thread_id: local_binding.and_then(|binding| binding.cloud_thread_id.clone()),
                 source_resource_id: source_resource_id.clone(),
-                proposed_provider_thread_id: None,
-                keep_both: None,
                 pins: ConversationActionPins {
                     context: ConversationContextPins {
                         host_id: binding.host_id.clone(),
@@ -6293,9 +6396,14 @@ fn provider_thread_review(
         // rows that change something. `NoChanges` also stays a Push-only
         // action inside validated plans.
         if purpose.builds_pull_plan() && pull.action != ConversationReviewAction::NoChanges {
-            let mut proposed_provider_thread_id = None;
+            // Review mints nothing (plans are pure intent): destination
+            // provider ids, the CreateLocal thread id, and every keep-both
+            // identity are minted inside apply. What stays pinned here are
+            // the identity-independent targets — the local source digest,
+            // the index-file expectation, and the in-place (non-codex)
+            // MaterializeCloud transcript target; destination absence for
+            // minted identities is asserted at apply instead.
             let mut expected_provider_state = Vec::new();
-            let mut keep_both = None;
             let materializing_digests = matches!(
                 pull.action,
                 ConversationReviewAction::MaterializeCloud
@@ -6312,58 +6420,40 @@ fn provider_thread_review(
                             "cloud materialization requires a bound provider session".to_string()
                         );
                     }
-                    let existing_provider_id = local.provider_thread_id.clone();
                     // Codex can create a physical history_base child at any
                     // time without changing the parent's bytes or binding.
                     // No target digest or dependency rescan can make an
                     // in-place replacement atomic with that external writer.
-                    // Every Codex cloud update is therefore copy-on-write:
-                    // install under a reviewed fresh identity and retain the
-                    // prior rollout as a possible native dependency. Other
-                    // providers have no physical rollout graph and retain the
-                    // ordinary in-place recipe.
-                    let relocate = is_codex;
-                    let provider_id = if relocate {
-                        mint_provider_thread_id(is_codex, &mut occupied_provider_ids)?
-                    } else {
-                        existing_provider_id
-                    };
-                    let sidecars = thread
-                        .map(|thread| conversation_sidecar_refs(provider, &thread_id, thread))
-                        .transpose()?
-                        .unwrap_or_default();
-                    let targets = adapter.materialization_targets(
-                        &super::providers::MaterializationTargetRequest {
-                            provider_home,
-                            project_root: &binding.project_root,
-                            provider_session_id: &provider_id,
-                            source_provider_session_id: thread
-                                .and_then(|thread| thread.source_thread_id.as_deref()),
-                            existing_transcript_path: (!relocate)
-                                .then_some(local.source_path.as_path()),
-                            sidecars: &sidecars,
-                            planned_at: created_at,
-                        },
-                    )?;
-                    for planned in &targets {
-                        let expectation = bounded_file_expectation(&planned.target_path)?;
-                        if relocate && expectation != TargetExpectation::Absent {
-                            return Err(format!(
-                                "reserved {} target '{}' is already occupied",
-                                provider_label,
-                                planned.target_path.display()
-                            ));
-                        }
-                        expected_provider_state.push(ProviderStateExpectation {
-                            target_path: planned.target_path.to_string_lossy().into_owned(),
-                            expectation: if relocate {
-                                TargetExpectation::Absent
-                            } else {
-                                expectation
+                    // Every Codex cloud update is therefore copy-on-write —
+                    // its fresh identity and targets exist only at apply.
+                    // Other providers have no physical rollout graph and
+                    // retain the ordinary in-place recipe under the row's
+                    // existing provider id, which is identity-independent
+                    // and stays pinned here.
+                    if !is_codex {
+                        let sidecars = thread
+                            .map(|thread| conversation_sidecar_refs(provider, thread))
+                            .transpose()?
+                            .unwrap_or_default();
+                        let targets = adapter.materialization_targets(
+                            &super::providers::MaterializationTargetRequest {
+                                provider_home,
+                                project_root: &binding.project_root,
+                                provider_session_id: &local.provider_thread_id,
+                                source_provider_session_id: thread
+                                    .and_then(|thread| thread.source_thread_id.as_deref()),
+                                existing_transcript_path: Some(local.source_path.as_path()),
+                                sidecars: &sidecars,
+                                planned_at: created_at,
                             },
-                        });
+                        )?;
+                        for planned in &targets {
+                            expected_provider_state.push(ProviderStateExpectation {
+                                target_path: planned.target_path.to_string_lossy().into_owned(),
+                                expectation: bounded_file_expectation(&planned.target_path)?,
+                            });
+                        }
                     }
-                    proposed_provider_thread_id = Some(provider_id);
                     if let Some(index_path) = &index_path {
                         expected_provider_state.push(ProviderStateExpectation {
                             target_path: index_path.to_string_lossy().into_owned(),
@@ -6375,8 +6465,9 @@ fn provider_thread_review(
                 }
                 ConversationReviewAction::KeepBoth => {
                     // The binding move: the local rollout is never edited,
-                    // only pinned byte-identical; the remote branch
-                    // materializes under fresh identities.
+                    // only pinned byte-identical. The remote branch's fresh
+                    // identities (provider alias, preserved thread, ordinal,
+                    // marker title) are minted at apply.
                     let local = local.ok_or_else(|| {
                         "conversation keep-both lacks a captured local branch".to_string()
                     })?;
@@ -6385,37 +6476,6 @@ fn provider_thread_review(
                         target_path: target.to_string_lossy().into_owned(),
                         expectation: bounded_file_expectation(&target)?,
                     });
-                    let remote_provider_thread_id =
-                        mint_provider_thread_id(is_codex, &mut occupied_provider_ids)?;
-                    let sidecars = thread
-                        .map(|thread| conversation_sidecar_refs(provider, &thread_id, thread))
-                        .transpose()?
-                        .unwrap_or_default();
-                    let targets = adapter.materialization_targets(
-                        &super::providers::MaterializationTargetRequest {
-                            provider_home,
-                            project_root: &binding.project_root,
-                            provider_session_id: &remote_provider_thread_id,
-                            source_provider_session_id: thread
-                                .and_then(|thread| thread.source_thread_id.as_deref()),
-                            existing_transcript_path: None,
-                            sidecars: &sidecars,
-                            planned_at: created_at,
-                        },
-                    )?;
-                    for planned in &targets {
-                        if planned.target_path.exists() {
-                            return Err(format!(
-                                "reserved {} target '{}' is already occupied",
-                                provider_label,
-                                planned.target_path.display()
-                            ));
-                        }
-                        expected_provider_state.push(ProviderStateExpectation {
-                            target_path: planned.target_path.to_string_lossy().into_owned(),
-                            expectation: TargetExpectation::Absent,
-                        });
-                    }
                     if let Some(index_path) = &index_path {
                         expected_provider_state.push(ProviderStateExpectation {
                             target_path: index_path.to_string_lossy().into_owned(),
@@ -6424,102 +6484,8 @@ fn provider_thread_review(
                                 .unwrap_or(TargetExpectation::Absent),
                         });
                     }
-                    // The preservation ordinal is max+1 over every provenance
-                    // record naming this origin, across the pinned cloud
-                    // snapshot and the local bindings document. Both inputs
-                    // are re-validated at apply (scope sha + bindings
-                    // revision), so a same-device advance forces a replan;
-                    // concurrent keep-boths of the same origin on other
-                    // devices can still mint a duplicate ordinal, which is
-                    // accepted — the device label disambiguates the marker.
-                    let next_ordinal = provider_scope
-                        .into_iter()
-                        .flat_map(|scope| scope.conversations.values())
-                        .filter_map(|thread| thread.preserved.as_ref())
-                        .chain(
-                            bindings_by_thread
-                                .values()
-                                .filter_map(|binding| binding.preserved.as_ref()),
-                        )
-                        .filter(|preserved| preserved.preserved_from == thread_id)
-                        .map(|preserved| preserved.ordinal)
-                        .max()
-                        .unwrap_or(0)
-                        .saturating_add(1);
-                    let device_label = match host_identity
-                        .local_display_name
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|label| !label.is_empty())
-                    {
-                        Some(label) => label.to_string(),
-                        None => {
-                            let (origin_host_token, _) = repository
-                                .derive_origin_tokens(&binding.bundle_id, &binding.replica_id)?;
-                            fallback_origin_host_label(&origin_host_token)
-                        }
-                    };
-                    let base_title = local
-                        .descriptor
-                        .as_ref()
-                        .map(|descriptor| descriptor.display_name.clone())
-                        .filter(|name| !name.trim().is_empty() && name != &local.provider_thread_id)
-                        .or_else(|| {
-                            thread.and_then(|thread| {
-                                thread.display_title.clone().filter(|title| {
-                                    !title.trim().is_empty()
-                                        && thread.source_thread_id.as_deref()
-                                            != Some(title.as_str())
-                                })
-                            })
-                        });
-                    keep_both = Some(KeepBothPlan {
-                        preserved_thread_id: ThreadId::parse(generated_named_id("thread")?)?,
-                        remote_provider_thread_id,
-                        preserved: PreservedProvenance {
-                            preserved_from: thread_id.clone(),
-                            ordinal: next_ordinal,
-                        },
-                        preserved_display_title: compose_preserved_title(
-                            base_title.as_deref(),
-                            next_ordinal,
-                            &device_label,
-                        ),
-                    });
                 }
                 ConversationReviewAction::CreateLocal => {
-                    let provider_id =
-                        mint_provider_thread_id(is_codex, &mut occupied_provider_ids)?;
-                    let sidecars = thread
-                        .map(|thread| conversation_sidecar_refs(provider, &thread_id, thread))
-                        .transpose()?
-                        .unwrap_or_default();
-                    let targets = adapter.materialization_targets(
-                        &super::providers::MaterializationTargetRequest {
-                            provider_home,
-                            project_root: &binding.project_root,
-                            provider_session_id: &provider_id,
-                            source_provider_session_id: thread
-                                .and_then(|thread| thread.source_thread_id.as_deref()),
-                            existing_transcript_path: None,
-                            sidecars: &sidecars,
-                            planned_at: created_at,
-                        },
-                    )?;
-                    for planned in &targets {
-                        if planned.target_path.exists() {
-                            return Err(format!(
-                                "reserved {} target '{}' is already occupied",
-                                provider_label,
-                                planned.target_path.display()
-                            ));
-                        }
-                        expected_provider_state.push(ProviderStateExpectation {
-                            target_path: planned.target_path.to_string_lossy().into_owned(),
-                            expectation: TargetExpectation::Absent,
-                        });
-                    }
-                    proposed_provider_thread_id = Some(provider_id);
                     if let Some(index_path) = &index_path {
                         expected_provider_state.push(ProviderStateExpectation {
                             target_path: index_path.to_string_lossy().into_owned(),
@@ -6541,10 +6507,9 @@ fn provider_thread_review(
                     direction: ConversationPlanDirection::Pull,
                     classified,
                     provider: provider.clone(),
-                    thread_id: thread_id.clone(),
+                    thread_id: unit_local_id.clone(),
+                    cloud_thread_id: unit_cloud_id.clone(),
                     source_resource_id: source_resource_id.clone(),
-                    proposed_provider_thread_id,
-                    keep_both,
                     pins: ConversationActionPins {
                         context: ConversationContextPins {
                             host_id: binding.host_id.clone(),
@@ -6591,7 +6556,8 @@ fn provider_thread_review(
             }
             pull_review.push(ConversationReviewRow {
                 provider: provider.clone(),
-                thread_id: thread_id.clone(),
+                thread_id: unit_local_id.clone(),
+                cloud_thread_id: unit_cloud_id.clone(),
                 resource_id: review_resource_id,
                 action: pull.action,
                 blocker: pull.blocker,
@@ -6640,13 +6606,16 @@ fn mint_provider_thread_id(
 }
 
 /// The sidecar references (`(kind, kind-relative path)`) carried by one
-/// portable conversation, decoded from its canonical sidecar namespace.
+/// portable conversation, decoded from its canonical sidecar namespace
+/// (keyed by the row's own cloud thread id).
 fn conversation_sidecar_refs(
     provider: &ProviderKey,
-    thread_id: &ThreadId,
     thread: &ConversationThread,
 ) -> Result<Vec<(String, String)>, String> {
-    let prefix = format!("state/conversations/{}/{}/sidecars/", provider, thread_id);
+    let prefix = format!(
+        "state/conversations/{}/{}/sidecars/",
+        provider, thread.thread_id
+    );
     let mut sidecars = Vec::new();
     for file in &thread.files {
         if let ConversationFileRole::Sidecar { sidecar_kind } = &file.role {
@@ -6737,7 +6706,6 @@ pub(crate) fn thread_entries(
         Some(snapshot),
         bytes,
         &views,
-        None,
         captured,
         &BTreeMap::new(),
         &resolved,
@@ -7052,7 +7020,6 @@ fn build_thread_sync_comparison(
                     Some(snapshot),
                     &mut bytes,
                     views,
-                    Some(discovery),
                     captured,
                     candidate_pins,
                     resolved,
@@ -7073,7 +7040,6 @@ fn build_thread_sync_comparison(
                     None,
                     &mut bytes,
                     views,
-                    Some(discovery),
                     captured,
                     candidate_pins,
                     resolved,
@@ -7287,6 +7253,9 @@ fn build_thread_sync_comparison(
             storage_updated_at: None,
             cloud_thread_id: None,
             forked_from: None,
+            // Capture-blocked candidates never enter the typed pipeline —
+            // no relation was computed against the storage for this row.
+            compared_against_storage: false,
             provider_thread_id: Some(provider_thread_id),
             push_decision: blocked.clone(),
             pull_decision: blocked,
@@ -7337,7 +7306,7 @@ fn build_thread_sync_comparison(
                         .source_thread_id
                         .clone()
                         .unwrap_or_else(|| thread_id.to_string()),
-                    conversation_resource_id: conversation_resource_id(provider, thread_id)?,
+                    conversation_resource_id: cloud_conversation_resource_id(provider, thread_id)?,
                     resource_id: thread.resource_id.clone(),
                     display_name: thread
                         .display_title
@@ -7351,6 +7320,7 @@ fn build_thread_sync_comparison(
                     storage_updated_at: Some(thread.updated_at),
                     cloud_thread_id: Some(thread_id.clone()),
                     forked_from: thread.forked_from.clone(),
+                    compared_against_storage: true,
                     provider_thread_id: thread.source_thread_id.clone(),
                     push_decision: view_only.clone(),
                     pull_decision: view_only.clone(),
@@ -8414,7 +8384,7 @@ fn captured_conversation_for_action<'a>(
 fn conversation_thread_from_capture(
     previous: Option<&ConversationThread>,
     action: &ConversationPlanAction,
-    result_thread_id: &ThreadId,
+    result_thread_id: &CloudThreadId,
     local_binding: Option<&LocalConversationBinding>,
     descriptor: &ResourceDescriptor,
     conversation: &provider_capture::CapturedConversation,
@@ -8423,8 +8393,8 @@ fn conversation_thread_from_capture(
     published_by: &PortableOrigin,
     updated_at: u64,
 ) -> Result<(ConversationThread, ResourceDescriptor, LogicalPath), String> {
-    let resource_id = conversation_resource_id(&action.provider, result_thread_id)?;
-    let logical_path = conversation_transcript_path(&action.provider, result_thread_id)?;
+    let resource_id = cloud_conversation_resource_id(&action.provider, result_thread_id)?;
+    let logical_path = cloud_conversation_transcript_path(&action.provider, result_thread_id)?;
     // Codex publishes the complete flattened standalone graph: identity,
     // counts, digests, and the portable tail all come from the verified
     // artifact, never from the leaf-only capture.
@@ -8494,7 +8464,7 @@ fn conversation_thread_from_capture(
         .sidecar_files
         .iter()
         .map(|sidecar| {
-            mallard_domain::conversation_sidecar_path(
+            mallard_domain::cloud_conversation_sidecar_path(
                 &action.provider,
                 result_thread_id,
                 &sidecar.sidecar_kind,
@@ -8615,7 +8585,7 @@ fn preserve_unchanged_scope_recipe_revision(
     let previous_generic_entries = previous
         .entries
         .iter()
-        .filter(|(resource_id, _)| parse_conversation_resource_id(resource_id.as_str()).is_err())
+        .filter(|(resource_id, _)| !is_conversation_resource_id(resource_id.as_str()))
         .map(|(resource_id, entry)| (resource_id.clone(), entry.clone()))
         .collect::<BTreeMap<_, _>>();
     if recipe.schema_version == previous.schema_version
@@ -8841,6 +8811,7 @@ fn build_publish_request(
     let mut operations = Vec::new();
     let mut planned_checkpoints: BTreeMap<ConversationOperationId, ConversationCheckpoint> =
         BTreeMap::new();
+    let mut resolved_cloud_ids: BTreeSet<CloudThreadId> = BTreeSet::new();
     for action in actions {
         let scope_key = SyncScopeKey::Provider(action.provider.clone());
         let scope = writable_scopes.get_mut(&scope_key).ok_or_else(|| {
@@ -8850,15 +8821,82 @@ fn build_publish_request(
             )
         })?;
         let (conversation, transcript) = captured_conversation_for_action(captured, action)?;
-        let result_thread_id = action.thread_id.clone();
-        let previous_thread = scope.conversations.get(&result_thread_id).cloned();
+        // Push actions always name a registered local thread (D5).
+        let local_thread_id = action.thread_id.clone().ok_or_else(|| {
+            format!(
+                "conversation Push action '{}' lacks its local thread id",
+                action.action_id
+            )
+        })?;
         let local_binding = document.bindings.iter().find(|candidate| {
             candidate.host_id == binding.host_id
                 && candidate.replica_id == binding.replica_id
                 && candidate.local_project_id == binding.local_project_id
                 && candidate.provider_profile_id == action.pins.context.provider_profile_id
-                && candidate.thread_id == action.thread_id
+                && candidate.thread_id == local_thread_id
         });
+        // Resolve the cloud identity first. A mapped action publishes under
+        // its existing cloud id after cross-checking the live row — any
+        // mismatch in either direction is a hard error, never a silent
+        // adoption. An unmapped CreateCloud mints here, at apply: a single
+        // attempt, fail-closed against the previous manifest's ids, every
+        // binding row's claim, and ids already resolved in this batch. The
+        // head CAS makes the previous-manifest check sound — if the head
+        // moved after observation, the publish itself fails.
+        let live_mapping = local_binding.and_then(|row| row.cloud_thread_id.clone());
+        let result_thread_id = match &action.cloud_thread_id {
+            Some(reviewed) => {
+                if live_mapping.as_ref() != Some(reviewed) {
+                    return Err(format!(
+                        "conversation '{}' cloud mapping changed after review; \
+                         refresh and push again",
+                        local_thread_id
+                    ));
+                }
+                reviewed.clone()
+            }
+            None => {
+                if action.action != ConversationPlanActionType::CreateCloud {
+                    return Err(format!(
+                        "conversation Push action '{}' lacks its reviewed cloud thread id",
+                        action.action_id
+                    ));
+                }
+                if let Some(live) = &live_mapping {
+                    return Err(format!(
+                        "conversation '{}' is already mapped to cloud thread '{}'; \
+                         refresh and push again",
+                        local_thread_id, live
+                    ));
+                }
+                let minted = CloudThreadId::generate()?;
+                let manifest_collision = previous_manifest.is_some_and(|manifest| {
+                    manifest
+                        .all_conversations()
+                        .any(|(_, thread_id, _)| thread_id == &minted)
+                });
+                let binding_collision = document
+                    .bindings
+                    .iter()
+                    .any(|row| row.cloud_thread_id.as_ref() == Some(&minted));
+                if manifest_collision || binding_collision {
+                    return Err(format!(
+                        "minted cloud thread id '{}' collides with existing state; \
+                         nothing was published",
+                        minted
+                    ));
+                }
+                minted
+            }
+        };
+        if !resolved_cloud_ids.insert(result_thread_id.clone()) {
+            return Err(format!(
+                "conversation Push batch resolves cloud thread '{}' twice; \
+                 nothing was published",
+                result_thread_id
+            ));
+        }
+        let previous_thread = scope.conversations.get(&result_thread_id).cloned();
         let descriptor = action
             .source_resource_id
             .as_ref()
@@ -8908,7 +8946,7 @@ fn build_publish_request(
                         && &link.storage_id == storage_id
                 })
                 .and_then(|link| link.conversation_checkpoints.get(&scope_key))
-                .and_then(|threads| threads.get(&action.thread_id));
+                .and_then(|threads| threads.get(&local_thread_id));
             if stored_checkpoint.map(|checkpoint| checkpoint.generation)
                 != action.pins.tail.checkpoint_generation
             {
@@ -9004,7 +9042,7 @@ fn build_publish_request(
                     resource_id, sidecar.logical_path
                 ));
             };
-            let sidecar_logical = mallard_domain::conversation_sidecar_path(
+            let sidecar_logical = mallard_domain::cloud_conversation_sidecar_path(
                 &action.provider,
                 &result_thread_id,
                 &sidecar.sidecar_kind,
@@ -9144,7 +9182,10 @@ fn build_publish_request(
             local_project_id: binding.local_project_id.clone(),
             provider_profile_id: action.pins.context.provider_profile_id.clone(),
             provider: action.provider.clone(),
-            thread_id: action.thread_id.clone(),
+            thread_id: local_thread_id.clone(),
+            // Minted (or mapped) before journaling: recovery installs the
+            // journaled documents verbatim and never re-mints.
+            cloud_thread_id: result_thread_id.clone(),
             operation: ConversationSyncOperationKind::CloudPublication(
                 ConversationPublicationOperation {
                     phase: PushJournalPhase::CandidateUploaded,
@@ -9204,6 +9245,9 @@ fn build_publish_request(
             Some(row) => {
                 row.provider_thread_id = operation.provider_thread_id.clone();
                 row.materialization_state = ConversationMaterializationState::Resumable;
+                // A first CreateCloud commits the freshly minted mapping; a
+                // mapped Publish rewrites the same value it already carries.
+                row.cloud_thread_id = Some(operation.cloud_thread_id.clone());
                 if row.root_tail_layout.is_none() {
                     row.root_tail_layout = Some(layout);
                 }
@@ -9216,6 +9260,7 @@ fn build_publish_request(
                 local_project_id: operation.local_project_id.clone(),
                 provider_profile_id: operation.provider_profile_id.clone(),
                 thread_id: operation.thread_id.clone(),
+                cloud_thread_id: Some(operation.cloud_thread_id.clone()),
                 forked_from: None,
                 preserved: None,
                 root_tail_layout: Some(layout),
@@ -9314,7 +9359,7 @@ fn cloud_publication_from_snapshot(snapshot: &BundleSnapshot) -> ConversationClo
 /// a local value against the manifest.
 fn snapshot_contains_publications(
     snapshot: &BundleSnapshot,
-    expected: &[(ThreadId, PortableConversationTail)],
+    expected: &[(CloudThreadId, PortableConversationTail)],
 ) -> bool {
     expected.iter().all(|(thread_id, tail_after)| {
         snapshot
@@ -9478,7 +9523,7 @@ fn publish_reviewed(
                 && candidate.replica_id == binding.replica_id
                 && candidate.local_project_id == binding.local_project_id
                 && candidate.provider_profile_id == action.pins.context.provider_profile_id
-                && candidate.thread_id == action.thread_id
+                && Some(&candidate.thread_id) == action.thread_id.as_ref()
         });
         let profile = machine
             .profiles
@@ -9531,7 +9576,12 @@ fn publish_reviewed(
                     link.conversation_checkpoints
                         .get(&SyncScopeKey::Provider(action.provider.clone()))
                 })
-                .and_then(|threads| threads.get(&action.thread_id))
+                .and_then(|threads| {
+                    action
+                        .thread_id
+                        .as_ref()
+                        .and_then(|thread_id| threads.get(thread_id))
+                })
                 .map(|checkpoint| checkpoint.generation)
         });
         let context = ConversationApplyContext {
@@ -9609,12 +9659,13 @@ fn publish_reviewed(
         updated_at,
     )?;
     validate_cloud_publication_binding_owners(&document.bindings, &operations)?;
-    let published_expectations: Vec<(ThreadId, PortableConversationTail)> = operations
+    let published_expectations: Vec<(CloudThreadId, PortableConversationTail)> = operations
         .iter()
         .filter_map(|operation| match &operation.operation {
-            ConversationSyncOperationKind::CloudPublication(payload) => {
-                Some((operation.thread_id.clone(), payload.tail_after.clone()))
-            }
+            ConversationSyncOperationKind::CloudPublication(payload) => Some((
+                operation.cloud_thread_id.clone(),
+                payload.tail_after.clone(),
+            )),
             _ => None,
         })
         .collect();
@@ -10132,11 +10183,12 @@ pub(super) fn push_bundle_reviewed_with_progress(
     let resources_changed = Some(if was_published { results.len() } else { 0 });
     for (action, message) in &publish_outcome.stale_conversations {
         results.push(OperationResourceResult {
-            resource_id: action
-                .source_resource_id
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(|| conversation_resource_id(&action.provider, &action.thread_id))?,
+            resource_id: conversation_action_row_key(action).ok_or_else(|| {
+                format!(
+                    "conversation Push action '{}' names no reportable resource",
+                    action.action_id
+                )
+            })?,
             state: "failed".to_string(),
             message: Some(message.clone()),
         });
@@ -10282,7 +10334,6 @@ pub(super) fn plan_bundle_restore_with_progress(
             Some(&snapshot),
             &mut byte_source,
             &views,
-            Some(&discovery),
             &captured,
             &BTreeMap::new(),
             &resolved,
@@ -10333,7 +10384,6 @@ pub(super) fn plan_bundle_restore_with_progress(
             Some(&snapshot),
             &mut byte_source,
             &views,
-            Some(&discovery),
             &captured,
             &candidate_pins,
             &resolved,
@@ -10375,10 +10425,17 @@ struct PreparedPullConversation {
     cloud_file_sha256: String,
     cloud_provider_thread_id: String,
     cloud_cwd: String,
-    cloud_forked_from: Option<ThreadId>,
+    cloud_forked_from: Option<CloudThreadId>,
     cloud_preserved: Option<PreservedProvenance>,
     cloud_display_title: Option<String>,
     cloud_updated_at: u64,
+    /// Sidecar references of the cloud row, for apply-time target
+    /// computation under the minted destination identity.
+    cloud_sidecars: Vec<(String, String)>,
+    /// The bound local session's discovery display name, when one exists —
+    /// the keep-both marker's base-title input, captured at prepare because
+    /// apply runs no discovery of its own.
+    local_display_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -10434,7 +10491,7 @@ fn local_target_expectation_for_action(
                 && candidate.replica_id == binding.replica_id
                 && candidate.local_project_id == binding.local_project_id
                 && candidate.provider_profile_id == action.pins.context.provider_profile_id
-                && candidate.thread_id == action.thread_id
+                && Some(&candidate.thread_id) == action.thread_id.as_ref()
         })
         .and_then(|candidate| candidate.provider_thread_id.as_deref());
     provider_thread_id
@@ -10458,6 +10515,7 @@ struct PreparedPullConversationFailure {
 /// fatal, but each action prepares independently: one stale or unreadable
 /// thread becomes a per-thread failure receipt instead of blocking the
 /// other approved threads.
+#[allow(clippy::type_complexity)]
 fn prepare_pull_conversation_actions(
     repository: &LocalStateRepository,
     resolved: &ResolvedBinding,
@@ -10470,13 +10528,16 @@ fn prepare_pull_conversation_actions(
     (
         Vec<PreparedPullConversation>,
         Vec<PreparedPullConversationFailure>,
+        Vec<provider_capture::LocalSessionView>,
     ),
     String,
 > {
     if actions.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
-    let (_, captured) = capture_all_local_conversations(repository, resolved)?;
+    // The session views feed two apply-side needs: the minted-identity
+    // occupied set and the keep-both base-title inputs.
+    let (session_views, captured) = capture_all_local_conversations(repository, resolved)?;
     let binding = &resolved.binding;
     let document = repository.load_conversation_bindings()?;
     let machine = repository.load_bindings()?;
@@ -10488,9 +10549,11 @@ fn prepare_pull_conversation_actions(
     let transcript_paths = actions
         .iter()
         .filter_map(|selected| {
-            snapshot
-                .manifest
-                .find_conversation(&selected.action.thread_id)
+            selected
+                .action
+                .cloud_thread_id
+                .as_ref()
+                .and_then(|cloud_thread_id| snapshot.manifest.find_conversation(cloud_thread_id))
                 .and_then(|(_, thread)| {
                     thread
                         .files
@@ -10513,13 +10576,16 @@ fn prepare_pull_conversation_actions(
                        bytes: &mut dyn BundleBytes|
      -> Result<PreparedPullConversation, String> {
         let action = &selected.action;
+        let cloud_thread_id = action.cloud_thread_id.as_ref().ok_or_else(|| {
+            "conversation Pull action lacks its reviewed cloud thread id".to_string()
+        })?;
         let (_, thread) = snapshot
             .manifest
-            .find_conversation(&action.thread_id)
+            .find_conversation(cloud_thread_id)
             .ok_or_else(|| {
                 format!(
                     "reviewed cloud conversation '{}' disappeared",
-                    action.thread_id
+                    cloud_thread_id
                 )
             })?;
         let transcript_ref = thread
@@ -10529,7 +10595,7 @@ fn prepare_pull_conversation_actions(
             .ok_or_else(|| {
                 format!(
                     "cloud conversation '{}' lacks a transcript",
-                    action.thread_id
+                    cloud_thread_id
                 )
             })?;
         let cloud_file_sha256 = snapshot
@@ -10538,7 +10604,7 @@ fn prepare_pull_conversation_actions(
             .ok_or_else(|| {
                 format!(
                     "cloud conversation '{}' transcript is absent from the manifest",
-                    action.thread_id
+                    cloud_thread_id
                 )
             })?
             .1
@@ -10565,7 +10631,7 @@ fn prepare_pull_conversation_actions(
                 && candidate.replica_id == binding.replica_id
                 && candidate.local_project_id == binding.local_project_id
                 && candidate.provider_profile_id == action.pins.context.provider_profile_id
-                && candidate.thread_id == action.thread_id
+                && Some(&candidate.thread_id) == action.thread_id.as_ref()
         });
         let profile = machine
             .profiles
@@ -10598,7 +10664,12 @@ fn prepare_pull_conversation_actions(
                     link.conversation_checkpoints
                         .get(&SyncScopeKey::Provider(action.provider.clone()))
                 })
-                .and_then(|threads| threads.get(&action.thread_id))
+                .and_then(|threads| {
+                    action
+                        .thread_id
+                        .as_ref()
+                        .and_then(|thread_id| threads.get(thread_id))
+                })
                 .map(|checkpoint| checkpoint.generation)
         });
         let context = ConversationApplyContext {
@@ -10650,6 +10721,15 @@ fn prepare_pull_conversation_actions(
                 action.action_id, pin
             )
         })?;
+        let local_display_name = local_binding
+            .and_then(|row| row.provider_thread_id.as_deref())
+            .and_then(|provider_thread_id| {
+                session_views.iter().find(|view| {
+                    view.provider == action.provider
+                        && view.provider_thread_id == provider_thread_id
+                })
+            })
+            .map(|view| view.descriptor.display_name.clone());
         Ok(PreparedPullConversation {
             action: action.clone(),
             cloud_transcript,
@@ -10660,6 +10740,8 @@ fn prepare_pull_conversation_actions(
             cloud_preserved: thread.preserved.clone(),
             cloud_display_title: thread.display_title.clone(),
             cloud_updated_at: thread.updated_at,
+            cloud_sidecars: conversation_sidecar_refs(&action.provider, thread)?,
+            local_display_name,
         })
     };
     for selected in actions {
@@ -10671,7 +10753,7 @@ fn prepare_pull_conversation_actions(
             }),
         }
     }
-    Ok((prepared, failures))
+    Ok((prepared, failures, session_views))
 }
 
 /// A per-thread conversation failure keeps its receipt so the rest of the
@@ -10683,11 +10765,14 @@ fn failed_conversation_receipt(
 ) -> Result<ApplyReceipt, String> {
     Ok(ApplyReceipt {
         action_id: action.action_id.clone(),
-        resource_id: action
-            .source_resource_id
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(|| conversation_resource_id(&action.provider, &action.thread_id))?,
+        // Cloud-only failures that predate minting carry the cloud resource
+        // id review always records as `source_resource_id` for cloud rows.
+        resource_id: conversation_action_row_key(action).ok_or_else(|| {
+            format!(
+                "conversation action '{}' names no reportable resource",
+                action.action_id
+            )
+        })?,
         action_type: RestoreActionType::MaterializeConversation,
         logical_path: None,
         source_sha256: None,
@@ -10807,11 +10892,14 @@ fn codex_index_payload(
 /// engine: reconstruct the verified cloud graph exactly once under fresh
 /// identities, journal the exact whole-document after-states, and install
 /// no-clobber. Metadata-only actions never reach this function.
+#[allow(clippy::too_many_arguments)]
 fn apply_prepared_pull_conversation(
     repository: &LocalStateRepository,
     plan: &RestorePlan,
     resolved: &ResolvedBinding,
+    snapshot: &BundleSnapshot,
     prepared: PreparedPullConversation,
+    occupied_provider_ids: &mut BTreeSet<String>,
     expected_bindings_document_revision: u64,
     applied_at: u64,
     on_phase: &mut dyn FnMut(&str, Duration),
@@ -10827,10 +10915,53 @@ fn apply_prepared_pull_conversation(
             && candidate.replica_id == binding.replica_id
             && candidate.local_project_id == binding.local_project_id
             && candidate.provider_profile_id == action.pins.context.provider_profile_id
-            && candidate.thread_id == action.thread_id
+            && Some(&candidate.thread_id) == action.thread_id.as_ref()
     });
     if live_binding.map(|binding| binding.revision) != action.pins.context.binding_revision {
         return Err("conversation binding changed after review".to_string());
+    }
+    let cloud_thread_id = action
+        .cloud_thread_id
+        .clone()
+        .ok_or_else(|| "conversation Pull action lacks its reviewed cloud thread id".to_string())?;
+    // A mapped local thread must still map to the reviewed cloud row; a
+    // mismatch in either direction is a hard failure, never an adoption.
+    if let Some(live_binding) = live_binding {
+        if action.action != ConversationPlanActionType::CreateLocal
+            && live_binding.cloud_thread_id.as_ref() != Some(&cloud_thread_id)
+        {
+            return Err(
+                "conversation cloud mapping changed after review; refresh and pull again"
+                    .to_string(),
+            );
+        }
+    }
+    // Journal pre-check before any minting or staging: a pending operation
+    // already naming this cloud thread — or this exact plan action — is an
+    // interrupted first attempt of the same work. Fail fast here so no
+    // second identity is minted; the insertion-time guard under the journal
+    // mutation stays authoritative.
+    {
+        let journal = repository.load_conversation_sync_journal()?;
+        if journal.operations.iter().any(|operation| {
+            operation.local_project_id == binding.local_project_id
+                && operation.cloud_thread_id == cloud_thread_id
+        }) {
+            return Err(format!(
+                "cloud thread '{}' already has a pending sync operation; \
+                 resolve or retry it before syncing this conversation again",
+                cloud_thread_id
+            ));
+        }
+        if journal.operations.iter().any(|operation| {
+            operation.plan_id.as_ref() == Some(&plan.plan_id)
+                && operation.plan_action_id.as_ref() == Some(&action.action_id)
+        }) {
+            return Err(format!(
+                "conversation plan action '{}' already has a journaled operation",
+                action.action_id
+            ));
+        }
     }
     let live_provider_thread_id =
         live_binding.and_then(|binding| binding.provider_thread_id.as_deref());
@@ -10851,22 +10982,41 @@ fn apply_prepared_pull_conversation(
         .cloud
         .clone()
         .ok_or_else(|| "conversation Pull action lacks its pinned cloud tail".to_string())?;
-    let destination_provider_thread_id = action
-        .keep_both
-        .as_ref()
-        .map(|keep_both| keep_both.remote_provider_thread_id.clone())
-        .or_else(|| action.proposed_provider_thread_id.clone())
-        .ok_or_else(|| "conversation Pull action lacks a destination provider id".to_string())?;
-    let materialize_in_place = action.action == ConversationPlanActionType::MaterializeCloud
-        && live_provider_thread_id == Some(destination_provider_thread_id.as_str());
+    // Resolve the destination provider identity here, at apply (D2). Codex
+    // can create a physical history_base child at any time, so every Codex
+    // cloud update is copy-on-write under a freshly minted alias; other
+    // providers replace in place under the row's existing provider id.
+    // CreateLocal and KeepBoth's remote branch always mint.
+    let materialize_in_place =
+        action.action == ConversationPlanActionType::MaterializeCloud && !is_codex;
     let materialize_relocated =
-        action.action == ConversationPlanActionType::MaterializeCloud && !materialize_in_place;
-    if action.action == ConversationPlanActionType::MaterializeCloud
-        && !materialize_in_place
-        && !is_codex
-    {
-        return Err("only Codex history dependencies can relocate a cloud update".to_string());
-    }
+        action.action == ConversationPlanActionType::MaterializeCloud && is_codex;
+    let destination_provider_thread_id = if materialize_in_place {
+        live_provider_thread_id
+            .ok_or_else(|| {
+                "conversation cloud update lost its provider identity after review".to_string()
+            })?
+            .to_string()
+    } else {
+        mint_provider_thread_id(is_codex, occupied_provider_ids)?
+    };
+    // Resolve the local thread identity: CreateLocal derives it from the
+    // freshly minted provider id (one uniform rule — the first identity is
+    // the derivation of the first provider alias); every other action
+    // operates on the reviewed local thread.
+    let local_thread_id = match &action.thread_id {
+        Some(thread_id) => thread_id.clone(),
+        None => {
+            if action.action != ConversationPlanActionType::CreateLocal {
+                return Err("conversation Pull action lacks its local thread id".to_string());
+            }
+            initial_conversation_thread_id(
+                &binding.bundle_id,
+                &action.provider,
+                &destination_provider_thread_id,
+            )?
+        }
+    };
     let relocation_source_provider_thread_id = action.source_resource_id.as_ref().and_then(|id| {
         let (source_provider, _) = id.as_str().split_once(':')?;
         (source_provider == action.provider.as_str())
@@ -10876,6 +11026,82 @@ fn apply_prepared_pull_conversation(
     if materialize_relocated && relocation_source_provider_thread_id != live_provider_thread_id {
         return Err("conversation relocation source identity changed after review".to_string());
     }
+    // KeepBoth identities and display facts are minted here (D2/D9): the
+    // preserved ThreadId, the provenance ordinal over the pinned snapshot's
+    // provider scope plus the live bindings document, and the marker title.
+    let keep_both_minted = if action.action == ConversationPlanActionType::KeepBoth {
+        let scoped_bindings = document_before
+            .bindings
+            .iter()
+            .filter(|row| {
+                row.host_id == binding.host_id
+                    && row.replica_id == binding.replica_id
+                    && row.local_project_id == binding.local_project_id
+                    && row.provider_profile_id == action.pins.context.provider_profile_id
+            })
+            .collect::<Vec<_>>();
+        // Max+1 over every provenance record naming this origin — cloud
+        // space against cloud space on both inputs. Concurrent keep-boths of
+        // the same origin on other devices can still mint a duplicate
+        // ordinal, which is accepted: the device label disambiguates.
+        let next_ordinal = snapshot
+            .manifest
+            .provider_scope(&action.provider)
+            .into_iter()
+            .flat_map(|scope| scope.conversations.values())
+            .filter_map(|thread| thread.preserved.as_ref())
+            .chain(
+                scoped_bindings
+                    .iter()
+                    .filter_map(|row| row.preserved.as_ref()),
+            )
+            .filter(|preserved| preserved.preserved_from == cloud_thread_id)
+            .map(|preserved| preserved.ordinal)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let identity = repository.load_or_create_host_identity()?;
+        let device_label = match identity
+            .local_display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+        {
+            Some(label) => label.to_string(),
+            None => {
+                let (origin_host_token, _) =
+                    repository.derive_origin_tokens(&binding.bundle_id, &binding.replica_id)?;
+                fallback_origin_host_label(&origin_host_token)
+            }
+        };
+        let base_title = prepared
+            .local_display_name
+            .clone()
+            .filter(|name| {
+                !name.trim().is_empty() && Some(name.as_str()) != live_provider_thread_id
+            })
+            .or_else(|| {
+                prepared.cloud_display_title.clone().filter(|title| {
+                    !title.trim().is_empty()
+                        && title.as_str() != prepared.cloud_provider_thread_id.as_str()
+                })
+            });
+        Some(KeepBothJournal {
+            preserved_thread_id: ThreadId::parse(generated_named_id("thread")?)?,
+            remote_provider_thread_id: destination_provider_thread_id.clone(),
+            preserved: PreservedProvenance {
+                preserved_from: cloud_thread_id.clone(),
+                ordinal: next_ordinal,
+            },
+            preserved_display_title: compose_preserved_title(
+                base_title.as_deref(),
+                next_ordinal,
+                &device_label,
+            ),
+        })
+    } else {
+        None
+    };
 
     // Reconstruct and reidentify exactly once, verifying typed invariants
     // before any journal or visible mutation. Codex order per §6.2: staged
@@ -11027,22 +11253,48 @@ fn apply_prepared_pull_conversation(
             .is_some_and(|path| Path::new(&target.target_path) == path.as_path())
     };
     let replace_existing = materialize_in_place;
-    let transcript_target = action
-        .pins
-        .target
-        .provider_state
-        .iter()
-        .find(|target| {
-            !is_index_target(target)
-                && (replace_existing || target.expectation == TargetExpectation::Absent)
-        })
-        .cloned()
-        .ok_or_else(|| "conversation Pull action lacks a transcript target".to_string())?;
-    if materialize_relocated && transcript_target.expectation != TargetExpectation::Absent {
-        return Err(
-            "conversation relocation destination is not a reviewed absent target".to_string(),
-        );
-    }
+    // The in-place transcript target consumes its reviewed pin; a minted
+    // identity's destinations are computed here under the resolved id, and
+    // every one must be Absent — an occupied path fails this action only
+    // (the engine's no-clobber commit is the last-line guard).
+    let transcript_target = if materialize_in_place {
+        action
+            .pins
+            .target
+            .provider_state
+            .iter()
+            .find(|target| !is_index_target(target))
+            .cloned()
+            .ok_or_else(|| "conversation Pull action lacks a transcript target".to_string())?
+    } else {
+        let provider_home = resolved.home(&action.provider)?;
+        let planned =
+            adapter.materialization_targets(&super::providers::MaterializationTargetRequest {
+                provider_home: Path::new(provider_home),
+                project_root: &binding.project_root,
+                provider_session_id: &destination_provider_thread_id,
+                source_provider_session_id: Some(prepared.cloud_provider_thread_id.as_str()),
+                existing_transcript_path: None,
+                sidecars: &prepared.cloud_sidecars,
+                planned_at: applied_at,
+            })?;
+        let mut transcript_target = None;
+        for target in &planned {
+            if bounded_file_expectation(&target.target_path)? != TargetExpectation::Absent {
+                return Err(format!(
+                    "conversation destination '{}' is already occupied",
+                    target.target_path.display()
+                ));
+            }
+            if target.role == ConversationFileRole::Transcript && transcript_target.is_none() {
+                transcript_target = Some(ProviderStateExpectation {
+                    target_path: target.target_path.to_string_lossy().into_owned(),
+                    expectation: TargetExpectation::Absent,
+                });
+            }
+        }
+        transcript_target.ok_or_else(|| "provider planned no transcript destination".to_string())?
+    };
     let mut targets = vec![ConversationTargetPayload {
         target_path: PathBuf::from(&transcript_target.target_path),
         role: ConversationFileRole::Transcript,
@@ -11059,12 +11311,11 @@ fn apply_prepared_pull_conversation(
     {
         let index_path = PathBuf::from(&index_target.target_path);
         let mut index_specs = Vec::new();
-        if let Some(keep_both) = &action.keep_both {
+        if let Some(keep_both) = &keep_both_minted {
             // The preserved copy keeps the original provider session id; its
-            // reviewed rename carries the plan-minted marker title. The id
-            // comes from the revision-pinned bindings document, so a moved
-            // binding forces a stale replan instead of renaming the wrong
-            // session.
+            // rename carries the marker title minted above. The id comes
+            // from the revision-pinned bindings document, so a moved binding
+            // forces a stale replan instead of renaming the wrong session.
             let preserved_provider_thread_id = document_before
                 .bindings
                 .iter()
@@ -11073,7 +11324,7 @@ fn apply_prepared_pull_conversation(
                         && row.replica_id == binding.replica_id
                         && row.local_project_id == binding.local_project_id
                         && row.provider_profile_id == action.pins.context.provider_profile_id
-                        && row.thread_id == action.thread_id
+                        && row.thread_id == local_thread_id
                 })
                 .and_then(|row| row.provider_thread_id.clone())
                 .ok_or_else(|| {
@@ -11137,13 +11388,13 @@ fn apply_prepared_pull_conversation(
     let config_before = repository.load_config()?;
     let mut config_after = config_before.clone();
     let scope = SyncScopeKey::Provider(action.provider.clone());
-    let retained_source_checkpoint = if materialize_relocated && is_codex {
+    let retained_source_checkpoint = if materialize_relocated {
         let old_provider_thread_id = live_provider_thread_id
             .ok_or_else(|| "conversation relocation lost its source provider id".to_string())?;
         let retained_thread_id = retained_conversation_thread_id(
             &binding.bundle_id,
             &action.provider,
-            &action.thread_id,
+            &local_thread_id,
             old_provider_thread_id,
         )?;
         if document_before.bindings.iter().any(|row| {
@@ -11166,7 +11417,7 @@ fn apply_prepared_pull_conversation(
                     && link.storage_id == plan.storage_id
             })
             .and_then(|link| link.conversation_checkpoints.get(&scope))
-            .and_then(|threads| threads.get(&action.thread_id))
+            .and_then(|threads| threads.get(&local_thread_id))
             .cloned()
             .ok_or_else(|| {
                 "conversation relocation lacks its reviewed source checkpoint".to_string()
@@ -11248,7 +11499,6 @@ fn apply_prepared_pull_conversation(
         prefix_witness,
         binding_revision: 0,
     };
-    let mut keep_both_journal = None;
     {
         let find_row = |document: &mut mallard_domain::ConversationBindings,
                         thread_id: &ThreadId|
@@ -11261,17 +11511,20 @@ fn apply_prepared_pull_conversation(
                     && &row.thread_id == thread_id
             })
         };
-        match (&action.action, &action.keep_both) {
+        match (&action.action, &keep_both_minted) {
             (ConversationPlanActionType::KeepBoth, Some(keep_both)) => {
                 // The binding move: the existing alias and its unchanged
-                // layout transfer to the preserved thread; the tracked
-                // thread imports the verified remote layout under fresh
-                // identities. No rollout byte changes.
-                let index = find_row(&mut document_after, &action.thread_id).ok_or_else(|| {
+                // layout transfer to the preserved thread, whose cloud
+                // mapping clears — an ordinary local-only thread whose later
+                // push mints a fresh cloud id. The tracked thread keeps its
+                // local id and mapping and imports the verified remote
+                // layout under fresh identities. No rollout byte changes.
+                let index = find_row(&mut document_after, &local_thread_id).ok_or_else(|| {
                     "conversation keep-both requires an existing binding".to_string()
                 })?;
                 let row = &mut document_after.bindings[index];
                 row.thread_id = keep_both.preserved_thread_id.clone();
+                row.cloud_thread_id = None;
                 row.forked_from = None;
                 row.preserved = Some(keep_both.preserved.clone());
                 row.revision = row.revision.saturating_add(1);
@@ -11284,7 +11537,8 @@ fn apply_prepared_pull_conversation(
                     replica_id: binding.replica_id.clone(),
                     local_project_id: binding.local_project_id.clone(),
                     provider_profile_id: action.pins.context.provider_profile_id.clone(),
-                    thread_id: action.thread_id.clone(),
+                    thread_id: local_thread_id.clone(),
+                    cloud_thread_id: Some(cloud_thread_id.clone()),
                     forked_from: None,
                     preserved: prepared.cloud_preserved.clone(),
                     root_tail_layout: Some(imported_layout.clone()),
@@ -11294,13 +11548,9 @@ fn apply_prepared_pull_conversation(
                     created_at: applied_at,
                     updated_at: applied_at,
                 });
-                keep_both_journal = Some(KeepBothJournal {
-                    preserved_thread_id: keep_both.preserved_thread_id.clone(),
-                    remote_provider_thread_id: keep_both.remote_provider_thread_id.clone(),
-                });
             }
             (ConversationPlanActionType::MaterializeCloud, None) => {
-                let index = find_row(&mut document_after, &action.thread_id).ok_or_else(|| {
+                let index = find_row(&mut document_after, &local_thread_id).ok_or_else(|| {
                     "conversation materialization requires an existing binding".to_string()
                 })?;
                 let row = &mut document_after.bindings[index];
@@ -11316,7 +11566,8 @@ fn apply_prepared_pull_conversation(
                     replica_id: binding.replica_id.clone(),
                     local_project_id: binding.local_project_id.clone(),
                     provider_profile_id: action.pins.context.provider_profile_id.clone(),
-                    thread_id: action.thread_id.clone(),
+                    thread_id: local_thread_id.clone(),
+                    cloud_thread_id: Some(cloud_thread_id.clone()),
                     forked_from: prepared.cloud_forked_from.clone(),
                     preserved: prepared.cloud_preserved.clone(),
                     root_tail_layout: Some(imported_layout.clone()),
@@ -11354,11 +11605,11 @@ fn apply_prepared_pull_conversation(
             }
             threads.insert(retained_thread_id, retained_checkpoint);
         }
-        if let Some(keep_both) = &action.keep_both {
+        if let Some(keep_both) = &keep_both_minted {
             // Re-key the destination's checkpoint to the preserved thread as
             // local-only observed state: observed tail, mapping, and witness
             // survive; the accepted pin and accepted physical end clear.
-            if let Some(mut moved) = threads.remove(&action.thread_id) {
+            if let Some(mut moved) = threads.remove(&local_thread_id) {
                 moved.accepted = None;
                 moved.accepted_local_tail = None;
                 moved.generation = moved.generation.saturating_add(1);
@@ -11367,12 +11618,12 @@ fn apply_prepared_pull_conversation(
             }
         }
         let generation = threads
-            .get(&action.thread_id)
+            .get(&local_thread_id)
             .map(|existing| existing.generation.saturating_add(1))
             .unwrap_or(0);
         let mut checkpoint = accepted_checkpoint.clone();
         checkpoint.generation = generation;
-        threads.insert(action.thread_id.clone(), checkpoint);
+        threads.insert(local_thread_id.clone(), checkpoint);
         link.scope_bases.entry(scope.clone()).and_modify(|base| {
             base.scope_revision = action.pins.revision.scope_revision.max(base.scope_revision);
             base.scope_sha256 = action.pins.revision.scope_sha256.clone();
@@ -11404,7 +11655,11 @@ fn apply_prepared_pull_conversation(
         local_project_id: binding.local_project_id.clone(),
         provider_profile_id: action.pins.context.provider_profile_id.clone(),
         provider: action.provider.clone(),
-        thread_id: action.thread_id.clone(),
+        // Every identity below was minted (or resolved) above, before this
+        // journal record exists: recovery installs the journaled documents
+        // verbatim and never re-mints.
+        thread_id: local_thread_id.clone(),
+        cloud_thread_id: cloud_thread_id.clone(),
         operation: ConversationSyncOperationKind::ProviderMaterialization(
             ConversationMaterializationOperation {
                 phase: PullJournalPhase::TargetStaged,
@@ -11416,7 +11671,7 @@ fn apply_prepared_pull_conversation(
                 // wire digests were verified at prepare.
                 pinned_lineage_digest: staged_lineage_digest,
                 pinned_semantic_digest: staged_semantic_digest,
-                keep_both: keep_both_journal,
+                keep_both: keep_both_minted,
                 sync_config_before: config_before,
                 sync_config_after: config_after,
                 bindings_before: document_before,
@@ -11450,7 +11705,9 @@ fn apply_prepared_pull_conversation(
     };
     Ok(ApplyReceipt {
         action_id: action.action_id.clone(),
-        resource_id: conversation_resource_id(&action.provider, &action.thread_id)?,
+        // Receipts stay in the local id space: the operation's resolved
+        // local thread, minted above for CreateLocal.
+        resource_id: conversation_resource_id(&action.provider, &local_thread_id)?,
         action_type,
         logical_path: None,
         source_sha256: Some(prepared.cloud_file_sha256.clone()),
@@ -11549,15 +11806,16 @@ pub(super) fn apply_bundle_restore_with_progress(
             )?),
         }
     }
-    let (prepared_conversations, prepare_failures) = prepare_pull_conversation_actions(
-        repository,
-        &resolved,
-        &snapshot,
-        &mut byte_source,
-        &materializing_actions,
-        &plan.storage_id,
-        applied_at,
-    )?;
+    let (prepared_conversations, prepare_failures, session_views) =
+        prepare_pull_conversation_actions(
+            repository,
+            &resolved,
+            &snapshot,
+            &mut byte_source,
+            &materializing_actions,
+            &plan.storage_id,
+            applied_at,
+        )?;
     on_phase("prepare conversations", phase_started.elapsed());
     for failure in prepare_failures {
         conversation_receipts.push(failed_conversation_receipt(
@@ -11566,6 +11824,21 @@ pub(super) fn apply_bundle_restore_with_progress(
             applied_at,
         )?);
     }
+    // The apply-time occupied set for minted provider identities: the
+    // prepare capture's session views, every binding row's provider id, and
+    // (inside the mint) ids minted earlier in this batch. Allocation
+    // exhaustion fails the action, never retries silently.
+    let mut occupied_provider_ids = session_views
+        .iter()
+        .map(|view| view.provider_thread_id.clone())
+        .chain(
+            repository
+                .load_conversation_bindings()?
+                .bindings
+                .iter()
+                .filter_map(|row| row.provider_thread_id.clone()),
+        )
+        .collect::<BTreeSet<String>>();
     // Threads settle independently. Successful actions advance the shared
     // bindings document, so the next already-reviewed action chains from the
     // revision this batch just committed instead of invalidating itself.
@@ -11574,12 +11847,9 @@ pub(super) fn apply_bundle_restore_with_progress(
         .map(|prepared| prepared.action.pins.context.bindings_document_revision);
     for prepared in prepared_conversations {
         let action = prepared.action.clone();
-        let resource = action
-            .source_resource_id
-            .clone()
-            .or_else(|| conversation_resource_id(&action.provider, &action.thread_id).ok())
+        let resource = conversation_action_row_key(&action)
             .map(|resource_id| resource_id.to_string())
-            .unwrap_or_else(|| action.thread_id.to_string());
+            .unwrap_or_else(|| action.action_id.to_string());
         let phase_label = format!("apply conversation {resource}");
         let phase_started = Instant::now();
         let expected_revision = expected_bindings_document_revision
@@ -11588,7 +11858,9 @@ pub(super) fn apply_bundle_restore_with_progress(
             repository,
             &plan,
             &resolved,
+            &snapshot,
             prepared,
+            &mut occupied_provider_ids,
             expected_revision,
             applied_at,
             on_phase,
@@ -11799,17 +12071,13 @@ pub(super) fn apply_bundle_restore_with_progress(
         .filter_map(|receipt| {
             receipt.conversation.as_ref().and_then(|conversation| {
                 conversation.preserved_thread_id.as_ref().map(|preserved| {
-                    // The marker title lives only in the plan's keep-both
-                    // record; a receipt without its action is a
-                    // plan/receipt mismatch, not a displayable result.
-                    let preserved_display_title = plan
-                        .conversation_actions
-                        .iter()
-                        .find(|action| action.action_id == receipt.action_id)
-                        .and_then(|action| action.keep_both.as_ref())
-                        .map(|keep_both| keep_both.preserved_display_title.clone())
+                    // The marker title is minted at apply and journaled; it
+                    // reaches the UI through the receipt, never a plan.
+                    let preserved_display_title = conversation
+                        .preserved_display_title
+                        .clone()
                         .ok_or_else(|| {
-                            "applied keep-both receipt has no matching plan action".to_string()
+                            "applied keep-both receipt lacks its minted marker title".to_string()
                         })?;
                     Ok(PreservedThreadResult {
                         action_id: receipt.action_id.clone(),
@@ -11875,6 +12143,11 @@ fn adopt_cloud_metadata_action(
     action: &ConversationPlanAction,
     applied_at: u64,
 ) -> Result<ApplyReceipt, String> {
+    // Adopt actions always operate on a registered local thread (D5).
+    let local_thread_id = action
+        .thread_id
+        .clone()
+        .ok_or_else(|| "conversation adoption lacks its local thread id".to_string())?;
     let cloud_tail = action
         .pins
         .tail
@@ -11907,7 +12180,7 @@ fn adopt_cloud_metadata_action(
             .conversation_checkpoints
             .entry(scope.clone())
             .or_default();
-        let checkpoint = threads.get_mut(&action.thread_id).ok_or_else(|| {
+        let checkpoint = threads.get_mut(&local_thread_id).ok_or_else(|| {
             "conversation adoption requires an existing destination checkpoint".to_string()
         })?;
         if Some(checkpoint.generation) != action.pins.tail.checkpoint_generation {
@@ -11946,7 +12219,7 @@ fn adopt_cloud_metadata_action(
     repository.install_config_snapshot(config)?;
     Ok(ApplyReceipt {
         action_id: action.action_id.clone(),
-        resource_id: conversation_resource_id(&action.provider, &action.thread_id)?,
+        resource_id: conversation_resource_id(&action.provider, &local_thread_id)?,
         action_type: RestoreActionType::MaterializeConversation,
         logical_path: None,
         source_sha256: None,
@@ -17159,10 +17432,10 @@ mod tests {
         storage_id: &StorageId,
         remote_cwd: &Path,
         tip_transcript: Vec<u8>,
-    ) -> (BundleSnapshot, ThreadId, ThreadId, ThreadId) {
-        let t1 = ThreadId::parse("thread-t1").unwrap();
-        let t11 = ThreadId::parse("thread-t11").unwrap();
-        let t111 = ThreadId::parse("thread-t111").unwrap();
+    ) -> (BundleSnapshot, CloudThreadId, CloudThreadId, CloudThreadId) {
+        let t1 = CloudThreadId::parse("cloudthread-t1").unwrap();
+        let t11 = CloudThreadId::parse("cloudthread-t11").unwrap();
+        let t111 = CloudThreadId::parse("cloudthread-t111").unwrap();
         let (origin_host_token, origin_replica_token) = repo
             .derive_origin_tokens(&project.bundle_id, &binding.replica_id)
             .unwrap();
@@ -17292,7 +17565,8 @@ mod tests {
         binding: &ProjectBinding,
         codex_home: &Path,
         logical_thread_id: &ThreadId,
-        logical_parent: Option<ThreadId>,
+        cloud_thread_id: &CloudThreadId,
+        logical_parent: Option<CloudThreadId>,
         provider_thread_id: &str,
         transcript: &[u8],
         _source: &BundleSnapshot,
@@ -17316,6 +17590,7 @@ mod tests {
                 local_project_id: binding.local_project_id.clone(),
                 provider_profile_id: profile_id,
                 thread_id: logical_thread_id.clone(),
+                cloud_thread_id: Some(cloud_thread_id.clone()),
                 forked_from: logical_parent,
                 preserved: None,
                 root_tail_layout: Some(RootTailLayout {
@@ -17423,7 +17698,7 @@ mod tests {
         assert!(link_recipe
             .entries
             .keys()
-            .all(|resource_id| { parse_conversation_resource_id(resource_id.as_str()).is_err() }));
+            .all(|resource_id| { !is_conversation_resource_id(resource_id.as_str()) }));
 
         // Both local sessions advance. Only the first also advances remotely,
         // producing one real divergence and leaving the second safe to Push.
@@ -17542,7 +17817,7 @@ mod tests {
             .contains_key(&pushable.resource_id));
 
         assert!(review.inventory.resources.iter().all(|resource| {
-            parse_conversation_resource_id(resource.descriptor.resource_id.as_str()).is_err()
+            !is_conversation_resource_id(resource.descriptor.resource_id.as_str())
         }));
         assert!(review
             .inventory
@@ -17591,10 +17866,14 @@ mod tests {
                 ("local-tip", "user", "local branch"),
             ],
         );
+        // The local registration keeps its own machine-local identity; the
+        // pairing to the cloud tip lives only in the binding's mapping.
+        let local_t111 = ThreadId::parse("thread-local-t111").unwrap();
         let local_path = bind_local_conversation(
             &repo,
             &binding,
             &codex_home,
+            &local_t111,
             &t111,
             Some(t11.clone()),
             local_provider_id,
@@ -17718,7 +17997,7 @@ mod tests {
             .iter()
             .find(|candidate| {
                 candidate.local_project_id == project.local_project_id
-                    && candidate.thread_id == t111
+                    && candidate.cloud_thread_id.as_ref() == Some(&t111)
             })
             .unwrap();
         assert_eq!(original_binding.forked_from, Some(t11));
@@ -18426,6 +18705,7 @@ mod tests {
                 local_project_id: binding.local_project_id.clone(),
                 provider_profile_id: profile_for_binding.clone(),
                 thread_id: logical_thread.clone(),
+                cloud_thread_id: None,
                 forked_from: None,
                 preserved: None,
                 root_tail_layout: Some(RootTailLayout {
@@ -18913,9 +19193,9 @@ mod tests {
             .map(|(_, _, thread)| thread.resource_id.clone())
             .collect::<BTreeSet<_>>();
         assert_eq!(portable_conversation_ids.len(), 3);
-        assert!(portable_conversation_ids
-            .iter()
-            .all(|resource_id| { parse_conversation_resource_id(resource_id.as_str()).is_ok() }));
+        assert!(portable_conversation_ids.iter().all(|resource_id| {
+            mallard_domain::parse_cloud_conversation_resource_id(resource_id.as_str()).is_ok()
+        }));
         let third = snapshot
             .manifest
             .all_conversations()
@@ -18952,20 +19232,20 @@ mod tests {
         assert!(selected_destination_recipe
             .entries
             .keys()
-            .all(|resource_id| { parse_conversation_resource_id(resource_id.as_str()).is_err() }));
+            .all(|resource_id| { !is_conversation_resource_id(resource_id.as_str()) }));
 
         let clean_review =
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
         assert!(clean_review.inventory.resources.iter().all(|resource| {
-            parse_conversation_resource_id(resource.descriptor.resource_id.as_str()).is_err()
+            !is_conversation_resource_id(resource.descriptor.resource_id.as_str())
         }));
         assert!(clean_review
             .inventory
             .recipe
             .entries
             .keys()
-            .all(|resource_id| { parse_conversation_resource_id(resource_id.as_str()).is_err() }));
+            .all(|resource_id| { !is_conversation_resource_id(resource_id.as_str()) }));
         // A later reviewed selection belongs only to this destination.
         let pushed_empty = push_bundle_with_recipe_with_repository(
             &repo,
@@ -21153,7 +21433,7 @@ mod tests {
         let parent_provider_id = "019f7500-0000-7000-8000-0000000000f0";
         let child_provider_id = "019f7500-0000-7000-8000-0000000000f1";
         let parent = ThreadSpec::new(
-            "stored-parent",
+            "cloudthread-stored-parent",
             parent_provider_id,
             command_test_transcript(
                 parent_provider_id,
@@ -21164,7 +21444,7 @@ mod tests {
             10,
         );
         let child = ThreadSpec::new(
-            "stored-subagent",
+            "cloudthread-stored-subagent",
             child_provider_id,
             command_test_subagent_transcript(
                 child_provider_id,
@@ -21198,12 +21478,15 @@ mod tests {
         let mut cloud_ids = comparison
             .entries
             .iter()
-            .map(|entry| entry.cloud_thread_id.as_ref().map(ThreadId::as_str))
+            .map(|entry| entry.cloud_thread_id.as_ref().map(CloudThreadId::as_str))
             .collect::<Vec<_>>();
         cloud_ids.sort_unstable();
         assert_eq!(
             cloud_ids,
-            vec![Some("stored-parent"), Some("stored-subagent")]
+            vec![
+                Some("cloudthread-stored-parent"),
+                Some("cloudthread-stored-subagent")
+            ]
         );
 
         let restore =
@@ -21211,9 +21494,15 @@ mod tests {
                 .unwrap();
         assert!(restore.actions.is_empty());
         assert_eq!(restore.conversation_actions.len(), 1);
+        // CreateLocal carries no local identity at plan time; the reviewed
+        // cloud row is the action's only id.
+        assert_eq!(restore.conversation_actions[0].thread_id, None);
         assert_eq!(
-            restore.conversation_actions[0].thread_id.as_str(),
-            "stored-parent"
+            restore.conversation_actions[0]
+                .cloud_thread_id
+                .as_ref()
+                .map(CloudThreadId::as_str),
+            Some("cloudthread-stored-parent")
         );
     }
 
@@ -21271,7 +21560,7 @@ mod tests {
         // Two stored threads with no local copy — the offerable set — and
         // one local-only session, which needs no cloud bytes in any mode.
         let stored_a = ThreadSpec::new(
-            "stored-a",
+            "cloudthread-stored-a",
             "019f7600-0000-7000-8000-0000000000a0",
             command_test_transcript(
                 "019f7600-0000-7000-8000-0000000000a0",
@@ -21282,7 +21571,7 @@ mod tests {
             10,
         );
         let stored_b = ThreadSpec::new(
-            "stored-b",
+            "cloudthread-stored-b",
             "019f7600-0000-7000-8000-0000000000b0",
             command_test_transcript(
                 "019f7600-0000-7000-8000-0000000000b0",
@@ -21334,7 +21623,6 @@ mod tests {
                 Some(&snapshot),
                 &mut bytes,
                 &views,
-                None,
                 &captured,
                 &BTreeMap::new(),
                 &resolved,
@@ -21364,7 +21652,6 @@ mod tests {
             Some(&snapshot),
             &mut bytes,
             &views,
-            None,
             &captured,
             &BTreeMap::new(),
             &resolved,
@@ -21419,7 +21706,6 @@ mod tests {
             Some(&oversized_snapshot),
             &mut bytes,
             &views,
-            None,
             &captured,
             &BTreeMap::new(),
             &resolved,
@@ -21597,7 +21883,7 @@ mod tests {
         };
         let stored_provider_id = "019f7500-0000-7000-8000-0000000000a0";
         let stored = ThreadSpec::new(
-            "stored-thread",
+            "cloudthread-stored-thread",
             stored_provider_id,
             command_test_transcript(
                 stored_provider_id,
@@ -21629,6 +21915,7 @@ mod tests {
                 local_project_id: binding.local_project_id.clone(),
                 provider_profile_id: profile_id,
                 thread_id: ThreadId::parse("thread-phantom").unwrap(),
+                cloud_thread_id: None,
                 forked_from: None,
                 preserved: None,
                 root_tail_layout: Some(RootTailLayout {
@@ -21657,7 +21944,9 @@ mod tests {
             .entries
             .iter()
             .find(|entry| {
-                entry.cloud_thread_id.as_ref().map(ThreadId::as_str) == Some("thread-phantom")
+                // A local-only binding has no cloud mapping; its row keys by
+                // the local resource id.
+                entry.conversation_resource_id.as_str() == "codex:conversation:thread-phantom"
             })
             .expect("phantom binding surfaces as its own row");
         assert_eq!(
@@ -21670,7 +21959,8 @@ mod tests {
             .entries
             .iter()
             .find(|entry| {
-                entry.cloud_thread_id.as_ref().map(ThreadId::as_str) == Some("stored-thread")
+                entry.cloud_thread_id.as_ref().map(CloudThreadId::as_str)
+                    == Some("cloudthread-stored-thread")
             })
             .expect("stored thread still classifies normally");
         assert_eq!(
@@ -21826,7 +22116,7 @@ mod tests {
         assert_eq!(stored_thread.thread_id, session_id);
         assert_eq!(
             stored_thread.resource_id,
-            conversation_resource_id(&codex_key(), &cloud_thread_id).unwrap()
+            cloud_conversation_resource_id(&codex_key(), &cloud_thread_id).unwrap()
         );
         assert_eq!(stored_thread.display_name, "Change glb color to yellow");
         assert!(
@@ -21849,13 +22139,15 @@ mod tests {
         let conversation_action = restore
             .conversation_actions
             .iter()
-            .find(|action| action.thread_id == cloud_thread_id)
+            .find(|action| action.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
             .cloned()
             .unwrap();
         assert_eq!(
             conversation_action.action,
             ConversationPlanActionType::CreateLocal
         );
+        // Plans are pure intent: CreateLocal names no local identity.
+        assert_eq!(conversation_action.thread_id, None);
         let before =
             get_bundle_readiness_with_repository(&repo, &storage_id, &bundle_id, &target_binding)
                 .unwrap();
@@ -21881,15 +22173,46 @@ mod tests {
             .applied_action_ids
             .contains(&conversation_action.action_id));
 
-        let restored_session_path = conversation_action
-            .pins
-            .target
-            .provider_state
-            .iter()
-            .find(|target| !target.target_path.ends_with("session_index.jsonl"))
+        // Apply minted the provider id and derived the local thread id; the
+        // binding records the pairing and the checkpoint records the
+        // installed rollout path. Neither identity appears in the plan.
+        let target_pulled_row = repo
+            .load_conversation_bindings()
             .unwrap()
-            .target_path
-            .clone();
+            .bindings
+            .into_iter()
+            .find(|row| {
+                row.local_project_id == target.local_project_id
+                    && row.cloud_thread_id.as_ref() == Some(&cloud_thread_id)
+            })
+            .unwrap();
+        let target_local_thread_id = target_pulled_row.thread_id.clone();
+        assert_ne!(
+            target_local_thread_id.as_str(),
+            cloud_thread_id.as_str(),
+            "the puller's local id never adopts the cloud id"
+        );
+        let restored_session_path = {
+            let config = repo.load_config().unwrap();
+            let checkpoint = config
+                .links
+                .iter()
+                .find(|link| {
+                    link.local_project_id == target.local_project_id
+                        && link.storage_id == storage_id
+                })
+                .and_then(|link| {
+                    link.conversation_checkpoints
+                        .get(&SyncScopeKey::Provider(codex_key()))
+                })
+                .and_then(|threads| threads.get(&target_local_thread_id))
+                .cloned()
+                .unwrap();
+            let PhysicalMappingState::Ready { root_mapping, .. } = &checkpoint.physical else {
+                panic!("pulled conversation has no ready mapping");
+            };
+            root_mapping.root_path.clone()
+        };
         let restored_session = std::fs::read_to_string(&restored_session_path).unwrap();
         let rows = restored_session
             .lines()
@@ -21973,7 +22296,8 @@ mod tests {
                 link.local_project_id == target.local_project_id && link.storage_id == storage_id
             })
             .unwrap();
-        let cloud_resource_id = conversation_resource_id(&codex_key(), &cloud_thread_id).unwrap();
+        let cloud_resource_id =
+            cloud_conversation_resource_id(&codex_key(), &cloud_thread_id).unwrap();
         assert!(!target_link
             .recipe
             .as_ref()
@@ -21990,7 +22314,7 @@ mod tests {
                 link.conversation_checkpoints
                     .get(&SyncScopeKey::Provider(codex_key()))
             })
-            .and_then(|threads| threads.get(&cloud_thread_id))
+            .and_then(|threads| threads.get(&target_local_thread_id))
             .unwrap();
         let PhysicalMappingState::Ready { root_mapping, .. } = &checkpoint.physical else {
             panic!("pulled conversation has no ready mapping");
@@ -22038,31 +22362,12 @@ mod tests {
         let update = source_pull
             .conversation_actions
             .iter()
-            .find(|action| action.thread_id == cloud_thread_id)
+            .find(|action| action.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
             .unwrap();
         assert_eq!(update.action, ConversationPlanActionType::MaterializeCloud);
-        let relocated_source_id = update
-            .proposed_provider_thread_id
-            .as_deref()
-            .expect("Codex cloud update mints a fresh provider id");
-        assert_ne!(relocated_source_id, session_id);
-        let transcript_targets = update
-            .pins
-            .target
-            .provider_state
-            .iter()
-            .filter(|target| {
-                target.target_path.ends_with(".jsonl")
-                    && !target.target_path.ends_with("session_index.jsonl")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(transcript_targets.len(), 1);
-        let relocated_source_session = PathBuf::from(&transcript_targets[0].target_path);
-        assert_ne!(
-            relocated_source_session,
-            std::fs::canonicalize(&source_session).unwrap()
-        );
-        assert_eq!(transcript_targets[0].expectation, TargetExpectation::Absent);
+        // Plans carry intent only: the fresh provider identity and its
+        // destination exist only at apply, which asserts the destination
+        // Absent itself.
         let source_bytes_before_update = std::fs::read(&source_session).unwrap();
         let source_applied = apply_bundle_restore_with_repository(
             &repo,
@@ -22082,12 +22387,20 @@ mod tests {
             .into_iter()
             .find(|binding| {
                 binding.local_project_id == source.local_project_id
-                    && binding.thread_id == cloud_thread_id
+                    && binding.cloud_thread_id.as_ref() == Some(&cloud_thread_id)
             })
             .unwrap();
-        assert_eq!(
-            source_row.provider_thread_id.as_deref(),
-            Some(relocated_source_id)
+        let relocated_source_id = source_row
+            .provider_thread_id
+            .clone()
+            .expect("Codex cloud update minted a fresh provider id at apply");
+        assert_ne!(relocated_source_id, session_id);
+        let relocated_source_session =
+            find_rollout(&source_codex.join("sessions"), relocated_source_id.as_str())
+                .expect("copy-on-write installed a fresh rollout");
+        assert_ne!(
+            relocated_source_session,
+            std::fs::canonicalize(&source_session).unwrap()
         );
         assert_eq!(
             std::fs::read(&source_session).unwrap(),
@@ -22175,8 +22488,9 @@ mod tests {
             push_bundle_with_repository(&repo, &target.local_project_id, &storage_id).unwrap();
         assert_eq!(pushed.revision, Some(3));
 
-        // The keep-both marker names this device; provenance and the marker
-        // title are minted into the plan itself.
+        // The keep-both marker names this device; the preserved identity,
+        // provenance, and marker title are minted at apply and surface
+        // through the journal-sourced receipt — the plan carries none.
         let identity = repo.load_or_create_host_identity().unwrap();
         repo.update_host_display_name(
             &identity.host_id,
@@ -22190,24 +22504,13 @@ mod tests {
         let divergent_action = divergent_pull
             .conversation_actions
             .iter()
-            .find(|action| action.thread_id == cloud_thread_id)
+            .find(|action| action.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
             .unwrap();
         assert_eq!(
             divergent_action.action,
             ConversationPlanActionType::KeepBoth
         );
-        let keep_both = divergent_action.keep_both.as_ref().unwrap();
-        let preserved_thread_id = keep_both.preserved_thread_id.clone();
-        let remote_provider_thread_id = keep_both.remote_provider_thread_id.clone();
         let marker_title = "Change glb color to yellow (Preserved 1 · Machine A)";
-        assert_eq!(
-            keep_both.preserved,
-            PreservedProvenance {
-                preserved_from: cloud_thread_id.clone(),
-                ordinal: 1,
-            }
-        );
-        assert_eq!(keep_both.preserved_display_title, marker_title);
         let divergent_result = apply_bundle_restore_with_repository(
             &repo,
             &divergent_pull.plan_id,
@@ -22220,10 +22523,9 @@ mod tests {
             divergent_result.failed_actions
         );
         assert_eq!(divergent_result.preserved_threads.len(), 1);
-        assert_eq!(
-            divergent_result.preserved_threads[0].preserved_thread_id,
-            preserved_thread_id
-        );
+        let preserved_thread_id = divergent_result.preserved_threads[0]
+            .preserved_thread_id
+            .clone();
         assert_eq!(
             divergent_result.preserved_threads[0].preserved_display_title,
             marker_title
@@ -22242,8 +22544,10 @@ mod tests {
             .unwrap();
         let pulled = source_bindings
             .iter()
-            .find(|binding| binding.thread_id == cloud_thread_id)
+            .find(|binding| binding.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
             .unwrap();
+        // The preserved branch detaches from the cloud thread entirely.
+        assert_eq!(preserved.cloud_thread_id, None);
         assert_eq!(
             preserved.preserved,
             Some(PreservedProvenance {
@@ -22254,12 +22558,13 @@ mod tests {
         assert!(pulled.preserved.is_none());
         assert_eq!(
             preserved.provider_thread_id.as_deref(),
-            Some(relocated_source_id)
+            Some(relocated_source_id.as_str())
         );
-        assert_eq!(
-            pulled.provider_thread_id.as_deref(),
-            Some(remote_provider_thread_id.as_str())
-        );
+        let remote_provider_thread_id = pulled
+            .provider_thread_id
+            .clone()
+            .expect("keep-both minted the remote branch's provider id at apply");
+        assert_ne!(remote_provider_thread_id, relocated_source_id);
         assert_ne!(preserved.thread_id, pulled.thread_id);
 
         // One transaction renamed the preserved copy's existing index row to
@@ -22272,7 +22577,7 @@ mod tests {
             .collect::<Vec<_>>();
         let marker_rows = divergent_rows
             .iter()
-            .filter(|row| row["id"] == relocated_source_id)
+            .filter(|row| row["id"] == relocated_source_id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(marker_rows.len(), 1);
         assert_eq!(marker_rows[0]["thread_name"], marker_title);
@@ -22311,11 +22616,25 @@ mod tests {
         let pushed_preserved =
             push_bundle_with_repository(&repo, &source.local_project_id, &storage_id).unwrap();
         assert_eq!(pushed_preserved.revision, Some(4));
+        // The preserved branch's first push minted a fresh cloud identity
+        // and committed the mapping on its binding row.
+        let preserved_cloud_id = repo
+            .load_conversation_bindings()
+            .unwrap()
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.local_project_id == source.local_project_id
+                    && binding.thread_id == preserved_thread_id
+            })
+            .and_then(|binding| binding.cloud_thread_id.clone())
+            .expect("preserved branch push committed a fresh mapping");
+        assert_ne!(preserved_cloud_id, cloud_thread_id);
         let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
         let published = engine.inspect(&bundle_id).unwrap();
         let (_, preserved_record) = published
             .manifest
-            .find_conversation(&preserved_thread_id)
+            .find_conversation(&preserved_cloud_id)
             .unwrap();
         assert_eq!(
             preserved_record.preserved,
@@ -22350,7 +22669,7 @@ mod tests {
         let preserved_action = target_pull
             .conversation_actions
             .iter()
-            .find(|action| action.thread_id == preserved_thread_id)
+            .find(|action| action.cloud_thread_id.as_ref() == Some(&preserved_cloud_id))
             .unwrap();
         assert_eq!(
             preserved_action.action,
@@ -22374,9 +22693,13 @@ mod tests {
             .into_iter()
             .find(|binding| {
                 binding.local_project_id == target.local_project_id
-                    && binding.thread_id == preserved_thread_id
+                    && binding.cloud_thread_id.as_ref() == Some(&preserved_cloud_id)
             })
             .unwrap();
+        assert_ne!(
+            target_preserved_row.thread_id, preserved_thread_id,
+            "each machine keeps its own local identity for the preserved thread"
+        );
         assert_eq!(
             target_preserved_row.preserved,
             Some(PreservedProvenance {
@@ -22461,20 +22784,38 @@ mod tests {
         let second_action = second_divergent
             .conversation_actions
             .iter()
-            .find(|action| action.thread_id == cloud_thread_id)
+            .find(|action| action.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
             .unwrap();
         assert_eq!(second_action.action, ConversationPlanActionType::KeepBoth);
-        let second_keep_both = second_action.keep_both.as_ref().unwrap();
+        // Ordinal and marker compose at apply: max+1 over cloud and binding
+        // provenance in the cloud id space, never a count of copies.
+        let second_result = apply_bundle_restore_with_repository(
+            &repo,
+            &second_divergent.plan_id,
+            vec![second_action.action_id.clone()],
+        )
+        .unwrap();
+        assert!(second_result.success, "{:?}", second_result.failed_actions);
+        assert_eq!(second_result.preserved_threads.len(), 1);
         assert_eq!(
-            second_keep_both.preserved,
-            PreservedProvenance {
+            second_result.preserved_threads[0].preserved_display_title,
+            "Change glb color to yellow (Preserved 6 · Machine A)"
+        );
+        let second_preserved_row = repo
+            .load_conversation_bindings()
+            .unwrap()
+            .bindings
+            .into_iter()
+            .find(|binding| {
+                binding.thread_id == second_result.preserved_threads[0].preserved_thread_id
+            })
+            .unwrap();
+        assert_eq!(
+            second_preserved_row.preserved,
+            Some(PreservedProvenance {
                 preserved_from: cloud_thread_id.clone(),
                 ordinal: 6,
-            }
-        );
-        assert_eq!(
-            second_keep_both.preserved_display_title,
-            "Change glb color to yellow (Preserved 6 · Machine A)"
+            })
         );
     }
 
@@ -23262,7 +23603,7 @@ mod tests {
             .recipe
             .entries
             .keys()
-            .all(|resource_id| parse_conversation_resource_id(resource_id.as_str()).is_err()));
+            .all(|resource_id| !is_conversation_resource_id(resource_id.as_str())));
         assert_eq!(second_binding.replica_id, first_binding.replica_id);
         assert_eq!(second_binding.revision, detached.revision + 1);
 
@@ -23501,23 +23842,9 @@ mod tests {
         let action = pull
             .conversation_actions
             .iter()
-            .find(|action| action.thread_id == base_thread_id)
+            .find(|action| action.thread_id.as_ref() == Some(&base_thread_id))
             .expect("cloud-advanced base is materializable");
         assert_eq!(action.action, ConversationPlanActionType::MaterializeCloud);
-        let fresh_id = action
-            .proposed_provider_thread_id
-            .as_deref()
-            .expect("relocation mints a provider id");
-        assert_ne!(fresh_id, base_id);
-        let transcript_target = action
-            .pins
-            .target
-            .provider_state
-            .iter()
-            .find(|target| !target.target_path.ends_with("session_index.jsonl"))
-            .unwrap();
-        assert_eq!(transcript_target.expectation, TargetExpectation::Absent);
-        assert_ne!(Path::new(&transcript_target.target_path), base_rollout);
 
         let applied = apply_bundle_restore_with_repository(
             &fixture.repo,
@@ -23535,7 +23862,13 @@ mod tests {
             .into_iter()
             .find(|binding| binding.thread_id == base_thread_id)
             .unwrap();
-        assert_eq!(moved.provider_thread_id.as_deref(), Some(fresh_id));
+        // Copy-on-write minted the fresh alias at apply; the plan carried
+        // no provider identity at all.
+        let fresh_id = moved
+            .provider_thread_id
+            .clone()
+            .expect("relocation minted a provider id at apply");
+        assert_ne!(fresh_id, base_id);
         let retained_thread_id =
             retained_conversation_thread_id(&bundle_id, &codex_key(), &base_thread_id, base_id)
                 .unwrap();
@@ -23711,7 +24044,10 @@ mod tests {
             .iter()
             .find(|binding| binding.thread_id == base_thread_id)
             .unwrap();
-        assert_eq!(moved_binding.provider_thread_id.as_deref(), Some(fresh_id));
+        assert_eq!(
+            moved_binding.provider_thread_id.as_deref(),
+            Some(fresh_id.as_str())
+        );
 
         // Reusing and later copy-on-writing the retained branch must advance
         // its identity generation. R1 moving away from the same native alias
@@ -23767,19 +24103,13 @@ mod tests {
         let retained_action = second_pull
             .conversation_actions
             .iter()
-            .find(|action| action.thread_id == retained_thread_id)
+            .find(|action| action.thread_id.as_ref() == Some(&retained_thread_id))
             .expect("cloud-advanced retained branch is materializable")
             .clone();
         assert_eq!(
             retained_action.action,
             ConversationPlanActionType::MaterializeCloud
         );
-        let retained_fresh_id = retained_action
-            .proposed_provider_thread_id
-            .as_deref()
-            .expect("retained branch update also uses copy-on-write")
-            .to_string();
-        assert_ne!(retained_fresh_id, base_id);
         let second_applied = apply_bundle_restore_with_repository(
             &fixture.repo,
             &second_pull.plan_id,
@@ -23797,14 +24127,15 @@ mod tests {
                 .unwrap();
         assert_ne!(second_retained_thread_id, retained_thread_id);
         let bindings = fixture.repo.load_conversation_bindings().unwrap();
-        assert_eq!(
-            bindings
-                .bindings
-                .iter()
-                .find(|binding| binding.thread_id == retained_thread_id)
-                .and_then(|binding| binding.provider_thread_id.as_deref()),
-            Some(retained_fresh_id.as_str())
-        );
+        // The retained branch's update also relocated under an alias minted
+        // at apply.
+        let retained_fresh_id = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.thread_id == retained_thread_id)
+            .and_then(|binding| binding.provider_thread_id.clone())
+            .expect("retained branch update minted a provider id at apply");
+        assert_ne!(retained_fresh_id, base_id);
         let unchanged_again = get_project_thread_sync_comparison_with_repository(
             &fixture.repo,
             &project_id,
@@ -23930,27 +24261,10 @@ mod tests {
         let action = pull
             .conversation_actions
             .iter()
-            .find(|action| action.thread_id == base_thread_id)
+            .find(|action| action.thread_id.as_ref() == Some(&base_thread_id))
             .expect("cloud-advanced base is materializable")
             .clone();
         assert_eq!(action.action, ConversationPlanActionType::MaterializeCloud);
-        let fresh_id = action
-            .proposed_provider_thread_id
-            .as_deref()
-            .expect("Codex cloud update mints a fresh provider id");
-        assert_ne!(fresh_id, base_id);
-        let transcript_target = action
-            .pins
-            .target
-            .provider_state
-            .iter()
-            .find(|target| !target.target_path.ends_with("session_index.jsonl"))
-            .unwrap();
-        assert_eq!(transcript_target.expectation, TargetExpectation::Absent);
-        assert_ne!(
-            Path::new(&transcript_target.target_path),
-            std::fs::canonicalize(&base_rollout).unwrap()
-        );
 
         // A native fork is created after the reviewed target and binding
         // pins were captured. Copy-on-write never targets the ancestor, so
@@ -24011,8 +24325,39 @@ mod tests {
             .into_iter()
             .find(|binding| binding.thread_id == base_thread_id)
             .unwrap();
-        assert_eq!(moved.provider_thread_id.as_deref(), Some(fresh_id));
-        assert!(Path::new(&transcript_target.target_path).is_file());
+        // Copy-on-write minted the fresh alias and its destination at apply.
+        let fresh_id = moved
+            .provider_thread_id
+            .clone()
+            .expect("Codex cloud update minted a fresh provider id at apply");
+        assert_ne!(fresh_id, base_id);
+        let relocated_rollout = {
+            let mut stack = vec![fixture.codex_home.join("sessions")];
+            let mut found = None;
+            while let Some(directory) = stack.pop() {
+                for entry in std::fs::read_dir(&directory)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.contains(fresh_id.as_str()))
+                    {
+                        found = Some(path);
+                    }
+                }
+            }
+            found.expect("copy-on-write installed a fresh rollout")
+        };
+        assert_ne!(
+            relocated_rollout,
+            std::fs::canonicalize(&base_rollout).unwrap()
+        );
         codex_history_graph::resolve_codex_root(
             &leaf_rollout,
             &codex_rollout_lookup(&fixture.codex_home),
@@ -24147,6 +24492,7 @@ mod tests {
             provider_profile_id: profile_id.clone(),
             provider: codex_key(),
             thread_id: thread_id.clone(),
+            cloud_thread_id: CloudThreadId::parse("cloudthread-owner-check").unwrap(),
             operation: ConversationSyncOperationKind::CloudPublication(
                 ConversationPublicationOperation {
                     phase: PushJournalPhase::CandidateUploaded,
@@ -24189,6 +24535,7 @@ mod tests {
             local_project_id: LocalProjectId::parse("project-old-owner").unwrap(),
             provider_profile_id: profile_id,
             thread_id,
+            cloud_thread_id: None,
             forked_from: None,
             preserved: None,
             root_tail_layout: Some(RootTailLayout {

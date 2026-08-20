@@ -696,15 +696,15 @@ fn sealed_project_scope() -> BundleScope {
 }
 
 struct ProviderScopeParts {
-    thread_id: ThreadId,
+    thread_id: CloudThreadId,
     scope: BundleScope,
 }
 
 fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderScopeParts {
     let key = provider(provider_key);
-    let thread_id = ThreadId::parse(format!("thread-{}", thread_suffix)).unwrap();
-    let resource = conversation_resource_id(&key, &thread_id).unwrap();
-    let transcript_path = conversation_transcript_path(&key, &thread_id).unwrap();
+    let thread_id = CloudThreadId::parse(format!("cloudthread-{}", thread_suffix)).unwrap();
+    let resource = cloud_conversation_resource_id(&key, &thread_id).unwrap();
+    let transcript_path = cloud_conversation_transcript_path(&key, &thread_id).unwrap();
     let chain = vec![
         canonical_message("m-a", None, 'a'),
         canonical_message("m-b", Some("m-a"), 'b'),
@@ -926,8 +926,8 @@ fn duplicate_threads_across_scopes_are_rejected() {
     // Build a claude scope embedding a thread with the same thread id.
     let claude_key = provider("claude");
     let thread_id = codex.thread_id.clone();
-    let resource = conversation_resource_id(&claude_key, &thread_id).unwrap();
-    let transcript_path = conversation_transcript_path(&claude_key, &thread_id).unwrap();
+    let resource = cloud_conversation_resource_id(&claude_key, &thread_id).unwrap();
+    let transcript_path = cloud_conversation_transcript_path(&claude_key, &thread_id).unwrap();
     let chain = vec![canonical_message("m-a", None, 'a')];
     let (lineage_digest, semantic_digest) = conversation_chain_digests(&chain).unwrap();
     let thread = ConversationThread {
@@ -1168,7 +1168,7 @@ fn project_content_tombstones_are_typed_and_path_bound() {
         let scope = manifest.scopes.get_mut(&SyncScopeKey::Project).unwrap();
         let tombstone = Tombstone {
             target: TombstoneTarget::ConversationThread {
-                thread_id: ThreadId::parse("thread-a").unwrap(),
+                thread_id: CloudThreadId::parse("cloudthread-a").unwrap(),
             },
             last_sha256: Some("a".repeat(64)),
             deleted_at: 2,
@@ -1336,7 +1336,7 @@ fn conversation_sidecars_stay_inside_their_thread_namespace() {
     let scope_key = SyncScopeKey::Provider(key.clone());
     let mut scope = parts.scope;
     let sidecar_path =
-        conversation_sidecar_path(&key, &parts.thread_id, "todos", "todo.json").unwrap();
+        cloud_conversation_sidecar_path(&key, &parts.thread_id, "todos", "todo.json").unwrap();
     let owner = scope.files.values().next().unwrap().resource_id.clone();
     {
         let thread = scope.conversations.values_mut().next().unwrap();
@@ -1393,10 +1393,9 @@ fn push_action(
         action_id: ActionId::parse(action_id).unwrap(),
         action: ConversationPlanActionType::CreateCloud,
         provider: provider(provider_key),
-        thread_id: ThreadId::parse(format!("thread-{}", thread_suffix)).unwrap(),
+        thread_id: Some(ThreadId::parse(format!("thread-{}", thread_suffix)).unwrap()),
+        cloud_thread_id: None,
         source_resource_id: None,
-        proposed_provider_thread_id: None,
-        keep_both: None,
         pins: ConversationActionPins {
             context: ConversationContextPins {
                 host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
@@ -2268,6 +2267,7 @@ fn conversation_bindings_carry_validated_layouts() {
         local_project_id: LocalProjectId::parse("project-a").unwrap(),
         provider_profile_id: LocalProviderProfileId::parse("profile-codex").unwrap(),
         thread_id: ThreadId::parse("thread-1").unwrap(),
+        cloud_thread_id: Some(CloudThreadId::parse("cloudthread-1").unwrap()),
         forked_from: None,
         preserved: None,
         root_tail_layout: Some(RootTailLayout {
@@ -2355,36 +2355,41 @@ fn preserved_titles_compose_and_strip_deterministically() {
 
 #[test]
 fn preserved_provenance_validates_on_every_carrier() {
-    let carrier = ThreadId::parse("thread-copy").unwrap();
-    let origin = ThreadId::parse("thread-origin").unwrap();
+    // Provenance is always cloud-space; a local carrier can no longer be
+    // named by it at all, so the self-preserve check exists only where the
+    // carrier is itself cloud-space (cloud rows).
+    let carrier = CloudThreadId::parse("cloudthread-copy").unwrap();
+    let origin = CloudThreadId::parse("cloudthread-origin").unwrap();
     PreservedProvenance {
         preserved_from: origin.clone(),
         ordinal: 1,
     }
-    .validate(&carrier)
+    .validate_for_cloud_row(&carrier)
     .unwrap();
     assert!(PreservedProvenance {
         preserved_from: origin.clone(),
         ordinal: 0,
     }
-    .validate(&carrier)
+    .validate()
     .unwrap_err()
-    .contains("zero preservation ordinal"));
+    .contains("zero ordinal"));
     assert!(PreservedProvenance {
         preserved_from: carrier.clone(),
         ordinal: 1,
     }
-    .validate(&carrier)
+    .validate_for_cloud_row(&carrier)
     .unwrap_err()
     .contains("preserved from itself"));
 
-    // Binding-level: the carrier is the binding's thread.
+    // Binding-level: the local carrier is type-distinct from the cloud-space
+    // provenance, so only the ordinal rule applies.
     let binding = LocalConversationBinding {
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         replica_id: ReplicaId::parse("replica-a").unwrap(),
         local_project_id: LocalProjectId::parse("project-a").unwrap(),
         provider_profile_id: LocalProviderProfileId::parse("profile-codex").unwrap(),
-        thread_id: carrier.clone(),
+        thread_id: ThreadId::parse("thread-copy").unwrap(),
+        cloud_thread_id: None,
         forked_from: None,
         preserved: Some(PreservedProvenance {
             preserved_from: origin.clone(),
@@ -2398,12 +2403,6 @@ fn preserved_provenance_validates_on_every_carrier() {
         updated_at: 1,
     };
     binding.validate().unwrap();
-    let mut self_preserved = binding.clone();
-    self_preserved.preserved = Some(PreservedProvenance {
-        preserved_from: carrier.clone(),
-        ordinal: 1,
-    });
-    assert!(self_preserved.validate().is_err());
     let mut zero_ordinal = binding;
     zero_ordinal.preserved = Some(PreservedProvenance {
         preserved_from: origin.clone(),
@@ -2436,10 +2435,7 @@ fn preserved_provenance_validates_on_every_carrier() {
         preserved_from: origin,
         ordinal: 0,
     });
-    assert!(thread
-        .validate()
-        .unwrap_err()
-        .contains("zero preservation ordinal"));
+    assert!(thread.validate().unwrap_err().contains("zero ordinal"));
 }
 
 #[test]
@@ -2519,6 +2515,7 @@ fn publication_operation(chain: &[CanonicalConversationMessage]) -> Conversation
         provider_profile_id: LocalProviderProfileId::parse("profile-codex").unwrap(),
         provider: provider("codex"),
         thread_id: ThreadId::parse("thread-1").unwrap(),
+        cloud_thread_id: CloudThreadId::parse("cloudthread-1").unwrap(),
         operation: ConversationSyncOperationKind::CloudPublication(
             ConversationPublicationOperation {
                 phase: PushJournalPhase::CandidateUploaded,
@@ -2627,6 +2624,11 @@ fn journal_operations_validate_phase_payloads() {
             keep_both: Some(KeepBothJournal {
                 preserved_thread_id: ThreadId::parse("thread-preserved").unwrap(),
                 remote_provider_thread_id: "0199a1b2-0000-7000-8000-000000000002".to_string(),
+                preserved: PreservedProvenance {
+                    preserved_from: CloudThreadId::parse("cloudthread-1").unwrap(),
+                    ordinal: 1,
+                },
+                preserved_display_title: "Conversation (Preserved 1 · Machine A)".to_string(),
             }),
             sync_config_before: SyncConfig::default(),
             sync_config_after: SyncConfig::default(),
@@ -2647,6 +2649,19 @@ fn journal_operations_validate_phase_payloads() {
         .validate()
         .unwrap_err()
         .contains("own thread"));
+
+    // The minted provenance must name the operation's own cloud thread.
+    let mut mismatched_provenance = materialization.clone();
+    if let ConversationSyncOperationKind::ProviderMaterialization(pull) =
+        &mut mismatched_provenance.operation
+    {
+        pull.keep_both.as_mut().unwrap().preserved.preserved_from =
+            CloudThreadId::parse("cloudthread-other").unwrap();
+    }
+    assert!(mismatched_provenance
+        .validate()
+        .unwrap_err()
+        .contains("must name the operation's cloud thread"));
 
     let mut keep_both_without_divergence = materialization.clone();
     if let ConversationSyncOperationKind::ProviderMaterialization(pull) =
@@ -2707,6 +2722,9 @@ fn plan_actions_validate_relation_action_and_pins() {
 
     let mut publish = push_action("action-4", "codex", "profile-codex", "4");
     publish.action = ConversationPlanActionType::Publish;
+    // Publish always carries its mapping; only an unmapped CreateCloud may
+    // omit the cloud id (minted at apply).
+    publish.cloud_thread_id = Some(CloudThreadId::parse("cloudthread-4").unwrap());
     publish.pins.tail.accepted = Some(t4.clone());
     publish.pins.tail.accepted_local = Some(t4.clone());
     publish.pins.tail.local = Some(t5.clone());
@@ -2717,7 +2735,8 @@ fn plan_actions_validate_relation_action_and_pins() {
     // executable action enum.
     let informational = ConversationReviewRow {
         provider: provider("codex"),
-        thread_id: ThreadId::parse("thread-info").unwrap(),
+        thread_id: Some(ThreadId::parse("thread-info").unwrap()),
+        cloud_thread_id: None,
         resource_id: ResourceId::parse("codex:conversation:thread-info").unwrap(),
         action: ConversationReviewAction::NoChanges,
         blocker: None,
@@ -2725,10 +2744,18 @@ fn plan_actions_validate_relation_action_and_pins() {
         action_id: None,
     };
     informational.validate().unwrap();
+    // A row must name at least one identity.
+    let mut nameless = informational.clone();
+    nameless.thread_id = None;
+    assert!(nameless
+        .validate()
+        .unwrap_err()
+        .contains("names no identity"));
 
-    // Keep-both requires its plan and never self-preserves.
+    // Keep-both is pure intent: it carries the id pair and mints nothing.
     let mut keep_both = push_action("action-6", "codex", "profile-codex", "6");
     keep_both.action = ConversationPlanActionType::KeepBoth;
+    keep_both.cloud_thread_id = Some(CloudThreadId::parse("cloudthread-6").unwrap());
     keep_both.pins.tail.accepted = Some(t4.clone());
     keep_both.pins.tail.accepted_local = Some(t4.clone());
     keep_both.pins.tail.local = Some(t5.clone());
@@ -2738,42 +2765,20 @@ fn plan_actions_validate_relation_action_and_pins() {
     keep_both.pins.tail.raw_range = None;
     keep_both.pins.tail.lineage_digest = Some("a".repeat(64));
     keep_both.pins.tail.semantic_digest = Some("b".repeat(64));
-    keep_both.keep_both = Some(KeepBothPlan {
-        preserved_thread_id: ThreadId::parse("thread-preserved").unwrap(),
-        remote_provider_thread_id: "0199a1b2-0000-7000-8000-000000000003".to_string(),
-        preserved: PreservedProvenance {
-            preserved_from: keep_both.thread_id.clone(),
-            ordinal: 1,
-        },
-        preserved_display_title: "Conversation (Preserved 1 · Machine A)".to_string(),
-    });
     keep_both.validate().unwrap();
-    let mut self_preserving = keep_both.clone();
-    self_preserving
-        .keep_both
-        .as_mut()
-        .unwrap()
-        .preserved_thread_id = self_preserving.thread_id.clone();
-    assert!(self_preserving.validate().is_err());
-    // The minted provenance must name the divergent thread it splits from.
-    let mut mismatched_provenance = keep_both.clone();
-    mismatched_provenance
-        .keep_both
-        .as_mut()
-        .unwrap()
-        .preserved
-        .preserved_from = ThreadId::parse("thread-other").unwrap();
-    assert!(mismatched_provenance
+    // Every pull action names its reviewed cloud row.
+    let mut cloudless = keep_both.clone();
+    cloudless.cloud_thread_id = None;
+    assert!(cloudless
         .validate()
         .unwrap_err()
-        .contains("must name the divergent thread"));
-    let mut planless = keep_both.clone();
-    planless.keep_both = None;
-    assert!(planless.validate().is_err());
+        .contains("requires its reviewed cloud thread id"));
 
-    // Materializing actions need provider identity and manifest digests.
+    // Materializing actions need manifest digests; provider identities are
+    // minted at apply and cannot inhabit a plan at all.
     let mut materialize = push_action("action-7", "codex", "profile-codex", "7");
     materialize.action = ConversationPlanActionType::MaterializeCloud;
+    materialize.cloud_thread_id = Some(CloudThreadId::parse("cloudthread-7").unwrap());
     materialize.pins.tail.accepted = Some(t4.clone());
     materialize.pins.tail.accepted_local = Some(t4.clone());
     materialize.pins.tail.local = Some(t4);
@@ -2781,16 +2786,20 @@ fn plan_actions_validate_relation_action_and_pins() {
     materialize.pins.tail.raw_range = None;
     materialize.pins.tail.lineage_digest = Some("a".repeat(64));
     materialize.pins.tail.semantic_digest = Some("b".repeat(64));
-    materialize.proposed_provider_thread_id =
-        Some("0199a1b2-0000-7000-8000-000000000004".to_string());
     materialize.validate().unwrap();
-    let mut no_identity = materialize.clone();
-    no_identity.proposed_provider_thread_id = None;
-    assert!(no_identity.validate().is_err());
     let mut no_digests = materialize.clone();
     no_digests.pins.tail.lineage_digest = None;
     no_digests.pins.tail.semantic_digest = None;
     assert!(no_digests.validate().is_err());
+
+    // CreateLocal is the only action without a local id; the pair matrix
+    // rejects every other combination.
+    let mut local_missing = materialize.clone();
+    local_missing.thread_id = None;
+    assert!(local_missing
+        .validate()
+        .unwrap_err()
+        .contains("local identity disagrees with its action"));
 
     // An action cannot be retagged without changing its tail evidence.
     let mut pull_publish = keep_both.clone();
@@ -2879,6 +2888,7 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
         local_project_id: LocalProjectId::parse("project-a").unwrap(),
         provider_profile_id: LocalProviderProfileId::parse("profile-codex").unwrap(),
         thread_id: ThreadId::parse("thread-1").unwrap(),
+        cloud_thread_id: None,
         forked_from: None,
         preserved: None,
         root_tail_layout: None,
@@ -2932,4 +2942,252 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
         .unwrap()
         .insert("binding_forked_from".to_string(), serde_json::json!(null));
     assert!(serde_json::from_value::<ConversationSyncOperation>(value).is_err());
+}
+
+// --- Cloud thread id decoupling ------------------------------------------------
+
+#[test]
+fn thread_id_spaces_are_structurally_disjoint() {
+    // The grammar boundary that makes cross-space collision unconstructible:
+    // a CloudThreadId must use the cloud namespace, a ThreadId never can.
+    CloudThreadId::parse("cloudthread-0123456789abcdef01234567").unwrap();
+    assert!(CloudThreadId::parse("thread-0123456789abcdef01234567")
+        .unwrap_err()
+        .contains("must start with 'cloudthread-'"));
+    assert!(ThreadId::parse("cloudthread-0123456789abcdef01234567")
+        .unwrap_err()
+        .contains("must not use the 'cloudthread-' cloud namespace"));
+    ThreadId::parse("thread-0123456789abcdef01234567").unwrap();
+
+    // A minted cloud id always parses into its own space and never the local
+    // one.
+    let minted = CloudThreadId::generate().unwrap();
+    assert!(minted.as_str().starts_with("cloudthread-"));
+    assert!(ThreadId::parse(minted.as_str()).is_err());
+
+    // A manifest conversation row outside the cloud namespace fails at the
+    // boundary: the map key cannot even deserialize as a CloudThreadId.
+    let parts = sealed_provider_scope("codex", "boundary");
+    let mut scope_value = serde_json::to_value(&parts.scope).unwrap();
+    let conversations = scope_value
+        .get_mut("conversations")
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    let row = conversations
+        .remove(parts.thread_id.as_str())
+        .expect("sealed scope carries its conversation row");
+    conversations.insert("thread-0123456789abcdef01234567".to_string(), row);
+    assert!(serde_json::from_value::<BundleScope>(scope_value).is_err());
+}
+
+#[test]
+fn pre_cutover_documents_fail_closed_on_missing_identity_keys() {
+    // Plain `Option` fields deserialize missing keys as `None` even without
+    // `#[serde(default)]`; the presence-requiring deserializer is what makes
+    // these keys mandatory. These are the exact document shapes a pre-cutover
+    // ~/.mallard would hold.
+    let binding = LocalConversationBinding {
+        host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+        replica_id: ReplicaId::parse("replica-a").unwrap(),
+        local_project_id: LocalProjectId::parse("project-a").unwrap(),
+        provider_profile_id: LocalProviderProfileId::parse("profile-codex").unwrap(),
+        thread_id: ThreadId::parse("thread-1").unwrap(),
+        cloud_thread_id: Some(CloudThreadId::parse("cloudthread-1").unwrap()),
+        forked_from: None,
+        preserved: None,
+        root_tail_layout: None,
+        provider_thread_id: None,
+        materialization_state: ConversationMaterializationState::StoredOnly,
+        revision: 1,
+        created_at: 1,
+        updated_at: 1,
+    };
+    let mut value = serde_json::to_value(&binding).unwrap();
+    // An explicit null is a valid unmapped row; a missing key is not.
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("cloud_thread_id".to_string(), serde_json::Value::Null);
+    let unmapped: LocalConversationBinding = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(unmapped.cloud_thread_id, None);
+    value.as_object_mut().unwrap().remove("cloud_thread_id");
+    assert!(serde_json::from_value::<LocalConversationBinding>(value).is_err());
+    // The mapped row always serializes the key.
+    let serialized = serde_json::to_value(&binding).unwrap();
+    assert!(serialized.as_object().unwrap().contains_key("cloud_thread_id"));
+
+    // A pre-cutover CreateCloud action: old `thread_id` string, no
+    // `cloud_thread_id` key, retired keys omitted-when-None. This is the
+    // exact shape that would otherwise silently execute under apply-minting.
+    let action = push_action("action-cutover", "codex", "profile-codex", "1");
+    let mut value = serde_json::to_value(&action).unwrap();
+    {
+        let object = value.as_object_mut().unwrap();
+        object.insert(
+            "thread_id".to_string(),
+            serde_json::json!("thread-0123456789abcdef01234567"),
+        );
+        object.remove("cloud_thread_id");
+    }
+    assert!(serde_json::from_value::<ConversationPlanAction>(value).is_err());
+    let mut value = serde_json::to_value(&action).unwrap();
+    value.as_object_mut().unwrap().remove("thread_id");
+    assert!(serde_json::from_value::<ConversationPlanAction>(value).is_err());
+    // Documents still carrying the retired minted-identity keys fail closed
+    // via deny_unknown_fields.
+    let mut value = serde_json::to_value(&action).unwrap();
+    value.as_object_mut().unwrap().insert(
+        "proposed_provider_thread_id".to_string(),
+        serde_json::json!("0199a1b2-0000-7000-8000-000000000001"),
+    );
+    assert!(serde_json::from_value::<ConversationPlanAction>(value).is_err());
+    let mut value = serde_json::to_value(&action).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("keep_both".to_string(), serde_json::json!(null));
+    assert!(serde_json::from_value::<ConversationPlanAction>(value).is_err());
+
+    // A pre-cutover journal operation lacks `cloud_thread_id` entirely; the
+    // required field fails natively.
+    let operation = publication_operation(&tail_chain());
+    let mut value = serde_json::to_value(&operation).unwrap();
+    value.as_object_mut().unwrap().remove("cloud_thread_id");
+    assert!(serde_json::from_value::<ConversationSyncOperation>(value).is_err());
+
+    // Review rows carry the same present-on-wire pair.
+    let row = ConversationReviewRow {
+        provider: provider("codex"),
+        thread_id: Some(ThreadId::parse("thread-1").unwrap()),
+        cloud_thread_id: None,
+        resource_id: ResourceId::parse("codex:conversation:thread-1").unwrap(),
+        action: ConversationReviewAction::NoChanges,
+        blocker: None,
+        blocked_reason: None,
+        action_id: None,
+    };
+    let mut value = serde_json::to_value(&row).unwrap();
+    value.as_object_mut().unwrap().remove("cloud_thread_id");
+    assert!(serde_json::from_value::<ConversationReviewRow>(value).is_err());
+}
+
+#[test]
+fn bindings_reject_duplicate_cloud_claims_per_scope() {
+    let host = HostId::parse("00112233445566778899aabbccddeeff").unwrap();
+    let row = |thread: &str, replica: &str, cloud: Option<&str>| LocalConversationBinding {
+        host_id: host.clone(),
+        replica_id: ReplicaId::parse(replica).unwrap(),
+        local_project_id: LocalProjectId::parse("project-a").unwrap(),
+        provider_profile_id: LocalProviderProfileId::parse("profile-codex").unwrap(),
+        thread_id: ThreadId::parse(thread).unwrap(),
+        cloud_thread_id: cloud.map(|value| CloudThreadId::parse(value).unwrap()),
+        forked_from: None,
+        preserved: None,
+        root_tail_layout: None,
+        provider_thread_id: None,
+        materialization_state: ConversationMaterializationState::StoredOnly,
+        revision: 1,
+        created_at: 1,
+        updated_at: 1,
+    };
+    let mut document = ConversationBindings::empty(host.clone());
+    document.bindings.push(row("thread-a", "replica-a", Some("cloudthread-shared")));
+    document.bindings.push(row("thread-b", "replica-a", Some("cloudthread-shared")));
+    assert!(document
+        .validate_structure()
+        .unwrap_err()
+        .contains("claimed by multiple conversations"));
+
+    // The same cloud id across scopes (different replicas) is legal, as are
+    // any number of unmapped rows.
+    let mut document = ConversationBindings::empty(host.clone());
+    document.bindings.push(row("thread-a", "replica-a", Some("cloudthread-shared")));
+    document.bindings.push(row("thread-b", "replica-b", Some("cloudthread-shared")));
+    document.bindings.push(row("thread-c", "replica-a", None));
+    document.bindings.push(row("thread-d", "replica-a", None));
+    document.validate_structure().unwrap();
+}
+
+#[test]
+fn journal_documents_enforce_per_space_pending_uniqueness() {
+    let chain = tail_chain();
+    let base = publication_operation(&chain);
+    let mut journal = ConversationSyncJournal::empty();
+
+    // Two operations for one local thread (same provider) are rejected.
+    let mut second = base.clone();
+    second.operation_id = ConversationOperationId::parse("op-2").unwrap();
+    second.plan_action_id = Some(ActionId::parse("action-2").unwrap());
+    second.cloud_thread_id = CloudThreadId::parse("cloudthread-2").unwrap();
+    journal.operations = vec![base.clone(), second.clone()];
+    assert!(journal
+        .validate()
+        .unwrap_err()
+        .contains("two operations for thread"));
+
+    // Two operations for one cloud thread are rejected even across distinct
+    // local threads — the retried-CreateLocal correlation.
+    second.thread_id = ThreadId::parse("thread-2").unwrap();
+    second.cloud_thread_id = base.cloud_thread_id.clone();
+    journal.operations = vec![base.clone(), second.clone()];
+    assert!(journal
+        .validate()
+        .unwrap_err()
+        .contains("two operations for cloud thread"));
+
+    // Two operations for one (plan, action) pair are rejected.
+    second.cloud_thread_id = CloudThreadId::parse("cloudthread-2").unwrap();
+    second.plan_action_id = base.plan_action_id.clone();
+    journal.operations = vec![base.clone(), second.clone()];
+    assert!(journal
+        .validate()
+        .unwrap_err()
+        .contains("one plan action"));
+
+    // Fully distinct identities coexist.
+    second.plan_action_id = Some(ActionId::parse("action-2").unwrap());
+    journal.operations = vec![base, second];
+    journal.validate().unwrap();
+}
+
+#[test]
+fn push_plans_reject_duplicate_cloud_claims() {
+    // Two mapped CreateClouds claiming one cloud thread cannot enter one
+    // reviewed plan document.
+    let plan = ConversationPushPlan {
+        schema_version: PUSH_PLAN_SCHEMA,
+        plan_id: PlanId::parse("plan-1").unwrap(),
+        storage_id: StorageId::parse("personal").unwrap(),
+        bundle_id: bundle_id(),
+        host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+        replica_id: ReplicaId::parse("replica-a").unwrap(),
+        local_project_id: LocalProjectId::parse("project-a").unwrap(),
+        expected_host_identity_revision: 3,
+        expected_project_binding_revision: 2,
+        expected_bindings_document_revision: 4,
+        revision: 0,
+        commit_id: "absent".to_string(),
+        manifest_sha256: "0".repeat(64),
+        created_at: 1,
+        expires_at: 10,
+        actions: vec![
+            {
+                let mut action = push_action("action-1", "codex", "profile-codex", "1");
+                action.cloud_thread_id =
+                    Some(CloudThreadId::parse("cloudthread-shared").unwrap());
+                action
+            },
+            {
+                let mut action = push_action("action-2", "codex", "profile-codex", "2");
+                action.cloud_thread_id =
+                    Some(CloudThreadId::parse("cloudthread-shared").unwrap());
+                action
+            },
+        ],
+    };
+    assert!(plan
+        .validate()
+        .unwrap_err()
+        .contains("claims one cloud thread twice"));
 }

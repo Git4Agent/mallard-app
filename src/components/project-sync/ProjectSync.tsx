@@ -2799,7 +2799,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       for (const action of currentRestorePlan.conversation_actions ?? []) {
         resourceByAction.set(
           action.action_id,
-          action.source_resource_id ?? `${action.provider}:conversation:${action.thread_id}`,
+          action.source_resource_id
+            ?? `${action.provider}:conversation:${action.thread_id ?? action.cloud_thread_id}`,
         );
       }
       const appliedActionIds = new Set(result.restoreResult?.applied_action_ids ?? []);

@@ -6,7 +6,7 @@ use crate::project_sync::bundle_engine::{
     BundleEngine, PublishBundleRequest, PublishExpectation, ScopePublishInput,
 };
 use crate::project_sync::domain::{
-    BundleRecipe, StorageConfig, StorageKind, ThreadId, Tombstone, TombstoneTarget,
+    BundleRecipe, CloudThreadId, StorageConfig, StorageKind, Tombstone, TombstoneTarget,
 };
 use crate::project_sync::storage_core::{
     CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
     let world = VariantWorld::new();
     let origin = world.origin(&world.repo_a, "replica-a");
-    let t1_id = ThreadId::parse("thread-v1").unwrap();
+    let t1_id = CloudThreadId::parse("cloudthread-v1").unwrap();
     let t1 = ThreadSpec::new(
         t1_id.as_str(),
         "source-thread",
@@ -97,7 +97,7 @@ fn local_store_immutable_and_head_failures_leave_a_retryable_fixed_point() {
     let world = VariantWorld::new();
     let origin = world.origin(&world.repo_a, "replica-a");
     let thread = ThreadSpec::new(
-        "thread-v1",
+        "cloudthread-v1",
         "source-thread",
         chain("source-thread", &[("m-a", "one")]),
         origin.clone(),
@@ -149,7 +149,7 @@ async fn stub_s3_current_schema_noop_and_fast_forward_match_local_protocol() {
     let world = VariantWorld::new();
     let origin = world.origin(&world.repo_a, "replica-a");
     let thread = ThreadSpec::new(
-        "thread-v1",
+        "cloudthread-v1",
         "source-thread",
         chain("source-thread", &[("m-a", "one")]),
         origin.clone(),
@@ -253,8 +253,8 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
     let world = VariantWorld::new();
     let origin_a = world.origin(&world.repo_a, "replica-a");
     let origin_b = world.origin(&world.repo_b, "replica-b");
-    let t1_id = ThreadId::parse("thread-v1").unwrap();
-    let t2_id = ThreadId::parse("thread-v2").unwrap();
+    let t1_id = CloudThreadId::parse("cloudthread-v1").unwrap();
+    let t2_id = CloudThreadId::parse("cloudthread-v2").unwrap();
     let t1 = ThreadSpec::new(
         t1_id.as_str(),
         "shared-source",
@@ -431,8 +431,8 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
     let world = VariantWorld::new();
     let origin_a = world.origin(&world.repo_a, "replica-a");
     let origin_b = world.origin(&world.repo_b, "replica-b");
-    let cloud_id = ThreadId::parse("thread-shared").unwrap();
-    let forked_id = ThreadId::parse("thread-forked-local").unwrap();
+    let cloud_id = CloudThreadId::parse("cloudthread-shared").unwrap();
+    let forked_id = CloudThreadId::parse("cloudthread-forked-local").unwrap();
     let cloud_thread = ThreadSpec::new(
         cloud_id.as_str(),
         "shared-source",
@@ -678,7 +678,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
 
 fn second_thread(origin: &crate::project_sync::domain::PortableOrigin) -> ThreadSpec {
     ThreadSpec::new(
-        "thread-v2",
+        "cloudthread-v2",
         "source-thread-v2",
         chain("source-thread-v2", &[("m-a", "one"), ("m-b2", "v2")]),
         origin.clone(),

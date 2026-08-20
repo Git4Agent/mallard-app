@@ -18,8 +18,8 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use mallard_domain::{
-    ActionId, BundleId, ConversationFileRole, ConversationPlanActionType, ConversationReviewAction,
-    DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection, KeepBothPlan,
+    ActionId, BundleId, CloudThreadId, ConversationFileRole, ConversationPlanActionType,
+    ConversationReviewAction, DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection,
     LocalConversationBinding, LocalProjectId, ProjectBinding, ProjectSetupDraft, ProviderKey,
     ResourceId, RestoreActionKind, RestorePlan, StorageConfig, StorageId, StorageKind,
     SyncScopeKey, ThreadId, MAX_CONVERSATION_FILE_BYTES,
@@ -387,7 +387,7 @@ fn read_provider_document(path: &Path) -> Vec<u8> {
             bytes.len() as u64 <= MAX_PROVIDER_DOCUMENT_BYTES,
             "live provider configuration exceeds its safety bound"
         );
-        return bytes;
+        bytes
     }
     #[cfg(not(unix))]
     read_bounded_file(
@@ -860,6 +860,7 @@ fn configure_codex_capture_child(command: &mut Command) {
         .env("no_proxy", "127.0.0.1");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_codex(
     codex_turn_count: &mut usize,
     provider: &LiveProviderConnection,
@@ -2743,6 +2744,7 @@ fn assert_resolved_local_alias_history(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_headless_history_verification(
     codex_turn_count: &mut usize,
     sensitive_needles: &[Vec<u8>],
@@ -3039,14 +3041,17 @@ fn verify_all_histories(
     codex_turn_count: &mut usize,
     sensitive_needles: &[Vec<u8>],
     repositories: [(&LocalStateRepository, &LocalProjectId, &Path, &Path); 2],
-    histories: &[(ThreadId, Vec<HistoryMarker>)],
+    histories: &[(CloudThreadId, Vec<HistoryMarker>)],
 ) {
     for (replica_index, (repository, project_id, codex_home, project_root)) in
         repositories.into_iter().enumerate()
     {
         let before = digest_inventory(codex_home);
-        for (history_index, (logical_thread_id, expected)) in histories.iter().enumerate() {
-            let binding = conversation_binding(repository, project_id, logical_thread_id);
+        for (history_index, (cloud_thread_id, expected)) in histories.iter().enumerate() {
+            // Each replica resolves the shared cloud identity to its own
+            // machine-local registration.
+            let logical_thread_id = local_thread_of_cloud(repository, project_id, cloud_thread_id);
+            let binding = conversation_binding(repository, project_id, &logical_thread_id);
             let provider_id = binding
                 .provider_thread_id
                 .as_deref()
@@ -3441,7 +3446,7 @@ fn portable_conversation_rollout(
     storage_id: &StorageId,
     bundle_id: &BundleId,
     storage_root: &Path,
-    logical_thread_id: &ThreadId,
+    cloud_thread_id: &CloudThreadId,
 ) -> Vec<u8> {
     let snapshot = redacted(
         service.inspect_bundle(storage_id, bundle_id),
@@ -3454,7 +3459,7 @@ fn portable_conversation_rollout(
         .expect("published bundle lacks its Codex scope");
     let conversation = scope
         .conversations
-        .get(logical_thread_id)
+        .get(cloud_thread_id)
         .expect("published bundle lacks its path-bearing conversation");
     let transcript = conversation
         .files
@@ -3487,7 +3492,7 @@ fn assert_portable_rollout_paths(
     storage_id: &StorageId,
     bundle_id: &BundleId,
     storage_root: &Path,
-    logical_thread_id: &ThreadId,
+    cloud_thread_id: &CloudThreadId,
     source_project_root: &Path,
     target_project_root: &Path,
     outside_root: &Path,
@@ -3497,7 +3502,7 @@ fn assert_portable_rollout_paths(
         storage_id,
         bundle_id,
         storage_root,
-        logical_thread_id,
+        cloud_thread_id,
     );
     assert_portable_patch_change_keys(&bytes, outside_root);
     for (relative, _) in IN_PROJECT_FIXTURES {
@@ -3741,61 +3746,113 @@ fn logical_thread_id(
     .expect("Mallard did not bind the real Codex thread")
 }
 
-fn keep_both_for(plan: &RestorePlan, logical_thread_id: &ThreadId) -> KeepBothPlan {
+/// The cloud identity a local thread is mapped to — the machine-global half
+/// of the binding-row pairing, and the only cross-replica rendezvous value.
+fn cloud_thread_id_of(
+    repository: &LocalStateRepository,
+    project_id: &LocalProjectId,
+    logical_thread_id: &ThreadId,
+) -> CloudThreadId {
+    conversation_binding(repository, project_id, logical_thread_id)
+        .cloud_thread_id
+        .expect("thread has no cloud mapping")
+}
+
+/// The machine-local thread registered for one cloud identity.
+fn local_thread_of_cloud(
+    repository: &LocalStateRepository,
+    project_id: &LocalProjectId,
+    cloud_thread_id: &CloudThreadId,
+) -> ThreadId {
+    redacted(
+        repository.load_conversation_bindings(),
+        "cannot load conversation bindings",
+    )
+    .bindings
+    .into_iter()
+    .find(|binding| {
+        binding.local_project_id == *project_id
+            && binding.cloud_thread_id.as_ref() == Some(cloud_thread_id)
+    })
+    .map(|binding| binding.thread_id)
+    .expect("cloud thread has no local registration")
+}
+
+/// Plans are pure intent: the divergent offer names the local thread and
+/// mints nothing — every keep-both identity exists only after apply.
+fn assert_keep_both_offered(plan: &RestorePlan, logical_thread_id: &ThreadId) {
     plan.conversation_actions
         .iter()
         .find(|action| {
-            action.thread_id == *logical_thread_id
+            action.thread_id.as_ref() == Some(logical_thread_id)
                 && action.action == ConversationPlanActionType::KeepBoth
         })
-        .and_then(|action| action.keep_both.clone())
-        .expect("divergent Pull does not offer Keep Both")
+        .expect("divergent Pull does not offer Keep Both");
+}
+
+/// The identities a keep-both apply minted, read back from the receipt and
+/// the committed binding rows.
+struct KeepBothOutcome {
+    preserved_thread_id: ThreadId,
+    remote_provider_thread_id: String,
 }
 
 fn assert_keep_both_result(
     repository: &LocalStateRepository,
     project_id: &LocalProjectId,
     logical_thread_id: &ThreadId,
+    cloud_thread_id: &CloudThreadId,
     old_provider_thread_id: &str,
-    keep_both: &KeepBothPlan,
     result: &RestoreResult,
-) {
-    assert_eq!(keep_both.preserved.preserved_from, *logical_thread_id);
-    assert!(keep_both.preserved.ordinal > 0);
-    assert!(keep_both.preserved_display_title.contains("Preserved "));
+) -> KeepBothOutcome {
     assert_eq!(result.preserved_threads.len(), 1);
     let preserved = &result.preserved_threads[0];
     assert_eq!(preserved.original_thread_id, *logical_thread_id);
-    assert_eq!(preserved.preserved_thread_id, keep_both.preserved_thread_id);
+    assert!(preserved.preserved_display_title.contains("Preserved "));
+    let preserved_thread_id = preserved.preserved_thread_id.clone();
+    // The tracking row keeps its local id and cloud mapping and receives the
+    // apply-minted remote alias.
+    let tracking = conversation_binding(repository, project_id, logical_thread_id);
     assert_eq!(
-        preserved.preserved_display_title,
-        keep_both.preserved_display_title
+        tracking.cloud_thread_id.as_ref(),
+        Some(cloud_thread_id),
+        "Keep Both dropped the tracking row's cloud mapping"
     );
-    assert_eq!(
-        provider_thread_id(repository, project_id, logical_thread_id),
-        keep_both.remote_provider_thread_id
-    );
+    let remote_provider_thread_id = tracking
+        .provider_thread_id
+        .clone()
+        .expect("Keep Both minted the remote branch's provider id at apply");
     assert_ne!(
-        keep_both.remote_provider_thread_id, old_provider_thread_id,
+        remote_provider_thread_id, old_provider_thread_id,
         "Keep Both reused the divergent provider thread for the cloud side"
     );
     assert_eq!(
-        provider_thread_id(repository, project_id, &keep_both.preserved_thread_id),
+        provider_thread_id(repository, project_id, &preserved_thread_id),
         old_provider_thread_id,
         "Keep Both did not retain the local provider thread on the preserved logical ID"
     );
+    let preserved_row = conversation_binding(repository, project_id, &preserved_thread_id);
     assert_eq!(
-        conversation_binding(repository, project_id, &keep_both.preserved_thread_id).preserved,
-        Some(keep_both.preserved.clone()),
-        "Keep Both did not persist preservation provenance"
+        preserved_row.cloud_thread_id, None,
+        "the preserved branch kept a cloud mapping"
     );
+    let provenance = preserved_row
+        .preserved
+        .expect("Keep Both did not persist preservation provenance");
+    // Provenance names the divergent thread's cloud identity (portable space).
+    assert_eq!(provenance.preserved_from, *cloud_thread_id);
+    assert!(provenance.ordinal > 0);
+    KeepBothOutcome {
+        preserved_thread_id,
+        remote_provider_thread_id,
+    }
 }
 
 fn assert_divergent_push_gate(
     service: &ProjectSyncService<'_>,
     project_id: &LocalProjectId,
     storage_id: &StorageId,
-    logical_thread_id: &ThreadId,
+    cloud_thread_id: &CloudThreadId,
     replica: &str,
 ) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -3805,7 +3862,7 @@ fn assert_divergent_push_gate(
             "cannot refresh the divergent thread comparison",
         );
         if comparison.entries.iter().any(|entry| {
-            entry.cloud_thread_id.as_ref() == Some(logical_thread_id)
+            entry.cloud_thread_id.as_ref() == Some(cloud_thread_id)
                 && entry.state == ThreadSyncState::Diverged
         }) {
             break;
@@ -3837,7 +3894,7 @@ fn assert_divergent_push_gate(
         .entries
         .iter()
         .find(|entry| {
-            entry.cloud_thread_id.as_ref() == Some(logical_thread_id)
+            entry.cloud_thread_id.as_ref() == Some(cloud_thread_id)
                 && entry.state == ThreadSyncState::Diverged
         })
         .unwrap_or_else(|| {
@@ -3868,7 +3925,7 @@ fn wait_for_thread_states(
     service: &ProjectSyncService<'_>,
     project_id: &LocalProjectId,
     storage_id: &StorageId,
-    expected: &[(&ThreadId, ThreadSyncState)],
+    expected: &[(&CloudThreadId, ThreadSyncState)],
     replica: &str,
 ) -> ThreadSyncComparison {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -5330,12 +5387,17 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     let logical_thread = logical_thread_id(&repository1, &project_id1, &provider_thread1);
     let session_resource = mallard_domain::conversation_resource_id(&codex_key(), &logical_thread)
         .expect("derive revision-1 conversation resource ID");
+    // Decoupling: the manifest row's identity was minted at push apply in
+    // its own cloud namespace, distinct from the pusher's local id; the
+    // pairing lives only in this machine's binding row.
+    let cloud_thread = cloud_thread_id_of(&repository1, &project_id1, &logical_thread);
+    assert_ne!(cloud_thread.as_str(), logical_thread.as_str());
     assert_portable_rollout_paths(
         &service1,
         &storage_id,
         &bundle_id,
         &mystorage1,
-        &logical_thread,
+        &cloud_thread,
         &project1,
         &project1_copy,
         &project1_external,
@@ -5380,7 +5442,16 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     let project_id2 = second.project.local_project_id.clone();
     let (_, initial_pull) = pull_and_apply(&service2, &storage_id, &bundle_id, &binding2);
     assert!(initial_pull.preserved_threads.is_empty());
-    let provider_thread2 = provider_thread_id(&repository2, &project_id2, &logical_thread);
+    // Decoupling: the puller minted its own local identity at apply — it
+    // matches neither the pusher's local id nor the cloud id, and both
+    // machines' binding rows map to the one cloud identity.
+    let logical_thread2 = local_thread_of_cloud(&repository2, &project_id2, &cloud_thread);
+    assert_ne!(logical_thread2, logical_thread);
+    assert_ne!(logical_thread2.as_str(), cloud_thread.as_str());
+    let session_resource2 =
+        mallard_domain::conversation_resource_id(&codex_key(), &logical_thread2)
+            .expect("derive replica B conversation resource ID");
+    let provider_thread2 = provider_thread_id(&repository2, &project_id2, &logical_thread2);
     assert_ne!(provider_thread2, provider_thread1);
     assert_rollout_cwd(&myconf2, &provider_thread2, &project1_copy);
     assert_raw_rollout_paths(
@@ -5393,7 +5464,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     assert_session_detail_paths(
         &service2,
         &project_id2,
-        &session_resource,
+        &session_resource2,
         &project1_copy,
         &myconf2,
         &provider_thread2,
@@ -5438,7 +5509,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         &storage_id,
         &bundle_id,
         &mystorage1,
-        &logical_thread,
+        &cloud_thread,
         &project1,
         &project1_copy,
         &project1_external,
@@ -5471,14 +5542,14 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         &service1,
         &project_id1,
         &storage_id,
-        &logical_thread,
+        &cloud_thread,
         "replica A",
     );
     let divergent_plan1 = redacted(
         service1.plan_bundle_restore(&storage_id, &bundle_id, &binding1),
         "cannot plan first divergent Pull",
     );
-    let first_keep_both = keep_both_for(&divergent_plan1, &logical_thread);
+    assert_keep_both_offered(&divergent_plan1, &logical_thread);
     let divergent_apply1 = redacted(
         service1.apply_bundle_restore(
             &divergent_plan1.plan_id,
@@ -5488,12 +5559,12 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     );
     assert!(divergent_apply1.success);
     assert_eq!(divergent_apply1.reviewed_base_advanced, Some(true));
-    assert_keep_both_result(
+    let first_keep_both = assert_keep_both_result(
         &repository1,
         &project_id1,
         &logical_thread,
+        &cloud_thread,
         &provider_thread1,
-        &first_keep_both,
         &divergent_apply1,
     );
     assert_rollout_cwd(
@@ -5525,14 +5596,25 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     let (_, third_pull) = pull_and_apply(&service2, &storage_id, &bundle_id, &binding2);
     assert!(third_pull.preserved_threads.is_empty());
     assert_eq!(
-        provider_thread_id(&repository2, &project_id2, &logical_thread),
+        provider_thread_id(&repository2, &project_id2, &logical_thread2),
         provider_thread2
     );
-    let first_preserved_on_b = provider_thread_id(
-        &repository2,
-        &project_id2,
+    // The preserved branch's push minted its own fresh cloud identity; B's
+    // pull registered it under B's own local id.
+    let first_preserved_cloud = cloud_thread_id_of(
+        &repository1,
+        &project_id1,
         &first_keep_both.preserved_thread_id,
     );
+    assert_ne!(first_preserved_cloud, cloud_thread);
+    let first_preserved_on_b_local =
+        local_thread_of_cloud(&repository2, &project_id2, &first_preserved_cloud);
+    assert_ne!(
+        first_preserved_on_b_local,
+        first_keep_both.preserved_thread_id
+    );
+    let first_preserved_on_b =
+        provider_thread_id(&repository2, &project_id2, &first_preserved_on_b_local);
     assert_rollout_cwd(&myconf2, &first_preserved_on_b, &project1_copy);
 
     // Starting from the shared revision-3 primary, A and B independently
@@ -5582,14 +5664,14 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         &service2,
         &project_id2,
         &storage_id,
-        &logical_thread,
+        &cloud_thread,
         "replica B",
     );
     let divergent_plan2 = redacted(
         service2.plan_bundle_restore(&storage_id, &bundle_id, &binding2),
         "cannot plan second divergent Pull",
     );
-    let second_keep_both = keep_both_for(&divergent_plan2, &logical_thread);
+    assert_keep_both_offered(&divergent_plan2, &logical_thread2);
     let divergent_apply2 = redacted(
         service2.apply_bundle_restore(
             &divergent_plan2.plan_id,
@@ -5599,12 +5681,12 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     );
     assert!(divergent_apply2.success);
     assert_eq!(divergent_apply2.reviewed_base_advanced, Some(true));
-    assert_keep_both_result(
+    let second_keep_both = assert_keep_both_result(
         &repository2,
         &project_id2,
-        &logical_thread,
+        &logical_thread2,
+        &cloud_thread,
         &provider_thread2,
-        &second_keep_both,
         &divergent_apply2,
     );
     assert_rollout_cwd(
@@ -5613,11 +5695,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         &project1_copy,
     );
     assert_eq!(
-        provider_thread_id(
-            &repository2,
-            &project_id2,
-            &first_keep_both.preserved_thread_id
-        ),
+        provider_thread_id(&repository2, &project_id2, &first_preserved_on_b_local),
         first_preserved_on_b,
         "the first preserved branch changed identity during the second Keep Both"
     );
@@ -5636,27 +5714,31 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     // and a reviewed no-op Push from either replica must not create revision 6.
     let (_, fifth_pull) = pull_and_apply(&service1, &storage_id, &bundle_id, &binding1);
     assert!(fifth_pull.preserved_threads.is_empty());
-    let second_preserved_on_a = provider_thread_id(
-        &repository1,
-        &project_id1,
+    let second_preserved_cloud = cloud_thread_id_of(
+        &repository2,
+        &project_id2,
         &second_keep_both.preserved_thread_id,
     );
+    assert_ne!(second_preserved_cloud, cloud_thread);
+    assert_ne!(second_preserved_cloud, first_preserved_cloud);
+    let second_preserved_on_a_local =
+        local_thread_of_cloud(&repository1, &project_id1, &second_preserved_cloud);
+    let second_preserved_on_a =
+        provider_thread_id(&repository1, &project_id1, &second_preserved_on_a_local);
     assert_rollout_cwd(&myconf1, &second_preserved_on_a, &project1);
-    assert_ne!(
-        first_keep_both.preserved_thread_id,
-        second_keep_both.preserved_thread_id
-    );
     for (repository, project_id) in [(&repository1, &project_id1), (&repository2, &project_id2)] {
+        // Every replica registered its own local thread per cloud identity;
+        // the three lineages keep three distinct provider identities.
         let provider_ids = [
-            provider_thread_id(repository, project_id, &logical_thread),
-            provider_thread_id(repository, project_id, &first_keep_both.preserved_thread_id),
-            provider_thread_id(
-                repository,
-                project_id,
-                &second_keep_both.preserved_thread_id,
-            ),
+            &cloud_thread,
+            &first_preserved_cloud,
+            &second_preserved_cloud,
         ]
         .into_iter()
+        .map(|cloud_id| {
+            let local = local_thread_of_cloud(repository, project_id, cloud_id);
+            provider_thread_id(repository, project_id, &local)
+        })
         .collect::<BTreeSet<_>>();
         assert_eq!(
             provider_ids.len(),
@@ -5731,11 +5813,28 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     ]
     .into_iter()
     .collect::<BTreeMap<_, _>>();
+    // The cross-replica rendezvous values: each node's freshly minted cloud
+    // identity, mapped on A's binding rows at push apply.
+    let graph_clouds = graph_threads
+        .iter()
+        .map(|(name, logical)| {
+            let cloud_id = cloud_thread_id_of(&repository1, &project_id1, logical);
+            assert_ne!(cloud_id.as_str(), logical.as_str());
+            (*name, cloud_id)
+        })
+        .collect::<BTreeMap<_, _>>();
     let (_, sixth_pull) = pull_and_apply(&service2, &storage_id, &bundle_id, &binding2);
     assert!(sixth_pull.preserved_threads.is_empty());
+    let graph_threads_b = graph_clouds
+        .iter()
+        .map(|(name, cloud_id)| {
+            let local = local_thread_of_cloud(&repository2, &project_id2, cloud_id);
+            assert_ne!(&local, &graph_threads[name]);
+            (*name, local)
+        })
+        .collect::<BTreeMap<_, _>>();
     for name in ["p0", "p1", "p2", "p3", "p4"] {
-        let logical = &graph_threads[name];
-        let pulled_alias = provider_thread_id(&repository2, &project_id2, logical);
+        let pulled_alias = provider_thread_id(&repository2, &project_id2, &graph_threads_b[name]);
         assert_ne!(
             pulled_alias, graph.nodes[name].provider_thread_id,
             "Pull reused a source provider identity"
@@ -5794,8 +5893,8 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         PushDestinationStatus::Ready { .. }
     ));
 
-    let p2_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads["p2"]);
-    let p3_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads["p3"]);
+    let p2_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads_b["p2"]);
+    let p3_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads_b["p3"]);
     append_paginated_turn(
         &myconf2,
         &project1_copy,
@@ -5824,16 +5923,16 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         &project_id1,
         &storage_id,
         &[
-            (&graph_threads["p1"], ThreadSyncState::LocalAhead),
-            (&graph_threads["p2"], ThreadSyncState::StorageAhead),
-            (&graph_threads["p3"], ThreadSyncState::Diverged),
+            (&graph_clouds["p1"], ThreadSyncState::LocalAhead),
+            (&graph_clouds["p2"], ThreadSyncState::StorageAhead),
+            (&graph_clouds["p3"], ThreadSyncState::Diverged),
         ],
         "replica A",
     );
     let p1_row = mixed_a
         .entries
         .iter()
-        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_threads["p1"]))
+        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_clouds["p1"]))
         .expect("mixed comparison lacks P1");
     assert_eq!(
         p1_row.push_decision.action,
@@ -5843,7 +5942,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     let p2_row = mixed_a
         .entries
         .iter()
-        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_threads["p2"]))
+        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_clouds["p2"]))
         .expect("mixed comparison lacks P2");
     assert_eq!(
         p2_row.pull_decision.action,
@@ -5853,7 +5952,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     let p3_row = mixed_a
         .entries
         .iter()
-        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_threads["p3"]))
+        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_clouds["p3"]))
         .expect("mixed comparison lacks P3");
     assert_eq!(
         p3_row.push_decision.action,
@@ -5877,7 +5976,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         service1.plan_bundle_restore(&storage_id, &bundle_id, &binding1),
         "cannot plan mixed paginated Pull on replica A",
     );
-    let p3_keep_both = keep_both_for(&seventh_plan_a, &graph_threads["p3"]);
+    assert_keep_both_offered(&seventh_plan_a, &graph_threads["p3"]);
     let seventh_apply_a = redacted(
         service1.apply_bundle_restore(
             &seventh_plan_a.plan_id,
@@ -5887,12 +5986,12 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     );
     assert!(seventh_apply_a.success);
     assert_eq!(seventh_apply_a.reviewed_base_advanced, Some(true));
-    assert_keep_both_result(
+    let p3_keep_both = assert_keep_both_result(
         &repository1,
         &project_id1,
         &graph_threads["p3"],
+        &graph_clouds["p3"],
         &p3_on_a_before_pull,
-        &p3_keep_both,
         &seventh_apply_a,
     );
     assert_eq!(
@@ -5932,11 +6031,15 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     assert_eq!(eighth_push.revision, Some(8));
     let (_, eighth_pull) = pull_and_apply(&service2, &storage_id, &bundle_id, &binding2);
     assert!(eighth_pull.preserved_threads.is_empty());
-    let p3_preserved_on_b = provider_thread_id(
-        &repository2,
-        &project_id2,
+    let p3_preserved_cloud = cloud_thread_id_of(
+        &repository1,
+        &project_id1,
         &p3_keep_both.preserved_thread_id,
     );
+    let p3_preserved_on_b_local =
+        local_thread_of_cloud(&repository2, &project_id2, &p3_preserved_cloud);
+    let p3_preserved_on_b =
+        provider_thread_id(&repository2, &project_id2, &p3_preserved_on_b_local);
     assert_rollout_cwd(&myconf2, &p3_preserved_on_b, &project1_copy);
     assert_fixed_point(
         &redacted(
@@ -5956,8 +6059,8 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     // Revision 9 reverses the conflict direction. B also advances P0; its
     // fresh review must keep that safe local work eligible while holding P4.
     let p4_on_a = provider_thread_id(&repository1, &project_id1, &graph_threads["p4"]);
-    let p4_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads["p4"]);
-    let p0_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads["p0"]);
+    let p4_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads_b["p4"]);
+    let p0_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads_b["p0"]);
     append_paginated_turn(
         &myconf1,
         &project1,
@@ -6004,15 +6107,15 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         &project_id2,
         &storage_id,
         &[
-            (&graph_threads["p0"], ThreadSyncState::LocalAhead),
-            (&graph_threads["p4"], ThreadSyncState::Diverged),
+            (&graph_clouds["p0"], ThreadSyncState::LocalAhead),
+            (&graph_clouds["p4"], ThreadSyncState::Diverged),
         ],
         "replica B",
     );
     let p0_row = mixed_b
         .entries
         .iter()
-        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_threads["p0"]))
+        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_clouds["p0"]))
         .expect("reverse comparison lacks P0");
     assert_eq!(
         p0_row.push_decision.action,
@@ -6022,7 +6125,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     let p4_row = mixed_b
         .entries
         .iter()
-        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_threads["p4"]))
+        .find(|entry| entry.cloud_thread_id.as_ref() == Some(&graph_clouds["p4"]))
         .expect("reverse comparison lacks P4");
     assert_eq!(
         p4_row.push_decision.action,
@@ -6038,23 +6141,23 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         service2.plan_bundle_restore(&storage_id, &bundle_id, &binding2),
         "cannot plan reverse divergent paginated Pull",
     );
-    let p4_keep_both = keep_both_for(&ninth_plan_b, &graph_threads["p4"]);
+    assert_keep_both_offered(&ninth_plan_b, &graph_threads_b["p4"]);
     let ninth_apply_b = redacted(
         service2.apply_bundle_restore(&ninth_plan_b.plan_id, approved_pull_actions(&ninth_plan_b)),
         "cannot apply reverse Keep Both",
     );
     assert!(ninth_apply_b.success);
     assert_eq!(ninth_apply_b.reviewed_base_advanced, Some(true));
-    assert_keep_both_result(
+    let p4_keep_both = assert_keep_both_result(
         &repository2,
         &project_id2,
-        &graph_threads["p4"],
+        &graph_threads_b["p4"],
+        &graph_clouds["p4"],
         &p4_on_b,
-        &p4_keep_both,
         &ninth_apply_b,
     );
     assert_eq!(
-        provider_thread_id(&repository2, &project_id2, &graph_threads["p0"]),
+        provider_thread_id(&repository2, &project_id2, &graph_threads_b["p0"]),
         p0_on_b,
         "reverse divergent Pull overwrote the unrelated LocalAhead P0"
     );
@@ -6251,6 +6354,13 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         ],
         "replica B preserved P4 did not retain its exact six-message history"
     );
+    // The preserved P4 branch was pushed at revision 10; its fresh cloud
+    // identity is the final rendezvous value.
+    let p4_preserved_cloud = cloud_thread_id_of(
+        &repository2,
+        &project_id2,
+        &p4_keep_both.preserved_thread_id,
+    );
     let p4_preserved_on_b = provider_thread_id(
         &repository2,
         &project_id2,
@@ -6262,35 +6372,26 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         &p4_preserved_on_b,
         &p4_preserved_history,
     );
+    // The ten final lineages rendezvous by cloud identity: local thread ids
+    // are machine-scoped and deliberately differ between the replicas.
     let histories = vec![
-        (logical_thread.clone(), existing_primary),
-        (
-            first_keep_both.preserved_thread_id.clone(),
-            first_preserved_history,
-        ),
-        (
-            second_keep_both.preserved_thread_id.clone(),
-            second_preserved_history,
-        ),
-        (graph_threads["p0"].clone(), p0_history),
-        (graph_threads["p1"].clone(), p1_history),
-        (graph_threads["p2"].clone(), p2_history),
-        (graph_threads["p3"].clone(), p3_primary_history),
-        (
-            p3_keep_both.preserved_thread_id.clone(),
-            p3_preserved_history,
-        ),
-        (graph_threads["p4"].clone(), p4_primary_history),
-        (
-            p4_keep_both.preserved_thread_id.clone(),
-            p4_preserved_history,
-        ),
+        (cloud_thread.clone(), existing_primary),
+        (first_preserved_cloud.clone(), first_preserved_history),
+        (second_preserved_cloud.clone(), second_preserved_history),
+        (graph_clouds["p0"].clone(), p0_history),
+        (graph_clouds["p1"].clone(), p1_history),
+        (graph_clouds["p2"].clone(), p2_history),
+        (graph_clouds["p3"].clone(), p3_primary_history),
+        (p3_preserved_cloud.clone(), p3_preserved_history),
+        (graph_clouds["p4"].clone(), p4_primary_history),
+        (p4_preserved_cloud.clone(), p4_preserved_history),
     ];
     assert_eq!(histories.len(), 10);
-    let expected_final_threads = histories
+    let expected_final_clouds = histories
         .iter()
-        .map(|(thread_id, _)| thread_id.clone())
+        .map(|(cloud_id, _)| cloud_id.clone())
         .collect::<BTreeSet<_>>();
+    assert_eq!(expected_final_clouds.len(), 10);
     for (service, repository, project_id) in [
         (&service1, &repository1, &project_id1),
         (&service2, &repository2, &project_id2),
@@ -6299,38 +6400,47 @@ fn live_codex_mallard_setup_push_pull_divergence() {
             service.compare_threads(project_id, &storage_id),
             "cannot verify the exact final conversation identity set",
         );
-        let compared_threads = comparison
+        let compared_clouds = comparison
             .entries
             .iter()
             .map(|entry| {
-                mallard_domain::parse_conversation_resource_id(
-                    entry.conversation_resource_id.as_str(),
-                )
-                .expect("final comparison contains a canonical conversation resource")
-                .1
+                entry
+                    .cloud_thread_id
+                    .clone()
+                    .expect("final comparison row lacks its cloud mapping")
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(
-            compared_threads, expected_final_threads,
-            "final comparison contains a missing or unexpected logical conversation"
+            compared_clouds, expected_final_clouds,
+            "final comparison contains a missing or unexpected cloud conversation"
         );
-        let bound_threads = repository
+        // Every comparison row keys by its local resource id at the fixed
+        // point (every row has a local side here).
+        for entry in &comparison.entries {
+            mallard_domain::parse_conversation_resource_id(entry.conversation_resource_id.as_str())
+                .expect("final comparison contains a canonical local conversation resource");
+        }
+        let bound_clouds = repository
             .load_conversation_bindings()
             .expect("read final conversation bindings")
             .bindings
             .into_iter()
             .filter(|binding| &binding.local_project_id == project_id)
-            .map(|binding| binding.thread_id)
+            .map(|binding| {
+                binding
+                    .cloud_thread_id
+                    .expect("final binding row lacks its cloud mapping")
+            })
             .collect::<BTreeSet<_>>();
         assert_eq!(
-            bound_threads, expected_final_threads,
-            "final machine binding set contains a missing or unexpected logical conversation"
+            bound_clouds, expected_final_clouds,
+            "final machine binding set contains a missing or unexpected cloud conversation"
         );
     }
-    let r1_derived_threads = [
-        logical_thread.clone(),
-        first_keep_both.preserved_thread_id.clone(),
-        second_keep_both.preserved_thread_id.clone(),
+    let r1_derived_clouds = [
+        cloud_thread.clone(),
+        first_preserved_cloud.clone(),
+        second_preserved_cloud.clone(),
     ];
     for (service, repository, project_id, codex_home, project_root, forbidden_root) in [
         (
@@ -6350,9 +6460,10 @@ fn live_codex_mallard_setup_push_pull_divergence() {
             project1.as_path(),
         ),
     ] {
-        for logical in &r1_derived_threads {
-            let provider_id = provider_thread_id(repository, project_id, logical);
-            let resource_id = mallard_domain::conversation_resource_id(&codex_key(), logical)
+        for cloud_id in &r1_derived_clouds {
+            let logical = local_thread_of_cloud(repository, project_id, cloud_id);
+            let provider_id = provider_thread_id(repository, project_id, &logical);
+            let resource_id = mallard_domain::conversation_resource_id(&codex_key(), &logical)
                 .expect("derive final R1-derived resource ID");
             assert_raw_rollout_paths(
                 codex_home,

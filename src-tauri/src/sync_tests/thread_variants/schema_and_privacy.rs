@@ -1,9 +1,9 @@
 use super::harness::{chain, codex_scope, codex_scope_key, ThreadSpec, VariantWorld};
 use crate::project_sync::domain::{
-    BundleId, BundleManifest, BundleScope, ConversationFileRef, ConversationFileRole,
-    ConversationLineageStatus, ConversationMaterializationState, ConversationPlanActionType,
-    LocalConversationBinding, LogicalPath, OriginHostAlias, PreservedProvenance, ProviderKey,
-    ReplicaId, ThreadId, Tombstone, TombstoneTarget,
+    BundleId, BundleManifest, BundleScope, CloudThreadId, ConversationFileRef,
+    ConversationFileRole, ConversationLineageStatus, ConversationMaterializationState,
+    ConversationPlanActionType, LocalConversationBinding, LogicalPath, OriginHostAlias,
+    PreservedProvenance, ProviderKey, ReplicaId, ThreadId, Tombstone, TombstoneTarget,
 };
 use crate::project_sync::storage_core::ObjectStore;
 use std::fs;
@@ -125,7 +125,7 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
     let origin = world.origin(&world.repo_b, "replica-b");
     world.publish(
         &[ThreadSpec::new(
-            "thread-alias-scan",
+            "cloudthread-alias-scan",
             "source-thread",
             chain("source-thread", &[("m-a", "safe")]),
             origin.clone(),
@@ -157,7 +157,7 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
                 10,
             ),
             ThreadSpec::new(
-                "thread-v2",
+                "cloudthread-v2",
                 "source-thread-v2",
                 chain("source-thread-v2", &[("m-a", "one"), ("m-b", "two")]),
                 origin.clone(),
@@ -183,7 +183,7 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
         let thread = scope.conversations.remove(&thread_id()).unwrap();
         scope
             .conversations
-            .insert(ThreadId::parse("thread-wrong").unwrap(), thread);
+            .insert(CloudThreadId::parse("cloudthread-wrong").unwrap(), thread);
     }));
     mutations.push(Box::new(|scope| {
         scope
@@ -250,17 +250,17 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
     mutations.push(Box::new(|scope| {
         let thread = scope.conversations.get_mut(&thread_id()).unwrap();
         thread.preserved = Some(PreservedProvenance {
-            preserved_from: ThreadId::parse("thread-v2").unwrap(),
+            preserved_from: CloudThreadId::parse("cloudthread-v2").unwrap(),
             ordinal: 0,
         });
     }));
     mutations.push(Box::new(|scope| {
-        let v2 = ThreadId::parse("thread-v2").unwrap();
+        let v2 = CloudThreadId::parse("cloudthread-v2").unwrap();
         let v1_resource = scope.conversations[&thread_id()].resource_id.clone();
         scope.conversations.get_mut(&v2).unwrap().resource_id = v1_resource;
     }));
     mutations.push(Box::new(|scope| {
-        let v2 = ThreadId::parse("thread-v2").unwrap();
+        let v2 = CloudThreadId::parse("cloudthread-v2").unwrap();
         let v1_path = scope.conversations[&thread_id()].files[0]
             .logical_path
             .clone();
@@ -270,12 +270,12 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
         let v1 = &scope.conversations[&thread_id()];
         let entry = scope.files[&v1.files[0].logical_path].clone();
         scope.files.insert(
-            LogicalPath::parse("state/conversations/codex/thread-v1/undeclared.json").unwrap(),
+            LogicalPath::parse("state/conversations/codex/cloudthread-v1/undeclared.json").unwrap(),
             entry,
         );
     }));
     mutations.push(Box::new(|scope| {
-        let v2 = ThreadId::parse("thread-v2").unwrap();
+        let v2 = CloudThreadId::parse("cloudthread-v2").unwrap();
         scope.conversations.remove(&v2);
     }));
     mutations.push(Box::new(|scope| {
@@ -370,6 +370,7 @@ fn local_bindings_reject_duplicate_provider_thread_ownership_profile_wide() {
         local_project_id: scope.project_id.clone(),
         provider_profile_id: scope.profile_id.clone(),
         thread_id: ThreadId::parse(thread).unwrap(),
+        cloud_thread_id: None,
         forked_from: None,
         preserved: None,
         provider_thread_id: Some("same-provider-thread".to_string()),
@@ -407,7 +408,7 @@ fn portable_objects_do_not_leak_machine_local_identity_or_paths() {
     let origin = world.origin(&world.repo_a, "replica-private-sentinel");
     world.publish(
         &[ThreadSpec::new(
-            "thread-v1",
+            "cloudthread-v1",
             "bounded-source-provenance",
             chain("bounded-source-provenance", &[("m-a", "safe content")]),
             origin.clone(),
@@ -443,6 +444,6 @@ fn portable_objects_do_not_leak_machine_local_identity_or_paths() {
     }
 }
 
-fn thread_id() -> ThreadId {
-    ThreadId::parse("thread-v1").unwrap()
+fn thread_id() -> CloudThreadId {
+    CloudThreadId::parse("cloudthread-v1").unwrap()
 }

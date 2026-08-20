@@ -20,10 +20,10 @@ use crate::providers::ProviderRegistry;
 use mallard_domain::{
     self as domain, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt, BindingState,
     BundleDirectoryEntry, BundleFileEntry, BundleHead, BundleId, BundleIdentity, BundleKind,
-    BundleManifest, BundleRecipe, BundleScope, BundleSnapshot, CapturedWith, ConversationThread,
-    LogicalPath, PlanId, PortableOrigin, ProjectBinding, ProviderKey, ResourceDescriptor,
-    ResourceId, ResourceKind, RestoreAction, RestoreActionKind, RestorePlan, StorageId,
-    SyncScopeKey, ThreadId, Tombstone, TombstoneTarget, BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
+    BundleManifest, BundleRecipe, BundleScope, BundleSnapshot, CapturedWith, CloudThreadId,
+    ConversationThread, LogicalPath, PlanId, PortableOrigin, ProjectBinding, ProviderKey,
+    ResourceDescriptor, ResourceId, ResourceKind, RestoreAction, RestoreActionKind, RestorePlan,
+    StorageId, SyncScopeKey, Tombstone, TombstoneTarget, BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
 };
 
 use crate::storage_core::{
@@ -84,7 +84,7 @@ pub struct BundleObjectAudit {
 pub struct ScopePublishInput {
     pub recipe: BundleRecipe,
     pub captured_with: CapturedWith,
-    pub conversations: BTreeMap<ThreadId, ConversationThread>,
+    pub conversations: BTreeMap<CloudThreadId, ConversationThread>,
     pub resources: BTreeMap<ResourceId, ResourceDescriptor>,
     /// Entries copied byte-for-byte from the reviewed previous scope. The
     /// engine verifies each against the current manifest's same scope.

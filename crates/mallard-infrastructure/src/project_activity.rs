@@ -16,11 +16,11 @@ use crate::providers::{
 };
 use crate::storage_core::ConfiguredObjectStore;
 use mallard_domain::{
-    conversation_resource_id, initial_conversation_thread_id, parse_conversation_resource_id,
-    retained_conversation_thread_id, ActionStatus, BindingState, BundleSnapshot,
-    ConversationBindings, ConversationMaterializationState, LocalProjectId, MaterializationStatus,
-    Materializations, PreservedProvenance, ProviderKey, StorageId, SyncConfig, SyncScopeKey,
-    ThreadId,
+    cloud_conversation_resource_id, conversation_resource_id, initial_conversation_thread_id,
+    parse_conversation_resource_id, retained_conversation_thread_id, ActionStatus, BindingState,
+    BundleSnapshot, CloudThreadId, ConversationBindings, ConversationMaterializationState,
+    LocalProjectId, LocalProviderProfileId, MaterializationStatus, Materializations,
+    PreservedProvenance, ProviderKey, StorageId, SyncConfig, SyncScopeKey, ThreadId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -522,7 +522,7 @@ fn record_is_preferred(candidate: &LocalSessionRecord, current: &LocalSessionRec
 #[derive(Clone, Debug)]
 pub struct RemoteSessionRecord {
     pub provider: ProviderKey,
-    pub thread_id: mallard_domain::ThreadId,
+    pub thread_id: CloudThreadId,
     pub source_thread_id: Option<String>,
     pub display_title: Option<String>,
     pub preserved: Option<PreservedProvenance>,
@@ -717,6 +717,7 @@ fn displaced_provider_alias_owners(
 /// branch identity and prove whether its physical bytes still exactly match
 /// a copy-on-write witness. Missing, partial, unreadable, or mismatching
 /// evidence always fails open as visible local work.
+#[allow(clippy::too_many_arguments)]
 pub fn retained_provider_alias_identity(
     bundle_id: &mallard_domain::BundleId,
     local_project_id: &LocalProjectId,
@@ -904,6 +905,31 @@ fn merge_activity_sessions_with_state(
                 .map(|preserved| (binding.thread_id.clone(), preserved))
         })
         .collect::<BTreeMap<ThreadId, PreservedProvenance>>();
+    // The only local↔cloud join in Activity: the scoped binding rows'
+    // mappings. Keyed by profile so a bundle-global cloud id resolves within
+    // its own provider's rows.
+    let cloud_to_local = bindings
+        .bindings
+        .iter()
+        .filter(|binding| {
+            binding.host_id == resolved.binding.host_id
+                && binding.replica_id == resolved.binding.replica_id
+                && binding.local_project_id == resolved.project_id
+                && resolved
+                    .binding
+                    .profile_ids
+                    .values()
+                    .any(|profile_id| profile_id == &binding.provider_profile_id)
+        })
+        .filter_map(|binding| {
+            binding.cloud_thread_id.clone().map(|cloud_thread_id| {
+                (
+                    (binding.provider_profile_id.clone(), cloud_thread_id),
+                    binding.thread_id.clone(),
+                )
+            })
+        })
+        .collect::<BTreeMap<(LocalProviderProfileId, CloudThreadId), ThreadId>>();
     let aliases = activity_conversation_aliases(resolved, bindings, materializations);
 
     let mut rows: BTreeMap<String, ProjectSessionSummary> = BTreeMap::new();
@@ -994,8 +1020,25 @@ fn merge_activity_sessions_with_state(
     }
 
     for record in remote {
-        let resource_id = conversation_resource_id(&record.provider, &record.thread_id)?;
-        let key = resource_id.to_string();
+        // The shared row-key rule: a cloud row claimed by a scoped binding
+        // keys by the local id (joining the local session row when one was
+        // discovered); an unclaimed row is "only in this storage" and keys
+        // by its own cloud id. The namespaces are prefix-disjoint, so the
+        // two key forms can never collide.
+        let claimed_local =
+            resolved
+                .binding
+                .profile_ids
+                .get(&record.provider)
+                .and_then(|profile_id| {
+                    cloud_to_local.get(&(profile_id.clone(), record.thread_id.clone()))
+                });
+        let key = match claimed_local {
+            Some(thread_id) => conversation_resource_id(&record.provider, thread_id)?.to_string(),
+            None => {
+                cloud_conversation_resource_id(&record.provider, &record.thread_id)?.to_string()
+            }
+        };
         if let Some(existing) = rows.get_mut(&key) {
             existing.source = SessionSourceState::LocalAndRemote;
             if existing.title.is_empty() {
@@ -1187,7 +1230,7 @@ pub fn build_project_activity(
         .into_iter()
         .map(|provider| ProviderActivityState {
             display_name: provider_display_name(registry, &provider),
-            access: provider_access(registry, &resolved, &provider),
+            access: provider_access(registry, resolved, &provider),
             detail: resolved.unavailable.get(&provider).cloned(),
             provider,
         })
@@ -1954,6 +1997,7 @@ mod activity_only_tests {
             local_project_id: resolved.project_id.clone(),
             provider_profile_id: profile_id.clone(),
             thread_id: thread_id.clone(),
+            cloud_thread_id: None,
             forked_from: None,
             preserved: None,
             root_tail_layout: None,
@@ -2007,6 +2051,7 @@ mod activity_only_tests {
                     .unwrap(),
                 accepted_tail: None,
                 preserved_thread_id: None,
+                preserved_display_title: None,
                 source_disposition: None,
             }),
         }
@@ -2451,7 +2496,8 @@ mod activity_only_tests {
                     local_project_id: resolved.project_id.clone(),
                     provider_profile_id: LocalProviderProfileId::parse("profile-test").unwrap(),
                     thread_id: preserved_thread_id.clone(),
-                    forked_from: Some(ThreadId::parse("thread-parent").unwrap()),
+                    cloud_thread_id: None,
+                    forked_from: Some(CloudThreadId::parse("cloudthread-parent").unwrap()),
                     preserved: None,
                     root_tail_layout: None,
                     provider_thread_id: Some("session-1".to_string()),
@@ -2484,7 +2530,7 @@ mod activity_only_tests {
                     .find(|binding| binding.thread_id == preserved_thread_id)
                     .unwrap();
                 binding.preserved = Some(PreservedProvenance {
-                    preserved_from: ThreadId::parse("thread-parent").unwrap(),
+                    preserved_from: CloudThreadId::parse("cloudthread-parent").unwrap(),
                     ordinal: 2,
                 });
                 binding.revision = binding.revision.saturating_add(1);
@@ -2509,7 +2555,7 @@ mod activity_only_tests {
         assert_eq!(
             preserved_sessions[0].preserved,
             Some(PreservedProvenance {
-                preserved_from: ThreadId::parse("thread-parent").unwrap(),
+                preserved_from: CloudThreadId::parse("cloudthread-parent").unwrap(),
                 ordinal: 2,
             })
         );

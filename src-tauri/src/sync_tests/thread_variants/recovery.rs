@@ -12,7 +12,7 @@ use crate::project_sync::conversation_sync::{
     ConversationStalePin, ConversationTailPin, ConversationTargetPin,
 };
 use crate::project_sync::domain::{
-    compute_portable_conversation_tail, BindingState, BundleId, BundleRecipe,
+    compute_portable_conversation_tail, BindingState, BundleId, BundleRecipe, CloudThreadId,
     ConversationCloudAnchor, ConversationFileRole, ConversationJournalTarget,
     ConversationMaterializationOperation, ConversationMaterializationState,
     ConversationOperationId, ConversationPlanActionType, ConversationPublicationOperation,
@@ -299,6 +299,7 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
         .unwrap(),
         provider: codex(),
         thread_id: ThreadId::parse("thread-journal").unwrap(),
+        cloud_thread_id: CloudThreadId::parse("cloudthread-journal").unwrap(),
         operation: canned_materialization(TailClassification::MissingLocal),
         provider_thread_id: Some("thread-a".to_string()),
         materialization_state: ConversationMaterializationState::Pending,
@@ -365,6 +366,7 @@ fn journal_rejects_duplicate_operation_ids() {
         .unwrap(),
         provider: codex(),
         thread_id: ThreadId::parse("thread-journal").unwrap(),
+        cloud_thread_id: CloudThreadId::parse("cloudthread-journal").unwrap(),
         operation: canned_publication(),
         provider_thread_id: None,
         materialization_state: ConversationMaterializationState::StoredOnly,
@@ -713,6 +715,7 @@ fn every_keep_both_checkpoint_recovers_to_one_valid_fixed_point() {
             .unwrap();
 
         let origin_thread = ThreadId::parse("thread-materialize").unwrap();
+        let cloud_thread = CloudThreadId::parse("cloudthread-materialize").unwrap();
         let preserved_thread = ThreadId::parse("thread-preserved-journal").unwrap();
         let local_transcript =
             TranscriptBuilder::new("source-thread", project_root.to_str().unwrap())
@@ -736,6 +739,7 @@ fn every_keep_both_checkpoint_recovers_to_one_valid_fixed_point() {
                     local_project_id: local_project_id.clone(),
                     provider_profile_id: profile_id.clone(),
                     thread_id: origin_thread.clone(),
+                    cloud_thread_id: Some(cloud_thread.clone()),
                     forked_from: None,
                     preserved: None,
                     root_tail_layout: Some(RootTailLayout {
@@ -810,9 +814,10 @@ fn every_keep_both_checkpoint_recovers_to_one_valid_fixed_point() {
                 .find(|row| row.thread_id == origin_thread)
                 .unwrap();
             row.thread_id = preserved_thread.clone();
+            row.cloud_thread_id = None;
             row.forked_from = None;
             row.preserved = Some(PreservedProvenance {
-                preserved_from: origin_thread.clone(),
+                preserved_from: cloud_thread.clone(),
                 ordinal: 1,
             });
             row.revision = row.revision.saturating_add(1);
@@ -824,6 +829,7 @@ fn every_keep_both_checkpoint_recovers_to_one_valid_fixed_point() {
             local_project_id: local_project_id.clone(),
             provider_profile_id: profile_id.clone(),
             thread_id: origin_thread.clone(),
+            cloud_thread_id: Some(cloud_thread.clone()),
             forked_from: None,
             preserved: None,
             root_tail_layout: Some(RootTailLayout {
@@ -858,6 +864,7 @@ fn every_keep_both_checkpoint_recovers_to_one_valid_fixed_point() {
             provider_profile_id: profile_id,
             provider: codex(),
             thread_id: origin_thread.clone(),
+            cloud_thread_id: cloud_thread.clone(),
             operation: ConversationSyncOperationKind::ProviderMaterialization(
                 ConversationMaterializationOperation {
                     phase: PullJournalPhase::TargetStaged,
@@ -868,6 +875,11 @@ fn every_keep_both_checkpoint_recovers_to_one_valid_fixed_point() {
                     keep_both: Some(KeepBothJournal {
                         preserved_thread_id: preserved_thread.clone(),
                         remote_provider_thread_id: "destination-thread".to_string(),
+                        preserved: PreservedProvenance {
+                            preserved_from: cloud_thread.clone(),
+                            ordinal: 1,
+                        },
+                        preserved_display_title: marker_title.to_string(),
                     }),
                     sync_config_before: config_before,
                     sync_config_after: config_after,
@@ -960,7 +972,7 @@ fn every_keep_both_checkpoint_recovers_to_one_valid_fixed_point() {
             assert_eq!(
                 preserved_row.preserved,
                 Some(PreservedProvenance {
-                    preserved_from: origin_thread.clone(),
+                    preserved_from: cloud_thread.clone(),
                     ordinal: 1,
                 })
             );
@@ -1013,9 +1025,10 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
         let world = VariantWorld::new();
         let origin = world.origin(&world.repo_a, "replica-cloud-checkpoint");
         let thread_id = ThreadId::parse("thread-cloud-checkpoint").unwrap();
+        let cloud_thread_id = CloudThreadId::parse("cloudthread-cloud-checkpoint").unwrap();
         let initial_transcript = super::harness::chain("source-thread", &[("m-a", "base")]);
         let initial_thread = super::harness::ThreadSpec::new(
-            thread_id.as_str(),
+            cloud_thread_id.as_str(),
             "source-thread",
             initial_transcript,
             origin.clone(),
@@ -1066,6 +1079,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                     local_project_id: scope.project_id.clone(),
                     provider_profile_id: scope.profile_id.clone(),
                     thread_id: thread_id.clone(),
+                    cloud_thread_id: Some(cloud_thread_id.clone()),
                     forked_from: None,
                     preserved: None,
                     root_tail_layout: Some(RootTailLayout {
@@ -1104,6 +1118,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
             initial.snapshot.head.commit_id,
             initial.snapshot.head.manifest_sha256,
             &thread_id,
+            &cloud_thread_id,
             bindings.revision,
             Some(bindings.bindings[0].revision),
             &advanced_transcript,
@@ -1536,6 +1551,7 @@ fn push_operation(
     commit_id: String,
     manifest_sha256: String,
     thread_id: &ThreadId,
+    cloud_thread_id: &CloudThreadId,
     bindings_revision: u64,
     binding_revision: Option<u64>,
     transcript: &[u8],
@@ -1565,6 +1581,7 @@ fn push_operation(
         provider_profile_id: scope.profile_id.clone(),
         provider: codex(),
         thread_id: thread_id.clone(),
+        cloud_thread_id: cloud_thread_id.clone(),
         operation: ConversationSyncOperationKind::CloudPublication(
             ConversationPublicationOperation {
                 phase: PushJournalPhase::CandidateUploaded,
@@ -1742,6 +1759,7 @@ impl MaterializationFixture {
             provider_profile_id: profile_id,
             provider: codex(),
             thread_id: ThreadId::parse("thread-materialize").unwrap(),
+            cloud_thread_id: CloudThreadId::parse("cloudthread-materialize").unwrap(),
             operation: ConversationSyncOperationKind::ProviderMaterialization(
                 ConversationMaterializationOperation {
                     phase: PullJournalPhase::TargetStaged,
@@ -1801,6 +1819,7 @@ impl MaterializationFixture {
                 local_project_id: operation.local_project_id.clone(),
                 provider_profile_id: operation.provider_profile_id.clone(),
                 thread_id: operation.thread_id.clone(),
+                cloud_thread_id: Some(operation.cloud_thread_id.clone()),
                 forked_from: None,
                 preserved: None,
                 root_tail_layout: Some(RootTailLayout {
@@ -1924,4 +1943,81 @@ fn canned_materialization(relation: TailClassification) -> ConversationSyncOpera
             crate::project_sync::domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         ),
     })
+}
+
+#[test]
+fn interrupted_create_local_retry_cannot_journal_a_second_identity() {
+    // Apply-time minting makes a retried CreateLocal mint fresh local
+    // identities, so the old local-id-only journal guard could not correlate
+    // it with the interrupted first attempt. The cloud id and the plan
+    // action are the correlation: the journal gate rejects the retry before
+    // any second identity is journaled, and recovery settles the original
+    // operation alone.
+    let fixture = MaterializationFixture::new();
+    let plan_action_id =
+        crate::project_sync::domain::ActionId::parse("action-materialize").unwrap();
+    let mut first = fixture.request();
+    first.operation.plan_action_id = Some(plan_action_id.clone());
+    let mut fail_after_journal = FailOnce::new(ConversationFailpoint::AfterJournal);
+    assert!(
+        apply_conversation_materialization(&fixture.repository, first, &mut fail_after_journal)
+            .is_err()
+    );
+    let journal = fixture.repository.load_conversation_sync_journal().unwrap();
+    assert_eq!(journal.operations.len(), 1);
+
+    // The retry carries fresh local identities (operation id, thread id,
+    // provider id) and the same reviewed cloud thread and plan action.
+    let mut retry = fixture.request();
+    retry.operation.operation_id =
+        ConversationOperationId::parse("operation-materialize-retry").unwrap();
+    retry.operation.plan_action_id = Some(plan_action_id.clone());
+    retry.operation.thread_id = ThreadId::parse("thread-materialize-retry").unwrap();
+    retry.operation.provider_thread_id = Some("destination-thread-retry".to_string());
+    let error = apply_conversation_materialization(
+        &fixture.repository,
+        retry,
+        &mut NoConversationFailpoints,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("already has a pending sync operation"),
+        "{error}"
+    );
+    assert!(error.contains("cloud thread"), "{error}");
+
+    // Even a corrupted retry that lost its cloud correlation is caught by
+    // the plan-action key.
+    let mut same_action = fixture.request();
+    same_action.operation.operation_id =
+        ConversationOperationId::parse("operation-materialize-retry2").unwrap();
+    same_action.operation.plan_action_id = Some(plan_action_id);
+    same_action.operation.thread_id = ThreadId::parse("thread-materialize-retry2").unwrap();
+    same_action.operation.provider_thread_id = Some("destination-thread-retry2".to_string());
+    same_action.operation.cloud_thread_id =
+        crate::project_sync::domain::CloudThreadId::parse("cloudthread-materialize-retry")
+            .unwrap();
+    let error = apply_conversation_materialization(
+        &fixture.repository,
+        same_action,
+        &mut NoConversationFailpoints,
+    )
+    .unwrap_err();
+    assert!(error.contains("already has a journaled operation"), "{error}");
+
+    // No second identity was ever journaled; recovery settles the original.
+    let journal = fixture.repository.load_conversation_sync_journal().unwrap();
+    assert_eq!(journal.operations.len(), 1);
+    assert_eq!(
+        journal.operations[0].operation_id.as_str(),
+        "operation-materialize"
+    );
+    let reopened = LocalStateRepository::from_home_dir(&fixture.home).unwrap();
+    recover_conversation_materializations(&reopened).unwrap();
+    assert!(reopened
+        .load_conversation_sync_journal()
+        .unwrap()
+        .operations
+        .is_empty());
+    assert_materialization_fixed_point(&fixture, &reopened, false);
 }

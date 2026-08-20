@@ -344,7 +344,7 @@ pub(crate) fn most_specific_project_relative_path<'a>(
         let specificity = (root.components().count(), root.as_os_str().len());
         if best
             .as_ref()
-            .map_or(true, |(current, _)| specificity > *current)
+            .is_none_or(|(current, _)| specificity > *current)
         {
             best = Some((specificity, relative));
         }

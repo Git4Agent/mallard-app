@@ -159,13 +159,16 @@ export function buildPullOutcome({
   error?: string | null;
 }): SyncOutcome {
   const titleByResource = new Map(items.map((item) => [item.resourceId, item.title]));
+  const actionRowKey = (action: RestorePlan["conversation_actions"][number]): string =>
+    action.source_resource_id
+      ?? `${action.provider}:conversation:${action.thread_id ?? action.cloud_thread_id}`;
   const resourceByAction = new Map(plan.conversation_actions.map((action) => [
     action.action_id,
-    action.source_resource_id ?? `${action.provider}:conversation:${action.thread_id}`,
+    actionRowKey(action),
   ]));
   const threadByResource = new Map(plan.conversation_actions.map((action) => [
-    action.source_resource_id ?? `${action.provider}:conversation:${action.thread_id}`,
-    action.thread_id,
+    actionRowKey(action),
+    action.thread_id ?? action.cloud_thread_id,
   ]));
   const nameFor = (resourceId: string): string => {
     const itemTitle = titleByResource.get(resourceId);

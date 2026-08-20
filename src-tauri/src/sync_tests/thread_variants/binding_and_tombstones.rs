@@ -5,15 +5,15 @@ use super::harness::{
 use crate::project_sync::bundle_engine::{
     PublishBundleRequest, PublishExpectation, ScopePublishInput,
 };
-use crate::project_sync::domain::{BundleRecipe, ThreadId, Tombstone, TombstoneTarget};
+use crate::project_sync::domain::{BundleRecipe, CloudThreadId, Tombstone, TombstoneTarget};
 use std::collections::BTreeMap;
 
 #[test]
 fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
     let world = VariantWorld::new();
     let origin = world.origin(&world.repo_a, "replica-a");
-    let t1_id = ThreadId::parse("thread-t1").unwrap();
-    let t2_id = ThreadId::parse("thread-t2").unwrap();
+    let t1_id = CloudThreadId::parse("cloudthread-t1").unwrap();
+    let t2_id = CloudThreadId::parse("cloudthread-t2").unwrap();
     let t1 = ThreadSpec::new(
         t1_id.as_str(),
         "thread-v1",

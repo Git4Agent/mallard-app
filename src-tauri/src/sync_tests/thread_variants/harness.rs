@@ -6,11 +6,12 @@ use crate::project_sync::conversation_codec::{
     analyze_codex_transcript, CodecLineage, CODEX_LINEAGE_CODEC_KEY,
 };
 use crate::project_sync::domain::{
-    conversation_resource_id, conversation_transcript_path, ApplyPolicy, BundleId, BundleIdentity,
-    BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot, CapturedWith,
-    ConversationFileRef, ConversationFileRole, ConversationLineageStatus, ConversationThread,
-    PortableOrigin, PreservedProvenance, Provenance, ProviderKey, RecipeEntry, ReplicaId,
-    ResourceDescriptor, ResourceKind, SessionPresentation, StorageId, SyncScopeKey, ThreadId,
+    cloud_conversation_resource_id, cloud_conversation_transcript_path, ApplyPolicy, BundleId,
+    BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot,
+    CapturedWith, CloudThreadId, ConversationFileRef, ConversationFileRole,
+    ConversationLineageStatus, ConversationThread, PortableOrigin, PreservedProvenance, Provenance,
+    ProviderKey, RecipeEntry, ReplicaId, ResourceDescriptor, ResourceKind, SessionPresentation,
+    StorageId, SyncScopeKey,
 };
 use crate::project_sync::persistence::LocalStateRepository;
 use crate::project_sync::storage_core::{LocalObjectStore, ObjectStore};
@@ -149,15 +150,16 @@ impl VariantWorld {
     }
 }
 
+/// One cloud manifest row spec: `thread_id` is the row's cloud identity.
 #[derive(Clone, Debug)]
 pub struct ThreadSpec {
-    pub thread_id: ThreadId,
+    pub thread_id: CloudThreadId,
     pub title: String,
     pub source_thread_id: String,
     pub transcript: Vec<u8>,
     pub created_by: Option<PortableOrigin>,
     pub last_updated_by: Option<PortableOrigin>,
-    pub forked_from: Option<ThreadId>,
+    pub forked_from: Option<CloudThreadId>,
     pub preserved: Option<PreservedProvenance>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -172,7 +174,7 @@ impl ThreadSpec {
         updated_at: u64,
     ) -> Self {
         Self {
-            thread_id: ThreadId::parse(thread).unwrap(),
+            thread_id: CloudThreadId::parse(thread).unwrap(),
             title: "Thread test conversation".to_string(),
             source_thread_id: source_thread_id.to_string(),
             transcript,
@@ -222,8 +224,8 @@ pub fn publish_request(
     let mut conversations = BTreeMap::new();
     for spec in threads {
         let analysis = analyze_codex_transcript(&spec.transcript);
-        let resource_id = conversation_resource_id(&provider, &spec.thread_id).unwrap();
-        let logical_path = conversation_transcript_path(&provider, &spec.thread_id).unwrap();
+        let resource_id = cloud_conversation_resource_id(&provider, &spec.thread_id).unwrap();
+        let logical_path = cloud_conversation_transcript_path(&provider, &spec.thread_id).unwrap();
         // Post-cutover manifests carry only proven-lineage conversations, so
         // the fixture demands the same of its specs.
         let CodecLineage::Complete {

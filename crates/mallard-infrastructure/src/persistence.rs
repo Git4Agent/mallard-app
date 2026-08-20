@@ -2842,6 +2842,7 @@ mod tests {
                 local_project_id: local_project_id.clone(),
                 provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
                 thread_id: ThreadId::parse("thread-a").unwrap(),
+                cloud_thread_id: None,
                 forked_from: None,
                 preserved: None,
                 root_tail_layout: Some(RootTailLayout {
@@ -2953,9 +2954,11 @@ mod tests {
                 local_project_id: local_project_id.clone(),
                 provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
                 thread_id: ThreadId::parse("thread-preserved").unwrap(),
+                cloud_thread_id: None,
                 forked_from: None,
                 preserved: Some(PreservedProvenance {
-                    preserved_from: ThreadId::parse("thread-origin").unwrap(),
+                    preserved_from: mallard_domain::CloudThreadId::parse("cloudthread-origin")
+                        .unwrap(),
                     ordinal: 3,
                 }),
                 root_tail_layout: Some(RootTailLayout {
@@ -3007,7 +3010,7 @@ mod tests {
         assert_eq!(
             bindings.bindings[0].preserved,
             Some(PreservedProvenance {
-                preserved_from: ThreadId::parse("thread-origin").unwrap(),
+                preserved_from: mallard_domain::CloudThreadId::parse("cloudthread-origin").unwrap(),
                 ordinal: 3,
             })
         );
@@ -3103,6 +3106,7 @@ mod tests {
                 local_project_id: LocalProjectId::parse("project-a").unwrap(),
                 provider_profile_id: first_profile_id.clone(),
                 thread_id: ThreadId::parse("group-a.variant-a").unwrap(),
+                cloud_thread_id: None,
                 forked_from: None,
                 preserved: None,
                 root_tail_layout: None,

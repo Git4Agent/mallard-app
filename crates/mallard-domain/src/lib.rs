@@ -94,8 +94,45 @@ fn validate_bundle_head_pin(
     Ok(())
 }
 
+const CLOUD_THREAD_ID_PREFIX: &str = "cloudthread-";
+
+fn no_extra_named_id_rule(_label: &str, _value: &str) -> Result<(), String> {
+    Ok(())
+}
+
+/// Local and cloud thread ids are structurally disjoint namespaces: a local
+/// `ThreadId` may never use the `cloudthread-` prefix and a `CloudThreadId`
+/// must, so no manifest, plan, or binding document can smuggle one space's
+/// id into the other's fields.
+fn reject_cloud_thread_namespace(label: &str, value: &str) -> Result<(), String> {
+    if value.starts_with(CLOUD_THREAD_ID_PREFIX) {
+        return Err(format!(
+            "{} must not use the '{}' cloud namespace: '{}'",
+            label,
+            CLOUD_THREAD_ID_PREFIX,
+            value.escape_debug()
+        ));
+    }
+    Ok(())
+}
+
+fn require_cloud_thread_namespace(label: &str, value: &str) -> Result<(), String> {
+    if !value.starts_with(CLOUD_THREAD_ID_PREFIX) {
+        return Err(format!(
+            "{} must start with '{}': '{}'",
+            label,
+            CLOUD_THREAD_ID_PREFIX,
+            value.escape_debug()
+        ));
+    }
+    Ok(())
+}
+
 macro_rules! named_id {
     ($name:ident, $label:literal) => {
+        named_id!($name, $label, extra = no_extra_named_id_rule);
+    };
+    ($name:ident, $label:literal, extra = $extra:path) => {
         #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
@@ -104,6 +141,7 @@ macro_rules! named_id {
             pub fn parse(value: impl Into<String>) -> Result<Self, String> {
                 let value = value.into();
                 validate_named_id($label, &value)?;
+                $extra($label, &value)?;
                 Ok(Self(value))
             }
 
@@ -138,13 +176,41 @@ named_id!(ResourceId, "resource id");
 named_id!(LocalProjectId, "local project id");
 named_id!(StorageId, "storage id");
 named_id!(ReplicaId, "replica id");
-named_id!(ThreadId, "thread id");
+named_id!(ThreadId, "thread id", extra = reject_cloud_thread_namespace);
+named_id!(
+    CloudThreadId,
+    "cloud thread id",
+    extra = require_cloud_thread_namespace
+);
 named_id!(PlanId, "plan id");
 named_id!(ActionId, "action id");
 named_id!(MaterializationId, "materialization id");
 named_id!(ConversationOperationId, "conversation operation id");
 named_id!(LocalProviderProfileId, "local provider profile id");
 named_id!(SetupDraftId, "setup draft id");
+
+impl CloudThreadId {
+    /// Mint a fresh cloud thread identity. Called only at push apply — plans
+    /// carry intent, never minted identities, and recovery installs journaled
+    /// documents verbatim without re-minting.
+    pub fn generate() -> Result<Self, String> {
+        Self::parse(generated_named_id("cloudthread")?)
+    }
+}
+
+/// Presence-requiring nullable deserializer: attaching `deserialize_with`
+/// disables serde's implicit missing-key tolerance for `Option` fields, so
+/// the key must be present on the wire (`null` for `None`). Fields using it
+/// must also serialize unconditionally (no `skip_serializing_if`), making
+/// pre-cutover documents that lack the key fail closed instead of silently
+/// loading as `None`.
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
+}
 
 macro_rules! fixed_hex_id {
     ($name:ident, $label:literal, $bytes:literal) => {
@@ -933,7 +999,7 @@ impl BundleRecipe {
         if let Some(resource_id) = self
             .entries
             .keys()
-            .find(|resource_id| parse_conversation_resource_id(resource_id.as_str()).is_ok())
+            .find(|resource_id| is_conversation_resource_id(resource_id.as_str()))
         {
             return Err(format!(
                 "machine-local recipe contains portable conversation resource '{}'; conversations must be reviewed through a conversation plan",
@@ -1761,27 +1827,33 @@ const PRESERVED_MARKER_PREFIX: &str = "Preserved ";
 const PRESERVED_MARKER_SEPARATOR: &str = " · ";
 
 /// Portable provenance of a divergent keep-both preservation: the origin
-/// thread the preserved copy was split from, and the 1-based per-origin
-/// ordinal minted at plan time. Display-only — never consulted by the
-/// resolver, and the origin thread may have been tombstoned or pruned since.
-/// Ordinals are pinned per device; concurrent keep-boths of the same origin
-/// on different devices may mint the same ordinal (accepted — the device
-/// label in the marker title disambiguates).
+/// thread the preserved copy was split from — always named in the cloud id
+/// space, on cloud rows and binding rows alike — and the 1-based per-origin
+/// ordinal minted at apply. Display-only — never consulted by the resolver,
+/// and the origin thread may have been tombstoned or pruned since. Ordinals
+/// are pinned per device; concurrent keep-boths of the same origin on
+/// different devices may mint the same ordinal (accepted — the device label
+/// in the marker title disambiguates).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PreservedProvenance {
-    pub preserved_from: ThreadId,
+    pub preserved_from: CloudThreadId,
     pub ordinal: u64,
 }
 
 impl PreservedProvenance {
-    pub fn validate(&self, carrier: &ThreadId) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), String> {
         if self.ordinal == 0 {
-            return Err(format!(
-                "conversation thread '{}' has a zero preservation ordinal",
-                carrier
-            ));
+            return Err("preservation provenance has a zero ordinal".to_string());
         }
+        Ok(())
+    }
+
+    /// Cloud rows share the provenance id space with their own key, so a
+    /// self-preserve is expressible there and rejected here. Binding rows
+    /// carry a local-space key, where the mismatch is a type error instead.
+    pub fn validate_for_cloud_row(&self, carrier: &CloudThreadId) -> Result<(), String> {
+        self.validate()?;
         if &self.preserved_from == carrier {
             return Err(format!(
                 "conversation thread '{}' cannot be preserved from itself",
@@ -1863,6 +1935,10 @@ pub fn compose_preserved_title(base: Option<&str>, ordinal: u64, device_label: &
     format!("{} ({})", base, marker)
 }
 
+/// One machine-local conversation registration. `thread_id` is this
+/// machine's local identity; `cloud_thread_id` is the machine-global half of
+/// the `(local, cloud)` pairing — the only place the mapping lives. The cloud
+/// stores no mapping and no local identity with linkage semantics.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LocalConversationBinding {
@@ -1871,9 +1947,16 @@ pub struct LocalConversationBinding {
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
     pub thread_id: ThreadId,
-    /// Immediate portable parent for an imported conversation branch.
+    /// The cloud thread this local thread is paired with; `None` for a
+    /// local-only thread (never published, or deliberately detached by
+    /// keep-both). Present on the wire even when `None` so pre-cutover rows
+    /// fail closed on the missing key.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub cloud_thread_id: Option<CloudThreadId>,
+    /// Immediate portable parent for an imported conversation branch, in the
+    /// cloud id space (copied verbatim from the pulled cloud row).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forked_from: Option<ThreadId>,
+    pub forked_from: Option<CloudThreadId>,
     /// Present when this thread is the local side retained by a divergent
     /// keep-both Pull. Portable: published with the thread on Push and
     /// restored from the cloud record on other machines' pulls.
@@ -1895,14 +1978,8 @@ pub struct LocalConversationBinding {
 
 impl LocalConversationBinding {
     pub fn validate(&self) -> Result<(), String> {
-        if self.forked_from.as_ref() == Some(&self.thread_id) {
-            return Err(format!(
-                "local conversation thread '{}' cannot fork from itself",
-                self.thread_id
-            ));
-        }
         if let Some(preserved) = &self.preserved {
-            preserved.validate(&self.thread_id)?;
+            preserved.validate()?;
         }
         if let Some(layout) = &self.root_tail_layout {
             layout.validate()?;
@@ -1979,6 +2056,7 @@ impl ConversationBindings {
         }
         let mut binding_keys = HashSet::new();
         let mut provider_owners = HashSet::new();
+        let mut cloud_claims = HashSet::new();
         for binding in &self.bindings {
             binding.validate()?;
             if binding.host_id != self.host_id {
@@ -1993,6 +2071,18 @@ impl ConversationBindings {
             );
             if !binding_keys.insert(key) {
                 return Err("duplicate local conversation binding".to_string());
+            }
+            if let Some(cloud_thread_id) = &binding.cloud_thread_id {
+                let claim = (
+                    binding.host_id.clone(),
+                    binding.replica_id.clone(),
+                    binding.local_project_id.clone(),
+                    binding.provider_profile_id.clone(),
+                    cloud_thread_id.clone(),
+                );
+                if !cloud_claims.insert(claim) {
+                    return Err("cloud thread id is claimed by multiple conversations".to_string());
+                }
             }
             if let Some(thread_id) = &binding.provider_thread_id {
                 let owner = (
@@ -2195,14 +2285,18 @@ impl ConversationPublicationOperation {
     }
 }
 
-/// The planned identities of a divergent keep-both binding move.  The full
-/// document mutations live in the operation's before/after states; these
-/// fields let recovery assert it is resuming the same planned move.
+/// The identities of a divergent keep-both binding move, minted at apply and
+/// journaled before any visible mutation.  The full document mutations live
+/// in the operation's before/after states; these fields let recovery assert
+/// it is resuming the same move, and receipts read minted keep-both facts
+/// from here — never from a plan.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct KeepBothJournal {
     pub preserved_thread_id: ThreadId,
     pub remote_provider_thread_id: String,
+    pub preserved: PreservedProvenance,
+    pub preserved_display_title: String,
 }
 
 /// A materializing Pull: verified cloud objects reconstructed into staged
@@ -2257,6 +2351,12 @@ impl ConversationMaterializationOperation {
             validate_provider_thread_id(
                 "conversation keep-both remote provider thread",
                 &keep_both.remote_provider_thread_id,
+            )?;
+            keep_both.preserved.validate()?;
+            validate_display_text(
+                "conversation keep-both preserved title",
+                &keep_both.preserved_display_title,
+                false,
             )?;
         }
         self.sync_config_before.validate()?;
@@ -2377,6 +2477,10 @@ pub struct ConversationSyncOperation {
     pub provider_profile_id: LocalProviderProfileId,
     pub provider: ProviderKey,
     pub thread_id: ThreadId,
+    /// The cloud identity this operation publishes or materializes. Required
+    /// and complete: operations are constructed at apply, after minting, so
+    /// the journal is the durable record of every identity pairing.
+    pub cloud_thread_id: CloudThreadId,
     pub operation: ConversationSyncOperationKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
@@ -2456,14 +2560,17 @@ impl ConversationSyncOperation {
             }
             ConversationSyncOperationKind::ProviderMaterialization(operation) => {
                 operation.validate()?;
-                if operation
-                    .keep_both
-                    .as_ref()
-                    .is_some_and(|keep_both| keep_both.preserved_thread_id == self.thread_id)
-                {
-                    return Err(
-                        "conversation keep-both cannot preserve into its own thread".to_string()
-                    );
+                if let Some(keep_both) = &operation.keep_both {
+                    if keep_both.preserved_thread_id == self.thread_id {
+                        return Err("conversation keep-both cannot preserve into its own thread"
+                            .to_string());
+                    }
+                    if keep_both.preserved.preserved_from != self.cloud_thread_id {
+                        return Err(
+                            "conversation keep-both provenance must name the operation's cloud thread"
+                                .to_string(),
+                        );
+                    }
                 }
             }
         }
@@ -2503,6 +2610,9 @@ impl ConversationSyncJournal {
             return Err("invalid conversation sync journal".to_string());
         }
         let mut ids = BTreeSet::new();
+        let mut local_keys = BTreeSet::new();
+        let mut cloud_keys = BTreeSet::new();
+        let mut plan_actions = BTreeSet::new();
         for operation in &self.operations {
             operation.validate()?;
             if !ids.insert(operation.operation_id.clone()) {
@@ -2510,6 +2620,40 @@ impl ConversationSyncJournal {
                     "duplicate conversation journal operation '{}'",
                     operation.operation_id
                 ));
+            }
+            // Pending-operation uniqueness, per identity space. The cloud key
+            // is deliberately not provider-qualified: cloud ids are
+            // bundle-global. Together with the plan-action key this closes
+            // the interrupted-retry hole apply-time minting opens — a retried
+            // action mints fresh local identities, but shares its cloud id
+            // and plan action with the journaled first attempt.
+            if !local_keys.insert((
+                operation.local_project_id.clone(),
+                operation.provider.clone(),
+                operation.thread_id.clone(),
+            )) {
+                return Err(format!(
+                    "conversation journal holds two operations for thread '{}'",
+                    operation.thread_id
+                ));
+            }
+            if !cloud_keys.insert((
+                operation.local_project_id.clone(),
+                operation.cloud_thread_id.clone(),
+            )) {
+                return Err(format!(
+                    "conversation journal holds two operations for cloud thread '{}'",
+                    operation.cloud_thread_id
+                ));
+            }
+            if let (Some(plan_id), Some(action_id)) =
+                (&operation.plan_id, &operation.plan_action_id)
+            {
+                if !plan_actions.insert((plan_id.clone(), action_id.clone())) {
+                    return Err(
+                        "conversation journal holds two operations for one plan action".to_string(),
+                    );
+                }
             }
         }
         Ok(())
@@ -2845,10 +2989,15 @@ impl SessionPresentation {
     }
 }
 
+/// One cloud conversation row. Keyed entirely in the cloud id space
+/// (`cloudthread-…`): the id is minted at push apply, independent of any
+/// machine's local thread id, and stays the thread's one portable identity
+/// across all storages. The cloud stores no local identity with linkage
+/// semantics.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationThread {
-    pub thread_id: ThreadId,
+    pub thread_id: CloudThreadId,
     pub provider: ProviderKey,
     /// Presentation-only provider title, or a bounded first-user fallback
     /// when the provider has no explicit title. Never used as identity.
@@ -2876,12 +3025,16 @@ pub struct ConversationThread {
     /// Provenance of a fork only. Never consulted by the resolver, and the
     /// referenced thread may have been tombstoned or pruned since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forked_from: Option<ThreadId>,
+    pub forked_from: Option<CloudThreadId>,
     /// Keep-both preservation provenance. Like `forked_from`, display-only:
     /// never consulted by the resolver, and the origin thread may have been
     /// tombstoned or pruned since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preserved: Option<PreservedProvenance>,
+    /// A content fact, never identity: the provider session id embedded in
+    /// the stored transcript bytes (the pusher's local session id). Consumed
+    /// only as content/context — builder self-verification, adapter renaming
+    /// hints, display fallbacks — and determines nothing about matching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2900,7 +3053,7 @@ impl ConversationThread {
         }
         self.presentation.validate()?;
         validate_display_text("conversation lineage codec", &self.lineage_codec, false)?;
-        let expected_resource_id = conversation_resource_id(&self.provider, &self.thread_id)?;
+        let expected_resource_id = cloud_conversation_resource_id(&self.provider, &self.thread_id)?;
         if self.resource_id != expected_resource_id {
             return Err(format!(
                 "conversation thread '{}' has non-canonical resource id '{}'",
@@ -2915,7 +3068,8 @@ impl ConversationThread {
         }
         let mut paths = BTreeSet::new();
         let mut transcript_count = 0_usize;
-        let canonical_transcript = conversation_transcript_path(&self.provider, &self.thread_id)?;
+        let canonical_transcript =
+            cloud_conversation_transcript_path(&self.provider, &self.thread_id)?;
         let canonical_prefix = format!(
             "state/conversations/{}/{}/",
             self.provider.as_str(),
@@ -3014,7 +3168,7 @@ impl ConversationThread {
             ));
         }
         if let Some(preserved) = &self.preserved {
-            preserved.validate(&self.thread_id)?;
+            preserved.validate_for_cloud_row(&self.thread_id)?;
         }
         if let Some(thread_id) = &self.source_thread_id {
             if thread_id.is_empty()
@@ -3145,35 +3299,6 @@ impl ProviderStateExpectation {
     fn validate(&self) -> Result<(), String> {
         validate_absolute_clean_path("conversation provider target", &self.target_path)?;
         self.expectation.validate()
-    }
-}
-
-/// The planned identities of a divergent keep-both: the minted logical thread
-/// that preserves the local branch, and the fresh provider alias that will
-/// track the cloud thread. All identities — the ids, the preservation
-/// provenance, and the marker display title — are minted during planning;
-/// apply and recovery never mint.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct KeepBothPlan {
-    pub preserved_thread_id: ThreadId,
-    pub remote_provider_thread_id: String,
-    pub preserved: PreservedProvenance,
-    pub preserved_display_title: String,
-}
-
-impl KeepBothPlan {
-    fn validate(&self) -> Result<(), String> {
-        validate_provider_thread_id(
-            "conversation keep-both remote provider thread",
-            &self.remote_provider_thread_id,
-        )?;
-        self.preserved.validate(&self.preserved_thread_id)?;
-        validate_display_text(
-            "conversation keep-both preserved title",
-            &self.preserved_display_title,
-            false,
-        )
     }
 }
 
@@ -3320,19 +3445,30 @@ impl ConversationActionPins {
     }
 }
 
+/// One reviewed conversation action. Plans are pure intent: review classifies
+/// relations and pins evidence, but assigns no new identity of any kind — no
+/// cloud thread id, no local thread id, no provider session id, no keep-both
+/// preserved identity or marker title. Every fresh identity is minted at
+/// apply, immediately before journaling; any conflict there fails the action.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationPlanAction {
     pub action_id: ActionId,
     pub action: ConversationPlanActionType,
     pub provider: ProviderKey,
-    pub thread_id: ThreadId,
+    /// The local thread this action operates on; `None` exactly for
+    /// `CreateLocal`, whose local identity is minted at apply. Present on
+    /// the wire even when `None` so pre-cutover actions fail closed.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub thread_id: Option<ThreadId>,
+    /// The cloud row this action was reviewed against; `None` exactly for an
+    /// unmapped `CreateCloud`, whose cloud identity is minted at apply.
+    /// Present on the wire even when `None` so pre-cutover actions fail
+    /// closed.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub cloud_thread_id: Option<CloudThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_resource_id: Option<ResourceId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proposed_provider_thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_both: Option<KeepBothPlan>,
     pub pins: ConversationActionPins,
 }
 
@@ -3343,14 +3479,19 @@ impl ConversationPlanAction {
         if !self.action.matches_relation(relation) {
             return Err("conversation plan action disagrees with its tail evidence".to_string());
         }
-        if self
-            .proposed_provider_thread_id
-            .as_ref()
-            .is_some_and(|thread_id| {
-                validate_provider_thread_id("conversation plan provider thread", thread_id).is_err()
-            })
+        // Identity-presence matrix: the local id is absent exactly when apply
+        // mints it (CreateLocal); the cloud id is absent only when apply
+        // mints it (unmapped CreateCloud). Both-absent is unrepresentable.
+        if self.thread_id.is_none() != (self.action == ConversationPlanActionType::CreateLocal) {
+            return Err(
+                "conversation plan action local identity disagrees with its action".to_string(),
+            );
+        }
+        if self.cloud_thread_id.is_none() && self.action != ConversationPlanActionType::CreateCloud
         {
-            return Err("conversation plan has an invalid provider thread id".to_string());
+            return Err(
+                "conversation plan action requires its reviewed cloud thread id".to_string(),
+            );
         }
 
         let publishes = matches!(
@@ -3369,39 +3510,6 @@ impl ConversationPlanAction {
         if materializes && self.pins.tail.lineage_digest.is_none() {
             return Err("conversation materializing action lacks manifest digest pins".to_string());
         }
-        if (self.action == ConversationPlanActionType::KeepBoth) != self.keep_both.is_some() {
-            return Err("conversation keep-both state disagrees with its action".to_string());
-        }
-        if let Some(keep_both) = &self.keep_both {
-            keep_both.validate()?;
-            if keep_both.preserved_thread_id == self.thread_id {
-                return Err(
-                    "conversation keep-both cannot preserve into its own thread".to_string()
-                );
-            }
-            if keep_both.preserved.preserved_from != self.thread_id {
-                return Err(
-                    "conversation keep-both provenance must name the divergent thread".to_string(),
-                );
-            }
-            if self.proposed_provider_thread_id.is_some() {
-                return Err(
-                    "conversation keep-both mints identities only in its keep-both plan"
-                        .to_string(),
-                );
-            }
-        }
-        let needs_proposed_provider = matches!(
-            self.action,
-            ConversationPlanActionType::MaterializeCloud | ConversationPlanActionType::CreateLocal
-        );
-        if needs_proposed_provider != self.proposed_provider_thread_id.is_some()
-            && self.keep_both.is_none()
-        {
-            return Err(
-                "conversation materialization action provider identity is inconsistent".to_string(),
-            );
-        }
         if !materializes && !self.pins.target.provider_state.is_empty() {
             return Err(
                 "non-materializing conversation action reserves provider targets".to_string(),
@@ -3412,12 +3520,17 @@ impl ConversationPlanAction {
 }
 
 /// Small immutable Pull-review row. `action_id` is present exactly when the
-/// row projects an executable action stored in `conversation_actions`.
+/// row projects an executable action stored in `conversation_actions`. The
+/// id pair mirrors the action's: `thread_id` is `None` for cloud-only rows,
+/// `cloud_thread_id` is `None` for local-only rows; at least one is present.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationReviewRow {
     pub provider: ProviderKey,
-    pub thread_id: ThreadId,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub thread_id: Option<ThreadId>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub cloud_thread_id: Option<CloudThreadId>,
     pub resource_id: ResourceId,
     pub action: ConversationReviewAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3430,6 +3543,9 @@ pub struct ConversationReviewRow {
 
 impl ConversationReviewRow {
     fn validate(&self) -> Result<(), String> {
+        if self.thread_id.is_none() && self.cloud_thread_id.is_none() {
+            return Err("conversation review row names no identity".to_string());
+        }
         if (self.action == ConversationReviewAction::Blocked) != self.blocker.is_some() {
             return Err("conversation review blocker disagrees with its action".to_string());
         }
@@ -3480,6 +3596,7 @@ impl ConversationPushPlan {
             return Err("invalid conversation push-plan lifetime or action count".to_string());
         }
         let mut action_ids = BTreeSet::new();
+        let mut claimed_cloud_ids = BTreeSet::new();
         let mut provider_scope_pins: BTreeMap<ProviderKey, (u64, String)> = BTreeMap::new();
         for action in &self.actions {
             action.validate()?;
@@ -3501,6 +3618,17 @@ impl ConversationPushPlan {
                 || action.pins.expires_at != self.expires_at
             {
                 return Err("conversation push-plan action pins disagree with the plan".to_string());
+            }
+            // Push actions always operate on a registered local thread; the
+            // action-level matrix leaves `None` to CreateLocal only, so this
+            // is a defensive restatement for the push document.
+            if action.thread_id.is_none() {
+                return Err("conversation push-plan action lacks its local thread id".to_string());
+            }
+            if let Some(cloud_thread_id) = &action.cloud_thread_id {
+                if !claimed_cloud_ids.insert((action.provider.clone(), cloud_thread_id.clone())) {
+                    return Err("conversation push-plan claims one cloud thread twice".to_string());
+                }
             }
             let scope_pin = (
                 action.pins.revision.scope_revision,
@@ -3610,10 +3738,13 @@ fn stable_conversation_id(prefix: &str, domain: &str, fields: &[&[u8]]) -> Resul
     Ok(value)
 }
 
-/// Derive the first portable identity for a provider-native conversation.
-/// Fork identities remain random and are persisted in their reviewed plans;
-/// this derivation only makes repeated reviews of the same previously-unbound
-/// local conversation stable before its first publication commits a binding.
+/// Derive the first machine-local identity for a provider-native
+/// conversation. Strictly machine-local: it makes repeated reviews of the
+/// same previously-unbound local conversation stable before its first
+/// publication commits a binding, and lets an orphaned materialized file
+/// whose binding is lost re-derive the same id at rediscovery. It never
+/// determines any cloud identity — the cloud id is minted independently at
+/// push apply.
 pub fn initial_conversation_thread_id(
     bundle_id: &BundleId,
     provider: &ProviderKey,
@@ -3673,6 +3804,16 @@ pub fn conversation_resource_id(
     ResourceId::parse(format!("{}:conversation:{}", provider.as_str(), thread_id))
 }
 
+/// The cloud-space twin of [`conversation_resource_id`], keying manifest
+/// rows. The two id namespaces are prefix-disjoint, so the two resource-id
+/// forms can never collide.
+pub fn cloud_conversation_resource_id(
+    provider: &ProviderKey,
+    thread_id: &CloudThreadId,
+) -> Result<ResourceId, String> {
+    ResourceId::parse(format!("{}:conversation:{}", provider.as_str(), thread_id))
+}
+
 /// Parse the canonical portable conversation resource identity
 /// (`<provider>:conversation:<thread>`). Provider-native capture identities
 /// such as `<provider>:session:<id>` deliberately do not match.
@@ -3695,6 +3836,38 @@ pub fn parse_conversation_resource_id(
     Ok((ProviderKey::parse(provider)?, ThreadId::parse(thread)?))
 }
 
+/// Parse the canonical cloud conversation resource identity
+/// (`<provider>:conversation:cloudthread-…`). Local-space resource ids
+/// deliberately do not match, exactly as cloud-space ids fail
+/// [`parse_conversation_resource_id`].
+pub fn parse_cloud_conversation_resource_id(
+    resource_id: &str,
+) -> Result<(ProviderKey, CloudThreadId), String> {
+    let mut parts = resource_id.splitn(3, ':');
+    let provider = parts
+        .next()
+        .ok_or_else(|| "resource id is empty".to_string())?;
+    let class = parts.next();
+    let thread = parts.next();
+    if class != Some("conversation") {
+        return Err(format!(
+            "'{}' is not a conversation resource id",
+            resource_id
+        ));
+    }
+    let thread = thread.ok_or_else(|| format!("'{}' has no thread id", resource_id))?;
+    Ok((ProviderKey::parse(provider)?, CloudThreadId::parse(thread)?))
+}
+
+/// True when the resource id names a conversation in either id space
+/// (`<provider>:conversation:<local or cloud thread>`). Machine-local
+/// selection state excludes both: local conversation identities key reviews
+/// and receipts, cloud identities key manifest rows.
+pub fn is_conversation_resource_id(resource_id: &str) -> bool {
+    parse_conversation_resource_id(resource_id).is_ok()
+        || parse_cloud_conversation_resource_id(resource_id).is_ok()
+}
+
 pub fn conversation_transcript_path(
     provider: &ProviderKey,
     thread_id: &ThreadId,
@@ -3706,9 +3879,35 @@ pub fn conversation_transcript_path(
     ))
 }
 
+pub fn cloud_conversation_transcript_path(
+    provider: &ProviderKey,
+    thread_id: &CloudThreadId,
+) -> Result<LogicalPath, String> {
+    LogicalPath::parse(format!(
+        "state/conversations/{}/{}/transcript.jsonl",
+        provider.as_str(),
+        thread_id
+    ))
+}
+
 pub fn conversation_sidecar_path(
     provider: &ProviderKey,
     thread_id: &ThreadId,
+    sidecar_kind: &str,
+    file_name: &str,
+) -> Result<LogicalPath, String> {
+    LogicalPath::parse(format!(
+        "state/conversations/{}/{}/sidecars/{}/{}",
+        provider.as_str(),
+        thread_id,
+        sidecar_kind,
+        file_name
+    ))
+}
+
+pub fn cloud_conversation_sidecar_path(
+    provider: &ProviderKey,
+    thread_id: &CloudThreadId,
     sidecar_kind: &str,
     file_name: &str,
 ) -> Result<LogicalPath, String> {
@@ -3795,7 +3994,7 @@ pub enum TombstoneTarget {
         logical_path: LogicalPath,
     },
     ConversationThread {
-        thread_id: ThreadId,
+        thread_id: CloudThreadId,
     },
 }
 
@@ -3889,7 +4088,7 @@ pub struct BundleScope {
     pub recipe: BundleRecipe,
     pub captured_with: CapturedWith,
     #[serde(default)]
-    pub conversations: BTreeMap<ThreadId, ConversationThread>,
+    pub conversations: BTreeMap<CloudThreadId, ConversationThread>,
     #[serde(default)]
     pub resources: BTreeMap<ResourceId, ResourceDescriptor>,
     #[serde(default)]
@@ -3910,7 +4109,7 @@ struct BundleScopeDigestView<'a> {
     revision: u64,
     recipe: &'a BundleRecipe,
     captured_with: &'a CapturedWith,
-    conversations: &'a BTreeMap<ThreadId, ConversationThread>,
+    conversations: &'a BTreeMap<CloudThreadId, ConversationThread>,
     resources: &'a BTreeMap<ResourceId, ResourceDescriptor>,
     files: &'a BTreeMap<LogicalPath, BundleFileEntry>,
     directories: &'a BTreeMap<LogicalPath, BundleDirectoryEntry>,
@@ -3925,7 +4124,7 @@ impl BundleScope {
         revision: u64,
         recipe: BundleRecipe,
         captured_with: CapturedWith,
-        conversations: BTreeMap<ThreadId, ConversationThread>,
+        conversations: BTreeMap<CloudThreadId, ConversationThread>,
         resources: BTreeMap<ResourceId, ResourceDescriptor>,
         files: BTreeMap<LogicalPath, BundleFileEntry>,
         directories: BTreeMap<LogicalPath, BundleDirectoryEntry>,
@@ -4614,7 +4813,7 @@ impl BundleManifest {
 
     pub fn all_conversations(
         &self,
-    ) -> impl Iterator<Item = (&SyncScopeKey, &ThreadId, &ConversationThread)> {
+    ) -> impl Iterator<Item = (&SyncScopeKey, &CloudThreadId, &ConversationThread)> {
         self.scopes.iter().flat_map(|(key, scope)| {
             scope
                 .conversations
@@ -4634,7 +4833,7 @@ impl BundleManifest {
 
     pub fn find_conversation(
         &self,
-        thread_id: &ThreadId,
+        thread_id: &CloudThreadId,
     ) -> Option<(&SyncScopeKey, &ConversationThread)> {
         self.scopes.iter().find_map(|(key, scope)| {
             scope
@@ -4975,6 +5174,7 @@ impl RestorePlan {
                 if row.action.planned_action() != Some(action.action)
                     || row.provider != action.provider
                     || row.thread_id != action.thread_id
+                    || row.cloud_thread_id != action.cloud_thread_id
                     || action
                         .source_resource_id
                         .as_ref()
@@ -5033,6 +5233,10 @@ pub struct ConversationApplyReceipt {
     /// divergent keep-both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preserved_thread_id: Option<ThreadId>,
+    /// The preserved copy's marker title, read from the journaled keep-both
+    /// record (identities are minted at apply; plans carry none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_display_title: Option<String>,
     /// Recorded for every consumed provider source; old sources are never
     /// moved or deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]

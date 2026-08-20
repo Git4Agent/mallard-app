@@ -956,7 +956,7 @@ mod tests {
             .split(|byte| *byte == b'\n')
             .filter(|raw| !raw.is_empty())
             .map(|raw| serde_json::from_slice::<serde_json::Value>(raw).unwrap())
-            .last()
+            .next_back()
             .and_then(|value| value.get("ordinal").and_then(serde_json::Value::as_u64))
             .unwrap()
             .checked_add(1)

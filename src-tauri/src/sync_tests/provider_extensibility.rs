@@ -142,7 +142,7 @@ fn unregistered_provider_scope_is_carried_unchanged_through_a_publish() {
     let future_path =
         LogicalPath::parse(format!("{}notes.md", provider_state_path_prefix(&future))).unwrap();
     let thread = ThreadSpec::new(
-        "thread-known",
+        "cloudthread-known",
         "provider-known",
         TranscriptBuilder::new("provider-known", "/tmp/project")
             .message("m-1", "user", "hello")

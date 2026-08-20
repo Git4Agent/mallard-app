@@ -171,7 +171,7 @@ export function pushReviewBlockers(
     // Thread rows never disable the whole Push: a diverged or held thread
     // is unselectable and keeps its cloud version, while every other
     // selected thread still publishes.
-    if (entry.cloud_thread_id) {
+    if (entry.compared_against_storage) {
       continue;
     }
     const selectedEntry = selected.has(entry.resource_id);

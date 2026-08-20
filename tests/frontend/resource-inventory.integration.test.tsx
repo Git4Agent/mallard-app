@@ -223,6 +223,7 @@ test("conversation divergence holds only its thread instead of blocking Push", (
     entries: [{
       ...entry,
       cloud_thread_id: "thread-diverged",
+      compared_against_storage: true,
     }],
   };
 
@@ -555,6 +556,7 @@ test("held threads and storage blockers share one banner with one way forward", 
         local_present: true,
         storage_present: true,
         cloud_thread_id: "thread-held",
+        compared_against_storage: true,
         push_decision: decision("require_pull", "divergent"),
         pull_decision: decision("keep_both", "diverged", true),
       },

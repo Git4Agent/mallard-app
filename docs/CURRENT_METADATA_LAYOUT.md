@@ -199,11 +199,24 @@ The records divide responsibility as follows:
 
 ### 3.3 Conversation identity
 
-Mallard maintains two conversation identities:
+Mallard maintains three conversation identities in two structurally disjoint
+Mallard id spaces plus the provider-native space:
 
-- `thread_id` is Mallard's logical, portable identity.
-- `provider_thread_id` is the provider-native identity, such as a Codex UUID,
-  and is bound to a local provider profile.
+| Identity | Namespace | Lives | Minted |
+| --- | --- | --- | --- |
+| `thread_id` (local) | `thread-…` (derived 32-hex or generated 24-hex; `cloudthread-` rejected) | binding rows, checkpoints, journal ops, receipts, Activity — never in a bundle | derived at registration (`initial_conversation_thread_id`), or at pull apply for `CreateLocal` |
+| `cloud_thread_id` | `cloudthread-` + 24 hex (prefix-pinned) | manifest rows, cloud resource ids, logical paths, tombstones, provenance | at push apply for an unmapped `CreateCloud`; one portable identity per lineage across all storages |
+| `provider_thread_id` | provider-native (UUID) | binding rows, provider files | provider app, or at pull apply for materializations |
+
+The pairing `(thread_id, cloud_thread_id)` lives only on the machine's
+binding row (`LocalConversationBinding.cloud_thread_id`, present-on-wire
+nullable: always serialized, `null` when unmapped, and the key is required on
+read so pre-cutover rows fail closed). The cloud stores no mapping and no
+local identity with linkage semantics. Per binding scope
+(host/replica/project/profile), at most one row may claim a given cloud
+thread id. Every fresh identity is minted at apply, never at planning, and
+journaled with its whole-document after-states before any visible mutation;
+recovery installs those documents verbatim and never mints.
 
 One provider thread ID may have only one owner for a given host/profile.
 `conversation_bindings.json` also records:
@@ -213,27 +226,32 @@ One provider thread ID may have only one owner for a given host/profile.
   (`whole_thread` or `fixed_paginated_tail`), and the fixed start record
   count — seeded at first full parse or imported from the verified cloud
   value at Pull install; and
-- `forked_from` as a provenance hint that is surfaced but never used for
-  matching or classification; and
-- `preserved` as the keep-both provenance hint (`preserved_from` origin
-  thread + per-origin ordinal), published with the thread on Push and
-  restored from the cloud record on other machines' pulls — display-only,
-  like `forked_from`.
+- `forked_from` as a provenance hint in the cloud id space that is surfaced
+  but never used for matching or classification; and
+- `preserved` as the keep-both provenance hint (`preserved_from` origin in
+  the cloud id space + per-origin ordinal), published with the thread on
+  Push and restored from the cloud record on other machines' pulls —
+  display-only, like `forked_from`.
 
 Acceptance state does not live on the binding. Each `ProjectStorageLink` in
-`sync_config.json` holds per-provider-scope conversation checkpoints: the
-accepted five-field portable tail with its commit/manifest witness, the
-replaceable observed tail, the physical mapping cursor with a raw-range pin
-and trailing probe window, the machine-local prefix witness over the fixed
-prefix, and generation/binding-revision fences. Removing a project removes
-its links and checkpoints; bindings and layouts survive, and a re-registered
-project re-proves acceptance by refolding the reviewed cloud tail against
-the local chain before it may push again.
+`sync_config.json` holds per-provider-scope conversation checkpoints keyed by
+the local `thread_id`: the accepted five-field portable tail with its
+commit/manifest witness, the replaceable observed tail, the physical mapping
+cursor with a raw-range pin and trailing probe window, the machine-local
+prefix witness over the fixed prefix, and generation/binding-revision fences.
+Removing a project removes its links and checkpoints; bindings — and with
+them the cloud mappings — survive, and a re-registered project re-proves
+acceptance mapping-driven: the adoption probe refolds local bytes against the
+cloud tail the binding's mapping names before the thread may push again.
+Mapping lifetime equals binding-row lifetime: if binding rows are lost, the
+machine's threads are local-only again, pulls re-materialize cloud threads as
+new local threads, and pushes mint new cloud ids.
 
-The portable manifest has its own conversation entry keyed by Mallard
-`thread_id`. It includes `source_thread_id`, so the provider-native source ID
-is portable metadata even though the local profile binding and absolute
-transcript path are not.
+The portable manifest has its own conversation entry keyed by the
+`cloudthread-…` id; manifest validation rejects any conversation row outside
+that namespace, so a manifest cannot inject a local-space id at all. It
+includes `source_thread_id` as a content fact only — the provider session id
+embedded in the stored transcript bytes — never an identity.
 
 ### 3.4 Review plans and transaction journals
 
@@ -566,7 +584,7 @@ captured_with
   Mallard version, optional provider versions, codec versions
 published_by_origin
   bundle-scoped host/replica tokens, optional shared label
-conversations[thread_id]
+conversations[cloud_thread_id]
 resources[resource_id]
 files[logical_path]
 directories[logical_path]
@@ -647,10 +665,11 @@ skip only.
 
 ### 5.6 Typed conversation metadata
 
-A portable conversation entry contains:
+A portable conversation entry contains (all thread references in the cloud
+id space):
 
 ```text
-thread_id
+thread_id                     # cloudthread-… (never a machine-local id)
 provider
 optional display_title
 resource_id
@@ -661,8 +680,9 @@ optional lineage_digest, semantic_digest
 portable_tail                 # codec, partition_kind, start_record_count,
                               # accepted_end_record_count, accepted_tail_state;
                               # required for Codex entries, end == message_count
-optional forked_from
-optional preserved            # keep-both provenance: preserved_from + ordinal
+optional forked_from          # cloud id space
+optional preserved            # keep-both provenance: preserved_from (cloud
+                              # id space) + ordinal
 optional source_thread_id
 optional created_by_origin, last_updated_by_origin
 created_at, updated_at
@@ -671,7 +691,7 @@ created_at, updated_at
 The canonical typed transcript path is:
 
 ```text
-state/conversations/<provider>/<mallard-thread-id>/transcript.jsonl
+state/conversations/<provider>/<cloud-thread-id>/transcript.jsonl
 ```
 
 The production conversation reconciliation path currently gives selected
@@ -838,6 +858,10 @@ payload is safe. Shared storage should be treated as private user data.
 - `host_id`: exactly 32 lowercase hexadecimal characters and private.
 - origin host/replica token: exactly 64 lowercase hexadecimal characters.
 - Mallard named IDs: 1-128 lowercase ASCII identifier characters.
+- local conversation `thread_id`: `thread-` prefix (derived 32-hex or
+  generated 24-hex); parsing rejects the `cloudthread-` namespace.
+- `cloud_thread_id`: `cloudthread-` plus exactly 24 lowercase hexadecimal
+  characters from 96 random bits; parsing requires the prefix.
 - logical path: at most 1,024 bytes, relative and normalized.
 - resources: at most 20,000 per manifest.
 - files, directories, and tombstones: at most 100,000 each.

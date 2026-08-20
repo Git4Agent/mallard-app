@@ -128,6 +128,7 @@ function entry(overrides: Partial<ThreadSyncEntry> & Pick<ThreadSyncEntry, "thre
     local_present: true,
     storage_present: false,
     cloud_thread_id: overrides.thread_id,
+    compared_against_storage: true,
     push_decision: decision("create_cloud", null, true),
     pull_decision: decision("report_local_only"),
     ...overrides,

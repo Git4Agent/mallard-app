@@ -359,6 +359,7 @@ export interface ConversationApplyReceipt {
   journal_operation_id: string;
   accepted_tail?: PortableConversationTail | null;
   preserved_thread_id?: string | null;
+  preserved_display_title?: string | null;
   source_disposition?: "retained" | null;
 }
 
@@ -837,13 +838,6 @@ export interface PreservedProvenance {
   ordinal: number;
 }
 
-export interface KeepBothPlan {
-  preserved_thread_id: string;
-  remote_provider_thread_id: string;
-  preserved: PreservedProvenance;
-  preserved_display_title: string;
-}
-
 export interface ConversationRawRangePin {
   start_byte_offset: number;
   end_byte_offset: number;
@@ -899,16 +893,18 @@ export interface ConversationPlanAction {
   action_id: string;
   action: ConversationPlanActionType;
   provider: ProviderKey;
-  thread_id: string;
+  /** Local thread; null exactly for create_local (minted at apply). */
+  thread_id: string | null;
+  /** Reviewed cloud row; null exactly for an unmapped create_cloud. */
+  cloud_thread_id: string | null;
   source_resource_id?: string | null;
-  proposed_provider_thread_id?: string | null;
-  keep_both?: KeepBothPlan | null;
   pins: ConversationActionPins;
 }
 
 export interface ConversationReviewRow {
   provider: ProviderKey;
-  thread_id: string;
+  thread_id: string | null;
+  cloud_thread_id: string | null;
   resource_id: string;
   action: ConversationReviewAction;
   blocker?: ConversationBlocker | null;
@@ -943,7 +939,7 @@ export interface PreservedThreadResult {
   action_id: string;
   original_thread_id: string;
   preserved_thread_id: string;
-  /** The plan-minted marker title the preserved copy was renamed to. */
+  /** The apply-minted marker title the preserved copy was renamed to. */
   preserved_display_title: string;
 }
 
@@ -1271,8 +1267,16 @@ export interface ThreadSyncEntry {
   status_detail?: string | null;
   local_updated_at?: number | null;
   storage_updated_at?: number | null;
+  /**
+   * The thread's honest cloud mapping (or the cloud row's own id for a
+   * storage-only row); null for a local-only thread. No longer a presence
+   * proxy for "row came from a storage comparison" — see
+   * `compared_against_storage`.
+   */
   cloud_thread_id?: string | null;
   forked_from?: string | null;
+  /** True for rows produced by a storage comparison (sync review). */
+  compared_against_storage: boolean;
   provider_thread_id?: string | null;
   push_decision: ThreadSyncDecision;
   pull_decision: ThreadSyncDecision;

@@ -5,14 +5,13 @@ use crate::project_sync::conversation_sync::{
 };
 use crate::project_sync::domain::{
     compare_conversation_tail, compute_portable_conversation_tail, default_conversation_decision,
-    ActionId, ClassifiedThread, ConversationActionPins, ConversationCapabilities,
+    ActionId, ClassifiedThread, CloudThreadId, ConversationActionPins, ConversationCapabilities,
     ConversationContextPins, ConversationPlanAction, ConversationPlanActionType,
     ConversationPlanDirection, ConversationReviewAction, ConversationRevisionPins,
-    ConversationTailPins, ConversationTargetPins, HostId, KeepBothPlan, LocalProjectId,
-    LocalProviderProfileId, PortableConversationTail, PreservedProvenance,
-    ProviderStateExpectation, RawRangePin, ReplicaId, ResourceId, SyncCurrency, TailClassification,
-    TailEvidenceBlocker, TailPartitionKind, TailSideEvidence, TargetExpectation, ThreadId,
-    VerifiedTailEvidence,
+    ConversationTailPins, ConversationTargetPins, HostId, LocalProjectId, LocalProviderProfileId,
+    PortableConversationTail, ProviderStateExpectation, RawRangePin, ReplicaId, ResourceId,
+    SyncCurrency, TailClassification, TailEvidenceBlocker, TailPartitionKind, TailSideEvidence,
+    TargetExpectation, ThreadId, VerifiedTailEvidence,
 };
 
 fn whole_tail(ids: &[(&str, &str)]) -> PortableConversationTail {
@@ -165,19 +164,21 @@ fn canonical_policy_covers_each_verified_relation_and_persists_only_mutations() 
                     review_only_pins(accepted.clone(), local.clone(), cloud.clone())
                 });
             let action_id = format!("action-{}-{direction:?}", case.name).to_lowercase();
+            // Plans carry intent only: the id pair follows the D5 presence
+            // matrix (no local id exactly for CreateLocal, no cloud id
+            // exactly for an unmapped CreateCloud), and no minted identity
+            // of any kind exists at plan time.
+            let planned_type = expected.planned_action();
             let planned = build_conversation_plan_action(ConversationPlanActionRequest {
                 action_id: ActionId::parse(action_id).unwrap(),
                 direction,
                 classified,
                 provider: codex(),
-                thread_id: ThreadId::parse("thread-a").unwrap(),
+                thread_id: (planned_type != Some(ConversationPlanActionType::CreateLocal))
+                    .then(|| ThreadId::parse("thread-a").unwrap()),
+                cloud_thread_id: (planned_type != Some(ConversationPlanActionType::CreateCloud))
+                    .then(|| CloudThreadId::parse("cloudthread-a").unwrap()),
                 source_resource_id: Some(ResourceId::parse("codex:conversation:source").unwrap()),
-                proposed_provider_thread_id: template_action
-                    .as_ref()
-                    .and_then(|action| action.proposed_provider_thread_id.clone()),
-                keep_both: template_action
-                    .as_ref()
-                    .and_then(|action| action.keep_both.clone()),
                 pins,
             })
             .unwrap();
@@ -235,28 +236,17 @@ fn reviewed_action_with_tails(
     cloud: Option<PortableConversationTail>,
 ) -> (ConversationPlanAction, ConversationApplyContext) {
     let pins = action_pins(Some(action_type), accepted, local, cloud);
-    let proposed_provider_thread_id = matches!(
-        action_type,
-        ConversationPlanActionType::MaterializeCloud | ConversationPlanActionType::CreateLocal
-    )
-    .then(|| "0199a1b2-0000-7000-8000-0000000000aa".to_string());
-    let keep_both = (action_type == ConversationPlanActionType::KeepBoth).then(|| KeepBothPlan {
-        preserved_thread_id: ThreadId::parse("thread-preserved").unwrap(),
-        remote_provider_thread_id: "0199a1b2-0000-7000-8000-0000000000bb".to_string(),
-        preserved: PreservedProvenance {
-            preserved_from: ThreadId::parse("thread-a").unwrap(),
-            ordinal: 1,
-        },
-        preserved_display_title: "Thread test conversation (Preserved 1 · Machine A)".to_string(),
-    });
+    // Intent only: identities (provider ids, keep-both facts) are minted at
+    // apply and cannot inhabit a plan.
     let action = ConversationPlanAction {
         action_id: ActionId::parse("action-thread").unwrap(),
         action: action_type,
         provider: codex(),
-        thread_id: ThreadId::parse("thread-a").unwrap(),
+        thread_id: (action_type != ConversationPlanActionType::CreateLocal)
+            .then(|| ThreadId::parse("thread-a").unwrap()),
+        cloud_thread_id: (action_type != ConversationPlanActionType::CreateCloud)
+            .then(|| CloudThreadId::parse("cloudthread-a").unwrap()),
         source_resource_id: Some(ResourceId::parse("codex:conversation:source").unwrap()),
-        proposed_provider_thread_id,
-        keep_both,
         pins,
     };
     action.validate().unwrap();

@@ -9,23 +9,24 @@
 use std::collections::BTreeMap;
 
 use mallard_domain::{
-    ActionId, ClassifiedThread, ConversationActionPins, ConversationPlanAction,
-    ConversationPlanDirection, KeepBothPlan, ProviderKey, ResourceId, ThreadId,
+    ActionId, ClassifiedThread, CloudThreadId, ConversationActionPins, ConversationPlanAction,
+    ConversationPlanDirection, ProviderKey, ResourceId, ThreadId,
 };
 
 /// Immutable inputs used to build one reviewed conversation action. Keeping
 /// these values together makes it difficult for Push, Pull, or a test facade
-/// to omit one of the concurrency pins.
+/// to omit one of the concurrency pins. Plans carry intent only: no request
+/// field can hold a minted identity — fresh cloud ids, local ids, provider
+/// session ids, and keep-both identities are all minted at apply.
 #[derive(Clone, Debug)]
 pub struct ConversationPlanActionRequest {
     pub action_id: ActionId,
     pub direction: ConversationPlanDirection,
     pub classified: ClassifiedThread,
     pub provider: ProviderKey,
-    pub thread_id: ThreadId,
+    pub thread_id: Option<ThreadId>,
+    pub cloud_thread_id: Option<CloudThreadId>,
     pub source_resource_id: Option<ResourceId>,
-    pub proposed_provider_thread_id: Option<String>,
-    pub keep_both: Option<KeepBothPlan>,
     pub pins: ConversationActionPins,
 }
 
@@ -46,9 +47,8 @@ pub fn build_conversation_plan_action(
         action: planned_action,
         provider: request.provider,
         thread_id: request.thread_id,
+        cloud_thread_id: request.cloud_thread_id,
         source_resource_id: request.source_resource_id,
-        proposed_provider_thread_id: request.proposed_provider_thread_id,
-        keep_both: request.keep_both,
         pins: request.pins,
     };
     action.validate()?;

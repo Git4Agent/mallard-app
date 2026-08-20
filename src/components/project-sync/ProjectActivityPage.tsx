@@ -951,7 +951,7 @@ function syncReviewStateLabel(
 ): string | null {
   if (!entry) return null;
   if (entry.state === "unavailable") return "Unavailable for sync";
-  if (entry.cloud_thread_id) {
+  if (entry.compared_against_storage) {
     const decision = mode === "push" ? entry.push_decision : entry.pull_decision;
     switch (decision.action) {
       case "no_changes": return null;

@@ -224,8 +224,8 @@ npm run tauri dev    # complete desktop app
 
 Application configuration is created through the app; normal development does
 not require an `.env` file. The opt-in paid live test has a separate local
-connection input described below. The additional aimock live test is entirely
-local and does not use that connection file.
+connection input described below. The additional aimock live tests are
+entirely local and do not use that connection file.
 
 ## Verify
 
@@ -323,6 +323,63 @@ and twenty loopback resumes completed in one 75.91-second Rust test run.
 See [`docs/PLAN_LIVE_CODEX_INTEGRATION_TEST.md`](./docs/PLAN_LIVE_CODEX_INTEGRATION_TEST.md)
 for the API topology, POC evidence, revision matrix, and safety assertions.
 
+### Live Claude Code Tuzi end-to-end test
+
+The paid Claude target uses the same ignored repository-root `.env.local`
+connection document, but requires its HTTPS URL to be the exact Tuzi site
+root (an input ending in `/v1` is normalized back to the root because Claude
+Code appends `/v1/messages`). It is separate from `npm run test:integration`
+and from the credentialless AIMock target.
+
+Run it only after checking the Tuzi key's quota and consumption log and when
+you intend to pay for three Sonnet 5 turns:
+
+```sh
+MALLARD_RUN_LIVE_CLAUDE_TUZI_E2E=1 npm run test:live-claude-tuzi-e2e
+```
+
+The runner requires Node.js 20.15.0 or newer and exactly Claude Code 2.1.235.
+Before Cargo starts, it validates `.env.local` as a bounded, no-follow,
+mode-`0600` three-field JSON document and performs a bounded authenticated
+catalog lookup for exact model ID `claude-sonnet-5`. It never passes the key
+through Cargo's environment. The Rust target independently reopens and
+validates the connection file, then exposes the key only to each direct
+Claude child as `ANTHROPIC_API_KEY`.
+
+The test makes exactly three Claude model-turn processes with automatic
+retries disabled, no fallback model, no tools, `--effort low`, a 1,024-token
+output limit, and a USD 0.05 Claude client cap per process. It creates a real
+session on replica A, publishes revision 1, pulls and reidentifies it onto
+replica B, resumes the relocated transcript through Tuzi, and publishes
+revision 2. Replica A then resumes its stale base independently. The test
+requires Push to be blocked, reviews a divergent Pull offering exactly one
+Keep Both action, preserves A's local continuation byte-for-byte, publishes
+both lineages as revision 3, and reconciles exact bindings, comparison rows,
+provider UUIDs, and root-level Claude JSONLs on both replicas. It finishes by
+applying reviewed empty Pull plans and proving no-op Pushes and byte-identical
+storage.
+
+All Claude homes, projects, process homes, Mallard repositories, and storage
+are private temporary roots. The test uses fixed synthetic markers and sends
+no repository source or personal conversation. It validates the production
+Claude adapter, paged Session Detail history, transcript structural rewrites,
+semantic lineage preservation, credential absence, portable-manifest path
+privacy, and full-depth no-follow state scans. The USD caps are client-side
+estimates; Tuzi's final consumption log remains authoritative, including for
+failed or disconnected calls.
+
+The final gate passed on August 19, 2026 with `1 passed, 0 failed`; the Rust
+body completed in 13.47 seconds and the complete package command in 18.14
+seconds. During implementation, one earlier execution completed only its
+first paid turn before a local plan-action assertion failed; the final
+three-turn execution then passed. Neither execution automatically retried.
+Check the Tuzi consumption log for the four development turns before running
+the paid gate again.
+
+See [`docs/PLAN_LIVE_CLAUDE_TUZI_INTEGRATION_TEST.md`](./docs/PLAN_LIVE_CLAUDE_TUZI_INTEGRATION_TEST.md)
+for the research, one-turn POC evidence, three-revision implementation, cost
+boundary, and exact limitations.
+
 ### Keyless aimock Codex end-to-end test
 
 The additional aimock suite drives the same installed Codex CLI and Mallard
@@ -411,6 +468,66 @@ path.
 
 See [`docs/PLAN_LIVE_CODEX_AIMOCK_INTEGRATION_TEST.md`](./docs/PLAN_LIVE_CODEX_AIMOCK_INTEGRATION_TEST.md)
 for the aimock topology, protocol POCs, exact accounting, and safety contract.
+
+### Credentialless aimock Claude Code end-to-end test
+
+The Claude Code aimock suite is a separate ignored target for the real Claude
+CLI and Mallard's production Claude adapter. It runs against one strict
+[CopilotKit/aimock](https://github.com/CopilotKit/aimock) server on an
+ephemeral literal-IPv4 loopback port. It does not read `.env.local`, a user
+Claude home, or `.credentials.json`, and it needs no provider account, login,
+real API key, remote model, GPU, or paid token.
+
+Install dependencies and run the explicitly gated target with:
+
+```sh
+npm install
+MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E=1 npm run test:live-claude-aimock-e2e
+```
+
+The current native-format gate requires exactly Claude Code `2.1.235`,
+`@copilotkit/aimock` `1.39.0`, Node.js 20.15.0 or newer, and the mock model
+identifier `claude-sonnet-4-6`. The runner strips inherited provider,
+provider-home, endpoint, and proxy state before Cargo starts. Each Claude
+turn uses `--bare`, `--permission-mode dontAsk`, and a one-tool `Read` allow
+list. Claude requires a non-empty `ANTHROPIC_API_KEY` for this custom endpoint,
+so the child receives the fixed non-secret placeholder
+`mallard-local-aimock-placeholder`. The mock requires that exact value in
+`X-Api-Key`; `Authorization` and alternate credential headers are forbidden.
+This is credentialless local-mock testing, not a headerless or keyless flow.
+
+The scenario creates five real source turns across two isolated Claude homes
+and five Mallard revisions. Revision 1 performs a real `Read` tool round;
+later turns exercise Pull relocation and reidentification, native resume on a
+second canonical project path, divergence in both directions, both Keep Both
+flows, three final cloud lineages, paged Session Detail history, and reviewed
+revision-5 no-op Push/Pull. Six additional snapshot resumes verify every final
+lineage from both replicas without changing either authoritative Claude home.
+
+The accounting is exact: 11 Claude model-turn processes make 12 authenticated
+`POST /v1/messages?beta=true` requests, because the revision-1 tool round uses
+two Messages calls. Claude Code 2.1.235 also makes one credential-free
+`HEAD /api/hello` compatibility probe per process. The raw boundary therefore
+requires exactly 23 requests: 12 model requests plus 11 probes. The Messages
+requests are separately reconciled with all 12 semantic aimock scenarios. Any
+duplicate scenario, other route or method, extra request, upgrade, wrong key,
+credential-bearing probe, history mismatch, or exposed tool makes the audit
+fail. No upstream, proxy, recorder, remote fixture, or retry path is
+configured.
+
+The package runner and Rust target also perform their own bounded, isolated
+`claude --version` preflights. Those are not model turns, start before the mock
+traffic, and make no request to aimock; the exact process budget above is
+deliberately the model-turn budget.
+
+The fully hardened gate passed on August 19, 2026: `1 passed, 0 failed`; the
+Rust test body completed in 12.91 seconds (14.80 seconds for the package
+command), with all 11 Claude model-turn processes, 12 model requests, and 11
+native hello probes accounted for.
+
+See [`docs/PLAN_LIVE_CLAUDE_AIMOCK_INTEGRATION_TEST.md`](./docs/PLAN_LIVE_CLAUDE_AIMOCK_INTEGRATION_TEST.md)
+for the initial POC evidence, five-revision matrix, final history oracle,
+implementation notes, and safety contract.
 
 ## Code map
 

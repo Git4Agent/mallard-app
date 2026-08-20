@@ -19,7 +19,7 @@ fn current_schema_true_noop_does_not_publish_or_change_provenance() {
     let world = VariantWorld::new();
     let origin_a = world.origin(&world.repo_a, "replica-a");
     let thread = ThreadSpec::new(
-        "thread-v1",
+        "cloudthread-v1",
         "source-thread",
         chain("source-thread", &[("m-a", "one"), ("m-b", "two")]),
         origin_a.clone(),
@@ -44,8 +44,8 @@ fn bound_thread_push_updates_only_its_thread() {
     let world = VariantWorld::new();
     let origin_a = world.origin(&world.repo_a, "replica-a");
     let origin_b = world.origin(&world.repo_b, "replica-b");
-    let t1_id = ThreadId::parse("thread-v1").unwrap();
-    let t2_id = ThreadId::parse("thread-v2").unwrap();
+    let t1_id = CloudThreadId::parse("cloudthread-v1").unwrap();
+    let t2_id = CloudThreadId::parse("cloudthread-v2").unwrap();
     let t1 = ThreadSpec::new(
         t1_id.as_str(),
         "source-thread",
@@ -133,8 +133,12 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         world.repo_b.load_or_create_host_identity().unwrap().host_id
     );
 
-    let t1_id = ThreadId::parse("thread-v1").unwrap();
-    let t2_id = ThreadId::parse("thread-v2").unwrap();
+    let t1_id = CloudThreadId::parse("cloudthread-v1").unwrap();
+    let t2_id = CloudThreadId::parse("cloudthread-v2").unwrap();
+    // Each machine registers its own local identity for a cloud thread; the
+    // pairing lives only in the binding rows' mappings.
+    let t1_local = ThreadId::parse("thread-v1").unwrap();
+    let t2_local = ThreadId::parse("thread-v2").unwrap();
     let mut t1 = ThreadSpec::new(
         t1_id.as_str(),
         "shared-source-thread",
@@ -186,6 +190,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     let a_active_path = install_active_branch(
         &world.repo_a,
         &scope_a,
+        &t1_local,
         &t1_id,
         "a-active-thread",
         &a_active,
@@ -195,6 +200,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     let b_active_path = install_active_branch(
         &world.repo_b,
         &scope_b,
+        &t2_local,
         &t2_id,
         "b-active-thread",
         &b_active,
@@ -219,6 +225,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         &world.repo_a,
         &scope_a,
         &[t1.clone(), t2.clone()],
+        &t1_local,
         &t1_id,
         "a-active-thread",
         &a_after_first_append,
@@ -233,6 +240,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         &world.repo_b,
         &scope_b,
         &world,
+        &t1_local,
         &t1_id,
         "shared-source-thread",
         "b-alternate-v1",
@@ -251,7 +259,10 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     assert_local_branch_state(
         &world.repo_b,
         &scope_b,
-        &[(&t1_id, "b-alternate-v1"), (&t2_id, "b-active-thread")],
+        &[
+            (&t1_local, "b-alternate-v1"),
+            (&t2_local, "b-active-thread"),
+        ],
     );
 
     let b_after_append = append_message(&b_active_before_pull, "m-d2", "continued on B");
@@ -271,6 +282,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         &world.repo_b,
         &scope_b,
         &[t1.clone(), t2.clone()],
+        &t2_local,
         &t2_id,
         "b-active-thread",
         &b_after_append,
@@ -286,6 +298,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         &world.repo_a,
         &scope_a,
         &world,
+        &t2_local,
         &t2_id,
         "shared-source-thread",
         "a-alternate-v2",
@@ -303,7 +316,10 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     assert_local_branch_state(
         &world.repo_a,
         &scope_a,
-        &[(&t1_id, "a-active-thread"), (&t2_id, "a-alternate-v2")],
+        &[
+            (&t1_local, "a-active-thread"),
+            (&t2_local, "a-alternate-v2"),
+        ],
     );
 
     let a_after_second_append =
@@ -324,6 +340,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         &world.repo_a,
         &scope_a,
         &[t1.clone(), t2.clone()],
+        &t1_local,
         &t1_id,
         "a-active-thread",
         &a_after_second_append,
@@ -338,6 +355,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         &world.repo_b,
         &scope_b,
         &world,
+        &t1_local,
         &t1_id,
         "shared-source-thread",
         "b-alternate-v1",
@@ -350,7 +368,10 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     assert_local_branch_state(
         &world.repo_b,
         &scope_b,
-        &[(&t1_id, "b-alternate-v1"), (&t2_id, "b-active-thread")],
+        &[
+            (&t1_local, "b-alternate-v1"),
+            (&t2_local, "b-active-thread"),
+        ],
     );
 
     let local_a_before_noop = world.repo_a.load_conversation_bindings().unwrap();
@@ -390,12 +411,18 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     assert_local_branch_state(
         &reopened_a,
         &scope_a,
-        &[(&t1_id, "a-active-thread"), (&t2_id, "a-alternate-v2")],
+        &[
+            (&t1_local, "a-active-thread"),
+            (&t2_local, "a-alternate-v2"),
+        ],
     );
     assert_local_branch_state(
         &reopened_b,
         &scope_b,
-        &[(&t1_id, "b-alternate-v1"), (&t2_id, "b-active-thread")],
+        &[
+            (&t1_local, "b-alternate-v1"),
+            (&t2_local, "b-active-thread"),
+        ],
     );
     assert_eq!(
         reopened_a
@@ -423,8 +450,10 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     );
     let origin_a = world.origin(&world.repo_a, "replica-a");
     let origin_b = world.origin(&world.repo_b, "replica-b");
-    let t1_id = ThreadId::parse("thread-v1").unwrap();
-    let t2_id = ThreadId::parse("thread-v2").unwrap();
+    let t1_id = CloudThreadId::parse("cloudthread-v1").unwrap();
+    let t2_id = CloudThreadId::parse("cloudthread-v2").unwrap();
+    let t2_local = ThreadId::parse("thread-v2").unwrap();
+    let t3_local = ThreadId::parse("thread-v3").unwrap();
     let t1 = ThreadSpec::new(
         t1_id.as_str(),
         "shared-source-thread",
@@ -450,7 +479,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
         10,
     );
     t2.forked_from = Some(t1_id.clone());
-    let t3_id = ThreadId::parse("thread-v3").unwrap();
+    let t3_id = CloudThreadId::parse("cloudthread-v3").unwrap();
     let mut t3 = ThreadSpec::new(
         t3_id.as_str(),
         "shared-source-thread",
@@ -512,7 +541,8 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
                 replica_id: scope.replica_id.clone(),
                 local_project_id: scope.project_id.clone(),
                 provider_profile_id: scope.profile_id.clone(),
-                thread_id: t2_id.clone(),
+                thread_id: t2_local.clone(),
+                cloud_thread_id: Some(t2_id.clone()),
                 forked_from: None,
                 preserved: None,
                 root_tail_layout: Some(whole_thread_layout()),
@@ -527,7 +557,8 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
                 replica_id: scope.replica_id.clone(),
                 local_project_id: scope.project_id.clone(),
                 provider_profile_id: scope.profile_id.clone(),
-                thread_id: t3_id.clone(),
+                thread_id: t3_local.clone(),
+                cloud_thread_id: Some(t3_id.clone()),
                 forked_from: None,
                 preserved: None,
                 root_tail_layout: Some(whole_thread_layout()),
@@ -727,8 +758,8 @@ use crate::project_sync::conversation_materialization::{
     NoConversationFailpoints,
 };
 use crate::project_sync::domain::{
-    compute_portable_conversation_tail, ConversationCloudAnchor, ConversationFileRole,
-    ConversationMaterializationOperation, ConversationOperationId,
+    compute_portable_conversation_tail, CloudThreadId, ConversationCloudAnchor,
+    ConversationFileRole, ConversationMaterializationOperation, ConversationOperationId,
     ConversationPublicationOperation, ConversationSyncOperation, ConversationSyncOperationKind,
     PlanId, PortableConversationTail, PullJournalPhase, PushJournalPhase, RootTailLayout,
     TailPartitionKind, TargetExpectation, PORTABLE_TAIL_CODEC_V1,
@@ -764,10 +795,12 @@ fn transcript_tail(transcript: &[u8]) -> PortableConversationTail {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_active_branch(
     repository: &LocalStateRepository,
     scope: &InstalledScope,
     thread_id: &ThreadId,
+    cloud_thread_id: &CloudThreadId,
     provider_thread_id: &str,
     transcript: &[u8],
     _source: &PublishedFixture,
@@ -787,6 +820,7 @@ fn install_active_branch(
                 local_project_id: scope.project_id.clone(),
                 provider_profile_id: scope.profile_id.clone(),
                 thread_id: thread_id.clone(),
+                cloud_thread_id: Some(cloud_thread_id.clone()),
                 forked_from: None,
                 preserved: None,
                 root_tail_layout: Some(whole_thread_layout()),
@@ -809,6 +843,7 @@ fn publish_bound_thread(
     scope: &InstalledScope,
     threads: &[ThreadSpec],
     bound_thread_id: &ThreadId,
+    cloud_thread_id: &CloudThreadId,
     provider_thread_id: &str,
     local_transcript: &[u8],
     publisher: crate::project_sync::domain::PortableOrigin,
@@ -841,7 +876,7 @@ fn publish_bound_thread(
     let tail_after = transcript_tail(local_transcript);
     let tail_before = current
         .manifest
-        .find_conversation(bound_thread_id)
+        .find_conversation(cloud_thread_id)
         .and_then(|(_, thread)| thread.portable_tail.clone());
     let planned_relation = if tail_before.is_some() {
         crate::project_sync::domain::TailClassification::LocalOutstanding
@@ -868,6 +903,7 @@ fn publish_bound_thread(
         provider_profile_id: scope.profile_id.clone(),
         provider: codex(),
         thread_id: bound_thread_id.clone(),
+        cloud_thread_id: cloud_thread_id.clone(),
         operation: ConversationSyncOperationKind::CloudPublication(
             ConversationPublicationOperation {
                 phase: PushJournalPhase::CandidateUploaded,
@@ -927,6 +963,7 @@ fn materialize_thread(
     scope: &InstalledScope,
     world: &VariantWorld,
     thread_id: &ThreadId,
+    cloud_thread_id: &CloudThreadId,
     source_thread_id: &str,
     destination_thread_id: &str,
     source_transcript: &[u8],
@@ -984,6 +1021,7 @@ fn materialize_thread(
     }) {
         Some(row) => {
             row.provider_thread_id = Some(destination_thread_id.to_string());
+            row.cloud_thread_id = Some(cloud_thread_id.clone());
             row.root_tail_layout = Some(whole_thread_layout());
             row.materialization_state = ConversationMaterializationState::Resumable;
             row.revision = row.revision.saturating_add(1);
@@ -995,6 +1033,7 @@ fn materialize_thread(
             local_project_id: scope.project_id.clone(),
             provider_profile_id: scope.profile_id.clone(),
             thread_id: thread_id.clone(),
+            cloud_thread_id: Some(cloud_thread_id.clone()),
             forked_from: None,
             preserved: None,
             root_tail_layout: Some(whole_thread_layout()),
@@ -1028,6 +1067,7 @@ fn materialize_thread(
         provider_profile_id: scope.profile_id.clone(),
         provider: codex(),
         thread_id: thread_id.clone(),
+        cloud_thread_id: cloud_thread_id.clone(),
         operation: ConversationSyncOperationKind::ProviderMaterialization(
             ConversationMaterializationOperation {
                 phase: PullJournalPhase::TargetStaged,

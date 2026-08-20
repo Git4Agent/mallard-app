@@ -1065,6 +1065,11 @@ fn insert_operations(
             // One thread never carries two concurrent journal operations:
             // a pending checkpoint must be verified or canceled before any
             // new Push or Pull mutation of the same conversation begins.
+            // The claim is checked in both identity spaces — a retried
+            // pull action mints fresh local identities, so only its cloud
+            // id (and plan action) can correlate it with the journaled
+            // first attempt. The cloud key is deliberately not
+            // provider-qualified: cloud ids are bundle-global.
             if journal
                 .operations
                 .iter()
@@ -1079,6 +1084,41 @@ fn insert_operations(
                     "conversation thread '{}' already has a pending sync operation; \
                      resolve or retry it before syncing this conversation again",
                     operation.thread_id
+                ));
+            }
+            if journal
+                .operations
+                .iter()
+                .chain(operations[..index].iter())
+                .any(|existing| {
+                    existing.local_project_id == operation.local_project_id
+                        && existing.cloud_thread_id == operation.cloud_thread_id
+                })
+            {
+                return Err(format!(
+                    "cloud thread '{}' already has a pending sync operation; \
+                     resolve or retry it before syncing this conversation again",
+                    operation.cloud_thread_id
+                ));
+            }
+            if operation.plan_id.is_some()
+                && operation.plan_action_id.is_some()
+                && journal
+                    .operations
+                    .iter()
+                    .chain(operations[..index].iter())
+                    .any(|existing| {
+                        existing.plan_id == operation.plan_id
+                            && existing.plan_action_id == operation.plan_action_id
+                    })
+            {
+                return Err(format!(
+                    "conversation plan action '{}' already has a journaled operation",
+                    operation
+                        .plan_action_id
+                        .as_ref()
+                        .map(|action_id| action_id.as_str())
+                        .unwrap_or("unknown")
                 ));
             }
         }
@@ -1543,21 +1583,27 @@ fn conversation_receipt(
     cloud_commit_id: &str,
     cloud_manifest_sha256: &str,
 ) -> ConversationApplyReceipt {
-    let (accepted_tail, preserved_thread_id, source_disposition) = match &operation.operation {
-        ConversationSyncOperationKind::CloudPublication(publication) => (
-            Some(publication.tail_after.clone()),
-            None,
-            Some(ConversationSourceDisposition::Retained),
-        ),
-        ConversationSyncOperationKind::ProviderMaterialization(materialization) => (
-            Some(materialization.accepted_tail_after.clone()),
-            materialization
-                .keep_both
-                .as_ref()
-                .map(|keep_both| keep_both.preserved_thread_id.clone()),
-            Some(ConversationSourceDisposition::Retained),
-        ),
-    };
+    let (accepted_tail, preserved_thread_id, preserved_display_title, source_disposition) =
+        match &operation.operation {
+            ConversationSyncOperationKind::CloudPublication(publication) => (
+                Some(publication.tail_after.clone()),
+                None,
+                None,
+                Some(ConversationSourceDisposition::Retained),
+            ),
+            ConversationSyncOperationKind::ProviderMaterialization(materialization) => (
+                Some(materialization.accepted_tail_after.clone()),
+                materialization
+                    .keep_both
+                    .as_ref()
+                    .map(|keep_both| keep_both.preserved_thread_id.clone()),
+                materialization
+                    .keep_both
+                    .as_ref()
+                    .map(|keep_both| keep_both.preserved_display_title.clone()),
+                Some(ConversationSourceDisposition::Retained),
+            ),
+        };
     ConversationApplyReceipt {
         host_id: operation.host_id.clone(),
         replica_id: operation.replica_id.clone(),
@@ -1576,6 +1622,7 @@ fn conversation_receipt(
         journal_operation_id: operation.operation_id.clone(),
         accepted_tail,
         preserved_thread_id,
+        preserved_display_title,
         source_disposition,
     }
 }
